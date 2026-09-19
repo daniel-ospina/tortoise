@@ -26,9 +26,60 @@ import contextlib
 import os
 import shutil
 import socket
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
+
+# The dashboard Pages project — the #4054 BFF root. `wrangler pages dev <dir>`
+# serves <dir> as the STATIC ROOT but resolves `functions/` against the CWD, so
+# serving `dist` from this directory gets production's asset layout AND the
+# Functions tree.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
+DASHBOARD_DIST = "dist"
+
+
+def ensure_dashboard_dist() -> None:
+    """Build the dashboard so the auth suites serve production's upload root.
+
+    WHY `dist` AND NOT `.`
+    ---------------------
+    `wrangler pages dev .` serves the SOURCE tree. The auth pages live in
+    `public/` (`signup.html`, `welcome.html`, `invite-accept.html`), so at the
+    source root they are not at `/welcome` and friends — Pages falls through to
+    the SPA shell, and a test asserting the reset panel silently asserts against
+    `index.html` instead. The deployment uploads `dist/`, which vite builds by
+    copying `public/` to the root, so `dist` is the only root that matches
+    production.
+
+    Idempotent and mtime-cached: rebuilds only when a source file is newer than
+    `dist/index.html`, so a whole session pays for at most one build.
+    """
+    dist_index = DASHBOARD_DIR / DASHBOARD_DIST / "index.html"
+    newest = 0.0
+    for p in DASHBOARD_DIR.rglob("*"):
+        rel_parts = set(p.relative_to(DASHBOARD_DIR).parts)
+        if rel_parts & {"dist", "node_modules", ".wrangler", ".vite"}:
+            continue
+        if p.is_file():
+            newest = max(newest, p.stat().st_mtime)
+    if dist_index.is_file() and dist_index.stat().st_mtime >= newest:
+        return
+    proc = subprocess.run(
+        ["npx", "vite", "build"],
+        cwd=str(DASHBOARD_DIR),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not dist_index.is_file():
+        # Fail, never skip: a suite that cannot serve the real asset root would
+        # assert against the SPA shell and pass vacuously.
+        pytest.fail(
+            "dashboard build failed — the auth suites serve its dist/ root:\n"
+            f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
 
 
 def require_toolchain() -> None:

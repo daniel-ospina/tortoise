@@ -8,10 +8,11 @@
 // Cloudflare Pages serves one project per custom domain, so we route by
 // Host header in a middleware: tortoise.* gets product.html, everything
 // else (premiselabs.co + *.pages.dev previews) gets index.html.
-// All other static assets (welcome.html, signup.html, signin.html) pass
-// through unchanged — EXCEPT on the exact premiselabs.co hostname, where
-// the tortoise-only pages 301 to their canonical (host consolidation,
-// 2026-08-17; see the TORTOISE_ONLY block below).
+// All other static assets (signin.html) pass through unchanged — EXCEPT on
+// the exact premiselabs.co hostname, where the tortoise-only pages 301 to
+// their canonical (host consolidation, 2026-08-17; see the TORTOISE_ONLY
+// block below). The AUTH surface (auth, signup, welcome, invite-accept) moved
+// to the app origin — issue #4054 — and 301s to app.premiselabs.co instead.
 //
 // The product page lives ONLY on the tortoise host (served at its root via
 // the rewrite below). The raw /product and /product.html paths are static
@@ -51,10 +52,26 @@ export const onRequest: PagesFunction = async (context) => {
   // Scoped to the EXACT company hostname: local dev (wrangler pages dev,
   // host=127.0.0.1) and *.pages.dev previews keep the pass-through so the
   // legal E2E suite can run against a dev server and previews stay
-  // navigable (neither is indexed; no SEO impact). Auth flows already
-  // target the tortoise host (welcome_url, invite emails, OAuth redirectTo)
-  // and are unaffected. Runtime fetches (the tortoise-onboarding skill at
-  // app.premiselabs.co/skills/...) are not in the set.
+  // navigable (neither is indexed; no SEO impact). Runtime fetches (the
+  // tortoise-onboarding skill at app.premiselabs.co/skills/...) are not in the
+  // set. The auth surface has its own origin split — see APP_ONLY below.
+  // The auth surface moved to the APP origin (#4054): `tortoise-dashboard`
+  // (app.premiselabs.co) owns the BFF and the three pages it serves
+  // (signup.html = /auth, welcome.html, invite-accept.html). Those pages 301
+  // to the APP host, not the tortoise host. `/signin` deliberately stays in
+  // the tortoise set: it is a legacy alias (`_redirects` maps it to `/auth`),
+  // which then lands on the app origin via the /auth redirect below — the app
+  // origin has no `/signin` route.
+  const APP_ORIGIN = "https://app.premiselabs.co";
+  const TORTOISE_ORIGIN = "https://tortoise.premiselabs.co";
+
+  const APP_ONLY = new Set([
+    "/signup", "/signup.html",
+    "/auth", "/auth.html",
+    "/welcome", "/welcome.html",
+    "/invite-accept", "/invite-accept.html",
+  ]);
+
   const TORTOISE_ONLY = new Set([
     "/docs", "/docs.html",
     "/faq", "/faq.html",
@@ -65,11 +82,7 @@ export const onRequest: PagesFunction = async (context) => {
     "/license", "/license.html",
     "/dpa", "/dpa.html",
     "/aviso-privacidad", "/aviso-privacidad.html",
-    "/signup", "/signup.html",
     "/signin", "/signin.html",
-    "/auth", "/auth.html",
-    "/welcome", "/welcome.html",
-    "/invite-accept", "/invite-accept.html",
   ]);
   const COMPANY_HOSTS = new Set(["premiselabs.co"]);
 
@@ -96,13 +109,22 @@ export const onRequest: PagesFunction = async (context) => {
         headers: { Location: target, ...HSTS },
       });
     }
+    // Auth moved to the APP origin (#4054) — the company-host copies 301
+    // there. Same normalization and query-string preservation as below:
+    // invite ?token=…, recovery ?type=recovery and OAuth ?error=… must survive.
+    if (path !== "/" && APP_ONLY.has(path)) {
+      const target = APP_ORIGIN + path.replace(/\.html$/, "") + url.search;
+      return new Response(null, {
+        status: 301,
+        headers: { Location: target, ...HSTS },
+      });
+    }
     if (path !== "/" && TORTOISE_ONLY.has(path)) {
       // Normalize the target to the extensionless canonical (single hop; the
       // .html raw-asset form would otherwise need a second _redirects hop on
       // the tortoise host) and PRESERVE the query string — invite-accept
       // (?token=…) and recovery links (?type=recovery) must not lose params.
-      const target =
-        "https://tortoise.premiselabs.co" + path.replace(/\.html$/, "") + url.search;
+      const target = TORTOISE_ORIGIN + path.replace(/\.html$/, "") + url.search;
       // Build the 301 manually — Response.redirect() returns a response with
       // IMMUTABLE headers, so stamping HSTS on it throws (Cloudflare 1101 /
       // 500 on every consolidated URL). Headers passed in the constructor
@@ -114,22 +136,20 @@ export const onRequest: PagesFunction = async (context) => {
     }
   }
 
-  // ── Single auth page at /auth ─────────────────────────────────────────
-  // One auth screen for the whole funnel (topbar login buttons,
-  // welcome/dashboard redirects, marketing CTAs, OAuth + recovery links).
-  // /auth serves the signup.html asset — the combined Log in / Sign up
-  // card. The company-host block above already 301'd /auth onto the
-  // tortoise host; on every other host (tortoise, pages.dev previews,
-  // local dev) serve the asset directly. /signin (all variants) is 301'd to
-  // /auth via _redirects; /signup remains a redirect-free alias of the same
-  // page (canonical /auth).
+  // ── Auth lives on the APP origin (#4054) ──────────────────────────────
+  // This project used to serve the one auth screen at /auth from the
+  // signup.html asset. The BFF and the three pages it serves moved to the
+  // `tortoise-dashboard` project (app.premiselabs.co), so this project can no
+  // longer render them. The company-host block above already 301'd the auth
+  // paths to the app origin; this covers the tortoise host (and previews/dev)
+  // so a request for /auth does not fall through to a DELETED asset. PRESERVE
+  // the query string — the #1224 OAuth state-expiry banner reads ?error=…
+  // here, and invite / recovery links carry ?token=… / ?type=recovery.
   if (url.pathname === "/auth" || url.pathname === "/auth.html") {
-    // Rewrite to the extensionless auth asset, PRESERVING the query string —
-    // the #1224 OAuth state-expiry banner reads ?error=… on this page, so a
-    // callback landing on /auth must keep its params. context.next()
-    // continues to the static-asset fallback (clean-URL resolution serves
-    // signup.html), NOT back through this middleware — no redirect loop.
-    return context.next(new Request(url.origin + "/signup" + url.search, context.request));
+    return new Response(null, {
+      status: 301,
+      headers: { Location: APP_ORIGIN + "/auth" + url.search, ...HSTS },
+    });
   }
 
   // On the tortoise host, the raw /product, /product.html and /index.html

@@ -56,9 +56,10 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     added; no slow leg, no carve-out leg.
     """
     for changed in (["website/docs.html"], ["website/faq.html"],
-                    ["website/welcome.html"], ["website/self-hosted.html"],
+                    ["website/apps/dashboard/public/welcome.html"],
+                    ["website/self-hosted.html"],
                     ["website/product.html"], ["website/index.html"],
-                    ["website/signup.html"], ["website/signin.html"],
+                    ["website/apps/dashboard/public/signup.html"],
                     ["website/privacy.html"],
                     ["docs/README.md", "website/self-hosted.html"]):
         r = _sel(changed)
@@ -352,7 +353,7 @@ def test_slow_files_never_in_fast_gate_selections():
     assert slow, "slow_files must be non-empty"
     assert not (set(m["tier1"]) & slow), "tier1 leaks a slow file"
 
-    docs = _sel(["docs/README.md", "website/welcome.html"])
+    docs = _sel(["docs/README.md", "website/apps/dashboard/public/welcome.html"])
     assert not (set(docs["test_files"]) & slow), "docs-only tier-1 leaks slow files"
 
     core = _sel(["tortoise/graph.py", "tortoise/ingest.py"])

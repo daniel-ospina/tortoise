@@ -36,7 +36,6 @@ public dpa.html
 public faq.html
 public functions
 public index.html
-public invite-accept.html
 public license.html
 public logo.png
 public privacy.html
@@ -44,12 +43,15 @@ public product.html
 public robots.txt
 public security.html
 public self-hosted.html
-public signin.html
-public signup.html
+# signin.html was DELETED in #4054: /signin, /signin/ and /signin.html are 301'd
+# to /auth by _redirects (and the company host by _middleware.ts), so the asset
+# was unreachable and kept the last legacy-bridge page alive.
 public sitemap-company.xml
 public sitemap-product.xml
 public tos.html
-public welcome.html
+# The auth pages (signup.html = /auth, welcome.html, invite-accept.html) moved
+# to the tortoise-dashboard project (website/apps/dashboard/public/) in #4054.
+# They are staged by the dashboard's vite build, not by this upload.
 excluded 2479-re-auth-implementation-plan.md
 excluded README.md
 excluded apps

@@ -35,6 +35,30 @@ interface FlowEnv extends Env {
   AUTH_CALLBACK_URL?: string;
 }
 
+/**
+ * The identity providers GoTrue may be asked for.
+ *
+ * This is an ALLOWLIST, never a passthrough. The value is written into an
+ * upstream redirect URL, so an unvalidated `provider` would be an arbitrary
+ * parameter injection into the authorize URL — and an attacker-chosen upstream
+ * flow. Anything not listed here is refused before the request can reach GoTrue.
+ */
+const AUTH_PROVIDERS = ["email", "github", "google"] as const;
+type AuthProvider = (typeof AUTH_PROVIDERS)[number];
+
+/**
+ * Resolve the requested provider.
+ *
+ * ABSENT is not the same as invalid: a missing param defaults to `email`, which
+ * is exactly the single-provider behaviour this endpoint shipped with. A
+ * present-but-empty `?provider=` is an unusable value and is refused like any
+ * other unknown one.
+ */
+function resolveProvider(raw: string | null): AuthProvider | null {
+  if (raw === null) return "email";
+  return AUTH_PROVIDERS.find((p) => p === raw) ?? null;
+}
+
 function randomUrlSafe(bytes = 32): string {
   const b = new Uint8Array(bytes);
   crypto.getRandomValues(b);
@@ -78,6 +102,12 @@ export const onRequestGet: PagesFunction<FlowEnv> = async ({ request, env }) => 
     return json({ error: "session_store_unavailable" }, { status: 503 });
   }
 
+  // Validated AFTER the store guard (so the existing 503 contract is unchanged)
+  // and BEFORE anything is minted: an unsupported provider must not create a
+  // flow row, set a cookie, or produce a hop to GoTrue.
+  const provider = resolveProvider(url.searchParams.get("provider"));
+  if (!provider) return json({ error: "unsupported_provider" }, { status: 400 });
+
   const flowId = randomUrlSafe(16);
   const verifier = randomUrlSafe(32);
   const challenge = await pkceChallenge(verifier);
@@ -103,7 +133,7 @@ export const onRequestGet: PagesFunction<FlowEnv> = async ({ request, env }) => 
 
   const redirectTo = env.AUTH_CALLBACK_URL ?? `${url.origin}/auth/callback`;
   const authorize = new URL(`${env.SUPABASE_URL}/auth/v1/authorize`);
-  authorize.searchParams.set("provider", "email");
+  authorize.searchParams.set("provider", provider);
   authorize.searchParams.set("redirect_to", redirectTo);
   authorize.searchParams.set("code_challenge", challenge);
   authorize.searchParams.set("code_challenge_method", "s256");

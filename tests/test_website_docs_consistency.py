@@ -49,6 +49,15 @@ from tests._html_links import (  # noqa: E402
 
 WEBSITE = REPO_ROOT / "website"
 FUNCTIONS = WEBSITE / "functions"
+# #4054: the repo now ships TWO Pages Functions trees. The BFF (auth, session,
+# api/v1) moved to the app project, so `/welcome` and `/auth/*` are served from
+# `website/apps/dashboard/functions/` while `/blog` and `/admin` stay here. A
+# resolver that only knew `website/functions/` would read a correct `/welcome`
+# link as dangling.
+FUNCTION_ROOTS = (
+    FUNCTIONS,
+    WEBSITE / "apps" / "dashboard" / "functions",
+)
 PRODUCT = WEBSITE / "product.html"
 DOCS = WEBSITE / "docs.html"
 FAQ = WEBSITE / "faq.html"
@@ -258,10 +267,12 @@ def _function_serves(path: str) -> bool:
         # satisfied the dangling-link guard it should have failed (review finding,
         # #3962).
         return False
-    targets = [FUNCTIONS.joinpath(*parts)]
-    for depth in range(len(parts), 0, -1):
-        targets.append(FUNCTIONS.joinpath(*parts[:depth], "index"))
-        targets.append(FUNCTIONS.joinpath(*parts[:depth], "[[path]]"))
+    targets = []
+    for root in FUNCTION_ROOTS:
+        targets.append(root.joinpath(*parts))
+        for depth in range(len(parts), 0, -1):
+            targets.append(root.joinpath(*parts[:depth], "index"))
+            targets.append(root.joinpath(*parts[:depth], "[[path]]"))
     return any(t.with_name(t.name + ext).is_file()
                for t in targets for ext in (".ts", ".js"))
 
@@ -458,7 +469,11 @@ def _offers_blog_entry(page: Path) -> bool:
 _IN_SCOPE_AT_3950 = frozenset({
     "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html", "index.html",
     "license.html", "privacy.html", "product.html", "security.html",
-    "self-hosted.html", "signup.html", "tos.html",
+    "self-hosted.html", "tos.html",
+    # ⚠️ `signup.html` LEFT this set in #4054: the page (the `/auth` screen)
+    # moved to the app project at `website/apps/dashboard/public/signup.html`,
+    # so it is no longer a page `website/` serves and no longer this guard's
+    # subject. Its route now lives at https://app.premiselabs.co/auth.
 })
 
 

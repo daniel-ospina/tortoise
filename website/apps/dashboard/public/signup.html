@@ -8,9 +8,6 @@
   <meta name="theme-color" content="#060b14">
   <link rel="canonical" href="https://tortoise.premiselabs.co/auth">
   <link rel="icon" type="image/png" href="/logo.png">
-  <!-- #1225: cross-subdomain session bridge — loaded in <head> BEFORE the
-       gate below (the gate's readValidSession is synchronous at gate time). -->
-  <script src="/assets/supabase-session.js"></script>
   <!-- #2744: dashboard-origin seam. Production leaves it unset → the same
        hardcoded app origin as before (no behavior change). The local-preview
        e2e sets window.__DASHBOARD_BASE_URL = http://127.0.0.1:8790 before the
@@ -26,8 +23,9 @@
        overriding the base URL here covers every post-login path at once.
        Allowlist-only: we never echo an arbitrary `next` — anything that is not
        a same-origin PATH under /admin is ignored (open-redirect guard).
-       The query is the ONLY carrier: claimRedirectTarget() sends OAuth back to
-       /auth?next=... (not to /admin), so no round-trip marker cookie is needed. -->
+       The query is the ONLY carrier: oauthNextPath() hands the return-to to
+       /auth/start (the BFF stores it in the flow row), so no round-trip marker
+       cookie is needed. -->
   <script>
     (function () {
       try {
@@ -53,49 +51,38 @@
       } catch (e) { /* best-effort — fall back to the app root */ }
     })();
   </script>
-  <!-- #1494: hard gate — a visitor with a VALID session must reach their
-       destination WITHOUT seeing the auth card flash. The shared
-       readValidSession enforces STRICT validity (missing/past expires_at =
-       invalid — the stale-session leak class); location.replace keeps Back
-       from returning here. Skipped when ?error/?error_code present (search
+  <!-- #1494/#3501: session probe. Under the BFF the session lives in an
+       HttpOnly `__Host-session` cookie, so the browser CANNOT read it and
+       there is no synchronous check left — the only way to know is to ask the
+       server. The probe STARTS here so the request is in flight before the
+       card paints; the main script consumes it once `showError` and the
+       redirect targets exist. Skipped when ?error/?error_code present (search
        or #1909 fragment) — the #1224 OAuth state-expiry banner must render.
-       Falls back to the async getSession bounce below. -->
+       A 503 is "we could not tell" and must NEVER be treated as signed-out
+       (#3485): the probe's status is passed through, and only a 200 forwards.
+       location.replace keeps Back from returning here. -->
   <script>
     (function () {
       try {
         var p = new URLSearchParams(window.location.search);
-        // #1909: supabase-js implicit flow returns OAuth errors in the URL
-        // FRAGMENT (#error=…) — read both surfaces or a denied round-trip
-        // bounces a signed-in visitor past the banner that explains it.
+        // #1909: OAuth errors can land in the URL FRAGMENT (#error=…) — read
+        // both surfaces or a denied round-trip is forwarded past the banner.
         var h = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-        if (p.get("error") || p.get("error_code") || h.get("error") || h.get("error_code")) return;
-        // #3080: the /admin gate bounced us with the LOCAL session intact but
-        // server-refused (expired/revoked token, or Supabase unreachable — the
-        // gate fails closed). Trusting the local cookie here would replace
-        // straight back to /admin and loop (ERR_TOO_MANY_REDIRECTS), because
-        // readValidSession only checks expires_at and never asks the server.
-        // Clear it (#1511 loop-safety: clear before bouncing) and stay on the
-        // card so the visitor can sign in again — then land on the return-to.
-        // #3080: the gate bounced us because the SERVER refused the local
-        // session. Do NOT destroy it here: this URL is attacker-forgeable
-        // (?next=/admin&stale=1), so clearing would be a one-link forced logout
-        // of the shared parent-domain cookie — taking the dashboard with it.
-        // Instead suppress BOTH forwarding paths (this gate and the async
-        // getSession bounce below) and let the visitor sign in again, which
-        // overwrites the cookie. An expired access token is also refreshable
-        // client-side, so destroying it would discard a recoverable session.
-        if (p.get("stale") === "1" && window.__ADMIN_RETURN_TO) {
-          window.__ADMIN_STALE = true;
-          return;
-        }
-        var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
-        if (!s) return;  // no VALID session → stay on the auth card
-        var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-        // #3080: an explicit /admin return-to wins — claim routing is
-        // meaningless there (<?claim=1> on /admin is not a route).
-        if (window.__ADMIN_RETURN_TO) { window.location.replace(window.__ADMIN_RETURN_TO); return; }
-        window.location.replace(claim ? window.__DASHBOARD_BASE_URL + "/?claim=1" : window.__DASHBOARD_BASE_URL);  // #1566: in-app welcome (root)
-      } catch (e) { /* best-effort — the async bounce below still applies */ }
+        window.__OAUTH_ERROR = !!(p.get("error") || p.get("error_code") || h.get("error") || h.get("error_code"));
+        // #3080: the gate bounced us because the SERVER refused the session.
+        // Do NOT forward (this probe or the main script), or we re-enter the
+        // /admin <-> /auth loop the bounce came from. This URL is
+        // attacker-forgeable (?next=/admin&stale=1), so it must not clear a
+        // cookie either — the visitor signs in again, which overwrites it.
+        if (p.get("stale") === "1" && window.__ADMIN_RETURN_TO) window.__ADMIN_STALE = true;
+        window.__SESSION_PROBE = null;
+        if (window.__OAUTH_ERROR || window.__ADMIN_STALE) return;
+        // status only: 200 = signed in, 401 = signed out, 503/0 = unknown.
+        window.__SESSION_PROBE = fetch("/api/session", {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        }).then(function (r) { return r.status; }).catch(function () { return 0; });
+      } catch (e) { /* best-effort — the card still renders */ }
     })();
   </script>
   <style>
@@ -600,17 +587,13 @@
     </div>
   </div>
 
-  <!-- Supabase JS client from CDN. onerror belt (#527): if the CDN is
-       blocked (ad-blocker/CSP/outage), surface a clear message instead of a
-       dead form — the historical trigger for the credential-echo bug. -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
-          onerror="(function(){var e=document.getElementById('error');if(e){e.textContent='Signup is temporarily unavailable (script blocked). Please try again later.';e.classList.add('visible');}})()"></script>
-  <!-- #1225: the session bridge now loads in <head> (before the auth card). -->
+  <!-- #3501: NO supabase-js, NO cross-subdomain bridge. The BFF holds the
+       session server-side; the browser holds only the HttpOnly `__Host-session`
+       cookie it cannot read. Every auth call below is a same-origin request to
+       /auth/* or /api/*, and no raw token ever reaches this page. -->
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
-    const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
-    const WELCOME_URL = window.__DASHBOARD_BASE_URL;  // #1566: OAuth lands on the app ROOT — first-timers get provisioned (welcome mode), returning users get the dashboard home
+    const WELCOME_URL = window.__DASHBOARD_BASE_URL;  // #1566: post-login target — first-timers get provisioned (welcome mode), returning users get the dashboard home
     // #1082 (PR1): claim-intent routing — when a claim is IN FLIGHT
     // (non-secret tt_claim_pending marker set by the dashboard claim card
     // on app.premiselabs.co — the raw tt_ key never leaves app-origin
@@ -632,38 +615,28 @@
       return WELCOME_URL;
     }
 
-    // #3080: what to hand GoTrue as a redirect target — for the OAuth provider
-    // AND for the email flows (signUp confirmation + resend). Deliberately NOT
-    // the same as the navigation target above. Landing must be /AUTH, never
-    // /admin: a #access_token fragment is never sent to a server function, so a
-    // landing on /admin makes the gate see an unauthenticated request and bounce
-    // (inheriting the fragment) to /auth?...&stale=1, whose stale branch then
-    // clears the token that had just arrived — the sign-in would revoke itself.
-    // /auth ingests the fragment, persists the session, and the async getSession
-    // bounce then forwards to the return-to.
-    // Absolute because GoTrue validates redirect_to by host + scheme and
-    // silently drops a relative value.
-    function gotrueRedirectTarget() {
-      if (window.__ADMIN_RETURN_TO) {
-        return window.location.origin + "/auth?next=" + encodeURIComponent(window.__ADMIN_RETURN_TO);
-      }
-      return claimRedirectTarget();
+    // #3501: where the BFF should land the visitor after an OAuth round-trip.
+    // A same-origin PATH — `/auth/start` stores it in the flow row and
+    // `/auth/callback` re-validates it with `safeNext` before redirecting. The
+    // server sets `__Host-session` BEFORE navigating, so landing on the
+    // return-to is safe (unlike the old fragment flow, where a /admin landing
+    // could never see the token and bounced into a self-revoking stale loop).
+    // The admin return-to wins over claim routing — /admin has no claim card.
+    function oauthNextPath() {
+      if (window.__ADMIN_RETURN_TO) return window.__ADMIN_RETURN_TO;
+      try {
+        if (/(?:^|; )tt_claim_pending=/.test(document.cookie)) return "/?claim=1";
+      } catch (e) { /* fall through to the app root */ }
+      return "/";
     }
-
-    // #801: server-side signup — the hosted API creates the Supabase auth
-    // user via the GoTrue admin API with email_confirm=true so NO
-    // confirmation email is sent, bypassing Supabase's built-in SMTP per-IP
-    // send bucket (over_email_send_rate_limit 429s blocked every signup
-    // from an exhausted IP in production). api.premiselabs.co is the hosted
-    // API (CORS allows premiselabs.co; same hardcode as welcome.html).
-    const SIGNUP_API_URL = "https://api.premiselabs.co";
 
     // #308 (R6): Turnstile CAPTCHA — mirrors the waitlist widget pattern in
     // index.html. Empty until a site key is provisioned (human step); when
     // set, the widget is injected into the signup form and a single-use
-    // token rides each /v1/signup/email submit as cf-turnstile-response.
-    // Server-side siteverify (TURNSTILE_SECRET_KEY, Fly secret) fails OPEN
-    // only while the secret is unset — matching this hidden-widget state.
+    // token rides each /auth/signup submit as cf-turnstile-response.
+    // NOTE (#3501): server-side siteverify does NOT yet live on the BFF
+    // /auth/signup route, so while a site key is provisioned this widget is
+    // advisory until it does (dormant today — the key is unset).
     const TURNSTILE_SITE_KEY = '';
     let turnstileToken = null;
 
@@ -698,25 +671,7 @@
       }
     }
 
-    // In dev/local, fall back to local Supabase
-    const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-    const supabaseUrl = isLocal
-      ? "http://127.0.0.1:54321"
-      : SUPABASE_URL;
-    const supabaseAnonKey = isLocal
-      // Local Supabase default anon key (public, safe to commit)
-      ? "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
-      : SUPABASE_ANON_KEY;
-
-    // Guard: check if the anon key placeholder was replaced at deploy time
-    const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
-
-    // ── #1909: OAuth errors land in the URL FRAGMENT, not just search ─────
-    // supabase-js implicit flow returns a denied/expired provider round-trip
-    // as #error=…&error_code=… (welcome.html forwards the hash to /auth).
-    // The client consumes the fragment during init, so snapshot it FIRST
-    // (mirrors welcome.html's landingHash) and read error params from BOTH
-    // surfaces.
+    // #1909/#1224: OAuth errors land in the URL FRAGMENT, not just search.
     const landingHash = window.location.hash;
     function oauthErrorParams() {
       var p = new URLSearchParams(window.location.search);
@@ -746,67 +701,29 @@
       } catch (e) { /* banner is best-effort */ }
     })();
 
-    let supabaseClient = null;
-    if (isConfigured) {
-      // typeof check + try/catch (#527): if the CDN script failed to load,
-      // window.supabase is undefined and createClient would THROW, killing
-      // this entire script block at parse time (the historical 2026-08-08
-      // bug that left the form as a static shell echoing credentials into
-      // the URL). Guard so the form degrades to a clear error instead.
-      // #1225: the shared factory (assets/supabase-session.js) is null-safe —
-      // it persists the session to the .premiselabs.co cookie the dashboard
-      // reads, and returns null (never throws) when the CDN is blocked.
-      if (typeof window.createTortoiseSupabaseClient === "function") {
-        try {
-          supabaseClient = window.createTortoiseSupabaseClient(supabaseUrl, supabaseAnonKey);
-        } catch (err) {
-          console.error("supabase client init failed:", err);
+    // ── Session probe consumer (#1494/#3501) ───────────────────────────────
+    // The BFF holds the session in an HttpOnly cookie, so the ONLY way to know
+    // whether a visitor is already signed in is `GET /api/session` (started in
+    // <head>). The status is load-bearing:
+    //   200 → signed in: forward to the destination (claim / return-to aware)
+    //   401 → genuinely signed out: stay on the card
+    //   503 or a network fault (0) → "we could not tell". NEVER treat this as
+    //        signed-out: that conflation is the #3485 login loop. Show the
+    //        honest retryable notice and leave the card usable.
+    // Suppressed on an OAuth-error landing (the #1224 banner) or a corroborated
+    // stale bounce (#3080) — the same suppression the head probe applies.
+    if (window.__SESSION_PROBE) {
+      window.__SESSION_PROBE.then(function (status) {
+        if (window.__ADMIN_STALE || window.__OAUTH_ERROR) return;
+        if (status === 200) {
+          window.location.replace(claimRedirectTarget());
+          return;
         }
-      } else {
-        console.warn("supabase-session.js shared script did not load — auth disabled");
-      }
-      if (!supabaseClient) {
-        document.querySelectorAll("button").forEach(function(btn) { btn.disabled = true; });
-        var errorEl = document.getElementById("error");
-        errorEl.textContent = "Signup is temporarily unavailable (script blocked). Please try again later.";
-        errorEl.classList.add("visible");
-      }
-    } else {
-      console.warn("SUPABASE_ANON_KEY not configured — auth disabled");
-      document.querySelectorAll("button").forEach(function(btn) { btn.disabled = true; });
-      var errorEl = document.getElementById("error");
-      errorEl.textContent = "Signup is not configured yet. Please contact support.";
-      errorEl.classList.add("visible");
-    }
-    // Expose the client on window for the watchdog script block (a top-level
-    // `let` does NOT create a window property — the watchdog must not show a
-    // false "temporarily unavailable" on healthy loads, #527).
-    window.supabaseClient = supabaseClient;
-
-    // Single auth page at /auth — a visitor who is ALREADY signed in is
-    // bounced to the dashboard/welcome (claim routing honored) instead of
-    // seeing the login card. #1224: an OAuth state-expiry landing (?error=…)
-    // must show the banner, NOT bounce — the failed attempt is exactly the
-    // audience the banner exists for (and the bounced redirect would mask
-    // the failure).
-    if (supabaseClient) {
-      supabaseClient.auth.getSession().then(function (r) {
-        // #3080: a corroborated stale bounce must not be forwarded here either —
-        // without this the async path re-enters the /admin ↔ /auth loop that the
-        // head gate just broke.
-        if (window.__ADMIN_STALE) return;
-        if (r && r.data && r.data.session) {
-          // #1511: strict validity — missing/past expires_at is NOT authed
-          // (a presence-only bounce here loops /auth↔welcome with the
-          // welcome gate's validity check).
-          var s = r.data.session;
-          if (!s.expires_at || s.expires_at * 1000 <= Date.now()) return;
-          var e = oauthErrorParams();
-          if (!e.error && !e.code) {
-            window.location.href = claimRedirectTarget();
-          }
+        if (status === 503 || status === 0) {
+          showError("We couldn't check whether you're already signed in — please try again in a moment.");
         }
-      }).catch(function () { /* best-effort */ });
+        // 401: genuinely signed out — stay on the card.
+      });
     }
 
     // ── Error display ──────────────────────────────────────────────────────
@@ -1173,7 +1090,7 @@
       try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
     }
     if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
-    if (window.supabaseClient && rateLimitRemainingMs() > 0) {
+    if (rateLimitRemainingMs() > 0) {
       showError(rateLimitMessage());
       applyRateLimitLockout();
     }
@@ -1286,13 +1203,12 @@
       el.classList.add("visible");
     }
 
-    // #1494/#1511: API-key login — paste an existing key (agents / anon
-    // bootstrap) in a focused modal. #1511: the key is exchanged for a REAL
-    // session server-side (POST /v1/session/login) — the session lands in
-    // the parent-domain cookie via supabase-session.js, so the dashboard is
-    // authenticated WITHOUT the raw key crossing origins (the old
-    // tortoise-origin localStorage write was SOP-invisible to the dashboard
-    // → the infinite origin bounce). Login-bucket discipline (#863).
+    // #1494/#1511/#3501: API-key login — paste an existing key (agents / anon
+    // bootstrap) in a focused modal. The key is exchanged for a REAL session
+    // SERVER-SIDE (POST /auth/api-key): the BFF calls the hosted API, stores the
+    // refresh token in D1 and sets the HttpOnly `__Host-session` cookie, so the
+    // dashboard is authenticated WITHOUT the raw key OR the token it returns
+    // ever reaching the browser. Login-bucket discipline (#863).
     async function loginWithApiKey(event) {
       if (event) event.preventDefault();
       const key = document.getElementById("apikey-input").value.trim();
@@ -1310,9 +1226,10 @@
       // consumption). Re-enabled on every non-navigation terminal path.
       var reenable = function () { setLoading(false); };
       try {
-        const resp = await fetch(SIGNUP_API_URL + "/v1/session/login", {
+        const resp = await fetch("/auth/api-key", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify({ api_key: key }),
         });
         if (resp.status === 429) {
@@ -1340,9 +1257,9 @@
           return;
         }
         if (!resp.ok) {
-          let detail = {};
-          try { detail = (await resp.json()).detail || {}; } catch (e) {}
-          const code = detail.error_code || "";
+          let payload = {};
+          try { payload = await resp.json(); } catch (e) {}
+          const code = payload.error || "";
           if (code === "ANON_TEAM_NO_OWNER") {
             // #1511/D2: this key belongs to an unclaimed team — funnel to the
             // dashboard claim card (the raw key never crosses origins; the
@@ -1372,23 +1289,11 @@
           reenable();
           return;
         }
-        const session = await resp.json();
-        if (typeof window.storeSession !== "function") {
-          showApiKeyModalError("Sign-in is temporarily unavailable.");
-          reenable();
-          return;
-        }
-        // Store the session DIRECTLY in the parent-domain cookie (auth.
-        // setSession does a network round trip — refresh/getUser — which is
-        // neither instant nor reliable here). storeSession returns false when
-        // the write didn't take (cookie-blocked browser) → clear error.
-        if (!window.storeSession(session)) {
-          showApiKeyModalError("Sign-in needs cookies enabled — please enable cookies and try again.");
-          reenable();
-          return;
-        }
+        // 200: the BFF already set the HttpOnly `__Host-session` cookie and
+        // stored the refresh token in D1. There is no client session to store —
+        // `window.storeSession` is gone with the JS-readable token it wrote.
         try { window.setLastAuthMethod("apikey"); } catch (e) {}
-        window.location.href = DASHBOARD_URL;
+        window.location.href = claimRedirectTarget();
       } catch (e) {
         setLoading(false);
         showApiKeyModalError("Sign-in failed — check your connection and try again.");
@@ -1408,6 +1313,34 @@
           "; Expires=" + expires;
       } catch (e) { /* best-effort */ }
     }
+
+    // #1511/D3: the "last used" preference. It used to be provided by the
+    // deleted session bridge (supabase-session.js) alongside the token
+    // machinery. It is a UI preference, NOT a credential, so it is kept — here
+    // in the page — under the same `tt_last_auth_method` cookie the bridge wrote
+    // (host-only on the app origin), with the bridge's legacy localStorage key
+    // as a read-only fallback.
+    var LAST_AUTH_COOKIE = "tt_last_auth_method";
+    var LEGACY_LAST_AUTH = "tortoise_last_auth_method";
+    function getLastAuthMethod() {
+      try {
+        var m = document.cookie.match(/(?:^|; )tt_last_auth_method=([^;]*)/);
+        if (m) return decodeURIComponent(m[1] || "");
+        var legacy = window.localStorage.getItem(LEGACY_LAST_AUTH);
+        return legacy || "";
+      } catch (e) { return ""; }
+    }
+    function setLastAuthMethod(method) {
+      if (!method) return;
+      try {
+        var expires = new Date(Date.now() + 90 * 24 * 3600 * 1000).toUTCString();
+        document.cookie = LAST_AUTH_COOKIE + "=" + encodeURIComponent(method) +
+          "; Path=/; SameSite=Lax" + (window.location.protocol === "https:" ? "; Secure" : "") +
+          "; Expires=" + expires;
+      } catch (e) { /* best-effort */ }
+    }
+    window.getLastAuthMethod = getLastAuthMethod;
+    window.setLastAuthMethod = setLastAuthMethod;
 
     // #1511/D3: "Last used" pills on the four option buttons.
     function applyLastUsedPills() {
@@ -1431,146 +1364,45 @@
       } catch (e) { /* best-effort */ }
     }
 
-    // ── OAuth sign in ──────────────────────────────────────────────────────
-    async function signInWithProvider(provider) {
-      if (!supabaseClient) { showError("Auth not configured."); return; }
+    // ── OAuth sign in (#3501) ────────────────────────────────────────────
+    // The OAuth flow MUST go through the BFF: `/auth/start` generates the PKCE
+    // `code_verifier` SERVER-SIDE and stores it in a flow row, so `/auth/callback`
+    // can exchange the code. A client-side `signInWithOAuth` would generate a
+    // verifier the server can never see. This is a plain same-origin navigation;
+    // no GoTrue URL is built here.
+    function signInWithProvider(provider) {
       clearError();
       setLoading(true);
-      try {
-        const { data, error } = await supabaseClient.auth.signInWithOAuth({
-          provider: provider,
-          options: {
-            redirectTo: gotrueRedirectTarget(),
-          },
-        });
-
-        if (error) {
-          showError(humanizeAuthError(error));
-          return;
-        }
-
-        // Supabase OAuth redirects the user, so we don't need to do anything else.
-        // X conversion (#736 Path A) is intentionally SKIPPED on OAuth signup:
-        // the provider redirect navigates the page away before any conversion
-        // event could be pushed/reliably attributed to the user id.
-        if (data?.url) {
-          try { window.setLastAuthMethod(provider); } catch (e) {}
-          window.location.href = data.url;
-        }
-      } catch (err) {
-        console.error("signInWithProvider:", err);
-        showError(humanizeAuthError(err));
-      } finally {
-        setLoading(false);
-        // #1494: setLoading(false) re-enabled EVERY button (modal submit
-        // included) and restored labels — re-assert the login-bucket
-        // countdown/disabled state for the modal.
-        if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
-        // Re-apply the signup lockout ONLY when active — on its no-lockout
-        // path applyRateLimitLockout calls clearError(), which would wipe a
-        // just-shown provider error (e.g. provider_disabled) (#1493 review).
-        // #1494 review: and only re-show the lockout message when the attempt
-        // did NOT surface its own error — a provider error must never be
-        // clobbered by the rate-limit copy.
-        if (rateLimitRemainingMs() > 0) {
-          applyRateLimitLockout();
-          const banner = document.getElementById("error");
-          if (!banner.classList.contains("visible")) showError(rateLimitMessage());
-        }
-      }
+      // X conversion (#736 Path A) is intentionally SKIPPED on OAuth signup: the
+      // provider redirect navigates the page away before any conversion event
+      // could be pushed/reliably attributed to the user id.
+      try { window.setLastAuthMethod(provider); } catch (e) {}
+      window.location.assign("/auth/start?provider=" + encodeURIComponent(provider)
+        + "&next=" + encodeURIComponent(oauthNextPath()));
     }
 
-    // ── Email/password sign up ─────────────────────────────────────────────
-    // #801: server-first — the hosted API creates the auth user via the
-    // GoTrue admin API with email_confirm=true (no confirmation email, no
-    // SMTP rate-limit bucket). Falls back to client-side auth.signUp when
-    // the API doesn't offer the endpoint (selfhost / dev).
-
-    // ── Server-first signup (#801) ────────────────────────────────────────
-    // #863: the API's 429 responses carry the mechanism in
-    // detail.error_code (email bucket vs per-IP); stale deployments send a
-    // bare string detail — stashed here so the caller can resolve the tier.
-    let lastServer429Code = "";
-    let lastServer429Message = "";
-
-    async function serverSignup(email, password) {
-      lastServer429Code = "";
-      lastServer429Message = "";
-      try {
-        const body = { email: email, password: password };
-        if (TURNSTILE_SITE_KEY) body["cf-turnstile-response"] = turnstileToken || "";
-        const resp = await fetch(SIGNUP_API_URL + "/v1/signup/email", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (resp.status === 404 || resp.status === 503) return "unavailable";
-        if (resp.ok) return "created";
-        let payload = {};
-        try { payload = await resp.json(); } catch (e) { /* non-JSON error body */ }
-        if (resp.status === 400) {
-          // #308: CAPTCHA challenge failed/missing (server siteverify).
-          const detail = (payload && payload.detail) || "";
-          showError(typeof detail === "string" && detail ? detail : "Please complete the security check and try again.");
-          return "handled";
-        }
-        if (resp.status === 409) return "already";
-        if (resp.status === 429) {
-          const detail = payload && payload.detail;
-          if (typeof detail === "object" && detail !== null) {
-            lastServer429Code = detail.error_code || "";
-            lastServer429Message = detail.message || "";
-          } else if (typeof detail === "string") {
-            lastServer429Message = detail;
-          }
-          return "ratelimited";
-        }
-        if (resp.status === 422) {
-          const detail = (payload && payload.detail) || "Please check your email and password and try again.";
-          showError(typeof detail === "string" ? detail : "Please check your email and password and try again.");
-          return "handled";
-        }
-        return "error";
-      } catch (err) {
-        console.warn("server signup unreachable:", err);
-        return "unavailable";
-      }
-    }
-
-    // #863: resolve which mechanism a server 429 came from. error_code wins;
-    // a code-less STRING detail is hint-scanned ("registration" → per-IP
-    // register bucket; "email"/"rate limit exceeded" → email bucket); the
-    // fail-safe default is the email tier — errs toward protecting the
-    // shared project-wide bucket (only reachable on stale deployments, since
-    // the API always sends a code after #863).
-    function resolveServer429Code() {
-      const known = ["over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip"];
-      if (known.includes(lastServer429Code)) return lastServer429Code;
-      const m = (lastServer429Message || "").toLowerCase();
-      if (m.includes("registration")) return "over_request_rate_limit_ip";
-      if (m.includes("email") || m.includes("rate limit exceeded")) return "over_email_send_rate_limit";
-      return "over_email_send_rate_limit";
-    }
-
-    async function signInAndGo(email, password) {
-      // The account is created confirmed server-side (#801) — sign in
-      // directly and skip the check-your-inbox step entirely.
-      const { data, error } = await supabaseClient.auth.signInWithPassword({
-        email: email,
-        password: password,
+    // ── BFF auth helper (#3501) ───────────────────────────────────────────
+    // Every auth call is a same-origin POST returning JSON. The helper does not
+    // throw on an HTTP error — the caller branches on `status`, so a 503 can be
+    // answered "try again" rather than "signed out" (#3485).
+    async function bffPost(path, payload) {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(payload),
       });
-      if (error) {
-        // #801 review P1: the account ALREADY exists (created server-side) —
-        // a sign-in failure here is transient (network/clock), not a bad
-        // password. We're already ON the auth page — switch to the Log in
-        // tab in place (a reload would land on the Sign up tab and wipe the
-        // message).
-        setAuthMode(false);
-        showError("Account created — but signing you in failed. Please try signing in below.");
-        return;
-      }
-      if (data?.user) pushSignupEvents(data.user);
-      window.location.href = WELCOME_URL;
+      let data = {};
+      try { data = (await res.json()) || {}; } catch (e) { data = {}; }
+      return { status: res.status, ok: res.ok, data: data };
+    }
+
+    // Map a BFF error payload onto the {code, message} shape the lockout and
+    // humanizer helpers read. The signup route forwards the provider's own code
+    // in `providerError`; every other route uses `error`.
+    function bffError(data) {
+      data = data || {};
+      return { code: data.providerError || data.error || "", message: data.message || "" };
     }
 
     // Analytics (#528) + X conversion (#736 Path A): client-side tracking —
@@ -1614,7 +1446,6 @@
       }
       if (signupInFlight) return;
       signupInFlight = true;
-      if (!supabaseClient) { showError("Auth not configured."); signupInFlight = false; return; }
       if (rateLimitRemainingMs() > 0) {
         showError(rateLimitMessage());
         applyRateLimitLockout();
@@ -1639,85 +1470,68 @@
           return;
         }
 
-        // #801: server-first signup (bypasses the SMTP rate-limit bucket).
-        // Only for the hosted API — local/dev runs the legacy client-side
-        // flow against local Supabase (api.premiselabs.co is not reachable
-        // from localhost; a cross-origin call there would just CORS-fail).
-        let outcome = "unavailable";  // local/dev → legacy client-side flow
-        if (!isLocal) {
-          outcome = await serverSignup(email, password);
-        }
-        if (outcome === "created") {
-          await signInAndGo(email, password);
-          return;
-        }
-        if (outcome === "already") {
-          showError("An account with this email already exists. Please sign in instead.");
-          return;
-        }
-        if (outcome === "ratelimited") {
-          // #863: tier-aware — email bucket → 1h lockout + exhausted copy;
-          // per-IP server limits → 60s short tier + network copy. Also sets
-          // the lockout now (the #801-era path showed copy but no lockout,
-          // leaving the shared bucket exposed to retry loops).
-          const err = { code: resolveServer429Code() };
+        // #3501: signup is server-side. `/auth/signup` calls GoTrue and, when
+        // the project has email confirmation ON, sends the confirmation email
+        // and returns NO session (`confirmationRequired`) — the page then shows
+        // the check-your-inbox state. With autoconfirm it returns a session and
+        // the route has already set `__Host-session`.
+        const body = { email: email, password: password };
+        if (TURNSTILE_SITE_KEY) body["cf-turnstile-response"] = turnstileToken || "";
+        const resp = await bffPost("/auth/signup", body);
+        const payload = resp.data || {};
+
+        if (resp.status === 429) {
+          // Tier-aware, if the BFF ever surfaces the provider bucket directly:
+          // email bucket → 1h lockout + exhausted copy; per-IP → 60s + network
+          // copy. Never leave the shared bucket exposed to a retry loop.
+          const err = bffError(payload);
           setRateLimitLockout(err);
           showError(isEmailBucketError(err) ? EMAIL_BUCKET_RATE_LIMIT_COPY : rateLimitMessage());
           return;
         }
-        if (outcome !== "unavailable") {
-          // "handled" (message already shown) or "error"
-          if (outcome === "error") showError("Signup failed. Please try again in a moment.");
-          return;
-        }
-
-        // ── Legacy fallback: client-side auth.signUp (selfhost / dev) ──
-        const { data, error } = await supabaseClient.auth.signUp({
-          email: email,
-          password: password,
-          options: {
-            // #3080: GoTrue target, not a navigation target — see
-            // gotrueRedirectTarget(). WELCOME_URL would point the confirmation
-            // link at the gated /admin and self-revoke the sign-in.
-            emailRedirectTo: gotrueRedirectTarget(),
-          },
-        });
-
-        if (error) {
-          if (isRateLimitError(error)) {
-            setRateLimitLockout(error);
-            // Tier-aware copy: humanizeAuthError maps ALL rate-limit codes to
-            // the pinned "about an hour" literal — the short per-IP tier must
-            // show its own minute-scoped message (code-review P2).
-            showError(isEmailBucketError(error) ? humanizeAuthError(error) : rateLimitMessage());
-          } else {
-            showError(humanizeAuthError(error));
+        if (resp.status === 400) {
+          // A provider REFUSAL (email_exists, validation_failed, weak_password,
+          // …). The route forwards the provider's code + a message.
+          const err = bffError(payload);
+          if (err.code === "user_already_exists" || err.code === "email_exists" || err.code === "user_exists") {
+            showError("An account with this email already exists. Please sign in instead.");
+            return;
           }
+          showError(err.message || humanizeAuthError(err));
+          return;
+        }
+        if (resp.status === 503) {
+          // The provider or the session store is unavailable. If the route
+          // reports `accountCreated`, the account EXISTS and only the session
+          // could not be established — a plain "try again" there would send the
+          // user to retry and hit "already exists". Say what happened instead.
+          if (payload.accountCreated) {
+            showError(payload.message || "Your account was created, but we couldn't sign you in automatically. Please sign in with your email and password.");
+            return;
+          }
+          // Store/provider fault: "try again", never "your signup was refused".
+          showError("Signup is temporarily unavailable — please try again in a moment.");
+          return;
+        }
+        if (!resp.ok) {
+          showError("Signup failed. Please try again in a moment.");
           return;
         }
 
-        // If email confirmation is enabled, show a message
-        if (data?.user?.identities?.length === 0) {
-          showError("An account with this email already exists. Please sign in instead.");
-          return;
-        }
-
-        // Analytics + conversion tracking (see pushSignupEvents above). Runs
-        // AFTER the identities check so existing accounts re-submitting
-        // (identities.length === 0) are not counted as new signups (#732).
-        pushSignupEvents(data.user);
-
-        // Email confirmation ON: signUp returns no session — show the
-        // check-your-inbox state with resend (E2E-8). The confirmation link
-        // returns the user to /welcome.html where the session is established.
-        if (!data?.session) {
+        // 200: GoTrue either sent a confirmation email (no session) or signed
+        // the user in (autoconfirm).
+        if (payload.confirmationRequired) {
+          // Analytics + conversion tracking (see pushSignupEvents). GoTrue's
+          // confirmation-required body carries no user object, so the event is
+          // keyed on the address; attribution moves server-side on confirm.
+          pushSignupEvents({ email: email });
           showConfirmationRequired(email);
           return;
         }
 
-        // Redirect to welcome page
-        // For email/password signup without email confirmation, the user is already signed in
-        window.location.href = WELCOME_URL;
+        if (payload.user) pushSignupEvents(payload.user);
+        try { window.setLastAuthMethod("email"); } catch (e) {}
+        window.location.href = claimRedirectTarget();
       } catch (err) {
         console.error("signUpWithEmail:", err);
         showError(humanizeAuthError(err));
@@ -1844,9 +1658,11 @@
       }
     }
 
-    // Forgot-password from the login modal — resetPasswordForEmail with the
-    // same two-tier login-bucket discipline (#863). The reset link returns
-    // to /welcome.html (recoveryMode landing, #863).
+    // Forgot-password from the login modal — POST /auth/reset (the BFF owns the
+    // GoTrue call) with the same two-tier login-bucket discipline (#863). The
+    // route is deliberately non-enumerating: a valid address always answers 200.
+    // The reset link lands on /welcome?reset=1 — the route's OWN redirect target
+    // (welcome.ts serves the reset panel), never a client-supplied one.
     let modalForgotInFlight = false;  // double-submit guard (shared email bucket, #801)
     async function modalForgotPassword(event) {
       if (event) event.preventDefault();
@@ -1858,18 +1674,24 @@
       document.getElementById("modal-error").classList.remove("visible");
       document.getElementById("modal-note").textContent = "";
       try {
-        const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
-          // #1566 (P1-3): the reset panel lives on tortoise/welcome.html —
-          // recoveryMode renders it and never redirects to the app.
-          redirectTo: window.location.origin + "/welcome.html",
-        });
-        if (error) {
-          if (isRateLimitError(error)) {
-            setLoginRateLimitLockout(error);
-            showModalError(isEmailBucketError(error) ? humanizeAuthError(error) : loginRateLimitMessage());
-          } else {
-            showModalError(humanizeAuthError(error));
-          }
+        const resp = await bffPost("/auth/reset", { email: email });
+        if (resp.status === 429) {
+          const err = bffError(resp.data);
+          setLoginRateLimitLockout(err);
+          showModalError(isEmailBucketError(err) ? humanizeAuthError(err) : loginRateLimitMessage());
+          return;
+        }
+        if (resp.status === 400) {
+          showModalError((resp.data && resp.data.message) || "That doesn't look like an email address.");
+          return;
+        }
+        if (resp.status === 503) {
+          // Provider/config fault: "try again", never a verdict about the address.
+          showModalError("We couldn't send the reset email right now — please try again in a moment.");
+          return;
+        }
+        if (!resp.ok) {
+          showModalError("Something went wrong — try again.");
           return;
         }
         const note = document.getElementById("modal-note");
@@ -1881,13 +1703,12 @@
       }
     }
 
-    // #1287: email+password LOGIN (combined-card login mode) — the page's
-    // legacy signin flow, inlined so /auth serves both modes. Routes to the
-    // dashboard on success (session cookie shared cross-subdomain).
+    // #1287/#3501: email+password LOGIN (combined-card login mode) — POST
+    // /auth/password. The BFF verifies the credential server-side and sets the
+    // HttpOnly `__Host-session` cookie; the browser never receives a token.
     async function signInWithEmailPassword() {
       if (signupInFlight) return;
       signupInFlight = true;
-      if (!supabaseClient) { showError("Auth not configured."); signupInFlight = false; return; }
       // #1493: LOGIN surface → login bucket (tortoise_signin_*) — a legacy
       // safety net for the inline form; must never touch the signup bucket.
       if (loginRateLimitRemainingMs() > 0) {
@@ -1905,23 +1726,32 @@
           showError("Enter your email and password.");
           return;
         }
-        const { data, error } = await supabaseClient.auth.signInWithPassword({ email: email, password: password });
-        if (error) {
-          // #1494 review P1-2: restore the two-tier login-bucket discipline
-          // on this path (the unified modal routes through here) — a rate
-          // limit sets the LOGIN lockout + tier copy instead of leaking the
-          // raw engine message (the #527 raw-leak class).
-          if (isRateLimitError(error)) {
-            setLoginRateLimitLockout(error);
-            showError(isEmailBucketError(error) ? humanizeAuthError(error) : loginRateLimitMessage());
-          } else {
-            showError(loginErrorMessage(error));
-          }
+        const resp = await bffPost("/auth/password", { email: email, password: password });
+        if (resp.status === 429) {
+          // #1494 review P1-2: a rate limit sets the LOGIN lockout + tier copy
+          // instead of leaking the raw engine message (the #527 raw-leak class).
+          const err = bffError(resp.data);
+          setLoginRateLimitLockout(err);
+          showError(isEmailBucketError(err) ? humanizeAuthError(err) : loginRateLimitMessage());
           return;
         }
-        if (data?.user) pushSignupEvents(data.user);
+        if (resp.status === 401) {
+          // The only 401 this route emits is a positive credential rejection.
+          showError(loginErrorMessage({ message: (resp.data && resp.data.message) || "Invalid email or password." }));
+          return;
+        }
+        if (resp.status === 503) {
+          // Store/provider fault: "try again", never "you are signed out".
+          showError("Sign-in is temporarily unavailable — please try again in a moment.");
+          return;
+        }
+        if (!resp.ok) {
+          showError((resp.data && resp.data.message) || "Something went wrong — try again.");
+          return;
+        }
+        if (resp.data && resp.data.user) pushSignupEvents(resp.data.user);
         try { window.setLastAuthMethod("email"); } catch (e) {}
-        window.location.href = WELCOME_URL;
+        window.location.href = claimRedirectTarget();
       } catch (e) {
         showError((e && e.message) || "Something went wrong — try again.");
       } finally {
@@ -1940,39 +1770,31 @@
       if (rateLimitRemainingMs() > 0) { applyRateLimitLockout(); return; }
       btn.disabled = true;
       try {
-        // supabase-js v2 returns {data, error} for HTTP errors (429 included) —
-        // it does NOT throw (only network failures throw). Destructure so a
-        // rate-limited resend is handled, not silently reported as success
-        // (code-review P1: the old catch-only path burned the shared bucket
-        // while claiming "Resent").
-        const { error } = await supabaseClient.auth.resend({
-          type: 'signup',
-          email: email,
-          // #3080: same GoTrue target as signUp — a resend must not point the
-          // confirmation link at the gated /admin.
-          options: { emailRedirectTo: gotrueRedirectTarget() },
-        });
-        if (error) {
-          if (isRateLimitError(error)) {
-            setRateLimitLockout(error);
-            document.getElementById("resend-note").textContent = isEmailBucketError(error)
-              ? "Email limit reached — try again in about an hour."
-              : "Email limit reached — try again in a minute.";
-          } else {
-            document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
-          }
+        // POST /auth/resend. A non-2xx is an HTTP STATUS here (not a silent
+        // {data, error} tuple), so a rate-limited resend cannot be mistaken for
+        // success — which burned the shared bucket while claiming "Resent".
+        const resp = await bffPost("/auth/resend", { email: email });
+        if (resp.status === 429) {
+          const err = bffError(resp.data);
+          setRateLimitLockout(err);
+          document.getElementById("resend-note").textContent = isEmailBucketError(err)
+            ? "Email limit reached — try again in about an hour."
+            : "Email limit reached — try again in a minute.";
+          return;
+        }
+        if (resp.status === 400) {
+          document.getElementById("resend-note").textContent =
+            (resp.data && resp.data.message) || "Could not resend — try again shortly.";
+          return;
+        }
+        if (!resp.ok) {
+          // 503 (provider/store) and anything else: retryable, NOT a success.
+          document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
           return;
         }
         document.getElementById("resend-note").textContent = "Resent — check your inbox (limit applies).";
       } catch (e) {
-        if (isRateLimitError(e)) {
-          setRateLimitLockout(e);
-          document.getElementById("resend-note").textContent = isEmailBucketError(e)
-            ? "Email limit reached — try again in about an hour."
-            : "Email limit reached — try again in a minute.";
-        } else {
-          document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
-        }
+        document.getElementById("resend-note").textContent = "Could not resend — try again shortly.";
       } finally {
         // ⛔ SET THE COOLDOWN FIRST so applyRateLimitLockout()'s update()
         // sees it when deciding whether to re-enable #btn-resend — setting it
@@ -1992,30 +1814,9 @@
   </script>
 <script src="/consent.js" defer></script>
 
-  <!-- Watchdog (#527): if the Supabase CDN script never arrives (slow
-       network, blocked CDN), surface a clear "temporarily unavailable" state
-       instead of a dead form. Idempotent: does nothing when the client is
-       present or an error is already showing; clears itself if the client
-       arrives late. -->
-  <script>
-    (function () {
-      function showWatchdogError() {
-        var el = document.getElementById("error");
-        if (!el) return;
-        if (window.supabaseClient || el.classList.contains("visible")) return;
-        el.textContent = "Signup is temporarily unavailable (script blocked). Please try again later.";
-        el.classList.add("visible");
-      }
-      function clearWatchdogError() {
-        var el = document.getElementById("error");
-        if (!el) return;
-        if (window.supabaseClient && el.textContent.indexOf("temporarily unavailable") !== -1) {
-          el.classList.remove("visible");
-        }
-      }
-      setTimeout(showWatchdogError, 6000);
-      setTimeout(clearWatchdogError, 10000);
-    })();
-  </script>
+  <!-- #3501: the Supabase-CDN watchdog is gone with the CDN script. There is
+       no client library to arrive late, so there is no "script blocked"
+       dead-form state left to guard — a BFF fault surfaces as an honest 503
+       message from the call that hit it. -->
 </body>
 </html>

@@ -105,6 +105,12 @@ jobs:
       # requirement lived in a PR body, which cannot fail — so it now lives in
       # config/required-bindings.yml and this step reads it. Fails BEFORE the
       # deploy, because the failure mode is "deploy succeeds, runtime 503s".
+      #
+      # `--project premise-labs` scopes the check to THIS deploy's project. Since
+      # #4054 the manifest also covers `tortoise-dashboard` (gated by the
+      # `deploy-dashboard` job below, `--project tortoise-dashboard`); without
+      # this scope the not-yet-configured dashboard would block the marketing
+      # deploy. Both projects are still checked — by the job that deploys them.
       - name: Preflight — required Pages bindings exist
         run: |
           python3 -m pip install --quiet 'pyyaml==6.0.3'
@@ -115,7 +121,7 @@ jobs:
           # ignore a required check).
           rc=1
           for attempt in $(seq 1 3); do
-            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml && rc=0 && break
+            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml --project premise-labs && rc=0 && break
             rc=$?
             echo "::warning::binding preflight attempt $attempt failed (exit $rc)"
             # No sleep after the FINAL attempt: it delays the failure by 10s for
@@ -407,6 +413,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # #4054: the BFF moved onto `tortoise-dashboard`, which when the move
+      # landed had 0 env vars and 0 D1 bindings — every /auth/* and /api/*
+      # request would have 503'd on a green deploy. The same #3616 gate that
+      # guards `premise-labs` now guards this project. `--project
+      # tortoise-dashboard` reads config/required-bindings.yml; a missing
+      # REQUIRED binding exits 1, which aborts THIS step and therefore the job
+      # BEFORE the upload — the whole point is that it gates, not warns. It runs
+      # before the build so a misconfigured project fails fast.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Preflight — required Pages bindings exist (tortoise-dashboard)
+        run: |
+          python3 -m pip install --quiet 'pyyaml==6.0.3'
+          rc=1
+          for attempt in $(seq 1 3); do
+            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml --project tortoise-dashboard && rc=0 && break
+            rc=$?
+            echo "::warning::binding preflight attempt $attempt failed (exit $rc)"
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          if [ "$rc" = "1" ]; then
+            echo '::error::A REQUIRED binding is absent on the tortoise-dashboard project.'
+            echo '::error::Bind the SESSIONS D1 database + the BFF env vars before deploying. See #4054.'
+          fi
+          exit $rc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

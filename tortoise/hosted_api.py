@@ -4425,7 +4425,7 @@ def _control_plane_unavailable() -> HTTPException:
     handler as a raw 500, which the client rendered as the misleading
     "Invalid API key.". This 503 carries a structured error_code the client
     maps to the unified unavailable copy (copy-string contract with
-    website/signup.html: "Sign-in is temporarily unavailable — try again in
+    website/apps/dashboard/public/signup.html: "Sign-in is temporarily unavailable — try again in
     a moment.").
     """
     return HTTPException(

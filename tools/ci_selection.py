@@ -112,10 +112,16 @@ SHARED_MODULES = (
 # from the manifest).
 SOURCE_PATTERNS = {
     "battery": ("battery/",),
-    "onboarding": ("tortoise/onboarding/", "website/welcome.html",
+    "onboarding": ("tortoise/onboarding/",
+                   # #4054: the auth surface moved to the app project — the BFF's
+                   # pages now live in the dashboard's `public/` tree (vite copies
+                   # them to `dist/`, the deployed root). `website/signin.html` was
+                   # deleted outright (it 301'd to /auth and was dead).
+                   "website/apps/dashboard/public/welcome.html",
+                   "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
-                   "website/index.html", "website/signup.html",
-                   "website/signin.html", "website/privacy.html",
+                   "website/index.html",
+                   "website/privacy.html",
                    # #3485: the shared cross-subdomain session bridge is a
                    # website asset whose guard test
                    # (test_cross_subdomain_cookie_sync.py) reads it directly.

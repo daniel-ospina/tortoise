@@ -1,8 +1,16 @@
 """
 Clickthrough verification for the #3501 BFF session flow.
 
-Runs the REAL Cloudflare Pages runtime (`wrangler pages dev website`) against a
-mock Supabase that performs REAL ES256 signing and REAL PKCE S256 verification.
+Runs the REAL Cloudflare Pages runtime (`wrangler pages dev
+website/apps/dashboard`) against a mock Supabase that performs REAL ES256
+signing and REAL PKCE S256 verification.
+
+The BFF moved with #4054: the auth + `/api/*` Functions now live in the
+`tortoise-dashboard` Pages project rooted at `website/apps/dashboard`, so the
+dev server runs from there. The blog Functions stayed in `website/` (the
+`premise-labs` project); their admin-gate cases need a `website/`-rooted server
+and — because one `wrangler pages dev` cannot serve both `functions/` trees —
+they moved to `test_blog_purge_admin_gate.py`.
 
 Nothing here is stubbed in a way that would hide a defect:
   - JWKS/token signing is genuine (Node crypto, raw r||s conversion)
@@ -33,7 +41,10 @@ import pytest
 from bff_test_helpers import require_toolchain
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-WEBSITE_DIR = REPO_ROOT / "website"
+# The BFF moved to the DASHBOARD Pages project (issue #4054). A Pages project's
+# `functions/` directory must sit beside the site directory, so `wrangler pages
+# dev .` runs from `website/apps/dashboard` — not `website/`.
+DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 MOCK = Path(__file__).resolve().parent / "mock_supabase.mjs"
 
 # Ports deliberately outside the 8790-8801 range: a pre-existing
@@ -123,11 +134,11 @@ def stack():
 
     # MUST run from inside the site directory. `wrangler pages dev <dir>` from
     # the repo root does NOT discover `<dir>/functions` — it logs
-    # "No Functions. Shimming..." and every route 404s. That cost a full
-    # debugging cycle; it is why the cwd here is WEBSITE_DIR and the argv is ".".
+    # "No Functions. Shimming..." and every route 404s. With #4054 the Functions
+    # live under DASHBOARD_DIR, so that is the site directory and the argv is ".".
     app = Proc(
         [
-            wrangler, "pages", "dev", ".",
+            wrangler, "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
             "-b", f"SUPABASE_URL={MOCK_URL}",
@@ -138,15 +149,12 @@ def stack():
         # that redirect off-box (403). Binding it locally also exercises the
         # config-not-literal change from SCOPE.md 6.
         "-b", f"APP_ORIGIN={APP}",
-        # Needed by the blog endpoints' config guard — otherwise requireAdmin is
-        # never reached and the legacy-bearer contract cannot be tested.
-        "-b", "SUPABASE_SERVICE_ROLE_KEY=mock-service-role",
         # Needed by /api/v1. Without it the proxy answers 503 proxy_not_configured
         # before the token path runs, so a data-path assertion would be testing the
         # config guard instead of the property.
         "-b", f"API_ORIGIN={MOCK_URL}",
         ],
-        cwd=str(WEBSITE_DIR),
+        cwd=str(DASHBOARD_DIR),
     )
     try:
         _wait(APP_PORT)
@@ -420,88 +428,6 @@ def test_profile_lookup_failure_does_not_sign_the_user_out(stack):
     assert user.get("email") is None, "profile fields should be absent when the lookup failed"
 
 
-def test_legacy_bearer_provider_outage_is_503_not_401(stack):
-    """The legacy bearer path must not turn a provider outage into a sign-out.
-
-    This is the #3485 class on the LAST path still carrying it: `verifySession`
-    returned null for both "invalid token" and "provider down", and requireAdmin
-    answered 401 for both.
-    """
-    _fault(authUser=True)
-    try:
-        req = urllib.request.Request(f"{APP}/blog/api/purge", method="POST", data=b"{}")
-        req.add_header("Authorization", "Bearer legacy-token")
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                status, body = r.status, r.read().decode()
-        except urllib.error.HTTPError as e:
-            status, body = e.code, e.read().decode()
-    finally:
-        _fault(authUser=False)
-
-    assert status == 503, (
-        f"a provider outage on the bearer path must be 503, never 401 — got {status} {body}"
-    )
-
-
-def _blog_admin(user_id: str | None = None, clear: bool = False) -> dict:
-    """Grant or clear blog_admins membership on the mock."""
-    payload: dict = {}
-    if user_id:
-        payload["userId"] = user_id
-    if clear:
-        payload["clear"] = True
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(f"{MOCK_URL}/__mock/blog-admin", method="POST", data=data)
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode())
-
-
-def _purge_with_bearer() -> tuple[int, str]:
-    req = urllib.request.Request(f"{APP}/blog/api/purge", method="POST", data=b"{}")
-    req.add_header("Authorization", "Bearer legacy-token")
-    req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
-
-
-def test_legacy_bearer_non_admin_is_401(stack):
-    """A genuinely non-admin bearer IS a refusal — the other side of the line.
-
-    Depends on the mock actually answering /rest/v1/blog_admins with an empty set.
-    Before that route existed this passed on a 404 for the wrong reason.
-    """
-    _blog_admin(clear=True)
-    status, body = _purge_with_bearer()
-    assert status == 401, f"a non-admin must be 401, got {status} {body}"
-
-
-def test_legacy_bearer_admin_is_accepted(stack):
-    """The ADMIN branch must be reachable — a 404 mock had made it untestable.
-
-    With membership granted, the request must get PAST the admin gate. It may then
-    fail for its own reasons (bad body), but it must not be refused as
-    unauthorized — which is the only thing that distinguishes the branch.
-    """
-    _blog_admin(user_id="user-123")
-    try:
-        status, body = _purge_with_bearer()
-    finally:
-        _blog_admin(clear=True)
-    # Assert the POST-gate status, not merely `!= 401`. `!= 401` also passes for
-    # 400/500/503, so a regression that answered 503 would keep this green.
-    assert status == 400, (
-        f"an ADMIN bearer must pass the admin gate and then fail on its own bad "
-        f"input (expected 400 invalid_slug), got {status} {body}"
-    )
-    assert json.loads(body).get("error") == "invalid_slug", body
-
-
 def test_signout_revokes_the_row_not_just_the_cookie(stack):
     """Sign-out must REVOKE server-side, not merely clear the cookie client-side.
 
@@ -626,8 +552,13 @@ def test_malformed_cookie_does_not_500(stack):
     A bare `%` raises URIError inside decodeURIComponent, which escaped and turned
     every endpoint's careful 401/503 contract into a 500.
     """
-    for path in ("/api/session", "/api/v1/teams", "/welcome", "/blog/api/purge"):
-        req = urllib.request.Request(f"{APP}{path}", method="POST" if "purge" in path else "GET")
+    # `/blog/api/purge` is NOT served by this server — the blog Functions stayed
+    # in the `premise-labs` project (website/), so its malformed-cookie case
+    # lives in test_blog_purge_admin_gate.py against a website/-rooted server.
+    # Dropping it here would silently lose that route's coverage (a 404 is also
+    # `!= 500`), which is why it was moved rather than left to pass vacuously.
+    for path in ("/api/session", "/api/v1/teams", "/welcome"):
+        req = urllib.request.Request(f"{APP}{path}", method="GET")
         req.add_header("Cookie", "__Host-session=%")
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -650,7 +581,7 @@ def test_unconfigured_provider_is_503_not_401(stack):
     provider configured: a not-configured result must be RETRYABLE, which is what
     routes it to 503 rather than 401.
     """
-    src = (REPO_ROOT / "website/functions/_shared/auth/supabase.ts").read_text(encoding="utf-8")
+    src = (DASHBOARD_DIR / "functions/_shared/auth/supabase.ts").read_text(encoding="utf-8")
     marker = 'error: "supabase not configured"'
     idx = src.index(marker)
     line = src[:idx].count("\n")
@@ -683,7 +614,7 @@ def test_dead_refresh_token_401s_consistently(stack):
         import glob
         import sqlite3
 
-        for db in glob.glob(str(WEBSITE_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
+        for db in glob.glob(str(DASHBOARD_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
             try:
                 con = sqlite3.connect(db)
                 con.execute(
@@ -700,42 +631,6 @@ def test_dead_refresh_token_401s_consistently(stack):
     assert s2 == 401, (
         f"a dead refresh token means the session is UNUSABLE — /api/session must "
         f"answer 401, got {s2} {b2} (it answered {s1} before)"
-    )
-
-
-def test_dead_bff_cookie_does_not_fall_back_to_a_legacy_bearer(stack):
-    """A REVOKED BFF cookie must not resurrect a legacy bearer.
-
-    Cycle 2 narrowed the legacy fallback so it only applies when no BFF cookie was
-    sent at all. Without that guard, F15's "a password change revokes every
-    session" is false for any browser still holding a legacy token, because D1
-    revocation cannot reach a Supabase access token.
-
-    This test sends BOTH (dead cookie + bearer) and asserts the request is still
-    refused. Deleting the `presentedBffCookie` guard makes this fail: the bearer
-    would be accepted and the admin gate reached.
-    """
-
-    # Grant the mock user admin rights, so an ACCEPTED bearer gets past the gate
-    # and the two outcomes are distinguishable.
-    _blog_admin(user_id="user-123")
-    try:
-        req = urllib.request.Request(f"{APP}/blog/api/purge", method="POST", data=b"{}")
-        # A BFF cookie that is present but resolves to nothing (never issued).
-        req.add_header("Cookie", "__Host-session=deadbeefdeadbeef")
-        req.add_header("Authorization", "Bearer legacy-token")
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                status, body = r.status, r.read().decode()
-        except urllib.error.HTTPError as e:
-            status, body = e.code, e.read().decode()
-    finally:
-        _blog_admin(clear=True)
-
-    assert status == 401, (
-        f"a dead BFF cookie must NOT fall back to the legacy bearer, got {status} {body} "
-        "— if this passed the admin gate, F15 is false for legacy-token holders"
     )
 
 
@@ -762,7 +657,7 @@ def test_expired_session_is_401_on_both_endpoints(stack):
 
     # Force the row's TTL into the past.
     patched = 0
-    for db in glob.glob(str(WEBSITE_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
+    for db in glob.glob(str(DASHBOARD_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
         try:
             con = sqlite3.connect(db)
             cur = con.execute(
