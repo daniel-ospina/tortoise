@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
-    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,
+    SOURCE_PATTERNS, SHARED_MODULES, load_manifest, select, integrity, slow_file_issues,
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
 )
@@ -135,6 +135,21 @@ def test_shared_module_goes_full():
     assert r["test_files"] == "ALL"
     r2 = _sel(["tests/conftest.py"])
     assert r2["full"] is True
+
+
+def test_every_shared_module_entry_selects_the_full_matrix():
+    """#4097: `SHARED_MODULES` is a hand-maintained list, so derive its invariant here.
+
+    `test_shared_module_goes_full` pins two literal examples; a future entry that is
+    added (or a cross-cutting leaf like `tortoise/env_truthy.py` that is REMOVED) would
+    otherwise silently downgrade to `core`-only and stop running the consumer suites.
+    """
+    py_modules = [m for m in SHARED_MODULES if m.endswith(".py")]
+    assert py_modules, "SHARED_MODULES should list python modules"
+    for module in py_modules:
+        result = _sel([module])
+        assert result["full"] is True, f"{module} is in SHARED_MODULES but selects {result}"
+        assert result["test_files"] == "ALL", module
 
 
 def test_unknown_path_goes_full():

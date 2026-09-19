@@ -33,8 +33,9 @@ Design invariants:
     degraded dict (all required fields missing).
   - Nothing here ever raises or blocks a write — ``validate_and_warn`` is the
     only call-site surface used by the channels and it logs WARNINGs only.
-  - The env-gate seam mirrors ``TORTOISE_SESSION_LLM_MOCK``
-    (``os.environ.get(...).strip().lower() == "1"``) — set ``1`` to enable.
+  - The env-gate seam resolves ``TORTOISE_VALIDATE_FRONTMATTER`` through the
+    declared truthy contract (``tortoise/env_truthy.py``): ``1``/``true``/``yes``/
+    ``on`` in any case enable it; unset/blank/garbage leaves it OFF.
 """
 from __future__ import annotations
 

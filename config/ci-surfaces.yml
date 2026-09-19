@@ -441,15 +441,18 @@ surfaces:
   - test_entity_stage.py
   - test_enumeration_surfaces.py
   # #4097: the env-truthiness contract + the non-divergence guard. The guard scans
-  # `tortoise/**` for a new ad-hoc vocabulary literal or a new narrow `== "1"` read,
-  # so it is registered in EVERY surface that owns a scanned module — `core` (the
-  # fallback arm, for the many scanned modules with no SOURCE_PATTERN: why,
-  # monitoring, extractor_v2, model_adapters, frontmatter_validator, cimd,
-  # pack_state, abuse, mcp_server, projection/, rerank, sdk, embedded_lifecycle,
-  # embedded_reaper, backup_config, env_truthy), `sdk` (retrieval.py), `api`
-  # (hosted_api.py / mcp_auth.py / __main__.py), `eval` (embeddings.py /
-  # cross_lens.py), `ep` (decide/dream/analyze/ranking.py) and `onboarding`
+  # all of `tortoise/**` + `tests/_embedded.py` for a new ad-hoc vocabulary literal or a
+  # new narrow `== "1"` read, so it is registered in EVERY surface that owns a scanned
+  # path — `core` (the fallback arm for the scanned modules with no SOURCE_PATTERN:
+  # why, monitoring, extractor_v2, model_adapters, frontmatter_validator, cimd,
+  # pack_state, abuse, rerank, embedded_lifecycle, embedded_reaper, backup_config),
+  # `sdk` (retrieval.py), `api` (hosted_api.py / mcp_auth.py / __main__.py), `eval`
+  # (embeddings.py / cross_lens.py), `ep` (dream/analyze/ranking.py) and `onboarding`
   # (tortoise/onboarding/**), whose ledger rows this file pins.
+  # (`mcp_server.py`, `projection/`, `sdk.py` and `env_truthy.py` need no registration
+  # here: they are in `tools/ci_selection.SHARED_MODULES`, which forces the full matrix.)
+  # `test_env_truthy.py` derives this requirement from SOURCE_PATTERNS, so a new or
+  # split surface cannot silently drop the guard.
   - test_env_truthy.py
   - test_epic903_fixtures.py
   - test_epic903_freshness.py

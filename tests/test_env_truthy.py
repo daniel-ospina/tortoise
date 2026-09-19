@@ -18,10 +18,11 @@ Three things are pinned here:
 It does NOT police:
 
 - V5 presence reads (`if os.environ.get(X)`);
-- split comparisons (`raw == "1" or raw == "true"`);
 - a vocabulary with no `"1"`/`"0"` anchor (e.g. `{"true","yes","on"}`);
 - a vocabulary composed at RUNTIME (`"1 true yes on".split()`, `"".join(...)`);
 - `getattr(os.environ, ...)` reads;
+- a `match` statement (`match os.environ.get(X): case "1":`) — only `Compare` nodes are
+  inspected;
 - a **two-step** alias chain (`_a = os.environ.get(X); _r = _a`) — one step
   (`_r = ...`, `_r: str = ...`, `(_r := ...)`) IS resolved;
 - `tests/` beyond `_embedded.py`, `tools/`, `graph-scripts/`, `apps/` — which already
@@ -31,13 +32,16 @@ It does NOT police:
   `tests/eval/why_suite/test_why_suite_ab.py`, `tests/test_email_signup.py`,
   `apps/graph-viz/server/connection.py`).
 
-Two of its clauses deliberately OVER-approximate, in the fail-closed direction: the alias
-map is module-global (a name ever bound to an env read is treated as that read for the whole
-module, so an unrelated reuse of the name can red), and the `Dict`-key clause flags any dict
+A split comparison (`raw == "1" or raw == "true"`) IS caught whenever its operands
+resolve — each half is its own `Compare`. Two clauses deliberately OVER-approximate, in
+the fail-closed direction: the alias map is module-global (a name ever bound to an env
+read is treated as that read for the whole module, so an unrelated reuse of the name can
+red; conversely, `setdefault` means the FIRST env name bound to a reused local name wins,
+so a second one in another scope is invisible), and the `Dict`-key clause flags any dict
 whose KEYS look like a vocabulary even when it is a non-env label map. Both are fixable by
-raising/adding the relevant ledger entry, or by making the shape unambiguous. The claim this
-file supports is therefore "no new divergence **inside the declared surface**, modulo the
-shapes listed above" — not "anywhere in the repo, however written". A JS/TS scan of
+raising/adding the relevant ledger entry, or by making the shape unambiguous. The claim
+this file supports is therefore "no new divergence **inside the declared surface**, modulo
+the shapes listed above" — not "anywhere in the repo, however written". A JS/TS scan of
 `website/functions/`, `supabase/functions/`, `client/` and `menu-bar/` found no boolean
 env-truthiness parsing, so there is no cross-language duplication to guard.
 
@@ -488,10 +492,20 @@ def _module_string_constants(tree: ast.Module) -> dict[str, str]:
 
 
 def _unwrap_chain(node: ast.expr) -> ast.expr:
-    """`os.environ.get(X, "").strip().lower()` -> the `os.environ.get(...)` call."""
-    while isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-            and node.func.attr not in ("get", "getenv"):
-        node = node.func.value
+    """`os.environ.get(X, "").strip().lower()` -> the `os.environ.get(...)` call.
+
+    Also unwraps a WALRUS operand, so `if (_r := os.environ.get(X)) == "1"` resolves:
+    the compare's own operand is the `NamedExpr`, not the `Name` the assignment binds.
+    """
+    while True:
+        if isinstance(node, ast.NamedExpr):
+            node = node.value
+            continue
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr not in ("get", "getenv"):
+            node = node.func.value
+            continue
+        break
     return node
 
 
@@ -587,6 +601,54 @@ def _is_vocabulary(values: set[str]) -> bool:
     return bool((values & (TRUTHY | FALSY)) - {"0", "1"})
 
 
+def _scan_source(rel: str, source: str) -> tuple[list[tuple[str, int]],
+                                                list[tuple[str, str, int]]]:
+    """Scan ONE module's source. Split out from `_scan()` so the alias/env-alias
+    machinery has a synthetic-source self-test (it is exercised by nothing in-tree)."""
+    literals: list[tuple[str, int]] = []
+    narrow: list[tuple[str, str, int]] = []
+    tree = ast.parse(source)
+    constants = _module_string_constants(tree)
+    environ_names = _os_environ_aliases(tree)
+    aliases = _env_aliases(tree, constants, environ_names)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Set, ast.Tuple, ast.List)):
+            values = {e.value for e in node.elts
+                      if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+            if _is_vocabulary(values):
+                literals.append((rel, node.lineno))
+        if isinstance(node, ast.Dict):
+            keys = {k.value for k in node.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            if _is_vocabulary(keys):
+                literals.append((rel, node.lineno))
+        if isinstance(node, ast.Compare):
+            sides = (node.left, *node.comparators)
+            names = {n for n in (_env_var_name(s, constants, aliases, environ_names)
+                                 for s in sides) if n}
+            if not names:
+                continue
+            hit = False
+            for op, comparator in zip(node.ops, node.comparators, strict=True):
+                if isinstance(op, (ast.Eq, ast.NotEq)):
+                    # a "1"/"0" literal on EITHER side (reversed operands count)
+                    for side in (node.left, comparator):
+                        if isinstance(side, ast.Constant) and side.value in ("1", "0"):
+                            hit = True
+                if isinstance(op, (ast.In, ast.NotIn)) \
+                        and isinstance(comparator, (ast.Tuple, ast.Set, ast.List)):
+                    values = {e.value for e in comparator.elts
+                              if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+                    # A NARROW membership test only: `("1",)` counts; the wide
+                    # vocabulary does not (the literal clause catches that).
+                    if ("1" in values or "0" in values) and not _is_vocabulary(values):
+                        hit = True
+            if hit:
+                for name in names:
+                    narrow.append((rel, name, node.lineno))
+    return literals, narrow
+
+
 def _scan() -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]]:
     """(vocabulary literals, narrow reads) over the declared surface."""
     literals: list[tuple[str, int]] = []
@@ -595,48 +657,21 @@ def _scan() -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]]:
         files = sorted(root.rglob("*.py")) if root.is_dir() else [root]
         for path in files:
             rel = path.relative_to(REPO_ROOT).as_posix()
-            tree = ast.parse(path.read_text())
-            constants = _module_string_constants(tree)
-            environ_names = _os_environ_aliases(tree)
-            aliases = _env_aliases(tree, constants, environ_names)
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Set, ast.Tuple, ast.List)):
-                    values = {e.value for e in node.elts
-                              if isinstance(e, ast.Constant) and isinstance(e.value, str)}
-                    if _is_vocabulary(values):
-                        literals.append((rel, node.lineno))
-                if isinstance(node, ast.Dict):
-                    keys = {k.value for k in node.keys
-                            if isinstance(k, ast.Constant) and isinstance(k.value, str)}
-                    if _is_vocabulary(keys):
-                        literals.append((rel, node.lineno))
-                if isinstance(node, ast.Compare):
-                    sides = (node.left, *node.comparators)
-                    names = {n for n in (_env_var_name(s, constants, aliases, environ_names)
-                                         for s in sides) if n}
-                    if not names:
-                        continue
-                    hit = False
-                    for op, comparator in zip(node.ops, node.comparators, strict=True):
-                        if isinstance(op, (ast.Eq, ast.NotEq)):
-                            # a "1"/"0" literal on EITHER side (reversed operands count)
-                            for side in (node.left, comparator):
-                                if isinstance(side, ast.Constant) \
-                                        and side.value in ("1", "0"):
-                                    hit = True
-                        if isinstance(op, (ast.In, ast.NotIn)) \
-                                and isinstance(comparator, (ast.Tuple, ast.Set, ast.List)):
-                            values = {e.value for e in comparator.elts
-                                      if isinstance(e, ast.Constant)
-                                      and isinstance(e.value, str)}
-                            # A NARROW membership test only: `("1",)` counts; the wide
-                            # vocabulary does not (the literal clause catches that).
-                            if ("1" in values or "0" in values) and not _is_vocabulary(values):
-                                hit = True
-                    if hit:
-                        for name in names:
-                            narrow.append((rel, name, node.lineno))
+            file_literals, file_narrow = _scan_source(rel, path.read_text())
+            literals.extend(file_literals)
+            narrow.extend(file_narrow)
     return literals, narrow
+
+
+def _scanned_rel_paths() -> list[str]:
+    """Every path in the declared scan surface, repo-relative (for the ratchet)."""
+    out: list[str] = []
+    for root in _SCAN_SURFACE:
+        if root.is_dir():
+            out.extend(p.relative_to(REPO_ROOT).as_posix() for p in sorted(root.rglob("*.py")))
+        else:
+            out.append(root.relative_to(REPO_ROOT).as_posix())
+    return out
 
 
 def test_no_adhoc_vocabulary_literal_outside_the_contract():
@@ -685,11 +720,50 @@ def test_guard_is_registered_in_every_surface_that_owns_a_scanned_module():
 
     manifest = yaml.safe_load((REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
     owners = {surface for surface, patterns in cs.SOURCE_PATTERNS.items()
-              if any(p.startswith("tortoise/") for p in patterns)} | {"core"}
+              if any(rel.startswith(p) for rel in _scanned_rel_paths() for p in patterns)} \
+        | {"core"}
     missing = sorted(s for s in owners
                      if "test_env_truthy.py" not in manifest["surfaces"].get(s, []))
     assert not missing, (
-        f"the env-truthiness guard scans all of tortoise/** but is not registered in "
-        f"surface(s) that own a scanned module: {missing} — add `- test_env_truthy.py` "
-        "to each (config/ci-surfaces.yml)"
+        f"the env-truthiness guard scans all of tortoise/** (and tests/_embedded.py) but is "
+        f"not registered in surface(s) that own a scanned path: {missing} — add "
+        "`- test_env_truthy.py` to each (config/ci-surfaces.yml)"
     )
+
+
+_SYNTHETIC_SHAPES = [
+    ('_r = os.environ.get("TORTOISE_SYNTH")\n_r == "1"\n', "plain assignment"),
+    ('_r: str = os.environ.get("TORTOISE_SYNTH")\n_r == "1"\n', "annotated assignment"),
+    ('if (_r := os.environ.get("TORTOISE_SYNTH")) == "1":\n    pass\n', "inline walrus"),
+    ('if (os.environ.get("TORTOISE_SYNTH")) == "1":\n    pass\n', "direct call"),
+    ('if os.environ["TORTOISE_SYNTH"] == "1":\n    pass\n', "subscript"),
+    ('if os.getenv("TORTOISE_SYNTH") == "1":\n    pass\n', "os.getenv"),
+    ('if "1" == os.environ.get("TORTOISE_SYNTH"):\n    pass\n', "reversed operands"),
+    ('from os import environ as env\nif env.get("TORTOISE_SYNTH") == "1":\n    pass\n',
+     "aliased environ import"),
+    ('NAME = "TORTOISE_SYNTH"\nif os.environ.get(NAME) == "1":\n    pass\n',
+     "module constant name"),
+    ('if os.environ.get("TORTOISE_SYNTH", "").strip().lower() == "1":\n    pass\n',
+     "normalised chain"),
+]
+
+
+@pytest.mark.parametrize("source,shape", _SYNTHETIC_SHAPES,
+                         ids=[s[1] for s in _SYNTHETIC_SHAPES])
+def test_scanner_resolves_every_declared_shape(source, shape):
+    """The alias/env-alias machinery is exercised by NOTHING in-tree (`tortoise/` has no
+    `from os import environ` and no aliased narrow read), so without this self-test a
+    regression that deletes it passes all of the above. Code review found the inline
+    walrus was claimed-covered but missed; this pins every shape the docstring lists."""
+    _, narrow = _scan_source("synthetic.py", source)
+    assert {name for _rel, name, _line in narrow} == {"TORTOISE_SYNTH"}, \
+        f"{shape} was not resolved by the scanner: {narrow}"
+
+
+def test_scanner_flags_a_synthetic_vocabulary_literal():
+    literals, _ = _scan_source("synthetic.py", '_V = {"1", "true", "yes", "t"}\n')
+    assert literals, "an extra-token vocabulary literal must be flagged"
+    literals, _ = _scan_source("synthetic.py", '_V = {"1": "on", "true": "off"}\n')
+    assert literals, "a Dict-keyed vocabulary must be flagged"
+    literals, _ = _scan_source("synthetic.py", '_V = {"0", "1"}\n_L = {"1": "one", "0": "zero"}\n')
+    assert not literals, "binary digits / a non-env label map must NOT be flagged"
