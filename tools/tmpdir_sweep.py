@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
@@ -263,6 +264,12 @@ def plan(
 ) -> list[Decision]:
     """Classify every depth-1 entry of `root`; never mutates anything."""
     root = os.path.realpath(root)
+    if not math.isfinite(older_than_hours) or older_than_hours < 0:
+        # `age_h < nan` is always False, so a nan gate makes EVERY entry a
+        # candidate — a silent bypass of the age guard (declared threat
+        # class 4). Reject it at the library boundary too, not only in main.
+        raise ValueError(
+            f"refusing a non-finite/negative age gate: {older_than_hours!r}")
     now = time.time() if now is None else now
     decisions: list[Decision] = []
 
@@ -428,6 +435,11 @@ def main(argv: list[str] | None = None) -> int:
         exact_names = _validated_tokens(
             args.exact_name if args.exact_name else DEFAULT_EXACT_NAMES,
             "--exact-name")
+        if not math.isfinite(args.older_than_hours) \
+                or args.older_than_hours < 0:
+            raise ValueError(
+                f"refusing a non-finite/negative --older-than-hours: "
+                f"{args.older_than_hours!r}")
         result = sweep(args.root, prefixes=prefixes, exact_names=exact_names,
                        older_than_hours=args.older_than_hours,
                        apply=args.apply)

@@ -247,6 +247,35 @@ def test_unparseable_pid_protects_a_stale_dir(tmp_path):
     assert result.removed == []
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses mode bits")
+def test_unreadable_pid_protects_a_stale_dir(tmp_path):
+    """The distinct `except OSError` branch of the pid guard (declared
+    threat class 3: unreadable pid)."""
+    weird = tmp_path / "ask_unreadable_66666666"
+    weird.mkdir()
+    pid_file = weird / "redis.pid"
+    pid_file.write_text(str(os.getpid()))
+    os.chmod(pid_file, 0o000)
+    ts = time.time() - _OLD_H * 3600.0
+    os.utime(weird, (ts, ts))
+    try:
+        result = sweep(str(tmp_path), apply=True, older_than_hours=24.0)
+        assert weird.exists()
+        assert result.removed == []
+    finally:
+        os.chmod(pid_file, 0o600)
+
+
+def test_sweep_refuses_a_non_finite_age_gate(tmp_path):
+    # `age_h < nan` is always False -> every entry becomes a candidate.
+    _make(tmp_path, "ask_nan_33333333", age_hours=0.0)
+    with pytest.raises(ValueError):
+        sweep(str(tmp_path), apply=True, older_than_hours=float("nan"))
+    with pytest.raises(ValueError):
+        sweep(str(tmp_path), apply=True, older_than_hours=-1.0)
+    assert (tmp_path / "ask_nan_33333333").exists()
+
+
 # ── CLI surface ───────────────────────────────────────────────────────────
 
 def test_main_dry_run_exit_0_and_json(tmp_path, capsys):
@@ -285,6 +314,15 @@ def test_main_refuses_a_missing_root(tmp_path, capsys):
     rc = main(["--root", str(tmp_path / "does-not-exist")])
     assert rc == 2
     assert "refusing" in capsys.readouterr().err
+
+
+def test_main_refuses_a_non_finite_age_gate(tmp_path, capsys):
+    young = _make(tmp_path, "ask_fresh_99999999", age_hours=0.0)
+    rc = main(["--root", str(tmp_path), "--apply",
+               "--older-than-hours", "nan"])
+    assert rc == 2
+    assert "non-finite" in capsys.readouterr().err
+    assert young.exists()  # a nan gate must never widen the sweep
 
 
 def test_main_exits_2_when_a_removal_fails(tmp_path, capsys, monkeypatch):

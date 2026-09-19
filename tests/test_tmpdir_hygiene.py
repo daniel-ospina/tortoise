@@ -11,6 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests._tmpdir_hygiene import (
@@ -119,6 +121,24 @@ def test_protected_reason_is_none_only_without_a_pid_file():
         with open(os.path.join(path, "redis.pid"), "w") as fh:
             fh.write("not-a-pid")
         assert _protected_reason(path) is not None  # fail closed
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses mode bits")
+def test_tracker_fails_closed_on_an_unreadable_pid():
+    """The distinct `except OSError` branch (declared threat class 3)."""
+    with TrackedTempfileArtifacts() as tracker:
+        path = tempfile.mkdtemp(prefix="ask_hygiene_unreadable_")
+        pid_file = os.path.join(path, "redis.pid")
+        with open(pid_file, "w") as fh:
+            fh.write(str(os.getpid()))
+        os.chmod(pid_file, 0o000)
+    try:
+        assert os.path.isdir(path)  # left for the reaper, never removed
+        assert [p for p, _ in tracker.skipped_live] == [path]
+    finally:
+        os.chmod(pid_file, 0o600)
+        os.remove(pid_file)
+        os.rmdir(path)
 
 
 def test_protected_reason_is_none_for_a_provably_dead_pid():
