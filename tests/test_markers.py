@@ -483,6 +483,11 @@ def test_no_redirect_stems_registry_exact():
         # TEST_NO_REDIRECT_STEMS but this pin was not updated, so the
         # repo-wide markers gate red'd on every PR until reconciled here.
         "test_projection_embedded_socket_timeout",
+        # 2026-09-18 #4028: the surface half asserts embedded brute-force
+        # relevance-floor semantics (the docker sig-A vector branch returns no
+        # absolute similarity), so the module joins the carve-out lane —
+        # registered in ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS.
+        "test_precision_leak_4028",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
