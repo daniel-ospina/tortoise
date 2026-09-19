@@ -855,7 +855,7 @@ class TestDashboardCreatedTeamRoundTrip:
         as_user()
         # env must be 0 BEFORE delete — soft_delete stamps the STORED
         # grace_hours and the purge honors stored grace over env
-        # (_past_grace): a 24h stamp would skip the just-deleted team.
+        # (_past_grace): a 7-day stamp would skip the just-deleted team.
         monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "0")
         r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
@@ -1050,6 +1050,32 @@ class TestPurge:
 
         assert _registry_count(db_path, "Team", "reg-promised") == 1  # kept
         assert _registry_count(db_path, "Team", "reg-env-old") == 0  # purged
+
+    def test_purge_does_not_defer_org_past_stored_grace(
+            self, reg_client, capture_audit, monkeypatch):
+        """#4179 P1 — grow-direction twin of ``test_purge_honors_stored_grace``.
+
+        A legacy in-flight org deleted under the old 24h default (stored
+        ``grace_hours=24``) 30h ago is past its OWN disclosed
+        ``hard_delete_after``. Raising the env default to 168h must NOT hold
+        it until 168h: the env cutoff is a fetch superset, never a pre-filter
+        of the stored promise."""
+        monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "168")
+        tc, db_path = reg_client  # noqa: RUF059
+        thirty_hours = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()  # noqa: UP017
+        _seed_registry(db_path, org_id="reg-legacy", deleted_at=thirty_hours)
+        sdk = TortoiseSDK(db_path, namespace="registry")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:'reg-legacy'}) SET t.grace_hours=24"
+        )
+        # control: no stored grace → the env fallback (168h) still applies.
+        _seed_registry(db_path, org_id="reg-env-recent",
+                       deleted_at=thirty_hours)
+
+        ha_mod._purge_deleted_orgs()
+
+        assert _registry_count(db_path, "Team", "reg-legacy") == 0
+        assert _registry_count(db_path, "Team", "reg-env-recent") == 1
 
     def test_purge_deletes_rows_past_grace_supabase(self, sb_client,
                                                     capture_audit):

@@ -25,29 +25,40 @@ CANONICAL_DOC_URL = (
 )
 
 
-# ── 1. the three paths agree on one 7-day window ────────────────────────────
+# ── 1. the implemented deletion paths agree; the user path is a doc pin ─────
 
 def test_restore_window_constants_agree():
-    """All three deletion paths read one window. Must be RED before #4179.
+    """The two IMPLEMENTED deletion paths (graph, team) read one window. The
+    user-account constant is asserted separately as a DOCUMENTATION PIN — it
+    has no consumer path, so this test must not claim a third wired path.
 
-    RED today: the team default is 24h and the user-account constant does not
-    exist. GREEN after: every path derives from ``retention.RESTORE_WINDOW``.
+    RED before #4179: the team default was 24h and the user-account constant
+    did not exist. GREEN after: every realised path derives from
+    ``retention.RESTORE_WINDOW``.
     """
     from tortoise import retention
     from tortoise.backup_sweep import _GRAPH_PURGE_GRACE_DAYS
-    from tortoise.hosted_api import (
-        TEAM_DELETE_GRACE_HOURS,
-        USER_ACCOUNT_DELETE_GRACE_HOURS,
-    )
+    from tortoise.hosted_api import TEAM_DELETE_GRACE_HOURS
 
     assert retention.RESTORE_WINDOW_DAYS == 7
     assert retention.RESTORE_WINDOW_HOURS == 168
-    # unit-normalized: the graph path is days, the account paths are hours.
+    # unit-normalized: the graph path is days, the team path is hours.
     assert _GRAPH_PURGE_GRACE_DAYS * 24 == retention.RESTORE_WINDOW_HOURS
     assert TEAM_DELETE_GRACE_HOURS == retention.RESTORE_WINDOW_HOURS
-    # Documentation pin only — there is no user-account deletion code path yet
-    # (privacy §16: no self-service deletion). This records the promised window
-    # for the support request; it is not a behaviour assertion.
+
+
+def test_user_account_window_is_a_documentation_pin():
+    """The user-account path has no deletion code today (privacy §16: no
+    self-service deletion). ``USER_ACCOUNT_DELETE_GRACE_HOURS`` records the
+    promised support/email window and is NOT read by any production module —
+    this pins the value and the fact that it is a promise, not behaviour.
+
+    Wiring it is a real feature (missing Supabase auth-admin deletion); if a
+    consumer appears, replace this pin with a behaviour assertion.
+    """
+    from tortoise import retention
+    from tortoise.hosted_api import USER_ACCOUNT_DELETE_GRACE_HOURS
+
     assert USER_ACCOUNT_DELETE_GRACE_HOURS == retention.RESTORE_WINDOW_HOURS
 
 
@@ -64,15 +75,27 @@ def test_lock_bound_stays_below_restore_window():
 
 def test_frontend_trash_grace_matches_authority():
     """``graphs.js`` cannot import Python, so the dashboard's copy could drift.
-    Parse it and bind it to the authority."""
+    Parse it and bind it to the authority; ``main.jsx`` renders the window and
+    is allowlisted in the scatter scan on the claim that it derives the number,
+    so bind it here too — a bare literal cannot hide behind the allowlist."""
     from tortoise import retention
 
-    js = (REPO / "website" / "apps" / "dashboard" / "src" / "graphs.js").read_text(
-        encoding="utf-8"
-    )
+    src = REPO / "website" / "apps" / "dashboard" / "src"
+    js = (src / "graphs.js").read_text(encoding="utf-8")
     m = re.search(r"export const TRASH_GRACE_DAYS\s*=\s*(\d+)", js)
     assert m, "graphs.js must declare `export const TRASH_GRACE_DAYS = <n>`"
     assert int(m.group(1)) == retention.RESTORE_WINDOW_DAYS
+
+    main = (src / "main.jsx").read_text(encoding="utf-8")
+    assert "TRASH_GRACE_DAYS" in main, (
+        "main.jsx must interpolate TRASH_GRACE_DAYS, not restate the window"
+    )
+    # Comments may narrate the window; rendered code must not hardcode it.
+    code = re.sub(r"/\*.*?\*/", " ", main, flags=re.S)
+    code = re.sub(r"//[^\n]*", " ", code)
+    n = retention.RESTORE_WINDOW_DAYS
+    bare = re.findall(rf"\b{n}\s*-?\s*d(?:ays?)?\b", code, re.I)
+    assert not bare, f"main.jsx hardcodes the restore window: {bare}"
 
 
 # ── 3. the privacy page states the path-qualified horizon ───────────────────
@@ -102,7 +125,12 @@ SCAN_ROOTS = (
     ("website/apps/dashboard/src", "*"),
     ("tortoise", "*.py"),
     ("supabase/migrations", "*.sql"),
+    ("config", "*"),
 )
+
+# Single config surfaces outside the roots above (the env template states the
+# window as "grace (7d)" — a compact form the scan must see).
+SCAN_FILES = (".env.example", "fly.toml")
 
 # Point-in-time records — they state the window as it was; the canonical doc
 # supersedes them. Excluded by prefix, with a reason.
@@ -131,8 +159,9 @@ SCATTER_ALLOWLIST: dict[str, str] = {
     "website/dpa.html": "owner-gated wording commit — links the canonical doc",
     "website/privacy.html": "owner-gated wording commit — links the canonical doc",
     # unrelated numbers (not deletion/retention windows)
-    "website/apps/dashboard/src/graphs.test.js": "derives its expectation from graphs.js",
+    "website/apps/dashboard/src/graphs.test.js": "derives its expectation from TRASH_GRACE_DAYS (graphs.js)",
     "website/apps/dashboard/src/graphsBackupColumnTripwire.test.js": "'retained' in a backup-list assertion — not a window",
+    "docs/scoping-432-subscriptions-claim-lifecycle.md": "event-store (30-day) retention — a different axis, not a deletion promise",
     "supabase/migrations/20260906000001_graphs_deleted_at.sql": "additive schema-history migration comment",
 }
 
@@ -151,35 +180,72 @@ LINKED_FILES = {
     "website/apps/dashboard/src/main.jsx",
 }
 
-# A tight deletion/retention-WINDOW statement — not any occurrence of "7 days".
-_CLAIM_RE = re.compile(
-    r"(?i)(?:"
-    r"(?:recover|restore|trash|grace|purge|eras|delet|permanently|retention|retain)"
-    r"[^\n]{0,45}\b7\b[^\n]{0,20}\bdays?\b"
-    r"|\b7\b[^\n]{0,20}\bdays?\b[^\n]{0,45}"
-    r"(?:recover|restore|trash|grace|purge|eras|delet|permanently|retention|retain)"
-    r"|\b(?:four weeks|4 weeks|28 days|168 hours)\b"
-    r"|\b24\s*h(?:ours?)?\b[^\n]{0,25}\bgrace\b"
-    r"|\bgrace\b[^\n]{0,25}\b24\s*h(?:ours?)?\b"
-    r"|limited additional period"
-    r"|(?:backups?|backup copies)[^\n]{0,30}(?:erased|kept|retained|horizon|four weeks|limited)"
-    r"|(?:erased|permanently erased)[^\n]{0,30}backups?"
-    r")"
-)
-
-# Code files whose only hits are the named implementation constants — the
-# canonical doc names them, so they are exempt by design (category ii).
-_NAMED_CONSTANT_FILES = {
+# Small modules that ARE the named-constant definitions — exempt as a whole
+# (every line in them is the authority).
+_NAMED_CONSTANT_MODULES = {
     "tortoise/retention.py",
-    "tortoise/backup_sweep.py",
     "tortoise/backup_config.py",
+}
+
+# Large modules that merely USE the constants — exempt ONLY on lines that name
+# a constant or link the canonical doc. A whole-file exemption on a ~24k-line
+# module hid a new independent literal (#4179 review).
+_NAMED_CONSTANT_USER_FILES = {
+    "tortoise/backup_sweep.py",
     "tortoise/hosted_api.py",
     "tortoise/sdk.py",
     "tortoise/supabase_control.py",
 }
 
+# The canonical constant names. A claim line in a user file is exempt when it
+# names one of these (the number is then traceable to the sole authority).
+_NAMED_CONSTANT_RE = re.compile(
+    r"\b(?:RESTORE_WINDOW_(?:DAYS|HOURS)|_GRAPH_PURGE_GRACE_DAYS"
+    r"|_TRASH_GRACE_DAYS|TEAM_DELETE_GRACE_HOURS|USER_ACCOUNT_DELETE_GRACE_HOURS"
+    r"|LOCK_DAYS_MAX|retention_(?:hourly|daily|weekly))\b"
+)
+
+
+# A deletion/restore/backup/retention WINDOW NOUN. The window branches require
+# one nearby, so an unrelated "our sprint cadence is 4 weeks", a "trial lasts
+# 28 days", a 24h display threshold, or a 30-day decay half-life cannot fail
+# the gate (#4179 review). "retain" only counts as "retained for" (a bare
+# "retained key"/"retained-pool" is not a window), and "recover" excludes the
+# hyphenated "recovery-velocity".
+_WINDOW_NOUN = (
+    r"(?:restor\w*|recover\w*(?![\w-])|trash|grace|purg\w*|"
+    r"retention(?![\w-])|retain\w*\s+for|deleted|deletion|delet\w*\s+for|"
+    r"eras\w*|permanent\w*)"
+)
+# The window literals — long, numeric, and compact forms. Compact forms
+# (7d / 7-day) are included because `.env.example` states the window as
+# "grace (7d)"; "24 hours" and "30 days" are covered because both appear in
+# promise-bearing copy (#4179 review).
+_WINDOW_RE = (
+    r"(?:\b7\s*-?\s*d(?:ays?)?\b"
+    r"|\b168\s*-?\s*h(?:ours?|rs?|r)?\b"
+    r"|\b24\s*-?\s*h(?:ours?|rs?|r)?\b"
+    r"|\b28\s*-?\s*days?\b"
+    r"|\b30\s*-?\s*days?\b"
+    r"|\bfour\s+weeks?\b"
+    r"|\b4\s*-?\s*weeks?\b)"
+)
+_CLAIM_RE = re.compile(
+    r"(?i)(?:"
+    rf"{_WINDOW_NOUN}[^\n]{{0,45}}{_WINDOW_RE}"
+    rf"|{_WINDOW_RE}[^\n]{{0,45}}{_WINDOW_NOUN}"
+    r"|limited additional period"
+    r"|(?:\bbackups?\b|backup copies)[^\n]{0,30}(?:erased|kept|retained|horizon|limited)"
+    r"|(?:erased|permanently erased)[^\n]{0,30}\bbackups?\b"
+    r")"
+)
+
 
 def _scanned_files():
+    for rel in SCAN_FILES:
+        path = REPO / rel
+        if path.is_file():
+            yield path
     for root, pattern in SCAN_ROOTS:
         base = REPO / root
         if not base.exists():
@@ -229,19 +295,47 @@ def test_no_unlinked_retention_claims():
     offenders: list[str] = []
     for path in _scanned_files():
         rel = path.relative_to(REPO).as_posix()
-        if rel == CANONICAL_DOC_REL or rel in _NAMED_CONSTANT_FILES:
+        if rel == CANONICAL_DOC_REL or rel in _NAMED_CONSTANT_MODULES:
             continue
         if _is_excluded(rel) or rel in SCATTER_ALLOWLIST:
             continue
+        line_scoped = rel in _NAMED_CONSTANT_USER_FILES
         text = path.read_text(encoding="utf-8", errors="ignore")
         for i, line in enumerate(text.splitlines(), 1):
-            if _CLAIM_RE.search(line):
-                offenders.append(f"{rel}:{i}: {line.strip()[:110]}")
+            if not _CLAIM_RE.search(line):
+                continue
+            if CANONICAL_DOC_REL in line or CANONICAL_DOC_URL in line:
+                continue  # the claim links the authority
+            if line_scoped and _NAMED_CONSTANT_RE.search(line):
+                continue  # the claim names a canonical constant
+            offenders.append(f"{rel}:{i}: {line.strip()[:110]}")
     assert not offenders, (
         "retention/deletion claim outside the canonical doc and the named "
         "constants — link " + CANONICAL_DOC_REL + " or add a reasoned "
         "allowlist entry:\n" + "\n".join(offenders)
     )
+
+
+def test_claim_regex_covers_new_forms_and_rejects_unrelated_numbers():
+    """#4179 review: the scan must catch the compact/numeric forms the plan
+    promised (30 days / 24 hours / 7d) AND must not fire on an unrelated
+    number that merely sits near a soft context word."""
+    for claim in (
+        "deleted data is retained for 30 days",
+        "backups are retained for 24 hours",
+        "the trash grace is 7d",
+        "restore it for 7 days",
+    ):
+        assert _CLAIM_RE.search(claim), f"scan misses a real claim: {claim!r}"
+    for unrelated in (
+        "our sprint cadence is 4 weeks and the trial lasts 28 days",
+        "returns a locale date past 24h — the retained-pool case",
+        "the fix is not to delete it but to shorten the 30-day half-life",
+        "BACKUP_KEY_PREVIOUS=   # RETAINED key during a rotation overlap",
+    ):
+        assert not _CLAIM_RE.search(unrelated), (
+            f"scan false-positives on unrelated copy: {unrelated!r}"
+        )
 
 
 def test_allowlist_entries_exist():

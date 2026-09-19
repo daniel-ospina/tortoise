@@ -9074,7 +9074,7 @@ function claimIntentInFlight() {
             {isOwnerAdmin && trash.length > 0 && (
               <details className="trash-section" open={false}>
                 <summary aria-label={`Trash, ${trash.length} item${trash.length === 1 ? '' : 's'}`}>
-                  🗑 Trash ({trash.length}) — deleted graphs are kept 7 days, then permanently erased
+                  🗑 Trash ({trash.length}) — deleted graphs are kept {TRASH_GRACE_DAYS} days, then permanently erased
                 </summary>
                 {trashMsg && <div className="error banner">{trashMsg}</div>}
                 {trashStatus === 'error' && <p className="dim small">Couldn't load trash — check your connection and try again.</p>}

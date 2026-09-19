@@ -5,6 +5,9 @@ domain: platform
 doc_status: live
 created: 2026-09-18
 ownedBy: epistemic-team
+subjects.team: epistemic-team
+aboutSubjects: tortoise
+aboutObjects: tortoise-cloud
 related:
   - issue: 4179
     note: "Canonical source of truth for the retention/deletion promise (owner ruling 2026-09-18)."
@@ -102,17 +105,30 @@ path.
 
 ## Where this promise is stated
 
-Every one of these either links here or is a named implementation constant. The
-anti-scatter scan (`tests/test_retention_promise.py::test_no_unlinked_retention_claims`)
-enforces it:
+The anti-scatter scan (`tests/test_retention_promise.py::test_no_unlinked_retention_claims`)
+fails on any new retention/deletion claim that neither links here nor is a named
+constant; `test_surveyed_files_link_to_canonical_doc` guards the link set itself.
+The coverage is:
 
-`website/privacy.html` · `website/dpa.html` · `website/apps/dashboard/src/{main.jsx,graphs.js,graphs.test.js}` ·
-`docs/ops/registry-backup-dr.md` · `docs/ops/multi-graph-migration-runbook.md` ·
-`docs/infra-runbook.md` · `docs/data-safety.md` · `docs/event-catalog.md` ·
-`docs/registry-graph-schema.md` · `docs/scoping-2304-delete-semantics.md` ·
-`docs/plans/2026-09-06-2304-delete-trash-can.md` · `docs/prototypes/2304-trash-ui.md` ·
+**Linked here and checked by the scan** — `website/privacy.html` · `website/dpa.html` ·
+`website/apps/dashboard/src/{main.jsx,graphs.js}` · `docs/ops/registry-backup-dr.md` ·
+`docs/ops/multi-graph-migration-runbook.md` · `docs/infra-runbook.md` ·
+`docs/data-safety.md` · `docs/registry-graph-schema.md` ·
+`docs/scoping-2304-delete-semantics.md`.
+
+**Named implementation constants** (exempt by design — the scan never counts them):
+`tortoise/{retention,backup_sweep,backup_config,hosted_api,sdk,supabase_control,hosted_backup}.py`.
+`website/apps/dashboard/src/graphs.test.js` is derived: it imports
+`TRASH_GRACE_DAYS` from `graphs.js` rather than restating the number.
+
+**Point-in-time records — exempt, not gated** (they state the window as it was;
+this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md` ·
+`docs/prototypes/2304-trash-ui.md` ·
 `docs/research/2026-09-06-backup-dr-best-practices.md` ·
-`docs/scoping-432-subscriptions-claim-lifecycle.md` · `tortoise/{retention,backup_sweep,backup_config,hosted_api,sdk,supabase_control,hosted_backup}.py`
+`docs/scoping-432-subscriptions-claim-lifecycle.md`.
+
+**Different axis — exempt, not gated:** `docs/event-catalog.md` (the 30-day
+`TORTOISE_EVENT_RETENTION_DAYS` operational event log, not a deletion promise).
 
 ## Proposed public wording — PENDING OWNER APPROVAL
 
@@ -123,16 +139,20 @@ enforces it:
 **Privacy §6 — replace the two list items:**
 
 > **Knowledge graphs.** Deleting a knowledge graph removes it from your view
-> immediately and revokes its API keys. It stays restorable from **Trash for 7
-> days** (see the [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)).
+> immediately and revokes its API keys. It stays restorable from the
+> organization's "Trash" for **7 days** (the single source of truth is the
+> [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)).
 > After the 7-day window the graph is permanently erased, together with its
 > backup copies.
 
 > **Backups.** Snapshots of live data are kept on a rolling schedule of 24
-> hourly, 7 daily, and 4 weekly copies — so a snapshot of data that was *live*
+> hourly, 7 daily, and 4 weekly copies, so a snapshot of data that was *live*
 > at the time may persist for up to about **four weeks**. This is a backup
-> horizon, not a retention claim about content you delete. A deleted graph's
-> own backups are erased with it at the end of its 7-day window.
+> horizon, not a retention claim about content you delete. At the end of a
+> deleted graph's 7-day window we erase its own backup copies from our primary
+> storage; that erasure is best-effort and is not retried if an individual copy
+> cannot be removed, and copies held in our secondary disaster-recovery store
+> (disabled by default) are not deleted.
 
 **Privacy §"Deletion scope" — replace the closing sentence:**
 
@@ -143,5 +163,7 @@ enforces it:
 **DPA §11 — replace the "limited additional period" phrase:**
 
 > … data in backups is retained for a limited period on a rolling 24-hour /
-> 7-day / 4-weekly schedule (about four weeks at most) to maintain integrity,
-> and is not used for any other purpose.
+> 7-day / 4-weekly schedule (about four weeks at most for snapshots of data
+> that was live; backups of a deleted team account are not yet erased on this
+> schedule, as recorded in the retention and deletion policy) to maintain
+> integrity, and is not used for any other purpose.

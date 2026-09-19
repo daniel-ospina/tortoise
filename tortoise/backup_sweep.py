@@ -1374,7 +1374,7 @@ def run_backup_sweep(
     }
 
 
-# ── #2304 trash purge (delete = quarantine → 7-day grace → erasure) ──────────
+# ── #2304 trash purge (delete = quarantine → _GRAPH_PURGE_GRACE_DAYS grace → erasure) ──
 # Owner Option C: tombstoned custom graphs are recoverable (trash restore) for
 # a disclosed grace window, then PHYSICALLY erased: the data-plane namespace
 # (GRAPH.DELETE), every backup artifact (nested pool + per-graph ops state +
@@ -1473,9 +1473,9 @@ def _drop_graph_namespace(db, namespace: str) -> None:
 def _purge_graph_storage(storage, org_id: str, graph_id: str,
                          namespace: str | None = None) -> dict[str, Any]:
     """Delete every backup artifact of one purged graph, best-effort per
-    family (failures are logged + reported and never abort the purge of the
-    namespace — the row is stamped regardless, so residual artifacts are
-    logged loudly for operator follow-up; the artifact families are:
+    family (failures are collected in the returned ``errors`` and never abort
+    the purge of the namespace — the row is stamped regardless, so a residual
+    artifact is NOT retried by the sweep; the artifact families are:
       - nested per-graph pool   backups/{org}/{gid}/  (#2313)
       - per-graph ops state     ops/teams/{org}/graphs/{gid}/ (#2313)
       - legacy FLAT archives of this graph, resolved through the #2370

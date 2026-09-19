@@ -2629,7 +2629,7 @@ def soft_delete_graph(cp, org_id: str, graph_id: str) -> bool:
     distinguish by a prior kind lookup for the 403 default-guard).
 
     #2304: stamps ``deleted_at`` (the trash grace window's start — the
-    purge enforces the 7-day recovery period off it; legacy tombstones
+    purge enforces the _GRAPH_PURGE_GRACE_DAYS recovery period off it; legacy tombstones
     (deleted_at NULL) predate the column and are treated as past-grace).
     """
     rows = cp.query(
