@@ -85,26 +85,25 @@ this is a collapse of names that already exist, not a design of new ones.
 
 | # | Canonical | Members (current names) | Action |
 |---|---|---|---|
-| W1 | `create_point` | `create_point`, `create_or_update_point`, `batch_create_points` | keep + **2 aliases collapse** |
-| W2 | `create_entity(type=)` | `create_entity`, `create_subject`, `create_object`, `create_event`, `create_document` | keep — **keep `create_event`** (eval calls it) |
-| W3 | `create_source` | `create_source`, `complete_source` | keep — **not foldable** (below) |
-| W4 | `create_edge(relation=)` | `create_edge`, `create_derivation`, `link_source_to_entity` | keep + collapse |
-| W5 | `create_operator(op_type=)` | `create_operator`, `create_direct_edge` | keep — **not foldable** (below) |
-| W6 | `index_directory` | `index_file`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
-| W7 | `ingest` | `ingest` | keep |
-| W8 | `capture_session` | `capture_session`, `checkpoint`, `diary_write`, `diary_read` | keep |
-| W9 | `commit_session` | `commit_session` | keep — **not foldable into W8** |
-| W10 | `update` | `update`, `update_point`, `update_entity` | keep + collapse |
-| W11 | `delete` | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep + collapse |
-| W12 | `supersede(transfer_edges=)` | `supersede`, `supersede_point`, `invalidate_point` | keep + collapse |
-| W13 | `retract_point` | `retract_point` | keep — **no successor, not a `supersede`** |
-| W14 | `promote_point` | `promote_point`, `list_drafts`, `quarantine_batch` | keep |
-| W15 | `operator_action(action=)` | `operator_action`, `mitigate_operator`, `annotate_operator` | keep + collapse |
-| W16 | `set_point_baseline` | `set_point_baseline` | keep |
-| W17 | `dream` | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | keep — **`compute_confidence` mislabelled read** |
-| W18 | `assess_source` | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
-| W19 | `approve_merge` | `approve_merge` | keep |
-| W20 | `file_decision`, `file_human_approval` | `file_decision`, `file_human_approval` | keep |
+| W1 | `create_entity(type=)` | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | keep — **`create_point` is absorbed**, mirroring the approved MCP list. `create_point` and `create_event` survive as warning aliases (#3883) because the eval harness calls them by name |
+| W2 | `create_source` | `create_source`, `complete_source` | keep — **not foldable** (below) |
+| W3 | `create_edge(relation=)` | `create_edge`, `create_derivation`, `link_source_to_entity` | keep + collapse |
+| W4 | `create_operator(op_type=)` | `create_operator`, `create_direct_edge` | keep — **not foldable** (below) |
+| W5 | `index_directory` | `index_file`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
+| W6 | `ingest` | `ingest` | keep |
+| W7 | `capture_session` | `capture_session`, `checkpoint`, `diary_write`, `diary_read` | keep |
+| W8 | `commit_session` | `commit_session` | keep — **not foldable into W8** |
+| W9 | `update` | `update`, `update_point`, `update_entity` | keep + collapse |
+| W10 | `delete` | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep + collapse |
+| W11 | `supersede(transfer_edges=)` | `supersede`, `supersede_point`, `invalidate_point` | keep + collapse |
+| W12 | `retract_point` | `retract_point` | keep — **no successor, not a `supersede`** |
+| W13 | `promote_point` | `promote_point`, `list_drafts`, `quarantine_batch` | keep |
+| W14 | `operator_action(action=)` | `operator_action`, `mitigate_operator`, `annotate_operator` | keep + collapse |
+| W15 | `set_point_baseline` | `set_point_baseline` | keep |
+| W16 | `dream` | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | keep — **`compute_confidence` mislabelled read** |
+| W17 | `assess_source` | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
+| W18 | `approve_merge` | `approve_merge` | keep |
+| W19 | `file_decision`, `file_human_approval` | `file_decision`, `file_human_approval` | keep |
 
 ### Control plane — namespaced
 
@@ -166,7 +165,6 @@ We have been wrong about this twice already, so the blockers are recorded explic
 | Pair | Blocker |
 |---|---|
 | `create_source` ↛ `create_entity` | the **URL is the node identity**; plus tier canonicalisation, conditional MERGE on `contentHash`, evidence-age clock, and its own journaling contract |
-| `create_point` ↛ `create_entity` | 501 LOC: content-hash dedup, tag sync, EP dirty-marking, `PointAdded` journal |
 | `create_operator` ↔ `create_direct_edge` | operator **node** vs bare edge — different EP factor extraction; a `reify` flag would silently change semantics |
 | `retract_point` ↔ `supersede` | retract has **no successor** |
 | `promote_point` ↔ `update_point(status='live')` | promote also promotes incident operators, under reviewer gating |
@@ -212,8 +210,8 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 **Where this lands for us.** 150 public methods on one flat class is ~5.5× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The target list above does exactly that: **36 groups over 149
-names** — 29 memory-facing (R1–R9, W1–W20) and 7 control-plane namespaces (N1–N7) —
+**collapse the aliases**. The target list above does exactly that: **35 groups over 149
+names** — 28 memory-facing (R1–R9, W1–W19) and 7 control-plane namespaces (N1–N7) —
 reached by grouping and merging, with the primitives still reachable and `backfill_v25`
 archived. The
 control plane is what moves behind namespaces; the memory surface
@@ -257,6 +255,82 @@ at the tool layer:
 `ingest` · `recall_state` · `promote_point` · `mitigate_operator` · `compute_confidence` ·
 `retract_point` · `dream` · `tortoise_fts_query` · `close`
 
+## What we have that competitors do not — and why
+
+Every method outside the **consensus core** needs a justification strong enough to survive
+review. The core, measured across 13 competitors, is only **six capability buckets** —
+*add · search · get/list · delete · update · namespace-scoping* — each held by 10–13 of 13
+products. Anything else on our surface is differential and must earn its place.
+
+Justification strength is graded honestly, including where it is weak. "Nobody else does
+this" is **not** by itself a strong justification, and several entries below fail that test.
+
+| Group | Members | Nearest competitor capability | Justification | Strength |
+|---|---|---|---|---|
+| R1 | `tortoise_fts_query`, `query`, `paginated_query`, `query_points_by_tag`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | search (13/13) | **Core — table stakes.** | — |
+| R2 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context` | none for gaps | Belief-propagation recall. `recall_gaps` — *what the graph does not know* — has **no analogue in any surveyed product**. | **strong** |
+| R3 | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | get/list (12/13) | **Core.** | — |
+| R4 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | Graphiti search, Neo4j retrievers | Graph-native traversal reachable *without* an LLM. Competitors fold traversal into search. The two governance members are ours alone. | adequate |
+| R5 | `status`, `taxonomy`, `list_*`, `audit`, `check_structure`, `validate_domain`, `stale_points`, `summarize_structure`, `dream_health_check`, `dream_health_state`, **`test_guard`** | `cognee.validate` | Graph structural validation — **Cognee has this**, so the claim is *"we differ in kind"*: ours is ontology-aware (`docs/ONTOLOGY.md`) where Cognee checks orphaned edges and identity mismatch generically. **`test_guard` is a test helper on the product surface — no product justification.** | adequate / **weak** |
+| R6 | `get_cross_lens_candidates`, `list_dedup_candidates` | `detect_contradictions` (Cognee, internal) | A **read-only** review queue for link candidates — surfaces the candidate, never auto-merges. No competitor exposes candidate review as public API. | adequate |
+| R7 | `get_provenance_chain`, `belief_timeline`, `restore_point_at` | provenance graph (Cognee) | Cognee also has provenance, so ours must differ in kind: ours is **who decided** (Point→authoredBy→Subject→delegation) to their **where it came from**. `belief_timeline` — how a belief itself changed over time — has no analogue. | adequate / strong |
+| R8 | `events_poll`, `list_batch`, `list_batches` | `history` (Mem0), `runs` (Letta) | A graph-native event log with batch containment. | adequate |
+| R9 | `get_confidence`, `calibrate_summary`, `calibration_passed` | **none — verified absent** | **Belief propagation / probabilistic confidence over a graph.** A zero-result repo-wide code search across all 10 vendor organisations returns no belief, confidence or probabilistic method on any client object. | **strong** |
+| W1 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | add (13/13) | **Core.** | — |
+| W2 | `create_source`, `complete_source` | `write_note`, `add` | A **source with a credibility tier** whose URL *is* its identity. No competitor models source trust; credibility is not a field anywhere in the survey. | **strong** |
+| W3 | `create_edge`, `create_derivation`, `link_source_to_entity` | `add_triplet` (Graphiti) | Typed edges constrained to an ontology allowlist, versus a free-form triplet insert. | adequate |
+| W4 | `create_operator`, `create_direct_edge` | **none — verified absent** | **Epistemic operators (IMPL / NAND) as first-class nodes.** A repo-wide search across the vendor orgs returns only NAND-flash drivers — never a graph operator. Nobody models entailment or incompatibility as a node. | **strong** |
+| W5 | `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | ingest (13/13) | **Core**, with file-hash resume — Cognee has `sync`, so this is table stakes rather than differential. | — |
+| W6 | `ingest` | add (13/13) | **Core — and the single most capable call on the surface**: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so edges can reference nodes created in the same call. It is currently folded into `capture_knowledge`; see Open items. | — |
+| W7 | `capture_session`, `checkpoint`, `diary_write`, `diary_read` | Letta conversations, Cognee session | Turn a session into memory with LLM extraction. Episodic-memory bucket is real (6/13). | adequate |
+| W8 | `commit_session` | same | **Weak.** This is an internal pipeline split (extractor-v2 + Layer-1 POST) surfaced as a public name. A caller does not experience it as a different *action* from `capture_session`. | **weak** |
+| W9 | `update`, `update_point`, `update_entity` | update (11/13) | **Core.** | — |
+| W10 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | delete (12/13) | **Core.** | — |
+| W11 | `supersede`, `supersede_point`, `invalidate_point` | Graphiti `invalid_at`/`expired_at` | Supersession is **implicit in theirs** (an ingest side effect they never expose) and **explicit in ours** — a first-class operation with edge transfer. | **strong** |
+| W12 | `retract_point` | none | A claim is **withdrawn without a successor**. Every competitor either deletes or supersedes; none retracts. | **strong** |
+| W13 | `promote_point`, `list_drafts`, `quarantine_batch` | Cognee write proposals | Draft→live promotion that also promotes incident operators, under review gating. Nobody else has a draft lifecycle for claims. | adequate |
+| W14 | `operator_action`, `mitigate_operator`, `annotate_operator` | **none — verified absent** | Same ground as W4: acting on an epistemic operator is meaningless in products that have no operators. | **strong** |
+| W15 | `set_point_baseline` | **none** | Declares a claim's **starting belief** (the Beta prior) with provenance on who set it. No product has a per-claim prior. | **strong** |
+| W16 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | `mem_scheduler` (MemOS) | Ours recomputes **beliefs** over a graph; MemOS reschedules **storage**. Different in kind, not degree. | **strong** |
+| W17 | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | none | Source credibility is a first-class, scored, cached property. Absent from every product surveyed. | **strong** |
+| W18 | `approve_merge` | **none — absent by omission** | Every surveyed product resolves entities **automatically**. A human gate on a merge is a deliberate refusal of that default, not a missing feature. | **strong** |
+| W19 | `file_decision`, `file_human_approval` | `propose_sql_write` (Cognee) | Decisions are **graph nodes** that participate in retrieval, not a pending queue beside the graph. | **strong** |
+| N1–N6 | `org_*`, `graph_*`, `membership_*`, `apikey_*`, `invitation_*`, `signup_token_*` | Chroma AdminClient, Weaviate users/roles, Letta access_tokens | Multi-tenant SaaS control plane, required by the hosted product. **Not product surface** — no competitor treats this as memory API, and it is exempt from the read/write guarantee. Two notes: `invitation_*` (8 methods) is **absent across the field** — nobody else invites, they create users directly — but *"nobody does it"* is not a strong reason to keep eight public methods; and this whole block is 34 of 150 methods, or 22% of the surface. | adequate / **weak on size** |
+| N7 | `ulid`, `close`, **`test_guard`** | `close` (7/13) | `close` is core lifecycle. **`ulid` is an ID utility no competitor exposes; `test_guard` is a test helper.** | **weak** |
+
+### What does not survive review
+
+Evidence, not taste. These are the entries whose justification is weak on its own terms:
+
+| Entry | Why it fails |
+|---|---|
+| `test_guard` | A test helper on the product surface. No product justification exists. |
+| `ulid` | An internal ID utility. Nothing competitor-side exposes one; callers can generate ULIDs. |
+| `commit_session` | An internal pipeline split, not a distinct user action from `capture_session`. |
+| `invitation_*` (8 methods) | Absent across the field because nobody *invites* — they create users directly. Eight public methods for an administrative flow no competitor models. |
+| `signup_token_*` (3 methods) | Same class as above; token recovery/revocation for an admin flow. |
+| `complete_source` | Zero code callers. |
+| `backfill_v25` | Already archived — targets a schema several versions old. |
+| The five unresolvable `sdk_method` values | Declarations that do not resolve (`recommendation: fix-declaration` in the manifest). |
+
+### The honest headline
+
+**Only two capabilities are genuinely unprecedented**, both verified by a zero-result
+repo-wide code search across all ten vendor organisations: **belief propagation /
+probabilistic confidence over a graph**, and **epistemic operators (IMPL / NAND) as
+first-class nodes**. A third — **human approval on merges** — is absent by deliberate
+omission.
+
+**Cognee is the product that undercuts most "unprecedented" claims.** It alone ships
+contradiction detection, per-claim provenance, graph structural validation, a write-proposal
+approval queue, ontology management, migration/backfill, and cross-product import adapters.
+Four of the capabilities expected to be unique to us had to be re-justified as *"we differ
+in kind"* rather than *"nobody does this"* — recorded above so the weaker claim is not made.
+
+Everything else that looks differential is really an instance of the six core buckets with
+our own semantics attached, which is defensible — but it is not a moat, and should not be
+justified as one.
+
 ## Open items
 
 | Item | Needs |
@@ -264,10 +338,14 @@ at the tool layer:
 | The **four** new dispatchers (`search`, `get(type=)`, `overview(section=)`, `recall(mode=)`) | approval — additive, but they add names to a frozen surface |
 | `invitation_get` | approval — a new name; the two lookup paths differ (salted-hash verify vs ULID match), so this is a design decision, not a rename |
 | `supersede` / `operator_action` parameter forwarding | `valid_from` and `credibility` must be forwarded before those two collapses are safe — today each is either a `TypeError` or silently ignored |
+| **`ingest` needs its own MCP tool name** | It is the only call that writes points + entities + sources + connections atomically — the batch-and-relationships upload — yet it is folded into `capture_knowledge` alongside two session workflows. Rename it out, or rename the container. |
+| `test_guard`, `ulid` | No product justification exists for either. Candidates for removal from the public surface. |
+| `commit_session` | Is it a distinct user action from `capture_session`, or an internal pipeline split? |
+| `invitation_*` (8), `signup_token_*` (3) | 11 public methods for administrative flows no competitor models as product API. Keep as namespaced admin, or reduce. |
 | `get_confidence` / `compute_confidence` / `get_source_reliability` | a decision: fix the declaration, or add a `write_back: bool` parameter — until then the read/write guarantee does not hold |
 | The control-plane cold-handle write | approval of a fix, or an explicit exemption for operator-only surfaces |
 | Five phantom `sdk_method` registry values | folded into #4035's class of defect |
-| 29 memory-facing groups vs the approved 23 tools | whether the SDK mirrors the tool list 1:1 or stays a superset |
+| 28 memory-facing groups vs the approved 23 tools | whether the SDK mirrors the tool list 1:1 or stays a superset |
 | `list_graphs` vs `graph_list` | a naming decision — raw DB names vs control-plane rows |
 | `ulid`, `close`, `test_guard` | whether utilities belong on the public surface at all |
 
