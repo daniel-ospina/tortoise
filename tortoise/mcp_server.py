@@ -3047,6 +3047,15 @@ def tortoise_session_capture(conversation: list[dict],
         org["legacy_full_access"] = bool(_current_legacy_full_access.get())
     if limits.get("max_points") is not None:
         org["max_points"] = int(limits["max_points"])
+    # #4010: carry the resolved sessions limit through the SAME bridge, but
+    # ONLY when it is actually present. `_check_org_limit(org, "sessions")`
+    # treats an EXPLICIT None as unlimited and a MISSING key as fail-closed
+    # (#310 GAP-B) — so a presence guard is required, not `.get()`: the bridge
+    # must not synthesize a key the resolver never produced (that would be the
+    # same silent leniency the `enforce_org_limit` fallback removal exists to
+    # kill, and it would make MCP capture succeed where REST 500s).
+    if "max_sessions" in limits:
+        org["max_sessions"] = limits["max_sessions"]
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
                               session_id=session_id,

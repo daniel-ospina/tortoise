@@ -146,6 +146,9 @@ surfaces:
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #4010: the session-cap removal — drives the hosted capture path + the
+  # registry resolver, so it belongs with the quota/api surface.
+  - test_issue_4010_sessions_unlimited.py
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
@@ -539,6 +542,7 @@ surfaces:
   - test_notify.py
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
   - test_open_kinds.py
+  - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all
   - test_operator_source_search.py
   - test_operator_source_unit.py
   - test_ops_safety.py
