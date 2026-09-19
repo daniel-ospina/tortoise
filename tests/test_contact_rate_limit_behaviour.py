@@ -133,9 +133,9 @@ def _limiter_source(code: str) -> str:
     declaration = re.search(r"const hits\s*=\s*[^;]+;", source)
     assert declaration is not None, "the limiter's state map was not found"
     # The declaration is used VERBATIM (only its TypeScript type arguments removed),
-    # not replaced by a `new Map()` of the harness's own: otherwise changing the
-    # store — `new WeakMap()` has no `size`, so the cap silently never runs — would
-    # be invisible to a behaviour test that builds its own store.
+    # not replaced by a `new Map()` of the harness's own: otherwise a store whose
+    # `size` is `undefined` — so the cap silently never runs — would be invisible to a
+    # behaviour test that builds its own store.
     store = re.sub(r"<[^>]*>", "", declaration.group(0))
     start = source.index("function rateLimited")
     body = source[start : _brace_end(source, start)]
@@ -231,17 +231,24 @@ const planned = Math.min(MAX_RATE_KEYS, CAP_CEILING) + 1;
 for (let i = 0; i < planned; i++) rateLimited("ip" + i, T0);
 observations.attemptedKeys = planned;
 observations.mapSize = hits.size === undefined ? -1 : hits.size;
+// WHICH keys survive, not just how many: an eviction that takes the NEWEST key
+// instead of the oldest leaves the count at the cap all the same.
+observations.oldestEvicted = !hits.has("ip0");
+observations.newestKept = hits.has("ip" + (planned - 1));
 
 // 5. The expired sweep, when over the cap: an EXPIRED key must be dropped before a
 // LIVE one. Seeds are written directly (the limiter cannot travel back in time to
 // create an expired window) and the LIVE ones are inserted FIRST, so insertion order
 // and expiry order disagree: an eviction that ignores expiry removes the live keys
-// and leaves the dead ones behind, which the counts below show.
+// and leaves the dead ones behind, which the counts below show. One seeded key has a
+// MIXED window, because `every` and `some` agree on single-entry windows — `some`
+// would drop a live history that still counts.
 hits.clear();
 const expiredAt = T0 - RATE_WINDOW_MS - 1;
 const cap = Math.min(MAX_RATE_KEYS, CAP_CEILING);
 for (let i = 0; i < cap; i++) hits.set("live" + i, [T0]);
 for (let i = 0; i < 10; i++) hits.set("dead" + i, [expiredAt]);
+hits.set("mixed", [expiredAt, T0]);
 rateLimited("fresh", T0);
 let deadLeft = 0;
 let liveLeft = 0;
@@ -251,6 +258,21 @@ for (const k of hits.keys()) {
 }
 observations.deadKeysLeft = deadLeft;
 observations.liveKeysLeft = liveLeft;
+observations.mixedKeySurvived = hits.has("mixed");
+
+// 6. The re-insert of the current key, which the limiter's own comment calls
+// load-bearing. An address that submits again must be the LAST key in insertion
+// order, or the eviction it triggers drops ITS OWN history and the limit becomes
+// bypassable by flooding distinct keys. `hits.delete(ip); hits.set(ip, recent);`
+// does that; a plain `hits.set(ip, recent)` leaves the key at its original position,
+// where the next eviction takes it.
+hits.clear();
+rateLimited("v", T0);
+for (let i = 0; i < cap - 1; i++) rateLimited("fill" + i, T0);
+rateLimited("v", T0 + 1);
+rateLimited("newcomer", T0);
+observations.reusedKeySurvived = hits.has("v");
+observations.reusedKeyHistory = (hits.get("v") || []).length;
 
 console.log(JSON.stringify(observations));
 """
@@ -367,6 +389,14 @@ def _check_cap(observed: dict) -> None:
         f"map must converge to exactly {observed['maxRateKeys']} keys, got "
         f"{observed['mapSize']}"
     )
+    assert observed["oldestEvicted"] is True, (
+        "eviction must take the OLDEST key — the first address of the flood must be "
+        "gone, or the cap is buying its bound by discarding recent history instead"
+    )
+    assert observed["newestKept"] is True, (
+        "the address that just submitted must not be the eviction victim: its "
+        "history would be lost immediately and the limit bypassable"
+    )
 
 
 def _check_sweep(observed: dict) -> None:
@@ -384,6 +414,27 @@ def _check_sweep(observed: dict) -> None:
         f"the live keys (plus the new one) must fill the cap: expected "
         f"{observed['maxRateKeys']}, got {observed['liveKeysLeft']}"
     )
+    assert observed["mixedKeySurvived"] is True, (
+        "a key holding one expired and one live timestamp must survive the sweep — "
+        "dropping it discards history that still counts (an `every` swept as `some`)"
+    )
+
+
+def _check_reinsert(observed: dict) -> None:
+    """A resubmitting address is re-inserted, so it is not evicted by its own call.
+
+    Without the re-insert the key keeps its original position in insertion order, so
+    the eviction triggered by the next key takes its history: the address loses the
+    submissions it already made and the limit becomes bypassable.
+    """
+    assert observed["reusedKeySurvived"] is True, (
+        "the resubmitting address must survive the eviction its own call triggers — "
+        "it was evicted, so its history is lost and the limit can be bypassed"
+    )
+    assert observed["reusedKeyHistory"] == 2, (
+        "the resubmitting address must keep its history (2 submissions), got "
+        f"{observed['reusedKeyHistory']}"
+    )
 
 
 INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
@@ -393,6 +444,7 @@ INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
     ("isolation", _check_isolation),
     ("cap", _check_cap),
     ("sweep", _check_sweep),
+    ("re-insert", _check_reinsert),
 )
 
 
@@ -443,49 +495,89 @@ def test_expired_keys_are_swept_before_live_ones(behaviour: dict) -> None:
     _check_sweep(behaviour)
 
 
+def test_a_resubmitting_address_is_not_evicted_by_its_own_call(behaviour: dict) -> None:
+    """The re-insert keeps the caller's history out of the eviction it triggers."""
+    _check_reinsert(behaviour)
+
+
 # These are the escapes from the #2409 pin history plus the ones review found here, as
 # an executable battery: each must be caught by the invariants above. Patterns are
-# matched as REGEXES with flexible whitespace, so re-indenting or reformatting the
-# limiter does not break the battery — the harness asserts behaviour, not layout —
+# REGEXES with flexible whitespace (`\s*` / `\s+`), so re-indenting or re-wrapping an
+# expression does not break the battery — the harness asserts behaviour, not layout —
 # and each pattern is asserted present, so a mutation that stops applying fails
-# loudly instead of leaving a battery that proves nothing.
+# loudly with the instruction to update it instead of proving nothing.
 MUTATIONS: tuple[tuple[str, str, str], ...] = (
     (
         "emptied history after the filter",
-        r"const recent = \(hits\.get\(ip\) \|\| \[\]\)\.filter\(\(t\) => t > cutoff\);",
+        r"const\s+recent\s*=\s*\(hits\.get\(ip\)\s*\|\|\s*\[\]\)\s*\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)\s*;",
         "\\g<0>\n  recent.length = 0;",
     ),
-    ("emptied history after the push", r"recent\.push\(now\);", "\\g<0>\n  recent.length = 0;"),
-    ("emptied history after the write-back", r"hits\.set\(ip, recent\);", "\\g<0>\n  recent.length = 0;"),
-    ("predicate that never counts", r"\(t\) => t > cutoff", "\\g<0> && false"),
-    ("empty array written back", r"hits\.set\(ip, recent\);", "hits.set(ip, []);"),
-    ("map cleared after the write-back", r"hits\.set\(ip, recent\);", "\\g<0>\n  hits.clear();"),
+    (
+        "emptied history after the push",
+        r"recent\.push\(\s*now\s*\)\s*;",
+        "\\g<0>\n  recent.length = 0;",
+    ),
+    (
+        "emptied history after the write-back",
+        r"hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
+        "\\g<0>\n  recent.length = 0;",
+    ),
+    ("predicate that never counts", r"\(\s*t\s*\)\s*=>\s*t\s*>\s*cutoff", "\\g<0> && false"),
+    ("empty array written back", r"hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;", "hits.set(ip, []);"),
+    (
+        "map cleared after the write-back",
+        r"hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
+        "\\g<0>\n  hits.clear();",
+    ),
     (
         "store that reports no size",
-        r"new Map<string, number\[\]>\(\)",
+        r"new\s+Map\s*<\s*string\s*,\s*number\[\]\s*>\s*\(\s*\)",
         'new Proxy(new Map(), { get: (t, p) => p === "size" ? undefined : '
         "(typeof t[p] === 'function' ? t[p].bind(t) : t[p]) })",
     ),
-    ("store that cannot hold string keys", r"new Map<string, number\[\]>\(\)", "new WeakMap()"),
-    ("threshold raised out of range", r"const RATE_LIMIT = 5;", "const RATE_LIMIT = 1_000_000_000;"),
-    ("window cut to nothing", r"const cutoff = now - RATE_WINDOW_MS;", "const cutoff = now;"),
-    ("trip comparison relaxed", r"recent\.length >= RATE_LIMIT", "recent.length > RATE_LIMIT"),
-    ("cap raised out of range", r"const MAX_RATE_KEYS = 5000;", "const MAX_RATE_KEYS = 50_000_000;"),
-    ("expiry predicate made non-strict", r"filter\(\(t\) => t > cutoff\)", "filter((t) => t >= cutoff)"),
+    (
+        "store that cannot hold string keys",
+        r"new\s+Map\s*<\s*string\s*,\s*number\[\]\s*>\s*\(\s*\)",
+        "new WeakMap()",
+    ),
+    ("threshold raised out of range", r"const\s+RATE_LIMIT\s*=\s*5\s*;", "const RATE_LIMIT = 1_000_000_000;"),
+    ("window cut to nothing", r"const\s+cutoff\s*=\s*now\s*-\s*RATE_WINDOW_MS\s*;", "const cutoff = now;"),
+    ("trip comparison relaxed", r"recent\.length\s*>=\s*RATE_LIMIT", "recent.length > RATE_LIMIT"),
+    ("cap raised out of range", r"const\s+MAX_RATE_KEYS\s*=\s*5000\s*;", "const MAX_RATE_KEYS = 50_000_000;"),
+    (
+        "expiry predicate made non-strict",
+        r"filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
+        "filter((t) => t >= cutoff)",
+    ),
     (
         "expiry filter removed",
-        r"\(hits\.get\(ip\) \|\| \[\]\)\.filter\(\(t\) => t > cutoff\)",
+        r"\(hits\.get\(ip\)\s*\|\|\s*\[\]\)\s*\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
         "hits.get(ip) || []",
     ),
     (
         "eviction overshoots the cap",
-        r"let excess = hits\.size - MAX_RATE_KEYS;",
+        r"let\s+excess\s*=\s*hits\.size\s*-\s*MAX_RATE_KEYS\s*;",
         "let excess = hits.size - 100;",
     ),
     (
         "expired sweep removed",
         r"for \(const \[k, v\] of hits\) \{\s*if \(v\.every\(\(t\) => t <= cutoff\)\) hits\.delete\(k\);\s*\}",
         "",
+    ),
+    (
+        "sweep predicate widened to `some`",
+        r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
+        "v.some((t) => t <= cutoff)",
+    ),
+    (
+        "re-insert of the current key removed",
+        r"hits\.delete\(\s*ip\s*\)\s*;\s*hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
+        "hits.set(ip, recent);",
+    ),
+    (
+        "eviction takes the newest key",
+        r"for\s*\(\s*const\s+k\s+of\s+hits\.keys\(\)\s*\)",
+        "for (const k of [...hits.keys()].reverse())",
     ),
 )
 
