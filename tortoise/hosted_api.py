@@ -5126,8 +5126,18 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     was not relevance-ranked (#160). FTS index on content/title/name/subject
     works without the embedding extra; vector joins in automatically when
     embeddings are available.
+
+    B6 (#3892): the read-path status contract is ADDITIVE and OFF BY DEFAULT.
+    When ``TORTOISE_READ_STATUS`` is truthy the response carries ``status`` —
+    ONE of the four recorded terms (``available`` / ``empty`` / ``degraded`` /
+    ``unconfigured``, see ``tortoise/read_status.py``) — so a store that could
+    not be reached is never served as a clean empty result. Unset/``0`` leaves
+    this response byte-identical.
     """
     _require_scope(org, "graphs:read", "search")
+    from tortoise.read_status import read_status_enabled as _read_status_enabled
+
+    status_out: dict | None = {} if _read_status_enabled() else None
     sdk = _data_sdk(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
@@ -5137,7 +5147,8 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         # thread so concurrent searches overlap their encode/DB work (same
         # asyncio.to_thread pattern used throughout this file).
         results = await asyncio.to_thread(
-            sdk.tortoise_fts_query, q, limit=limit)
+            sdk.tortoise_fts_query, q, limit=limit,
+            read_status_out=status_out)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
@@ -5153,7 +5164,12 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         if "kind" not in props:
             props["kind"] = "statement"
         out.append(props)
-    return {"results": out, "count": len(out)}
+    response = {"results": out, "count": len(out)}
+    if status_out is not None:
+        # The SDK sets this on every return path; a missing term is a bug, not
+        # a reason to emit null under a vocabulary of exactly four terms.
+        response["status"] = status_out["status"]
+    return response
 
 
 @app.get("/v1/topics/{topic}/summary")

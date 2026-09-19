@@ -343,6 +343,26 @@ def _component_fingerprint(fn) -> str | None:
     )
 
 
+def _carried_response_fields() -> list:
+    """Preserve the hand-authored `response_fields` block across a re-cut.
+
+    These entries record response FIELDS, which the gate deliberately does not
+    compare (the freeze is on tools and endpoints — #3863). They cannot be
+    derived from the declaration, so `cut` must carry them forward: a re-cut
+    that dropped them would silently empty the table the carve-out depends on
+    and the obligation to record a field would evaporate on regeneration.
+    """
+    try:
+        with MANIFEST_FILE.open() as fh:
+            doc = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return []
+    if not isinstance(doc, dict):
+        return []
+    fields = doc.get("response_fields")
+    return fields if isinstance(fields, list) else []
+
+
 def cmd_cut(args: argparse.Namespace) -> int:
     from tortoise.mcp_server import __name__ as _  # noqa: F401  (import check)
     from tortoise.sdk import TortoiseSDK
@@ -599,6 +619,8 @@ def cmd_cut(args: argparse.Namespace) -> int:
             ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
         ).stdout.strip(),
         "allowed_transforms": transform_names,
+        # Hand-authored, and deliberately NOT gated — carried forward, never re-derived.
+        "response_fields": _carried_response_fields(),
         "approval_status": "pending-owner-approval",
         "approval_principal": None,
         "approval_pr": None,
@@ -715,6 +737,55 @@ def cmd_render(args: argparse.Namespace) -> int:
         if classes.get(cls):
             add(f"| {cls} | {len(classes[cls])} |")
     add(f"| **total** | **{len(sdk)}** |")
+    add("")
+    add("---")
+    add("")
+    add("## What the gate compares — and what it does not")
+    add("")
+    add("The freeze this document serves is on **tools and endpoints**. An **added field on an")
+    add("existing response** that is off by default, and leaves the response byte-identical when it")
+    add("is off, is neither a new tool nor a new endpoint — so it does not gate **as an addition**.")
+    add("")
+    add("**One qualification: the gate also fingerprints implementations.** It records a digest of")
+    add("each registered tool's own code object, so a field added *inside a tool's handler* changes")
+    add("that tool's fingerprint — and, since the fingerprint covers the function's source position,")
+    add("the fingerprint of every tool defined after it — and reds the gate, correctly, as a changed")
+    add("implementation rather than a new tool. Add response fields in the SDK or assembly layer,")
+    add("not inside a tool function, and the carve-out holds.")
+    add("")
+    add("**And it must still be recorded.** Every such addition goes in the table below, so this")
+    add("document stays the single source of truth. Two of `check`'s properties defend that record:")
+    add("an empty or missing `response_fields` block is a failure, and every entry must name a tool")
+    add("or endpoint that exists in this manifest — so the record can be neither deleted nor left")
+    add("unanchored. Nothing inspects response bodies at runtime, so a field that nobody recorded")
+    add("at all is a review obligation, not a machine check — the carve-out is about what the gate")
+    add("*fails* on, not about what goes *unrecorded*.")
+    add("")
+    add("### Recorded response fields")
+    add("")
+    add("| Response | Field | Emitted when | Unchanged when off |")
+    add("|---|---|---|---|")
+    _rf_block = doc.get("response_fields")
+    for _rf in (_rf_block if isinstance(_rf_block, list) else []):
+        # `check` REPORTS a malformed block or entry; skip it here rather than crashing the
+        # renderer or emitting a blank placeholder row.
+        if not isinstance(_rf, dict) or not _rf.get("response") or not _rf.get("field"):
+            continue
+        # Normalise whitespace AND pipes in every cell: an unescaped `|` splits the markdown
+        # row, and an embedded newline breaks it the same way.
+        _cells = [
+            " ".join(str(_rf.get(k, d) or d).split()).replace("|", "/")
+            for k, d in (
+                ("response", ""),
+                ("field", ""),
+                ("emitted_when", ""),
+                ("unchanged_when_off", "yes"),
+            )
+        ]
+        add(f"| `{_cells[0]}` | `{_cells[1]}` | {_cells[2]} | {_cells[3]} |")
+    add("")
+    add("A field belongs in that table from the moment it is added — an off-by-default field that")
+    add("is not recorded here has no approval behind it, and the carve-out does not cover it.")
     add("")
     add("---")
     add("")
@@ -952,7 +1023,7 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: eight properties over the declared set."""
+    """AC13's lint: ten properties over the declared set."""
     from tortoise.tool_registry import GROUP_BY_NAME, TOOL_REGISTRY
 
     order = load_order()
@@ -967,6 +1038,34 @@ def cmd_check(args: argparse.Namespace) -> int:
     malformed = [r for r in doc["rows"] if not isinstance(r, dict) or "name" not in r]
     for r in malformed:
         problems.append(f"malformed row (not a mapping with a name): {r!r}")
+    # The `response_fields` block records fields deliberately outside the gate
+    # (#3863). Validate its shape here so a malformed entry is REPORTED rather
+    # than crashing the renderer with a bare KeyError.
+    _rf_block = doc.get("response_fields")
+    for rf in (_rf_block if isinstance(_rf_block, list) else []):
+        if not isinstance(rf, dict) or not rf.get("response") or not rf.get("field"):
+            problems.append(
+                f"malformed response_fields entry (needs `response` and `field`): {rf!r}"
+            )
+    # 9/10. The `response_fields` record must not be able to VANISH, and must be
+    # ANCHORED to the surface it describes — otherwise the obligation to record
+    # an off-by-default field is prose only.
+    if not isinstance(_rf_block, list) or not _rf_block:
+        problems.append(
+            "the `response_fields` block is missing or empty — it is the single source of "
+            "truth for off-by-default response additions and must not be deletable"
+        )
+    else:
+        _row_names = {str(r["name"]) for r in doc["rows"] if isinstance(r, dict) and "name" in r}
+        for rf in _rf_block:
+            if not isinstance(rf, dict) or not rf.get("response"):
+                continue  # its shape is already reported above
+            _resp = str(rf["response"])
+            if _resp not in _row_names and f"sdk:{_resp}" not in _row_names:
+                problems.append(
+                    f"response_fields entry names {_resp!r}, which is not a tool or endpoint "
+                    f"in this manifest — the record must be anchored to the surface it describes"
+                )
     rows = [
         r for r in doc["rows"] if isinstance(r, dict) and "name" in r and not str(r["name"]).startswith("sdk:")
     ]
@@ -1044,7 +1143,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     if problems:
         print(f"\n{len(problems)} problem(s)")
         return 1
-    print(f"OK — {len(rows)} tool rows, eight properties hold")
+    print(f"OK — {len(rows)} tool rows, ten properties hold")
     return 0
 
 
