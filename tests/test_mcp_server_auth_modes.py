@@ -479,6 +479,11 @@ class TestAskConnectedAssemblyExposure:
         ).rstrip("/")
         uri = f"{base}_{uuid.uuid4().hex[:10]}"
         monkeypatch.setenv("TORTOISE_DB_URI", uri)
+        # #4017: the fleet shell exports TORTOISE_API_URL=https://api.premiselabs.co,
+        # and ``sdk.ask()`` takes its REMOTE branch whenever it is set — the two
+        # tests in this class then bypass the hermetic _FakeSdk/seam below and POST
+        # REAL requests at production (2 failed with the var set, 2 passed cleared).
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
         # hermetic embedder: monkeypatch-scoped so the process-wide module
         # state is RESTORED at test teardown (raw assignment here leaked
         # EmbeddingModel.get/compute_embedding into every later test in the
