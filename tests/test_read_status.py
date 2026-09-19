@@ -14,9 +14,9 @@ pytest output are recorded in the PR body / the lane report):
 
 * **Collapse the failed path back onto empty** — make ``classify_read_status``
   return ``STATUS_EMPTY`` when the store was not reached (the #3892 defect) →
-  ``TestReadPathStates::test_state_unconfigured_*``,
-  ``TestClassify::test_configured_but_unreachable_is_degraded`` and
-  ``test_unconfigured_is_distinguishable_from_empty`` RED.
+  ``TestClassify::test_never_declared_is_unconfigured``,
+  ``test_unconfigured_is_not_empty`` and the end-to-end
+  ``test_state_a_store_that_will_not_open_is_degraded`` RED.
 * **Re-fork the mapping** — make the configured-but-unreachable condition
   report ``unconfigured`` again (the pre-alignment read-path mapping) → the
   ``degraded`` tests and the cross-lane parity rows RED.
@@ -59,13 +59,19 @@ def _no_embedder(monkeypatch):
         EmbeddingModel, "get", classmethod(lambda cls, load_timeout=None: None))
 
 
-class _UnreachableGraph:
-    def query(self, *args, **kwargs):
-        raise RuntimeError("connection refused")
+def _unopenable_store(monkeypatch, sdk):
+    """Make the store's OPEN fail the way a real outage does.
 
+    ``FalkorProjection.__init__`` calls ``_auto_health_recover()``, which
+    raises ``RuntimeError`` when a DECLARED server is unreachable (or a
+    declared embedded file cannot be opened) — so ``_get_proj()`` raising IS
+    what a configured-but-down store looks like on the read path.
+    """
+    def _health_check_failed():
+        raise RuntimeError(
+            "DB health check failed on open (server/production mode).")
 
-class _UnreachableProj:
-    g = _UnreachableGraph()
+    monkeypatch.setattr(sdk, "_get_proj", _health_check_failed)
 
 
 class TestVocabulary:
@@ -177,6 +183,19 @@ class TestClassify:
             degraded=False) != STATUS_EMPTY
         assert classify_read_status(
             reached=True, hit_count=0, degraded=False) == STATUS_EMPTY
+
+    def test_a_read_that_answered_is_never_unconfigured(self):
+        # The vocabulary's invariant, enforced at the classifier itself: a
+        # read that reached the store (or returned rows) PROVES a store was
+        # declared, whatever the caller passed for `configured`.
+        assert classify_read_status(
+            configured=False, reached=True, hit_count=3,
+            degraded=False) == STATUS_AVAILABLE
+        assert classify_read_status(
+            configured=False, reached=True, hit_count=0,
+            degraded=False) == STATUS_EMPTY
+        assert classify_leg_trace(
+            [], hit_count=3, configured=False) == STATUS_AVAILABLE
 
     def test_breaker_open_trace_is_degraded_not_unconfigured(self):
         # A trace whose legs were all skipped by a tripped breaker is a store
@@ -327,30 +346,39 @@ class TestReadPathStates:
         finally:
             sdk.close()
 
-    def test_state_unconfigured_no_store_is_a_status_not_an_exception(
+    def test_state_a_store_that_will_not_open_is_degraded(
             self, sdk_factory, monkeypatch):
+        # `unconfigured` names a store that was NEVER DECLARED. The engine SDK
+        # always resolves a store TARGET (a server URI, or the canonical
+        # embedded path via `resolve_db_path()` / `FalkorProjection`'s no-arg
+        # fallback), so a store that will not open is off by OUTAGE —
+        # `degraded` — and the status is the answer, not an exception.
         sdk = sdk_factory()
         try:
-            def _boom():
-                raise RuntimeError("no store/endpoint configured")
-
-            monkeypatch.setattr(sdk, "_get_proj", _boom)
+            _unopenable_store(monkeypatch, sdk)
             out: dict = {}
-            # MUST NOT raise, and MUST NOT be reported as an empty read.
             rows = sdk.tortoise_fts_query("alpha", read_status_out=out, limit=5)
             assert rows == []
-            assert out["status"] == STATUS_UNCONFIGURED
+            assert out["status"] == STATUS_DEGRADED
+            assert out["status"] != STATUS_UNCONFIGURED
         finally:
             sdk.close()
 
-    def test_state_configured_but_unreachable_is_degraded(
-            self, sdk_factory, monkeypatch):
-        # The client boundary's mapping: `unconfigured` names a store that was
-        # NEVER DECLARED, and this SDK has one (the projection object was
-        # obtained) — it just did not answer. Off by outage is `degraded`.
-        sdk = sdk_factory()
+    def test_state_real_unreachable_server_is_degraded(
+            self, monkeypatch):
+        """The LIVE case the mocked one stands in for: a declared but
+        unreachable server. No mock of ``_get_proj`` — the SDK opens a real
+        (closed) port, the health check fails, and the status must be
+        ``degraded``, never `unconfigured`."""
+        from tortoise.sdk import TortoiseSDK
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@127.0.0.1:1/tortoise_probe")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.setenv("FLY_APP_NAME", "test")  # server mode → fail loud
+        sdk = TortoiseSDK()
         try:
-            monkeypatch.setattr(sdk, "_get_proj", lambda: _UnreachableProj())
+            assert sdk._db_uri is not None  # a target IS declared
             out: dict = {}
             rows = sdk.tortoise_fts_query("alpha", read_status_out=out, limit=5)
             assert rows == []
@@ -361,15 +389,11 @@ class TestReadPathStates:
 
     def test_state_breaker_open_but_reachable_is_degraded_not_unconfigured(
             self, sdk_factory, monkeypatch):
-        """P1 review fix: the probe is PROOF. A store that answers `RETURN 1`
-        but whose in-process breakers are still open is a store with a skipped
-        leg (`degraded`) — never `unconfigured`, which is the term reserved for
-        a store that could not be reached at all.
-
-        The store is deliberately EMPTY and no leg returns rows, so the probe's
-        `reached=True` is the ONLY thing that can move this test: without the
-        override the trace derives no reachability and classifies
-        `unconfigured` (the P1 defect)."""
+        """A store that answers `RETURN 1` but whose in-process breakers are
+        still open is a store with a skipped leg: `degraded`. `unconfigured`
+        is reserved for a store that was NEVER DECLARED, and this one has a
+        declared target. The store is deliberately empty and no leg returns
+        rows, so the class comes from the skipped legs themselves."""
         _no_embedder(monkeypatch)
         from tortoise import search_engine
 
@@ -384,32 +408,48 @@ class TestReadPathStates:
         finally:
             sdk.close()
 
-    def test_unconfigured_is_distinguishable_from_empty(
+    def test_engine_read_path_never_reports_unconfigured(
             self, sdk_factory, monkeypatch):
-        """THE load-bearing assertion of #3892."""
-        sdk_u = sdk_factory()
-        try:
-            def _boom():
-                raise RuntimeError("no store/endpoint configured")
+        """The alignment's honest consequence, pinned.
 
-            monkeypatch.setattr(sdk_u, "_get_proj", _boom)
-            out_u: dict = {}
-            rows_u = sdk_u.tortoise_fts_query(
-                "alpha", read_status_out=out_u, limit=5)
-        finally:
-            sdk_u.close()
-        sdk_e = sdk_factory()
+        `unconfigured` names a SET-UP GAP — no store / endpoint / key was ever
+        declared. The engine SDK always resolves a store TARGET: a server URI,
+        or the canonical embedded path via ``resolve_db_path()`` and
+        ``FalkorProjection``'s no-arg fallback. So every engine read path
+        lands on ``available`` / ``empty`` / ``degraded`` and never on
+        ``unconfigured`` — including the two states that LOOK like it:
+        a store that answered with nothing (``empty``) and a store that will
+        not open (``degraded``). The term stays consumable at the classifier
+        (``configured=False``); it is the client boundary that can reach it.
+        """
+        sdk = sdk_factory()
         try:
             _no_embedder(monkeypatch)
+            # store answered, nothing matched -> empty (NOT unconfigured)
             out_e: dict = {}
-            rows_e = sdk_e.tortoise_fts_query(
+            rows_e = sdk.tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out_e, limit=5)
+            assert rows_e == []
+            assert out_e["status"] == STATUS_EMPTY
+            assert out_e["status"] != STATUS_UNCONFIGURED
         finally:
-            sdk_e.close()
-        assert rows_u == rows_e == []          # identical observable results…
-        assert out_u["status"] == STATUS_UNCONFIGURED
-        assert out_e["status"] == STATUS_EMPTY
-        assert out_u["status"] != out_e["status"]  # …distinguishable statuses
+            sdk.close()
+        sdk2 = sdk_factory()
+        try:
+            # store declared but will not open -> degraded (NOT unconfigured)
+            _unopenable_store(monkeypatch, sdk2)
+            out_u: dict = {}
+            rows_u = sdk2.tortoise_fts_query(
+                "alpha", read_status_out=out_u, limit=5)
+            assert rows_u == []
+            assert out_u["status"] == STATUS_DEGRADED
+            assert out_u["status"] != STATUS_UNCONFIGURED
+        finally:
+            sdk2.close()
+        # and the classifier still names the term for its one condition
+        assert classify_read_status(
+            configured=False, reached=False, hit_count=0,
+            degraded=False) == STATUS_UNCONFIGURED
 
     def test_status_is_additive_and_the_default_response_is_unchanged(
             self, sdk_factory, monkeypatch):
@@ -440,18 +480,38 @@ class TestReadPathStates:
         finally:
             sdk.close()
 
-    def test_recall_state_unconfigured_is_a_status_not_an_exception(
+    def test_recall_state_unopenable_store_is_degraded(
             self, sdk_factory, monkeypatch):
         sdk = sdk_factory()
         try:
-            def _boom():
-                raise RuntimeError("no store/endpoint configured")
-
-            monkeypatch.setattr(sdk, "_get_proj", _boom)
+            _unopenable_store(monkeypatch, sdk)
             out: dict = {}
             rows = sdk.recall_state("alpha", read_status_out=out, limit=5)
             assert rows == []
-            assert out["status"] == STATUS_UNCONFIGURED
+            assert out["status"] == STATUS_DEGRADED
+            assert out["status"] != STATUS_UNCONFIGURED
+        finally:
+            sdk.close()
+
+    def test_recall_state_available_never_accompanies_zero_rows(
+            self, sdk_factory, monkeypatch):
+        """The status describes the read the caller RECEIVES: a rerank / floor
+        that drops every candidate makes it `empty` (the store was reached and
+        nothing matched), never `available`. Verified live before the fix:
+        `recall_state(query=None, kind="statement", min_confidence=1.0)`
+        returned 0 rows with `status='available'`."""
+        _no_embedder(monkeypatch)
+        sdk = sdk_factory()
+        try:
+            sdk.create_point("statement", "alpha beta gamma waves")
+            assert sdk.recall_state(None, kind="statement", limit=5)  # rows exist
+            out: dict = {}
+            rows = sdk.recall_state(
+                None, kind="statement", min_confidence=1.0,
+                read_status_out=out, limit=5)
+            assert rows == []
+            assert out["status"] == STATUS_EMPTY
+            assert out["status"] != STATUS_AVAILABLE
         finally:
             sdk.close()
 

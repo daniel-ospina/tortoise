@@ -12776,7 +12776,6 @@ class TortoiseSDK:
         # terms of its own.
         from .read_status import (
             STATUS_DEGRADED as _STATUS_DEGRADED,
-            STATUS_UNCONFIGURED as _STATUS_UNCONFIGURED,
             classify_leg_trace as _classify_leg_trace,
         )
 
@@ -12807,22 +12806,21 @@ class TortoiseSDK:
             _caller_trace = leg_trace
         else:
             _caller_trace = None
-        #: True once the reachability probe has proved the store ANSWERS.
-        store_answered = False
 
         def _with_read_status(rows: list[dict]) -> list[dict]:
-            """Attach the recorded read status when the caller asked for it."""
+            """Attach the recorded read status when the caller asked for it.
+
+            With a sink, EVERY call happens after the projection was obtained
+            AND the bounded reachability probe answered — a probe failure or a
+            `_get_proj()` failure returns before any of these paths. So the
+            store is known to be DECLARED and to have ANSWERED, and
+            ``configured=True`` / ``reached=True`` are facts, not defaults.
+            """
             if read_status_out is not None:
                 read_status_out["status"] = _classify_leg_trace(
                     status_trace or (), hit_count=len(rows),
-                    # A store we reached here IS configured (the projection
-                    # object was obtained above): `unconfigured` names a store
-                    # that was never declared, and is not available past this
-                    # point. The probe is proof of ANSWERING; a trace whose
-                    # legs were skipped by a tripped breaker must not walk it
-                    # back to a failure class the store does not have.
                     configured=True,
-                    reached=True if store_answered else None)
+                    reached=True)
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
             return rows
@@ -12831,8 +12829,16 @@ class TortoiseSDK:
             proj = self._get_proj()
         except Exception:
             if read_status_out is not None:
-                # No store: unconfigured — never empty, never an exception.
-                read_status_out["status"] = _STATUS_UNCONFIGURED
+                # A store that will not OPEN is `degraded` (off by OUTAGE):
+                # `_auto_health_recover()` raises when a declared server is
+                # unreachable or a declared embedded file cannot be read. This
+                # SDK always resolves a store TARGET — a server URI, or the
+                # canonical embedded path via `resolve_db_path()` and
+                # `FalkorProjection`'s no-arg fallback — so there is no
+                # "never declared" state here to report as `unconfigured`
+                # (off by policy, a set-up gap the engine does not have).
+                # Never an empty result, and never a raise.
+                read_status_out["status"] = _STATUS_DEGRADED
                 return []
             raise
         graph = proj.g
@@ -12843,7 +12849,6 @@ class TortoiseSDK:
             # annotates.
             try:
                 graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or 500))
-                store_answered = True
             except Exception as e:  # noqa: BLE001, RUF100
                 # The store IS configured (the projection object was obtained
                 # just above) but did not answer: off by OUTAGE — `degraded`,
@@ -14051,7 +14056,9 @@ class TortoiseSDK:
         """
         from .ranking import StateRanker
         from .read_status import (
-            STATUS_UNCONFIGURED,
+            STATUS_AVAILABLE,
+            STATUS_DEGRADED,
+            STATUS_EMPTY,
             combine_read_statuses,
         )
 
@@ -14069,8 +14076,10 @@ class TortoiseSDK:
             proj = self._get_proj()
         except Exception:
             if read_status_out is not None:
-                # No store: unconfigured — never an empty result.
-                read_status_out["status"] = STATUS_UNCONFIGURED
+                # A store that will not OPEN is `degraded` (off by outage);
+                # `unconfigured` (off by policy) is not reachable from this
+                # SDK, which always resolves a store target. Never a raise.
+                read_status_out["status"] = STATUS_DEGRADED
                 return []
             raise
         ranker = state_ranker or StateRanker(
@@ -14117,10 +14126,6 @@ class TortoiseSDK:
                 read_status_out=_object_status)
             if object_centric else []
         )
-        if read_status_out is not None:
-            read_status_out["status"] = combine_read_statuses(
-                (_point_status or {}).get("status"),
-                (_object_status or {}).get("status"))
         # #1350: Object status filter (decision 2a — completed/in_progress
         # stay visible; superseded/deprecated/archived/retracted excluded
         # from the state view unless include_superseded brings them back).
@@ -14199,6 +14204,19 @@ class TortoiseSDK:
                 out = [by_id.get(i["id"], i) for i in out]
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
+        if read_status_out is not None:
+            # B6 (#3892): the composite is derived AFTER the pipeline, from the
+            # rows the caller actually RECEIVES. The filters, the rerank and
+            # the `min_confidence` floor can drop every candidate the legs
+            # returned, and `available` ("reached AND returned content") must
+            # never describe an empty result — the same rule
+            # `tortoise_fts_query` applies to its final row list.
+            _composite = combine_read_statuses(
+                (_point_status or {}).get("status"),
+                (_object_status or {}).get("status"))
+            if _composite == STATUS_AVAILABLE and not out:
+                _composite = STATUS_EMPTY
+            read_status_out["status"] = _composite
         return out
 
     def retrieval_legs(

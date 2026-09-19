@@ -36,6 +36,15 @@ answer), and neither failure is ever reported as a successful empty result.
 ``unconfigured`` (never declared) and ``degraded`` (configured but impaired)
 are likewise never reported as each other.
 
+**Where ``unconfigured`` comes from on the read path.** ``configured=False`` is
+the ONLY route to it, and the engine SDK never passes it: the SDK always
+resolves a store TARGET (a server URI, or the canonical embedded path via
+``resolve_db_path()`` / ``FalkorProjection``'s no-arg fallback), so a store it
+cannot OPEN is ``degraded`` (off by outage), not a set-up gap. The term stays
+consumable here — and is asserted cross-lane — because the client boundary is
+where a missing endpoint / key is a real condition, and a read that answered
+must never be mislabelled regardless of what a caller wires to ``configured``.
+
 **Cross-lane parity.** The client boundary (``client/tortoise_client/cli.py``,
 ``tortoise/tortoise_client.py``) reports the same four terms from that same
 home module. ``tests/test_read_status.py`` asserts, term for term, that the
@@ -111,6 +120,13 @@ def classify_read_status(*, reached: bool, hit_count: int, degraded: bool,
     successful read: when a leg did not run, a partial result is not a clean
     one and "nothing matched" is not established.
     """
+    if reached or hit_count > 0:
+        # A read that ANSWERED (or returned rows) proves a store was declared:
+        # `unconfigured` — a set-up gap — must never describe it, whatever the
+        # caller passed for ``configured``. This keeps the vocabulary's
+        # invariant true at the classifier itself, not only at the SDK call
+        # sites that happen to hard-code ``configured=True``.
+        configured = True
     status = classify_condition(
         configured=configured, reached=reached, hits=hit_count)
     if status == STATUS_UNCONFIGURED:
