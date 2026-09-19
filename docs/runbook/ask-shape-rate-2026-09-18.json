@@ -1,7 +1,7 @@
 {
   "instrument": "tools/ask_shape_rate.py",
-  "instrument_sha256": "23e585d55b1cce4710252eaf6d169ac035ed339ef5b61f11b17dcf573b4946c2",
-  "generated_at": "2026-09-19T00:47:47.440675+00:00",
+  "instrument_sha256": "10364852c7c1b548a71fb1394f326c33b312d781d580cd9ceaadf0c4dcb9d1f7",
+  "generated_at": "2026-09-19T01:57:31.581540+00:00",
   "fixture": {
     "path": "tests/fixtures/ask_spotcheck_composition.json",
     "sha256": "7f4062643323af4e5d0fec0b98bb3e3ca8499362c3f7e07a83c55f07633d15fa",
@@ -13,7 +13,7 @@
     "n_turns": 10470,
     "tree_pin": {
       "asserted": true,
-      "sha": "0881dca355914a1eef650e2ecd5fb88569fe9786"
+      "sha": "4c9218a776df879809cb419db248b371fdc3ca37"
     }
   },
   "decision_rule": {
@@ -55,11 +55,11 @@
       {
         "question_id": "0100672e",
         "turns": 486,
-        "seed_s": 1.56
+        "seed_s": 1.39
       }
     ],
     "total_turns_all_21": 10470,
-    "extrapolated_full_21_s": 33.6
+    "extrapolated_full_21_s": 29.9
   },
   "known_green": {
     "ok": true,
@@ -1259,6 +1259,7 @@
       "arms_error_free": true,
       "faulted_arms": [],
       "M2_control_expected_failures": 21,
+      "M2_control_unexpected_failures": [],
       "all": true
     },
     "substitution_signature": {
@@ -1274,11 +1275,11 @@
         "question_id": "0100672e",
         "expected_abstain": false,
         "abstained": false,
-        "answer_head": "$60 on coffee mugs for my coworkers.",
+        "answer_head": "Based on the context, you spent $60 total on coffee mugs for your coworkers, but the amount per mug is not stated.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1484,
+        "duration_ms": 1583,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1372,17 +1373,18 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "60 on coffee mugs for my coworkers",
-          "shared_span_words": 7,
-          "longest_common_span": "60 on coffee mugs for my coworkers",
-          "longest_common_span_words": 7,
+          "shared_span": "on coffee mugs for",
+          "shared_span_words": 4,
+          "longest_common_span": "on coffee mugs for",
+          "longest_common_span_words": 4,
           "ok": true
         },
         "gold_answer_span": null,
         "gold_answer_span_words": 0,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": true
+        "pass": true,
+        "attempts": 1
       },
       {
         "question_id": "0a995998",
@@ -1392,7 +1394,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1467,
+        "duration_ms": 1959,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1505,7 +1507,8 @@
         "gold_answer_span_words": 1,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "1d4e3b97",
@@ -1515,7 +1518,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1564,
+        "duration_ms": 1511,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1624,7 +1627,8 @@
         "gold_answer_span_words": 4,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "1de5cff2",
@@ -1634,7 +1638,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1469,
+        "duration_ms": 1567,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1737,7 +1741,8 @@
         "gold_answer_span_words": 0,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "2133c1b5",
@@ -1747,7 +1752,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1429,
+        "duration_ms": 1245,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1853,7 +1858,8 @@
         "gold_answer_span_words": 2,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": true
+        "pass": true,
+        "attempts": 1
       },
       {
         "question_id": "26bdc477",
@@ -1863,7 +1869,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1189,
+        "duration_ms": 1324,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1968,7 +1974,8 @@
         "gold_answer_span_words": 1,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "830ce83f",
@@ -1978,7 +1985,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1424,
+        "duration_ms": 1444,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2084,7 +2091,8 @@
         "gold_answer_span_words": 2,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "b0479f84",
@@ -2094,7 +2102,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1897,
+        "duration_ms": 1657,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2202,17 +2210,18 @@
         "gold_answer_span_words": 3,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": true
+        "pass": true,
+        "attempts": 1
       },
       {
         "question_id": "ba358f49_abs",
         "expected_abstain": true,
         "abstained": true,
-        "answer_head": "I don't know \u2014 the context mentions Rachel's wedding next year, but it doesn't contain any information about your age or when you'll get married.",
+        "answer_head": "I don't know \u2014 the context mentions Rachel's wedding next year but doesn't state your age or when you'll get married.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1432,
+        "duration_ms": 1301,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -2321,17 +2330,18 @@
         "gold_answer_span_words": 2,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "ceb54acb",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "The context does not contain the other four options \u2014 it only mentions \"sexual compulsions\" as a shorter term, with no list of additional alternatives.",
+        "answer_head": "The context does not contain the other four options. It only mentions \"sexual compulsions\" as a shorter term for the behaviors; no list of additional alternativ",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1536,
+        "duration_ms": 1557,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2441,17 +2451,18 @@
         "gold_answer_span_words": 1,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "d6233ab6",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "The context does not contain information about whether attending a high school reunion would be a good idea. It does mention the user's happy high school experi",
+        "answer_head": "The context does not contain information about whether attending a high school reunion would be a good idea. It does mention the user's happy high school memori",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1652,
+        "duration_ms": 1735,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2550,30 +2561,31 @@
         "l2a_ask_gold": true,
         "l2b_search": true,
         "l2b_recall": true,
-        "l3_grounding": true,
+        "l3_grounding": false,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "happy high school experiences",
-          "shared_span_words": 4,
-          "longest_common_span": "happy high school experiences",
-          "longest_common_span_words": 4,
-          "ok": true
+          "shared_span": null,
+          "shared_span_words": 0,
+          "longest_common_span": "happy high school",
+          "longest_common_span_words": 3,
+          "ok": false
         },
         "gold_answer_span": "high school experiences such as being part of the debate team and taking advanced placement courses",
         "gold_answer_span_words": 16,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "e4e14d04",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "I don't know \u2014 the context mentions you joined \"Book Lovers Unite\" three weeks ago and attended a meetup last week, but it doesn't state how long you had been a",
+        "answer_head": "I don't know \u2014 the context mentions you joined \"Book Lovers Unite\" three weeks before one session and attended a meetup \"last week,\" but it doesn't state how lo",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1584,
+        "duration_ms": 1492,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2663,27 +2675,28 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "book lovers unite three weeks ago and",
-          "shared_span_words": 7,
-          "longest_common_span": "book lovers unite three weeks ago and",
-          "longest_common_span_words": 7,
+          "shared_span": "book lovers unite three weeks",
+          "shared_span_words": 5,
+          "longest_common_span": "book lovers unite three weeks",
+          "longest_common_span_words": 5,
           "ok": true
         },
         "gold_answer_span": "two weeks",
         "gold_answer_span_words": 2,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "e831120c",
         "expected_abstain": false,
         "abstained": false,
-        "answer_head": "The context does not specify how many weeks it took you to watch the main Star Wars films. It only mentions that you watched all 22 Marvel Cinematic Universe mo",
+        "answer_head": "The context does not specify how many weeks it took to watch the main Star Wars films. It only mentions that you watched all 22 Marvel Cinematic Universe movies",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1207,
+        "duration_ms": 1484,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2791,17 +2804,18 @@
         "gold_answer_span_words": 1,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": true
+        "pass": true,
+        "attempts": 1
       },
       {
         "question_id": "e9327a54",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "The context does not mention a dessert shop with giant milkshakes. It does include a discussion of family-friendly dessert spots in Orlando, but no such specifi",
+        "answer_head": "The context does not mention a dessert shop with giant milkshakes. It does include general Orlando dessert-spot recommendations and a plan to visit multiple des",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1352,
+        "duration_ms": 1595,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2899,25 +2913,26 @@
           "gold_turn_head_present": true,
           "shared_span": null,
           "shared_span_words": 0,
-          "longest_common_span": "in orlando",
-          "longest_common_span_words": 2,
+          "longest_common_span": "in one night",
+          "longest_common_span_words": 3,
           "ok": false
         },
         "gold_answer_span": "the",
         "gold_answer_span_words": 1,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "eace081b",
         "expected_abstain": false,
         "abstained": false,
-        "answer_head": "You're planning to stay on Oahu.",
+        "answer_head": "Oahu.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1229,
+        "duration_ms": 1266,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3010,20 +3025,21 @@
         "l2a_ask_gold": true,
         "l2b_search": true,
         "l2b_recall": true,
-        "l3_grounding": true,
+        "l3_grounding": false,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "planning to stay on oahu",
-          "shared_span_words": 5,
-          "longest_common_span": "planning to stay on oahu",
-          "longest_common_span_words": 5,
-          "ok": true
+          "shared_span": null,
+          "shared_span_words": 0,
+          "longest_common_span": "oahu",
+          "longest_common_span_words": 1,
+          "ok": false
         },
         "gold_answer_span": "oahu",
         "gold_answer_span_words": 1,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": true
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "f4f1d8a4_abs",
@@ -3033,7 +3049,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1521,
+        "duration_ms": 1527,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -3137,7 +3153,8 @@
         "gold_answer_span_words": 4,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": true
+        "pass": true,
+        "attempts": 1
       },
       {
         "question_id": "gpt4_6ed717ea",
@@ -3147,7 +3164,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1542,
+        "duration_ms": 1179,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3247,7 +3264,8 @@
         "gold_answer_span_words": 2,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "gpt4_7a0daae1",
@@ -3257,7 +3275,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1641,
+        "duration_ms": 1684,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3368,17 +3386,18 @@
         "gold_answer_span_words": 1,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "gpt4_8279ba02",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "I don't know \u2014 the context mentions that you just got a smoker today, but it doesn't provide a date for that purchase, so the number of days ago can't be determ",
+        "answer_head": "I don't know \u2014 the context mentions that you got a smoker \"today,\" but it doesn't provide a date for that session, so the number of days ago can't be determined",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1445,
+        "duration_ms": 1786,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3467,17 +3486,18 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "just got a smoker today",
-          "shared_span_words": 5,
-          "longest_common_span": "just got a smoker today",
-          "longest_common_span_words": 5,
+          "shared_span": "got a smoker today",
+          "shared_span_words": 4,
+          "longest_common_span": "got a smoker today",
+          "longest_common_span_words": 4,
           "ok": true
         },
         "gold_answer_span": "the last",
         "gold_answer_span_words": 2,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "gpt4_93159ced_abs",
@@ -3487,7 +3507,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1446,
+        "duration_ms": 1464,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -3595,18 +3615,19 @@
         "gold_answer_span_words": 2,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       },
       {
         "question_id": "gpt4_d84a3211",
         "expected_abstain": false,
-        "abstained": true,
-        "answer_head": "I don't know. The context mentions a $25 chain replacement and $40 bike lights, but it does not state the total amount spent on bike-related expenses since the ",
+        "abstained": false,
+        "answer_head": "The context mentions $25 for a chain replacement and $40 for bike lights, totaling $65, but it does not state the total amount spent on bike-related expenses si",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1481,
-        "l1_abstain": false,
+        "duration_ms": 1522,
+        "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
           "sharegpt_OHd1RQ7_37",
@@ -3702,22 +3723,23 @@
           "gold_turn_head_present": true,
           "shared_span": null,
           "shared_span_words": 0,
-          "longest_common_span": "i don t",
-          "longest_common_span_words": 3,
+          "longest_common_span": "of the",
+          "longest_common_span_words": 2,
           "ok": false
         },
         "gold_answer_span": null,
         "gold_answer_span_words": 0,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": false,
+        "attempts": 1
       }
     ],
-    "shape_rate": 0.2857142857142857,
+    "shape_rate": 0.23809523809523808,
     "abstain_pn": {
-      "passed": 11,
+      "passed": 12,
       "n": 21,
-      "rate": 0.5238095238095238
+      "rate": 0.5714285714285714
     },
     "provenance_pn": {
       "passed": 21,
@@ -3725,9 +3747,9 @@
       "rate": 1.0
     },
     "grounding_pn": {
-      "passed": 11,
+      "passed": 9,
       "n": 21,
-      "rate": 0.5238095238095238
+      "rate": 0.42857142857142855
     },
     "ctx_recall_pn": {
       "passed": 21,
@@ -3767,23 +3789,23 @@
         "n": 21
       },
       "span_ge_2_words": {
-        "passed": 20,
+        "passed": 19,
         "n": 21
       },
       "span_ge_3_words": {
-        "passed": 15,
+        "passed": 14,
         "n": 21
       },
       "span_ge_4_words": {
-        "passed": 11,
+        "passed": 9,
         "n": 21
       },
       "span_ge_5_words": {
-        "passed": 8,
+        "passed": 5,
         "n": 21
       },
       "span_ge_6_words": {
-        "passed": 6,
+        "passed": 4,
         "n": 21
       }
     },
@@ -3798,9 +3820,9 @@
   "verdict": {
     "decision": "DO-NOT-CLAIM",
     "reasons": [
-      "shape_rate 0.286 < 0.80",
-      "abstain 11/21 < 21/21",
-      "grounding 11/21 < 18/21"
+      "shape_rate 0.238 < 0.80",
+      "abstain 12/21 < 21/21",
+      "grounding 9/21 < 18/21"
     ],
     "claim_allowed": null
   },
