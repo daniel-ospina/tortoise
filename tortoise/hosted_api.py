@@ -8943,7 +8943,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (`prior_turn_count`), not on which branch ran — otherwise those paths are
     # a billing/abuse blind spot. The conservative over-count for the abuse leg
     # is the documented posture.
-    if (not session_existed or retry_failed_capture
+    # #3892 (review cycle 1, P2): a KEYLESS re-capture of an UNCHANGED
+    # transcript writes nothing — its turn ids are deterministic, so the loop
+    # MERGEs onto the same Points — yet `retry_failed_capture` is True for it
+    # (prior lane "none"), which would meter a phantom write-op and charge the
+    # full transcript length on the abuse leg. The retry arm therefore applies
+    # only when the retry can EXTRACT (a keyed retry mints points); the
+    # grown-transcript arm still covers the keyless case that really writes.
+    if (not session_existed or (retry_failed_capture and not no_provider)
             or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt. A keyless

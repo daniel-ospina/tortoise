@@ -362,6 +362,45 @@ def test_metering_counts_a_grown_keyless_recapture(monkeypatch, client):
         "a grown keyless re-capture writes a new turn Point and must be metered"
 
 
+def test_keyless_recapture_of_unchanged_transcript_meters_nothing(
+        monkeypatch, client):
+    """#4188 (review cycle 1, P2): a KEYLESS re-capture of an UNCHANGED
+    transcript is an idempotent no-op — its turn ids are deterministic, so the
+    loop MERGEs onto the same Points and writes ZERO nodes. `retry_failed_
+    capture` is nevertheless True for it (the prior lane is "none"), so a
+    meter keyed on which branch ran fires a phantom write-op on every re-POST
+    (and charges the full transcript length on the abuse leg) — the #1827
+    class, reopened for the keyless shape. The meter must stay SILENT."""
+    import tortoise.hosted_api as ha_mod
+    meter: list = []
+    monkeypatch.setattr(
+        ha_mod, "_record_write_op",
+        lambda org, nodes_written=0: meter.append(
+            (org["org_id"], nodes_written)))
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    conv = [{"role": "user", "content": "an unchanged keyless transcript"}]
+    r1 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-meter-noop"})
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["extraction_mode"] == "no-provider", r1.json()
+
+    # Re-POST the IDENTICAL transcript while still keyless: the retry gate is
+    # armed (prior lane "none") but the turn loop writes nothing.
+    meter.clear()
+    r2 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-meter-noop"})
+    assert r2.status_code == 200, r2.text
+    assert not meter, (
+        "an unchanged keyless re-capture writes ZERO nodes — the meter must "
+        f"not fire (phantom write-op): {meter}"
+    )
+
+
 def test_default_llm_with_provider_key_422_on_empty(monkeypatch, client):
     """P1 #1529: an EMPTY conversation is now rejected with 422 before any
     write (the old "graceful" 200 + extracted:0 is the E2E-8 owned negative

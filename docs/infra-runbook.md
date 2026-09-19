@@ -276,16 +276,19 @@ provider/model and fails in hosted mode when the key is missing.
 
 ### Cost bounds per capture
 
-Bounds are enforced IN ORDER by `capture_session` (tortoise/hosted_api.py):
+Bounds enforced by `capture_session` (tortoise/hosted_api.py). **A missing
+provider key is not a gate** (#3892): a keyless capture is STORED (turns only)
+with extraction skipped, so it never refuses and never reaches the 402
+estimate below (the keyless path mints zero non-episodic points). The
+extraction-bearing path is bounded IN ORDER:
 
-1. **No provider gate** — a keyless capture is STORED (turns only) and
-   extraction is skipped; it is not refused (#3892).
-2. **Turn cap** — `MAX_SESSION_TURNS = 500` → `400` above it.
-3. **Points quota (pre-write estimate)** — `402` when the extraction-aware
+1. **Turn cap** — `MAX_SESSION_TURNS = 500` → `400` above it.
+2. **Points quota (pre-write estimate)** — `402` when the extraction-aware
    estimate exceeds the team's points quota. Estimate:
    `est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
    (the ×2 covers the M2 relations stage's IMPL/NAND operator nodes; sentence
-   count is capped per turn — the #329 flood gate).
+   count is capped per turn — the #329 flood gate). Skipped entirely on the
+   keyless path, which extracts nothing.
 
 No sessions quota: the flat `max_sessions = 1000` was removed in **#4010** —
 sessions are unlimited for every tier, and a stored `Team.max_sessions` is
@@ -296,7 +299,8 @@ points-quota numerator for NON-episodic Points only (turn Points / Session /
 Event are episodic and don't count), and `included_write_ops_per_month: 10000`
 is the write-ops budget. Worst-case node amplification per turn: 200
 sentences × 2 = 400 nodes, so a full 500-turn session is ~200K estimated
-nodes — always stopped by the 402 gate BEFORE any write. In practice the
+nodes — for an extraction-bearing capture, always stopped by the 402 gate
+BEFORE any write. In practice the
 cheap-tier models extract far fewer points than the cap; the estimate is the
 fail-closed upper bound.
 

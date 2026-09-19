@@ -3393,11 +3393,16 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         return 1
     # #4188: never report an unqualified success for a DEFERRED capture — a
     # keyless store is a 2xx with extraction skipped. Surface the receipt's
-    # non-llm mode + additive warnings (stderr), mirroring _cmd_session_import.
+    # no-provider mode + additive warnings (stderr), mirroring
+    # _cmd_session_import. Only the no-provider mode means "not extracted":
+    # "replayed" means a PRIOR capture SUCCEEDED, so its memory points DO
+    # exist — printing "memory points were not extracted" for it would be a
+    # false statement about the session.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
     _capture_mode = result.get("extraction_mode")
-    if _capture_mode and not str(_capture_mode).startswith("llm"):
-        print(f"  Extraction: {_capture_mode} — memory points were not "
-              "extracted", file=_sys.stderr)
+    if _capture_mode == _CAPTURE_NO_PROVIDER_MODE:
+        print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
+              "memory points were extracted", file=_sys.stderr)
     if result.get("warnings"):
         print("capture warnings: " + "; ".join(
             str(w) for w in result["warnings"]), file=_sys.stderr)
