@@ -1318,24 +1318,55 @@ def test_codex_hooks_upgrade_defaults_to_codex_home_not_the_cwd(cli):
 
 
 @pytest.mark.parametrize("hooks_cmd", ["status", "upgrade"])
-def test_codex_hooks_refuses_a_non_absolute_home_as_a_populated_error(
-        tmp_path, hooks_cmd):
-    """A NON-absolute ``HOME`` (``Path.home()`` returns it verbatim — it does
-    NOT raise) leaves ``default_root`` no root it can make absolute, so it
-    refuses.  That refusal must reach the CLI as a populated message and a
-    non-zero exit, exactly like every other refusal in this command — never an
-    uncaught traceback.  ``_cmd_hooks`` is shared by BOTH ``hooks status`` and
-    ``hooks upgrade``, and it called `default_root` outside any try/except, so
-    both commands printed a raw ``ValueError`` traceback (#4024 P2-1).
+@pytest.mark.parametrize(
+    ("home", "expected"),
+    [
+        # A RELATIVE `$HOME`: `Path.home()` returns it VERBATIM, and
+        # `default_root` refuses it as a `ValueError`.
+        ("relhome", "cannot resolve an absolute install root"),
+        # NOTE: an EMPTY `$HOME` is deliberately NOT in this matrix. It does
+        # not reach the root resolver at all: `Path.home()` yields `/`, which
+        # is absolute, so `default_root` returns `/.codex` and the refusal
+        # comes LATER from the writability preflight (a DIFFERENT refusal with
+        # a different message). Pinning it here would assert the wrong
+        # mechanism — and on a machine that can write `/.codex` it would not
+        # refuse at all. The same reasoning applies to an UNSET `$HOME`, which
+        # falls back to the passwd entry and resolves normally.
+        # A literal `~` / `~/x`: the expansion is a no-op, so `Path.home()`
+        # ITSELF raises `RuntimeError("Could not determine home directory.")`.
+        ("~", "Could not determine home directory."),
+        ("~/x", "Could not determine home directory."),
+    ],
+)
+def test_codex_hooks_refuses_an_unresolvable_home_as_a_populated_error(
+        tmp_path, hooks_cmd, home, expected):
+    """An unresolvable ``HOME`` leaves the capture root with no absolute base;
+    the refusal must reach the CLI as a populated message plus a non-zero
+    exit, exactly like every other refusal in this command — never an
+    uncaught traceback.  ``_cmd_hooks`` is shared by BOTH ``hooks status``
+    and ``hooks upgrade``, and it evaluated the root outside any try/except
+    (#4024 P2-1).
 
-    Mutation: drop the ``try/except ValueError`` around the root resolution in
-    ``_cmd_hooks`` — the CLI prints a ``Traceback`` ending in the raw
-    ``ValueError`` and this REDs."""
+    The matrix spans BOTH members of the raise-set, which is why the boundary
+    is a catch-all rather than an enumeration:
+
+    * ``relhome`` / ``''`` — ``Path.home()`` returns a NON-absolute value
+      VERBATIM and ``default_root`` refuses it with a ``ValueError``.
+    * ``~`` and ``~/x`` — ``Path.home()`` itself RAISES ``RuntimeError``:
+      ``pathlib`` refuses when the ``~`` expansion is a no-op.  An earlier
+      revision asserted "``Path.home()`` returns it verbatim — it does NOT
+      raise", which is true of ``relhome`` and FALSE of ``~`` — and that
+      false generalisation is exactly what let the ``RuntimeError`` escape an
+      ``except ValueError`` boundary.
+
+    Mutation: restore the enumerated ``except ValueError`` around the root
+    resolution — the ``relhome``/``''`` cases stay green while the
+    ``~``/``~/x`` cases RED with the raw ``RuntimeError`` traceback."""
     cwd = tmp_path / "proj"
     cwd.mkdir()
     env = {
         **os.environ,
-        "HOME": "relhome",          # NON-absolute on purpose
+        "HOME": home,
         "CODEX_HOME": "",
         "TORTOISE_DB_URI": "",
         "TORTOISE_SECRET_PEPPER": "test-static-pepper",
@@ -1346,10 +1377,40 @@ def test_codex_hooks_refuses_a_non_absolute_home_as_a_populated_error(
     assert r.returncode != 0, (r.returncode, r.stdout, r.stderr)
     assert "Traceback" not in r.stderr, r.stderr
     # a populated refusal, not a bare exit — with the repair path.
-    assert "cannot resolve an absolute install root" in r.stderr, r.stderr
+    assert expected in r.stderr, r.stderr
     assert "to repair" in r.stderr, r.stderr
-    # the refusal is read-only: nothing was written into the relative root.
+    # the refusal is read-only: nothing was written into a relative root.
     assert not (cwd / "relhome").exists(), r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("hooks_cmd", ["status", "upgrade"])
+@pytest.mark.parametrize("home", ["~", "~/x"])
+def test_hooks_claude_also_survives_an_unresolvable_home(
+        tmp_path, hooks_cmd, home):
+    """``_P.home()`` is evaluated BEFORE ``default_root``'s early
+    ``return Path('.')`` for the project-scoped Claude layout, so the raising
+    ``HOME`` reaches ``--harness claude`` too and the SAME boundary must catch
+    it.  A fix scoped to the codex arm, or placed around only the
+    ``default_root`` call, leaves this RED.
+
+    Mutation: evaluate ``_P.home()`` outside the guarded region, or guard the
+    codex arm only — this prints the raw ``RuntimeError`` traceback."""
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = {
+        **os.environ,
+        "HOME": home,
+        "CODEX_HOME": "",
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+
+    r = _run(("hooks", hooks_cmd, "--harness", "claude"), env, cwd)
+
+    assert r.returncode != 0, (r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "Could not determine home directory." in r.stderr, r.stderr
+    assert "to repair" in r.stderr, r.stderr
 
 
 # ── the CLI surface (`tortoise install <harness>`) ──────────────────────

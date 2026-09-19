@@ -3048,16 +3048,31 @@ def _cmd_hooks(args) -> int:
     # no-capture this seam exists to prevent (#3818).
     explicit_dir = getattr(args, "dir", None)
     try:
+        # `_P.home()` is INSIDE the boundary because it can RAISE, not merely
+        # return a non-absolute path: with `$HOME` set to a literal `~` (or
+        # `~/x`) the expansion is a no-op and `pathlib` raises
+        # `RuntimeError("Could not determine home directory.")`; a RELATIVE
+        # `$HOME` (`relhome`) is returned verbatim and refused by
+        # `default_root` as a `ValueError`.  Those are two members of ONE
+        # raise-set, so the boundary is the sibling module's catch-all —
+        # `except MemoryError: raise` then `except Exception` — never an
+        # `except (ValueError, RuntimeError)` enumeration, which the next
+        # unenumerated member refutes (the shape that let `TypeError` #3987
+        # and `UnicodeDecodeError` #3988 escape `capture_install`'s old
+        # `(OSError, RuntimeError)` tuple; see tortoise/capture_install.py).
+        # Guarding the whole root-resolution expression covers the raise from
+        # `_P.home()`, not just the call after it.  Surface every member the
+        # way every other failure in this command is surfaced: a populated
+        # message on stderr plus a non-zero exit, never an uncaught traceback
+        # (#4024 P2-1).  The sibling call sites are already guarded
+        # (`capture_install`'s catch-all, `doctor`'s `except Exception`);
+        # this one was not.
+        home = _P.home()
         root = (_P(explicit_dir) if explicit_dir is not None
-                else default_root(layout, _P.home()))
-    except ValueError as e:
-        # `default_root` refuses when the root cannot be made absolute — a
-        # relative `$HOME`, which `Path.home()` returns VERBATIM (it does not
-        # raise).  Surface it the way every other failure in this command is
-        # surfaced: a populated message on stderr plus a non-zero exit, never
-        # an uncaught traceback (#4024 P2-1).  The sibling call sites are
-        # already guarded (`capture_install`'s catch-all, `doctor`'s
-        # `except Exception`); this one was not.
+                else default_root(layout, home))
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
         print(str(e), file=_sys.stderr)
         # Same repair-hint shape as the drift refusal below.  It names a
         # PLACEHOLDER dir rather than a concrete one: the root is exactly what
@@ -5291,21 +5306,38 @@ def _cmd_doctor(args):
     except Exception as e:
         results.append(("Session extraction", "⚠️", f"check unavailable: {str(e)[:60]}"))
 
-    # 6. Harness detection
-    home = Path.home()
-    detections: list[str] = []
-    if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
-        detections.append("Pi (extension found)")
-    if (home / ".claude").exists() or Path(".claude").exists():
-        detections.append("Claude Code")
-    if (home / ".codex").exists() or Path(".codex").exists():
-        detections.append("Codex")
-    if Path(".cursor").exists():
-        detections.append("Cursor")
-    if detections:
-        results.append(("Harnesses", "✅", ", ".join(detections)))
-    else:
-        results.append(("Harnesses", "⚠️", "none detected — run tortoise setup to configure"))
+    # 6. Harness detection.  `Path.home()` sits INSIDE this boundary because
+    # it can RAISE, not merely return: with `$HOME` a literal `~` (`~/x`
+    # alike) the expansion is a no-op and `pathlib` raises
+    # `RuntimeError("Could not determine home directory.")` — the same
+    # raise-set member that traced back from `_cmd_hooks` (#4024 P2-1).  Same
+    # catch-all with the explicit `MemoryError` re-raise as the sibling
+    # seams, never an `except (A, B)` enumeration (see
+    # tortoise/capture_install.py).  A failed resolution is a WARNING row and
+    # leaves `home` None, so the detection block below is skipped rather than
+    # run against a substituted root.
+    home: Path | None = None
+    try:
+        home = Path.home()
+        detections: list[str] = []
+        if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
+            detections.append("Pi (extension found)")
+        if (home / ".claude").exists() or Path(".claude").exists():
+            detections.append("Claude Code")
+        if (home / ".codex").exists() or Path(".codex").exists():
+            detections.append("Codex")
+        if Path(".cursor").exists():
+            detections.append("Cursor")
+        if detections:
+            results.append(("Harnesses", "✅", ", ".join(detections)))
+        else:
+            results.append(("Harnesses", "⚠️",
+                            "none detected — run tortoise setup to configure"))
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        results.append(("Harnesses", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
 
     # 7. Capture-hook install freshness (#3795/#3801). The install seam is a
     # manual copy, so an already-installed host keeps a byte-frozen script and
@@ -5330,7 +5362,11 @@ def _cmd_doctor(args):
         )
         for _harness in ("claude", "codex"):
             _layout = get_layout(_harness)
-            _root = default_root(_layout, home)
+            # Claude is project-scoped (`root_env is None`) and ignores this
+            # argument; a `None` home (step 6 could not resolve it) is given
+            # the cwd so a codex layout still refuses as a populated
+            # `ValueError` rather than raising `TypeError` on `Path(None)`.
+            _root = default_root(_layout, home if home is not None else Path("."))
             if not is_installed(_root, _harness):
                 continue
             findings = detect_install(_root, _harness)
