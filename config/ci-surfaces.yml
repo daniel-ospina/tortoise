@@ -35,11 +35,19 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
+  - test_telemetry_registration.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
   - test_api.py
   - test_action_endpoints_dual_auth.py
+  # #B7: the activation scorecard (GET /v1/activation/scorecard). Registered under
+  # `api` AND `core` deliberately, same rationale as the boot guards above: the
+  # endpoint lives in tortoise/hosted_api.py (selects `api`) while
+  # tortoise/activation_scorecard.py matches no named pattern and falls to the
+  # `core` fallback — a one-surface registration would skip the suite whenever
+  # the other half of the diff changed.
+  - test_activation_scorecard.py
   - test_audit.py
   # #2938: the eight battery members previously dual-registered here (arms,
   # cli, config, determinism, enums, run, runner, setup) were verified per
@@ -122,6 +130,7 @@ surfaces:
   # test_graphcopy_boolean_index_3154.py.
   - test_capture_cost_measurement.py
   - test_hosted_auth.py
+  - test_cross_tenant_read_isolation.py  # #3663: capture->read cross-tenant READ isolation (hosted api: search/sessions/detail/export + backups + MCP list_graphs + namespace opener)
   - test_hosted_backup.py
   # #3895: the dump's node set and edge set must be the SAME set — registered
   # under `api` because tortoise/hosted_backup.py owns that surface (see the
@@ -145,6 +154,9 @@ surfaces:
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #4010: the session-cap removal — drives the hosted capture path + the
+  # registry resolver, so it belongs with the quota/api surface.
+  - test_issue_4010_sessions_unlimited.py
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
@@ -226,6 +238,11 @@ surfaces:
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
   - test_codex_capture_hook.py
+  # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, the agent-transcript parser, and the CLI install
+  # into the HOME-scoped ~/.cursor. Same dual registration as
+  # test_capture_install.py.
+  - test_cursor_capture_hook.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -332,10 +349,12 @@ surfaces:
   # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
+  - test_embedder_provision.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
+  - test_activation_scorecard.py   # #B7: activation scorecard (with the `api` half — see there)
   - test_agent_ops_pack.py
   - test_agent_ops_supersede.py
   - test_alert_store.py
@@ -365,6 +384,7 @@ surfaces:
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
+  - test_tmpdir_hygiene_4096.py  # #4096: AST guard — no pytest fixture may mkdtemp a tree without reclaiming it (meta test; reads tests/**, no DB)
   # #3755: session-start.sh must fire the install-probe beacon even when
   # `tortoise context` fails (the digest was `|| exit 0`, which skipped the
   # probe). Registered under `core` because `tortoise/claude-hooks/` is an
@@ -387,6 +407,11 @@ surfaces:
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
   - test_codex_capture_hook.py
+  # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, the agent-transcript parser, and the CLI install
+  # into the HOME-scoped ~/.cursor. Same dual registration as
+  # test_capture_install.py.
+  - test_cursor_capture_hook.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -538,6 +563,7 @@ surfaces:
   - test_notify.py
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
   - test_open_kinds.py
+  - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all
   - test_operator_source_search.py
   - test_operator_source_unit.py
   - test_ops_safety.py
@@ -584,6 +610,7 @@ surfaces:
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
+  - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
@@ -642,6 +669,12 @@ surfaces:
   # hosted_api import), the window guard did not run for the very change it
   # guards. Dual-registered with `api` (same #2938 precedent).
   - test_session_import_codex.py
+  # #2901: the canonical terminal-status vocabulary + its consumer parity.
+  # A change to `tortoise/live.py` (the canonical home) or
+  # `tortoise/indexer/github_indexer.py` / the graph-scripts maps to no named
+  # surface, so `core` is the arm that runs on the very change it guards (same
+  # #2498 rationale as test_lifecycle_guards.py above).
+  - test_terminal_status_vocabulary.py
   ep:
   - test_a9_direct_edge_traversal.py
   # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
@@ -715,6 +748,7 @@ surfaces:
   # website/functions/_middleware.ts under Node) and the console's move to the
   # app origin. Pure/harness — no wrangler, no network.
   - test_admin_origin_redirect.py
+  - test_dashboard_unknown_address.py
   - test_github_connect.py
   - test_github_connector.py
   - test_github_indexer.py
@@ -733,6 +767,7 @@ surfaces:
   - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
   - test_onboarding_analytics_patch.py
   - test_onboarding_endpoints.py
+  - test_onboarding_false_completion_repair.py  # #3912: false decide-completed repair + guard (docker-lane)
   - test_onboarding_health_flip.py
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
@@ -982,6 +1017,7 @@ slow_files:
 # Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
 # + test_markers).
 carve_out:
+- test_precision_leak_4028.py  # #4028: the surface half asserts embedded brute-force floor semantics
 - test_graph_integrity_gate.py
 - test_per_session_census.py
 - test_resume_gate_parity.py
@@ -991,11 +1027,20 @@ carve_out:
 - test_longmem_runner.py  # #2573/P3-lane-flip: embedded eval harness (D2-D4 vector-leg asserts are FalkorDBLite-only)
 - test_backup_e2e.py
 - test_config.py
+- test_cross_tenant_read_isolation.py  # #3663: asserts production org_{org_id} graph-name scoping; the carve-out exemption is load-bearing (without it the test redirect would rename every path-built graph, so in a URI-set lane the scoping checks would FAIL — hard RED, not a false pass)
 - test_embedded_concurrency.py
 - test_embedded_durability_claim.py  # #2879: embedded AOF durability drift pin (on-disk appendonlydir measurement)
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py
 - test_flip_gate.py
+# #4047: both #3845 fork-guard files are module-level `embedded_only` (their
+# subject is the embedded daemon's module-fork wedge), were absent from
+# carve_out, and so were collected-and-SKIPPED by every full selection — a
+# permanently green, permanently unexecuted gate on main (#3845's own evidence
+# never ran on a full selection). Registered here so the URI-unset carve-out
+# job runs them.
+- test_fork_safety_3845.py
+- test_fork_slot_wedge_3845.py
 - test_guard.py
 - test_hard_reject.py
 - test_hosted_backup.py
@@ -1049,6 +1094,7 @@ durations:
   test_doctor.py: 44.8
   test_onboarding_w6_capture_disclosure.py: 43.2
   test_onboarding_w4_settings.py: 38.8
+  test_onboarding_false_completion_repair.py: 42.1  # #3912: 48 docker-lane tests (SDK round-trips per org)
   test_graph_diagnostics.py: 37.3
   eval/write_path/test_write_path_runner.py: 36.0
   test_write_verb.py: 35.7

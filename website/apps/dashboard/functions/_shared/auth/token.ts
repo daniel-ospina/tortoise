@@ -23,7 +23,7 @@
  * not about the short-lived credential the proxy needs.
  */
 import type { Env } from "./session";
-import { ensureColumn } from "./session";
+import { ensureColumn, ensureSchema } from "./session";
 import { refreshSession, isRefreshTokenDead } from "./supabase";
 
 /** Refresh this many ms before actual expiry, to avoid using a token mid-flight. */
@@ -44,6 +44,25 @@ export type TokenResult =
   | { ok: false; reason: "unavailable" };
 
 export async function ensureSchemaTokenColumns(db: D1Database): Promise<void> {
+  // The BASE TABLE first, then the columns added on top of it.
+  //
+  // `ALTER TABLE` on a table that does not exist yet throws `no such table:
+  // sessions` — which is NOT a duplicate-column error, so `ensureColumn`
+  // rethrows it and the caller's `catch` reports the whole session store as
+  // unavailable (the admin gate answers 503 "temporarily unavailable").
+  //
+  // Every READ path calls this function and none of them calls
+  // `ensureSchema` — the gate, `/api/session`, the W6 token-handler proxy,
+  // `/api/v1`, provision, profile, set-email, update-password. So the base
+  // table had to already exist, and only the six WRITE paths
+  // (callback/confirm/password/api-key/signup/link) created it. On any
+  // deployment where the migration had not been applied — a fresh local D1,
+  // or the e2e harness, which applies the migration straight to the sqlite
+  // file and so is never observed by the running runtime — every read path
+  // 503'd with the schema looking fine in the file. `ensureSchema` is
+  // idempotent (`CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`),
+  // so calling it here costs one no-op statement on the normal path.
+  await ensureSchema(db);
   // Uses `ensureColumn`, which swallows ONLY the duplicate-column error. The
   // first version caught everything, so a genuine DDL failure was invisible and
   // manifested as every proxied request 503ing with no signal anywhere.

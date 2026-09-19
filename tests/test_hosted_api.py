@@ -72,7 +72,7 @@ TEST_TEAM = {
     "max_graphs": 1,
     "max_points": 10000,
     "max_api_keys": 2,
-    "max_sessions": 1000,
+    "max_sessions": None,
 }
 
 
@@ -1800,6 +1800,127 @@ class TestRevokedKeysDoNotConsumeCap2481:
         assert client.delete(
             f"/v1/team/keys/{s.json()['id']}").status_code == 200
         assert client.post("/v1/team/keys").status_code == 200
+
+
+class TestKeyAllowance3874:
+    """#3874: /v1/team exposes the org's API-key allowance BEFORE the cap,
+    from the same source the mint gate enforces — the pre-cap read and the
+    at-cap 402 must agree, so a future change to one cannot silently desync
+    the other.
+
+    EXECUTES the real path: the allowance is read from a live GET /v1/team on
+    the REAL registry key-auth lane (not the dependency-override stub, which
+    would just echo whatever the test injected), then keys are minted through
+    POST /v1/team/keys until the gate refuses.
+    """
+
+    def test_pre_cap_allowance_equals_at_cap_refusal(self, client):
+        import re
+
+        import tortoise.hosted_api as ha_mod
+
+        # A stored allowance that differs from BOTH the free-tier pricing
+        # default and the TEST_TEAM stub (2) — so a surface that ignores the
+        # stored limit, or falls back to a hardcode, cannot pass.
+        stored = 4
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_api_keys = $n",
+            params={"id": TEST_ORG_ID, "n": stored},
+        )
+
+        # Mint the auth credential under the override — the override only
+        # supplies the org DICT; the mint gate already reads the stored limit.
+        boot = client.post("/v1/team/keys")
+        assert boot.status_code == 200, boot.text
+        token = boot.json()["key"]
+
+        # Drop the override → the REAL registry key-auth lane resolves /v1/team
+        # (the override would otherwise return TEST_TEAM's injected value).
+        app.dependency_overrides.pop(get_current_org, None)
+        try:
+            h = {"Authorization": f"Bearer {token}"}
+
+            # (a) PRE-CAP: the allowance is readable before any cap is hit.
+            body = client.get("/v1/team", headers=h).json()
+            allowance = body["max_api_keys"]
+            assert allowance == stored, (
+                "pre-cap surface did not expose the org's stored allowance: "
+                f"{allowance!r} != {stored!r}")
+
+            # (b) The mint gate's OWN resolver agrees with the exposed field.
+            gate_limit = ha_mod._org_node_sync_limits(TEST_ORG_ID)["max_api_keys"]
+            assert gate_limit == allowance, (
+                "the exposed allowance and the mint gate's resolver disagree: "
+                f"{allowance!r} != {gate_limit!r}")
+
+            # (c) Every mint below the advertised allowance succeeds — the
+            # number is the enforced bound, not merely echoed (the boot key
+            # already occupies one slot).
+            for i in range(stored - 1):
+                r = client.post("/v1/team/keys", headers=h,
+                                json={"name": f"fill-{i}"})
+                assert r.status_code == 200, (
+                    f"mint {i + 2}/{stored} refused below the advertised "
+                    f"allowance: {r.status_code} {r.text}")
+
+            # (d) AT-CAP: the refusal names the SAME allowance (the dashboard
+            # parses this number for its at-cap notice).
+            r = client.post("/v1/team/keys", headers=h)
+            assert r.status_code == 402, r.text
+            m = re.search(r"limit reached \((\d+)\)", r.json()["detail"])
+            assert m is not None, r.text
+            assert int(m.group(1)) == allowance, (
+                f"pre-cap allowance {allowance} != at-cap refusal {m.group(1)} "
+                "— the two surfaces desynced")
+        finally:
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM)
+
+    def test_session_lane_allowance_comes_from_the_gate_resolver(
+            self, monkeypatch):
+        """#3874: the SESSION lane (the lane the dashboard's /v1/team call
+        actually uses — Supabase mode) must take its max_api_keys from the
+        MINT GATE's own resolver, not a precedence copied into the session
+        lane. If it keeps a second source, a future stored allowance could
+        be enforced by the gate while the pre-cap surface advertises the
+        tier default (the exact desync the issue forbids).
+
+        Pinned sharply by substituting the gate resolver: a session lane
+        with its own source would return the tier default (2), not 9.
+        """
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://3874.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-3874")
+        # Abuse telemetry must not fire — best-effort, but keep it inert.
+        monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
+        fake = FakeControlPlane()
+        fake.seed("organizations", [{"id": TEST_ORG_ID, "tier": "free",
+                                     "name": "3874 Org"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEST_ORG_ID, "role": "owner",
+            "status": "active"}])
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        # The gate's resolver is the ONE allowance source. Substituting it
+        # must flow straight through the session lane.
+        monkeypatch.setattr(ha_mod, "_org_node_sync_limits",
+                            lambda _org_id: {"max_api_keys": 9})
+
+        request = Request({
+            "type": "http", "method": "GET", "path": "/v1/team",
+            "query_string": b"", "headers": Headers({}).raw,
+        })
+        team = asyncio.run(ha_mod._session_user_org(request, {"user_id": _U1}))
+        assert team["org_id"] == TEST_ORG_ID, team
+        assert team["max_api_keys"] == 9, (
+            "the session lane must read the allowance from the mint gate's "
+            f"resolver, got {team['max_api_keys']!r}")
 
 
 class TestKeysList:

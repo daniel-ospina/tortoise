@@ -47,7 +47,7 @@ Cross-references: ONTOLOGY.md §5 (Subject Kind Vocabulary) / §6 (Subclass Mode
   max_graphs: integer?,    // null = unlimited; 1 for free tier
   max_api_keys: integer?,  // tier-derived from pricing.json (free=2)
   max_points: integer?,    // = pricing.json max_graph_nodes (points quota counts graph nodes)
-  max_sessions: integer?,  // flat 1000 across tiers
+  max_sessions: integer?,  // not written by apply_limits/team creation since #4010 (sessions are UNLIMITED for every tier; a stored value is NOT honoured as a cap). sdk.org_update is still a writer, so the property can exist; graph-scripts/clear_max_sessions_4010.py deletes it
   backup_enabled: boolean,
   backup_latest_at: datetime?
 })

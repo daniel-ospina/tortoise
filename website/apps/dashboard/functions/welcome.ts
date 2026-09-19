@@ -72,9 +72,20 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   // Recovery landing: the reset panel is the only case that renders. It is a
   // form; it posts to /auth/update-password, which is where the write happens.
   if (url.searchParams.get("reset") !== null) {
-    return env.ASSETS
-      ? env.ASSETS.fetch(request)
-      : json({ error: "assets unavailable" }, { status: 503 });
+    if (!env.ASSETS) return json({ error: "assets unavailable" }, { status: 503 });
+    // Fetch the ASSET BY NAME, never by re-requesting this URL.
+    //
+    // `ASSETS.fetch` runs the static-asset router, and that layer DOES apply
+    // `_redirects` (unlike inbound routing, where a matching Function wins).
+    // The app project USED to carry `/welcome / 200` — a rewrite for the
+    // in-app first-run wizard (#1287, #1566) — and re-requesting
+    // `/welcome?reset=1` then answered with the SPA document, so the recovery
+    // landing rendered the dashboard shell with no panel in it. That rule is
+    // gone (#4104), but naming the file is what makes this branch immune to a
+    // rewriting rule being added back: the intent is "serve welcome.html", and
+    // this asks for exactly that rather than depending on the router resolving
+    // the path and on nothing rewriting it.
+    return env.ASSETS.fetch(new URL("/welcome.html", url.origin).toString());
   }
 
   // Otherwise: straight to the app. A claim in flight (the `tt_claim_pending`

@@ -98,6 +98,37 @@ def _to_iso_date(raw: str) -> str:
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else "2020-01-01"
 
 
+def _fixture_session_date(raw: str) -> str:
+    """The fixture's own session date as ``YYYY-MM-DD``, or ``""`` when it is
+    absent or unparseable — NEVER a placeholder (#4106).
+
+    This value is written as the session's RECORDED time, which the ask-path
+    date annotation renders to the reader, so a placeholder here would put a
+    FABRICATED date in front of a temporal question. Accepts the dataset's
+    ``YYYY/MM/DD`` form and an ``YYYY-MM-DD`` one; anything else is unknown.
+    """
+    m = re.match(r"(\d{4})[/-](\d{2})[/-](\d{2})", raw or "")
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
+
+
+def _clear_recorded_time(proj, session_id: str) -> None:
+    """Erase a seeded session's recorded time — session AND turns (#4106).
+
+    ``seed_capture_turn_store`` models a CAPTURE, so its ``now=None`` default
+    is the run clock, and capture always writes ``created_at``. A fixture
+    whose dataset records NO date for the session must therefore remove what
+    that default wrote: the ask-path date annotation reads
+    ``:Session.created_at``, so leaving the run clock there would render the
+    test run's date as the session's date. Turn ``createdAt`` is cleared with
+    it to keep the one-``now``-per-session shape intact.
+    """
+    proj.g.query("MATCH (s:Session {id:$sid}) SET s.created_at = null",
+                 params={"sid": session_id})
+    proj.g.query("MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                 "SET t.createdAt = null",
+                 params={"sid": session_id})
+
+
 def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
                           now: str | None = None) -> str:
     """MERGE a ``(:Session)`` node in the shape BOTH capture writers write.
@@ -247,26 +278,50 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     repo reads ``ev-s{i}``, and it is NOT capture's ``sessionCaptured``
     Event — different id, different prop set): it is a date-only marker, and
     nothing joins a turn Point to it. That last part IS faithful to capture
-    — turn Points carry no ``eventId`` there either — so the ask lane's
-    ``:Event`` date annotation does not reach these turns and is NOT
-    fabricated.
+    — turn Points carry no ``eventId`` there either.
+
+    #4106: the session's own RECORDED time (``:Session.created_at``, which
+    capture writes) now carries the fixture's ``haystack_dates[i]`` date,
+    not the seeding wall clock. Capture-shaped turn Points carry no
+    ``eventId``, so the ONLY recorded date a turn can reach is the session's
+    own — seeding it as ``now`` is what makes that recorded time TRUE. It
+    was previously ``datetime.now()``, i.e. the wall clock of the test run,
+    which would have made every turn's date a FABRICATION the moment the
+    read path started rendering it (#4106 safety rule: a wrong date is worse
+    than no date). Seeding it as the fixture's date is the same convention
+    the eval ingest uses (``tools/longmem_eval/ingest_v2.py`` sets
+    ``s.created_at`` from ``session_date``) and keeps the turn ``createdAt``
+    equal to the session's, exactly as capture writes both from one ``now``.
     """
     proj = sdk._get_proj()
     sessions = question.get("haystack_sessions") or []
     dates = question.get("haystack_dates") or []
     session_ids = question.get("haystack_session_ids") or []
-    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     for i, session in enumerate(sessions):
         raw_sid = session_ids[i] if i < len(session_ids) else None
         sid = (raw_sid.strip()
                if isinstance(raw_sid, str) and raw_sid.strip()
                else f"sess-{i}")
+        # #4106: the fixture's own date, or UNKNOWN. A placeholder would be
+        # rendered to the reader as a real session date.
+        sdate = _fixture_session_date(dates[i]) if i < len(dates) else ""
         # The SAME window, blank gate and store write both capture surfaces
         # run (#1532 D1 / #1529 D3) — a session with no extractable line
-        # contributes NO Session, NO turn Point and NO Event.
-        if not seed_capture_turn_store(sdk, sid, session or [], now=now):
+        # contributes NO Session, NO turn Point and NO Event. The session's
+        # recorded time IS the fixture's session date (#4106) — one ``now``
+        # for the session and all of its turns, as capture writes them.
+        turn_ids = seed_capture_turn_store(
+            sdk, sid, session or [],
+            now=f"{sdate}T10:00:00Z" if sdate else None)
+        if not turn_ids:
             continue
-        sdate = _to_iso_date(dates[i]) if i < len(dates) else "2020-01-01"
+        if not sdate:
+            # #4106: the fixture records NO date for this session, and
+            # ``seed_capture_turn_store``'s ``now=None`` default is capture's
+            # own RUN clock — erase it (session AND turns), so the read path
+            # reports UNKNOWN instead of fabricating the run date.
+            _clear_recorded_time(proj, sid)
+            continue
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
             params={"eid": f"ev-s{i}", "st": f"{sdate}T10:00:00Z"},

@@ -11,6 +11,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_domain_validators.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -461,6 +462,8 @@ def graph_sdk():
     sdk = _make_sdk()
     yield sdk
     sdk.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(os.path.dirname(sdk._db_path), ignore_errors=True)
 
 
 class TestGraphValidators:
@@ -715,7 +718,7 @@ def commit_client():
         app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "test-team-405", "key_id": "k", "legacy_full_access": True, "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
-            "max_api_keys": 2, "max_sessions": 1000}
+            "max_api_keys": 2, "max_sessions": None}
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
         # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
         # clear at enter; pop-pin → restore __init__ → deterministic anchor

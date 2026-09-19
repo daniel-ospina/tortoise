@@ -136,6 +136,12 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # wheel without it fails the install with "shipped capture hook not
           # found".
           "codex-hooks/*.sh",
+          # #3819: the Cursor capture seam ships too — `tortoise install
+          # cursor` copies the hook out of the PACKAGE into ~/.cursor/hooks,
+          # so a wheel without it fails the install with "shipped capture hook
+          # not found". (Cursor has NO config-dir env var: `CURSOR_HOME` does
+          # not exist in Cursor 3.20.21.)
+          "cursor-hooks/*.sh",
           # #3808: the same is true of the Pi capture seam — `tortoise install
           # pi` copies this extension out of the PACKAGE (not the repo), so a
           # wheel without it fails the install with "shipped capture extension

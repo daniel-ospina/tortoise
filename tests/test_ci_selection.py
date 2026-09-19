@@ -113,15 +113,22 @@ def _tracked_files(root: Path) -> list[str]:
     in. `node_modules` is NOT excluded either: parts of it are tracked here, so
     excluding it would diverge from git in the other direction.
     """
-    proc = subprocess.run(
-        ["git", "ls-files", "-z"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-    )
-    # Not check=True: a bare CalledProcessError (no git, an sdist export with no
-    # .git, or `fatal: detected dubious ownership`) fails as an opaque traceback
-    # and, worse, would make every entry look dead for the wrong reason.
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:  # no git binary at all
+        raise AssertionError(
+            "git is not on PATH, so the tracked set is unknown — this test "
+            f"cannot decide liveness: {exc}"
+        ) from exc
+    # check=False + an explicit assert, rather than check=True: check=True would
+    # raise a bare CalledProcessError with no context, so an sdist export with no
+    # `.git`, or `fatal: detected dubious ownership`, would look like every entry
+    # being dead rather than like a broken environment.
     assert proc.returncode == 0, (
         "git ls-files failed, so the tracked set is unknown — this test cannot "
         "decide liveness and must not report every entry as dead: "
@@ -159,13 +166,16 @@ def test_source_patterns_all_name_something_real():
     tracked = set(_tracked_files(root))
 
     def names_something_real(pattern: str) -> bool:
-        # Directory-style entries (`tortoise/onboarding/`) name a SUBTREE.
-        if pattern.endswith("/"):
-            return any(f.startswith(pattern) for f in tracked)
-        # Everything else is a literal file path. Anchoring matters: an
-        # unanchored prefix test would call a dead entry
-        # `.../functions/admin/[[path]]` alive, because `.../[[path]].ts` exists.
-        return pattern in tracked
+        # A real tracked path is always live.
+        if pattern in tracked:
+            return True
+        # Otherwise it must name a SUBTREE, anchored on the separator. `select()`
+        # matches with `startswith`, so a directory entry is live with OR without
+        # its trailing slash (`tortoise/onboarding` and `tortoise/onboarding/`
+        # both match). Reporting the slash-less form as "names NOTHING" would be
+        # false — it IS live — and would disagree with
+        # `test_every_source_pattern_is_selectable`, which accepts it.
+        return any(f.startswith(pattern.rstrip("/") + "/") for f in tracked)
 
     dead = sorted(
         f"[{surface}] {pat}"
@@ -353,6 +363,21 @@ def test_unrelated_tools_change_still_tier1():
     assert r["full"] is False
     assert r["surfaces"] == []
     assert set(r["test_files"]) == _tier1()
+
+
+def test_activation_cohort_change_does_not_drop_to_tier1():
+    # #B7 (#3674): tools/activation_cohort.py owns part of
+    # tests/test_activation_scorecard.py (its roll_up cohort-summing logic).
+    # Without the TOOL_CARVEOUTS entry the flat "tools/" prefix swallows it ->
+    # tier-1 smoke only, and the suite that pins the cohort number never runs.
+    r = _sel(["tools/activation_cohort.py"])
+    assert r["surfaces"], r
+    assert set(r["test_files"]) != _tier1(), r
+    # Today it lands in the fail-closed unknown-path branch (FULL matrix — the
+    # heaviest but safest gate for a file a reported metric depends on). If
+    # that ever becomes a mapped surface, the owning suite must still run.
+    if not r["full"]:
+        assert "test_activation_scorecard.py" in r["test_files"], r
 
 
 def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
@@ -917,6 +942,44 @@ def test_push_legs_partitions_every_classified_file():
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
     # bench push_extra lands in half b
     assert any(f.startswith("bench/") for f in legs["half_b"])
+
+
+def test_carve_out_mirrors_test_no_redirect_stems():
+    """#4047: `carve_out:` and `TEST_NO_REDIRECT_STEMS` are one set in two homes.
+
+    `config/ci-surfaces.yml`'s `carve_out:` routes a file to the URI-unset
+    carve-out job and bars it from every docker leg; `tests/_embedded.py`'s
+    `TEST_NO_REDIRECT_STEMS` is the redirect exemption that keeps a module
+    embedded if it is executed with a URI set. A stem in only ONE of them is a
+    silent hole, in opposite directions (see the failure message).
+
+    Scope, stated honestly: this pin catches ONE-LIST-ONLY drift. It does NOT
+    catch #4047's own shape — the fork guards were missing from BOTH lists, so
+    the two sets were EQUAL then and this assertion passed on the pre-fix tree.
+    That shape is caught by the source scan in
+    `tests/test_markers.py::test_module_level_embedded_only_modules_are_carve_out`;
+    the two guards cover different holes and neither subsumes the other.
+    """
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    m = load_manifest()
+    # The one documented asymmetry: the bench smoke file is path-qualified in
+    # the manifest (`bench/...`) and bare-stem keyed in the registry. The
+    # registry/redirect mechanism is itself stem-keyed, so a collapse can only
+    # happen where the stem genuinely collides.
+    carve = {f.removesuffix(".py").removeprefix("bench/") for f in m["carve_out"]}
+    registry = set(TEST_NO_REDIRECT_STEMS)
+    assert carve == registry, (
+        "carve_out and TEST_NO_REDIRECT_STEMS have drifted — a stem in only "
+        "one of the two registries is a silent hole: "
+        f"registry-only={sorted(registry - carve)} — in the redirect registry "
+        "but NOT routed to the carve-out job, so a full (URI-set) selection "
+        "collects it on a docker leg and skips its embedded_only-marked tests "
+        "there; with a module-level mark that is the whole file, reported "
+        "green. "
+        f"carve-out-only={sorted(carve - registry)} — routed to the carve-out "
+        "job but not redirect-exempt, so an out-of-band URI run would flip its "
+        "embedded constructions to the server lane instead of the embedded "
+        "daemon")
 
 
 def test_integrity_no_matrix_drift():

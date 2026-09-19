@@ -21,6 +21,7 @@ Guards (the census's executable form — cycle-5 P1-5 / cycle-6 P2-10/P2-15):
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -56,6 +57,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
     "test_capture_session.py": {"registry": "session-capture"},
+    "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_index_docs_api.py": {"registry": "index-docs"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
@@ -77,6 +79,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
     "test_import_endpoint.py": {"registry": "import-ledger"},
+    "test_issue_4010_sessions_unlimited.py": {"registry": "prod-coupled"},  # #4010: registry seeding (org_create + registry-lane auth) mirrors test_quota/test_commit_endpoint
     "test_index_mcp.py": {"registry": "prod-coupled",
                            "e2e-900": "redirect-derived per-path"},
     "test_invites_email_http.py": {"registry": "prod-coupled"},
@@ -90,6 +93,18 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
     "test_onboarding_integration.py": {"registry": "prod-coupled"},
+    # #3912 repair guard: TestGuardHelpers.test_registry_cross_check_keys_on_
+    # namespace_not_display_name seeds a `Graph` row into the registry graph and
+    # then calls `_has_scoped_graphs`, whose OWN body constructs
+    # `TortoiseSDK(namespace="registry")` (sdk.py L1784 maps that literal to
+    # `registry_tortoise`). Seed and read must therefore be the SAME graph: a
+    # test_* rename would seed a verbatim test_* graph while the guard still
+    # read `registry_tortoise`: the first arm then passes VACUOUSLY (the seeded
+    # row is invisible, so nothing is "scoped") and the second goes red
+    # (`assert False is True`) — the custom-graph row is never found. Renaming
+    # breaks the coupling; the namespace IS the identity here. VERIFIED by
+    # rename probe this task.
+    "test_onboarding_false_completion_repair.py": {"registry": "prod-coupled"},  # #3912: registry seed read back by the guard's own TortoiseSDK(namespace="registry")
     "test_onboarding_seed_endpoint.py": {"registry": "prod-coupled"},  # #1999 (W3): seed/decide endpoint tests
     "test_onboarding_state_split.py": {"registry": "prod-coupled"},
     "test_onboarding_state.py": {"registry": "unit-only"},
@@ -450,6 +465,13 @@ def test_no_redirect_stems_registry_exact():
         "test_flip_gate",
         "test_guard",
         "test_hard_reject",
+        # #4047: both #3845 fork-guard files carry a module-level
+        # `pytestmark = pytest.mark.embedded_only` (their subject is the
+        # embedded daemon's module-fork wedge) but were absent from
+        # carve_out/TEST_NO_REDIRECT_STEMS, so a full selection collected them
+        # and every test skipped — a permanently unexecuted gate on main.
+        "test_fork_safety_3845",
+        "test_fork_slot_wedge_3845",
         "test_hosted_backup",
         "test_migrate_db",
         "test_ops_safety",
@@ -482,6 +504,20 @@ def test_no_redirect_stems_registry_exact():
         # TEST_NO_REDIRECT_STEMS but this pin was not updated, so the
         # repo-wide markers gate red'd on every PR until reconciled here.
         "test_projection_embedded_socket_timeout",
+        # 2026-09-18 #4028: the surface half asserts embedded brute-force
+        # relevance-floor semantics (the docker sig-A vector branch returns no
+        # absolute similarity), so the module joins the carve-out lane —
+        # registered in ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS.
+        "test_precision_leak_4028",
+        # #3663: the cross-tenant read-isolation proof asserts PRODUCTION
+        # graph names (org_{org_id}) on the MCP list_graphs filter, the
+        # namespace probe and its opener. The exemption is load-bearing:
+        # without it the class-level test redirect would rename path-built
+        # graphs to test_<hash>, so under a server URI no production name
+        # would exist and those assertions would FAIL — a hard RED, not a false
+        # pass. Runs embedded in every lane (same rationale as
+        # test_hosted_backup).
+        "test_cross_tenant_read_isolation",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
@@ -520,6 +556,324 @@ def test_embedded_only_marked_tests_registered():
         src = (_TESTS_ROOT / fname).read_text(encoding="utf-8")
         assert needle in src, \
             f"{fname} lost its embedded_only mark (D-2=A)"
+
+
+_MARKER_NAME = "embedded_only"
+
+
+def _folded_str(node):
+    """The string a constant expression folds to, or None.
+
+    `getattr(pytest.mark, "embedded" + "_only")` builds a string pytest resolves
+    to the marker, so the name has to be folded before it can be compared.
+    Handles plain constants, `+` chains of them, and an f-string with no
+    interpolation.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _folded_str(node.left), _folded_str(node.right)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.JoinedStr):
+        parts = [_folded_str(v) for v in node.values]
+        return None if any(p is None for p in parts) else "".join(parts)
+    return None
+
+
+def _marker_key(node, aliases: dict, seen: tuple = ()) -> str | None:
+    """The string an access key denotes, when that string is statically known.
+
+    The key of `getattr(pytest.mark, <key>)` / `pytest.mark[<key>]` is usually a
+    literal, but a module-level constant is just as static: `MARKER =
+    "embedded_only"` then `getattr(pytest.mark, MARKER)` marks the module, and
+    the name resolves through the same alias map the mark expressions use.
+    """
+    folded = _folded_str(node)
+    if folded is not None:
+        return folded
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        # `_folded_str` folds literals only; a chain built from module constants
+        # (`MARKER = PREFIX + "_only"`) is just as static, so resolve each side.
+        left = _marker_key(node.left, aliases, seen)
+        right = _marker_key(node.right, aliases, seen)
+        return None if left is None or right is None else left + right
+    if isinstance(node, (ast.Tuple, ast.List)) and len(node.elts) == 1:
+        # `K = ("embedded_only",)` / `for K in ("embedded_only",):`
+        return _marker_key(node.elts[0], aliases, seen)
+    if isinstance(node, ast.Name) and node.id not in seen:
+        for value in aliases.get(node.id, ()):
+            got = _marker_key(value, aliases, (*seen, node.id))
+            if got is not None:
+                return got
+    return None
+
+
+def _mentions_marker(node, aliases: dict, seen: tuple = ()) -> bool:
+    """True when an expression may reference the embedded_only marker.
+
+    A whole-subtree walk, not a shape match. pytest accepts the mark in a list,
+    a tuple, a set, a conditional expression, a starred expansion, a subscript,
+    a comprehension or a concatenation, and any of those may nest it
+    arbitrarily — a hand-written unwrapper that enumerates the shapes it knows
+    leaves whichever form nobody thought of silently unguarded, which is exactly
+    the failure this guard exists to catch. A bare name met ANYWHERE inside the
+    expression is resolved through `aliases` (a container can hide the mark one
+    hop down: `marks = [mark]`).
+
+    The marker name is accepted as a STRING only where a string is the access
+    key — `getattr(pytest.mark, "embedded_only")` and
+    `pytest.mark["embedded_only"]` — because matching the bare token anywhere
+    would red on prose that merely shares the word
+    (`reason="embedded_only"`), and a red on a module that is not embedded-only
+    asks for a registration that would move a server-lane test file into the
+    URI-unset carve-out job.
+
+    `seen` breaks alias cycles; a name already visited is not re-entered.
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and sub.attr == _MARKER_NAME:
+            return True
+        if isinstance(sub, ast.Subscript) \
+                and _marker_key(sub.slice, aliases) == _MARKER_NAME:
+            return True
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) \
+                and sub.func.id == "getattr" \
+                and any(_marker_key(a, aliases) == _MARKER_NAME
+                        for a in sub.args[1:]):
+            return True
+        if (isinstance(sub, ast.Name) and sub.id not in seen
+                and aliases.get(sub.id)
+                and any(_references_embedded_only(v, aliases, (*seen, sub.id))
+                        for v in aliases[sub.id])):
+            return True
+    return False
+
+
+def _bound_names(target) -> list:
+    """Names bound by an assignment or loop target, flattening tuple unpacking.
+
+    `globals()["pytestmark"] = ...` (and the `locals()` spelling) binds the
+    module global too, so a subscript assignment whose key folds to a string
+    counts as binding that name.
+    """
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [n for el in target.elts for n in _bound_names(el)]
+    if isinstance(target, ast.Starred):
+        return _bound_names(target.value)
+    if isinstance(target, ast.Subscript):
+        base = target.value
+        if isinstance(base, ast.Call) and isinstance(base.func, ast.Name) \
+                and base.func.id in ("globals", "locals"):
+            name = _folded_str(target.slice)
+            return [name] if name else []
+    return []
+
+
+def _references_embedded_only(expr, aliases: dict, seen: tuple = ()) -> bool:
+    """True when a module-scope value may BE the embedded_only marker.
+
+    Conservative by construction. A bare Name is resolved through the aliases
+    bound BEFORE the point of use (Python runs top to bottom); anything else is
+    accepted if the marker is mentioned anywhere inside it. Prose does not
+    match: the token inside a docstring or a `skipif(reason=...)` string is an
+    ast.Constant holding the whole sentence, not one equal to the bare name.
+
+    `aliases` maps a name to every value bound to it so far, so a name rebound
+    in a branch counts as marked if ANY of its bindings is. `seen` breaks alias
+    cycles. Both choices, and the subtree walk above, err toward a false RED —
+    a false RED costs one line of registration, a false GREEN is the silent
+    collect-and-skip hole.
+
+    OUT of contract — a mark constructed at runtime (returned by a helper, read
+    off a config object): this is a source scan, not an interpreter.
+    """
+    if isinstance(expr, ast.Name):
+        if expr.id in seen:
+            return False
+        return any(_references_embedded_only(v, aliases, (*seen, expr.id))
+                   for v in aliases.get(expr.id, ()))
+    return _mentions_marker(expr, aliases, seen)
+
+
+# Module-scope compound statements: a mark set inside one of these IS a
+# module-level mark, so the walk descends into them. FunctionDef / ClassDef
+# bodies are NOT module scope (a mark set there does not mark the module), so
+# the walk stops at them.
+#
+# The walk is a conservative OVER-APPROXIMATION: it also descends into branches
+# that cannot execute (`if False:`), where pytest would not see the mark. That
+# direction is deliberate — a false RED costs an unnecessary registration, a
+# false GREEN is the silent-collect-and-skip hole this guard exists to close —
+# and it is not detectable without evaluating conditions.
+_COMPOUND_STMTS = tuple(
+    c for c in (ast.If, ast.Try, ast.For, ast.While, ast.With,
+                ast.AsyncFor, ast.AsyncWith, ast.Match,
+                getattr(ast, "TryStar", None))
+    if c is not None)
+
+
+def _iter_module_scope(stmts):
+    """Yield module-scope statements, descending into nested compound bodies."""
+    for node in stmts:
+        yield node
+        if not isinstance(node, _COMPOUND_STMTS):
+            continue
+        # Read every container defensively: `match` is in _COMPOUND_STMTS but
+        # carries only `cases`, and only `try` carries `handlers`/`finalbody`.
+        yield from _iter_module_scope(getattr(node, "body", None) or [])
+        for handler in getattr(node, "handlers", None) or []:
+            yield from _iter_module_scope(handler.body)
+        # `match` stores its bodies per case, not in `body`/`orelse`.
+        for case in getattr(node, "cases", None) or []:
+            yield from _iter_module_scope(case.body)
+        yield from _iter_module_scope(getattr(node, "orelse", None) or [])
+        yield from _iter_module_scope(getattr(node, "finalbody", None) or [])
+
+
+def _module_level_embedded_only(tree) -> bool:
+    """True when the module sets `pytestmark` to the embedded_only marker.
+
+    Every module-scope assignment to `pytestmark` counts — not only the first
+    (`pytestmark = pytest.mark.slow` then a later
+    `pytestmark = pytest.mark.embedded_only` marks the whole module) and not
+    only a bare one (a mark inside an `if`/`try`/`match` body at module scope
+    marks it too). `+=` counts as well.
+
+    Aliases are bound IN SOURCE ORDER: Python runs top to bottom, so a name
+    assigned after the `pytestmark` line cannot have been its value, while a
+    name bound in several places keeps every prior binding (see
+    `_references_embedded_only`). Tuple/list unpacking and `for` targets bind
+    names too and are recorded.
+
+    A module-scope `pytestmark` that references the marker is enough to red even
+    when a LATER assignment overrides it back off — the same conservative
+    direction as a branch that cannot execute. Both are false REDs by
+    construction, and both are cheaper than a silent miss.
+
+    Two module-scope bindings cannot be read from here at all — a walrus in a
+    condition (`if (pytestmark := ...):`) and an import
+    (`from _marks import pytestmark`) — so they count as marked: the value is
+    unknowable at scan time, and the conservative direction is a red.
+    """
+    aliases: dict[str, list] = {}
+    for node in _iter_module_scope(tree.body):
+        targets: list = []
+        if isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AugAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            # `for _m in [pytest.mark.embedded_only]:` binds `_m` before any
+            # later use, so the loop's iterable is the alias's value.
+            targets, value = [node.target], node.iter
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            # The value lives in another module — unknowable here.
+            if any((a.asname or a.name) == "pytestmark" for a in node.names):
+                return True
+            continue
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) \
+                and any(kw.arg == "pytestmark" for kw in node.value.keywords):
+            # `globals().update(pytestmark=...)` — bound through a call, so the
+            # value cannot be read here; unknowable counts as marked.
+            return True
+        else:
+            continue
+        if value is None:
+            continue
+        names = [n for t in targets for n in _bound_names(t)]
+        if "pytestmark" in names and _references_embedded_only(value, aliases):
+            return True
+        for name in names:
+            aliases.setdefault(name, []).append(value)
+
+    # A walrus binds mid-expression, not through a statement target.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.NamedExpr) \
+                and isinstance(node.target, ast.Name) \
+                and node.target.id == "pytestmark" \
+                and _references_embedded_only(node.value, aliases):
+            return True
+    return False
+
+
+def test_module_level_embedded_only_modules_are_carve_out(request):
+    # #4047: it is the MODULE-level form of the marker that can go silent.
+    # `@pytest.mark.embedded_only` on one test skips that test under a URI and
+    # the file's other tests still run on the docker legs — a docker-leg half
+    # is the design (test_audit's CLI error-path siblings, etc.).
+    # `pytestmark = pytest.mark.embedded_only` skips the WHOLE module, so such
+    # a module is only ever executed if it is routed to the URI-unset carve-out
+    # job; if it is not registered it is collected on the docker legs, skipped
+    # there, and the run reports GREEN while skipping every test in it. Both
+    # #3845 fork guards were in exactly that state (#3845's evidence never ran
+    # on a full selection) and nothing red'd, because the exact-set pin below
+    # compares the registry to a literal and was in agreement with it.
+    #
+    # Two halves, because they cover different populations and fail differently:
+    #   EXACT — every module pytest actually collected in this session. pytest
+    #     has already imported them, so we read what `pytestmark` EVALUATED to
+    #     (conditionals, aliases, comprehensions, getattr: all resolved by the
+    #     interpreter). No guessing, no false verdicts.
+    #   SOURCE SCAN — every test module on disk. Catches a module that this
+    #     session did not collect (a docs-only or surface-scoped selection) and
+    #     is deliberately conservative, so it can over-report.
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    registered = set(TEST_NO_REDIRECT_STEMS)
+
+    # ── EXACT ────────────────────────────────────────────────────────────────
+    exact = []
+    visited = set()
+    for item in request.session.items:
+        mod = item.getparent(pytest.Module)
+        if mod is None or mod.nodeid in visited:
+            continue
+        visited.add(mod.nodeid)
+        marks = getattr(getattr(mod, "obj", None), "pytestmark", None)
+        if marks is None:
+            continue
+        marks = marks if isinstance(marks, (list, tuple)) else [marks]
+        if "embedded_only" in {getattr(m, "name", None) for m in marks} \
+                and Path(str(mod.path)).stem not in registered:
+            exact.append(mod.nodeid)
+
+    # ── SOURCE SCAN ─────────────────────────────────────────────────────────
+    offenders = []
+    # The universe mirrors pytest's own collection: BOTH default `python_files`
+    # patterns (`test_*.py` and `*_test.py`) — a marker module named the second
+    # way is collected and skipped exactly the same. Skips key on real path
+    # PARTS: a substring test over the whole absolute path would step over a
+    # collected file under a directory that merely contains ".venv".
+    skip_parts = {"__pycache__", ".venv", ".git", "node_modules"}
+    for path in sorted(_TESTS_ROOT.rglob("*.py")):
+        if not (path.name.startswith("test_") or path.name.endswith("_test.py")):
+            continue
+        if skip_parts & set(path.relative_to(_TESTS_ROOT).parts):
+            continue
+        try:
+            # parse BYTES: ast honours a PEP 263 coding declaration, so a
+            # latin-1 module (importable, collected) is read rather than
+            # skipped by a utf-8 decode error.
+            tree = ast.parse(path.read_bytes())
+        except (SyntaxError, UnicodeDecodeError, ValueError):
+            continue  # not importable source; pytest would not collect it either
+        if _module_level_embedded_only(tree) and path.stem not in registered:
+            offenders.append(str(path.relative_to(_REPO_ROOT)))
+    assert not exact, (
+        "a test module in this session carries a module-level embedded_only "
+        "pytestmark but is not in the carve-out registry — it is collected here "
+        "and every test in it is skipped, so the run is green without "
+        "executing; register the stem in tests/_embedded.py "
+        f"TEST_NO_REDIRECT_STEMS AND config/ci-surfaces.yml `carve_out:`: {exact}")
+    assert not offenders, (
+        "module-level `pytestmark = pytest.mark.embedded_only` outside the "
+        "carve-out registry — a full selection collects these and reports "
+        "them green while skipping every test in them; register the stem in "
+        "tests/_embedded.py TEST_NO_REDIRECT_STEMS AND "
+        f"config/ci-surfaces.yml `carve_out:`: {offenders}")
 
 
 def test_session_token_present_and_hex12_during_docker_session(monkeypatch):

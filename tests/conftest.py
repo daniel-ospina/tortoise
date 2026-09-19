@@ -7,6 +7,7 @@ directly (no user-facing tier path in v1). Used by E2E-1/3/4/5/10/11/12/13.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 
 import pytest
@@ -192,12 +193,41 @@ def _serialize_embedded_construction():
     mp.undo()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _reclaim_session_tmpdirs():
+    """#4096: reclaim SESSION-scoped test temp trees at the very end of the run.
+
+    `tests/conftest.py:shared_embedded_db` and `tests/_embedded.py:shared_proj`
+    each `mkdtemp` one shared tree for the whole session and (before this) never
+    removed it. They cannot reclaim locally: their consumers never close their
+    servers, and the pass-2 sweeps in `_redislite_hygiene` / `_server_graph_hygiene`
+    read the socket/pid markers *inside* those trees — removing the tree in the
+    shared fixture's own teardown (which reverse setup order places BEFORE the
+    sweeps) would destroy that evidence and could orphan a live redislite server
+    (#4068/#1005).
+
+    `autouse`, and with no dependency on the shared fixtures, so it is set up
+    regardless of which tests request the shared trees; it reads the registry they
+    populate (`tests._embedded.SESSION_TMPDIRS`). The teardown-last edge is
+    **structural, not alphabetical**: `_redislite_hygiene` declares this fixture as
+    a dependency, so setup runs reclaim -> redislite -> server_graph and
+    reverse-order teardown runs server_graph -> redislite -> reclaim. (pytest orders
+    same-scope autouse fixtures by NAME, not declaration order — a rename would
+    silently invert a declaration-order assumption.)
+    """
+    yield
+    from tests import _embedded as _embedded_mod
+    _embedded_mod.drain_session_tmpdirs()
+
+
 @pytest.fixture
 def provision_test_user():
     created = []
+    tmpdirs = []
 
     def factory(tier: str = "free", demo_seed: bool = True):
         tmpdir = tempfile.mkdtemp()
+        tmpdirs.append(tmpdir)
         # Epic #1647 (plan-review P1-5): under a supported URI, sweep the
         # shared non-test "e2e-tests" namespace to a guard-passing per-test
         # test_e2e_<uuid> (the SDK maps it to test_e2e_<uuid>_tortoise,
@@ -212,7 +242,9 @@ def provision_test_user():
         team = sdk.org_create(f"e2e-{os.urandom(4).hex()}")
         lim = tier_limits(tier)
         # #310 (review fix 16b): mirror production CREATE semantics — write
-        # max_points (= max_graph_nodes, GAP-B mapping) + max_sessions too.
+        # max_points (= max_graph_nodes, GAP-B mapping). #4010: max_sessions is
+        # written as NULL (unlimited) — it is never a cap, and a leftover
+        # number here would re-create exactly the trap the issue names.
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier=$tier, t.max_graphs=$mg, "
             "t.max_users=$mu, t.max_api_keys=$mk, t.max_points=$mp, "
@@ -220,7 +252,7 @@ def provision_test_user():
             params={"id": team["id"], "tier": tier,
                     "mg": lim["max_graphs_per_team"], "mu": lim["max_users_per_team"],
                     "mk": lim["max_api_keys"], "mp": lim["max_graph_nodes"],
-                    "ms": 1000, "ops": lim["included_write_ops_per_month"],
+                    "ms": None, "ops": lim["included_write_ops_per_month"],
                     "nodes": lim["max_graph_nodes"]},
         )
         if demo_seed:
@@ -241,6 +273,10 @@ def provision_test_user():
             sdk.close()
         except Exception:
             pass
+    # #4096: close first (above), then reclaim — removing the tree under a live
+    # redislite server would orphan it.
+    for d in tmpdirs:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
@@ -323,12 +359,17 @@ def shared_embedded_db():
     # embedded shared server, unchanged.
     """
     import tempfile as _tf
-    db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+
+    from tests._embedded import register_session_tmpdir
+
+    tmpdir = _tf.mkdtemp(prefix="tortoise_shared_embedded_")
+    register_session_tmpdir(tmpdir)
+    db_path = os.path.join(tmpdir, "shared.db")
     yield db_path
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _redislite_hygiene():
+def _redislite_hygiene(_reclaim_session_tmpdirs):
     """Bound redislite orphan accumulation (#1005) + index-pid files (#1231).
 
     Session start: register this suite in the active-suite registry and run
@@ -934,6 +975,24 @@ def _packs_env_isolation(monkeypatch):
 def _codex_home_isolation(monkeypatch):
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("TORTOISE_TEST_CODEX_HOME_SCRUBBED", "1")
+    yield
+
+
+# ── #3819 (P1-2): ambient CURSOR_HOME isolation ───────────────────────────
+# Cursor has NO config-dir env var (verified: `CURSOR_HOME` appears nowhere in
+# Cursor 3.20.21's bundle; it reads `~/.cursor/hooks.json`), so the resolver
+# never consults one.  The scrub is DEFENSE-IN-DEPTH: a future code path that
+# reintroduced an env-scoped Cursor root cannot silently redirect an install
+# away from the real `~/.cursor` during an unrelated test.  It is NOT itself
+# the guard — no test can observe a property the code does not consult.  The
+# guard that CAN go red is
+# `test_no_cursor_test_can_reach_the_real_cursor_store` in
+# test_cursor_capture_hook.py, which re-introduces an ambient `CURSOR_HOME`
+# (aimed at the live store) and asserts the resolved root is still under the
+# tmp tree.
+@pytest.fixture(autouse=True)
+def _cursor_home_isolation(monkeypatch):
+    monkeypatch.delenv("CURSOR_HOME", raising=False)
     yield
 
 
