@@ -855,6 +855,17 @@ def test_rate_limit_map_is_bounded() -> None:
     assert re.search(r"recent\.push\(\s*now\s*\)", body), (
         "the window must be extended with the CURRENT timestamp, or the limiter never trips"
     )
+    # …and the pushed window must be STORED BACK: `hits.get(ip)` is the limiter's
+    # only state source, so a re-insert that stores a literal `[]` — or is dropped —
+    # leaves the map permanently empty and the trip a dead branch while every other
+    # assertion here stays green (cycle-22 review).
+    assert re.search(
+        r"recent\.push\(\s*now\s*\);\s*[\s\S]*?\bhits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
+        body,
+    ), (
+        "the pushed window must be written back into the map as `recent`, or the "
+        "limiter can never trip"
+    )
     # `cutoff` is what the window is filtered BY: `const cutoff = now` (or
     # `Infinity`) makes every stored entry stale, so the window is always empty and
     # the trip can never fire — while `RATE_WINDOW_MS` stays "used" by the
