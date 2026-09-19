@@ -91,6 +91,18 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
     "test_onboarding_integration.py": {"registry": "prod-coupled"},
+    # #3912 repair guard: TestGuardHelpers.test_registry_cross_check_keys_on_
+    # namespace_not_display_name seeds a `Graph` row into the registry graph and
+    # then calls `_has_scoped_graphs`, whose OWN body constructs
+    # `TortoiseSDK(namespace="registry")` (sdk.py L1784 maps that literal to
+    # `registry_tortoise`). Seed and read must therefore be the SAME graph: a
+    # test_* rename would seed a verbatim test_* graph while the guard still
+    # read `registry_tortoise`: the first arm then passes VACUOUSLY (the seeded
+    # row is invisible, so nothing is "scoped") and the second goes red
+    # (`assert False is True`) — the custom-graph row is never found. Renaming
+    # breaks the coupling; the namespace IS the identity here. VERIFIED by
+    # rename probe this task.
+    "test_onboarding_false_completion_repair.py": {"registry": "prod-coupled"},  # #3912: registry seed read back by the guard's own TortoiseSDK(namespace="registry")
     "test_onboarding_seed_endpoint.py": {"registry": "prod-coupled"},  # #1999 (W3): seed/decide endpoint tests
     "test_onboarding_state_split.py": {"registry": "prod-coupled"},
     "test_onboarding_state.py": {"registry": "unit-only"},
