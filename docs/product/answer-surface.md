@@ -217,12 +217,14 @@ measurement justifies a change.
   (`ask_lane.run_ask_lane`) is unbudgeted. The orphaned
   `quota.py`/`metering.py` ask cluster is retained pending the #3849 §7 D5
   purge follow-up.
-- **Metering (retained mechanism, no lane caller passes an org):** per-query
+- **Metering (retained mechanism, no PRODUCT caller passes an org):** per-query
   record via `record_ask_usage` (best-effort, non-fatal — metering failures
   never block the answer). The single call site is now
-  `ask_lane.run_ask_lane` (the SDK held it before #3849); the eval-only lane
-  passes no `org_id`, so nothing is metered today. Zero records when the
-  reader/retrieval call FAILS. Selfhost records nothing — the
+  `ask_lane.run_ask_lane` (the SDK held it before #3849); the lane's real
+  callers (`tools/ask_spotcheck.py`, the LongMemEval assembly arm) pass no
+  `org_id`, so nothing is metered on a real run — `tests/test_ask_sdk.py`
+  drives the record path with an explicit `org_id` to pin it. Zero records when
+  the reader/retrieval call FAILS. Selfhost records nothing — the
   transport-keyed `_selfhost_transport` exemption, never a value-keyed
   "selfhost" check (a hosted team literally named "selfhost" was
   record-and-budget-charged before #3849; nothing is metered today).
