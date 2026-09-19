@@ -75,7 +75,7 @@ this is a collapse of names that already exist, not a design of new ones.
 | R2 | `recall(mode=)` | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context` | keep, **new dispatcher** |
 | R3 | `get(type=)` | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, **new dispatcher** |
 | R4 | `traverse` | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |
-| R5 | `overview(section=)` | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, **new dispatcher** |
+| R5 | `overview(section=)` | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, **new dispatcher** — `test_guard` is test infrastructure, kept for the safety guard, not as a capability |
 | R6 | `review_connections` | `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
 | R7 | `provenance` | `get_provenance_chain`, `belief_timeline`, `restore_point_at` | keep — **both provenance methods stay** |
 | R8 | `events_poll`, `list_batches` | `events_poll`, `list_batch`, `list_batches` | keep |
@@ -92,7 +92,7 @@ this is a collapse of names that already exist, not a design of new ones.
 | W5 | `index_directory` | `index_file`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
 | W6 | `ingest` | `ingest` | keep |
 | W7 | `capture_session` | `capture_session`, `checkpoint`, `diary_write`, `diary_read` | keep |
-| W8 | `commit_session` | `commit_session` | keep — **not foldable into W8** |
+| W8 | `commit_session` | `commit_session` | keep — **not foldable into W7**: a different backend (hosted `/v1/sessions/commit` + API key), and the name does not convey that |
 | W9 | `update` | `update`, `update_point`, `update_entity` | keep + collapse |
 | W10 | `delete` | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep + collapse |
 | W11 | `supersede(transfer_edges=)` | `supersede`, `supersede_point`, `invalidate_point` | keep + collapse |
