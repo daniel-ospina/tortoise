@@ -214,9 +214,12 @@ def test_no_email_provider_or_send_capable_credential_in_the_form_path() -> None
         # No SEND-CAPABLE credential travels from the form. The one secret it
         # does send is the intake's inbound one (`x-inbound-secret`), which
         # submits an item and nothing else — send-capable provider headers stay
-        # forbidden.
-        assert "Bearer" not in src, f"{path.name} constructs a bearer header"
-        assert "Authorization" not in src, f"{path.name} sets an authorization header"
+        # forbidden. Checked on COMMENT-STRIPPED code: a comment cannot travel,
+        # so a note documenting the rule must not red the suite (cycle-6 review).
+        code_only = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        code_only = re.sub(r"//[^\n]*", "", code_only)
+        assert "Bearer" not in code_only, f"{path.name} constructs a bearer header"
+        assert "Authorization" not in code_only, f"{path.name} sets an authorization header"
 
     # Stronger: no source file under website/functions may name the sender or
     # its endpoint — the form's path is not the only place a stray key could
@@ -382,14 +385,15 @@ def test_the_confirmation_promises_no_reply() -> None:
     # ATTRIBUTE-carried copy is visitor-facing too (cycle-5 review): the meta
     # description is what search engines and link previews show, and a
     # placeholder / aria-label / title / alt is text the visitor reads in the
-    # page. Replacing whole tags dropped all of it, so it is collected first.
+    # page. Replacing whole tags dropped all of it.
+    #
+    # EVERY attribute value is scanned, in either quote style — an enumerated
+    # name list is the same mistake one level down: `aria-description` (announced
+    # by a screen reader) and a single-quoted `content` both escaped it
+    # (cycle-6 review).
     attr_text = " ".join(
-        unescape(value)
-        for value in re.findall(
-            r'\b(?:content|placeholder|aria-label|title|value|alt)\s*=\s*"([^"]*)"',
-            page_markup,
-            re.I,
-        )
+        unescape(m.group(1) if m.group(1) is not None else m.group(2))
+        for m in re.finditer(r'''=\s*(?:"([^"]*)"|'([^']*)')''', page_markup)
     )
     page_text = " ".join(
         (unescape(re.sub(r"<[^>]+>", " ", page_markup)) + " " + attr_text).split()
@@ -528,7 +532,9 @@ def test_rate_limit_map_is_bounded() -> None:
     The slice starts at the CAP's own guard, not at the `hits.size >
     MAX_RATE_KEYS` string anywhere in the file: that string was satisfiable from
     inside the expired-keys sweep above it (cycle-1 review), from a `/* … */`
-    block comment (cycle-4), and from a dead `if (false)` branch (cycle-4).
+    block comment (cycle-4), and it could be nested inside a disabled branch —
+    `if (false)` (cycle-4) or `if (!true)` (cycle-6) — so its brace depth in the
+    function body is asserted now rather than its spelling.
 
     ⚠️  WHAT THIS PINS, AND WHAT IT CANNOT. It gates the SHAPE of the cap — the
     guard, a cap-derived `excess`, and an eviction loop that breaks at the cap,
@@ -555,16 +561,32 @@ def test_rate_limit_map_is_bounded() -> None:
     # (cycle-4 review).
     code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     code = re.sub(r"//[^\n]*", "", code)
-    # A dead branch keeps every token readable while eviction never runs —
-    # `if (false) if (hits.size > MAX_RATE_KEYS) { … }` passed this pin
-    # (cycle-4 review).
-    assert not re.search(r"\b(?:if|while)\s*\(\s*(?:false|0)\s*\)", code), (
-        "a disabled branch cannot guard the rate-limit cap"
+    # A disabled branch keeps every token readable while eviction never runs —
+    # `if (false) if (hits.size > MAX_RATE_KEYS) { … }` passed an earlier version
+    # of this pin (cycle-4 review), and so did `if (!true)` (cycle-6), which no
+    # spelling list can enumerate. So the guard's NESTING is checked instead: it
+    # must sit directly in the function body, at brace depth 1. Any enclosing
+    # block — whatever its condition — makes it unreachable and fails here.
+    fn_start = code.index("function rateLimited")
+    guard_at = code.index("if (hits.size > MAX_RATE_KEYS)", fn_start)
+    depth = code[fn_start:guard_at].count("{") - code[fn_start:guard_at].count("}")
+    assert depth == 1, (
+        f"the cap guard is nested at brace depth {depth}: an enclosing branch can disable "
+        "the cap while every token stays readable"
+    )
+    # …and a BRACELESS enclosing branch adds no brace at all, so the depth check
+    # misses it: `if (!true) if (hits.size > MAX_RATE_KEYS) { … }` disabled the cap
+    # with the suite green (cycle-6 review). The guard must therefore begin its own
+    # statement — nothing between the previous statement boundary and the guard but
+    # whitespace.
+    stmt = re.split(r"[;{}]", code[fn_start:guard_at])[-1]
+    assert not re.search(r"\b(?:if|while|for)\b", stmt), (
+        "the cap guard must not be the braceless body of another branch: "
+        f"{stmt.strip()[:80]!r}"
     )
     # …and an early `return false` would make the cap unreachable with the loop
     # below still intact, so the cap must sit on the function's ONLY un-limited
     # exit.
-    fn_start = code.index("function rateLimited")
     fn_exit = code.index("return false;", fn_start) + len("return false;")
     assert code[fn_start:fn_exit].count("return false") == 1, (
         "the cap must be on the function's only un-limited exit — an earlier `return false` "
