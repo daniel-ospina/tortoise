@@ -1049,20 +1049,30 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             # evidence: its faults are excluded from flip detection above and
             # its flips are not credited here. A faulted arm makes the whole
             # control NOT fired (=> VOID), never quietly fired.
-            # ⚠ EXCEPTION: the M2-CONTROL arm's AskReaderUnavailable records
-            # are its DESIGNED outcome — it demonstrates that the fixed code
-            # fails loud on a blank output instead of fabricating an
-            # abstention (that is the whole comparison against M2). Counting
-            # them as faults would VOID every run.
+            # ⚠ The M2-CONTROL arm's AskReaderUnavailable records are its
+            # DESIGNED outcome — it demonstrates that the fixed code fails
+            # loud on a blank output instead of fabricating an abstention
+            # (that is the whole comparison against M2). The exemption is
+            # CAUSE-scoped, not arm-scoped: any OTHER exception in that arm is
+            # a genuine fault and VOIDs the control like any other.
+            m2c_expected, m2c_unexpected = set(), set()
+            for r in m2c:
+                if not r.get("error"):
+                    continue
+                if str(r["error"]).startswith("AskReaderUnavailable"):
+                    m2c_expected.add(r.get("question_id"))
+                else:
+                    m2c_unexpected.add(r.get("question_id"))
             faulted_arms = [
-                name for name, recs, expected_failures in
-                (("baseline", base, False), ("M1", m1, False),
-                 ("M2", m2, False), ("M2_control", m2c, True),
-                 ("M3", m3, False))
-                if _err_qids(recs) and not expected_failures]
+                name for name, recs in
+                (("baseline", base), ("M1", m1), ("M2", m2), ("M3", m3))
+                if _err_qids(recs)]
+            if m2c_unexpected:
+                faulted_arms.append("M2_control")
             fired["arms_error_free"] = not faulted_arms
             fired["faulted_arms"] = faulted_arms
-            fired["M2_control_expected_failures"] = len(_err_qids(m2c))
+            fired["M2_control_expected_failures"] = len(m2c_expected)
+            fired["M2_control_unexpected_failures"] = sorted(m2c_unexpected)
             fired["all"] = (all(fired[k] for k in
                                 ("M1_l2_red", "M2_l1_red", "M3_l3_red",
                                  "M3_l1_red"))
@@ -1086,14 +1096,25 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             for k in ("M1_l2_red", "M2_l1_red", "M3_l3_red", "M3_l1_red"):
                 print(f"[movement] {k} = {fired[k]}")
             if not fired["all"]:
-                receipt["verdict"] = {
-                    "decision": "VOID",
-                    "reasons": ["movement control FLAT — the instrument is "
-                                "decoration; reported VOID, never 'no effect'"] +
-                               [k for k in ("M1_l2_red", "M2_l1_red",
-                                            "M3_l3_red", "M3_l1_red")
-                                if not fired[k]],
-                }
+                # Name the ACTUAL cause. A faulted arm is not a flat control:
+                # reporting it as "decoration" would tell an operator to
+                # discard a working instrument over a transient substrate
+                # fault.
+                void_reasons: list[str] = []
+                if not fired["arms_error_free"]:
+                    void_reasons.append(
+                        "movement control INVALID — per-question fault(s) in "
+                        "arm(s): " + ", ".join(fired["faulted_arms"]) +
+                        " (a fault is not movement evidence); reported VOID")
+                flat = [k for k in ("M1_l2_red", "M2_l1_red", "M3_l3_red",
+                                    "M3_l1_red") if not fired[k]]
+                if flat:
+                    void_reasons.append(
+                        "movement control FLAT — the named leg did not move "
+                        f"({', '.join(flat)}); the instrument is decoration; "
+                        "reported VOID, never 'no effect'")
+                receipt["verdict"] = {"decision": "VOID",
+                                      "reasons": void_reasons}
                 _write_receipt(args, receipt)
                 return EXIT_NOT_ADOPT
             if args.mode == "movement":
