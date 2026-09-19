@@ -1657,21 +1657,45 @@ jobs:
           python-version: '3.12'
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
-      - name: Run D14 hosted-api keepalive guards (embedded, URI unset — #2188)
-        # Deliberately NO TORTOISE_DB_URI (the D14 skip hook fires when URI
-        # is set); CARVE_OUT=1 permits the URI-less embedded run. Same -k as
-        # the #2172 proof gate.
+      - name: Run the embedded_only marker selection (URI unset — #4164)
+        # Deliberately NO TORTOISE_DB_URI (the autouse D-2 skip hook fires
+        # when a URI is set and would skip every marked test); CARVE_OUT=1 is
+        # the explicit URI-less opt-in.
+        #
+        # #4164: this job used to run `tests/test_hosted_api.py -k
+        # "concurrent_first_calls or …"` — a HAND LIST of the five D14 guards.
+        # A hand list covers only the marks someone remembered, and that is
+        # exactly what happened: of the marked tests in files OUTSIDE the
+        # carve-out set, those five ran here and the rest were collected-and-
+        # skipped on every docker leg and executed NOWHERE (test_audit's
+        # embedded_busy case, TestDriftCounterWiring, test_index_directory,
+        # test_indexes, test_lme_m6_evidence, test_onboard_prompt_ref,
+        # test_pack_state, test_session_extraction_modes). Selecting by the
+        # MARKER cannot drift: a new @pytest.mark.embedded_only test in ANY
+        # file — per-test, class-level, or class-body `pytestmark` — is picked
+        # up by the next run without editing this step. That is also why the
+        # step is pinned by tests/test_markers.py::
+        # test_ci_runs_the_embedded_only_marker_selection (it fails if this
+        # goes back to naming tests).
         run: |
           set -eo pipefail
-          timeout -s INT -k 10 15m python -m pytest tests/test_hosted_api.py \
-            -k "concurrent_first_calls or registry_anchor_reuses or reuses_healthy_anchor or rebinds_stale_anchor" \
+          timeout -s INT -k 10 15m python -m pytest tests/ -m embedded_only \
             -v --timeout=300 -p no:cacheprovider --junitxml=/tmp/junit-d14.xml -o junit_family=xunit1 2>&1 | tee /tmp/pytest-d14.log
-          # #2188 review P3-1: fail-closed on a silent all-skip — a URI leak
-          # or broadened skip hook would skip all 5 embedded_only guards and
-          # exit 0. Assert the 5 PASSED lines are actually present.
+          # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
+          # widened. The floor is 30 and the number is NOT arbitrary: the four
+          # marked files that are ALREADY carve-out registered (precision_leak
+          # 6 + test_hosted_api 5 + fork_slot_wedge 11 + fork_safety 4 = 26)
+          # pass on their own, so a floor at 25 would still be met by a hook
+          # broadened to skip exactly the class #4164 exists for. 30 sits above
+          # that baseline and below the measured total, so losing the rescued
+          # class reds the job while a few legitimate removals do not.
+          # Measured 2026-09-19 on this tree: 36 passed / 35 skipped (each skip
+          # exogenous — docker-lane files that also carry the marker, RUN_*_E2E
+          # suites, an absent optional dep). The contract is that the marks
+          # RUN; the exact count is free to grow.
           passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
-          echo "D14 guards passed: $passed"
-          [ "$passed" -ge 5 ] || { echo "::error::expected 5 D14 guards to RUN (got $passed passed — all-skip?)"; exit 1; }
+          echo "embedded_only-marked tests passed: $passed"
+          [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
       - name: Upload D14 log (measurement artifact, #2188)
         if: always()
         continue-on-error: true

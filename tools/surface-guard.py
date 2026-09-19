@@ -37,7 +37,32 @@ from __future__ import annotations
 import argparse
 import ast as _ast
 import sys
+import types
 from pathlib import Path
+
+
+def _code_digest(code) -> str:
+    """Move-invariant, implementation-complete digest of a code object.
+
+    `co_code` alone is NOT enough: a constant is loaded as `LOAD_CONST <index>`,
+    so two handlers with the same opcode shape but different constants or names
+    hash identically (verified: 98 tools collapsed to 62 digests, and a read
+    tool shared one with a destructive write tool).  `co_firstlineno` is
+    excluded on purpose — a pure code move is not a served change.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(code.co_code)
+    for attr in ("co_names", "co_varnames", "co_freevars", "co_cellvars"):
+        h.update(repr(getattr(code, attr)).encode())
+    for const in code.co_consts:
+        # a nested code object must be recursed, never repr'd (its repr carries
+        # a memory address and is not stable)
+        h.update(_code_digest(const).encode() if isinstance(const, types.CodeType)
+                 else repr(const).encode())
+    return h.hexdigest()[:16]
+
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -254,14 +279,16 @@ def main(argv: list[str]) -> int:
     # leaving the name set and the entry count identical, so it passed every check above
     # (verified: a live client then invoked the shadow function). Comparing the identity of
     # the component behind each name catches a count-preserving substitution.
-    import hashlib as _hashlib
-
     def _fingerprint(fn) -> str | None:
         """Code-object identity — see the note in tools/surface_manifest.py.
 
-        Built from `co_filename`, `co_firstlineno` and a digest of `co_code` rather than
-        from `__module__`/`__qualname__`, because those are writable strings a shadow can
-        simply copy from the tool it is replacing.
+        Built from `co_filename` and a digest of the bytecode, names and constants
+        (`_code_digest`) rather than from `__module__`/`__qualname__`, because those
+        are writable strings a shadow can simply copy from the tool it is replacing.
+        `co_firstlineno` is deliberately NOT part of the identity: a pure code move
+        (an edit elsewhere in the file) is not a change to the served implementation,
+        yet it shifts every handler below it and reddened the gate on an unchanged
+        surface.
         """
         code = getattr(fn, "__code__", None)
         if code is None:
@@ -273,10 +300,7 @@ def main(argv: list[str]) -> int:
             rel = Path(code.co_filename).resolve().relative_to(ROOT.resolve())
         except Exception:
             rel = Path(code.co_filename).name
-        return (
-            f"{rel}:{code.co_firstlineno}:"
-            f"{_hashlib.sha256(code.co_code).hexdigest()[:16]}"
-        )
+        return f"{rel}:{_code_digest(code)}"
 
     live_components: dict[str, str] = {}
     for _key, _tool in mcp_server.mcp._local_provider._components.items():
@@ -313,9 +337,21 @@ def main(argv: list[str]) -> int:
                 "cannot tell whether the implementation behind that name was replaced. "
                 "Re-cut the baseline."
             )
-        live = live_components.get(name)
-        if live is None:
+        if name not in live_components:
             continue  # absence is already reported by the missing-served check above
+        live = live_components[name]
+        # A PRESENT but unfingerprintable component (no `__code__`, e.g. a
+        # functools.partial) is malformed evidence, not absence: treating it as
+        # skippable let a same-name substitution with no code object through
+        # (verified: a partial shadow of an approved tool exited 0).
+        if live is None:
+            problems.append(
+                f"the tool served as `{name}` has no code-object identity (its callable "
+                "has no `__code__`), so the guard cannot tell whether the implementation "
+                "behind that name was replaced. Register a plain function, or re-cut "
+                "the baseline."
+            )
+            continue
         if live != stored:
             problems.append(
                 f"the implementation served as `{name}` changed: the baseline recorded "

@@ -2634,15 +2634,25 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+# Dependency-free mirror of `tortoise.env_truthy.TRUTHY` (#4097). This module has NO
+# intra-package module-level imports by design (see the module docstring), so it
+# cannot import the shared leaf without dragging in `tortoise/__init__.py` ->
+# redislite. A module-level delegate was measured to break the standalone import
+# purity pinned by
+# tests/test_env_truthy.py::test_reaper_standalone_import_stays_dependency_free;
+# the mirror is held in lockstep with the contract by
+# tests/test_env_truthy.py::test_reaper_mirror_matches_the_contract.
+_ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
 def _env_truthy(raw: str | None) -> bool:
     """Truthy env value: {1,true,yes,on}, case-insensitive.
 
-    #4068: `None` (unset) is False. Mirrors the repo's de-facto truthy
-    convention; the `--full-scan` flag takes precedence over the env var
+    #4068: `None` (unset) is False. Mirrors `tortoise.env_truthy.is_truthy` (see
+    `_ENV_TRUTHY` above); the `--full-scan` flag takes precedence over the env var
     (the `_parse_timeout` CLI > env > default shape).
     """
-    return raw is not None and str(raw).strip().lower() in (
-        "1", "true", "yes", "on")
+    return raw is not None and str(raw).strip().lower() in _ENV_TRUTHY
 
 
 def _lock_holder_pid() -> str:

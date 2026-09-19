@@ -23,6 +23,7 @@ from typing import Any
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
+from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
@@ -1400,10 +1401,11 @@ def _ep_require_calibration_default() -> bool:
     since the #344 flip landed via PR #1212; set "0" to opt out). Draft
     points are excluded from the gate (#780/#1212), so draft-heavy test
     graphs stay passable under the fail-closed default.
+
+    #4097: resolved through the declared truthy contract; `default "1"` is the
+    default VALUE, so garbage still reads OFF.
     """
-    import os
-    raw = os.environ.get("TORTOISE_EP_REQUIRE_CALIBRATION", "1").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get("TORTOISE_EP_REQUIRE_CALIBRATION", "1"))
 
 
 # Per-corpus in-process run locks: the embedded FalkorDBLite's cross-connection
@@ -1725,6 +1727,15 @@ def _resolve_vector_min_similarity() -> float | None:
     if not (0.0 < value <= 1.0):
         return None
     return value
+
+
+def _index_no_network_enabled() -> bool:
+    """`TORTOISE_INDEX_NO_NETWORK` — test-only: `extract_metadata=False` without network.
+
+    #4097: the single resolution point for that knob (``TortoiseSDK._index_no_network``
+    delegates here), so the declared truthy contract has one place to assert.
+    """
+    return env_flag("TORTOISE_INDEX_NO_NETWORK", False)
 
 
 class TortoiseSDK:
@@ -17534,9 +17545,7 @@ class TortoiseSDK:
         return 24.0
 
     def _index_no_network(self) -> bool:
-        import os as _os
-        return _os.environ.get("TORTOISE_INDEX_NO_NETWORK", "").strip().lower() in (
-            "1", "true", "yes")
+        return _index_no_network_enabled()
 
     def _index_read_file(self, path, max_bytes: int):
         """Layer-2 BOUNDED BINARY read (§6.4 cycle-4 pin).

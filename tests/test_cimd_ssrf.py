@@ -542,7 +542,24 @@ def test_cimd_enabled_by_default(monkeypatch):
     assert cimd.client_id_metadata_document_supported()
 
 
-@pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", "off", ""])
+@pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", "off"])
 def test_cimd_can_be_disabled(monkeypatch, value):
     monkeypatch.setenv("TORTOISE_OAUTH_CIMD", value)
     assert not cimd.cimd_enabled()
+
+
+@pytest.mark.parametrize("name", ["TORTOISE_OAUTH_CIMD", "TORTOISE_OAUTH_CIMD_SAME_ORIGIN"])
+@pytest.mark.parametrize("blank", ["", " "])
+def test_cimd_blank_is_unset_not_a_statement(monkeypatch, name, blank):
+    """#4097: a blank value (`""` or whitespace-only) is UNSET, not "off".
+
+    The pre-#4097 `_env_flag` carried `""` in its falsy tuple, so a blank value — what an
+    unset CI secret materialises as — flipped BOTH default-ON levers. For
+    `TORTOISE_OAUTH_CIMD_SAME_ORIGIN` that direction RELAXED the same-origin SSRF guard;
+    after #4097 blank falls back to the default (required). `0`/`false`/`no`/`off`
+    remain explicit OFF.
+    """
+    monkeypatch.setenv(name, blank)
+    resolver = (cimd.same_origin_redirects_required if name.endswith("SAME_ORIGIN")
+                else cimd.cimd_enabled)
+    assert resolver() is True
