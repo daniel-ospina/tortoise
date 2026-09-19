@@ -2537,6 +2537,28 @@ def test_lock_write_failure_is_loud_not_silent(tmp_path, caplog, monkeypatch):
     assert lock._fh is None
 
 
+def test_lock_flock_failure_is_loud_not_silent(tmp_path, caplog, monkeypatch):
+    """#4098 cycle-5: covers the `cannot take the lock` branch — a flock
+    failure that is NOT contention (EINTR/EIO) must be loud. Previously the
+    single handler reported it as if another sweeper held the lock."""
+    import fcntl
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    lock = er._ReaperLock(str(tmp_path / ".tortoise-reaper-z" / ".reaper.lock"))
+
+    def _boom(*_a, **_kw):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(fcntl, "flock", _boom)
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        assert lock.acquire() is False, "a flock fault must fail closed"
+    assert any("cannot take the lock" in r.message for r in caplog.records), \
+        "a non-contention flock failure must be loud"
+    assert lock._fh is None
+
+
 def test_reaper_lock_holder_pid_never_blocks_on_fifo(tmp_path, monkeypatch):
     """#4098 cycle-2 P1: `_lock_holder_pid()` is evaluated in `main()` BEFORE
     `signal.alarm(timeout)` is armed, so a FIFO planted at the lock path must

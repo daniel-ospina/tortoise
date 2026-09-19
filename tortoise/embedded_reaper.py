@@ -2095,6 +2095,12 @@ class _ReaperLock:
         self._fh = None
 
     def _refuse(self, reason: str, foreign_owned: bool = False) -> bool:
+        # #4098 review: close FIRST — a refusal abandons an open fh (and, on
+        # the write-failure path, a successfully-taken flock), so leaving it
+        # to refcounting is a real fd-lifetime change. `_close_fh_quietly`
+        # is null-safe and idempotent, so the non-regular path's own call
+        # cannot double-close.
+        self._close_fh_quietly()
         # #4098 review: EVERY refusal must be LOUD. A silent `return False`
         # is indistinguishable from "another sweeper holds the lock", and on
         # a shared `/tmp` this path is attacker-triggerable and PERMANENT: a
@@ -2145,7 +2151,16 @@ class _ReaperLock:
             # Require the dir to be OURS; otherwise fail closed LOUDLY — the
             # uid-scoped name means this needs a deliberate, targeted
             # pre-creation, not the ordinary shared-`/tmp` case.
-            if os.fstat(dir_fd).st_uid != os.geteuid():
+            #
+            # #4098 review: `acquire()`'s contract is "return False on every
+            # failure, never raise" — the invariant `_close_fh_quietly`
+            # exists to preserve. An unguarded `fstat` here was the one
+            # remaining violation (a filesystem-level EIO reaches it).
+            try:
+                dir_uid = os.fstat(dir_fd).st_uid
+            except OSError:
+                return self._refuse("cannot stat the lock directory")
+            if dir_uid != os.geteuid():
                 return self._refuse(
                     "the lock directory is not owned by this uid",
                     foreign_owned=True)
@@ -2219,8 +2234,11 @@ class _ReaperLock:
                 fcntl.flock(self._fh, fcntl.LOCK_UN)
             except OSError:
                 pass
-            self._fh.close()
-            self._fh = None
+            # #4098 review: guarded, like every other close. `close()` can
+            # raise (EINTR/EIO) and `release()` runs from `main()`'s finally
+            # while `_run_sweep`'s exception may be in flight — a bare close
+            # would replace it and escape main() as an uncaught traceback.
+            self._close_fh_quietly()
 
 
 def _parse_timeout(cli_value: str | None) -> int:
