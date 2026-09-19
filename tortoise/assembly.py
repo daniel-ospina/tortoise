@@ -1101,7 +1101,12 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
     guard) -> assemble_context(caps). NEVER raises untyped: the
     run_ask_lane() envelope maps any raise to AskRetrievalUnavailable.
     """
-    from tortoise.retrieval import assemble_context
+    from tortoise.retrieval import (
+        DEFAULT_CONTEXT_ITEM_CAP,
+        DEFAULT_CONTEXT_TOKEN_CAP,
+        assemble_context,
+        resolve_byte_cap_from_caps,
+    )
     if caps is None:
         from tortoise.retrieval import resolve_ask_retrieval_caps
         caps = resolve_ask_retrieval_caps()
@@ -1160,12 +1165,21 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         from tortoise.why import enrich_items, w4_enrichment_enabled
         if w4_enrichment_enabled():
             hits = enrich_items(sdk._get_proj(), hits)
+    # #4105 review fix: the byte ceiling fallback for a LEGACY caps dict
+    # (one that predates ``context_byte_cap``) is DERIVED from that dict's
+    # token cap, never the 32 KiB literal — otherwise a caller passing a
+    # widened token cap but no byte cap gets the old silent no-op back on
+    # exactly this seam.
+    legacy_token_cap = caps.get("context_token_cap",
+                                DEFAULT_CONTEXT_TOKEN_CAP)
+    byte_cap = resolve_byte_cap_from_caps(caps)
     selected = assemble_context(
-        hits, top_k=caps.get("context_item_cap", 40),
-        max_context_tokens=caps.get("context_token_cap", 8000),
+        hits, top_k=caps.get("context_item_cap", DEFAULT_CONTEXT_ITEM_CAP),
+        max_context_tokens=legacy_token_cap,
         question_date=question_date,
-        context_item_cap=caps.get("context_item_cap", 40),
-        byte_cap=caps.get("context_byte_cap", 32768))
+        context_item_cap=caps.get("context_item_cap",
+                                  DEFAULT_CONTEXT_ITEM_CAP),
+        byte_cap=byte_cap)
     if not selected:
         # P1-1: both halves resolved but the assembly has NOTHING to say
         # (content-less subjects) — firing would replace legacy evidence

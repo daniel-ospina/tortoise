@@ -459,12 +459,20 @@ def _fresh_db(tag: str) -> str | None:
     global _LAST_DOCKER_GRAPH
     base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
     if base:
-        prefix, _, _leaf = base.rpartition("/")
+        from urllib.parse import urlparse
+        parsed = urlparse(base)
+        leaf = parsed.path.lstrip("/")
+        if not leaf:
+            raise SystemExit(
+                "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI must name a base "
+                "GRAPH segment (e.g. docker://:pw@host:6379/askshape) — a "
+                f"bare server URI is rejected: {base!r}")
         if _LAST_DOCKER_GRAPH:
             _drop_docker_graph(base, _LAST_DOCKER_GRAPH)
             _LAST_DOCKER_GRAPH = None
-        name = f"{_leaf or 'askshape'}_{tag}_{os.getpid()}_{next(_DB_SEQ)}"
-        os.environ["TORTOISE_DB_URI"] = f"{prefix}/{name}"
+        name = f"{leaf}_{tag}_{os.getpid()}_{next(_DB_SEQ)}"
+        os.environ["TORTOISE_DB_URI"] = (
+            f"{parsed.scheme}://{parsed.netloc}/{name}")
         _LAST_DOCKER_GRAPH = name
         return None
     return os.path.join(tempfile.mkdtemp(prefix=f"askshape_{tag}_"), "t.db")
@@ -1060,6 +1068,11 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         "instrument_sha256": _sha256_file(os.path.abspath(__file__)),
         "generated_at": datetime.now(UTC).isoformat(),
         "fixture": fixture_shape,
+        # Which store the rate was measured against. The docker selector
+        # (TORTOISE_ASK_SHAPE_DB_URI) is a substrate change the SDK branches
+        # on, so it is recorded rather than implied by the command line.
+        "substrate": (os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
+                      or "embedded"),
         "decision_rule": {
             "shape_rate_min": SHAPE_RATE_ADOPT,
             "provenance_min": f"{FIXTURE_N}/{FIXTURE_N}",
