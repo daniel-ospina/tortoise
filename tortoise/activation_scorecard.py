@@ -127,10 +127,14 @@ SURFACE = "activation_scorecard"
 # as dedup-before-create housekeeping. The wide set is reported alongside as a
 # sensitivity bound so the definition's arbitrariness is VISIBLE rather than
 # baked into a single number.
+#
+# `tortoise_ask` is deliberately ABSENT: it became eval-only (owner-directed,
+# #3849 — removed from the MCP surface / SDK / REST by #3929), and #3849 assigns
+# this lane the follow-up that the value scorecard must NOT count ask traffic.
+# Counting a non-product eval lane as activation would inflate the denominator.
 RETRIEVAL_TOOL_ALLOWLIST: frozenset[str] = frozenset({
     "tortoise_search",
     "tortoise_recall",
-    "tortoise_ask",
     "tortoise_search_sessions",
 })
 RETRIEVAL_TOOL_ALLOWLIST_WIDE: frozenset[str] = RETRIEVAL_TOOL_ALLOWLIST | frozenset({

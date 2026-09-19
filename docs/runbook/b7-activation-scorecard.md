@@ -40,7 +40,7 @@ score the legs that are not.
 | `captured` | A `(:Session)` exists in the window | graph-scoped, sessions |
 | `stored` | ≥1 transcript-turn `(:Point)` (`pointKind: 'event'`) wired `(:Session)-[:CONTAINS]->` — the transcript was actually persisted | graph-scoped, sessions |
 | `memory_produced` | ≥1 point that is NOT a transcript turn (`pointKind IS NULL OR pointKind <> 'event'`), i.e. extraction produced memory | graph-scoped, sessions |
-| `recall_attempted` | A retrieval tool call (`tortoise_search` / `tortoise_recall` / `tortoise_ask` / `tortoise_search_sessions`) at or after the org's `first_memory_at` | **org-wide, event count** |
+| `recall_attempted` | A retrieval tool call (`tortoise_search` / `tortoise_recall` / `tortoise_search_sessions`) at or after the org's `first_memory_at`. `tortoise_ask` is excluded — it is eval-only, not a product surface (#3849) | **org-wide, event count** |
 | `value_confirmed` | **Not measurable** — permanent refusal | — |
 
 ### Two traps this is built to avoid

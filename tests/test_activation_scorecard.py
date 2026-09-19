@@ -640,9 +640,12 @@ def test_retrieval_allowlist_is_pinned_by_name_and_cannot_be_silently_widened():
     assert names >= RETRIEVAL_TOOL_ALLOWLIST, RETRIEVAL_TOOL_ALLOWLIST - names
     assert names >= RETRIEVAL_TOOL_ALLOWLIST_WIDE, RETRIEVAL_TOOL_ALLOWLIST_WIDE - names
 
+    # `tortoise_ask` is deliberately NOT allowlisted: it is eval-only (#3849,
+    # surface removed by #3929) and the scorecard must not count ask traffic.
     assert {
-        "tortoise_search", "tortoise_recall", "tortoise_ask",
+        "tortoise_search", "tortoise_recall",
         "tortoise_search_sessions"} == RETRIEVAL_TOOL_ALLOWLIST
+    assert "tortoise_ask" not in RETRIEVAL_TOOL_ALLOWLIST
     for connect_time in ("tortoise_health", "tortoise_status",
                          "tortoise_list_pointkinds", "tortoise_overview",
                          "tortoise_session_context"):
