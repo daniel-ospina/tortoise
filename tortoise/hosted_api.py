@@ -49,6 +49,10 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import API_KEY_PREFIXES, hash_api_key
+from tortoise.file_indexer import (  # #4005 shared identity primitives
+    derive_session_source_url,
+    provenance_basename,
+)
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -9378,16 +9382,22 @@ async def session_install_probe(body: InstallProbeRequest,
 # judge_summary dropped from v1).
 
 # Privacy helpers (W-7 / §6.1): provenance paths are BASENAME only — the full
-# local path never leaves the machine; the session Source url derives from the
-# basename (+ contentHash), never the full path.
+# local path never leaves the machine. The session Source's IDENTITY is the
+# canonical ``session:<session_id>`` (ONTOLOGY §4.6, #4005) — the same url the
+# capture path materializes and ``delete_session`` deletes; the W-7 basename
+# rides as a PROPERTY (``sourcePath`` on the Source/Document), never in the url.
 
 
-def _session_source_basename(payload: CommitPayload) -> str:  # noqa: F821
-    """The session Source identity = the FIRST provenance basename (privacy,
-    W-7). Empty when the payload has no provenance_refs (valid empty commit)."""
+def _document_source_basename(payload: CommitPayload) -> str:  # noqa: F821
+    """The payload's W-7 basename (FIRST provenance_ref) — the value written
+    to ``Document.sourcePath``. NOT the session Source identity (that is the
+    canonical ``session:<session_id>``, #4005). Empty when the payload has no
+    provenance_refs (valid empty commit). Derived through the ONE shared
+    ``file_indexer.provenance_basename`` primitive — the same one Layer-1 uses
+    — so Layer-1's accepted set and this value can never disagree."""
     if not payload.provenance_refs:
         return ""
-    return os.path.basename(payload.provenance_refs[0].path.rstrip("/"))
+    return provenance_basename(payload.provenance_refs[0].path)
 
 
 def _commit_response(
@@ -9549,7 +9559,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     reconcile = plan.reconcile
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
-    session_basename = _session_source_basename(payload)
+    document_basename = _document_source_basename(payload)
 
     # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
     # the value-chain container is episodic; the VALUE Points below are the
@@ -9579,7 +9589,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         params={"did": doc_id, "title": payload.summary or session_id,
                 "summary": payload.summary, "arc": payload.story_arc,
                 "sid": session_id, "eid": event_id,
-                "srcpath": session_basename, "now": now},
+                "srcpath": document_basename, "now": now},
     )
 
     # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
@@ -9638,19 +9648,50 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 params={"eid": ev.id, "name": name},
             )
 
-    # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
-    # + external artifacts from sources[]; the session Source references the
-    # Document AND the external artifacts (DE2E-5 chain). ──
+    # ── 4. Source bridge: the session Source (#4005 — the canonical
+    # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
+    # the capture path materializes (sdk._materialize_session_source), the
+    # projection stub mints (_mint_source_stub) and delete_session / the
+    # capture orphan sweep delete — so capture, commit and delete converge on
+    # ONE Source, with an alias rule for pre-fix basename nodes tracked in
+    # #4125) + external artifacts from sources[]; the session Source
+    # references the Document AND the external artifacts (DE2E-5 chain). The
+    # contentHash is the client-supplied raw anchor and NEVER hash(url): an
+    # absent anchor is passed through as NULL so _upsert_source's conditional
+    # write PRESERVES the stored hash/version (an anchored re-commit followed
+    # by an anchorless one must not wipe the anchor — see #3998). The raw's
+    # W-7 basename rides as a PROPERTY (Source.sourcePath / Document.sourcePath),
+    # never in the identity. ──
     session_urls: list[str] = []
-    for ref in payload.provenance_refs:
-        url = os.path.basename(ref.path.rstrip("/"))
-        if url not in session_urls:
-            session_urls.append(url)
+    # The payload's point/event source_refs use the W-7 basename; the graph
+    # Source identity is the canonical session url. This maps one to the other
+    # so extractedFrom still resolves. Both sides derive the basename through
+    # the ONE shared file_indexer primitive (Layer-1 uses the same one), so
+    # Layer-1 can never accept a source_ref this map does not know. The stored
+    # point/event `source_ref` PROPERTY keeps the W-7 basename by design — the
+    # provenance resolution surface is the `extractedFrom` edge (J-4), which
+    # this map re-points; no in-repo reader resolves a Source via `source_ref`
+    # (#4005 review, sub-threshold #40).
+    session_ref_urls: dict[str, str] = {}
+    if payload.provenance_refs:
+        session_url = derive_session_source_url(session_id)
+        session_urls.append(session_url)
+        session_spans: list[str] = []
+        for ref in payload.provenance_refs:
+            session_spans.extend(ref.spans)
+            base = provenance_basename(ref.path)
+            if base:
+                session_ref_urls.setdefault(base, session_url)
+        # An absent anchor stays absent: NULL (not "") so the conditional
+        # MERGE preserves a previously stored contentHash/version/title.
+        anchor = next((ref.contentHash for ref in payload.provenance_refs
+                       if ref.contentHash), None)
         sdk.create_source(
-            url, "agentSession",
-            contentHash=content_hash(url) if url else "",
-            provenance_spans=list(ref.spans), is_episodic=True,
+            session_url, "agentSession",
+            contentHash=anchor,
+            provenance_spans=session_spans, is_episodic=True,
             sourceDate=payload.captured_at,
+            source_path=document_basename or None,
         )
     external_urls: list[str] = []
     for src in payload.sources:
@@ -9701,7 +9742,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): the commit-receiver points were
                 # written WITHOUT session_id — the source-session attribution
                 # evidence mark needs the point's session on both capture
@@ -9723,7 +9766,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): see above — session_id on the
                 # committed points so both capture paths (SDK + hosted) carry
                 # the same source-session attribution surface.
