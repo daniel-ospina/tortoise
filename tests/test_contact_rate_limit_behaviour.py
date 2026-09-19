@@ -255,10 +255,12 @@ DRIVER = r"""
 const vm = require("node:vm");
 const encode = JSON.stringify;
 const emit = console.log.bind(console);
-// The sandbox is EMPTY on purpose. A `vm` context already has its own complete set of
+// The sandbox is EMPTY on purpose: a `vm` context already has its own complete set of
 // ECMAScript intrinsics, and passing this realm's `Object`/`JSON`/`Map` in would hand the
-// limiter this realm's prototypes — enough to poison `Object.prototype.toJSON` and rewrite
-// the report. An empty context also has no `process`, no `require` and no `console`.
+// limiter this realm's prototypes — enough to poison `Object.prototype.toJSON`. No
+// `process` and no `require` are reachable there either. (`console` does exist in the
+// context, which is why the payload must be the single nonce-tagged line: an extra line is
+// refused rather than believed.)
 const sandbox = {};
 vm.createContext(sandbox);
 // The constants and the store come OUT of the built limiter rather than being declared
@@ -269,6 +271,25 @@ const limiter = vm.runInContext(
   sandbox,
 );
 const rateLimited = limiter.rateLimited;
+// Seeds are built INSIDE the context. A host-realm array handed in would let the limiter
+// climb out through it (`raw.constructor.constructor("return this")()` is the host global
+// when `raw` is a host array), and from there it can poison this realm's prototypes and
+// rewrite the payload. Numbers and strings cross safely; nothing else does.
+vm.runInContext(
+  [
+    "globalThis.__seed = (k, value) => hits.set(k, [value]);",
+    "globalThis.__seedPair = (k, first, second) => hits.set(k, [first, second]);",
+    "globalThis.__seedRun = (k, value, count) => hits.set(k, new Array(count).fill(value));",
+    "globalThis.__seedMixed = (k, first, value, count) =>",
+    "  hits.set(k, [first, ...new Array(count).fill(value)]);",
+  ].join("\n"),
+  sandbox,
+);
+// The helpers are own properties of the sandbox object; the driver calls them from its own
+// realm, and every array they build is created INSIDE the context.
+const __seed = sandbox.__seed;
+const __seedPair = sandbox.__seedPair;
+const __seedMixed = sandbox.__seedMixed;
 const hits = limiter.hits;
 const RATE_LIMIT = limiter.RATE_LIMIT;
 const RATE_WINDOW_MS = limiter.RATE_WINDOW_MS;
@@ -399,21 +420,21 @@ observations.oldestEvicted = !hits.has("ip" + (planned - 1)); // inserted first
 hits.clear();
 const expiredAt = T0 - RATE_WINDOW_MS - 1;
 const cap = Math.min(MAX_RATE_KEYS, CAP_CEILING);
-for (let i = 0; i < cap; i++) hits.set("live" + i, [T0]);
-for (let i = 0; i < 10; i++) hits.set("dead" + i, [expiredAt]);
-hits.set("dead-edge", [T0 - RATE_WINDOW_MS]);
+for (let i = 0; i < cap; i++) __seed("live" + i, T0);
+for (let i = 0; i < 10; i++) __seed("dead" + i, expiredAt);
+__seed("dead-edge", T0 - RATE_WINDOW_MS);
 // A NON-MONOTONIC key: a live timestamp followed by an expired one, reachable under the
 // clock step §12 exercises. A predicate inspecting only the LAST entry deletes it and
 // discards live history, while `every` keeps it.
-hits.set("mixed-rev", [T0, expiredAt]);
+__seedPair("mixed-rev", T0, expiredAt);
 // The LIVE side of the same boundary: one millisecond inside the window the key must
 // SURVIVE. Over-expiring it is invisible to the counts (the oldest-first loop evicts
 // one more key and both totals land where they should), so it is observed by name.
-hits.set("live-edge", [T0 - RATE_WINDOW_MS + 1]);
+__seed("live-edge", T0 - RATE_WINDOW_MS + 1);
 // A fully expired key with MORE THAN ONE timestamp: a sweep that inspects a single
 // entry instead of all of them keeps it, and no single-entry seed can show that.
-hits.set("dead-multi", [expiredAt, expiredAt - 1]);
-hits.set("mixed", [expiredAt, T0]);
+__seedPair("dead-multi", expiredAt, expiredAt - 1);
+__seedPair("mixed", expiredAt, T0);
 rateLimited("fresh", T0);
 let deadLeft = 0;
 let liveLeft = 0;
@@ -448,7 +469,7 @@ observations.reusedKeyHistory = (hits.get(CLIENT_V) || []).length;
 // store — invisible to a check that only counts how many entries an ALLOWED call
 // stored, which is why the seed here is oversized with one expired entry.
 hits.clear();
-hits.set(CLIENT_R, [expiredAt, ...new Array(limit).fill(T0)]);
+__seedMixed(CLIENT_R, expiredAt, T0, limit);
 observations.refusalRefuses = rateLimited(CLIENT_R, T0);
 observations.storedAfterRefusal = (hits.get(CLIENT_R) || []).length;
 
@@ -470,7 +491,7 @@ observations.refusedKeySurvived = hits.has(CLIENT_K);
 // the cap. An expired key under the cap therefore lingers — observable as its presence
 // after an unrelated call, and hoisting the sweep out of the guard changes that.
 hits.clear();
-hits.set("stale", [T0 - RATE_WINDOW_MS - 1]);
+__seed("stale", T0 - RATE_WINDOW_MS - 1);
 rateLimited("unrelated", T0);
 observations.staleKeyLingeredUnderCap = hits.has("stale");
 
@@ -486,7 +507,7 @@ observations.staleKeyLingeredUnderCap = hits.has("stale");
 hits.clear();
 rateLimited(CLIENT_G, T0);
 for (let i = 0; i < cap - 2; i++) rateLimited("pad" + i, T0);
-hits.set("stale-under", [T0 - RATE_WINDOW_MS - 1]);
+__seed("stale-under", T0 - RATE_WINDOW_MS - 1);
 rateLimited(CLIENT_G, T0 + 1);
 observations.staleLingeredAtCap = hits.has("stale-under");
 rateLimited("pushes-over", T0);
@@ -501,8 +522,8 @@ observations.staleSweptOverCap = hits.has("stale-under");
 hits.clear();
 const liveSeed = cap - 10;
 const expiredSeed = 20;
-for (let i = 0; i < liveSeed; i++) hits.set("kept" + i, [T0]);
-for (let i = 0; i < expiredSeed; i++) hits.set("gone" + i, [expiredAt]);
+for (let i = 0; i < liveSeed; i++) __seed("kept" + i, T0);
+for (let i = 0; i < expiredSeed; i++) __seed("gone" + i, expiredAt);
 rateLimited("crosses", T0);
 let keptLeft = 0;
 for (const k of hits.keys()) if (!k.startsWith("gone")) keptLeft++;
@@ -519,8 +540,8 @@ observations.negativeExcessExpected = liveSeed + 1;
 // keys that are gone and leaves the map OVER its bound. The bound is the whole point of
 // the cap, so the resulting size is observed, not just the expired count.
 hits.clear();
-for (let i = 0; i < 2; i++) hits.set("early" + i, [expiredAt]);
-for (let i = 0; i < cap + 1; i++) hits.set("late" + i, [T0]);
+for (let i = 0; i < 2; i++) __seed("early" + i, expiredAt);
+for (let i = 0; i < cap + 1; i++) __seed("late" + i, T0);
 rateLimited("crosses2", T0);
 observations.snapshotMapSize = hits.size === undefined ? -1 : hits.size;
 let snapshotExpired = 0;
@@ -613,10 +634,12 @@ def _observe(code: str) -> dict:
     cannot execute is a limiter this harness cannot certify.
 
     The payload is tagged with a per-run NONCE and must be the ONLY line on stdout. The
-    limiter is compiled by the driver with `new Function`, so it shares no scope with the
-    report: it cannot see the nonce, cannot reach `observations`, and cannot redirect the
-    captured emit path — a limiter that writes its own stdout line is refused rather than
-    believed. That is a boundary, not a sandbox: the limiter still runs in the same
+    limiter is compiled in a `vm` context (`vm.runInContext`), whose intrinsics and globals
+    are its own, and the driver seeds it through helpers defined INSIDE that context, so no
+    host object ever crosses in: the limiter cannot reach this realm's objects or the nonce,
+    and the payload is built from values it cannot influence. Across the boundary only
+    numbers and strings travel. A limiter that writes its own stdout line is refused rather
+    than believed. That is a boundary, not a sandbox: the limiter still runs in the same
     process, so the guarantee is exactly this — it cannot influence the payload, and output
     it did not have the harness ask for is rejected.
     """
@@ -951,15 +974,21 @@ INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
 
 
 def _key_failures(code: str) -> list[str]:
-    """Every store key must be exactly the address — no derived, sliced or normalised key.
+    r"""The address reaches the store unchanged, and no key is derived on the way.
 
-    A read key that is the identity on the corpus but not on real input is a bypass the
-    scenarios cannot be relied on to expose: `String(ip).slice(0, 15)` and
-    `String(ip).split(":")[0]` are the identity on every short IPv4 literal, and
-    `String(ip).replace("::", ":")` is the identity on every FULL-form IPv6 literal, so
-    each new corpus shape only moves the escape. What actually matters is that the read
-    key and the write key are the same value, so the keys are read: `hits.get(ip)`,
-    `hits.set(ip, ...)` and `hits.delete(ip)`.
+    Three properties, all read from the function rather than sampled:
+
+    * every address-keyed store operation uses the expression `ip` (the sweep and eviction
+      delete the loop key `k`, which is the point of those loops);
+    * every use of `hits` is a dot-method call this check can see — bracket notation,
+      optional chaining and a destructured `get` would leave the live operations
+      unexamined while the count stayed satisfied by dead ones;
+    * neither `ip` nor `now` is REASSIGNED. Reading the call sites only shows the keys are
+      the same EXPRESSION; a lossy transform applied first (`ip = ip.replace(/\./g, "")`)
+      makes two distinct clients share a bucket while every argument still reads `ip`.
+
+    That third property is why this is a read and not a scenario: the transform is injective
+    over any address corpus (dot-stripping is on dotted quads), so no scenario can see it.
     """
     body = _limiter_source(code)
     function_body = body[body.index("function rateLimited") :]
@@ -973,6 +1002,13 @@ def _key_failures(code: str) -> list[str]:
             f"check reads, found {calls!r} — a limiter whose store it cannot find is one "
             "it cannot certify"
         )
+    for name in ("ip", "now"):
+        if re.search(rf"(?<![.\w]){name}\s*=(?!=)", function_body):
+            failures.append(
+                f"`{name}` is reassigned in the limiter — a lossy transform applied to it "
+                "(stripping dots, slicing, normalising) makes distinct clients share one "
+                "bucket while every call site still reads the same name"
+            )
     # Every use of `hits` must be a dot-method call the scan above can see. A different
     # spelling of the SAME operations — bracket notation, optional chaining, a
     # destructured `get`, a helper wrapper — would leave the live store operations
@@ -1037,6 +1073,42 @@ def _key_failures_only(code: str) -> list[str]:
     key, a re-bound binding) that no amount of scenario-building is guaranteed to reach.
     """
     return _key_failures(code) + _binding_failures(code)
+
+
+def test_the_context_boundary_cannot_be_crossed() -> None:
+    """Rebinding the serializer, the console or a prototype inside the context, or
+    trying to climb out through a value the driver passed in, changes NOTHING about the
+    report: the reporter uses this realm's captured `encode`/`emit` on this realm's
+    `observations`, and every value the limiter can reach is its own realm's.
+
+    Asserted as an equality against the real run rather than as a battery entry, because
+    the attempts are inert BY CONSTRUCTION — pairing them with `return false;` would only
+    re-test that a broken limiter is caught, and say nothing about the boundary. The climb
+    is the one that MATTERED: with a host-realm array seeded into the store,
+    `raw.constructor.constructor('return this')()` returned the DRIVER's global and the
+    payload could be forged. It now returns the context's own global.
+    """
+    real = CONTACT_TS.read_text(encoding="utf-8")
+    signature = r"function rateLimited\(ip: string, now: number\): boolean \{"
+    literal = "function rateLimited(ip: string, now: number): boolean {"
+    climb = (
+        "const raw = hits.get(ip);\n"
+        "  if (raw && !(raw instanceof Array)) {\n"
+        "    raw.constructor.constructor('return this')().Object.prototype.toJSON = "
+        "() => '{}';\n"
+        "  }"
+    )
+    for injection in (
+        "JSON.stringify = () => '{}';\n  console.log = () => {};",
+        "Object.prototype.toJSON = () => '{}';\n"
+        "  Object.prototype.hasOwnProperty = () => false;",
+        climb,
+    ):
+        mutated = _apply_mutation(signature, literal + "\n  " + injection, real)
+        assert _observe(mutated) == _observe(real), (
+            f"the report changed when the limiter ran `{injection[:40]}...` — code under "
+            "test must not be able to influence the values it is judged on"
+        )
 
 
 def test_the_store_is_keyed_by_the_address_alone() -> None:
@@ -1348,24 +1420,26 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "const cutoff = (now - RATE_WINDOW_MS) | 0;",
     ),
     (
-        "the limiter poisons the payload prototype",
+        "the limiter climbs out through a host-realm value",
         r"function rateLimited\(ip: string, now: number\): boolean \{",
         "function rateLimited(ip: string, now: number): boolean {\n"
-        "  Object.prototype.toJSON = () => '{}';\n"
+        "  const raw = hits.get(ip);\n"
+        "  if (raw && !(raw instanceof Array)) {\n"
+        "    raw.constructor.constructor('return this')().Object.prototype.toJSON = "
+        "() => '{}';\n"
+        "  }\n"
         "  return false;",
+    ),
+    (
+        "the address is normalised before it is used",
+        r"function rateLimited\(ip: string, now: number\): boolean \{",
+        "function rateLimited(ip: string, now: number): boolean {\n"
+        "  ip = ip.replace(/\\./g, '');",
     ),
     (
         "the cutoff is quantised to float32",
         r"const cutoff = now - RATE_WINDOW_MS;",
         "const cutoff = Math.fround(now - RATE_WINDOW_MS);",
-    ),
-    (
-        "the limiter forges the payload through the serializer",
-        r"function rateLimited\(ip: string, now: number\): boolean \{",
-        "function rateLimited(ip: string, now: number): boolean {\n"
-        "  JSON.stringify = () => '{}';\n"
-        "  console.log = () => {};\n"
-        "  return false;",
     ),
     (
         "the store is reached by bracket notation with a derived key",
