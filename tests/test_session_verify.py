@@ -345,18 +345,21 @@ _FORK_SECONDS: dict[tuple[str, str], float] = {}
 def _hook_byte_sources(harness: str, root: Path, command: str) -> list[Path]:
     """The on-disk hook files whose bytes feed this seam's fingerprint.
 
-    The raw command path is taken literally (a guard may synthesise a bare
-    path), and the file a registered command names is resolved through the
-    installer's OWN classifier — ``hook_install._invokes_script``, the same
-    predicate ``detect_install``/``registered_commands`` use.  A token the
-    classifier matched by its ``$VAR`` suffix form is NOT resolvable here, so
-    it contributes no source: the fingerprint falls to its marker rather than
-    keying on a guessed path.
+    The raw command path is taken literally for a command with no ``$`` (a
+    guard may synthesise a bare path).  A command containing ``$`` never
+    contributes that raw path: the literal string is not the file a shell
+    would run, so keying on it would key on a path that did not execute.
+
+    The file a registered command names is resolved through the installer's
+    OWN classifier — ``hook_install._invokes_script``, the same predicate
+    ``detect_install``/``registered_commands`` use.  A token the classifier
+    matched by its ``$VAR`` suffix form is NOT resolvable here, so it
+    contributes no source either.
     """
     import tortoise.hook_install as hook_install
 
     sources: list[Path] = []
-    if command:
+    if command and "$" not in command:
         raw = Path(command)
         sources.append(raw if raw.is_absolute() else Path(root) / raw)
     layout = hook_install.get_layout(harness)
