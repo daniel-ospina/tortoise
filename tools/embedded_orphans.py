@@ -97,6 +97,7 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
     """
     from tortoise.embedded_reaper import (
         _PROC_INFO_CACHE,
+        SOCKET_MARKER,
         _active_client_count,
         _batch_process_info,
         _classify_dir,
@@ -120,7 +121,7 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
                 if not sock_dir:
                     unclassified += 1
                     continue
-                socket_path = f"{sock_dir}/redis.socket"
+                socket_path = f"{sock_dir}/{SOCKET_MARKER}"
                 rec = _classify_dir(sock_dir, socket_path, known_pid=pid)
                 if rec is None:
                     unclassified += 1

@@ -28,11 +28,12 @@ so orphans are cleaned within 2-3 spawn cycles).
 > in the ephemeral namespace with an in-process `os.scandir` — no `find`
 > subprocess, no depth-2 lstat storm — and logs a WARNING with a partial set
 > if its budget expires (the sweep summary then reads `SCAN TRUNCATED`). The
-> scoped set is exactly the set every reap/rmtree path already requires, so
-> nothing actionable is skipped. `--full-scan` (env
-> `TORTOISE_REAPER_FULL_SCAN=1`) widens **detection only** to every depth-1
-> entry — it adds no reaping capability and is for operator forensics, not
-> for the scheduled sweep.
+> scoped set is exactly the set every **removal** path already requires, and
+> live servers are enumerated name-independently by pass 1, so nothing
+> removable or killable is skipped. `--full-scan` (env
+> `TORTOISE_REAPER_FULL_SCAN=1`) restores the pre-#4068 **un-scoped**
+> enumeration for operator forensics; it can reach nothing an earlier release
+> could not, and the scheduled sweep stays scoped.
 
 ## Cron (Linux / macOS with cron)
 
