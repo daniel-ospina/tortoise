@@ -368,3 +368,116 @@ def test_search_fallback_is_subject_scoped():
     assert ch.closed == [2]
     store.resolve_incident("STALE", "team_a")
     assert ch.closed == [2, 1]
+
+
+# ── #3820 cycle-7: the tri-state resolve fact ──────────────────────────────
+
+def test_resolve_state_reports_the_three_facts():
+    """``resolve_incident_state`` reports WHICH fact holds (#3820 cycle-7).
+
+    ABSENT (nothing stored), RESOLVED (closed + deleted), and SKIPPED_FRESH
+    (an incident IS open but is at/after the caller's ``before`` bound, so it
+    is left untouched). The analytics sink needs the distinction because its
+    process state is driven by the fact, not by a guess about a boolean.
+
+    RED mutation: return ``ABSENT`` (or ``RESOLVED``) at the ``before`` skip
+    instead of ``SKIPPED_FRESH`` → this reds on the SKIPPED_FRESH assertion;
+    or delete the object on the skip → it reds on
+    ``storage.list("ops/alerts/") != []``.
+    """
+    from datetime import datetime, timedelta
+
+    from tortoise.alert_store import ResolveOutcome
+
+    ch = _FakeChannels()
+    store = _store(ch)
+
+    # ABSENT — no incident at all.
+    assert store.resolve_incident_state("STALE", "team_x") is ResolveOutcome.ABSENT
+
+    store.open_incident("STALE", "team_x")
+    key = store._key("STALE", "team_x")
+    filed_at = datetime.fromisoformat(
+        json.loads(store._storage.download(key))["filed_at"])
+
+    # SKIPPED_FRESH — filed at/after the bound: untouched (no close, no push,
+    # and the dedup object is still there, so the incident is still open).
+    assert store.resolve_incident_state(
+        "STALE", "team_x", before=filed_at) is ResolveOutcome.SKIPPED_FRESH
+    assert ch.closed == []
+    assert store._storage.list("ops/alerts/") != []
+
+    # RESOLVED — the same incident, now strictly before the bound.
+    assert store.resolve_incident_state(
+        "STALE", "team_x",
+        before=filed_at + timedelta(seconds=1)) is ResolveOutcome.RESOLVED
+    assert len(ch.closed) == 1
+    assert store._storage.list("ops/alerts/") == []
+
+
+def test_resolve_incident_stays_a_bool_for_a_skipped_fresh():
+    """``resolve_incident`` keeps its bool contract (#3820 cycle-7).
+
+    Eleven other callers branch on ``if store.resolve_incident(...)``, so a
+    truthy tri-state enum returned from HERE would make SKIPPED_FRESH — and
+    ABSENT — read as a successful resolve. The fact lives in
+    ``resolve_incident_state``; this method is its ``is RESOLVED``.
+
+    RED mutation: ``return self.resolve_incident_state(...)`` (hand back the
+    enum) → the SKIPPED_FRESH call is truthy and this reds on ``is False``.
+    """
+    from datetime import datetime
+
+    ch = _FakeChannels()
+    store = _store(ch)
+    store.open_incident("STALE", "team_x")
+    key = store._key("STALE", "team_x")
+    filed_at = datetime.fromisoformat(
+        json.loads(store._storage.download(key))["filed_at"])
+
+    assert store.resolve_incident("STALE", "team_x", before=filed_at) is False
+    assert store._storage.list("ops/alerts/") != [], "SKIPPED_FRESH must not delete"
+    # …and the same call without the bound still resolves it.
+    assert store.resolve_incident("STALE", "team_x") is True
+
+
+def test_open_incident_state_reports_the_three_facts_and_keeps_the_bool():
+    """#3820 cycle-8 P2-2 — ``open_incident_state`` names WHICH fact holds.
+
+    ``open_incident``'s ``False`` conflates a DEDUP hit (the object already
+    exists — an incident IS on record) with a SUPPRESSED kind (no issue and NO
+    object). The analytics alert gate needs the distinction, and a caller that
+    re-asks ``suppression_active`` at a later instant can disagree with the
+    decision the call already made. The tri-state is decided from ONE read of
+    the predicate; the bool form stays its ``is FILED`` for the callers that
+    only branch on it.
+
+    RED mutation: collapse the suppression branch into ``DEDUP`` (or report
+    the pause as ``FILED``) → the SUPPRESSED assertion below fails, and with
+    ``FILED`` the ``ch.issues == {}`` assertion fails too.
+    """
+    from tortoise.alert_store import OpenOutcome
+
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+
+    # 1) a PAUSED kind → SUPPRESSED: no issue, no dedup object, nothing on
+    #    record. This is the fact the alert gate must not arm on.
+    storage.upload(
+        "ops/suppression.json",
+        json.dumps({"STALE": {"until": "2999-01-01T00:00:00+00:00"}}).encode(),
+        content_type="application/json")
+    assert store.open_incident_state("STALE", "team_x") is OpenOutcome.SUPPRESSED
+    assert ch.issues == {}, "a paused kind files nothing"
+    assert storage.list("ops/alerts/") == [], "…and creates no dedup object"
+
+    # 2) pause withdrawn → FILED (this call is the filer).
+    storage.upload("ops/suppression.json", b"{}",
+                   content_type="application/json")
+    assert store.open_incident_state("STALE", "team_x") is OpenOutcome.FILED
+
+    # 3) already open → DEDUP, and the BOOL stays its ``is FILED``.
+    assert store.open_incident("STALE", "team_x") is False
+    assert store.open_incident_state("STALE", "team_x") is OpenOutcome.DEDUP
+    assert len(ch.issues) == 1, "a dedup hit must never re-file"

@@ -2466,8 +2466,9 @@ def _cmd_install_hooks(args) -> int:
 
     * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude / cline;
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
-      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry) and pi
-      (the in-repo capture extension).
+      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
+      codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
+      hooks.json`` registration), and pi (the in-repo capture extension).
 
     Capture used to be a copy-paste block in the dashboard: the installer gave
     a user the read path and nothing that files a session — and because the
@@ -2520,14 +2521,14 @@ def _cmd_install_hooks(args) -> int:
         return rc
 
     # Validate the read half BEFORE the capture half writes.  `tortoise install
-    # claude` installs two halves; if the read half refuses (a malformed
-    # ``UserPromptSubmit``, a symlink that escapes the root, a foreign cline
-    # hook) the command must fail with NOTHING written, not leave a project
-    # with capture installed and the read registration refused.  The read
-    # half's own dry run performs the exact checks the real run does and
-    # writes nothing.  Only claude has BOTH halves: ``pi`` has no read hook,
-    # ``codex``/``cline`` no capture.
-    if harness == "claude":
+    # claude` and `tortoise install codex` each install two halves; if the read
+    # half refuses (a malformed ``UserPromptSubmit``, a symlink that escapes the
+    # root, a foreign cline hook) the command must fail with NOTHING written,
+    # not leave a project with capture installed and the read registration
+    # refused.  The read half's own dry run performs the exact checks the real
+    # run does and writes nothing.  ``pi`` has no read hook; ``cline`` no
+    # capture.
+    if harness in ("claude", "codex"):
         refusal = _read_hook_refusal(args)
         if refusal != 0:
             return refusal
@@ -2536,7 +2537,7 @@ def _cmd_install_hooks(args) -> int:
     # shape/symlink checks above, or the capture half's own pre-flight), the
     # command fails with NOTHING written rather than leave a project with a
     # read hook and a silently-absent capture step.
-    if harness in ("claude", "pi"):
+    if harness in ("claude", "codex", "pi"):
         rc = _install_capture_seam(args, install_capture)
         if rc != 0:
             return rc
@@ -2587,6 +2588,22 @@ def _install_capture_seam(args, install_capture) -> int:
         # be a lie (the action lines already said what WOULD happen).
         claim = "Pi capture extension installed. " if result.changed else ""
         print(f"{claim}{_PI_MCP_GUIDANCE}")
+    if args.harness == "codex" and not getattr(args, "dry_run", False):
+        # #3818 P1-3: the capture registration is HOME-scoped ($CODEX_HOME/
+        # hooks.json — the ONE hook source Codex 0.154.0 reads). Codex refuses
+        # to RUN an untrusted hook, so a user who only trusts the (dead)
+        # project-local .codex/hooks.json captures nothing while the install
+        # prints success. Name the ACTUAL effective file.
+        from tortoise.capture_install import codex_home
+        codex_root = codex_home(_P.home())
+        print(
+            f"Codex runs a hook only after you TRUST it. The capture hook "
+            f"registered in {codex_root / 'hooks.json'} is HOME-scoped: "
+            "trust it from the Hooks menu on the next interactive `codex` run "
+            "(non-interactive runs need `codex exec "
+            "--dangerously-bypass-hook-trust`). Trusting a project-local "
+            ".codex/hooks.json does NOT cover it - Codex reads hook "
+            "registrations from $CODEX_HOME/hooks.json.")
     return 0
 
 
@@ -2685,7 +2702,9 @@ def _install_read_hook_impl(args) -> int:
         print("Installable harness seams (per-turn volunteering-memory hook "
               "+ capture):")
         print("  tortoise install codex   → <dir>/.codex/hooks.json "
-              "(UserPromptSubmit → volunteer-turn.sh codex)")
+              "(UserPromptSubmit → volunteer-turn.sh codex) + capture: "
+              "tortoise-session-end.sh into <codex-home>/hooks with a merged "
+              "SessionEnd entry in <codex-home>/hooks.json")
         print("  tortoise install claude  → <dir>/.claude/settings.json "
               "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
               "session-start.sh / session-end.sh into <dir>/.claude/hooks "
@@ -3009,6 +3028,7 @@ def _cmd_hooks(args) -> int:
 
     from tortoise.hook_install import (
         contract_version,
+        default_root,
         detect_install,
         get_layout,
         upgrade_install,
@@ -3019,7 +3039,53 @@ def _cmd_hooks(args) -> int:
     except ValueError as e:
         print(str(e), file=_sys.stderr)
         return 1
-    root = _P(getattr(args, "dir", "."))
+    # An explicit `--dir` always wins (Claude's project-scoped install depends
+    # on it). With NO `--dir`, a layout that declares an env root (Codex)
+    # resolves through it — `${CODEX_HOME:-$HOME/.codex}` — because Codex reads
+    # its hooks ONLY from the HOME-scoped file: defaulting to the cwd inspected
+    # and "upgraded" the dead project-local path Codex never reads, printing
+    # `✅ ... upgraded.` while leaving the real install untouched — the silent
+    # no-capture this seam exists to prevent (#3818).
+    explicit_dir = getattr(args, "dir", None)
+    try:
+        # `_P.home()` is INSIDE the boundary because it can RAISE, not merely
+        # return a non-absolute path: with `$HOME` set to a literal `~` (or
+        # `~/x`) the expansion is a no-op and `pathlib` raises
+        # `RuntimeError("Could not determine home directory.")`; a RELATIVE
+        # `$HOME` (`relhome`) is returned verbatim and refused by
+        # `default_root` as a `ValueError`.  Those are two members of ONE
+        # raise-set, so the boundary is the sibling module's catch-all —
+        # `except MemoryError: raise` then `except Exception` — never an
+        # `except (ValueError, RuntimeError)` enumeration, which the next
+        # unenumerated member refutes (the shape that let `TypeError` #3987
+        # and `UnicodeDecodeError` #3988 escape `capture_install`'s old
+        # `(OSError, RuntimeError)` tuple; see tortoise/capture_install.py).
+        # Guarding the whole root-resolution expression covers the raise from
+        # `_P.home()`, not just the call after it.  Surface every member the
+        # way every other failure in this command is surfaced: a populated
+        # message on stderr plus a non-zero exit, never an uncaught traceback
+        # (#4024 P2-1).  The sibling call sites are already guarded
+        # (`capture_install`'s catch-all, `doctor`'s `except Exception`);
+        # this one was not.
+        # `_P.home()` stays INSIDE the boundary but in the ELSE arm: it can
+        # RAISE, so it must be guarded, but an explicit `--dir` makes HOME
+        # irrelevant (`_P(explicit_dir)` never consults it) — evaluating it
+        # above the ternary made an unresolvable HOME abort a `--dir` inspect
+        # or repair that would otherwise have worked.
+        root = (_P(explicit_dir) if explicit_dir is not None
+                else default_root(layout, _P.home()))
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(str(e), file=_sys.stderr)
+        # Same repair-hint shape as the drift refusal below.  It names a
+        # PLACEHOLDER dir rather than a concrete one: the root is exactly what
+        # could not be resolved, so echoing one back would teach a path that
+        # is itself unresolvable.
+        print("\nRun `tortoise hooks upgrade"
+              f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
+              " --dir <absolute-dir>` to repair.", file=_sys.stderr)
+        return 1
 
     if args.hooks_cmd == "status":
         try:
@@ -3326,6 +3392,48 @@ def _cmd_session_probe(args, api_key: str, api_url: str) -> int:
     return 0
 
 
+def _capture_error_file(harness: str) -> Path:
+    """Local breadcrumb for a capture attempt that never wrote a receipt.
+
+    The dashboard's ``session_capture_last_error_{harness}`` is SERVER state,
+    so a pre-POST failure (an unreachable host, no config, 0 parsed turns)
+    never reaches it and the panel reads healthy while the session is lost.
+    This file is the local companion: ``tortoise sessions import`` writes it
+    on failure and removes it on a 2xx, so a silent no-capture is at least
+    observable on the machine that produced it (the rollout survives on disk
+    for a ``sessions import`` backfill).
+    """
+    import os
+    receipt_dir = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts")))
+    return receipt_dir.parent / "capture-errors" / f"{harness}.json"
+
+
+def _record_capture_error(harness: str, detail: str) -> None:
+    """Write the local capture-failure breadcrumb. Best-effort only — a
+    breadcrumb write must never break the capture path it observes."""
+    import json as _json
+    import time
+    path = _capture_error_file(harness)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({
+            "harness": harness,
+            "detail": detail,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_capture_error(harness: str) -> None:
+    """Remove the failure breadcrumb after a 2xx receipt lands."""
+    import contextlib
+    with contextlib.suppress(OSError):
+        _capture_error_file(harness).unlink()
+
+
 def _cmd_sessions_import(args) -> int:
     """T2 backfill (#1727 Slice 2, Task 15): import a historical session
     transcript from a harness store (codex / claude-desktop / pi).
@@ -3342,6 +3450,12 @@ def _cmd_sessions_import(args) -> int:
     (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
     capture extension applies) keeping the most recent turns, with the
     truncation reported — never a silent drop.
+
+    Every failure that does NOT reach a 2xx also writes a local breadcrumb
+    (``_record_capture_error``), and a 2xx clears it: a pre-POST failure
+    (unreachable host, no config, 0 turns) otherwise leaves the dashboard's
+    server-side failure key unset, so the panel would read healthy over a
+    session that was never captured.
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
@@ -3351,20 +3465,25 @@ def _cmd_sessions_import(args) -> int:
     from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
 
     file_path = Path(args.file)
-    if not file_path.exists():
-        print(f"Session file not found: {args.file}", file=_sys.stderr)
-        return 1
     # CLI alias: --harness desktop ⇒ wire harness claude-desktop (canonical
     # SessionRequest Literal member — receipt key session_capture_receipt_
-    # claude-desktop).
+    # claude-desktop). Resolved BEFORE the existence check so a missing file
+    # still records its breadcrumb under the right harness.
     harness = {"desktop": "claude-desktop"}.get(args.harness, args.harness)
+    if not file_path.exists():
+        print(f"Session file not found: {args.file}", file=_sys.stderr)
+        _record_capture_error(harness, f"session file not found: {args.file}")
+        return 1
     try:
         turns = parse_transcript(str(file_path), harness)
     except ValueError as e:
         print(f"parse failed: {e}", file=_sys.stderr)
+        _record_capture_error(harness, f"parse failed: {e}")
         return 1
     if not turns:
         print("No conversation turns parsed from session file.", file=_sys.stderr)
+        _record_capture_error(
+            harness, f"no conversation turns parsed from {file_path.name}")
         return 1
 
     # The bound is the HANDLER's `MAX_SESSION_TURNS` (tortoise/quota.py) — not
@@ -3401,10 +3520,14 @@ def _cmd_sessions_import(args) -> int:
     except _ConfigError as e:
         print(f"Invalid config at {e} — fix or delete it, or run "
               "'tortoise init --api-key <key>'.", file=_sys.stderr)
+        _record_capture_error(harness, f"invalid config at {e}")
         return 1
     if api_key is None:
         print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.",
               file=_sys.stderr)
+        _record_capture_error(
+            harness, "no .tortoise config found (run 'tortoise init "
+                     "--api-key <key>')")
         return 1
 
     payload = {"harness": harness, "session_id": session_id,
@@ -3424,9 +3547,12 @@ def _cmd_sessions_import(args) -> int:
         body = e.read().decode() if e.fp else ""
         # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
+        _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}")
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        _record_capture_error(
+            harness, f"cannot reach API at {api_url}: {e.reason}")
         return 1
 
     # Any 2xx is a success — the server stored the Session and wrote its
@@ -3440,7 +3566,9 @@ def _cmd_sessions_import(args) -> int:
             or result.get("extraction_mode")), file=_sys.stderr)
 
     # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
-    # state key; this LOCAL marker makes re-import a cheap no-op).
+    # state key; this LOCAL marker makes re-import a cheap no-op) and the
+    # local failure breadcrumb is cleared.
+    _clear_capture_error(harness)
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),
@@ -5182,21 +5310,38 @@ def _cmd_doctor(args):
     except Exception as e:
         results.append(("Session extraction", "⚠️", f"check unavailable: {str(e)[:60]}"))
 
-    # 6. Harness detection
-    home = Path.home()
-    detections: list[str] = []
-    if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
-        detections.append("Pi (extension found)")
-    if (home / ".claude").exists() or Path(".claude").exists():
-        detections.append("Claude Code")
-    if (home / ".codex").exists() or Path(".codex").exists():
-        detections.append("Codex")
-    if Path(".cursor").exists():
-        detections.append("Cursor")
-    if detections:
-        results.append(("Harnesses", "✅", ", ".join(detections)))
-    else:
-        results.append(("Harnesses", "⚠️", "none detected — run tortoise setup to configure"))
+    # 6. Harness detection.  `Path.home()` sits INSIDE this boundary because
+    # it can RAISE, not merely return: with `$HOME` a literal `~` (`~/x`
+    # alike) the expansion is a no-op and `pathlib` raises
+    # `RuntimeError("Could not determine home directory.")` — the same
+    # raise-set member that traced back from `_cmd_hooks` (#4024 P2-1).  Same
+    # catch-all with the explicit `MemoryError` re-raise as the sibling
+    # seams, never an `except (A, B)` enumeration (see
+    # tortoise/capture_install.py).  A failed resolution is a WARNING row and
+    # leaves `home` None, so the detection block below is skipped rather than
+    # run against a substituted root.
+    home: Path | None = None
+    try:
+        home = Path.home()
+        detections: list[str] = []
+        if (home / ".pi" / "agent" / "extensions" / "tortoise-context").exists():
+            detections.append("Pi (extension found)")
+        if (home / ".claude").exists() or Path(".claude").exists():
+            detections.append("Claude Code")
+        if (home / ".codex").exists() or Path(".codex").exists():
+            detections.append("Codex")
+        if Path(".cursor").exists():
+            detections.append("Cursor")
+        if detections:
+            results.append(("Harnesses", "✅", ", ".join(detections)))
+        else:
+            results.append(("Harnesses", "⚠️",
+                            "none detected — run tortoise setup to configure"))
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        results.append(("Harnesses", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
 
     # 7. Capture-hook install freshness (#3795/#3801). The install seam is a
     # manual copy, so an already-installed host keeps a byte-frozen script and
@@ -5205,27 +5350,44 @@ def _cmd_doctor(args):
     # checked ONLY when a capture-hook install is actually present: a project
     # that never installed the hooks must not be nagged (they may use the
     # hosted MCP path alone). Also probed by `tortoise hooks status`.
+    #
+    # Each layout is checked at the root a REAL install uses — through the same
+    # `default_root` resolver the CLI uses: Claude is project-scoped (cwd) and
+    # Codex lives in `$CODEX_HOME`. Checking Codex at the cwd would report a
+    # green row for an install Codex never reads (#3818) — the same silent
+    # no-capture the row exists to catch.
     try:
         from tortoise.hook_install import (
             contract_version,
+            default_root,
             detect_install,
             get_layout,
             is_installed,
         )
-        if is_installed(Path("."), "claude"):
-            findings = detect_install(Path("."), "claude")
+        for _harness in ("claude", "codex"):
+            _layout = get_layout(_harness)
+            # Claude is project-scoped (`root_env is None`) and ignores this
+            # argument; a `None` home (step 6 could not resolve it) is given
+            # the cwd so a codex layout still refuses as a populated
+            # `ValueError` rather than raising `TypeError` on `Path(None)`.
+            _root = default_root(_layout, home if home is not None else Path("."))
+            if not is_installed(_root, _harness):
+                continue
+            findings = detect_install(_root, _harness)
             blocking = [f for f in findings if f.blocking]
-            version = contract_version(get_layout("claude"))
+            version = contract_version(_layout)
+            label = ("Capture hooks" if _harness == "claude"
+                     else f"Capture hooks ({_harness})")
             if not blocking:
-                results.append(("Capture hooks", "✅",
+                results.append((label, "✅",
                                 f"install current (contract v{version})"))
             else:
                 first = blocking[0]
                 results.append((
-                    "Capture hooks", "❌",
+                    label, "❌",
                     f"{len(blocking)} stale issue(s) — run `tortoise hooks "
-                    f"status` for the repair path ({first.kind}: "
-                    f"{first.detail})",
+                    f"status --harness {_harness}` for the repair path "
+                    f"({first.kind}: {first.detail})",
                 ))
     except Exception as e:
         results.append(("Capture hooks", "⚠️",
@@ -6508,8 +6670,9 @@ def main(argv: list[str] | None = None) -> int:
             "--harness", default="claude",
             help="Harness seam to inspect (default: claude)")
         _hp.add_argument(
-            "--dir", default=".",
-            help="Project directory holding the install (default: cwd)")
+            "--dir", default=None,
+            help="Directory holding the install (default: the harness's own "
+                 "root — cwd for claude, $CODEX_HOME for codex)")
     hooks_status.add_argument(
         "--json", action="store_true",
         help="Emit a machine-readable drift report")

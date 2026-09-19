@@ -50,9 +50,11 @@ Run locally against a wrangler pages dev preview:
     TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1 \
     python -m pytest tests/e2e/test_legal_pages.py -v
 
-Run against production (manual post-deploy verification — the repo's
-pages deploy workflow deploy-pages.yml has NO post-deploy job; the CI
-post-deploy job is tracked as follow-up #677):
+Run against production (manual post-deploy verification — the pages deploy
+workflow `deploy-pages.yml` has two post-deploy steps in the `deploy` job
+(`Post-deploy — sign-in is actually reachable`, and since #3620
+`Post-deploy — internal paths are not publicly served`) plus the separate
+`verify-legal` job, which is this suite; #677 shipped `verify-legal`):
   RUN_LEGAL_E2E=1 ALLOW_PROD=1 BASE_URL=https://premiselabs.co \
     TORTISE_HOST=https://tortoise.premiselabs.co \
     python -m pytest tests/e2e/test_legal_pages.py -v

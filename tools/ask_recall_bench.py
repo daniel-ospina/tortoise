@@ -31,10 +31,12 @@ fallback, vector leg absent unless ``--embedder`` injects a probe) or
 installed; ``TORTOISE_DB_URI`` must be set).
 
 LEVERS: ``--levers on`` enables the ask-lane knobs (A1 numeric tokens,
-A4 search_keys PRF, A5 evidence boost) exactly the way ``ask()`` resolves
+A4 search_keys PRF, A5 evidence boost) exactly the way ``run_ask_lane()``
+resolves
 them; ``--levers off`` (default) disables them for the baseline. A3 fusion
 weights/k are threaded from the env (TORTOISE_ASK_FUSION_WEIGHTS/_K) in
-BOTH postures — default None/60 = the shared global, matching ``ask()``.
+BOTH postures — default None/60 = the shared global, matching
+``run_ask_lane()``.
 ``--cap-limit N``/``--cap-item N`` set the A6 measurement caps.
 
 A2 EMBEDDER PROBE: ``--embedder <name>`` injects a same-384-dim probe model
@@ -291,9 +293,10 @@ def _scan_for_failures(data: list[dict], *, scan_limit: int,
 
 def _levers_env(levers: str) -> None:
     """Set the ask-lane env knobs to the requested lever posture so the bench
-    measures exactly what ``ask()`` would resolve (single source of truth).
+    measures exactly what ``run_ask_lane()`` would resolve (single source of
+    truth).
     A3's fusion weights/k default to the shared global (None/60) in BOTH
-    postures — matching ``ask()``, which passes them through only when the
+    postures — matching ``run_ask_lane()``, which passes them through only when the
     operator sets TORTOISE_ASK_FUSION_* explicitly."""
     if levers == "off":
         os.environ["TORTOISE_ASK_NUMERIC_TOKENS"] = "0"
@@ -306,7 +309,7 @@ def _levers_env(levers: str) -> None:
 
 
 def _resolve_bench_a3() -> tuple[dict | None, int]:
-    """Resolve the A3 fusion knobs exactly as ``ask()`` does (the env is the
+    """Resolve the A3 fusion knobs exactly as ``run_ask_lane()`` does (the env is the
     single source of truth — TORTOISE_ASK_FUSION_WEIGHTS / _K). Default
     None/60 = the shared global resolution, unchanged."""
     from tortoise.retrieval import (
