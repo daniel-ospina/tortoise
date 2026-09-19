@@ -111,15 +111,22 @@ BYTES_PER_TOKEN_FLOOR = 8
 #: 21-question fixture at the historical 40/120/40/8000/32KiB defaults the
 #: byte ceiling bound at a mean 4,730 context tokens and all five
 #: answer-bearing turns the retriever had RANKED (fused ranks 67/84/89/93/147)
-#: failed to reach the reader; at 200/200/200/32000/256KiB (byte derived —
-#: 32,000 x 8) every answerable question's gold turns ARE admitted, at a mean
-#: ~29k context tokens. The raise is a deliberate, measured departure from the
-#: historical "caps stay at 40 until measured" position (see #4105). Metered
-#: cost stays under the documented $0.01/query structural target: 32k prompt
-#: tokens x $0.21/M (ASK_METER_RATES) = $0.0067 + output.
+#: failed to reach the reader.
+#:
+#: 16,000 — NOT 32,000 — is the measured default. Admission is monotone,
+#: but the READER is not: 32k admits every gold turn (including 0a995998's
+#: rank-147 turn) yet DILUTES the small reader, regressing four questions
+#: that passed at the historical caps (b0479f84, e831120c, f4f1d8a4_abs,
+#: eace081b) and dropping shape_rate to 6/21. At 16k (byte ceiling derived:
+#: 16,000 x 8), shape_rate is 10/21, abstain 15/21, grounding 15/21 — the
+#: three best-target questions pass, 0a995998's rank-147 turn stays out
+#: (its own pool-depth decision, #4105), and one question (eace081b)
+#: regresses. The 32k option remains one env var away and is reported.
+#: Metered cost stays under the documented $0.01/query structural target
+#: (16k prompt tokens x $0.21/M = $0.0034 + output).
 DEFAULT_ASK_RETRIEVAL_LIMIT = 200
 DEFAULT_ASK_CONTEXT_ITEM_CAP = 200
-DEFAULT_ASK_CONTEXT_TOKEN_CAP = 32000
+DEFAULT_ASK_CONTEXT_TOKEN_CAP = 16000
 DEFAULT_ASK_POOL_SIZE = 200
 
 #: C2 (#1745) / #1945: evidence-mark boost rank-offset multipliers. The
@@ -146,7 +153,7 @@ _POOL_CLAMP = (1, 10000)
 #: ``tortoise_fts_query`` before dedup/assemble); raising only the window
 #: floods the reader budget. The pre-#4105 defaults were the historical
 #: 40/40/8000/32KiB; #4105 measured the frozen D3 fixture and raised them to
-#: 200/200/32000 (byte ceiling derived) so the ranked-but-unread gold turns
+#: 200/200/16000 (byte ceiling derived) so the ranked-but-unread gold turns
 #: reach the reader. #4105 also adds the POOL depth and the BYTE ceiling to
 #: that same resolution: a window raise past the pool is cut by the pool, and
 #: a window raise past 32 KiB was cut by an un-resolvable literal — both were
@@ -246,7 +253,7 @@ def ask_env_boost_float(name: str, default: float) -> float:
 def resolve_ask_retrieval_caps() -> dict:
     """A6 (#2070) / #4105: resolve the ask lane's retrieval-window limit,
     pool depth and assembly caps IN TANDEM (env-gated; #4105 defaults
-    200/200/200/32000/256KiB, measured on the frozen D3 fixture). Returns
+    200/200/200/16000/128KiB, measured on the frozen D3 fixture). Returns
     ``{"limit", "pool_size", "context_item_cap", "context_token_cap",
     "context_byte_cap"}`` — the single resolution ``run_ask_lane()`` threads
     into ``tortoise_fts_query(limit=…, pool_size=…)``, ``assemble_context``
