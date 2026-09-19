@@ -64,11 +64,17 @@ export const WORKFLOWS_PROMPT =
 //   pi     = tortoise/pi-hooks/tortoise-capture.ts copied into
 //            ~/.pi/agent/extensions/ (extension session_start install-probe +
 //            session_shutdown capture; recording ON by default)
-// No other harness has a seam: claude-desktop is backfill-import only,
-// cursor's spike found no capture path, and web/chatgpt are cloud-hosted.
+//   cursor = tortoise/cursor-hooks/session-end.sh copied into
+//            ${CURSOR_HOME:-~/.cursor}/hooks + wired in hooks.json under
+//            "sessionEnd" (Cursor 3.20.21 reads hooks.json from the HOME-scoped
+//            .cursor/ dir; the entry is a FLAT {"command": …} object).
+//            IDE-ONLY: cloud agents have no editor-lifetime session boundary.
+// No other harness has a seam: claude-desktop is backfill-import only, and
+// web/chatgpt are cloud-hosted.
 export const HARNESS_CAPTURE_SEAM = {
   claude: 'tortoise/claude-hooks/session-end.sh',
   codex: 'tortoise/codex-hooks/session-end.sh',
+  cursor: 'tortoise/cursor-hooks/session-end.sh',
   pi: 'tortoise/pi-hooks/tortoise-capture.ts',
 }
 
@@ -79,7 +85,11 @@ export const HARNESS_CAPTURE_SUPPORT = {
   'claude-desktop': false,  // backfill import only (Task 15) — no live install path
   'claude-web': false,      // disabled-with-reason pending the Task 13 spike signal
   codex: CAPTURE_SEAM_HARNESSES.has('codex'),
-  cursor: false,            // cursor spike verdict: unsupported for capture
+  // #3819: capture is possible for LOCAL/IDE sessions (sessionEnd + a
+  // transcript_path/agent-transcripts store). `true` here is DERIVED from the
+  // seam, never asserted; the IDE-only limitation is disclosed on the install
+  // surface, not encoded as a false here.
+  cursor: CAPTURE_SEAM_HARNESSES.has('cursor'),
   pi: CAPTURE_SEAM_HARNESSES.has('pi'),
   chatgpt: false,        // #1701: cloud-hosted — no server-visible filing signal
 }
@@ -127,6 +137,10 @@ export const HARNESS_STEPS = (harness, key) => ({
     { label: 'Export the key — add this line to your shell profile (~/.zshrc or ~/.bashrc) so it persists:', code: `export TORTOISE_API_KEY=${key}`, copy: `export TORTOISE_API_KEY=${key}` },
     'Create .cursor/mcp.json in this project with the JSON below — the config references the env var, not the key:',
     { label: 'Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding):', code: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor`, copy: `curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor` },
+    // #3819 (owner ruling): the IDE-only limitation is disclosed on the
+    // install/connect surface, not buried in a footnote.
+    { label: 'Install session capture (the sessionEnd hook):', code: 'tortoise install cursor', copy: 'tortoise install cursor' },
+    "Session capture is IDE-ONLY: local desktop-editor sessions are captured, but CURSOR CLOUD AGENT sessions are not — Cursor's docs: 'Cloud agents have no editor-lifetime session boundary. sessionEnd is tied to the IDE session, not a cloud agent chat.'",
   ],
   chatgpt: [
     'Enable Developer mode: chatgpt.com → Settings → Security and login → Developer mode (Plus/Pro/Business/Enterprise/Education).',
@@ -254,6 +268,33 @@ chmod +x "\${CODEX_HOME:-$HOME/.codex}/hooks/tortoise-session-end.sh"
 # review prompt (Hooks menu). Non-interactive runs need
 #   codex exec --dangerously-bypass-hook-trust
 # Or just run: tortoise install codex`
+
+// #3819: the Cursor capture-INSTALL step — the in-repo sessionEnd hook that
+// makes LOCAL Cursor desktop-editor sessions land in Tortoise Cloud. Shown in
+// the Memory-sources inline row; the connect-wizard step (HARNESS_STEPS.cursor)
+// carries the same disclosure. The registration is HOME-scoped
+// (`$CURSOR_HOME/hooks.json`, Cursor's own user-scoped hook source) — a
+// project-local `.cursor/hooks.json` is gated on workspace trust. Cursor's
+// entry is a FLAT {"command": …} script object; its validator rejects a
+// nested matcher group and invalidates the whole hooks.json.
+export const CURSOR_CAPTURE_INSTALL = `# Session capture for Cursor (#3819): recording is on by default (ToS-covered);
+# the sessionEnd hook files each LOCAL desktop-editor session to Tortoise Cloud
+# unless your organization switches it off (Memory sources > Agent sessions —
+# the server returns a 409 while disabled). Install from your Tortoise checkout
+# (github.com/daniel-ospina/tortoise):
+tortoise install cursor
+# ...or by hand: copy tortoise/cursor-hooks/session-end.sh into
+# "\${CURSOR_HOME:-$HOME/.cursor}/hooks/" and add it under "sessionEnd" in
+# "\${CURSOR_HOME:-$HOME/.cursor}/hooks.json" as a FLAT script object:
+#   {"command": "<abs-path>/tortoise-session-end.sh"}
+# (Cursor's validator rejects a NESTED matcher-group entry and then loads
+#  NO hooks at all — the entry must be flat.)
+#
+# ** IDE-ONLY — Cursor CLOUD AGENT sessions are NOT captured. **
+# Cursor's docs: "Cloud agents have no editor-lifetime session boundary.
+# sessionEnd is tied to the IDE session, not a cloud agent chat." The desktop
+# editor is the supported capture surface for this seam; a cloud-agent chat
+# has no sessionEnd to hook.`
 
 // #1710: the copyable payload is EXACTLY what the user pastes into the
 // harness target (terminal / config file / chat). The lead-in instructions
@@ -391,20 +432,21 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
   pi: PI_CAPTURE_INSTALL,
   // #3818: the Codex SessionEnd capture hook — same sharing rule as Pi.
   codex: CODEX_CAPTURE_INSTALL,
+  // #3819: the Cursor sessionEnd capture hook — same sharing rule.
+  cursor: CURSOR_CAPTURE_INSTALL,
 }
 
 // #1728 Slice 3 (Task 16/17): per-harness disabled-with-reason copy for the
 // sessions rows — pinned in the plan (web = "session capture for web is in
 // progress — not available yet" until the Task 13 spike verdict flips
 // HARNESS_CAPTURE_SUPPORT; claude-desktop = backfill import only until an
-// install path exists (codex got one in #3818); cursor = spike verdict). The
+// install path exists (codex got one in #3818, cursor in #3819)). The
 // reason map covers the DISABLED harnesses only — a supported harness renders
 // the capture step, never a reason. Never hidden rows — disabled with an
 // honest reason.
 export const HARNESS_CAPTURE_REASON = {
   'claude-desktop': 'backfill import only — no live install path yet',
   'claude-web': 'session capture for web is in progress — not available yet',
-  cursor: 'unsupported for session capture',
   chatgpt: "ChatGPT connects from its own cloud — session capture isn't available for it",
 }
 

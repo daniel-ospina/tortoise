@@ -1509,6 +1509,35 @@ class TestDoctorIntegration:
         assert any("codex" in ln and "❌" in ln for ln in lines), lines
         assert any("hooks status --harness codex" in ln for ln in lines), lines
 
+    def test_doctor_reports_a_cursor_install_at_cursor_home(self, doctor_env, capsys):
+        """Doctor checks the Cursor seam at `$CURSOR_HOME` (here `~/.cursor`),
+        the only path Cursor reads — not the cwd (#3819).
+
+        MUTATION: check only claude+codex layouts → no cursor row → RED.
+        """
+        from tortoise.capture_install import install_capture
+        assert install_capture("cursor", home=doctor_env).ok
+
+        lines = self._doctor_lines(capsys)
+        assert any("cursor" in ln and "✅" in ln for ln in lines), lines
+        # ...and nothing was read from the untrusted project-local path.
+        assert not (doctor_env / "hooks.json").exists()
+
+    def test_doctor_fails_on_a_stale_cursor_install(self, doctor_env, capsys):
+        """A stale Cursor install is a FAIL, same as Claude's/Codex's —
+        doctor's freshness row must not be Claude-only (#3819).
+
+        MUTATION: add the cursor row but never mark its drift → RED.
+        """
+        from tortoise.capture_install import install_capture
+        assert install_capture("cursor", home=doctor_env).ok
+        stale = (doctor_env / ".cursor" / "hooks" / "tortoise-session-end.sh")
+        stale.write_text("#!/usr/bin/env bash\n# tortoise session capture\nexit 0\n")
+
+        lines = self._doctor_lines(capsys)
+        assert any("cursor" in ln and "❌" in ln for ln in lines), lines
+        assert any("hooks status --harness cursor" in ln for ln in lines), lines
+
 
 # ── 5. harness-agnosticism (the mechanism must not be Claude-shaped) ────
 

@@ -1,0 +1,422 @@
+"""#3819 — the shipped Cursor capture hook (`tortoise/cursor-hooks/session-end.sh`).
+
+These tests drive the REAL script with a controlled PATH, HOME and a fake
+`tortoise` on PATH, and assert the resolved outcome: the argv the capture step
+receives, the transcript fallback, the fail-open exits, and — load-bearing —
+that the hook DETACHES.
+
+Cursor's `onWillShutdown` JOINS the sessionEnd hook promise, so a hook that
+performs the capture POST synchronously DELAYS the app quitting by the POST
+duration (~1–10 s). The shipped hook must therefore return immediately and let
+a detached worker do the slow POST — exactly the shape the Codex seam needed
+for its measured ~1 s budget.
+
+Every docstring names the mutation that turns it RED.
+"""
+from __future__ import annotations
+
+import json
+import os
+import stat
+import subprocess
+import time
+from pathlib import Path
+
+from tortoise.capture_install import install_capture
+from tortoise.hook_install import count_canonical_markers, read_hook_version
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HOOK = REPO_ROOT / "tortoise" / "cursor-hooks" / "session-end.sh"
+VERSION_MARKER = "# tortoise-hook-version: 1"
+
+#: A REAL Cursor 3.20.21 agent transcript captured on this machine
+#: (2026-09-18, `~/.cursor/projects/empty-window/agent-transcripts/
+#: 86bd7492-46a1-4bee-a91f-0a4ea4a10ee1/…jsonl`). The ONE redaction is the
+#: live API key the composer draft happened to contain (`tt_…` →
+#: ``<REDACTED-API-KEY>``); every other byte is as Cursor wrote it. It is a
+#: captured artifact, not a hand-planted fixture written to match the parser.
+REAL_TRANSCRIPT = (
+    REPO_ROOT / "tests" / "fixtures" / "cursor"
+    / "agent-transcript-86bd7492.jsonl")
+
+
+def _fake_tortoise(bindir: Path, log: Path, *, sleep_s: float = 0.0) -> None:
+    """A `tortoise` that records its argv (and a DONE marker after ``sleep_s``)."""
+    script = bindir / "tortoise"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'sleep {sleep_s}\n'
+        f'printf "%s\\n" "$@" >> {log}\n'
+        f'echo DONE >> {log}\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+def _install_fake_nohup(bindir: Path) -> Path:
+    """A `nohup` shim that records every worker spawn, then runs the real one.
+
+    The synchronous hook hands off by `nohup "$SELF" --worker &`; recording
+    that call is the only way to observe "was a worker spawned at all?" — the
+    capture log can be silent because the WORKER bailed on a later guard (a
+    different defect than the hook spawning one it should not have).
+    """
+    log = bindir / "nohup.log"
+    script = bindir / "nohup"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "NOHUP %s\\n" "$*" >> {log}\n'
+        'exec /usr/bin/nohup "$@"\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return log
+
+
+def _run_hook(stdin_json: str, *, home: Path, bindir: Path, timeout: float = 15,
+              extra_env: dict[str, str] | None = None):
+    _install_fake_nohup(bindir)
+    env = {
+        "HOME": str(home),
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        # The module fallback must not accidentally find a real checkout.
+        "TORTOISE_SRC_DIR": str(home / "no-checkout"),
+        "TMPDIR": str(home / "tmp"),
+    }
+    env.update(extra_env or {})
+    (home / "tmp").mkdir(parents=True, exist_ok=True)
+    start = time.monotonic()
+    proc = subprocess.run(
+        ["/bin/bash", str(HOOK)],
+        input=stdin_json,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=timeout,
+    )
+    return proc, time.monotonic() - start
+
+
+def _wait_for_done(log: Path, timeout: float = 12) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if log.exists() and "DONE" in log.read_text(encoding="utf-8"):
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"the detached capture did not complete: {log}")
+
+
+def test_hook_artifact_carries_the_version_marker():
+    """The install contract is one marker, column-0, one per file.
+
+    Mutation: delete ``# tortoise-hook-version: 1`` from the shipped hook — the
+    install then has no generation to compare and this REDs."""
+    text = HOOK.read_text(encoding="utf-8")
+    assert text.startswith(f"#!/usr/bin/env bash\n{VERSION_MARKER}\n"), text[:120]
+    assert read_hook_version(HOOK) == 1
+    assert count_canonical_markers(HOOK) == 1, (
+        "exactly one column-0 marker (an in-body mention is not a declaration)")
+
+
+def test_cursor_home_is_scrubbed_so_no_cursor_test_can_touch_the_real_home():
+    """Every test here runs under the autouse CURSOR_HOME scrub: a direct
+    `install_capture("cursor", home=...)` resolves its root through
+    `$CURSOR_HOME`, so an ambient value sends the install into the REAL
+    `~/.cursor` — the suite would mutate the machine it runs on.
+
+    Mutation: delete the autouse `_cursor_home_isolation` fixture from
+    tests/conftest.py — the sentinel is absent and this REDs."""
+    assert os.environ.get("TORTOISE_TEST_CURSOR_HOME_SCRUBBED") == "1", (
+        "the autouse CURSOR_HOME scrub did not run — an ambient CURSOR_HOME "
+        "would send install_capture('cursor', home=...) into the real home")
+    assert not os.environ.get("CURSOR_HOME"), (
+        f"an ambient CURSOR_HOME leaked into a cursor test: "
+        f"{os.environ.get('CURSOR_HOME')!r} — installs would land in the real "
+        "Cursor config")
+
+
+def test_hook_detaches_so_cursor_shutdown_cannot_kill_the_capture(tmp_path):
+    """Cursor's `onWillShutdown` JOINS the sessionEnd hook, so the hook must
+    return immediately and the capture must complete AFTER the parent exits.
+
+    Mutation: drop the trailing ``&``/``disown`` (run the capture
+    synchronously) — the hook blocks for the capture's duration, Cursor waits
+    on it, and ``elapsed`` fails its bound."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log, sleep_s=4.0)
+    transcript = tmp_path / "agent.jsonl"
+    transcript.write_text(
+        '{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}\n',
+        encoding="utf-8")
+
+    proc, elapsed = _run_hook(
+        json.dumps({"conversation_id": "c-1", "session_id": "c-1",
+                    "transcript_path": str(transcript),
+                    "reason": "window_close", "hook_event_name": "sessionEnd"}),
+        home=home, bindir=bindir)
+    assert proc.returncode == 0, proc.stderr
+    assert elapsed < 2.5, (
+        f"the hook blocked for {elapsed:.1f}s — Cursor JOINS this promise on "
+        "shutdown, so a synchronous capture delays quitting by the POST")
+    assert not log.exists(), "the capture finished before the hook returned"
+
+    _wait_for_done(log)
+    assert "DONE" in log.read_text(encoding="utf-8"), (
+        "the detached worker did not survive the hook's exit")
+
+
+def test_hook_files_the_real_transcript_with_harness_cursor_and_the_session_id(tmp_path):
+    """The capture step is `sessions import --harness cursor` with the REAL
+    session_id as the idempotency key.
+
+    Mutation: hardcode ``--harness claude`` (or drop ``--session-id``) — the
+    server files the session under the wrong bucket / loses convergence and
+    this REDs."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log)
+    transcript = tmp_path / "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+
+    proc, _ = _run_hook(
+        json.dumps({"conversation_id": "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1",
+                    "session_id": "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1",
+                    "transcript_path": str(transcript),
+                    "reason": "user_close", "hook_event_name": "sessionEnd"}),
+        home=home, bindir=bindir)
+    assert proc.returncode == 0, proc.stderr
+
+    _wait_for_done(log)
+    argv = [t for t in log.read_text(encoding="utf-8").split() if t != "DONE"]
+    assert argv == ["sessions", "import", "--file", str(transcript),
+                    "--harness", "cursor", "--session-id",
+                    "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1"], argv
+
+
+def test_real_transcript_parses_and_imports_through_the_real_cli(tmp_path, monkeypatch):
+    """The seam's load-bearing link: the REAL `parse_cursor` over a REAL Cursor
+    agent transcript, driven through the REAL `tortoise sessions import
+    --harness cursor` path. Every other test here stubs `tortoise` on PATH, so
+    a `parse_cursor` that returned 0 turns (or a rejected `--harness cursor` /
+    `--session-id`, or a wrong endpoint) would leave them all green.
+
+    Uses the captured transcript in tests/fixtures/cursor/ (see
+    ``REAL_TRANSCRIPT``), copied into a tmpdir so the test never mutates the
+    live Cursor store.
+
+    Mutation: make ``parse_cursor`` return ``[]`` — the real-turn assertion
+    REDs."""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.session_import import parse_transcript
+
+    assert REAL_TRANSCRIPT.is_file(), (
+        f"the captured real transcript is missing: {REAL_TRANSCRIPT}")
+    transcript = tmp_path / REAL_TRANSCRIPT.name
+    transcript.write_bytes(REAL_TRANSCRIPT.read_bytes())
+
+    # 1. The REAL parser over the REAL transcript.
+    turns = parse_transcript(str(transcript), "cursor")
+    assert turns, "parse_cursor returned no turns for a real Cursor transcript"
+    assert turns[0]["role"] == "user"
+
+    # 2. The REAL CLI path, with only the network transport stubbed (a receipt
+    # is a 2xx server fact; `_cmd_sessions_import` builds the request for real).
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    captured: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"session_id": "s-cursor-real"}'
+
+    def _fake_urlopen(req, timeout=None):
+        captured["payload"] = json.loads(req.data.decode())
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        return _Resp()
+
+    args = SimpleNamespace(
+        file=str(transcript), harness="cursor",
+        session_id="86bd7492-46a1-4bee-a91f-0a4ea4a10ee1")
+    with mock.patch("urllib.request.urlopen", _fake_urlopen):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 0
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/v1/sessions"), captured["url"]
+    assert captured["payload"]["harness"] == "cursor"
+    assert captured["payload"]["session_id"] == (
+        "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1")
+    assert captured["payload"]["conversation"] == turns
+    receipts = list((tmp_path / "receipts").glob("*.json"))
+    assert len(receipts) == 1, receipts
+
+
+def test_hook_resolves_the_agent_transcripts_fallback_when_path_is_null(tmp_path):
+    """`transcript_path` is NULL when the user disabled transcripts. The hook
+    must fall back to Cursor's machine-local store —
+    ``~/.cursor/projects/<mangled-workspace>/agent-transcripts/<mangled-id>/
+    <mangled-id>.jsonl`` (bundle: ``$5i`` / ``hCf``) — and file THAT.
+
+    Mutation: drop the fallback resolver — the null-path worker exits 0 and
+    the capture log stays empty, REDing the argv assertion."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log)
+
+    game_id = "abc-123-def"
+    project = Path("/tmp/My Project/scratch")
+    mangled_project = "tmp-My-Project-scratch"
+    transcripts = (home / ".cursor" / "projects" / mangled_project
+                   / "agent-transcripts" / game_id)
+    transcripts.mkdir(parents=True)
+    transcript = transcripts / f"{game_id}.jsonl"
+    transcript.write_text(
+        '{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}\n',
+        encoding="utf-8")
+
+    proc, _ = _run_hook(
+        json.dumps({"conversation_id": game_id, "session_id": game_id,
+                    "transcript_path": None, "reason": "window_close",
+                    "hook_event_name": "sessionEnd",
+                    "workspace_roots": [str(project)]}),
+        home=home, bindir=bindir,
+        extra_env={"CURSOR_PROJECT_DIR": str(project)})
+    assert proc.returncode == 0, proc.stderr
+
+    _wait_for_done(log)
+    argv = [t for t in log.read_text(encoding="utf-8").split() if t != "DONE"]
+    assert argv == ["sessions", "import", "--file", str(transcript),
+                    "--harness", "cursor", "--session-id", game_id], argv
+
+
+def test_hook_is_fail_open_when_transcript_path_is_null(tmp_path):
+    """A null ``transcript_path`` WITH no fallback transcript on disk is a
+    clean no-op, never a crash. The parent hands off; the WORKER rejects the
+    empty path.
+
+    Mutation: drop the empty-path guard chain (``[ -n "$TRANSCRIPT_PATH" ]``
+    together with ``[ -f "$TRANSCRIPT_PATH" ]``) — the worker then invokes the
+    capture with an empty ``--file`` and this REDs. Either guard alone already
+    rejects a null path (``[ -f "" ]`` is false), so the pair is the unit an
+    empty path exercises."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log)
+
+    proc, _ = _run_hook(
+        json.dumps({"conversation_id": "sid", "session_id": "sid",
+                    "transcript_path": None, "reason": "window_close",
+                    "hook_event_name": "sessionEnd"}),
+        home=home, bindir=bindir)
+    assert proc.returncode == 0, proc.stderr
+    time.sleep(1.0)
+    assert not log.exists(), "a null transcript_path still invoked the capture"
+    assert (bindir / "nohup.log").exists(), (
+        "the parent must hand off — the null-path rejection lives in the worker")
+
+
+def test_hook_is_fail_open_when_transcript_is_missing_on_disk(tmp_path):
+    """A ``transcript_path`` that no longer exists must not invoke the capture.
+
+    Mutation: drop the ``-f`` test — a stale path reaches the CLI and this
+    REDs."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log)
+
+    proc, _ = _run_hook(
+        json.dumps({"conversation_id": "sid", "session_id": "sid",
+                    "transcript_path": str(tmp_path / "gone.jsonl"),
+                    "reason": "window_close", "hook_event_name": "sessionEnd"}),
+        home=home, bindir=bindir)
+    assert proc.returncode == 0, proc.stderr
+    time.sleep(1.0)
+    assert not log.exists(), "a missing transcript still invoked the capture"
+
+
+def test_hook_exits_zero_on_empty_stdin(tmp_path):
+    """Cursor never blocks on memory capture — an empty payload is a no-op,
+    and the hook must not even SPAWN the detached worker (a null transcript is
+    a different case, rejected by the worker itself).
+
+    Mutation: remove the empty-payload guard (``[ -s "$PAYLOAD" ]``) — the hook
+    then nohup-spawns the worker on empty stdin and this REDs on the
+    ``nohup.log`` assertion."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log)
+
+    proc, _ = _run_hook("", home=home, bindir=bindir)
+    assert proc.returncode == 0, proc.stderr
+    time.sleep(1.0)
+    assert not log.exists()
+    assert not (bindir / "nohup.log").exists(), (
+        "empty stdin still spawned the detached capture worker")
+
+
+def test_installed_hook_is_executable_by_its_owner(tmp_path):
+    """Cursor executes the registered command directly, so the install must
+    produce an owner-executable script.
+
+    Mutation: install with mode 0o644 — Cursor cannot run the hook and this
+    REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    result = install_capture("cursor", home=home)
+    assert result.ok, result.error
+    installed = home / ".cursor" / "hooks" / "tortoise-session-end.sh"
+    assert installed.is_file()
+    mode = installed.stat().st_mode
+    assert mode & stat.S_IXUSR, f"installed hook is not owner-executable: {mode:o}"
+    assert installed.read_bytes() == HOOK.read_bytes(), (
+        "the installed hook is not the shipped artifact byte-for-byte")
+
+
+def test_reinstall_repairs_a_hook_that_lost_its_exec_bit(tmp_path):
+    """A `cp`-without-`chmod` install files nothing while reporting success —
+    the install must repair the owner exec bit.
+
+    Mutation: skip the exec-bit repair in ``_install_script`` — this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    assert install_capture("cursor", home=home).ok
+    installed = home / ".cursor" / "hooks" / "tortoise-session-end.sh"
+    os.chmod(installed, 0o644)
+
+    again = install_capture("cursor", home=home)
+    assert again.ok, again.error
+    assert again.changed is True, again.actions
+    assert installed.stat().st_mode & stat.S_IXUSR

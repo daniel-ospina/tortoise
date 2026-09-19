@@ -2537,7 +2537,7 @@ def _cmd_install_hooks(args) -> int:
     # shape/symlink checks above, or the capture half's own pre-flight), the
     # command fails with NOTHING written rather than leave a project with a
     # read hook and a silently-absent capture step.
-    if harness in ("claude", "codex", "pi"):
+    if harness in ("claude", "codex", "pi", "cursor"):
         rc = _install_capture_seam(args, install_capture)
         if rc != 0:
             return rc
@@ -2545,6 +2545,13 @@ def _cmd_install_hooks(args) -> int:
         # Pi has no shell-hook read seam — its only seam is the capture
         # extension; `_install_capture_seam` already reported the install,
         # the no-op, and the MCP/restart guidance.
+        return 0
+    if harness == "cursor":
+        # Cursor has no shell-hook read seam either: the sessionEnd capture
+        # hook is its only seam, and `_install_capture_seam` already reported
+        # the install, the no-op, and the IDE-only disclosure.  Falling
+        # through to `_install_read_hook` would inspect (and could rewrite) a
+        # CLINE registration as if it were Cursor's.
         return 0
     return _install_read_hook(args)
 
@@ -2604,6 +2611,20 @@ def _install_capture_seam(args, install_capture) -> int:
             "--dangerously-bypass-hook-trust`). Trusting a project-local "
             ".codex/hooks.json does NOT cover it - Codex reads hook "
             "registrations from $CODEX_HOME/hooks.json.")
+    if args.harness == "cursor" and not getattr(args, "dry_run", False):
+        # #3819 (owner ruling): the IDE-only limitation is DISCLOSED where the
+        # user chooses Cursor — the install surface — not buried. Cursor's own
+        # docs: "Cloud agents have no editor-lifetime session boundary."
+        from tortoise.capture_install import cursor_home
+        cursor_root = cursor_home(_P.home())
+        print(
+            f"Cursor's sessionEnd hook is IDE-ONLY. The capture hook "
+            f"registered in {cursor_root / 'hooks.json'} fires for LOCAL "
+            "desktop-editor sessions (the expected surface). CURSOR CLOUD "
+            "AGENT sessions are NOT captured — Cursor's docs: 'Cloud agents "
+            "have no editor-lifetime session boundary. sessionEnd is tied to "
+            "the IDE session, not a cloud agent chat.' If you use cloud "
+            "agents, their sessions are not filed by this seam.")
     return 0
 
 
@@ -2714,8 +2735,11 @@ def _install_read_hook_impl(args) -> int:
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
               "tortoise-capture.ts (the capture extension; Pi has no "
               "shell-hook read seam)")
+        print("  tortoise install cursor  → ${CURSOR_HOME:-~/.cursor}/hooks.json "
+              "(the sessionEnd capture hook; Cursor has no shell-hook read "
+              "seam. IDE-ONLY: Cursor cloud agent sessions are not captured)")
         print("Other seams (docs/matrix only, this wave): "
-              "devin, cursor, gemini, opencode — see "
+              "devin, gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
         return 0
 
@@ -5364,7 +5388,7 @@ def _cmd_doctor(args):
             get_layout,
             is_installed,
         )
-        for _harness in ("claude", "codex"):
+        for _harness in ("claude", "codex", "cursor"):
             _layout = get_layout(_harness)
             # Claude is project-scoped (`root_env is None`) and ignores this
             # argument; a `None` home (step 6 could not resolve it) is given
@@ -6606,7 +6630,7 @@ def main(argv: list[str] | None = None) -> int:
     session_view.add_argument("id", help="Session ID")
     # #1727 Slice 2 (Task 15): T2 backfill — `tortoise sessions import`
     # (plural — the plan's pinned CLI shape) ingests historical transcripts
-    # from harness stores (codex / claude-desktop / pi).
+    # from harness stores (codex / claude-desktop / cursor / pi).
     sessions = sp.add_parser(
         "sessions",
         help="Backfill agent sessions from historical transcripts (#1727 Task 15)")
@@ -6617,7 +6641,7 @@ def main(argv: list[str] | None = None) -> int:
                              help="Path to the session transcript (JSONL or text)")
     sess_import.add_argument(
         "--harness", required=True,
-        choices=["codex", "claude-desktop", "desktop", "pi"],
+        choices=["codex", "claude-desktop", "desktop", "cursor", "pi"],
         help="Harness format to parse (each harness has its own record "
              "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(
@@ -6636,8 +6660,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline", "pi"],
-        help="Harness to install (codex | claude | cline | pi)")
+        choices=["codex", "claude", "cline", "cursor", "pi"],
+        help="Harness to install (codex | claude | cline | cursor | pi)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")

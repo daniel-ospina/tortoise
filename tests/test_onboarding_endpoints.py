@@ -905,10 +905,10 @@ def test_install_probe_round_trip(client):
 
 def test_install_probe_unregistered_harness_422(client):
     """Task 14: a harness with no REGISTERED install_probe_ key (codex /
-    claude-desktop / claude-web / cursor — backfill-only or pending-spike
-    harnesses) → 422 at the model boundary, never a silent drop (an
-    unregistered key would be discarded by the allowlist filter and look
-    like a recorded probe)."""
+    claude-desktop / claude-web / cursor — harnesses with no install-probe
+    beacon; cursor has a capture seam (#3819) but fires no probe) → 422 at the
+    model boundary, never a silent drop (an unregistered key would be
+    discarded by the allowlist filter and look like a recorded probe)."""
     from tortoise.hosted_api import _make_sdk
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",

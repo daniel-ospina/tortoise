@@ -245,10 +245,18 @@ class HarnessLayout:
     ``root_env`` declares the env var a harness resolves its install root
     through when the caller passes NO explicit directory (``root_home_default``
     is the ``$HOME``-relative fallback): Codex reads its hooks ONLY from
-    ``$CODEX_HOME`` (never a project-local file), so a cwd default would
-    inspect and "upgrade" a path Codex never reads while the real install stays
-    broken (#3818).  ``None`` keeps the cwd default — Claude's install is
+    ``$CODEX_HOME`` and Cursor ONLY from ``$CURSOR_HOME`` (never a
+    project-local file), so a cwd default would inspect and "upgrade" a path
+    the harness never reads while the real install stays broken (#3818,
+    #3819).  ``None`` keeps the cwd default — Claude's install is
     project-scoped.
+
+    ``flat_entry`` selects the settings ENTRY shape.  Claude and Codex nest
+    the handler under a matcher group (``{"hooks": [{"type": "command", …}]}``);
+    Cursor's ``.cursor/hooks.json`` uses a FLAT script object
+    (``{"command": …, "timeout": …}``) and its own validator REJECTS a nested
+    entry (``Hook script command must be a string``), which invalidates the
+    WHOLE config so Cursor loads no hooks at all — a silent no-capture (#3819).
     """
 
     harness: str
@@ -259,6 +267,7 @@ class HarnessLayout:
     matcher: bool = True
     root_env: str | None = None
     root_home_default: str | None = None
+    flat_entry: bool = False
 
     def hooks_root(self, root: Path) -> Path:
         return root / self.hooks_dir
@@ -274,7 +283,8 @@ def _spec_command(layout: HarnessLayout, spec: HookScriptSpec,
     Claude's is the root-relative ``rel_command``; a harness with
     ``absolute_command`` (Codex) needs the script's absolute path, quoted the
     ONE way the installer quotes it (``shlex.quote``) so the drift detector,
-    ``upgrade`` and ``capture_install._install_codex`` agree byte-for-byte.
+    ``upgrade`` and ``capture_install._install_home_scoped`` agree
+    byte-for-byte.
     """
     if not layout.absolute_command or root is None:
         return spec.rel_command
@@ -297,6 +307,40 @@ def _claude_layout() -> HarnessLayout:
             HookScriptSpec(
                 "session-end.sh", "SessionEnd", 60,
                 f"{_CLAUDE_HOOKS_DIR}/session-end.sh",
+            ),
+        ),
+    )
+
+
+def _cursor_layout() -> HarnessLayout:
+    """The Cursor capture seam as a layout (#3819) — NOT a fork of the logic.
+
+    Cursor reads hook registrations from ``$CURSOR_HOME/hooks.json``
+    (default ``~/.cursor/hooks.json``) — verified against the installed
+    bundle (``CursorHooksService`` resolves ``pathService.userHome() /
+    ".cursor" / "hooks.json"``); a project-local ``<repo>/.cursor/hooks.json``
+    is gated on workspace trust and fires nothing when untrusted, so the
+    HOME-scoped registration is the reliable one.  Its entry is a FLAT
+    ``{"command": …, "timeout": …}`` object (``flat_entry``), the script is
+    registered by ABSOLUTE path (the command runs from the hook cwd, not the
+    install dir), and there is no matcher key.  ``sessionEnd`` is an
+    IDE-only event: Cursor's docs state cloud agents have no editor-lifetime
+    session boundary.
+    """
+    return HarnessLayout(
+        harness="cursor",
+        hooks_dir="hooks",
+        settings_file="hooks.json",
+        absolute_command=True,
+        matcher=False,
+        root_env="CURSOR_HOME",
+        root_home_default=".cursor",
+        flat_entry=True,
+        scripts=(
+            HookScriptSpec(
+                "tortoise-session-end.sh", "sessionEnd", None,
+                "hooks/tortoise-session-end.sh",
+                source_subdir="cursor-hooks", source_name="session-end.sh",
             ),
         ),
     )
@@ -331,11 +375,12 @@ def _codex_layout() -> HarnessLayout:
     )
 
 
-#: Shipped layouts.  Cursor (#3819) adds an entry here; Codex (#3818) already
-#: has one, so its seam is drift-checked and upgradeable like Claude's.
+#: Shipped layouts.  Every seam with an installer is registered here, so it
+#: is drift-checked and upgradeable like Claude's (#3818, #3819).
 HARNESS_LAYOUTS: dict[str, HarnessLayout] = {
     "claude": _claude_layout(),
     "codex": _codex_layout(),
+    "cursor": _cursor_layout(),
 }
 
 
@@ -354,19 +399,20 @@ def default_root(layout: HarnessLayout, home: Path) -> Path:
 
     Claude's install is project-scoped, so its default is the cwd (``.``).  A
     layout with ``root_env`` resolves through that env var — for Codex the
-    documented ``${CODEX_HOME:-$HOME/.codex}`` — because Codex reads its hooks
-    only from the HOME-scoped ``hooks.json``: a cwd default would inspect and
-    "upgrade" the dead project-local path this seam replaces, and report
-    success while nothing is captured (#3818).
+    documented ``${CODEX_HOME:-$HOME/.codex}`` and for Cursor the analogous
+    ``${CURSOR_HOME:-$HOME/.cursor}`` — because each reads its hooks only from
+    the HOME-scoped ``hooks.json``: a cwd default would inspect and "upgrade"
+    the dead project-local path this seam replaces, and report success while
+    nothing is captured (#3818, #3819).
 
     The returned root is ALWAYS absolute and ``~``-expanded.  Returning the
-    env value verbatim registered a command Codex could never resolve: a
+    env value verbatim registered a command the harness could never resolve: a
     literal ``CODEX_HOME=~/.codex`` (a tilde written into a config file is
     never shell-expanded) stayed a literal ``~`` directory, and a relative
-    ``CODEX_HOME=relcodex`` registered ``relcodex/hooks/...`` — which Codex
-    resolves against the SESSION cwd, so it silently captured nothing while
-    ``install`` printed success.  A relative env value is anchored at the same
-    HOME-scoped base the documented fallback uses, so the root is
+    ``CODEX_HOME=relcodex`` registered ``relcodex/hooks/...`` — which the
+    harness resolves against the SESSION cwd, so it silently captured nothing
+    while ``install`` printed success.  A relative env value is anchored at the
+    same HOME-scoped base the documented fallback uses, so the root is
     deterministic and ``install``/``status`` can never disagree (#3818).
     """
     if layout.root_env is None:
@@ -1025,12 +1071,20 @@ def _invokes_script(command: str, script_name: str,
 def _entry_command_dicts(entry: object, script_name: str | None = None,
                          hooks_dir: str | None = None,
                          root: str | os.PathLike[str] | None = None,
+                         *, flat: bool = False,
                          ) -> list[dict]:
     """EVERY child command dict in ``entry`` that invokes our script.
 
     A wrapper entry may hold the same command more than once; checking only
     the first would leave the second untimed (Claude Code cancels it at its
     1.5 s default) while ``detect_install`` reported the install current.
+
+    ``flat`` selects the Cursor shape: the ENTRY ITSELF is the command dict
+    (``{"command": …}``), with no ``hooks`` array.  That is not a cosmetic
+    difference — Cursor's validator rejects a nested entry and invalidates the
+    whole ``hooks.json``, so reading a flat entry as "not ours" would append a
+    duplicate that breaks the file, and writing a nested one would silently
+    disable every Cursor hook (#3819).
     """
     if not isinstance(entry, dict):
         return []
@@ -1051,6 +1105,19 @@ def _entry_command_dicts(entry: object, script_name: str | None = None,
         return script_name is None or _invokes_script(
             command, script_name, hooks_dir, root)
 
+    if flat:
+        # Cursor's schema accepts ``type`` omitted (defaults to "command") or
+        # "command"; anything else (a prompt hook) is not a command hook.
+        if entry.get("type") not in (None, "command"):
+            return []
+        command = entry.get("command")
+        if not isinstance(command, str):
+            return []
+        if script_name is not None and not _invokes_script(
+                command, script_name, hooks_dir, root):
+            return []
+        return [entry]
+
     inner = entry.get("hooks")
     if isinstance(inner, list):
         return [item for item in inner if _ok(item)]
@@ -1059,7 +1126,8 @@ def _entry_command_dicts(entry: object, script_name: str | None = None,
 
 def _entry_command_dict(entry: object, script_name: str | None = None,
                         hooks_dir: str | None = None,
-                        root: str | os.PathLike[str] | None = None) -> dict | None:
+                        root: str | os.PathLike[str] | None = None,
+                        *, flat: bool = False) -> dict | None:
     """The dict carrying ``command`` for a nested (matcher) entry.
 
     Claude Code requires ``{"type": "command", "command": …}`` inside an
@@ -1072,9 +1140,15 @@ def _entry_command_dict(entry: object, script_name: str | None = None,
     would miss a hook that is not first and leave the load-bearing ``timeout``
     unset).  Returns ``None`` for anything malformed rather than raising —
     malformed entries are treated as foreign and left untouched.
+
+    ``flat`` is Cursor's entry shape — the entry IS the command dict (#3819).
     """
     if not isinstance(entry, dict):
         return None
+    if flat:
+        found = _entry_command_dicts(entry, script_name, hooks_dir, root,
+                                     flat=True)
+        return found[0] if found else None
 
     inner = entry.get("hooks")
     if isinstance(inner, list):
@@ -1094,9 +1168,11 @@ def _entry_command_dict(entry: object, script_name: str | None = None,
 
 def _entry_is_ours(entry: object, script_name: str,
                    hooks_dir: str | None = None,
-                   root: str | os.PathLike[str] | None = None) -> bool:
+                   root: str | os.PathLike[str] | None = None,
+                   *, flat: bool = False) -> bool:
     """True when an entry invokes our ``script_name`` under ``hooks_dir``."""
-    return _entry_command_dict(entry, script_name, hooks_dir, root) is not None
+    return _entry_command_dict(entry, script_name, hooks_dir, root,
+                               flat=flat) is not None
 
 
 def _load_settings(path: Path | None) -> tuple[dict | None, str | None]:
@@ -1249,7 +1325,8 @@ def _settings_findings(layout: HarnessLayout, data: dict,
             ))
             continue
         ours = [e for e in entries
-                if _entry_is_ours(e, spec.name, layout.hooks_dir, root)]
+                if _entry_is_ours(e, spec.name, layout.hooks_dir, root,
+                                  flat=layout.flat_entry)]
         if not ours:
             findings.append(Finding(
                 "missing-hook-entry",
@@ -1261,20 +1338,21 @@ def _settings_findings(layout: HarnessLayout, data: dict,
         expected_command = _spec_command(layout, spec, root)
         for entry in ours:
             for inner in _entry_command_dicts(entry, spec.name,
-                                              layout.hooks_dir, root):
-                # Codex runs the command from its own cwd, so a relative or
-                # stale-path registration is a silent no-capture — flag it as
-                # drift `upgrade` repairs (Claude's ``$CLAUDE_PROJECT_DIR``
-                # form is deliberately left alone, so this is gated on the
-                # absolute-command layout).
+                                              layout.hooks_dir, root,
+                                              flat=layout.flat_entry):
+                # The harness runs the command from its own cwd, so a relative
+                # or stale-path registration is a silent no-capture — flag it
+                # as drift `upgrade` repairs (Claude's
+                # ``$CLAUDE_PROJECT_DIR`` form is deliberately left alone, so
+                # this is gated on the absolute-command layout).
                 if (layout.absolute_command
                         and inner.get("command") != expected_command):
                     findings.append(Finding(
                         "settings-stale-command",
                         f"{spec.event} entry for {spec.name} runs "
                         f"{inner.get('command')!r}; expected the absolute "
-                        f"path {expected_command!r} (Codex resolves the "
-                        "command from the session cwd)",
+                        f"path {expected_command!r} ({layout.harness} "
+                        "resolves the command from its own cwd)",
                         script=spec.name, event=spec.event,
                     ))
                 if spec.timeout is None:
@@ -1515,7 +1593,8 @@ def is_installed(root: str | os.PathLike[str], harness: str = "claude") -> bool:
             for spec in layout.scripts:
                 entries = hooks.get(spec.event)
                 if isinstance(entries, list) and any(
-                    _entry_is_ours(e, spec.name, layout.hooks_dir, root)
+                    _entry_is_ours(e, spec.name, layout.hooks_dir, root,
+                                   flat=layout.flat_entry)
                     for e in entries
                 ):
                     return True
@@ -1566,16 +1645,26 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
             entries = []
             hooks[spec.event] = entries
         ours = [e for e in entries
-                if _entry_is_ours(e, spec.name, layout.hooks_dir, root)]
+                if _entry_is_ours(e, spec.name, layout.hooks_dir, root,
+                                  flat=layout.flat_entry)]
         if not ours:
-            inner = {"type": "command",
-                     "command": _spec_command(layout, spec, root)}
-            if spec.timeout is not None:
-                inner["timeout"] = spec.timeout
-            fresh: dict = {"hooks": [inner]}
-            if layout.matcher:
-                fresh["matcher"] = ""
-            entries.append(fresh)
+            command = _spec_command(layout, spec, root)
+            if layout.flat_entry:
+                # Cursor's shape: the entry IS the command dict.  Nesting it
+                # would fail Cursor's validator and disable EVERY hook in the
+                # file — the silent no-capture this seam exists to prevent.
+                fresh = {"command": command}
+                if spec.timeout is not None:
+                    fresh["timeout"] = spec.timeout
+                entries.append(fresh)
+            else:
+                inner = {"type": "command", "command": command}
+                if spec.timeout is not None:
+                    inner["timeout"] = spec.timeout
+                fresh: dict = {"hooks": [inner]}
+                if layout.matcher:
+                    fresh["matcher"] = ""
+                entries.append(fresh)
             if spec.timeout is None:
                 actions.append(
                     f"settings: added {spec.event} entry for {spec.name}")
@@ -1588,7 +1677,8 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
         expected_command = _spec_command(layout, spec, root)
         for entry in ours:
             for inner in _entry_command_dicts(entry, spec.name,
-                                              layout.hooks_dir, root):
+                                              layout.hooks_dir, root,
+                                              flat=layout.flat_entry):
                 if (layout.absolute_command
                         and inner.get("command") != expected_command):
                     actions.append(
