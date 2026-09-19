@@ -19,7 +19,8 @@
  * which is confusing to a new sign-up. So this form is an INTAKE PRODUCER, not
  * an email sender: RECEIVING IS THE MECHANISM AND SENDING IS THE EXCEPTION.
  * It routes INTO intake. No SEND-capable credential is provisioned for it —
- * not because sending is forbidden, but because the queue leg needs none.
+ * not because sending is forbidden, but because the queue leg needs no way to
+ * send (it carries the intake's own inbound secret; see the correction below).
  *
  * ── WIRED AT THE EXISTING INTAKE (relay ruling, tortoise #2409) ─────────────
  * The endpoint is the intake that already exists — one intake, many producers
@@ -37,8 +38,10 @@
  *
  *   1. THE QUEUE LEG DOES CARRY A SECRET — the intake's own inbound shared
  *      secret. It is not a send-capable credential and it cannot send mail; the
- *      earlier note here that this leg “needs none” was premised on a
- *      credential-free intake and is corrected rather than deleted.
+ *      earlier UNQUALIFIED note here that this leg “needs none” was premised on
+ *      a credential-free intake, and it is corrected rather than deleted (the
+ *      qualified claim — no send-capable credential — still holds and is the
+ *      one that matters).
  *   2. THE SOURCE NAME MUST BE ENV-NAME-SAFE. The intake derives the variable
  *      name by uppercasing the source, so `website/contact` would ask for
  *      `INBOUND_SECRET_WEBSITE/CONTACT` — not a name any platform can set. It
