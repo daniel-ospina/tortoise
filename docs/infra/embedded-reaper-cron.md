@@ -21,7 +21,7 @@ so orphans are cleaned within 2-3 spawn cycles).
 > state ≥ 10 min with no live suite markers — the #1642 FIX 3
 > discriminator that #1557's blanket live-pid protection lacked) plus
 > stale_socket leftovers, so a running test suite's servers are never
-> disturbed. The singleton lock (~/.tortoise/.reaper.lock) makes concurrent
+> disturbed. The singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`) makes concurrent
 > runs safe.
 >
 > **Discovery is scoped (#4068).** Pass 2 enumerates depth-1 tempdir entries
@@ -88,7 +88,7 @@ Load: `launchctl load ~/Library/LaunchAgents/com.tortoise.embedded-reaper.plist`
   The install script schedules with `--timeout 300` (a 10-min cadence has
   room for a 5-min sweep; the 120s default is too tight for a multi-hundred
   orphan backlog on a loaded box — observed abort mid-cleanup).
-- Singleton lock (`~/.tortoise/.reaper.lock`) prevents cron/manual overlap.
+- Singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`) prevents cron/manual overlap.
 - Only **no-path tempdir orphans** are killed; path-based servers (stable
   singleton, CWD leaks) are NEVER touched (that's Child 2's migration job).
 - `--no-dry-run` also **rmtrees dead-pid leftover dirs** (`stale_socket`
