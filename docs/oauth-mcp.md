@@ -220,6 +220,13 @@ inspection against the migration rather than by a test.
 | `TORTOISE_OAUTH_CIMD` | `1` | `0`/`false`/`no`/`off` disables both the metadata flag and the fetch path |
 | `TORTOISE_OAUTH_CIMD_SAME_ORIGIN` | `1` | `0` relaxes "non-loopback `redirect_uris` must be same-origin with the client_id URL" — the single lever if a future client's document legitimately spans hosts |
 
+Both knobs resolve through the shared env-truthiness contract (`tortoise/env_truthy.py`, #4097),
+so any truthy spelling (`1`/`true`/`yes`/`on`, any case) enables and any falsy spelling
+(`0`/`false`/`no`/`off`) disables. **An EMPTY value (`TORTOISE_OAUTH_CIMD=`) or a
+whitespace-only one means *unset*, i.e. the default — it does NOT disable the knob.**
+Before #4097 an empty value silently disabled `TORTOISE_OAUTH_CIMD` (and, worse, silently
+*relaxed* `TORTOISE_OAUTH_CIMD_SAME_ORIGIN`); set either to `0` to actually turn it off.
+
 ### Limitations (deliberate)
 
 - The rate-limit and fetch-cache stores are in-process, so the real bound is

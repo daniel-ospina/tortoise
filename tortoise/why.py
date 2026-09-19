@@ -53,6 +53,7 @@ import logging
 import os
 import re
 
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
 from .live import is_terminal_status  # #2490: terminal rows override has_ep
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
@@ -94,12 +95,9 @@ def w4_enrichment_enabled() -> bool:
     """Resolve the W4 enrichment flag (honored on ALL enriched surfaces).
 
     Default OFF — production exposure is gated by the epic's user-exposure
-    gate. Truthy values: 1/true/yes/on.
+    gate. Truthy values: the declared contract (1/true/yes/on) — #4097.
     """
-    v = os.environ.get(W4_FLAG_ENV)
-    if v is None:
-        return False
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get(W4_FLAG_ENV))
 
 
 # ── The shared assembly ────────────────────────────────────────────────────

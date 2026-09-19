@@ -49,6 +49,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import API_KEY_PREFIXES, hash_api_key
+from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -6021,8 +6022,7 @@ def _signup_email_confirm() -> bool:
     Supabase's SMTP project-wide email-send bucket). false|0|no|off (case-insensitive) opt
     back into the confirmation-email funnel.
     """
-    val = os.environ.get("TORTOISE_SIGNUP_EMAIL_CONFIRM", "true").strip().lower()
-    return val not in ("false", "0", "no", "off")
+    return env_flag("TORTOISE_SIGNUP_EMAIL_CONFIRM", True)
 
 
 def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
@@ -17094,7 +17094,7 @@ def _linking_available() -> bool:
     via the Management API). Fail-closed: False until explicitly enabled —
     the banner's promise-free variant and the link-intent 503 depend on it.
     """
-    return os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED", "") == "1"
+    return is_truthy(os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED"))
 
 
 def _identity_admin_user(user_id: str) -> dict | None:
@@ -18068,6 +18068,15 @@ async def session_context(org: dict = Depends(get_current_org_gated)):  # noqa: 
         raise HTTPException(status_code=500, detail="Context unavailable")  # noqa: B904
 
 
+def _volunteer_slo_enforced() -> bool:
+    """`TORTOISE_VOLUNTEER_ENFORCE_SLO` — perf lane / induced-timeout tests only.
+
+    #4097: the single resolution point for that knob (``volunteer_context`` calls
+    it), through the declared truthy contract.
+    """
+    return is_truthy(os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO"))
+
+
 @app.post("/v1/context")
 async def volunteer_context(
     body: VolunteerContextRequest,
@@ -18134,8 +18143,7 @@ async def volunteer_context(
     # so a slow CI machine can never randomly empty a healthy request; the
     # HARD ceiling (8 × SLO) below degrades ANY pathological read (never 503,
     # never a hung caller) with the same fail-open shape.
-    enforce_slo = os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO", "").strip() \
-        .lower() in ("1", "true", "yes", "on")
+    enforce_slo = _volunteer_slo_enforced()
     completed = False
     try:
         # #1676 offload: the canonical pipeline is CPU/DB-blocking (hybrid
@@ -20030,7 +20038,7 @@ def _telemetry_strict() -> bool:
 
     Reading it at import time would both (a) make the flag untestable and
     (b) let a dev flag set before boot survive into production."""
-    return os.environ.get(_TELEMETRY_STRICT_ENV) == "1"
+    return is_truthy(os.environ.get(_TELEMETRY_STRICT_ENV))
 
 
 def _report_unregistered(where: str, subject: str,

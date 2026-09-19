@@ -221,7 +221,7 @@ jobs:
     # Epic #1647 Task 10 Step 1a (P4): the pmv validate job is now a docker
     # lane (same URI mechanics as the fast matrix — job-level URI + the
     # EXPECT_URI tripwire signal). The carve-out exemption is the conftest
-    # TORTOISE_TEST_NO_REDIRECT list (17 stems) — no CARVE_OUT needed (URI
+    # TORTOISE_TEST_NO_REDIRECT stem list — no CARVE_OUT needed (URI
     # is set), and the carve-out files stay embedded by exemption.
     env:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
