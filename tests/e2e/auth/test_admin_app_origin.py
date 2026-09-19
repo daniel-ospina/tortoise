@@ -38,7 +38,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from bff_test_helpers import d1_sqlite_files, pick_free_port, require_toolchain, stop
+from bff_test_helpers import pick_free_port, require_toolchain, stop
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
@@ -57,6 +57,19 @@ HANDLE = "a" * 64
 UNKNOWN_HANDLE = "b" * 64
 ACCESS = "mock-access-token"
 
+# This suite's PRIVATE D1 persist dir, set by the `stack` fixture.
+#
+# Without it the suite reads the SHARED `website/apps/dashboard/.wrangler` state,
+# and that state accumulates rows from every other auth suite forever. That is
+# not hypothetical: `test_link_flow.py` seeds a session for handle `"b" * 64`
+# (user-aaa, token seed-access-token), which is exactly this suite's
+# UNKNOWN_HANDLE — so the "unknown handle bounces to sign-in" case resolved a
+# real row and got 200 instead of 302, permanently, once test_link_flow had ever
+# run against that shared state. The assertion was measuring another suite's
+# leftovers. `test_bff_profile_and_email.py` already isolates for this reason;
+# this suite now does too (#4104).
+PERSIST: Path | None = None
+
 
 def _wait(port: int, timeout: float = 90.0) -> bool:
     deadline = time.time() + timeout
@@ -68,14 +81,29 @@ def _wait(port: int, timeout: float = 90.0) -> bool:
     return False
 
 
+def _d1_files() -> list[Path]:
+    """The D1 DATABASE files in this suite's isolated persist dir.
+
+    Not simply "the newest *.sqlite": the persist tree also holds
+    `metadata.sqlite` (D1's index) and the observability trace store, and
+    picking one of those seeds a database the Worker never reads — which
+    presents as a route 503 with the schema looking fine in the file, not as a
+    seeding error.
+    """
+    assert PERSIST is not None, "stack fixture must run first"
+    return [
+        p for p in PERSIST.glob("**/d1/**/*.sqlite") if p.name != "metadata.sqlite"
+    ]
+
+
 def _d1_sqlite() -> Path:
     deadline = time.time() + 30
     while time.time() < deadline:
-        files = d1_sqlite_files(DASHBOARD_DIR)
+        files = _d1_files()
         if files:
-            return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+            return max(files, key=lambda p: p.stat().st_mtime)
         time.sleep(0.3)
-    raise RuntimeError(f"no D1 sqlite appeared under {DASHBOARD_DIR}")
+    raise RuntimeError(f"no D1 database sqlite appeared under {PERSIST}")
 
 
 def _warm_d1() -> None:
@@ -91,10 +119,10 @@ def _warm_d1() -> None:
         req.add_header("Cookie", "__Host-session=" + "0" * 64)
         with contextlib.suppress(Exception):
             urllib.request.urlopen(req, timeout=15).read()
-        if d1_sqlite_files(DASHBOARD_DIR):
+        if _d1_files():
             return
         time.sleep(0.3)
-    raise RuntimeError(f"no D1 sqlite appeared under {DASHBOARD_DIR}")
+    raise RuntimeError(f"no D1 database sqlite appeared under {PERSIST}")
 
 
 def _seed() -> None:
@@ -121,7 +149,7 @@ def _seed() -> None:
 
 
 @pytest.fixture(scope="module")
-def stack(_dashboard_dist_built):
+def stack(_dashboard_dist_built, tmp_path_factory):
     require_toolchain()
     node = shutil.which("node")
     wrangler = shutil.which("wrangler")
@@ -136,12 +164,14 @@ def stack(_dashboard_dist_built):
         shutil.rmtree(admin_dst)
     shutil.copytree(BLOG_ADMIN_DIST, admin_dst)
 
-    global APP_PORT, MOCK_PORT, APP, MOCK_URL
+    global APP_PORT, MOCK_PORT, APP, MOCK_URL, PERSIST
     claimed: set[int] = set()
     APP_PORT = pick_free_port(APP_PORT, claimed)
     MOCK_PORT = pick_free_port(MOCK_PORT, claimed)
     APP = f"http://127.0.0.1:{APP_PORT}"
     MOCK_URL = f"http://127.0.0.1:{MOCK_PORT}"
+    # A private D1 for this suite alone — see the PERSIST comment above.
+    PERSIST = tmp_path_factory.mktemp("admin-bff-d1")
 
     env = os.environ.copy()
     env["MOCK_PORT"] = str(MOCK_PORT)
@@ -157,6 +187,7 @@ def stack(_dashboard_dist_built):
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--compatibility-date=2026-08-26",
             "--d1", "SESSIONS",
+            "--persist-to", str(PERSIST),
             "-b", f"SUPABASE_URL={MOCK_URL}",
             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
             # Both the gate's RPC and the proxy's upstream live on the mock.

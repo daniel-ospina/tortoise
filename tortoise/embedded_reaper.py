@@ -3,7 +3,7 @@
 Epic #1647 P4 (Task 10) DEMOTION: this module is now DEV-MACHINE HYGIENE
 ONLY. CI runs the docker lane — the fast matrix provisions falkordb, and
 migrated files construct via the URI-aware redirect (never spawning a
-redislite server); the 17 carve-out files run embedded in the URI-unset
+redislite server); the carve-out files run embedded in the URI-unset
 carve-out job, whose conftest `_redislite_hygiene` session sweeps own their
 own orphan reclamation. Docker halves produce ~0 embedded orphans by
 construction (E2E-7). The reaper keeps its local-dev role: a dev box's
@@ -2634,15 +2634,25 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+# Dependency-free mirror of `tortoise.env_truthy.TRUTHY` (#4097). This module has NO
+# intra-package module-level imports by design (see the module docstring), so it
+# cannot import the shared leaf without dragging in `tortoise/__init__.py` ->
+# redislite. A module-level delegate was measured to break the standalone import
+# purity pinned by
+# tests/test_env_truthy.py::test_reaper_standalone_import_stays_dependency_free;
+# the mirror is held in lockstep with the contract by
+# tests/test_env_truthy.py::test_reaper_mirror_matches_the_contract.
+_ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
 def _env_truthy(raw: str | None) -> bool:
     """Truthy env value: {1,true,yes,on}, case-insensitive.
 
-    #4068: `None` (unset) is False. Mirrors the repo's de-facto truthy
-    convention; the `--full-scan` flag takes precedence over the env var
+    #4068: `None` (unset) is False. Mirrors `tortoise.env_truthy.is_truthy` (see
+    `_ENV_TRUTHY` above); the `--full-scan` flag takes precedence over the env var
     (the `_parse_timeout` CLI > env > default shape).
     """
-    return raw is not None and str(raw).strip().lower() in (
-        "1", "true", "yes", "on")
+    return raw is not None and str(raw).strip().lower() in _ENV_TRUTHY
 
 
 def _lock_holder_pid() -> str:

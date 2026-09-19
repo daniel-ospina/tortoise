@@ -45,6 +45,7 @@ aboutObjects: tortoise
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
 | E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |
+| Read-path latency profile — phase-by-phase measurement of the ask lane, store round-trips, and the captured-turn embedding census (WAVE-R / M1, #4194) | `docs/research/2026-09-19-m1-read-path-latency-profile.md` |
 | Temporal reasoning in competitor agent-memory systems (2026-09-02) | `docs/research/2026-09-02-temporal-reasoning-competitors.md` |
 | Temporal retrieval admission trace — where #2578's temporal evidence is lost (#2976, 2026-09-11) | `docs/research/2026-09-11-2976-temporal-retrieval-trace.md` |
 | Kinds classification-later deep research (#1695) | `docs/research/2026-08-26-classification-later.md` |

@@ -226,9 +226,14 @@ def _enforce_mcp_tool_scope(name: str) -> None:
 
     - legacy full-access keys (scopes None OR legacy_full_access) and OAuth/
       session resolutions (scopes None) pass — existing flows unchanged.
-    - a SCOPED key is enforced: tools in WRITE_TOOL_NAMES need
-      graphs:write; everything else (read tools) needs graphs:read (write
-      implies read — graphs:write satisfies reads).
+    - a SCOPED key is enforced: the tool's registry entry carries the declared
+      `writes` flag — a `writes=True` tool needs graphs:write, everything else
+      needs graphs:read (write implies read — graphs:write satisfies reads).
+      `WRITE_TOOL_NAMES` is the derived view of that flag (#4170).
+    - an UNRESOLVABLE name is DENIED (`AuthorizationError`), never served as a
+      read. The old else-branch treated any name missing from the parallel
+      write list as a read, so a writer absent from that list was reachable by
+      a graphs:read-only key (#4170).
     - deleg=0 children without a data scope never reach here (the
       middleware rejects them at resolution); deleg=0 children WITH a data
       scope are routed to their own graph by _get_org_sdk and enforced
@@ -242,7 +247,14 @@ def _enforce_mcp_tool_scope(name: str) -> None:
     if scopes is None or _current_legacy_full_access.get():
         return
     have = set(scopes)
-    if name in WRITE_TOOL_NAMES:
+    entry = get_tool_by_name().get(name)
+    if entry is None:
+        # #4170: an unresolvable name is DENIED, never served as a read. The
+        # default used to be "read", so a write missing from the parallel list
+        # was reachable from a graphs:read-only key.
+        raise AuthorizationError(
+            f"Unknown tool {name} — denied (not present in the registry).")
+    if entry.writes:
         if "graphs:write" not in have:
             raise AuthorizationError(
                 f"Key lacks graphs:write scope for tool {name}.")
@@ -414,44 +426,23 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 })
 
 
-# #308 (R3, scoping delta 11): the explicit WRITE set for read-velocity
-# classification — tools/call for a tool NOT in this set counts as a read.
-# NOT derived as the complement of _QUOTA_GATED: tortoise_ingest is
-# _quota_gated-wrapped but absent from that frozenset, and the demo-create
-# tool writes Points via _enforce_quota without the wrapper. Membership is
-# asserted by an introspective test (plan Task 11) so a new write tool cannot
-# silently be counted as a read.
-WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
-    "tortoise_ingest",               # bulk write (wrapped, not in _QUOTA_GATED)
-    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph,
-    "tortoise_mine_conversations", "tortoise_approve_merge",
-    "tortoise_promote_point",
-    # C5 #2114 (code-review P1): the destructive/mutating _rw() tools a
-    # graphs:read-only key must NEVER invoke — a read-only key deleting
-    # points/entities or mutating operators/sources is a write-scope
-    # bypass. Membership asserted by test_every_node_creating_tool_* +
-    # test_no_write_tool_counted_as_read (extended in C5).
-    "tortoise_delete_point", "tortoise_delete", "tortoise_delete_entity",
-    "tortoise_set_point_baseline", "tortoise_set_source_tier",
-    "tortoise_annotate_operator",
-    # tortoise_pack_install MERGEs :PackManifest/:PackInstall into the
-    # tenant graph (write) — re-review P2: it was missing (classified read).
-    "tortoise_pack_install",
-    # C5 #2114 (re-review 3): REST/MCP parity + write-cache tools — session
-    # capture writes episodic Points (REST twin requires graphs:write); the
-    # onboarding index/demo/toggle tools write DEFAULT-graph/org state;
-    # get_source_reliability write-through refreshes the Source cache.
-    "tortoise_session_capture",
-    "tortoise_graph_set_recording",  # #2302: per-graph recording override write (team:manage-gated in-function; a graphs:read-only key must never reach it) — REST PATCH /v1/graphs twin
-    "tortoise_onboarding_github_index",
-    "tortoise_onboarding_session_recording",
-    "tortoise_get_source_reliability",
-    "tortoise_onboarding_github_connect",  # stores credentials + org state
-    # main-side #2156 landed during the C5 rebase — onboarding_seed writes
-    # the two anchor Subjects into the DEFAULT graph (derived write-set test
-    # caught it at the rebased head).
-    "tortoise_onboarding_seed",
-})
+# #4170: the write permission lives on each ToolDefinition entry (`writes`),
+# so WRITE_TOOL_NAMES is DERIVED — a rename or a merge edits the entry and the
+# permission travels with it. It is no longer a hand-maintained parallel list
+# that a new writer could silently be missing from.
+#
+# #308 (R3, scoping delta 11): this is also the read-velocity classification
+# set — tools/call for a tool NOT in it counts as a read. It is NOT the
+# complement of _QUOTA_GATED: tortoise_ingest is _quota_gated-wrapped but
+# absent from that frozenset, and the demo-create tool writes Points via
+# _enforce_quota without the wrapper.
+#
+# The `# noqa: E402` is deliberate: the bottom `tool_registry` import exists
+# for the adapter, and importing the derived helpers here keeps this module's
+# import order unchanged (tool_registry does not import mcp_server — no cycle).
+from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noqa: E402
+
+WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
 
 
 # #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
@@ -3115,7 +3106,16 @@ def tortoise_session_capture(conversation: list[dict],
                 and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             with contextlib.suppress(Exception):
                 _record_capture_last_error(org_id, harness, str(detail))
-        return {"error": str(detail), "status": status}
+        # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
+        # — the points-estimate gate, the cohort cost cap, or the
+        # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
+        # ERR_QUOTA code rather than making the caller interpret a bare status.
+        # One mapping site covers every 402 this impl can raise, so REST and
+        # MCP cannot drift on the class of a refusal.
+        out = {"error": str(detail), "status": status}
+        if status == 402:
+            out["code"] = ERR_QUOTA
+        return out
 
 
 def tortoise_graph_set_recording(recording: bool | None,

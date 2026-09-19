@@ -22,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 from prometheus_client import Counter, Histogram, generate_latest
 
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
+
 logger = logging.getLogger(__name__)
 
 # Auth functions imported lazily (in _Handler.do_GET) to avoid
@@ -1660,9 +1662,9 @@ def _healthz_required() -> bool:
 
     The previous exact ``== "1"`` match made ``true``/``yes``/``on`` silently
     do nothing — a deploy-time contract believed to be enforced and not.
+    #4097: resolved through the declared truthy contract.
     """
-    return (os.environ.get("TORTOISE_HEALTHZ_REQUIRED", "").strip().lower()
-            in ("1", "true", "yes", "on"))
+    return is_truthy(os.environ.get("TORTOISE_HEALTHZ_REQUIRED"))
 
 
 def resolve_healthz_target(port: int | None = None, bind: str | None = None,
