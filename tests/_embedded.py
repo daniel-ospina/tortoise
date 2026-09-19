@@ -20,6 +20,7 @@ import contextlib
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 
@@ -41,6 +42,17 @@ SESSION_TMPDIRS: list[str] = []
 def register_session_tmpdir(path: str) -> None:
     """Register a session-scoped test tree for end-of-session reclamation."""
     SESSION_TMPDIRS.append(path)
+
+
+def reclaim_tmpdirs(dirs: list[str]) -> int:
+    """rmtree each tree in ``dirs`` (best-effort) and return the count.
+
+    Split out from the session reclaimer so the removal primitive is unit-
+    testable without draining the live ``SESSION_TMPDIRS`` registry mid-session.
+    """
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    return len(dirs)
 
 
 # ── #3546: ONE process-wide embedded construction lock ────────────────────
@@ -262,10 +274,13 @@ def has_falkor() -> bool:
     if _HAS_FALKOR is None:
         try:
             from redislite.falkordb_client import FalkorDB  # noqa: F401
-            db_path = os.path.join(
-                tempfile.mkdtemp(prefix="tortoise_probe_"), "probe.db")
+            tmpdir = tempfile.mkdtemp(prefix="tortoise_probe_")
+            db_path = os.path.join(tmpdir, "probe.db")
             proj = FalkorProjection(db_path, graph_name="test")
             proj.close()
+            # #4096: reclaim the probe tree — one per process before _HAS_FALKOR
+            # caches, and the reaper never reaps a .db-only tree.
+            shutil.rmtree(tmpdir, ignore_errors=True)
             _HAS_FALKOR = True
         except Exception:
             _HAS_FALKOR = False

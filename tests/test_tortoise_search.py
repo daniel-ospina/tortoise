@@ -22,19 +22,35 @@ from tortoise.sdk import TortoiseSDK
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-@pytest.fixture
-def sdk():
-    sdk = _new_sdk()
-    yield sdk
-    sdk.close()
-    # #4096: reclaim this fixture's temp tree on teardown (the _new_sdk helper
-    # is shared with test bodies, so ownership stays with the fixture).
-    shutil.rmtree(os.path.dirname(sdk._db_path), ignore_errors=True)
+# #4096: every `_new_sdk()` call site registers its SDK here. This module's SDK
+# tests take `sdk=None` with an in-body fallback (so the module stays direct-run
+# compatible), which means pytest never injects a `sdk` fixture — so ownership of
+# the temp tree has to sit with the call sites, not with a fixture that never
+# runs. The autouse reclaimer drains this after each test: **close first**, then
+# reclaim (never remove a tree under a live redislite server — #3685/#4068).
+_NEW_SDKS: list[TortoiseSDK] = []
+
+
+@pytest.fixture(autouse=True)
+def _reclaim_search_trees():
+    """#4096: close + reclaim every `_new_sdk()` tree this test created."""
+    yield
+    while _NEW_SDKS:
+        sdk = _NEW_SDKS.pop()
+        try:  # noqa: SIM105
+            sdk.close()
+        except Exception:
+            pass
+        tree = os.path.dirname(sdk._db_path) if sdk._db_path else None
+        if tree:
+            shutil.rmtree(tree, ignore_errors=True)
 
 
 def _new_sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_search_test_"), "test.db")
-    return TortoiseSDK(db_path)
+    sdk = TortoiseSDK(db_path)
+    _NEW_SDKS.append(sdk)
+    return sdk
 
 
 # ── search_points (unit — no DB) ─────────────────────────────────────

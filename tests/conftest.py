@@ -211,12 +211,17 @@ def _reclaim_session_tmpdirs():
     this is set up early (regardless of which tests request the shared trees) and
     torn down LAST — after both sweeps. It reads the registry the shared fixtures
     populate (`tests._embedded.SESSION_TMPDIRS`).
+
+    The teardown-last edge is **structural, not alphabetical**: `_redislite_hygiene`
+    declares this fixture as a dependency, so setup runs reclaim -> redislite ->
+    server_graph and reverse-order teardown runs server_graph -> redislite ->
+    reclaim. (pytest orders same-scope autouse fixtures by NAME, not declaration
+    order — a rename would silently invert a declaration-order assumption.)
     """
     yield
     from tests import _embedded as _embedded_mod
     dirs, _embedded_mod.SESSION_TMPDIRS[:] = list(_embedded_mod.SESSION_TMPDIRS), []
-    for d in dirs:
-        shutil.rmtree(d, ignore_errors=True)
+    _embedded_mod.reclaim_tmpdirs(dirs)
 
 
 @pytest.fixture
@@ -368,7 +373,7 @@ def shared_embedded_db():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _redislite_hygiene():
+def _redislite_hygiene(_reclaim_session_tmpdirs):
     """Bound redislite orphan accumulation (#1005) + index-pid files (#1231).
 
     Session start: register this suite in the active-suite registry and run
