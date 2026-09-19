@@ -149,11 +149,12 @@ EPHEMERAL_PREFIXES = (
 # matching root; see _socket_walk_roots for the measurement that rules out
 # simply walking deeper (on a 23k-entry tempdir the depth-3 walk blew past
 # SOCKET_WALK_TIMEOUT, which also fails the walk closed). Deliberately a
-# SUBSET of EPHEMERAL_PREFIXES: each entry costs one `find` per matching
-# tempdir child, and the members omitted here hold their socket dirs directly.
+# SUBSET of EPHEMERAL_PREFIXES: each entry costs one extra depth-1 scan per
+# matching tempdir child, and the members omitted here hold their socket dirs
+# directly.
 # NOTE: the prefix is only the first filter — the root must also carry
 # SESSION_ROOT_MARKER, or `tt_`'s long-standing use as a plain test-scratch
-# prefix turns this into hundreds of extra `find` roots (see
+# prefix turns this into hundreds of extra scan roots (see
 # _socket_walk_roots).
 NESTED_SCRATCH_PREFIXES = ("tt_",)
 
@@ -237,8 +238,11 @@ ZERO_CLIENT_STATE_PATH = os.path.join(
 SOCKET_WALK_TIMEOUT = 20.0
 
 # #3752: share of SOCKET_WALK_TIMEOUT that the GLOBAL (tempdir) root keeps no
-# matter how many nested session roots are walked. The nested roots' own
-# timeout is capped at ``remaining - GLOBAL_WALK_RESERVE_S``, so they can
+# matter how many nested session roots are walked. A nested root's deadline is
+# capped at ``deadline - reserve``, where the reserve IN FORCE is
+# ``min(GLOBAL_WALK_RESERVE_S, budget / 2)`` — the cap matters because a caller
+# may legally pass a small budget, and an uncapped reserve would exceed it and
+# zero the nested pass. So they can
 # never consume the reserve: the global pass is the only one that reaches
 # non-session dirs, and letting N nested roots starve it would silently stop
 # cleaning ordinary killed-suite residue. In the common case (1-2 cheap
@@ -1331,8 +1335,8 @@ def _iter_candidate_dirs_over_roots(tmpdir: str, *, predicate,
     the reason `tt_` alone is not a sufficient filter.
 
     Roots are scanned nested-first, and a nested root may only spend
-    ``budget - GLOBAL_WALK_RESERVE_S``, so it can never starve the global
-    pass — which is the only one that reaches non-session dirs. ``complete``
+    ``min(GLOBAL_WALK_RESERVE_S, budget / 2)`` less than the global pass's
+    deadline, so it can never starve the global pass — which is the only one that reaches non-session dirs. ``complete``
     is the AND over every root: a partial set from ANY root is never
     reported as a finished scan.
 
@@ -1346,16 +1350,19 @@ def _iter_candidate_dirs_over_roots(tmpdir: str, *, predicate,
     """
     if budget is None:
         budget = SOCKET_WALK_TIMEOUT
-    roots = _socket_walk_roots(tmpdir)          # discovery I/O, not charged
+    roots, complete = _socket_walk_roots_with_completeness(tmpdir)
+    # The reserve is capped at HALF the budget: a caller may legally pass a
+    # small one (a test does), and an uncapped GLOBAL_WALK_RESERVE_S would
+    # then exceed it, driving every nested root's deadline into the past —
+    # silently zeroing the nested pass this function exists for.
+    reserve = min(GLOBAL_WALK_RESERVE_S, max(0.0, budget) / 2.0)
     deadline = time.monotonic() + budget
     dirs: list[str] = []
-    complete = True
     for idx, root in enumerate(roots):
         root_deadline: float | None = deadline
         if idx < len(roots) - 1:
             # a nested session root; the last root returned is the tempdir
-            root_deadline = max(time.monotonic(),
-                                deadline - GLOBAL_WALK_RESERVE_S)
+            root_deadline = max(time.monotonic(), deadline - reserve)
         res = _iter_candidate_dirs(root, predicate=predicate,
                                    deadline=root_deadline)
         dirs.extend(res.dirs)
@@ -1434,10 +1441,13 @@ def _socket_walk_roots(tmpdir: str) -> list[str]:
 
     Widening the single walk to maxdepth 3 is NOT the fix: on a 23k-entry
     tempdir the depth-3 walk measured 53-55s across two independent runs on a
-    loaded box — over ``SOCKET_WALK_TIMEOUT`` — while depth 2 measured 6.2s
+    loaded box — over ``SOCKET_WALK_TIMEOUT``, and a timed-out walk FAILS
+    CLOSED — while depth 2 measured 6.2s
     under light load and 18.0s under heavy load on the same tree. The
     load-bearing figure is the depth-3 blow-out past the 20s budget (a
-    timed-out walk returns [], i.e. fail closed), which is exactly the
+    timed-out walk fails closed — pre-#4068 it returned `[]`, post-#4068 it
+    returns the partial set with `complete=False`, and neither is reaped
+    from), which is exactly the
     pollution-disables-cleanup failure mode of #1449; the depth-2 variance is
     why the budget is a deadline rather than a per-invocation timeout. So the
     global pass keeps its cheap depth and each recognised scratch root gets
@@ -1462,20 +1472,54 @@ def _socket_walk_roots(tmpdir: str) -> list[str]:
     session roots (0 or 1 in the common case), so extending the prefix list
     stays cheap.
     """
+    roots, _complete = _socket_walk_roots_with_completeness(tmpdir)
+    return roots
+
+
+def _socket_walk_roots_with_completeness(tmpdir: str) -> tuple[list[str], bool]:
+    """`_socket_walk_roots` plus whether the root set was enumerated fully.
+
+    #3752 review: root discovery had NO completeness channel, so an `OSError`
+    from the scandir (an unreadable/removed tempdir, a transient FS error
+    mid-iteration) silently yielded `[tmpdir]` and the caller reported
+    ``complete=True`` — a "finished" scan that enumerated none of the nested
+    session roots, which are the only pass that reaches per-session residue.
+    That contradicts the module's own rule that a partial scan is never
+    reported as a finished one.
+    """
     nested: list[str] = []
+    complete = True
     try:
         for entry in os.scandir(tmpdir):
             if not entry.is_dir(follow_symlinks=False):
                 continue
             if not entry.name.startswith(NESTED_SCRATCH_PREFIXES):
                 continue
-            if not os.path.exists(
-                    os.path.join(entry.path, SESSION_ROOT_MARKER)):
+            marker = os.path.join(entry.path, SESSION_ROOT_MARKER)
+            # NOT `os.path.exists`: it swallows every OSError and returns
+            # False, so an unreadable marker is indistinguishable from an
+            # absent one and the candidate would be dropped with the root set
+            # still reading as complete — the exact "finished scan that saw no
+            # session root" this function exists to prevent. `os.stat` is
+            # explicit: ENOENT means "not a session root", anything else means
+            # "cannot decide", which is an incomplete root set.
+            try:
+                os.stat(marker)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.warning(
+                    "session-root probe failed for %s (%s) — root set "
+                    "incomplete", entry.path, exc)
+                complete = False
                 continue
             nested.append(entry.path)
-    except OSError:
-        pass
-    return [*nested, tmpdir]
+    except OSError as exc:
+        logger.warning(
+            "session-root discovery failed for %s (%s) — root set incomplete",
+            tmpdir, exc)
+        complete = False
+    return [*nested, tmpdir], complete
 
 
 def _classify_dir(dbdir: str, socket_path: str,

@@ -153,16 +153,16 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
         stale_dirs = []
         census_truncated = False
         if deep:
-            import time as _time
-
             from tortoise.embedded_reaper import (
-                SOCKET_WALK_TIMEOUT,
                 _registry_for,
                 _scan_socket_dirs,
             )
+            # #3752: `budget` is a DURATION, and the walk takes its deadline
+            # after root discovery — so this must pass the budget, never a
+            # pre-computed absolute cutoff (which the walk has no parameter
+            # for since the nested-session-root merge).
             scan = _scan_socket_dirs(
-                __import__("tempfile").gettempdir(), full_scan=True,
-                deadline=_time.monotonic() + SOCKET_WALK_TIMEOUT)
+                __import__("tempfile").gettempdir(), full_scan=True)
             census_truncated = not scan.complete
             for d in scan.dirs:
                 try:

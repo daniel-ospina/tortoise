@@ -297,12 +297,13 @@ def test_socket_walk_reaches_into_a_nested_session_scratch_root(tmp_path):
     suite's dead socket dirs would stop being swept by the host reaper.
 
     Widening the single walk to depth 3 is not the fix: measured on a
-    23k-entry tempdir, depth 2 took 6.2s and depth 3 took 53.3s, over
-    `SOCKET_WALK_TIMEOUT` — and a timed-out walk returns [], re-opening the
-    #1449 pollution-disables-cleanup hole. The bounded nested pass this
-    asserts costs one extra depth-1 `os.scandir` per recognised session root
-    instead (`_iter_candidate_dirs_over_roots`; the `find` subprocess this
-    was originally written against no longer exists — #4068)."""
+    23k-entry tempdir, the depth-2 walk took 6.2s and depth 3 took 53.3s,
+    over `SOCKET_WALK_TIMEOUT` — and a timed-out walk FAILS CLOSED (the
+    post-#4068 census returns the partial set it found with
+    `complete=False`, where the pre-#4068 `find` walk returned `[]`),
+    re-opening the #1449 pollution-disables-cleanup hole. The bounded nested
+    pass this asserts costs one extra depth-1 `os.scandir` per recognised
+    session root instead (`_iter_candidate_dirs_over_roots`)."""
     from tortoise.embedded_reaper import _scan_socket_dirs
 
     direct = tmp_path / "redislite_direct"
@@ -349,6 +350,53 @@ def test_socket_walk_ignores_legacy_tt_prefixed_scratch_dirs(tmp_path):
         "a legacy tt_* scratch dir's socket must not be reached as a session root"
 
 
+def test_unreadable_session_root_marker_makes_the_root_set_incomplete(
+        tmp_path, monkeypatch, caplog):
+    """#3752 review: root discovery had no completeness channel, so a session
+    root it could not DECIDE about was dropped and the scan still reported
+    complete — a "finished" census that enumerated no nested root.
+
+    `os.path.exists` cannot express this: it swallows every `OSError` and
+    returns False, which is why the probe here must be an explicit `os.stat`.
+    A marker that stats ENOENT means "not a session root"; a marker that stats
+    anything else means "cannot decide" and must fail closed.
+    """
+    import logging
+
+    from tortoise import embedded_reaper as reaper
+
+    _make_session_root(tmp_path, "tt_abc12345")
+    real_stat = os.stat
+
+    def stat_boom(path, *a, **kw):
+        if str(path).endswith(reaper.SESSION_ROOT_MARKER):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_stat(path, *a, **kw)
+
+    monkeypatch.setattr(os, "stat", stat_boom)
+    with caplog.at_level(logging.WARNING, logger=reaper.logger.name):
+        roots, complete = reaper._socket_walk_roots_with_completeness(
+            str(tmp_path))
+    assert complete is False, \
+        "an undecidable session-root probe must report an INCOMPLETE root set"
+    assert roots == [str(tmp_path)], "the tempdir root must still be walked"
+    assert any("root set incomplete" in r.message for r in caplog.records), \
+        "the incomplete root set must be logged, not silent"
+
+
+def test_session_root_marker_absent_is_not_incomplete(tmp_path):
+    """The counter-case: a plain `tt_*` test-scratch dir with no marker is
+    legitimately NOT a session root — skipping it is correct and must NOT
+    report the root set as incomplete (otherwise every legacy `tt_` dir
+    would permanently mark every sweep truncated)."""
+    from tortoise import embedded_reaper as reaper
+
+    (tmp_path / "tt_211_deadbeef").mkdir()
+    roots, complete = reaper._socket_walk_roots_with_completeness(str(tmp_path))
+    assert complete is True, "an absent marker is a decision, not a failure"
+    assert roots == [str(tmp_path)]
+
+
 def test_socket_walk_orders_nested_roots_before_the_tempdir(tmp_path):
     """The nested roots come first so a slow global pass cannot consume the
     shared walk budget before the dirs only the nested pass can reach."""
@@ -367,11 +415,15 @@ def test_nested_roots_cannot_starve_the_global_pass(tmp_path, monkeypatch):
     (tempdir) pass — the only pass that reaches non-session dirs.
 
     Behavioural, not arithmetic: the deadline each root actually receives is
-    recorded, and the test asserts the global root's is the FULL budget while
-    the nested roots' are clamped. With the reserve disabled the nested roots
-    get the whole budget, which the test proves by running that case too — so
-    it does not merely mirror the constant, and it is independent of
-    GLOBAL_WALK_RESERVE_S' value.
+    recorded, and the test asserts the nested roots' deadlines sit exactly
+    ``GLOBAL_WALK_RESERVE_S`` earlier than the global root's. The counter-case
+    re-runs with the reserve disabled and asserts the deadlines COLLAPSE —
+    which is precisely what the primary assertion forbids, so the primary is
+    load-bearing rather than an artefact.
+
+    Both invocations take their own measurements: comparing run 2 against a
+    deadline captured in run 1 would silently measure run 1's duration
+    instead of run 2's clamp.
     """
     from tortoise import embedded_reaper as reaper
 
@@ -379,8 +431,14 @@ def test_nested_roots_cannot_starve_the_global_pass(tmp_path, monkeypatch):
     for r in nested:
         os.makedirs(r, exist_ok=True)
     global_root = str(tmp_path)
-    monkeypatch.setattr(reaper, "_socket_walk_roots",
-                        lambda _tmpdir: [*nested, global_root])
+    monkeypatch.setattr(reaper, "_socket_walk_roots_with_completeness",
+                        lambda _tmpdir: ([*nested, global_root], True))
+    # GLOBAL_WALK_RESERVE_S is derived from SOCKET_WALK_TIMEOUT at import, so
+    # pin BOTH: the invariant `0 < reserve < budget` is what makes the
+    # assertion below meaningful.
+    monkeypatch.setattr(reaper, "SOCKET_WALK_TIMEOUT", 4.0)
+    monkeypatch.setattr(reaper, "GLOBAL_WALK_RESERVE_S", 2.0)
+    assert 0 < reaper.GLOBAL_WALK_RESERVE_S < reaper.SOCKET_WALK_TIMEOUT
 
     seen: list[tuple[str, float | None]] = []
     real_iter = reaper._iter_candidate_dirs
@@ -391,25 +449,35 @@ def test_nested_roots_cannot_starve_the_global_pass(tmp_path, monkeypatch):
 
     monkeypatch.setattr(reaper, "_iter_candidate_dirs", recording_iter)
 
-    reaper._iter_candidate_dirs_over_roots(global_root, predicate=lambda n: True)
-    assert seen, "no root was scanned — test proves nothing"
-    assert seen[-1][0] == global_root, \
-        f"the tempdir root must be scanned LAST, got {[r for r, _ in seen]!r}"
-    glob_dl = seen[-1][1]
-    nested_dls = [dl for _r, dl in seen[:-1]]
-    assert glob_dl is not None and all(dl is not None for dl in nested_dls)
-    assert all(glob_dl - dl >= reaper.GLOBAL_WALK_RESERVE_S - 0.5
+    def run() -> tuple[float, list[float | None]]:
+        seen.clear()
+        reaper._iter_candidate_dirs_over_roots(global_root,
+                                               predicate=lambda n: True)
+        assert seen, "no root was scanned — test proves nothing"
+        assert seen[-1][0] == global_root, \
+            f"the tempdir root must be scanned LAST: {[r for r, _ in seen]!r}"
+        glob_dl = seen[-1][1]
+        assert glob_dl is not None
+        return glob_dl, [dl for _r, dl in seen[:-1]]
+
+    glob_dl, nested_dls = run()
+    assert nested_dls and all(dl is not None for dl in nested_dls)
+    assert all(abs((glob_dl - dl) - reaper.GLOBAL_WALK_RESERVE_S) < 0.5
                for dl in nested_dls), \
         f"nested roots were not clamped by the reserve: {seen!r}"
 
-    # Counter-case: with the reserve disabled the clamp is a no-op, so the
-    # assertion above is load-bearing rather than an artefact of a low cap.
+    # Counter-case, measured WITHIN this invocation: with the reserve disabled
+    # the nested deadlines collapse onto the global one — the exact condition
+    # the assertion above rejects.
     monkeypatch.setattr(reaper, "GLOBAL_WALK_RESERVE_S", 0.0)
-    seen.clear()
-    reaper._iter_candidate_dirs_over_roots(global_root, predicate=lambda n: True)
-    assert all(abs(glob_dl - dl) < 0.5 for _r, dl in seen), \
-        "with the reserve disabled the global pass should have lost its " \
-        "advantage — the test no longer pins anything"
+    glob2, nested2 = run()
+    assert nested2 and all(dl is not None for dl in nested2)
+    assert all(abs(glob2 - dl) < 0.5 for dl in nested2), \
+        "without the reserve the nested deadlines must collapse onto the " \
+        "global one; if they do not, the primary assertion proves nothing"
+    assert not all(abs((glob2 - dl) - 2.0) < 0.5 for dl in nested2), \
+        "the reserve-disabled run still looks clamped — the test is not " \
+        "actually disabling the clamp"
 
 
 def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
@@ -419,16 +487,22 @@ def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
     failure the nested pass exists to prevent. Covered for BOTH walk call
     sites.
 
-    The budget constant is monkeypatched: the ordering being asserted is
-    scale-invariant, so sleeping the real budget would burn 20 s of wall clock
-    for nothing.
+    The assertion is the FULL budget, measured from when discovery RETURNED
+    (``seen[0][1] >= discovery_end + budget``): "a deadline exists" would be
+    satisfied by an implementation that still charges discovery. The budget
+    constant is monkeypatched — the ordering is scale-invariant, so sleeping
+    the real 20 s would buy nothing.
     """
     from tortoise import embedded_reaper as reaper
 
     monkeypatch.setattr(reaper, "SOCKET_WALK_TIMEOUT", 0.5)
+    monkeypatch.setattr(reaper, "GLOBAL_WALK_RESERVE_S", 0.2)
+
+    discovery_end: list[float] = []
 
     def slow_roots(tmpdir):
         time.sleep(0.5 + 0.2)  # longer than the (patched) budget
+        discovery_end.append(time.monotonic())
         return [str(tmpdir)]
 
     seen: list[tuple[str, float | None]] = []
@@ -438,20 +512,30 @@ def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
         seen.append((root, deadline))
         return real_iter(root, predicate=predicate, deadline=deadline)
 
-    monkeypatch.setattr(reaper, "_socket_walk_roots", slow_roots)
+    monkeypatch.setattr(reaper, "_socket_walk_roots_with_completeness",
+                        lambda td: (slow_roots(td), True))
     monkeypatch.setattr(reaper, "_real_gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(reaper, "_iter_candidate_dirs", recording_iter)
 
     reaper._scan_socket_dirs(str(tmp_path))
-    assert seen, "_scan_socket_dirs: no root was scanned after slow discovery"
-    assert seen[0][1] is not None and seen[0][1] > time.monotonic(), \
-        f"_scan_socket_dirs: discovery time was charged to the walk {seen!r}"
+    assert seen and discovery_end, \
+        "_scan_socket_dirs: nothing scanned after slow discovery"
+    assert all(dl is not None and
+               dl >= discovery_end[0] + reaper.SOCKET_WALK_TIMEOUT - 0.05
+               for _r, dl in seen), \
+        f"_scan_socket_dirs charged discovery to the walk: {seen!r} " \
+        f"(discovery ended {discovery_end[0]})"
 
     seen.clear()
+    discovery_end.clear()
     reaper._sweep_quarantine_dirs(dry_run=True)
-    assert seen, "_sweep_quarantine_dirs: no root was scanned after slow discovery"
-    assert seen[0][1] is not None and seen[0][1] > time.monotonic(), \
-        f"_sweep_quarantine_dirs: discovery charged to the walk {seen!r}"
+    assert seen and discovery_end, \
+        "_sweep_quarantine_dirs: nothing scanned after slow discovery"
+    assert all(dl is not None and
+               dl >= discovery_end[0] + reaper.SOCKET_WALK_TIMEOUT - 0.05
+               for _r, dl in seen), \
+        f"_sweep_quarantine_dirs charged discovery to the walk: {seen!r} " \
+        f"(discovery ended {discovery_end[0]})"
 
 
 def test_env_spelling_of_the_shared_tempdir_is_blocked():
@@ -633,24 +717,23 @@ def test_quarantine_walk_reaches_nested_session_roots(tmp_path, monkeypatch):
     (q / reaper.REAPER_OWNED_MARKER).write_text("")
 
     monkeypatch.setattr(reaper, "_real_gettempdir", lambda: str(tmp_path))
-    roots: list[str] = []
+    calls: list[tuple[str, object]] = []
     real_iter = reaper._iter_candidate_dirs
 
     def recording_iter(root, *, predicate, deadline=None):
-        roots.append(root)
+        calls.append((root, predicate))
         return real_iter(root, predicate=predicate, deadline=deadline)
 
     monkeypatch.setattr(reaper, "_iter_candidate_dirs", recording_iter)
     reaper._sweep_quarantine_dirs(dry_run=True)
+    roots = [r for r, _p in calls]
     assert str(session) in roots, \
         f"the nested session root was not scanned for quarantines: {roots!r}"
     assert str(tmp_path) in roots, "the tempdir root scan regressed"
-    # ...and the predicate actually surfaces the quarantine dir in that root.
-    scan = reaper._iter_candidate_dirs(
-        str(session),
-        predicate=lambda name: reaper.STALE_QUARANTINE_SUFFIX in name)
-    assert str(q) in scan.dirs, \
-        f"the quarantine dir was not matched inside {session}: {scan.dirs!r}"
+    # Assert the predicate the SWEEP ITSELF passed — re-declaring it locally
+    # would let the sweep scan the right root with the wrong predicate.
+    assert all(p(str(q).split("/")[-1]) for _r, p in calls), \
+        "the sweep's own predicate does not match the quarantine dir it must find"
 
 
 def test_discover_never_shells_out_to_the_shared_temp_dir(monkeypatch):
