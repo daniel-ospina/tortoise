@@ -23,6 +23,7 @@ import ast
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -200,20 +201,30 @@ def test_non_dict_properties_is_tolerated(tmp_path, monkeypatch):
     assert not any(k[0] == "analytics_props" for k in ha._TELEMETRY_DROP_COUNTS)
 
 
-def test_concurrent_drops_count_exactly_and_warn_once():
+def test_concurrent_drops_count_exactly_and_warn_once(monkeypatch, caplog):
     """The lock makes 'always counted' and 'reported at most once' hold under
-    the threaded emit sites (`asyncio.to_thread`, the MCP executor)."""
+    the threaded emit sites. The counter is widened so a lost lock actually
+    loses increments (a plain Counter's read-modify-write is too narrow to
+    interleave reliably)."""
+    from collections import Counter
     from concurrent.futures import ThreadPoolExecutor
 
-    n = 50
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    class _SlowCounter(Counter):
+        def __setitem__(self, key, value):
+            time.sleep(0.0005)
+            super().__setitem__(key, value)
+
+    monkeypatch.setattr(ha, "_TELEMETRY_DROP_COUNTS", _SlowCounter())
+    n = 16
+    with caplog.at_level(logging.WARNING), \
+            ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(
-            lambda _: ha._report_unregistered("concurrency", "same", {"k"}),
+            lambda _: ha._report_unregistered(
+                "concurrency", "same", {"k"}),
             range(n)))
     assert ha._TELEMETRY_DROP_COUNTS[
         ("concurrency", "same", ("k",))] == n
-    assert len([m for m in ha._TELEMETRY_DROP_REPORTED
-                if m[0] == "concurrency"]) == 1
+    assert len(_warnings(caplog)) == 1
 
 
 def test_drop_state_is_bounded_for_distinct_client_keys():
@@ -223,7 +234,21 @@ def test_drop_state_is_bounded_for_distinct_client_keys():
     for i in range(ha._TELEMETRY_DROP_MAX_MARKERS + 25):
         ha._report_unregistered("bounded", "distinct", {f"k{i}"})
     assert len(ha._TELEMETRY_DROP_COUNTS) <= ha._TELEMETRY_DROP_MAX_MARKERS + 1
-    assert len(ha._TELEMETRY_DROP_REPORTED) <= ha._TELEMETRY_DROP_MAX_MARKERS
+    per_site = ha._TELEMETRY_DROP_REPORTED[("bounded", "distinct")]
+    assert len(per_site) <= ha._TELEMETRY_DROP_MAX_PER_SITE
+
+
+def test_one_site_cannot_silence_another_sites_warning(caplog):
+    """A client flooding the PATCH front door with distinct unknown field
+    names must not exhaust the warning budget for unrelated sites. With a
+    single global dedup set this REDs: after the global cap is reached no
+    other site ever warns again."""
+    for i in range(ha._TELEMETRY_DROP_MAX_MARKERS + 10):
+        ha._report_unregistered(
+            "onboarding_state_patch", "unknown_field", {f"bad{i}"})
+    with caplog.at_level(logging.WARNING):
+        ha._report_unregistered("analytics_props", "capture_cost", {"aha"})
+    assert any("aha" in rec.getMessage() for rec in _warnings(caplog))
 
 
 # ── S1: the analytics prop filter / the shipped billing loss ────────────────
@@ -350,6 +375,16 @@ def test_artifact_copied_invalid_enum_is_reported(patch_client, caplog):
     assert any("harness" in rec.getMessage() for rec in caplog.records)
     # The event still does NOT fire — no artifact_copied row was written.
     assert not patch_client._jsonl.exists()
+
+
+def test_strict_invalid_beacon_raises_loudly(patch_client, monkeypatch):
+    """Strict mode is a dev/test opt-in; an enum-invalid beacon raises from the
+    endpoint body (→ 500 in production wiring) rather than being swallowed.
+    This documents the one strict-mode exception the beacon comment scopes."""
+    monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
+    with pytest.raises(ha.UnregisteredTelemetryKey):
+        patch_client.patch("/v1/onboarding/state",
+                           json={"harness": "vim", "section": "config"})
 
 
 # ── S6 + the structural gate: every emitted prop key must be registered ─────
@@ -539,6 +574,12 @@ def test_every_emitted_prop_key_is_allowlisted():
     props before they ship.
     """
     calls = _collect(_HOSTED_API) + _collect(_MCP_SERVER)
+    # Pin the TOTAL emit-site count: a NEW site whose props expression cannot
+    # be resolved would otherwise be filtered out by `if c.keys` and pass the
+    # subset check. Any addition must update this inventory (and register its
+    # props), which is exactly the review the gate exists to force.
+    assert len(calls) == 11, (
+        f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (
         "the AST walk resolved suspiciously few emit sites — the walk is "

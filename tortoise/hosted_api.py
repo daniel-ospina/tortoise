@@ -18768,10 +18768,12 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     updates.pop("org_created", None)
     # Epic #529 copy-attribution beacon: analytics-only fields — pop before
     # the state merge (email pattern) and emit artifact_copied for enum-valid
-    # pairs; invalid values still emit no event and change no state, so a
-    # stale or malformed beacon can never break the copy UX or pollute state.
-    # #3821: the rejection is now REPORTED (raised only under strict mode)
-    # instead of vanishing without an observer.
+    # pairs; invalid values still emit no event and change no state, so IN
+    # NORMAL MODE a stale or malformed beacon cannot pollute state. #3821:
+    # the rejection is now REPORTED instead of vanishing without an observer —
+    # and because this raise is in the endpoint BODY (not a pydantic
+    # validator) strict mode turns it into a 500, which is why strict is off
+    # by default and never set in production.
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
@@ -19755,8 +19757,11 @@ _TELEMETRY_STRICT_ENV = "TORTOISE_TELEMETRY_STRICT"
 _TELEMETRY_DROP_COUNTS: Counter[tuple[str, str, tuple[str, ...]]] = Counter()
 
 # (where, subject, bounded key fingerprint) already warned — the OTel
-# "at most once per record" dedup.
-_TELEMETRY_DROP_REPORTED: set[tuple[str, str, tuple[str, ...]]] = set()
+# "at most once per record" dedup, kept PER SITE. A single global set let the
+# client-controlled PATCH front door consume the whole warning budget and
+# silence EVERY other site's first warning — a per-site budget keeps one
+# noisy surface from blinding the others.
+_TELEMETRY_DROP_REPORTED: dict[tuple[str, str], set[tuple[str, ...]]] = {}
 
 # Guards the count and the warn-dedup so "always counted" and "reported at
 # most once" hold under the threaded emit sites (`asyncio.to_thread`, the
@@ -19764,12 +19769,19 @@ _TELEMETRY_DROP_REPORTED: set[tuple[str, str, tuple[str, ...]]] = set()
 # the happy path.
 _TELEMETRY_DROP_LOCK = threading.Lock()
 
-# Cardinality bounds: at most this many distinct key-sets are retained per
-# structure (further distinct sets fold into one "<overflow>" entry), and at
-# most this many keys are named in one counter key / log line. A CALLER-
-# SUPPLIED key name can never make the reporter retain or log without bound.
+# Cardinality bounds: at most this many counter entries in total (further
+# distinct key-sets fold into ONE shared overflow entry), at most this many
+# fingerprints reported per site, and at most this many keys named in one
+# counter key / log line. A CALLER-SUPPLIED key name can never make the
+# reporter retain or log without bound.
 _TELEMETRY_DROP_MAX_MARKERS = 512
+_TELEMETRY_DROP_MAX_PER_SITE = 64
 _TELEMETRY_DROP_MAX_KEYS = 20
+
+# The sentinel a capped counter folds into — SHARED across sites, so the
+# Counter stays bounded overall rather than bounded-per-site.
+_TELEMETRY_DROP_OVERFLOW: tuple[str, str, tuple[str, ...]] = (
+    "<overflow>", "<overflow>", ())
 
 
 def _telemetry_drop_fingerprint(keys: frozenset[str] | set[str]) -> tuple[str, ...]:
@@ -19838,23 +19850,24 @@ def _report_unregistered(where: str, subject: str,
     """
     if not unknown:
         return
-    marker = (where, subject, _telemetry_drop_fingerprint(frozenset(unknown)))
+    fingerprint = _telemetry_drop_fingerprint(frozenset(unknown))
     with _TELEMETRY_DROP_LOCK:
-        counter_key = marker
+        counter_key = (where, subject, fingerprint)
         if (counter_key not in _TELEMETRY_DROP_COUNTS
                 and len(_TELEMETRY_DROP_COUNTS) >= _TELEMETRY_DROP_MAX_MARKERS):
-            counter_key = (where, subject, ("<overflow>",))
+            counter_key = _TELEMETRY_DROP_OVERFLOW
         _TELEMETRY_DROP_COUNTS[counter_key] += 1
-        report = (marker not in _TELEMETRY_DROP_REPORTED
-                  and len(_TELEMETRY_DROP_REPORTED) < _TELEMETRY_DROP_MAX_MARKERS)
+        reported = _TELEMETRY_DROP_REPORTED.setdefault((where, subject), set())
+        report = (fingerprint not in reported
+                  and len(reported) < _TELEMETRY_DROP_MAX_PER_SITE)
         if report:
-            _TELEMETRY_DROP_REPORTED.add(marker)
+            reported.add(fingerprint)
     if report:
         _logger.warning(
             "unregistered telemetry key(s) dropped at %s (subject=%s): %s — "
             "NOT forwarded; if the loss is unintended, register them in "
             "_ALLOWED_ANALYTICS_PROPS (props) or _ALLOWED_STATE_KEYS (state)",
-            where, subject, list(marker[2]))
+            where, subject, list(fingerprint))
     if _telemetry_strict():
         raise UnregisteredTelemetryKey(where, subject, set(unknown))
 
@@ -20036,10 +20049,9 @@ def _track_analytics_event(org_id: str, event_name: str,
     ``fallback``/``dropped`` additionally increment
     ``monitoring.ANALYTICS_OUTCOME_COUNT`` and, at most once per degradation
     episode, file ``ANALYTICS_SINK_DEGRADED``. That alert leg is best-effort —
-    it cannot escape (the never-raise contract above is unchanged, with
-    strict mode's registration guard as its ONE documented non-return exit)
-    and it is NOT conditioned on the alert channel existing: counting happens
-    either way.
+    it adds no non-return exit of its own (the contract above has exactly ONE:
+    strict mode's registration guard) and it is NOT conditioned on the alert
+    channel existing: counting happens either way.
 
     #3820 (D5a): the alert leg is also NOT conditioned on the backup sweep
     being enabled. ``_backup_config_safe()`` returns ``None`` whenever
