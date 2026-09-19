@@ -53,6 +53,7 @@ import logging
 import os
 import re
 
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
 from .live import is_terminal_status  # #2490: terminal rows override has_ep
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
@@ -66,7 +67,7 @@ logger = logging.getLogger(__name__)
 # ── W4 flag ────────────────────────────────────────────────────────────────
 # Default OFF (production exposure gated by the epic's user-exposure gate —
 # both conditions must hold before the flip). Tests / dev / the A11 pilot set
-# it explicitly, mirroring the TORTOISE_ENABLE_ASK gating precedent (#2013).
+# it explicitly, mirroring the flag-gated rollout precedent.
 W4_FLAG_ENV = "TORTOISE_W4_ENRICHMENT"
 
 # ── Budgets (plan §3.1.1 — pinned by the S6 contract test) ────────────────
@@ -94,12 +95,9 @@ def w4_enrichment_enabled() -> bool:
     """Resolve the W4 enrichment flag (honored on ALL enriched surfaces).
 
     Default OFF — production exposure is gated by the epic's user-exposure
-    gate. Truthy values: 1/true/yes/on.
+    gate. Truthy values: the declared contract (1/true/yes/on) — #4097.
     """
-    v = os.environ.get(W4_FLAG_ENV)
-    if v is None:
-        return False
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get(W4_FLAG_ENV))
 
 
 # ── The shared assembly ────────────────────────────────────────────────────
@@ -730,7 +728,7 @@ def project_item(item: dict, block: dict) -> dict:
 def item_to_why_entry(item: dict) -> dict | None:
     """Project an enriched item back to the canonical §3.1.4 why entry.
 
-    Used by the ask surface (its pool hits flow through the search-path
+    Used by the ask lane (its pool hits flow through the search-path
     enrichment) — zero extra graph reads. Returns None when the item was
     not enriched (no W4 data).
     """

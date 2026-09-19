@@ -182,6 +182,10 @@ def client(monkeypatch):
             # the data-plane gates otherwise (mirrors #2241 migration).
             "org_id": "test-team-722", "key_id": "test-key-722",
             "legacy_full_access": True, "tier": "free",
+            # #4010: the sessions gate is fail-closed on a MISSING key now
+            # (the lenient 1000 fallback is deleted) — the override must
+            # carry the resolved value: unlimited → explicit None.
+            "max_sessions": None,
         }
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —

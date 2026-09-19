@@ -835,7 +835,8 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
                     _current_legacy_full_access]
         toks = [v.set(val) for v, val in zip(
             ctx_vars,
-            [TEST_ORG_ID, {}, None, None, ["graphs:read", "graphs:write"],
+            [TEST_ORG_ID, {"max_points": 100000, "max_sessions": None},
+             None, None, ["graphs:read", "graphs:write"],
              False],
             strict=True)]
         try:

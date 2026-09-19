@@ -119,9 +119,47 @@ MAX_OPERATORS = 500
 # max_points/max_api_keys have NO constant here — they resolve from
 # tortoise.pricing.tier_limits (product/pricing.json) so a legacy org without
 # stored limits gets pricing-correct caps, never the stale 1000/20 consts that
-# contradicted pricing.json (#310 GAP-B, review fix 2). max_sessions has no
-# pricing.json field — flat 1000 across tiers (matches REST today).
-DEFAULT_MAX_SESSIONS = 1000
+# contradicted pricing.json (#310 GAP-B, review fix 2).
+#
+# max_sessions has NO constant here and NO pricing.json field either. The
+# flat 1000 was an INHERITED CODE FALLBACK, never a ratified product cap —
+# and the reason is checkable, not reconstructed: the plan that carried it
+# also designated its OWN canonical limits source, and that source has no
+# session field at all. `product/pricing.json` (canonical single source,
+# decision 1d: "product/pricing.json ... is canonical; pricing.md is
+# doc-generated from it") contains ZERO occurrences of "session" and no
+# sessions row in its tier table. What the plan recorded was KEEPING THE
+# EXISTING FALLBACK — as a fallback: 05-plan.md:570, "keep flat fallbacks
+# (1000/1000) in v1 OR fold into ops_allowance — decision: keep
+# points/sessions flat in v1; ops_allowance (write ops) is the billing
+# metric", restated at :598 ("points/sessions stay flat 1000/1000 in v1").
+# Keeping a fallback is not ratifying the value, and 05-plan.md:18's "human
+# gate #2 approved" reads in full "all 8 substeps, coherence CLEAN; human
+# gate #2 approved 2026-08-07; decomposed into #568-#578" — it approved the
+# plan's coherence to decompose, not a constant inside a tier table. The
+# default pre-dates the #329 security commit (f6ca5ebdb), whose scoping doc
+# only instructed preserving the existing resource in the shared helper
+# (docs/plans/scoping-329-problem.md:17 — a refactor-safety instruction, not
+# a cap ratification). It became a production ceiling because the limits
+# resolvers substituted the constant as their fallback wherever a stored
+# value was absent, and the lenient `if resource == "sessions"` branch in
+# enforce_org_limit supplied it to callers whose limits dict lacked the key
+# entirely (the MCP capture bridge).
+#
+# #4010 REMOVES that fallback (the 2026-09-19 correction on the issue
+# withdraws the earlier "recorded v1 decision / REOPEN" framing). Sessions
+# are UNLIMITED for every tier, and unlike every other limit a STORED
+# max_sessions value is deliberately NOT honoured as a cap (see
+# resolve_org_limits): a stored 1000 would otherwise keep the org capped
+# after the constant was deleted. This removes an unratified fallback that
+# should never have been enforcement; it is NOT a reopen of a v1 cap
+# decision, because nothing that RATIFIES a cap ever named it — no owner
+# ruling, no decision record, no `product/pricing.json` field. Approved docs
+# do carry 1000 forward as a default (`git grep -n max_sessions -- '*.md'`);
+# carrying a default forward is the inheritance this comment describes, not a
+# ratification. The owner confirms he never approved a 1k cap. Stale
+# 1000-as-cost-bound framing elsewhere: #4052. The P2-7 billing-metric
+# decision is untouched — write-ops remains the billing metric.
 
 # ── Documents cap: DERIVED-CONSTANT (T2-P2a, #1726 Slice 1) ────────────────
 # max_documents is DERIVED from max_points with a documented conversion
@@ -136,6 +174,9 @@ _DOCUMENTS_FROM_POINTS_FACTOR = 10
 _RESOURCE_LIMIT_KEYS = {
     "points": "max_points",
     "api_keys": "max_api_keys",
+    # #4010: the key is still carried so the resolved dict holds an EXPLICIT
+    # None for sessions ("present but unlimited") rather than a missing key
+    # (which is fail-closed). No constant ever supplies a value for it.
     "sessions": "max_sessions",
     "users": "max_users",
     "graphs": "max_graphs",
@@ -203,8 +244,16 @@ def resolve_org_limits(org_id: str) -> dict:
     Org node, as before.
 
     Missing Org → QuotaCheckError (fail-closed; the auth layer should
-    guarantee key→org mapping). Missing attributes → defaults
-    (aligned with product/pricing.json free tier).
+    guarantee key→org mapping).
+
+    CONTRACT (the return shape every caller must honour, #310 GAP-B / #4010):
+    the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
+    that is PRESENT with value ``None`` means UNLIMITED (sessions is always
+    this, for every tier — #4010); a MISSING key is fail-closed in
+    ``enforce_org_limit`` (``QuotaCheckError`` → HTTP 500) for every resource.
+    A missing ATTRIBUTE on the row/column is resolved to a value here — it
+    never leaves the key absent. (The pre-#4010 rule of the same shape was
+    "missing attributes → defaults"; sessions has no default any more.)
     """
     if not org_id:
         raise QuotaCheckError("resolve_org_limits requires a org_id")
@@ -259,8 +308,11 @@ def resolve_org_limits(org_id: str) -> dict:
         # explicit None limit as unlimited; substituting finite caps would
         # hard-cap legacy/migrated rows). max_points override (GAP-B,
         # 20260817000001) takes precedence over graph_size_cap (the
-        # fallback), then pricing; max_api_keys/max_sessions fall back to
-        # pricing/defaults.
+        # fallback), then pricing; max_api_keys falls back to pricing.
+        # #4010: max_sessions is UNLIMITED for every tier — no pricing field,
+        # no constant, and (deliberately) no stored value honoured as a cap.
+        # The Supabase orgs row has no max_sessions column at all, so there is
+        # nothing to read even if we wanted to.
         mu = row.get("max_users")
         mg = row.get("max_graphs")
         # #1859 P3-2: max_points column (points-cap override, migration
@@ -278,7 +330,7 @@ def resolve_org_limits(org_id: str) -> dict:
             "max_points": (int(lim["max_graph_nodes"]) if anon_override
                             else (int(mp) if mp is not None else lim["max_graph_nodes"])),
             "max_api_keys": lim["max_api_keys"],
-            "max_sessions": DEFAULT_MAX_SESSIONS,
+            "max_sessions": None,
         }
     reg = _make_sdk(namespace="registry")
     rows = reg._get_registry().query(
@@ -289,7 +341,7 @@ def resolve_org_limits(org_id: str) -> dict:
     ).result_set
     if not rows:
         raise QuotaCheckError(f"Team {org_id!r} not found in registry")
-    tier, mu, mg, mp, mak, ms = rows[0]
+    tier, mu, mg, mp, mak, _ms = rows[0]
     tier = tier or "free"
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
@@ -301,7 +353,15 @@ def resolve_org_limits(org_id: str) -> dict:
         "max_graphs": int(mg) if mg is not None else None,
         "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
         "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-        "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier — the flat 1000 was
+        # an inherited code fallback, never a ratified cap (see the module
+        # comment above). `_ms` (the stored t.max_sessions) is read so the
+        # removal is VISIBLE at the exact site that could re-introduce the
+        # cap — and then NOT honoured, because a stored 1000 must never
+        # re-cap an org (the trap this issue names). Clearing the stored rows
+        # is the defence-in-depth half; ignoring them here is the half that
+        # actually decides.
+        "max_sessions": None,
     }
 
 
@@ -498,6 +558,9 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
     Args:
         limits: resolved org limits dict (from resolve_org_limits or the
             authenticated caller). None → skip (stdio/operator, no org).
+            A key that is PRESENT and None means UNLIMITED (skip); a MISSING
+            key is fail-closed (QuotaCheckError) for every resource — build
+            the dict from _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010).
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
@@ -547,12 +610,15 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         # stored null) — skip enforcement (#683). Distinguish from a MISSING
         # key, which is fail-closed (#310 GAP-B): never silently fall back to
         # lenient caps.
+        # #4010: sessions is no longer the exception to that rule. The flat
+        # 1000 it fell back to was an inherited code fallback, never a
+        # ratified cap (see the module comment above), so it has no constant
+        # to fall back to and its resolved value is always the explicit None
+        # — the lenient `if resource == "sessions": limit =
+        # DEFAULT_MAX_SESSIONS` branch is deleted, not relocated.
         if limit_key in limits:
             return
-        if resource == "sessions":
-            limit = DEFAULT_MAX_SESSIONS
-        else:
-            raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
+        raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
     count = _count_resource(org_id, resource, sdk=sdk)
     if count >= limit:
         raise QuotaExceededError(
@@ -561,6 +627,15 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
 
 
 # ── Ask lane: shared budget bucket + bounded runner (#1987 Tasks 6/7/8) ────
+#
+# ⛔ RETIRED-BUT-RETAINED (#3849): every PRODUCT caller of this cluster — the
+# hosted REST /v1/ask handler, the hosted MCP ask handler and the selfhost
+# /ask handler — was removed with the ask product surface, so no product path
+# reaches it today (the eval-only lane, tortoise/ask_lane.py, is unbudgeted).
+# Its one remaining caller is a test: tests/test_quota.py pins
+# `run_ask_bounded`'s exec-floor guarantee, so the #3849 §7 D5 purge has to
+# move or drop that test with it. The comments below that name the removed
+# handlers are kept as the record of what the bounds were.
 #
 # The ONE shared per-org per-minute LLM budget for the ask lane, used by
 # BOTH the hosted REST handler and the hosted MCP handler (no duplicated
@@ -649,12 +724,17 @@ def ask_budget_retry_after(org_id: str | None) -> float:
 
 class AskInFlightLimitError(Exception):
     """Per-org in-flight cap hit (4 concurrent) — mapped to 429
-    ``in_flight_limit`` by the ask handlers."""
+    ``in_flight_limit`` by the ask handlers (removed in #3849 — no handler
+    maps it any more, though the retained ``run_ask_bounded`` still raises
+    it; see the RETIRED note on this cluster)."""
 
 
 class AskBoundedTimeoutError(Exception):
     """The bounded ask section exceeded ``_ASK_TIMEOUT_S`` (semaphore queue
-    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers."""
+    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers
+    (removed in #3849 — no handler maps it any more, though the retained
+    ``run_ask_bounded`` still raises it and tests/test_quota.py pins that;
+    see the RETIRED note on this cluster)."""
 
 
 #: Ask-lane bounds (#1987 Task 7): global semaphore, per-org in-flight cap,
@@ -725,7 +805,10 @@ def ask_in_flight_capacity(org_id: str | None) -> bool:
 async def run_ask_bounded(fn, org_id: str | None, *args, **kwargs):
     """Shared bounded ask runner (#1987 Task 7/8/9) — the ONE wrapper the
     hosted HTTP handler, the hosted MCP handler, and the selfhost REST
-    handler all await.
+    handler all awaited (all three removed in #3849, so no product caller
+    reaches it any more; its one remaining caller is ``tests/test_quota.py``,
+    which pins the exec-floor guarantee — see the RETIRED note on this
+    cluster).
 
     Bounds: global ``asyncio.Semaphore(8)`` + ``asyncio.wait_for(_ASK_TIMEOUT_S)``
     wrapping the FULL bounded section (semaphore acquire + the to_thread
@@ -751,8 +834,9 @@ async def run_ask_bounded(fn, org_id: str | None, *args, **kwargs):
     sem = st["sem"]
     inflight = st["in_flight"]
     # ``_sdk_org_id`` is the bound SDK lane's metering org_id (hosted
-    # HTTP/MCP handlers pass the org; selfhost passes None) — stripped here
-    # so ``fn`` (sdk.ask) receives it WITHOUT colliding with this wrapper's
+    # HTTP/MCP handlers pass the org; selfhost passes None; that SDK entry
+    # point was removed in #3849) — stripped here
+    # so ``fn`` receives it WITHOUT colliding with this wrapper's
     # own ``org_id`` (the in-flight-cap key).
     fn_kwargs = dict(kwargs)
     sdk_org_id = fn_kwargs.pop("_sdk_org_id", org_id)

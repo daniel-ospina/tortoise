@@ -14,7 +14,7 @@ the read-side seam the hosted auth paths use AFTER the flip:
 - Tier/quota come from the ``teams`` row (max_users/max_graphs/
   graph_size_cap); max_points (the 20260817000001 points-cap override
   column) takes precedence over graph_size_cap, which falls back to
-  ``tortoise.pricing.tier_limits`` defaults (max_api_keys/max_sessions
+  ``tortoise.pricing.tier_limits`` defaults (max_api_keys
   always fall back to pricing) — mirroring the registry path.
 - Invitations (plan Task 4): mint/accept/rescind live here too — pending
   invitations are redeemed by plaintext token via indexed lookup_hash
@@ -49,8 +49,9 @@ no new deps, matching the analytics-write pattern in hosted_api.py.
 
 Query dialect: ``query(table, select, filters, method, json_body, order,
 limit)`` where filters are ``(column, op, value)`` tuples with ops
-``eq | neq | is`` (None → ``IS NULL``) and ``lte`` (ISO-8601 cutoff,
-used by the deleted-org purge sweep, #302). ``method`` supports
+``eq | neq | is`` (None → ``IS NULL``) and the ordered, NULL-excluding
+``gt | gte | lt | lte`` (``lte`` is the ISO-8601 cutoff used by the
+deleted-org purge sweep, #302). ``method`` supports
 ``GET | POST | PATCH | DELETE`` (DELETE is used only by the post-grace
 hard-delete purge). The test fake implements the SAME interface over
 in-memory rows, so the resolution logic is shared verbatim between CI
@@ -59,6 +60,7 @@ and production.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import uuid as _uuid
 from datetime import UTC, datetime, timezone
@@ -68,8 +70,11 @@ import httpx
 _logger = logging.getLogger(__name__)
 
 # Env-var names: SUPABASE_SERVICE_ROLE_KEY is the canonical name (edge
-# functions, supabase/README.md); SUPABASE_SERVICE_KEY is the legacy name the
-# analytics write path uses — accept either so the flip works with both.
+# functions, supabase/README.md); SUPABASE_SERVICE_KEY is the legacy name —
+# accept either so the flip works with both. The analytics write path now reads
+# BOTH (it previously read only the legacy name, so every hosted analytics
+# event was written to ephemeral disk and lost — #3677), so no caller is left
+# on a single name.
 _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 
 # Base orgs columns (migration 0006 — the core orgs table; drift-safe).
@@ -173,6 +178,43 @@ def is_supabase_enabled() -> bool:
     return configured
 
 
+_LOGIC_TREE_RESERVED = ',()"'
+
+
+def _quote_in_logic_tree(value: object) -> str:
+    """Quote a value for a PostgREST logic tree.
+
+    Inside ``and=(...)``, a value containing ``,`` ``(`` ``)`` or ``"`` is
+    syntax, not data — ``a.gt.x,y`` is TWO conditions and ``a.gt.x)`` closes
+    the group. PostgREST's escape is to wrap the value in double quotes, with
+    an embedded ``"`` backslash-escaped. A value with none of the reserved
+    characters is emitted bare, so the common timestamp/count case keeps the
+    obvious form (#3686 re-review P2: the grouping added this hazard)."""
+    text = "" if value is None else str(value)
+    if not any(ch in text for ch in _LOGIC_TREE_RESERVED):
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _encode(op: str, value: object, in_logic_tree: bool = False) -> str:
+    """Encode one PostgREST filter condition. ``in_logic_tree`` applies the
+    quoting rule that only applies inside ``and=(...)``."""
+    if op == "is":
+        return "is.null" if value is None else f"is.{value}"
+    if op == "eq":
+        rendered = f"eq.{value}"
+    elif op == "neq":
+        rendered = f"neq.{value}"
+    elif op in ("gt", "lt", "gte", "lte"):
+        rendered = f"{op}.{value}"
+    else:
+        raise ValueError(f"unsupported filter op {op!r}")
+    if in_logic_tree:
+        head, _, tail = rendered.partition(".")
+        return f"{head}.{_quote_in_logic_tree(tail)}"
+    return rendered
+
+
 class SupabaseControlPlane:
     """PostgREST client for control-plane reads/writes (service role).
 
@@ -202,7 +244,8 @@ class SupabaseControlPlane:
         import httpx
         self._http = httpx.Client(timeout=self._timeout)
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         """Call a Postgres function via PostgREST RPC (#765 plan Task 8).
 
         ``POST {url}/rest/v1/rpc/{fn}`` with the service key and JSON body.
@@ -210,6 +253,12 @@ class SupabaseControlPlane:
         orgs + org_memberships + api_keys upsert, migration 0010) — the
         agent-signup / register / org-create writers must NOT hand-roll
         three table writes when the RPC is one transaction.
+
+        ``representation`` (#3665): the write lane wants ``return=minimal``
+        (the default — no echo), but a SCALAR-returning read function has its
+        body suppressed by that same header. ``representation=True`` sends
+        ``Prefer: return=representation`` and returns the decoded JSON value
+        (see :meth:`rpc_value`).
 
         Fail-closed contract (same as ``query``): non-2xx responses and
         transport errors raise RuntimeError. Uses the same persistent httpx
@@ -221,7 +270,8 @@ class SupabaseControlPlane:
             "apikey": self._key,
             "Authorization": f"Bearer {self._key}",
             "Content-Type": "application/json",
-            "Prefer": "return=minimal",
+            "Prefer": ("return=representation" if representation
+                       else "return=minimal"),
         }
         try:
             import httpx  # noqa: F401
@@ -263,7 +313,26 @@ class SupabaseControlPlane:
             raise RuntimeError(
                 f"Supabase control-plane bad RPC response ({fn}): {e}"
             ) from e
-        return data if isinstance(data, dict) else None
+        # #3665: a scalar/array-returning RPC decodes to a bare JSON value
+        # (a float, a text[] as a JSON array), NOT a dict. The value is
+        # returned verbatim rather than coerced to None — coercion is what
+        # made a scalar read indistinguishable from an empty one.
+        return data
+
+    def rpc_value(self, fn: str, body: dict | None = None):
+        """Call a scalar-returning RPC and return its decoded value (#3665).
+
+        The read counterpart of :meth:`rpc`. PostgREST returns a scalar /
+        array-returning function's result as the bare JSON body (e.g. a
+        number for ``double precision``, ``["a", "b"]`` for ``text[]``), so
+        the decoded value IS the result — no unwrapping is applied here
+        (guessing a wrapper shape would corrupt an array result).
+
+        FAIL-CLOSED: transport/HTTP failures raise ``RuntimeError`` (from
+        :meth:`rpc`); a body that cannot be decoded raises rather than
+        reading as an empty result.
+        """
+        return self.rpc(fn, body, representation=True)
 
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
@@ -273,8 +342,17 @@ class SupabaseControlPlane:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
-        (value None → ``col=is.null``), ``gt``, ``lt``. Raises RuntimeError
-        on any failure.
+        (value None → ``col=is.null``), ``gt``, ``gte``, ``lt``, ``lte``.
+        Raises RuntimeError on any failure.
+
+        Filters may repeat a column. TWO OR MORE conditions on the same column
+        are combined into one PostgREST ``and=(...)`` group — a flat query string
+        carries one operator per column, so a second condition would otherwise
+        silently REPLACE the first. A single condition keeps the plain flat form,
+        so existing callers' requests are unchanged. A filter whose column is
+        literally ``"and"`` raises ``ValueError``: it would collide with the
+        logic-tree key this method writes. Values inside the group that carry a
+        reserved character are quoted (see ``_LOGIC_TREE_RESERVED``).
 
         ``timeout`` (#2850/#2988): an optional PER-REQUEST override for the
         httpx call. ``None`` (the default) keeps the client-level timeout —
@@ -290,25 +368,42 @@ class SupabaseControlPlane:
         params: dict[str, str] = {}
         if select:
             params["select"] = ",".join(select)
+
+        # ⛔ A PostgREST flat query string carries ONE operator per column, and
+        # `params` is keyed by column — so a SECOND condition on the SAME column
+        # overwrites the first and SILENTLY DROPS a bound. That is not
+        # hypothetical: `_read_recall` passed `created_at gt since` +
+        # `created_at lt until`, so the lower bound vanished and the analytics
+        # leg read the org's whole history instead of the requested window
+        # (found by code review of #3686). `abuse.rule_event_between` had the
+        # same latent drop.
+        #
+        # Fix: group by column. A column with several conditions goes into one
+        # `and=(...)` group (PostgREST ANDs it against the other, flat params);
+        # single-condition columns keep the plain flat form, so no existing
+        # caller's request shape changes.
+        by_col: dict[str, list[tuple[str, object]]] = {}
         for col, op, value in filters or []:
-            if op == "is":
-                params[col] = "is.null" if value is None else f"is.{value}"
-            elif op == "eq":
-                params[col] = f"eq.{value}"
-            elif op == "neq":
-                params[col] = f"neq.{value}"
-            elif op in ("gt", "lt"):
-                # #765 plan Task 8: reconcile (expires_at < now) + the
-                # signup/org-creation rate-limit counts (created_at > cutoff)
-                # need ordered comparisons. NULL semantics mirror SQL: a row
-                # with a NULL column never matches (PostgREST's gt./lt. is
-                # NULL-excluding; the fake mirrors this).
-                params[col] = f"{op}.{value}"
-            elif op == "lte":
-                # ISO-8601 cutoff for the post-grace purge sweep (#302).
-                params[col] = f"lte.{value}"
+            if col == "and":
+                # `and` is the PostgREST logic-tree key this method itself
+                # writes. A filter on a column of that name would be silently
+                # overwritten by the grouped form — refuse it outright, not
+                # only when it happens to carry several conditions.
+                raise ValueError(
+                    "filter column 'and' collides with the PostgREST logic-"
+                    "tree key used to combine same-column conditions")
+            by_col.setdefault(col, []).append((op, value))
+        grouped: list[str] = []
+        for col, conds in by_col.items():
+            if len(conds) == 1:
+                op, value = conds[0]
+                params[col] = _encode(op, value)
             else:
-                raise ValueError(f"unsupported filter op {op!r}")
+                grouped.extend(
+                    f"{col}.{_encode(op, value, in_logic_tree=True)}"
+                    for op, value in conds)
+        if grouped:
+            params["and"] = f"({','.join(grouped)})"
         if order:
             params["order"] = order
         if limit is not None:
@@ -540,12 +635,12 @@ def resolve_api_key(cp, token: str) -> dict | None:
 
     Returns the same dict shape as the registry get_current_org path
     (org_id, key_id, tier, max_users, max_graphs, max_points, max_api_keys,
-    max_sessions) plus additive metadata (key_prefix/created_via/created_by)
+    max_sessions — always None: unlimited, #4010) plus additive metadata
+    (key_prefix/created_via/created_by)
     plus the C1 tenancy fields (graph_id, graph_namespace, scopes,
     legacy_full_access, delegation_depth, created_by_key_id).
     """
     from tortoise.auth import lookup_hash
-    from tortoise.quota import DEFAULT_MAX_SESSIONS
 
     now = datetime.now(UTC)
     h = lookup_hash(token)
@@ -715,9 +810,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
         # forces the reduced node cap.
         "max_points": (int(lim["max_graph_nodes"]) if anon_override
                        else (int(max_points) if max_points is not None else lim["max_graph_nodes"])),
-        # 0006 orgs has no max_api_keys/max_sessions columns — pricing/defaults
+        # 0006 orgs has no max_api_keys column — pricing resolves it.
+        # #4010: sessions are UNLIMITED for every tier; max_sessions has no
+        # column either, and no constant supplies one.
         "max_api_keys": lim["max_api_keys"],
-        "max_sessions": DEFAULT_MAX_SESSIONS,
+        "max_sessions": None,
         # additive metadata (not part of the registry dict contract)
         "key_prefix": key_prefix,
         "created_via": created_via,
@@ -3041,6 +3138,85 @@ def metering_increment_ask(cp, org_id: str, period: str, *, calls: int = 1,
          "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
          "p_cost_usd": cost_usd},
     )
+
+
+def metering_increment_capture_cost(cp, org_id: str, period: str, *,
+                                    calls: int = 0,
+                                    cost_usd: float = 0.0) -> None:
+    """Increment the org's MEASURED capture-extraction cost for the period
+    (#3665) via the ``metering_increment_capture_cost`` SQL RPC
+    (20260917000001) — the capture-side mirror of ``metering_increment_ask``
+    (atomic under Postgres row locking; best-effort by contract — the caller
+    swallows exceptions)."""
+    cp.rpc(
+        "metering_increment_capture_cost",
+        {"p_org_id": org_id, "p_period": period, "p_calls": calls,
+         "p_cost_usd": cost_usd},
+    )
+
+
+def metering_cohort_spend(cp, org_ids: list[str], period: str) -> float:
+    """Measured LLM spend for a COHORT over one billing period (#3665).
+
+    Aggregates ``SUM(ask_cost_usd + capture_cost_usd)`` over the cohort's
+    ``metering_records`` rows for the period **server-side**, in the
+    ``metering_cohort_spend`` SQL function (20260917000001).
+
+    WHY AN RPC RATHER THAN A FILTERED ROW READ (code-review cycle 1, P1):
+    PostgREST silently caps a row LIST at the project's ``db-max-rows``, and a
+    silently short read UNDERSTATES spend — a fail-open on a spend ceiling.
+    The row count cannot detect it (a short read returns FEWER rows; the
+    (org_id, period) PK makes an over-return impossible, so the earlier
+    "more rows than the cohort has orgs" guard was unreachable dead code).
+    The function returns ONE scalar, so no row cap can apply.
+
+    One row per ORG, never one per capture: the aggregate is bounded by the
+    cohort size, not by capture volume — which is why the cap can afford this
+    read on every admission (#3665 trade-off 2, decided: no cache, no
+    weakened bound).
+
+    FAIL-CLOSED: a failure raises (``RuntimeError`` from ``rpc``), never a
+    partial or zero sum. A non-finite aggregate raises too — a poisoned SUM
+    must not price as a cheap cohort.
+    """
+    wanted = sorted({str(i) for i in (org_ids or []) if i})
+    if not wanted:
+        return 0.0
+    value = cp.rpc_value("metering_cohort_spend",
+                         {"p_org_ids": wanted, "p_period": period})
+    total = float(value or 0.0)
+    if not math.isfinite(total):
+        raise RuntimeError(
+            f"metering_records cohort aggregate is not finite ({value!r}) — "
+            "refusing to price the cohort from it (fail-closed)")
+    return total
+
+
+def cohort_org_ids_since(cp, since: str, limit: int) -> list[str]:
+    """Org ids created after *since*, at most ``limit + 1`` of them (#3665).
+
+    Server-side ``array_agg`` (RPC ``cohort_org_ids_since``,
+    20260917000001) — ONE row, one column, so ``db-max-rows`` cannot
+    truncate the cohort the way it could truncate a filtered row list. A
+    truncated cohort is worse than an understated sum: every dropped org
+    reads as "outside the cohort" and the cap is silently DISARMED for it.
+
+    The comparison is ``timestamptz`` in SQL, so the value's format cannot
+    change its meaning (an unvalidated string would compare lexicographically
+    in the registry lane — ``cohort_cost.resolve_cohort_cost_cap`` validates
+    and normalises the value before it reaches either lane).
+
+    Returns up to ``limit + 1`` ids so the caller can detect an over-bound
+    cohort and fail closed rather than pricing a partial set.
+
+    FAIL-CLOSED: a failure raises (``RuntimeError`` from ``rpc``).
+    """
+    value = cp.rpc_value("cohort_org_ids_since",
+                         {"p_since": since, "p_limit": limit})
+    if value is None:
+        return []
+    ids = value if isinstance(value, (list, tuple)) else [value]
+    return [str(i) for i in ids if i]
 
 
 # ── #1875: invitee-side pending/accept/decline (by-id, email-scoped) ────────

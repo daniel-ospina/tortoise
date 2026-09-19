@@ -257,7 +257,8 @@ def test_discover_protects_path_based_server_with_old_settings(tmp_path):
         assert matches[0]["classification"] == "protected"
 
 
-def test_discover_unknown_old_settings_pattern_defaults_protected(tmp_path, caplog):
+def test_discover_unknown_old_settings_pattern_scoped_absent_full_scan_protected(
+        tmp_path, caplog):
     """Pre-#90 .settings, no db_filename, no .db file, non-matching dirname
     -> protected (boot cooldown: no live pid) — never crash, never killable.
 
@@ -265,8 +266,14 @@ def test_discover_unknown_old_settings_pattern_defaults_protected(tmp_path, capl
     so it is no longer flagged as an 'unrecognized pattern' (the tree itself
     is known-ephemeral); protection now comes from the boot cooldown. The
     unrecognized-pattern warning only applies outside ephemeral trees.
+
+    #4068 re-argument: discovery is now scoped to the ephemeral namespace,
+    and `my-custom-name` is OUTSIDE it — so the scoped sweep does not
+    enumerate the dir at all, which is strictly STRONGER than classifying
+    it `protected`. The classification claim is preserved (and the escape
+    hatch's purpose is pinned) by asserting both halves.
     """
-    dbdir = tmp_path / "my-custom-name"  # non-matching dirname
+    dbdir = tmp_path / "my-custom-name"  # non-matching (out-of-namespace) name
     dbdir.mkdir()
     socket_path = dbdir / "redis.socket"
     socket_path.write_text("")
@@ -276,10 +283,156 @@ def test_discover_unknown_old_settings_pattern_defaults_protected(tmp_path, capl
         "dbdir": str(dbdir),
     }))
     with monkeypatch_tempdir(tmp_path):
-        found = discover()
+        # (a) scoped discovery: out-of-namespace name -> not enumerated
+        assert [s for s in discover()
+                if str(dbdir) in s.get("dbdir", "")] == []
+        # (b) detect-only hatch: discovered AND classified protected
+        found = discover(full_scan=True)
         matches = [s for s in found if str(dbdir) in s.get("dbdir", "")]
-        assert matches, "unknown-pattern server not discovered"
+        assert matches, "unknown-pattern server not discovered under --full-scan"
         assert matches[0]["classification"] == "protected"
+
+
+def test_full_scan_does_not_add_actions_beyond_scoped(monkeypatch):
+    """Adversarial class 4: `--full-scan` restores the pre-#4068 UN-SCOPED
+    enumeration, but it cannot add an ACTION. The fixture is aged past the
+    boot-cooldown guard and carries a REAL dead socket, so the removal chain
+    actually runs — and is refused by CONTAINMENT (the dir's name is outside
+    the ephemeral namespace). Removing Guard 1 reddens this test."""
+    import shutil
+    import time as _t
+
+    import tortoise.embedded_reaper as _R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        outdir = base / "my-custom-name"
+        outdir.mkdir()
+        sp = outdir / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # real dead socket -> the probe guard would NOT refuse
+        (outdir / "redis.pid").write_text("99999999\n")
+        (outdir / "x.settings").write_text(json.dumps({
+            "pidfile": str(outdir / "redis.pid"), "unixsocket": str(sp),
+            "dbdir": str(outdir), "dbfilename": "redis.db"}))
+        old = _t.time() - 120
+        os.utime(str(outdir), (old, old))  # past the boot-cooldown guard
+        # `outdir` realpaths under the tempdir but its NAME is out of the
+        # discovery namespace, so containment (not probe/age) must refuse.
+        monkeypatch.setattr(_R, "_real_gettempdir", lambda: str(base))
+        for full_scan in (False, True):
+            acted = _R._run_sweep(dry_run=False, batch_size=None,
+                                  full_scan=full_scan, sweep_pid_files=False)
+            assert not [r for r in acted
+                        if str(outdir) in str(r.get("dbdir", ""))], (
+                            full_scan, acted)
+        assert outdir.is_dir() and sp.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_live_candidate_is_found_by_pass1_regardless_of_dir_name(
+        tmp_path, monkeypatch):
+    """The PASS-1 LEMMA the scoped discovery's kill-losslessness rests on:
+    a LIVE server is enumerated by pgrep + cmdline regardless of its socket
+    dir's name, so the scoped pass 2 losing an out-of-namespace name costs
+    no kill. Pinned so a pass-1 regression reddens here."""
+    import tortoise.embedded_reaper as _R
+    for name in ("my-custom-name", "another-custom-name"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "redis.socket").write_text("")
+    # pass 1 resolves the dir from the live pid's cmdline (name-independent)
+    monkeypatch.setattr(_R, "_pgrep_redis_servers", lambda: [424242])
+    monkeypatch.setattr(_R, "_socket_dir_from_cmdline",
+                        lambda pid: str(tmp_path / "my-custom-name"))
+    monkeypatch.setattr(_R, "_classify_dir",
+                        lambda d, s, known_pid=None: {
+                            "pid": known_pid, "socket_path": s, "dbdir": d,
+                            "classification": "protected", "settings": None})
+    with monkeypatch_tempdir(tmp_path):
+        recs = list(_R.discover())
+    assert [r["dbdir"] for r in recs] == [str(tmp_path / "my-custom-name")], recs
+
+
+def test_symlinked_decoy_dir_never_reaped(monkeypatch):
+    """Adversarial class 1: an ephemeral-named SYMLINK pointing OUTSIDE the
+    reaper's tempdir. Discovery cannot enumerate it (symlinked entries are
+    skipped), and a crafted record is refused by CONTAINMENT on the realpath
+    — the target is not under the tempdir. The fixture is aged past the
+    boot-cooldown guard and carries a REAL dead socket, so the refusal is
+    provably containment's and not a probe/age abort; the link and its target
+    survive. Removing Guard 1 lets the target be renamed/rmtree'd and this
+    test reddens."""
+    import shutil
+    import time as _t
+
+    import tortoise.embedded_reaper as _R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        target = base / "decoy-target"
+        target.mkdir()
+        sp = target / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # real dead socket file (persists)
+        (target / "redis.pid").write_text("99999999\n")  # > pid_max
+        (target / "x.settings").write_text(json.dumps({
+            "pidfile": str(target / "redis.pid"), "unixsocket": str(sp),
+            "dbdir": str(target), "dbfilename": "redis.db"}))
+        old = _t.time() - 120
+        os.utime(str(target), (old, old))  # past the boot-cooldown guard
+        link = base / "tmpDECOYXX"
+        link.symlink_to(target, target_is_directory=True)
+        # the reaper's tempdir is redirected elsewhere, so the link's realpath
+        # (the target) is OUT of tree -> containment must refuse
+        monkeypatch.setattr(_R, "_real_gettempdir",
+                            lambda: "/nonexistent-4068-other-root")
+        assert _R._is_ephemeral_dir(os.path.realpath(str(link)),
+                                    _R._real_gettempdir()) is False
+        rec = {
+            "pid": None, "socket_path": str(link / "redis.socket"),
+            "dbdir": str(link), "path_based": True, "dir_missing": False,
+            "client_count": None, "uptime": None,
+            "classification": "stale_socket", "settings": None,
+        }
+        acted = _R.reap([rec], dry_run=False)
+        assert not [r for r in acted
+                    if str(link) in str(r.get("dbdir", ""))], acted
+        assert link.is_symlink() and target.is_dir()
+        assert (target / "redis.socket").exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_namespace_match_with_escaping_realpath_refused(monkeypatch):
+    """Adversarial class 2: a record whose `dbdir` realpaths OUTSIDE the
+    reaper's tempdir is refused by the destruction CONTAINMENT guard. The
+    fixture is aged past the boot-cooldown guard and carries a REAL dead
+    socket, so neither the probe nor the age guard can be the reason —
+    removing Guard 1 reddens this test."""
+    import shutil
+    import time as _t
+
+    import tortoise.embedded_reaper as _R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        sp = base / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # real dead socket -> the probe guard would NOT refuse
+        old = _t.time() - 120
+        os.utime(str(base), (old, old))  # past the boot-cooldown guard
+        # redirect the reaper's notion of the tempdir so `base` is out of tree
+        monkeypatch.setattr(_R, "_real_gettempdir",
+                            lambda: "/nonexistent-4068-other-root")
+        assert _R._is_ephemeral_dir(os.path.realpath(str(base)),
+                                    _R._real_gettempdir()) is False
+        rec = {"dbdir": str(base), "socket_path": str(sp)}
+        assert _R._remove_stale_socket_dir(rec, dry_run=False) is None
+        assert base.is_dir() and sp.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 # ── Error isolation ─────────────────────────────────────────────────
@@ -351,6 +504,214 @@ def test_discover_handles_symlinked_tempdir(tmp_path, monkeypatch):
         assert isinstance(found, list)
     finally:
         db.close()
+
+
+# ── #4068: scoped, in-process discovery ─────────────────────────────
+
+def test_scoped_discovery_predicate_equivalence_at_depth_1(tmp_path):
+    """For depth-1 dirs the DISCOVERY predicate `_ephemeral_name` and the
+    destruction predicate `_is_ephemeral_dir` are the SAME set. The scoped
+    walk's removal-losslessness rests on this — it must redden if either
+    side changes, so it asserts on the function actually used by
+    `_scan_socket_dirs`, not on an inlined copy of its body."""
+    from tortoise.embedded_reaper import (
+        _ephemeral_name,
+        _is_ephemeral_dir,
+    )
+    tmp_real = os.path.realpath(str(tmp_path))
+    for name in ["tmp", "tmpx", "redislite_x", "tortoise_a", "tt_", "lme-x",
+                 "my-custom-name", "d", "ask_sdk_x"]:
+        d = tmp_path / name
+        d.mkdir()
+        assert _ephemeral_name(name) == _is_ephemeral_dir(
+            os.path.realpath(str(d)), tmp_real), name
+
+
+def test_discovery_tests_the_name_before_is_symlink(
+        tmp_path, monkeypatch):
+    """The perf win IS the ordering: a foreign entry costs a dirent read and
+    is never even symlink-tested. `DirEntry.is_symlink()` is C-level and
+    invisible to an `os.stat` counter, so the ORDER is pinned directly: the
+    predicate is called for every entry, `is_symlink` only for matches."""
+    calls = {"predicate": 0, "is_symlink": 0}
+    real_scandir = os.scandir
+    real_is_symlink = os.DirEntry.is_symlink
+
+    class _CountingEntry:
+        def __init__(self, e):
+            self._e = e
+            self.name = e.name
+            self.path = e.path
+
+        def is_symlink(self):
+            calls["is_symlink"] += 1
+            return real_is_symlink(self._e)
+
+    class _CountingScan:
+        def __init__(self, path):
+            self._it = real_scandir(path)
+
+        def __iter__(self):
+            for e in self._it:
+                yield _CountingEntry(e)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self._it.close()
+            return False
+
+    for i in range(500):
+        (tmp_path / f"foreign_{i}").mkdir()
+    (tmp_path / "tmpAAAAAAAA").mkdir()
+    (tmp_path / "tmpAAAAAAAA" / "redis.socket").write_text("")
+    from tortoise.embedded_reaper import _ephemeral_name as _real_pred
+    from tortoise.embedded_reaper import _iter_candidate_dirs
+
+    monkeypatch.setattr(os, "scandir", _CountingScan)
+
+    def _counting_pred(name):
+        calls["predicate"] += 1
+        return _real_pred(name)
+
+    res = _iter_candidate_dirs(str(tmp_path), predicate=_counting_pred)
+    assert res.dirs == [str(tmp_path / "tmpAAAAAAAA")]
+    assert calls["predicate"] == 501, calls
+    assert calls["is_symlink"] == 1, calls
+
+
+def test_find_socket_dirs_scoped_skips_custom_full_scan_finds(tmp_path):
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    for name in ("my-custom-name", "redislite_ok"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "redis.socket").write_text("")
+    assert _scan_socket_dirs(str(tmp_path)).dirs == [
+        str(tmp_path / "redislite_ok")]
+    assert set(_scan_socket_dirs(str(tmp_path), full_scan=True).dirs) == {
+        str(tmp_path / "my-custom-name"), str(tmp_path / "redislite_ok")}
+
+
+def test_find_socket_dirs_finds_either_marker_name(tmp_path):
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    (tmp_path / "tmpAAAAAAA1").mkdir()
+    (tmp_path / "tmpAAAAAAA2").mkdir()
+    (tmp_path / "tmpAAAAAAA1" / "redis.socket").write_text("")
+    (tmp_path / "tmpAAAAAAA2" / "redis.pid").write_text("")
+    assert len(_scan_socket_dirs(str(tmp_path)).dirs) == 2
+
+
+def test_find_socket_dirs_symlinked_marker_file_still_discovered(tmp_path):
+    """A symlink NAMED redis.socket inside a real ephemeral dir is found —
+    `find -name` matches it too."""
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    d = tmp_path / "tmpZZZZZZZZ"
+    d.mkdir()
+    (tmp_path / "elsewhere.socket").write_text("")
+    os.symlink(tmp_path / "elsewhere.socket", d / "redis.socket")
+    assert _scan_socket_dirs(str(tmp_path)).dirs == [str(d)]
+
+
+def test_symlinked_dir_not_enumerated(tmp_path, tmp_path_factory):
+    """Parity with `find` without -L: a symlinked depth-1 dir is not descended."""
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    root = tmp_path / "root"
+    root.mkdir()
+    target = tmp_path_factory.mktemp("outside")  # OUTSIDE the scanned root
+    (target / "redis.socket").write_text("")
+    (root / "tmpLINKLINK").symlink_to(target, target_is_directory=True)
+    (root / "tmpREALONE1").mkdir()
+    (root / "tmpREALONE1" / "redis.socket").write_text("")
+    res = _scan_socket_dirs(str(root), full_scan=True)
+    assert res.dirs == [str(root / "tmpREALONE1")] and res.complete
+
+
+def test_find_socket_dirs_budget_expiry_partial_and_warns(tmp_path, caplog):
+    import time as _t
+
+    from tortoise.embedded_reaper import _scan_socket_dirs
+    for i in range(50):
+        d = tmp_path / f"tmp{i:08d}"
+        d.mkdir()
+        (d / "redis.socket").write_text("")
+    with caplog.at_level("WARNING"):
+        res = _scan_socket_dirs(str(tmp_path), deadline=_t.monotonic() - 1.0)
+    assert res.complete is False and res.dirs == []
+    assert "budget" in caplog.text.lower()
+
+
+def test_iter_candidate_dirs_oserror_mid_iteration_is_partial(
+        tmp_path, monkeypatch, caplog):
+    """A mid-iteration OSError keeps the entries already yielded."""
+    from tortoise.embedded_reaper import _iter_candidate_dirs
+    (tmp_path / "tmphit").mkdir()
+    (tmp_path / "tmpboom").mkdir()
+    real = os.scandir
+
+    class _It:
+        def __init__(self):
+            self._it = real(str(tmp_path))
+            self._n = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self._n += 1
+            if self._n > 1:
+                raise OSError("nope")
+            return next(self._it)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(os, "scandir", lambda p: _It())
+    with caplog.at_level("WARNING"):
+        res = _iter_candidate_dirs(str(tmp_path), predicate=lambda n: True)
+    assert res.complete is False and len(res.dirs) == 1
+    assert "failed" in caplog.text.lower()
+
+
+def test_iter_candidate_dirs_empty_root_is_complete(tmp_path):
+    from tortoise.embedded_reaper import _iter_candidate_dirs
+    res = _iter_candidate_dirs(str(tmp_path), predicate=lambda n: True)
+    assert res.dirs == [] and res.complete is True
+
+
+def test_discover_full_scan_keyword_reaches_walk(tmp_path):
+    from tortoise.embedded_reaper import discover
+    d = tmp_path / "my-custom-name"
+    d.mkdir()
+    (d / "redis.socket").write_text("")
+    with monkeypatch_tempdir(tmp_path):
+        assert [r for r in discover()
+                if r["dbdir"].endswith("my-custom-name")] == []
+        found = [r for r in discover(full_scan=True)
+                 if r["dbdir"].endswith("my-custom-name")]
+    assert found and found[0]["classification"] == "protected"
+
+
+def test_scan_set_equality_against_independent_predicate(tmp_path):
+    """Acceptance #3: the scoped set equals the set computed independently
+    from the invariant (ephemeral name AND a marker present)."""
+    from tortoise.embedded_reaper import _ephemeral_name, _scan_socket_dirs
+    expected = set()
+    for name, marker in [("tmpAAAAAAA1", "redis.socket"),
+                         ("redislite_ok", "redis.pid"),
+                         ("tortoise_x", "redis.socket"),
+                         ("my-custom-name", "redis.socket"),
+                         ("d", "redis.socket"),
+                         ("ask_sdk_x", "redis.pid")]:
+        d = tmp_path / name
+        d.mkdir()
+        (d / marker).write_text("")
+        if _ephemeral_name(name):
+            expected.add(str(d))
+    assert set(_scan_socket_dirs(str(tmp_path)).dirs) == expected
 
 
 # ── CLIENT LIST / SKIPME ────────────────────────────────────────────
@@ -1312,7 +1673,7 @@ def test_run_sweep_includes_stale_pid_files(tmp_path, monkeypatch):
     # No redis servers involved — discover() finds nothing; the pid sweep is
     # the only actor. _run_sweep takes the reaper lock; it must be free.
     monkeypatch.setattr("tortoise.embedded_reaper.discover",
-                        lambda jobs=1: [])
+                        lambda jobs=1, **kw: [])
     acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True)
     pid_actions = [a for a in acted if a.get("classification") == "stale_pid_file"]
     assert len(pid_actions) == 1
@@ -1948,7 +2309,7 @@ def test_run_sweep_removes_stale_socket_record(monkeypatch):
         monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(dbdir.parent / "locks"))
         monkeypatch.setattr(
             "tortoise.embedded_reaper.discover",
-            lambda jobs=1: [_stale_record(dbdir, sock)])
+            lambda jobs=1, **kw: [_stale_record(dbdir, sock)])
         acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True,
                            sweep_pid_files=False)
         assert any(a.get("dbdir") == str(dbdir) for a in acted)
@@ -2042,7 +2403,7 @@ def test_run_sweep_combined_quarantine_and_pid_files(monkeypatch):
         old = time.time() - 120
         os.utime(stale_pid, (old, old))
         monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(locks))
-        monkeypatch.setattr("tortoise.embedded_reaper.discover", lambda jobs=1: [])
+        monkeypatch.setattr("tortoise.embedded_reaper.discover", lambda jobs=1, **kw: [])
         acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True)
         classes = {a.get("classification") for a in acted}
         assert "stale_quarantine" in classes
@@ -2065,7 +2426,7 @@ def test_cli_json_emits_stale_socket_shape(monkeypatch):
                             lambda self: None)
         monkeypatch.setattr(
             "tortoise.embedded_reaper.discover",
-            lambda jobs=1: [_stale_record(dbdir, sock)])
+            lambda jobs=1, **kw: [_stale_record(dbdir, sock)])
         import io
         import json as _json
         out = io.StringIO()
@@ -2103,6 +2464,22 @@ def test_sweep_quarantine_dirs_removes_dead_leftover():
         removed = _sweep_quarantine_dirs(dry_run=False)
         assert q in removed
         assert not os.path.exists(q)
+
+
+def test_quarantine_sweep_budget_expiry_partial(monkeypatch, caplog):
+    """#4068: the quarantine scan shares the bounded primitive — expiry is a
+    WARNING + partial result, never an exception or a silent empty sweep."""
+    import tortoise.embedded_reaper as _R
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
+        q = os.path.realpath(str(dbdir)) + ".reaper-stale-123"
+        os.rename(dbdir, q)
+        _mark_quarantine(q)
+        monkeypatch.setattr(_R, "SOCKET_WALK_TIMEOUT", -1.0)
+        with caplog.at_level("WARNING"):
+            removed = _R._sweep_quarantine_dirs(dry_run=True)
+        assert removed == []
+        assert "budget" in caplog.text.lower()
+        assert os.path.exists(q), "partial scan must not mutate"
 
 
 def test_sweep_quarantine_dirs_keeps_live_leftover():
@@ -3030,6 +3407,94 @@ def test_embedded_orphans_census_fails_closed_when_enumeration_fails(
 
     monkeypatch.setattr(mod, "census", _boom)
     assert mod.main([]) == 2
+
+
+def test_run_sweep_plain_list_discover_seam(monkeypatch):
+    """A monkeypatched `discover` returning a plain list must not break
+    `_run_sweep` and must read as INCOMPLETE (fail-closed) — an unknown
+    result is never a finished scan (#4068)."""
+    from tortoise.embedded_reaper import _run_sweep
+    monkeypatch.setattr("tortoise.embedded_reaper.discover",
+                        lambda jobs=1, **kw: [])
+    res = _run_sweep(dry_run=True, batch_size=None, sweep_pid_files=False)
+    assert list(res) == [] and res.complete is False
+
+
+def test_parse_full_scan_env_truthiness():
+    from tortoise.embedded_reaper import _env_truthy
+    for raw in ("1", "true", "TRUE", "yes", "On"):
+        assert _env_truthy(raw) is True, raw
+    for raw in (None, "", "0", "false", "no", "off", "garbage"):
+        assert _env_truthy(raw) is False, raw
+
+
+def test_cli_full_scan_resolves_from_flag_and_env(monkeypatch, capsys):
+    """CLI flag > env > default, and the resolved value reaches `_run_sweep`."""
+    import tortoise.embedded_reaper as _R
+    seen = {}
+
+    def _fake_run_sweep(**kw):
+        seen.update(kw)
+        return _R._ScanAwareList()
+
+    monkeypatch.setattr(_R, "_run_sweep", _fake_run_sweep)
+    monkeypatch.setattr(_R._ReaperLock, "acquire", lambda self: True)
+    monkeypatch.setattr(_R._ReaperLock, "release", lambda self: None)
+    monkeypatch.delenv("TORTOISE_REAPER_FULL_SCAN", raising=False)
+
+    assert _R.main([]) == 0 and seen["full_scan"] is False
+    assert _R.main(["--full-scan"]) == 0 and seen["full_scan"] is True
+    monkeypatch.setenv("TORTOISE_REAPER_FULL_SCAN", "1")
+    assert _R.main([]) == 0 and seen["full_scan"] is True
+    monkeypatch.setenv("TORTOISE_REAPER_FULL_SCAN", "0")
+    assert _R.main([]) == 0 and seen["full_scan"] is False
+    capsys.readouterr()
+
+
+def test_main_surfaces_truncation(monkeypatch, capsys):
+    """#4068: a truncated discovery must never read as a finished sweep."""
+    import tortoise.embedded_reaper as _R
+
+    def _truncated(**kw):
+        out = _R._ScanAwareList()
+        out.complete = False
+        return out
+
+    monkeypatch.setattr(_R, "_run_sweep", _truncated)
+    monkeypatch.setattr(_R._ReaperLock, "acquire", lambda self: True)
+    monkeypatch.setattr(_R._ReaperLock, "release", lambda self: None)
+    assert _R.main(["--no-dry-run"]) == 0
+    assert "SCAN TRUNCATED" in capsys.readouterr().out
+
+
+def test_census_reports_truncation(monkeypatch, capsys):
+    """#4068: --deep is detect-only and bounded; a truncated scan must be
+    reported (dict key + stderr warning), and must NOT change the exit code."""
+    mod = _load_embedded_orphans()
+    monkeypatch.setattr(mod, "census", lambda **kw: {
+        "live_servers": 0, "orphans": 0, "orphan_details": [],
+        "protected": 0, "unclassified": 0, "stale_socket_dirs": 0,
+        "stale_socket_dir_sample": [], "census_truncated": True})
+    assert mod.main(["--deep"]) == 0
+    assert "PARTIAL" in capsys.readouterr().err
+
+
+def test_deep_census_uses_the_unscoped_scan(monkeypatch):
+    """`--deep` must request full_scan (detect-only) and surface the
+    scan's completeness without raising on an incomplete scan."""
+    mod = _load_embedded_orphans()
+    import tortoise.embedded_reaper as _R
+    seen = {}
+
+    def _fake_scan(tmpdir, **kw):
+        seen.update(kw)
+        return _R._ScanResult([], complete=False)
+
+    monkeypatch.setattr(_R, "_scan_socket_dirs", _fake_scan)
+    monkeypatch.setattr(mod, "_enumerate_servers_strict", lambda: [])
+    res = mod.census(deep=True)
+    assert seen.get("full_scan") is True
+    assert res["census_truncated"] is True
 
 
 def test_embedded_orphans_inconclusive_is_not_clean(monkeypatch, capsys):

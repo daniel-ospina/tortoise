@@ -12,6 +12,13 @@ redirect lands on the dashboard LOGIN screen).
 Pure static text assertions: no browser, no network. Source files, not bundles,
 so regex anchoring to declaration patterns is reliable.
 
+#3485 is deliberately NOT pinned by text here. Its read/migrate/store invariants
+(the localStorage-only loop, expired-legacy displacement, corrupt-legacy
+containment, fragment-strip ordering) are EXECUTED against the real script in
+`website/apps/dashboard/src/supabaseSessionBridge.test.js` — three review cycles
+of brace/substring pins were each escaped by obfuscations that did not change
+behaviour, which is the whole reason a behavioural suite replaced them.
+
 ⚠️ THIS MODULE PINS A DESIGN THAT IS BEING RETIRED (#3501). The parent-domain
 cookie is a REVERSAL, not a fallback: it is JavaScript-readable by construction,
 which is the property #3501 exists to remove. This suite stays green for the
@@ -451,16 +458,17 @@ def test_shared_helpers_present() -> None:
 def test_dashboard_public_copy_is_byte_identical() -> None:
     """The dashboard loads the shared script from its own public/ copy (the
     dashboard is a separate Pages project — dist/ only deploys). It must stay
-    byte-identical to the shared file (Task 5 asserts the built dist copy).
-    The built dist/ copy is also git-tracked and is what the deployed
-    dashboard actually serves — assert it too so a forgotten rebuild can't
-    ship a stale bridge (code-review P3, cycle 3)."""
+    byte-identical to the shared file.
+
+    #3775: dist/ is no longer git-tracked — it is a build artifact. A dist/
+    copy used to be asserted here too, so a forgotten rebuild could not ship a
+    stale bridge; that failure class is gone. Both deploy paths (deploy.sh +
+    deploy-pages.yml) and the dashboard-js-tests job build dist/ from public/
+    with vite immediately before it is served, and vite copies public/
+    verbatim (verified byte-for-byte in #3775), so public/ is the contract to
+    pin. The built bundle is what `distBundle.test.js` scans."""
     public_copy = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "assets" / "supabase-session.js"
-    dist_copy = REPO_ROOT / "website" / "apps" / "dashboard" / "dist" / "assets" / "supabase-session.js"
     shared = _read(SHARED)
     assert public_copy.exists(), "missing dashboard public/ copy"
     assert public_copy.read_text(encoding="utf-8") == shared, \
         "dashboard public/ copy drifted from the shared file"
-    assert dist_copy.exists(), "missing dashboard dist/ copy"
-    assert dist_copy.read_text(encoding="utf-8") == shared, \
-        "dashboard dist/ copy drifted from the shared file (rebuild dashboard)"

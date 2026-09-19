@@ -21,7 +21,7 @@ hard per-session cap (E2E-10: one session can't monopolize the context).
 # (``load_scorer``) now live ONCE in ``tortoise/rerank.py`` and are imported
 # + re-exported here. This module keeps only the eval-lane adapters: the
 # ``TORTOISE_LME_RERANK*`` env namespace, the gate, and the eval's own
-# module-level cache globals (the test seam). The product ask lane uses the
+# module-level cache globals (the test seam). The eval-only ask lane uses the
 # same code behind ``TORTOISE_ASK_RERANK``.
 # ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations

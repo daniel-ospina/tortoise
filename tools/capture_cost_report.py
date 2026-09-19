@@ -9,7 +9,11 @@ extraction that made provider calls has real spend), into
 
     ``_capture_cost_props`` -> ``_track_analytics_event``).
 
-Replay / M2 captures carry no extractor telemetry and emit nothing.
+M2 captures (#3824) DO make real provider calls — they simply discard the
+usage block — so they emit a row carrying ``unattributed`` with every
+measured field zeroed; the report counts those calls into
+``unmetered_attempts`` instead of reading the session as an unmeasured or
+$0 one.
 
     row.properties = {
         session_id, calls, retries, prompt_tokens, completion_tokens,
@@ -17,6 +21,7 @@ Replay / M2 captures carry no extractor telemetry and emit nothing.
         calls_without_cost,   # calls the provider served without a charge
         calls_without_usage,  # calls that carried no usage block at all
         deadline_aborts,      # billed upstream, unpriceable here
+        unattributed,         # #3824: calls made, no roll-up survived
         by_stage: {stage: {provider: {model: {calls, prompt_tokens,
                     completion_tokens, cost_usd, usage_present,
                     calls_without_cost, calls_without_usage}}}},
@@ -31,8 +36,10 @@ stays ``write_ops``.
 
 Usage
 -----
-Live (needs ``SUPABASE_URL`` + ``SUPABASE_SERVICE_KEY`` — service role;
-``analytics_events`` RLS denies customer reads)::
+Live (needs ``SUPABASE_URL`` + a service key of either name —
+``SUPABASE_SERVICE_ROLE_KEY`` on the hosted deployment, the legacy
+``SUPABASE_SERVICE_KEY`` elsewhere; service role, since ``analytics_events``
+RLS denies customer reads)::
 
     uv run python tools/capture_cost_report.py --days 7 --top 10
     uv run python tools/capture_cost_report.py --days 7 --out /tmp/cost.json
@@ -106,13 +113,26 @@ def fetch_rows(days: int, *, timeout: float = 30.0) -> list[dict]:
     with ``Range`` so a chatty beta does not silently truncate the window
     (Supabase caps a single response; a truncated window would understate
     p95 — the number the whole issue is about).
+
+    #3677: the service key comes from the ONE resolution seam
+    (``supabase_control._service_key()``) — the hosted deployment sets only
+    ``SUPABASE_SERVICE_ROLE_KEY``. A legacy-name-only lookup would have
+    refused to pull from any deployment that supplied only the canonical
+    name. That made this the SECOND half of one defect: the writer would have
+    dropped the rows and this reader would then have refused to fetch them, so
+    the per-session cost evidence (#3359) needed both halves repaired, not
+    just the writer.
     """
+    # Function-local so this tool stays importable without the SDK.
+    from tortoise.supabase_control import _service_key
+
     url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    key = _service_key() or None
     if not url or not key:
         raise ValueError(
-            "SUPABASE_URL and SUPABASE_SERVICE_KEY must both be set for a "
-            "live pull — or pass --jsonl/--json for an offline report")
+            "SUPABASE_URL and a service key (SUPABASE_SERVICE_ROLE_KEY or the "
+            "legacy SUPABASE_SERVICE_KEY) must both be set for a live pull — "
+            "or pass --jsonl/--json for an offline report")
     import httpx
 
     since = _iso_days_ago(days)
@@ -226,6 +246,8 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         add(f"  excluded, no calls at all         : {dist['excluded_no_calls']}")
         add(f"  excluded, calls but unmetered     : {dist['excluded_unmeasured']}")
         add(f"  deadline-killed (billed, no toks) : {dist['deadline_aborts']}")
+        add(f"  calls with no surviving roll-up   : {dist['unattributed_calls']}")
+        add(f"  captures behind those calls       : {dist['unattributed_captures']}")
         add("  (check that captures are actually running extraction, that the")
         add("   hosted emit path is deployed, and that the serving model ids")
         add("   have a row in the versioned PRICING_MAP)")
@@ -259,6 +281,9 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
     add(f"  excluded, no calls at all      : {dist['excluded_no_calls']}")
     add(f"  excluded, calls but unmetered  : {dist['excluded_unmeasured']}")
     add(f"  deadline-killed (billed, no toks): {dist['deadline_aborts']}")
+    add(f"  calls with no surviving roll-up   : {dist['unattributed_calls']} "
+        f"(across {dist['unattributed_captures']} capture(s)) — counted in "
+        "the attempts line below, not additional to it")
     add(f"  calls served without a charge  : {dist['calls_without_cost']}")
     add(f"  attempts with no meterable reply: {dist['unmetered_attempts']}")
     add(f"  sessions tokens we could not price: {dist['unpriced_sessions']}")

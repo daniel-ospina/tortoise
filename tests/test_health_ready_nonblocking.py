@@ -192,12 +192,14 @@ def _fly_check_budget_proxy_s() -> float | None:
     # as a /health/ready budget proxy would be a different quantity entirely
     # (and smaller than the ready worst case, so it cannot serve as a ceiling).
     # There is consequently NO HTTP-check budget left to compare against here.
-    # The deferred top-level ``[checks.loop_liveness]`` does NOT restore one:
-    # it is a loop-liveness check (fly.toml documents its timeout as 5s, below
-    # the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
+    # The top-level ``[checks.loop_liveness]`` (shipped #3447) does NOT restore
+    # one: it is a loop-liveness check (fly.toml documents its timeout as 5s,
+    # below the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
     # ``services[0].http_checks`` one, and this reader does not consume it. The
     # cross-endpoint bound now lives in ``READY_WORST_CASE_BUDGET_S``, and the
-    # caller's else branch fails closed if any top-level ``[checks]`` appears.
+    # caller's else branch MODELS that one entry explicitly (identity, bounds,
+    # and that it does not feed the ceiling) while still failing closed on any
+    # OTHER top-level ``[checks]`` entry.
     if "http_checks" not in svc:
         return None
     try:
@@ -359,9 +361,12 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     the only external bound is the TCP replacement — whose 5s timeout is
     documented as headroom, not a latency budget, and cannot serve as a
     ceiling. When no http_check budget exists the test asserts instead that the
-    documented replacement (``[[services.tcp_checks]]``) IS present and that no
-    top-level ``[checks]`` table has appeared — so removing or altering the
-    checks block reds here rather than silently passing.
+    documented replacement (``[[services.tcp_checks]]``) IS present, that the
+    top-level ``[checks.loop_liveness]`` entry this repo now ships IS present
+    and carries its own documented bounds (and is NOT the readiness ceiling),
+    and that no OTHER top-level ``[checks]`` entry has appeared — so removing,
+    altering or shadowing the checks block reds here rather than silently
+    passing.
     """
     import httpx
 
@@ -463,30 +468,108 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     else:
         # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a
         # positive assertion rather than a silent skip: it may only mean the
-        # documented HTTP->TCP migration, so the replacement must be present, and
-        # deleting the whole checks block still reds here.
+        # documented HTTP->TCP migration, so the SERVICES replacement
+        # ([[services.tcp_checks]]) must be present — deleting THAT block reds
+        # immediately below. (The separate top-level [checks] block has its own
+        # fail-closed absence assertion at the end of this branch; this paragraph
+        # covers the services check only, not `[checks]`.)
         #
-        # FAIL CLOSED on a top-level [checks] table. The deferred
-        # [checks.loop_liveness] follow-up is NOT a readiness budget (fly.toml
-        # documents its timeout as 5s — below the sum — and it times loop
-        # liveness, not a request), so it can never restore this ceiling, and
-        # nothing here reads it. If it (or any other top-level check) lands, this
-        # reds so whoever adds it must wire a real deadline in deliberately
-        # instead of silently leaving the sum unbounded.
+        # 2026-09-17 (#3447): the top-level `[checks.loop_liveness]` entry the
+        # old guard failed closed on has LANDED. A flat `"checks" not in _cfg`
+        # would now forbid the shipped config outright; widening it to "any
+        # top-level table is fine" would delete the guard. Instead MODEL the
+        # known entry explicitly: assert its identity and its bounds, and assert
+        # it cannot feed the readiness ceiling — any OTHER top-level check still
+        # reds, so a future unmodelled `[checks]` entry cannot escape this
+        # analysis.
+        #
+        # It is NOT wired into READY_WORST_CASE_BUDGET_S (the message's other
+        # offered resolution) because it is a DIFFERENT quantity: 9090/healthz
+        # is a dedicated listener off the client's request path, and the check's
+        # 5s timeout times loop liveness, not a request — it would TIGHTEN the
+        # 11.6s readiness worst case to a value about a different surface, i.e.
+        # silently disarm the ceiling it is supposed to guard.
         _cfg = tomllib.loads((REPO / "fly.toml").read_text())
         assert _cfg["services"][0].get("tcp_checks"), (
             "fly.toml exposes NEITHER an http_check budget proxy NOR the "
             "tcp_checks that replaced it (#2850) — the services checks block "
             "was removed or altered without the documented migration"
         )
-        assert "checks" not in _cfg, (
-            "fly.toml now defines a top-level [checks] table. The deferred "
-            "[checks.loop_liveness] is a loop-liveness check, NOT a readiness "
-            "budget, so it does not restore the cross-endpoint ceiling and this "
-            "reader does not consume it. Wire its deadline into "
-            "READY_WORST_CASE_BUDGET_S (or assert it here) rather than letting "
-            f"the sum ({ready_worst_case}s) go unbounded."
-        )
+        checks = _cfg.get("checks")
+        if checks is not None:
+            assert isinstance(checks, dict) and set(checks) == {"loop_liveness"}, (
+                "fly.toml carries an unmodelled top-level [checks] entry: "
+                f"{sorted(checks) if isinstance(checks, dict) else checks!r}. Only "
+                "the loop-liveness check (#3447) is modelled here. A new top-level "
+                "check also gates flyctl's deploy wait and may bound the readiness "
+                "surface — add it to this model (identity + bounds + whether it "
+                "feeds READY_WORST_CASE_BUDGET_S) rather than letting it escape "
+                "the cross-endpoint analysis."
+            )
+            ll = checks["loop_liveness"]
+            assert isinstance(ll, dict), (
+                f"[checks.loop_liveness] is not a table ({ll!r}) — its bounds "
+                "cannot be evaluated"
+            )
+            assert ll.get("type") == "http" and ll.get("path") == "/healthz", (
+                "[checks.loop_liveness] must probe the app's dedicated HTTP "
+                f"/healthz listener; got type={ll.get('type')!r} "
+                f"path={ll.get('path')!r}"
+            )
+            assert ll.get("port") == 9090, (
+                "[checks.loop_liveness] must target the dedicated 9090 listener, "
+                "NOT the client-facing 8000 plane — its whole point is to be off "
+                f"the request path; got port={ll.get('port')!r}"
+            )
+            assert ll.get("method", "get") == "get", (
+                "[checks.loop_liveness] must be a GET — the handler 405s anything "
+                "else (monitoring.py _method_not_allowed), and flyctl's deploy "
+                "wait requires every reported check to pass, so a non-GET fails "
+                f"every deploy; got {ll.get('method')!r}"
+            )
+            # Its OWN documented bounds (fly.toml §6.4): pin them so a silent
+            # edit to the interval/timeout/grace cannot pass through the model.
+            interval, timeout, grace = "15s", "5s", "180s"
+            assert (ll.get("interval"), ll.get("timeout"), ll.get("grace_period")) \
+                == (interval, timeout, grace), (
+                    "[checks.loop_liveness] bounds drifted from the documented "
+                    f"{interval}/{timeout}/{grace}: got interval={ll.get('interval')!r} "
+                    f"timeout={ll.get('timeout')!r} grace_period={ll.get('grace_period')!r}"
+                )
+            # NOT a readiness budget. Its 5s timeout sits BELOW /health/ready's
+            # sequential worst case, so borrowing it as a ceiling would be a
+            # silent DISARM; and _fly_check_budget_proxy_s — the only reader —
+            # consumes services[0].http_checks, never a top-level check (which is
+            # exactly why it returned None and put this branch in force).
+            loop_timeout_s = float(timeout[:-1])
+            assert loop_timeout_s < ready_worst_case, (
+                "[checks.loop_liveness] timeout must stay BELOW /health/ready's "
+                f"sequential worst case ({ready_worst_case}s) — it bounds loop "
+                "liveness, not a readiness request, so it cannot serve as the "
+                "cross-endpoint ceiling"
+            )
+            assert loop_timeout_s != READY_WORST_CASE_BUDGET_S, (
+                "[checks.loop_liveness] timeout must not BE the readiness policy "
+                "ceiling (READY_WORST_CASE_BUDGET_S) — the policy constant is "
+                "independent of this check, not borrowed from it"
+            )
+        else:
+            # Failure #3447 exists to catch, stated as the branch's own contract:
+            # an ABSENT top-level [checks] block is not the unmodelled case above
+            # and must not skip the model. In the #2850 state this block is the
+            # only application-level probe in the file — every remaining check is
+            # kernel-served (services.tcp_checks) and therefore blind to a
+            # stalled-but-running event loop. Deleting it is exactly the mistake
+            # that needs a mandatory post-merge `flyctl checks list`, so the
+            # tripwire has to red here rather than delegate that to the operator.
+            raise AssertionError(
+                "fly.toml has NO top-level [checks] block: got "
+                f"{checks!r}. Absence is NOT modelled — in the #2850 state "
+                "[checks.loop_liveness] is the only check that can see a STALLED "
+                "event loop (services.tcp_checks is kernel-served and cannot). "
+                "Restore [checks.loop_liveness] or record its removal AND its "
+                "replacement here deliberately."
+            )
 
 
 def test_db_probe_bound_covers_the_sdk_acquisition_prefix():

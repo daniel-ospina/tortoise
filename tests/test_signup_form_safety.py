@@ -83,6 +83,40 @@ def test_email_and_password_have_autocomplete() -> None:
     assert 'autocomplete="current-password"' in SIGNIN
 
 
+# ── #3781: the private-beta gate must never come back ──────────────────────
+
+
+def test_no_client_side_beta_gate() -> None:
+    """#3781: the signup funnel must stay OPEN for a real new user.
+
+    The retired gate was a full-viewport overlay that covered all four
+    sign-in options until the visitor typed a hardcoded client-side
+    constant (`BETA_ACCESS_CODE = "betatester"`) or carried a
+    `localStorage['tortoise_beta_access']` flag — it blocked every real
+    signup and restricted nobody who read the page source (the endpoint it
+    appeared to protect, POST /v1/signup/email, is in SKIP_AUTH).
+
+    Checked against comment-stripped source so documenting the removal in a
+    comment can never miss a re-introduction of the overlay itself.
+    """
+    stripped = _strip_html_comments(SIGNUP)
+    # Quote- and attribute-agnostic on purpose (review P2): pinning `id="beta-gate"`
+    # missed `id='beta-gate'`, a `class="beta-gate"` overlay, and the `.beta-gate`
+    # CSS rule — a re-introduction in any of those spellings passed the guard while
+    # restoring the exact defect. The bare identifier covers every spelling; the
+    # constant/flag tokens are already spelling-independent.
+    for token, why in (
+        ("beta-gate", "the full-viewport overlay (or its CSS) is back"),
+        ("BETA_ACCESS_CODE", "the hardcoded client-side access code is back"),
+        ("BETA_ACCESS_KEY", "the client-side access-key constant is back"),
+        ("confirmBetaAccess", "the client-side unlock handler is back"),
+        ("tortoise_beta_access", "the localStorage unlock flag is back"),
+    ):
+        assert token not in stripped, f"#3781 regression: {why} ({token})"
+    # The front door itself must remain reachable (the gate's inverse).
+    assert 'id="btn-email"' in stripped, "the email signup CTA is missing"
+
+
 # ── The historical script-kill: no `let supabase` shadowing ────────────────
 
 

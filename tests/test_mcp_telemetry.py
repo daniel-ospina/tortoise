@@ -292,6 +292,10 @@ class TestRealWritePath:
         # Force the local JSONL fallback (no Supabase configured).
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+        # #3820 (cycle-2 P1): the canonical key name too — `SUPABASE_SERVICE_KEY`
+        # is LEGACY, and an ambient production `SUPABASE_SERVICE_ROLE_KEY` would
+        # otherwise make this "no Supabase" premise false.
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
         fallback = tmp_path / "analytics_fallback.jsonl"
         monkeypatch.setattr(hosted_api, "_ANALYTICS_FALLBACK_PATH", str(fallback))
 

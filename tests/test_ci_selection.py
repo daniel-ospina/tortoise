@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
-    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,  # noqa: F401
+    SOURCE_PATTERNS, SHARED_MODULES, load_manifest, select, integrity, slow_file_issues,
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
 )
@@ -137,6 +137,21 @@ def test_shared_module_goes_full():
     assert r2["full"] is True
 
 
+def test_every_shared_module_entry_selects_the_full_matrix():
+    """#4097: `SHARED_MODULES` is a hand-maintained list, so derive its invariant here.
+
+    `test_shared_module_goes_full` pins two literal examples; a future entry that is
+    added (or a cross-cutting leaf like `tortoise/env_truthy.py` that is REMOVED) would
+    otherwise silently downgrade to `core`-only and stop running the consumer suites.
+    """
+    py_modules = [m for m in SHARED_MODULES if m.endswith(".py")]
+    assert py_modules, "SHARED_MODULES should list python modules"
+    for module in py_modules:
+        result = _sel([module])
+        assert result["full"] is True, f"{module} is in SHARED_MODULES but selects {result}"
+        assert result["test_files"] == "ALL", module
+
+
 def test_unknown_path_goes_full():
     # fail-closed: a path outside any known subtree must never silently
     # under-select (new top-level dir/subsystem → full matrix)
@@ -157,6 +172,30 @@ def test_test_file_change_selects_owning_surface():
     assert "ep" in r["surfaces"]
     r2 = _sel(["tests/test_harness_mcp_config.py"])
     assert "onboarding" in r2["surfaces"]
+
+
+def test_pi_hooks_change_selects_the_capture_guard():
+    """#3575 P1-B: `tortoise/pi-hooks/` matches no SOURCE_PATTERNS entry, so a
+    change to the extension selects `core` via the `tortoise/` fallback. The
+    guard that pins the extension must be IN that selection — registered only
+    under `onboarding`, a PR fixing the extension ran neither the Python guard
+    nor the extension's `node --test` suite. `--integrity` cannot see this
+    (the file is classified); only a selection assertion can."""
+    r = _sel(["tortoise/pi-hooks/tortoise-capture.ts"])
+    assert r["full"] is False
+    assert "core" in r["surfaces"]
+    assert "test_pi_capture_hooks.py" in r["test_files"]
+
+
+def test_session_import_change_selects_the_window_guard():
+    """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
+    parsers.py change selects `core` via the fallback. The window guard must be
+    in that selection — registered only under `api`, it did not run for the
+    change it guards."""
+    r = _sel(["tortoise/session_import/parsers.py"])
+    assert r["full"] is False
+    assert "core" in r["surfaces"]
+    assert "test_session_import_codex.py" in r["test_files"]
 
 
 def test_two_surfaces_union():
@@ -249,6 +288,21 @@ def test_unrelated_tools_change_still_tier1():
     assert set(r["test_files"]) == _tier1()
 
 
+def test_activation_cohort_change_does_not_drop_to_tier1():
+    # #B7 (#3674): tools/activation_cohort.py owns part of
+    # tests/test_activation_scorecard.py (its roll_up cohort-summing logic).
+    # Without the TOOL_CARVEOUTS entry the flat "tools/" prefix swallows it ->
+    # tier-1 smoke only, and the suite that pins the cohort number never runs.
+    r = _sel(["tools/activation_cohort.py"])
+    assert r["surfaces"], r
+    assert set(r["test_files"]) != _tier1(), r
+    # Today it lands in the fail-closed unknown-path branch (FULL matrix — the
+    # heaviest but safest gate for a file a reported metric depends on). If
+    # that ever becomes a mapped surface, the owning suite must still run.
+    if not r["full"]:
+        assert "test_activation_scorecard.py" in r["test_files"], r
+
+
 def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     # #2071: tools/ask_spotcheck*.py are carved out of NON_PYTHON_PREFIXES
     # and mapped to the sdk surface — a spot-check-only change selects the
@@ -264,6 +318,36 @@ def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     # a test-file change selects its owning surface too
     r = _sel(["tests/test_ask_spotcheck_judge.py"])
     assert "sdk" in r["surfaces"]
+
+
+def test_ask_recall_bench_change_selects_sdk_not_tier1():
+    # #3910: tools/ask_recall_bench.py owns the `_retrieve_pipeline` mirror in
+    # tests/test_ask_retrieval_levers.py. Before its SOURCE_PATTERNS entry the
+    # flat "tools/" prefix swallowed the path, so `changed` came back empty and
+    # select() took the docs-only return — surfaces=[], tier-1 smoke only — and
+    # the guard test for that exact file never ran on the PR that changed it
+    # (the #1349/#3332 shape the ratchet exists for).
+    r = _sel(["tools/ask_recall_bench.py"])
+    assert r["full"] is False
+    assert "sdk" in r["surfaces"], r
+    assert "test_ask_retrieval_levers.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_gen_ask_transcripts_change_selects_sdk_not_tier1():
+    # #3914: tools/gen_ask_transcripts.py owns the capture-shaped seeder the
+    # committed transcript goldens are generated from, and its shape is pinned
+    # by tests/test_ask_seed_shape.py. Before its SOURCE_PATTERNS entry the
+    # flat "tools/" prefix swallowed the path, so a seeder-only change came
+    # back with surfaces=[] and select() took the docs-only return — tier-1
+    # smoke only — leaving BOTH guards unrun on the PR that changed the
+    # seeder (the #1349/#3332/#3910 class the ratchet exists for).
+    r = _sel(["tools/gen_ask_transcripts.py"])
+    assert r["full"] is False, r
+    assert "sdk" in r["surfaces"], r
+    assert "test_ask_seed_shape.py" in r["test_files"], r
+    assert "test_ask_regression_llm.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
 
 
 def test_collision_preflight_tool_change_fails_closed_to_full():
@@ -731,18 +815,34 @@ def test_real_workflow_halves_are_consistent():
     # (space-joined matrix_* outputs) —
     # the #1266 discipline runs against the derivation. Verify the derived
     # halves carry every fast file exactly once and tilt is bounded.
+    # #3400: the tilt invariant is now DURATION, not count. The full-matrix
+    # halves are packed by measured weight (LPT), so a correct split is
+    # duration-balanced while carrying very different file counts — the real
+    # pool splits 195/325 at 27.95m/27.95m (one 855s file + ~130 sub-second
+    # files on one side). The old `abs(count_a - count_b) <= 3` assertion
+    # encoded the duration-blind parity split this issue exists to remove.
     from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
-                                    workflow_halves_issues)
-    legs = push_legs(load_manifest())
+                                    workflow_halves_issues,
+                                    HALF_DURATION_IMBALANCE_RATIO)
+    m = load_manifest()
+    legs = push_legs(m)
     halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
-    issues = workflow_halves_issues(load_manifest(), halves, TESTS_DIR)
+    issues = workflow_halves_issues(m, halves, TESTS_DIR)
     assert issues == [], f"derived halves drift: {issues}"
-    assert abs(len(halves["a"]) - len(halves["b"])) <= 3, "tilt beyond ±3"
+    weights = {h: sum(m["durations"].get(f + ".py", 2.0) for f in fs)
+               for h, fs in halves.items()}
+    ratio = max(weights.values()) / min(weights.values())
+    assert ratio <= HALF_DURATION_IMBALANCE_RATIO, (
+        f"duration tilt beyond {HALF_DURATION_IMBALANCE_RATIO}x: "
+        f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
+        f"(ratio {ratio:.2f}x)")
+    # every fast file rides exactly one half (no coverage hole, no double-run)
+    assert not (halves["a"] & halves["b"]), "leg overlap"
 
 
 def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg. Epic
-    #1647 Task 9: the 17-file carve-out set is its OWN leg (E2E-4) — it is
+    #1647 Task 9: the carve-out set is its OWN leg (E2E-4) — it is
     excluded from fast AND slow docker legs."""
     from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
     m = load_manifest()
@@ -765,6 +865,44 @@ def test_push_legs_partitions_every_classified_file():
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
     # bench push_extra lands in half b
     assert any(f.startswith("bench/") for f in legs["half_b"])
+
+
+def test_carve_out_mirrors_test_no_redirect_stems():
+    """#4047: `carve_out:` and `TEST_NO_REDIRECT_STEMS` are one set in two homes.
+
+    `config/ci-surfaces.yml`'s `carve_out:` routes a file to the URI-unset
+    carve-out job and bars it from every docker leg; `tests/_embedded.py`'s
+    `TEST_NO_REDIRECT_STEMS` is the redirect exemption that keeps a module
+    embedded if it is executed with a URI set. A stem in only ONE of them is a
+    silent hole, in opposite directions (see the failure message).
+
+    Scope, stated honestly: this pin catches ONE-LIST-ONLY drift. It does NOT
+    catch #4047's own shape — the fork guards were missing from BOTH lists, so
+    the two sets were EQUAL then and this assertion passed on the pre-fix tree.
+    That shape is caught by the source scan in
+    `tests/test_markers.py::test_module_level_embedded_only_modules_are_carve_out`;
+    the two guards cover different holes and neither subsumes the other.
+    """
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    m = load_manifest()
+    # The one documented asymmetry: the bench smoke file is path-qualified in
+    # the manifest (`bench/...`) and bare-stem keyed in the registry. The
+    # registry/redirect mechanism is itself stem-keyed, so a collapse can only
+    # happen where the stem genuinely collides.
+    carve = {f.removesuffix(".py").removeprefix("bench/") for f in m["carve_out"]}
+    registry = set(TEST_NO_REDIRECT_STEMS)
+    assert carve == registry, (
+        "carve_out and TEST_NO_REDIRECT_STEMS have drifted — a stem in only "
+        "one of the two registries is a silent hole: "
+        f"registry-only={sorted(registry - carve)} — in the redirect registry "
+        "but NOT routed to the carve-out job, so a full (URI-set) selection "
+        "collects it on a docker leg and skips its embedded_only-marked tests "
+        "there; with a module-level mark that is the whole file, reported "
+        "green. "
+        f"carve-out-only={sorted(carve - registry)} — routed to the carve-out "
+        "job but not redirect-exempt, so an out-of-band URI run would flip its "
+        "embedded constructions to the server lane instead of the embedded "
+        "daemon")
 
 
 def test_integrity_no_matrix_drift():
@@ -831,6 +969,130 @@ def test_duration_integrity():
     bad2 = dict(m)
     bad2["durations"] = {"not_a_real_file.py": 10.0}
     assert duration_issues(bad2) != []
+
+
+# ── #3400: duration-balanced full-matrix halves + durations coverage ──────
+# The push halves used to be index-parity (`fast[0::2]` / `fast[1::2]`) —
+# duration-blind, so half (b) collected the slow files by luck (37.1m vs
+# 18.8m on the real pool) and blew the 55m watchdog. These pin the LPT pack (#1473)
+# on the full-matrix path and the coverage floor that keeps the `durations`
+# map from rotting back to a handful of entries.
+
+
+def _duration_manifest(heavy: dict[str, float],
+                       tiny_count: int) -> dict:
+    """A synthetic full-matrix manifest: a few heavy files + many 2s files,
+    all in one freshly-named surface so nothing touches the real pool."""
+    tiny = [f"test_tiny_{i:04d}.py" for i in range(tiny_count)]
+    files = [*heavy.keys(), *tiny]
+    durations = {**heavy, **{f: 2.0 for f in tiny}}
+    return {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+            "carve_out": [], "push_extra": [], "durations": durations}
+
+
+def test_full_matrix_split_is_duration_balanced():
+    """#3400: the full-matrix (push) halves are packed by measured duration.
+
+    Four heavy files + many 2s files: parity can cluster the heavies on one
+    half; LPT must not.  The assertion is the *duration* ratio, not a count
+    ratio — the correct duration split of the real pool is 195/325 files.
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, push_legs
+    heavy = {"test_h0.py": 850.0, "test_h1.py": 700.0,
+             "test_h2.py": 650.0, "test_h3.py": 600.0}
+    m = _duration_manifest(heavy, tiny_count=200)
+    legs = push_legs(m)
+    a, b = set(legs["half_a"]), set(legs["half_b"])
+    assert not (a & b), "leg overlap"
+    assert a | b == {f[:-3] for f in m["surfaces"]["core"]}, "coverage hole"
+    weights = {h: sum(m["durations"][f + ".py"] for f in fs)
+               for h, fs in (("a", a), ("b", b))}
+    ratio = max(weights.values()) / min(weights.values())
+    assert ratio <= HALF_DURATION_IMBALANCE_RATIO, (
+        f"parity-style tilt survived: { {h: round(w / 60, 1) for h, w in weights.items()} }"
+        f" min (ratio {ratio:.2f}x)")
+    # the heavy files must be SPREAD — the 850s file must not sit with every
+    # other heavy file on one half while the other side carries only 2s files.
+    a_heavy = {f for f in heavy if f[:-3] in a}
+    b_heavy = {f for f in heavy if f[:-3] in b}
+    assert a_heavy and b_heavy, (
+        f"heavy files clustered on one half: a={sorted(a_heavy)} b={sorted(b_heavy)}")
+    assert len(a_heavy) < len(heavy) and len(b_heavy) < len(heavy)
+    # and the OLD parity split of the same pool is the thing being fixed
+    order = sorted(m["surfaces"]["core"])
+    p_a, p_b = order[0::2], order[1::2]
+    p_wa = sum(m["durations"][f] for f in p_a)
+    p_wb = sum(m["durations"][f] for f in p_b)
+    parity_ratio = max(p_wa, p_wb) / min(p_wa, p_wb)
+    assert parity_ratio > ratio, (
+        f"fixture does not exercise the defect: parity {parity_ratio:.2f}x "
+        f"vs LPT {ratio:.2f}x")
+
+
+def test_push_legs_is_deterministic():
+    """#3400: same manifest -> byte-identical halves, repeated calls."""
+    from tools.ci_selection import push_legs
+    m = _duration_manifest({"test_h0.py": 850.0, "test_h1.py": 700.0}, 50)
+    first = push_legs(m)
+    assert push_legs(m) == first
+    assert push_legs(m) == first
+    real = load_manifest()
+    assert push_legs(real) == push_legs(real)
+
+
+def test_halves_duration_imbalance_flagged():
+    """#3400: a heavy file dumped on one half reds even when counts look even."""
+    from tools.ci_selection import workflow_halves_issues
+    m = _duration_manifest({"test_big.py": 600.0}, tiny_count=10)
+    # 5 vs 6 files — a count-balanced split, duration-lopsided
+    halves = {"a": ["test_big", "test_tiny_0000", "test_tiny_0002",
+                     "test_tiny_0004", "test_tiny_0006"],
+              "b": ["test_tiny_0001", "test_tiny_0003", "test_tiny_0005",
+                     "test_tiny_0007", "test_tiny_0008", "test_tiny_0009"]}
+    issues = workflow_halves_issues(m, halves)
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_duration_coverage_guard_fires_when_low():
+    """#3400: 15 weights for 100 fast files is the rot this guard forbids."""
+    from tools.ci_selection import duration_coverage_issues
+    m = _duration_manifest({}, tiny_count=0)
+    m["surfaces"]["core"] = [f"test_cov_{i:03d}.py" for i in range(100)]
+    m["durations"] = {f: 2.0 for f in m["surfaces"]["core"][:15]}
+    issues = duration_coverage_issues(m)
+    assert issues, "guard did not bite at 15% coverage"
+    assert any("15.0%" in i and "floor" in i for i in issues), issues
+
+
+def test_duration_coverage_guard_boundary_and_realistic():
+    """#3400: the floor is inclusive; realistic coverage is silent."""
+    from tools.ci_selection import duration_coverage_issues, load_manifest
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    below = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:89]}}
+    at = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+          "durations": {f: 2.0 for f in files[:90]}}
+    above = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:95]}}
+    assert duration_coverage_issues(below) != [], "89% must fire"
+    assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
+    assert duration_coverage_issues(above) == [], "95% must be silent"
+    # the real map: 502/520 fast files measured (96.5%)
+    assert duration_coverage_issues(load_manifest()) == []
+
+
+def test_duration_coverage_guard_backwards_compatible():
+    """#3400: an absent/empty durations map is never a hard failure."""
+    from tools.ci_selection import duration_coverage_issues
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    base = {"surfaces": {"core": files}, "tier1": [], "slow_files": []}
+    assert duration_coverage_issues(base) == []              # key absent
+    assert duration_coverage_issues({**base, "durations": {}}) == []   # empty
+    assert duration_coverage_issues({**base, "durations": None}) == []  # null
+    # a repo with no fast files at all must not divide by zero
+    assert duration_coverage_issues(
+        {"surfaces": {}, "tier1": [], "slow_files": [],
+         "durations": {"x.py": 1.0}}) == []
 
 
 # ── #1668: the P2 flip's workflow-wiring pins (epic #1647 Task 6) ─────────
@@ -1084,8 +1346,8 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
 
 
 def test_carve_out_job_uri_unset_with_carve_out_flag():
-    """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the 17-file
-    embedded set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
+    """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the embedded
+    set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
     carve-out to the server lane) with TORTOISE_TEST_CARVE_OUT=1 (the P4
     enforcement-prep escape), and consumes the changes job's carve_out
     output as its file list."""
@@ -1943,3 +2205,137 @@ def test_real_manifest_has_no_duplicate_entries():
     # registration is deliberate and must stay allowed).
     dupes = duplicate_entries(load_manifest())
     assert dupes == [], f"duplicate manifest entries: {dupes}"
+
+
+def test_halves_guard_reports_single_sided_pack_without_crashing():
+    # #3407 review P2: the branch written to CATCH a zero-weight half died with
+    # ZeroDivisionError while formatting its own diagnosis — `hi / lo` was
+    # evaluated inside the f-string after `lo <= 0` had short-circuited the
+    # comparison. A single-sided pack is reachable (a 1-file pool, or an
+    # all-zero measured map), and this is the only check that catches it:
+    # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both pass
+    # when one half is empty.
+    from tools.ci_selection import workflow_halves_issues
+    m = {"surfaces": {"core": ["test_only.py"]}, "tier1": [], "slow_files": [],
+         "durations": {"test_only.py": 5.0}}
+    issues = workflow_halves_issues(m, {"a": {"test_only.py"}, "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_halves_guard_reports_all_zero_map_without_crashing():
+    from tools.ci_selection import workflow_halves_issues
+    files = ["test_a.py", "test_b.py", "test_c.py"]
+    m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+         "durations": {f: 0.0 for f in files}}
+    issues = workflow_halves_issues(m, {"a": set(files), "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_duration_issues_flags_non_numeric_value():
+    # #3407 review P2: the guards iterated KEYS only, so a hand-edit typo in the
+    # now-505-line map passed `--integrity` silently and then crashed
+    # `push_legs` with a TypeError inside `split_fast_gate`'s sort key.
+    from tools.ci_selection import duration_issues
+    m = {"surfaces": {"core": ["test_crypto.py"]}, "tier1": [], "slow_files": [],
+         "durations": {"test_crypto.py": "fast"}}
+    issues = duration_issues(m)
+    assert any("not numeric" in i for i in issues), issues
+
+
+def test_integrity_chain_names_bad_duration_instead_of_crashing():
+    # #3407 review P1 (cycle 2): `duration_issues` alone is NOT the gate. The
+    # real `--integrity` chain evaluates `leg_coverage_issues()` -> `push_legs()`
+    # -> `split_fast_gate()`, whose sort key negates the weight — so a
+    # non-numeric value raised TypeError inside the packer BEFORE the check
+    # that names it had run, and the gate tracebacked instead of diagnosing.
+    # This test runs the CLI's actual chain, on a real manifest with one real
+    # fast-pool key poisoned, which the isolated helper test cannot see.
+    from tools.ci_selection import (
+        duration_coverage_issues,
+        duration_issues,
+        fast_pool,
+        integrity,
+        leg_coverage_issues,
+        load_manifest,
+    )
+    # cycle 3 added an int beyond float range (math.isfinite raises
+    # OverflowError) and a negative duration (impossible data, exited 0).
+    for bad in (None, "fast", float("nan"), 10 ** 400, -5.0):
+        m = load_manifest()
+        key = fast_pool(m)[0]
+        m = dict(m)
+        m["durations"] = dict(m.get("durations") or {})
+        m["durations"][key] = bad
+        # Must not raise.
+        problems = (integrity(m) + slow_file_issues(m) + duration_issues(m)
+                    + leg_coverage_issues(m) + duration_coverage_issues(m))
+        named = [p for p in problems if "durations value" in p]
+        assert named, f"a bad duration value ({bad!r}) was not named: {problems}"
+
+
+def test_split_fast_gate_cannot_crash_on_a_malformed_duration():
+    # The packer must degrade to the default, never raise — belt and braces for
+    # the ordering fix above (any consumer, any order).
+    from tools.ci_selection import split_fast_gate
+    files = ["tests/test_a.py", "tests/test_b.py"]
+    for bad in (None, "fast", float("nan"), float("inf"), True):
+        a, b = split_fast_gate(files, {"test_a.py": bad})
+        assert len(a) + len(b) == 2, (bad, a, b)
+
+
+def test_integrity_cli_exits_nonzero_for_a_huge_int_and_a_negative(tmp_path, monkeypatch):
+    # #3407 review cycle 3: the isolated helper tests could not see an EXIT
+    # CODE, and the two residual classes were both silent-green failures. This
+    # drives the real CLI entry point (`main()`, which reads sys.argv and the
+    # module-level MANIFEST) over a genuinely poisoned manifest.
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+    for bad in (10 ** 400, -5.0, float("nan")):
+        m = cs.load_manifest()
+        m = dict(m)
+        m["durations"] = dict(m.get("durations") or {})
+        m["durations"][cs.fast_pool(m)[0]] = bad
+        poisoned = tmp_path / "poisoned-ci-surfaces.yml"
+        poisoned.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", poisoned)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() != 0, f"a bad duration value ({bad!r}) exited 0"
+
+
+def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path, monkeypatch):
+    # #3407 review cycle 4 (pre-existing): `duration_issues` and `--split` read
+    # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
+    # as None — the empty-map state `duration_coverage_issues` documents as
+    # "NOT a failure". A raw TypeError traceback is not a diagnosis: it makes
+    # the gate look broken rather than making it say what is wrong.
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+    # `None` is NOT in this list: null/absent is the documented empty-map
+    # PASS, and is asserted below.
+    for bad in (0, "foo", [1.0]):
+        m = dict(cs.load_manifest())
+        m["durations"] = bad
+        poisoned = tmp_path / "bad-durations.yml"
+        poisoned.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", poisoned)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() != 0, f"durations={bad!r} exited 0"
+    # The documented empty-map contracts must still PASS, or the guard above
+    # has simply turned one wrong answer into another.
+    for empty in ({}, None):
+        m = dict(cs.load_manifest())
+        if empty is None:
+            m.pop("durations", None)
+        else:
+            m["durations"] = {}
+        ok = tmp_path / "empty-durations.yml"
+        ok.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", ok)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() == 0, f"an empty durations map ({empty!r}) was treated as a failure"

@@ -42,7 +42,6 @@ __all__ = [  # noqa: RUF022
 
 _STRIPE_API = "https://api.stripe.com/v1"
 _ACTIVE_STATUSES = ("active", "trialing", "past_due")
-_MAX_SESSIONS = 1000  # flat across tiers (matches today's effective default)
 
 
 class BillingError(Exception):
@@ -455,12 +454,16 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
 
     GAP-B mapping: ``max_points := tier_limits(tier)["max_graph_nodes"]`` —
     the points quota counter counts graph nodes (see module docstring).
-    ``max_sessions`` is 1000 flat across tiers.
+    ``max_sessions`` is written as **NULL (unlimited)** for every tier: the
+    flat 1000 was an inherited code fallback, never a ratified cap (#4010 —
+    see the module comment in ``tortoise/quota.py``). Writing the NULL here
+    also CLEARS any stored cap on the next tier change — the data half of the
+    same fix (one-shot sweep: graph-scripts/clear_max_sessions_4010.py).
 
     #771 review P1: Supabase mode PATCHes the orgs row (tier + the quota
     columns 0006 carries: max_users/max_graphs/ops_allowance/graph_size_cap;
-    max_api_keys/max_sessions fall back to pricing defaults in quota.py) —
-    the registry twin only for selfhost.
+    max_api_keys falls back to pricing and max_sessions is unlimited in
+    quota.py) — the registry twin only for selfhost.
     """
     from tortoise.pricing import tier_limits
 
@@ -491,7 +494,8 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
             "max_graphs": lim["max_graphs_per_team"],
             "max_api_keys": lim["max_api_keys"],
             "max_points": lim["max_graph_nodes"],
-            "max_sessions": _MAX_SESSIONS,
+            # #4010: unlimited for every tier — NULL, never a number.
+            "max_sessions": None,
         },
     )
 

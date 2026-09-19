@@ -668,7 +668,9 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
 
     Round-4 review P2: the shared-reference check alone was too weak — it also
     passed when a member was DROPPED from the tuple (exactly the orphan round 3
-    fixed). Pin membership so the tuple must cover all four lifespan tasks.
+    fixed). Pin membership so the tuple must cover every lifespan task the
+    module arms — the four original ones plus the #3284
+    ``_first_contact_task``.
     """
     tree = ast.parse(
         (TORTOISE_PKG / "hosted_api.py").read_text(), filename="hosted_api.py"
@@ -691,6 +693,7 @@ def test_liveness_start_and_stop_share_one_task_attribute_tuple():
         "_health_probe_task",
         "_boot_sweep_task",
         "_event_retention_task",
+        "_first_contact_task",
     }
     attr_tuple: tuple[str, ...] | None = None
     for node in ast.walk(tree):
