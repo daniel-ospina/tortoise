@@ -679,12 +679,21 @@ class TestIntrospection:
     def test_write_tool_names_cover_all_quota_gated(self):
         """#4113: the non-SDK (empty-binding) writers are a DECLARED set that is
         write-classified — not ad-hoc literal assertions that a rename erases."""
-        from tool_surface_capabilities import NON_SDK_WRITER_TOOLS  # noqa: I001
-        from tortoise.mcp_server import WRITE_TOOL_NAMES, _QUOTA_GATED
-        assert WRITE_TOOL_NAMES >= _QUOTA_GATED
-        assert NON_SDK_WRITER_TOOLS <= WRITE_TOOL_NAMES
-        # non-vacuity: the declared set is the real empty-binding writers
+        from tool_surface_capabilities import (  # noqa: I001
+            NON_SDK_WRITER_TOOLS, quota_gated_wrap_sites, registry_entries_by_method,
+        )
+        from tortoise.mcp_server import WRITE_TOOL_NAMES
         from tortoise.tool_registry import TOOL_REGISTRY
+        # every _quota_gated wrap site's (HTTP) tool is write-classified
+        by_method = registry_entries_by_method()
+        wrapped = {m for m, _, _ in quota_gated_wrap_sites().sites}
+        assert wrapped, "wrap-site scan is vacuous"
+        for method in sorted(wrapped):
+            for entry in by_method.get(method, []):
+                if entry.http_policy:
+                    assert entry.name in WRITE_TOOL_NAMES, (entry.name, method)
+        # non-SDK (empty-binding) writers are a declared, write-classified set
+        assert NON_SDK_WRITER_TOOLS <= WRITE_TOOL_NAMES
         empty_writers = {e.name for e in TOOL_REGISTRY
                          if not e.sdk_method and e.name in WRITE_TOOL_NAMES}
         assert empty_writers == set(NON_SDK_WRITER_TOOLS)
@@ -702,11 +711,6 @@ class TestIntrospection:
         assert wrap_site_violations() == []
         weighted = {m for m, _, w in sites.sites if w}
         assert weighted == set(WEIGHT_BEARING_METHODS), weighted
-        # per-site, not per-method: mitigate_operator has two sites
-        per_method: dict[str, list[bool]] = {}
-        for m, _, w in sites.sites:
-            per_method.setdefault(m, []).append(w)
-        assert any(len(v) > 1 for v in per_method.values()), per_method
 
     def test_no_write_tool_counted_as_read(self):
         """#4113: derive the ACTUAL wrap sites from the AST (not a text find),

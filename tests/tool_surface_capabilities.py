@@ -14,6 +14,9 @@ a merge cannot blind a guard.  Every derivation accepts an injectable
 prove the predicate can fail — an assertion that survives its own bug is dead.
 
 Nothing here imports production state mutably; it is read-only introspection.
+
+Sibling name-keyed guards in ``tests/test_mcp_http.py`` are the same class but
+are filed separately (#4121) and out of scope here.
 """
 
 from __future__ import annotations
@@ -153,14 +156,19 @@ _FS_ATTRS: frozenset[str] = frozenset({
 _MUTATING = re.compile(r"\b(CREATE|MERGE|DETACH\s+DELETE|DELETE|SET|REMOVE|DROP)\b")
 # A decisive mutating clause (`CREATE (`, `MERGE (`, `DETACH DELETE`) is
 # sufficient on its own — a bare `CREATE (g:Graph {...})` has no MATCH hint.
-_MUTATING_STRONG = re.compile(
-    r"\b(CREATE|MERGE)\s*[\(\{]|\bCREATE\s+(INDEX|CONSTRAINT)\b|DETACH\s+DELETE")
+_MUTATING_STRONG = re.compile(r"\b(CREATE|MERGE)\s*[\(\{]|DETACH\s+DELETE")
+# Schema DDL (CREATE INDEX/CONSTRAINT) is NOT a node mutation: _get_registry()
+# lazily runs _ensure_registry_indexes(), so counting DDL as mutation would make
+# every control-plane READ (org_list, graph_list, apikey_list, …) a "mutator"
+# and false-red a legitimate read tool after the cutover.  Declared out of
+# scope here; the schema bootstrap is not a tool-surface node write.
+_SCHEMA_DDL = re.compile(r"\bCREATE\s+(INDEX|CONSTRAINT)\b")
 _CYPHER_HINT = re.compile(r"\b(MATCH|RETURN|WHERE|UNWIND|CALL|WITH)\b")
 _LABEL = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
 # Projection write helpers — a call to one of these mutates the graph.
 _PROJ_WRITE = re.compile(
-    r"^(apply$|create_|update_|delete_|merge_|link_|add_|remove_|set_|upsert_|journal_)"
+    r"^_?(apply$|create_|update_|delete_|merge_|link_|add_|remove_|set_|upsert_|journal_)"
 )
 
 # Attribute receivers treated as NOT filesystem roots.
@@ -217,6 +225,16 @@ def _sdk_methods(tree: ast.Module) -> tuple[dict[str, ast.AST], dict[str, ast.AS
     return methods, funcs
 
 
+def _is_projection(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in ("proj", "projection")
+    if isinstance(node, ast.Call):
+        return _is_projection(node.func)
+    if isinstance(node, ast.Attribute):
+        return node.attr == "_get_proj"
+    return False
+
+
 def _scan_body(node: ast.AST) -> tuple[bool, bool, bool, set, set[str]]:
     """Scan one function body.
 
@@ -250,7 +268,7 @@ def _scan_body(node: ast.AST) -> tuple[bool, bool, bool, set, set[str]]:
                     uses_registry = True
                 if fn.attr in _FS_ATTRS and receiver not in _NON_FS_RECEIVERS:
                     reaches_fs = True
-                if receiver == "proj" and _PROJ_WRITE.match(fn.attr):
+                if _is_projection(fn.value) and _PROJ_WRITE.match(fn.attr):
                     mutates = True
             elif isinstance(fn, ast.Name):
                 callees.add((None, fn.id))
@@ -262,7 +280,6 @@ def _scan_body(node: ast.AST) -> tuple[bool, bool, bool, set, set[str]]:
 def _closure(
     seeds: set[str],
     calls: dict[str, set[tuple[str | None, str]]],
-    method_names: set[str],
     module_funcs: set[str],
 ) -> set[str]:
     """Transitive closure over `self.<m>()` and module-level `<f>()` calls."""
@@ -275,10 +292,6 @@ def _closure(
                 continue
             for receiver, attr in callees:
                 if receiver == "self" and attr in result:
-                    result.add(name)
-                    changed = True
-                    break
-                if receiver == "self" and attr in method_names and attr in result:
                     result.add(name)
                     changed = True
                     break
@@ -312,10 +325,12 @@ def _sdk_analysis(source: str | None) -> dict:
             registry_users.add(name)
         method_labels[name] = labels
 
-    method_names = set(methods)
     module_funcs = set(f"mod:{k}" for k in funcs)
-    mutators = _closure(direct_mut, calls, method_names, module_funcs)
-    fs_methods = _closure(direct_fs, calls, method_names, module_funcs)
+    mutators = _closure(direct_mut, calls, module_funcs)
+    fs_methods = _closure(direct_fs, calls, module_funcs)
+    # registry reach is TRANSITIVE too: a public wrapper that delegates the
+    # control-plane mutation to a private helper must still be operator-only.
+    registry_users = _closure(registry_users, calls, module_funcs)
 
     # transitive label union
     transit_labels: dict[str, set[str]] = {}
@@ -358,12 +373,18 @@ def _sdk_analysis(source: str | None) -> dict:
 
 
 def sdk_graph_mutators(source: str | None = None) -> frozenset[str]:
-    """TortoiseSDK methods whose body creates/mutates graph nodes (transitively)."""
+    """Operations whose body creates/mutates graph nodes (transitively).
+
+    Members are TortoiseSDK method names, plus module-level helpers as
+    ``mod:<name>`` (the closure traverses them).  Schema DDL (CREATE
+    INDEX/CONSTRAINT) is NOT a node mutation and is excluded.
+    """
     return frozenset(_sdk_analysis(source)["mutators"])
 
 
 def sdk_filesystem_methods(source: str | None = None) -> frozenset[str]:
-    """TortoiseSDK methods reaching a caller-supplied filesystem walk."""
+    """Operations reaching a filesystem walk (transitively; ``mod:<name>``
+    entries included), minus the declared INTERNAL_PATH_READERS."""
     return frozenset(_sdk_analysis(source)["fs_methods"] - INTERNAL_PATH_READERS)
 
 
@@ -385,6 +406,16 @@ class HandlerOperations:
     unresolved: tuple[str, ...]  # human-readable dynamic-dispatch sites
 
 
+def _module_level_funcs(tree: ast.Module) -> dict[str, ast.AST]:
+    """Only MODULE-LEVEL defs — `register_all` resolves `globals()[name]`, so a
+    nested def or a class method is not a handler."""
+    out: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out[node.name] = node
+    return out
+
+
 def _mcp_functions(tree: ast.Module) -> dict[str, ast.AST]:
     funcs: dict[str, ast.AST] = {}
     for node in ast.walk(tree):
@@ -399,6 +430,15 @@ def _is_sdk_factory(call: ast.AST) -> bool:
         and isinstance(call.func, ast.Name)
         and call.func.id in ("_get_org_sdk", "_get_sdk")
     )
+
+
+def _recv_key(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return None
 
 
 def _param_names(node: ast.AST) -> set[str]:
@@ -422,27 +462,30 @@ def _dynamic_dispatch(node: ast.AST) -> list[str]:
         if isinstance(sub, (ast.Assign, ast.AnnAssign)):
             value = sub.value
             targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
-            is_dynamic = isinstance(value, ast.Subscript) or (
+            is_lookup = isinstance(value, ast.Subscript) or (
                 isinstance(value, ast.Call)
                 and (getattr(value.func, "id", None)
                      or getattr(value.func, "attr", None))
-                in ("getattr", "partial", "get", "setdefault", "pop"))
-            if is_dynamic:
+                in ("get", "setdefault", "pop", "getattr", "partial"))
+            if is_lookup:
                 for t in targets:
-                    if isinstance(t, ast.Name):
-                        dynamic.add(t.id)
+                    key = _recv_key(t)
+                    if key:
+                        dynamic.add(key)
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
             continue
         fn = sub.func
+        # an immediately-invoked computed value: `_HANDLERS[k]()`,
+        # `_HANDLERS.get(k)()`, `getattr(x, y)()`, `partial(...)()`
         if isinstance(fn, ast.Subscript):
             found.append(f"line {sub.lineno}: subscript-call dispatch")
         elif isinstance(fn, ast.Call):
-            inner = getattr(fn.func, "id", None) or getattr(fn.func, "attr", None)
-            if inner in ("getattr", "partial"):
-                found.append(f"line {sub.lineno}: {inner}() dispatch")
+            found.append(f"line {sub.lineno}: call-of-call dispatch")
         elif isinstance(fn, ast.Name) and fn.id in dynamic:
             found.append(f"line {sub.lineno}: resolve-then-call dispatch ({fn.id})")
+        elif isinstance(fn, ast.Attribute) and fn.attr in ("getattr", "partial"):
+            found.append(f"line {sub.lineno}: {fn.attr}() dispatch")
     return found
 
 
@@ -458,12 +501,17 @@ def _handler_operations_cached(tool_name: str, source: str | None) -> HandlerOpe
 
     # module-level simple aliases: `_alias = _helper` (a merge-time refactor)
     func_alias: dict[str, str] = {}
+    module_aliases: set[str] = set()  # `import tortoise.sdk as s`
     for item in tree.body:
         if isinstance(item, ast.Assign):
             for t in item.targets:
                 if isinstance(t, ast.Name) and isinstance(item.value, ast.Name) \
                         and item.value.id in funcs:
                     func_alias[t.id] = item.value.id
+        if isinstance(item, ast.Import):
+            for alias in item.names:
+                if alias.name in ("tortoise.sdk", "tortoise.sdk.sdk"):
+                    module_aliases.add(alias.asname or alias.name.split(".")[-1])
 
     sdk_methods = sdk_method_names()
     ops: set[str] = set()
@@ -481,20 +529,33 @@ def _handler_operations_cached(tool_name: str, source: str | None) -> HandlerOpe
                 targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
                 if value is not None and _is_sdk_factory(value):
                     for t in targets:
-                        if isinstance(t, ast.Name):
-                            aliases.add(t.id)
+                        if isinstance(t, ast.Tuple):
+                            for elt in t.elts:
+                                key = _recv_key(elt)
+                                if key:
+                                    aliases.add(key)
+                        else:
+                            key = _recv_key(t)
+                            if key:
+                                aliases.add(key)
         for sub in ast.walk(node):
             if isinstance(sub, ast.Attribute):
                 receiver = sub.value
-                if _is_sdk_factory(receiver) or (
-                        isinstance(receiver, ast.Name) and receiver.id in aliases):
+                key = _recv_key(receiver)
+                if _is_sdk_factory(receiver) or (key is not None and key in aliases):
                     ops.add(sub.attr)
-                elif isinstance(receiver, ast.Name) and receiver.id in params \
-                        and sub.attr in sdk_methods:
+                elif key is not None and key in params and sub.attr in sdk_methods:
                     # an SDK handle passed into a helper: `_do(_get_org_sdk())`
                     ops.add(sub.attr)
+                elif key in module_aliases and sub.attr in sdk_methods:
+                    # `import tortoise.sdk as s; s.create_point(...)`
+                    ops.add(sub.attr)
             if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
-                callee = func_alias.get(sub.func.id, sub.func.id)
+                callee_name = sub.func.id
+                if callee_name in sdk_methods and callee_name not in funcs:
+                    # `from tortoise.sdk import create_point; create_point(...)`
+                    ops.add(callee_name)
+                callee = func_alias.get(callee_name, callee_name)
                 if callee in funcs and callee not in seen:
                     seen.add(callee)
                     stack.append(funcs[callee])
@@ -580,14 +641,15 @@ def tools_reaching(operation: str, source: str | None = None) -> set[str]:
 
 @lru_cache(maxsize=8)
 def _self_guard_cached(tool_name: str, source: str | None) -> bool:
-    """True iff the handler's FIRST statement dominates it with an HTTP guard.
+    """True iff the handler's first COMPOUND statement is the HTTP guard — simple
+    statements (assignments) may precede it.
 
     An `http_policy=False` tool is still callable by name over HTTP (only
     `tools/list` is filtered), so it must reject HTTP calls itself. Production
     uses a leading `if _transport_mode.get() == "http": return
-    _http_excluded_error()`. Requiring the guard to be the first statement (and
-    its test to reference the transport signal) rejects a partial, nested or
-    dead guard that an existence-only check would accept.
+    _http_excluded_error()`. The test must be a POSITIVE transport-is-http check
+    (`_transport... == "http"` or `*_transport*http*()`), so a negated,
+    conjunctive or dead guard does not count.
     """
     tree = _mcp_tree(source)
     funcs = _mcp_functions(tree)
@@ -608,9 +670,24 @@ def _self_guard_cached(tool_name: str, source: str | None) -> bool:
         if isinstance(stmt, (ast.If, ast.For, ast.While, ast.Try, ast.With,
                              ast.Return, ast.Raise, ast.AsyncFor, ast.AsyncWith)):
             return False
-    if guard is None or "_transport" not in ast.unparse(guard.test):
+    if guard is None or not _positive_http_test(guard.test):
         return False
     return _returns_directly_guards(guard.body, funcs)
+
+
+def _positive_http_test(test: ast.AST) -> bool:
+    """A POSITIVE check that the transport IS http — an inverted
+    (`if not _transport...`) or conjunctive guard must NOT count."""
+    if isinstance(test, (ast.UnaryOp, ast.BoolOp)):
+        return False
+    if isinstance(test, ast.Compare):
+        left = ast.unparse(test.left)
+        return "_transport" in left and any(
+            isinstance(c, ast.Constant) and c.value == "http" for c in test.comparators)
+    if isinstance(test, ast.Call):
+        name = ast.unparse(test.func)
+        return "transport" in name and "http" in name
+    return False
 
 
 def _returns_directly_guards(body: list, funcs: dict, _depth: int = 0) -> bool:
@@ -724,7 +801,7 @@ def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[s
     """Every declared sdk_method resolves, every entry has a handler, and no
     handler hides a call behind dynamic dispatch."""
     methods = sdk_method_names()
-    funcs = set(_mcp_functions(_mcp_tree(mcp_src)))
+    funcs = set(_module_level_funcs(_mcp_tree(mcp_src)))
     out: list[str] = []
     for e in entries:
         if e.sdk_method and e.sdk_method not in methods and \
@@ -771,6 +848,47 @@ def exemption_set_violations(entries) -> list[str]:
     return []
 
 
+def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
+    """Every declared set is live + exact: a stale entry fails loudly.
+
+    Without this, renaming a declared operation (`dream`, `upsert_tenant_manifest`,
+    an `INTERNAL_PATH_READERS` member) silently drops it from its check — the same
+    name-goes-stale vacuity #4113 exists to remove.
+    """
+    methods = sdk_method_names(sdk_src)
+    by_method: dict[str, list] = {}
+    for e in entries:
+        if e.sdk_method:
+            by_method.setdefault(e.sdk_method, []).append(e)
+    out: list[str] = []
+    for op in sorted(HTTP_EXCLUDED_SDK_METHODS):
+        if op not in methods:
+            out.append(f"HTTP_EXCLUDED_SDK_METHODS entry {op!r} does not resolve")
+        bound = by_method.get(op, [])
+        if not bound:
+            out.append(f"HTTP_EXCLUDED_SDK_METHODS entry {op!r} has no tool binding")
+        for e in bound:
+            if e.http_policy:
+                out.append(f"{e.name}: declared HTTP-excluded operation {op!r} is HTTP-exposed")
+    for op in sorted(NON_SDK_WRITER_OPERATIONS):
+        if not by_method.get(op):
+            out.append(f"NON_SDK_WRITER_OPERATIONS entry {op!r} has no tool binding")
+    for op in sorted(READ_THROUGH_WRITE_METHODS):
+        if op not in methods and op not in NON_SDK_WRITER_OPERATIONS \
+                and op not in DANGLING_SDK_DECLARATIONS:
+            out.append(f"READ_THROUGH_WRITE_METHODS entry {op!r} does not resolve")
+        for e in by_method.get(op, []):
+            if not e.http_policy or e.annotations is None \
+                    or e.annotations.readOnlyHint is not True:
+                out.append(
+                    f"{e.name}: READ_THROUGH_WRITE_METHODS entry {op!r} bound to a "
+                    f"non-read HTTP tool")
+    for op in sorted(INTERNAL_PATH_READERS):
+        if op not in methods:
+            out.append(f"INTERNAL_PATH_READERS entry {op!r} does not resolve")
+    return out
+
+
 def wrap_site_violations(mcp_src: str | None = None) -> list[str]:
     """Every _quota_gated site resolves; the weight partition is exact; every
     wrapped method is bound to a tool."""
@@ -809,7 +927,7 @@ def write_surface_map_violations(method_to_tool: dict[str, str] | None = None,
     dead = set(mapping.values()) - live
     if dead:
         out.append(f"write-surface map names non-existent tools (update the map): {sorted(dead)}")
-    missing = {mapping[m] for m in wrapped} - _ms.WRITE_TOOL_NAMES
+    missing = {mapping[m] for m in (wrapped & set(mapping))} - _ms.WRITE_TOOL_NAMES
     if missing:
         out.append(f"write tools missing from WRITE_TOOL_NAMES: {sorted(missing)}")
     return out

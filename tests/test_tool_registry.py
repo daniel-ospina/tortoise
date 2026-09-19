@@ -461,6 +461,25 @@ def _passed_handle_do(client):
 
 def tortoise_probe_passed_handle():
     return _passed_handle_do(_get_org_sdk())
+
+def tortoise_probe_inverted_guard():
+    if not _transport_is_http():
+        return _http_excluded_error()
+    return _safe(_get_org_sdk().create_point, "x")
+'''
+
+_BARE_IMPORT_SRC = '''
+from tortoise.sdk import create_point
+import tortoise.sdk as sdk
+
+def _get_org_sdk():
+    ...
+
+def tortoise_probe_bare_import():
+    return create_point("x")
+
+def tortoise_probe_module_alias():
+    return sdk.create_point("x")
 '''
 
 _SDK_HELPER_DELEGATION_SRC = '''
@@ -498,10 +517,15 @@ class TestCapabilityModel:
         mutators = sdk_graph_mutators()
         assert {"create_point", "delete", "update"} <= mutators
         assert not ({"query", "get_point", "list_pointkinds"} & mutators)
+        # over-inclusion sentinel: control-plane READS are not mutators
+        assert not ({"org_list", "graph_list", "apikey_list", "org_get"} & mutators)
         fs = sdk_filesystem_methods()
         assert {"ingest_corpus", "index_directory"} <= fs
         assert not ({"_probe_embedded_busy", "session_index_health"} & fs)
-        assert {"org_create", "membership_create"} <= sdk_operator_only_mutators()
+        op = sdk_operator_only_mutators()
+        assert {"org_create", "membership_create", "apikey_revoke",
+                "invitation_create"} <= op
+        assert not ({"org_list", "graph_list", "apikey_list"} & op)
 
     def test_handler_operations_reads_value_passed_and_alias_forms(self):
         """`_get_org_sdk().<m>` as a passed value and via an alias are both seen."""
@@ -527,7 +551,52 @@ class TestCapabilityModel:
         from tortoise.tool_registry import TOOL_REGISTRY
         assert binding_resolution_violations(TOOL_REGISTRY) == []
 
+    def test_declared_sets_are_live(self):
+        """Every declared set entry resolves — a rename fails loudly, it does
+        not silently drop out of its check."""
+        from tool_surface_capabilities import declared_set_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        assert declared_set_violations(TOOL_REGISTRY) == []
+
     # ── falsifiability — each declared threat class must be able to fail ──
+
+    def test_T1_inverted_self_guard_fails(self):
+        """A guard whose transport test is NEGATED lets HTTP through — it must
+        not count as a self-guard."""
+        from tool_surface_capabilities import (
+            handler_self_guards,
+            write_classification_violations,
+        )
+
+        from tortoise.tool_registry import _rw
+        entry = _probe("tortoise_probe_inverted_guard", "create_point",
+                       annotations=_rw(), http_policy=False)
+        assert not handler_self_guards("tortoise_probe_inverted_guard", _PROBE_SRC)
+        assert write_classification_violations([entry], _PROBE_SRC)
+
+    def test_T1_bare_import_and_module_alias_fail(self):
+        """`from tortoise.sdk import create_point` and `import tortoise.sdk as s;
+        s.create_point` are both statically resolvable writes."""
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import _ro
+        for probe in ("tortoise_probe_bare_import", "tortoise_probe_module_alias"):
+            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            assert write_classification_violations([entry], _BARE_IMPORT_SRC), probe
+
+    def test_T4_per_site_duplicate_weight_fails(self):
+        """T4: a per-METHOD model would collapse this; per-site must catch one
+        weighted and one unweighted site for the same method."""
+        from tool_surface_capabilities import wrap_site_violations
+        src = (
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def _quota_gated(fn, *a, **k): ...\n"
+            "def a(): return _quota_gated(_get_org_sdk().create_point, abuse_weight=1)\n"
+            "def b(): return _quota_gated(_get_org_sdk().create_point)\n"
+        )
+        assert wrap_site_violations(src)
 
     def test_T1_read_labelled_tool_reaching_a_write_fails(self):
         """T1: a merged tool labelled read-only whose handler writes."""
@@ -633,6 +702,11 @@ class TestCapabilityModel:
         dropped["no_such_wrapped_method"] = "tortoise_create_point"
         assert any("stale map" in v
                    for v in write_surface_map_violations(dropped))
+        # FORWARD: a wrap site with no map entry is reported (no KeyError)
+        omitted = {k: v for k, v in DECLARED_WRITE_SURFACE_MAP.items()
+                   if k != "update_point"}
+        assert any("unmapped" in v
+                   for v in write_surface_map_violations(omitted))
 
     def test_T1_dict_get_dispatch_fails_closed(self):
         """T1: `h = _HANDLERS.get(k); h()` (the idiomatic dispatch table) must
