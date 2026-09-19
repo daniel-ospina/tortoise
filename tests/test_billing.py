@@ -680,6 +680,41 @@ class TestWebhook:
         tier, status, cust, sub_id, _ = self._mirror(billing_client)
         assert (tier, status, cust, sub_id) == ("pro", "active", "cus_1", "sub_1")
 
+    def test_webhook_analytics_carries_plan_and_tier(
+            self, monkeypatch, tmp_path, billing_client):
+        """#3821 regression: the billing emit passes plan/tier to
+        `_track_analytics_event`; before #3821 neither was in
+        `_ALLOWED_ANALYTICS_PROPS`, so every billing row was written
+        STRIPPED — the live silent loss since c928b0316 (2026-08-09)."""
+        from tortoise import billing as bl
+        from tortoise import hosted_api as ha
+
+        org_id = billing_client["org_id"]
+        self._bind_customer(billing_client, "cus_3821")
+        fallback = tmp_path / "billing-analytics.jsonl"
+        monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH", str(fallback))
+        for var in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+                    "SUPABASE_SERVICE_ROLE_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
+                            self._verify({
+            "type": "checkout.session.completed", "id": "evt_3821",
+            "data": {"object": {"client_reference_id": org_id,
+                                "customer": "cus_3821",
+                                "customer_details": {"email": "o@e.com"},
+                                "subscription": "sub_3821"}}}))
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: FIXTURE_SUB)
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200, r.text
+        rows = [json.loads(line) for line in
+                fallback.read_text().splitlines() if line.strip()]
+        assert rows, "the webhook must emit a billing analytics row"
+        props = rows[-1]["properties"]
+        assert props.get("plan") == "pro"
+        assert props.get("tier") == "pro"
+        assert props.get("status") == "checkout.session.completed"
+
     def test_webhook_replay_dedup_single_processing(self, monkeypatch, billing_client):
         from tortoise import billing as bl
         from tortoise import notify as nt
