@@ -734,6 +734,7 @@ surfaces:
   - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
   - test_onboarding_analytics_patch.py
   - test_onboarding_endpoints.py
+  - test_onboarding_false_completion_repair.py  # #3912: false decide-completed repair + guard (docker-lane)
   - test_onboarding_health_flip.py
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
@@ -1050,6 +1051,7 @@ durations:
   test_doctor.py: 44.8
   test_onboarding_w6_capture_disclosure.py: 43.2
   test_onboarding_w4_settings.py: 38.8
+  test_onboarding_false_completion_repair.py: 42.1  # #3912: 48 docker-lane tests (SDK round-trips per org)
   test_graph_diagnostics.py: 37.3
   eval/write_path/test_write_path_runner.py: 36.0
   test_write_verb.py: 35.7
