@@ -2486,6 +2486,57 @@ def test_lock_holder_pid_ignores_a_foreign_owned_lock_dir(tmp_path, monkeypatch)
         "a foreign-owned lock dir's contents are attacker-authored"
 
 
+def test_lock_contention_is_silent(tmp_path, caplog, monkeypatch):
+    """#4098 cycle-4 P2: the single `except OSError` around flock + seek +
+    truncate + write + flush conflated CONTENTION with FAILURE. Contention is
+    the ordinary case and must stay silent — a warning there fires on every
+    concurrent run — while a real fault must be loud."""
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    path = str(tmp_path / ".tortoise-reaper-x" / ".reaper.lock")
+    holder, waiter = er._ReaperLock(path), er._ReaperLock(path)
+    assert holder.acquire()
+    try:
+        with caplog.at_level(logging.WARNING, logger=er.logger.name):
+            assert waiter.acquire() is False, "the second sweeper must not acquire"
+        assert not [r for r in caplog.records if "reaper lock unavailable" in r.message], \
+            "ordinary lock contention must NOT warn (it fires on every run)"
+    finally:
+        holder.release()
+
+
+def test_lock_write_failure_is_loud_not_silent(tmp_path, caplog, monkeypatch):
+    """#4098 cycle-4 P2: a full/read-only tempfs (ENOSPC/EDQUOT/EIO) fails in
+    seek/truncate/write/flush, which the old single `except OSError` swallowed
+    as if it were contention — a silent, permanent-looking disable."""
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    path = str(tmp_path / ".tortoise-reaper-y" / ".reaper.lock")
+    lock = er._ReaperLock(path)
+
+    class _BadIO:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def __getattr__(self, name):
+            return getattr(self._fh, name)
+
+        def truncate(self, *a, **kw):
+            raise OSError(28, "No space left on device")
+
+    real_fdopen = os.fdopen
+    monkeypatch.setattr(os, "fdopen", lambda fd, mode: _BadIO(real_fdopen(fd, mode)))
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        assert lock.acquire() is False, "a write failure must fail closed"
+    assert any("cannot write the lock file" in r.message for r in caplog.records), \
+        "a non-contention fault must be loud, not mistaken for contention"
+    assert lock._fh is None
+
+
 def test_reaper_lock_holder_pid_never_blocks_on_fifo(tmp_path, monkeypatch):
     """#4098 cycle-2 P1: `_lock_holder_pid()` is evaluated in `main()` BEFORE
     `signal.alarm(timeout)` is armed, so a FIFO planted at the lock path must

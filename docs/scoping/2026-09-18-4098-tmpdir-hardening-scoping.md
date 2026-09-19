@@ -163,7 +163,7 @@ and filed** (never left in the in-scope set).
 | 4 | A **transient write failure** (`ENOSPC`) on the marker | Skip THIS record only — never propagate out of `reap()`, never abort the sweep | `test_marker_write_error_skips_one_record_not_the_sweep` |
 | 5 | A **symlink planted at the lock path** (T5) — the bind-relative `<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`, and a link at the lock DIR | `_ReaperLock.acquire()` must refuse it (ELOOP), never truncate the target; the lock dir must be **owned by the invoking uid** (a foreign-owned dir fails closed) | `test_reaper_lock_never_follows_symlink`, `test_reaper_lock_refuses_a_foreign_owned_lock_dir` |
 | 5b | A **symlinked lock DIR**, and a **foreign-owned lock DIR** (T5) | The holder read must be anchored on the dir fd (basename-only `O_NOFOLLOW` is insufficient), bounded, ownership-gated, and use `O_NONBLOCK` | `test_lock_holder_pid_never_follows_a_symlinked_lock_dir`, `test_lock_holder_pid_ignores_a_foreign_owned_lock_dir`, `test_reaper_lock_holder_pid_never_blocks_on_fifo` |
-| 5c | A **pre-created lock-dir name we cannot remove** — a directory, symlink, or plain file owned by a foreign uid under a 1777 sticky `/tmp` | EVERY refusal must fail closed AND log: a silent `return False` is indistinguishable from ordinary lock contention, and the condition is permanent, so silence would stop the reaper without a trace. Ordinary flock contention must stay SILENT | `test_foreign_owned_lock_dir_fails_closed_and_warns`, `test_symlink_at_lock_dir_refuses_loudly` |
+| 5c | A **pre-created lock-dir name we cannot remove** — a directory, symlink, or plain file owned by a foreign uid under a 1777 sticky `/tmp`; and any NON-contention lock fault (a full/read-only tempfs) | EVERY refusal must fail closed AND log — a silent `return False` is indistinguishable from ordinary lock contention, and the pre-creation case is permanent, so silence would stop the reaper without a trace. Ordinary `flock` contention (`EWOULDBLOCK`/`EAGAIN`) must stay SILENT | `test_foreign_owned_lock_dir_fails_closed_and_warns`, `test_symlink_at_lock_dir_refuses_loudly`, `test_lock_contention_is_silent`, `test_lock_write_failure_is_loud_not_silent` |
 
 **ESCALATED — declared out of scope, filed as #4136** (these are NOT in this PR's contract)
 
@@ -266,10 +266,16 @@ escalated, because it is the identical mechanical class on the scheduled path an
 > **The residual this accepts, stated plainly:** a hostile uid can still pre-create our exact
 > `<euid>` name — as a directory, a symlink, or a plain file — and the 1777 sticky bit means we
 > cannot remove it, so it is a targeted denial of OUR sweeps. EVERY refusal path therefore logs
-> `"reaper lock unavailable (<reason>) at <path> — refusing to lock; this path is owned by another
-> uid and can only be removed by its owner or root, so sweeps are skipped until then"` (unopenable
-> dir, foreign-owned dir, unopenable lock file, unwrappable fd, non-regular lock path), so no
-> variant can fail silently and be mistaken for ordinary lock contention. It is logged, not
+> `"reaper lock unavailable (<reason>) at <path> — refusing to lock; <tail>"`, where the tail
+> attributes ownership **only where ownership was established**: the foreign-owned-dir refusal says
+> "this path is owned by another uid and can only be removed by its owner or root, so sweeps are
+> skipped until then", and every other refusal says "this uid cannot clear the cause, so sweeps are
+> skipped until it is fixed". So no variant can fail silently and be mistaken for ordinary lock
+> contention. The refusals routed this way are: unopenable dir, foreign-owned dir, unopenable lock
+> file, unwrappable fd, non-regular lock path, `flock` failing for a reason other than
+> `EWOULDBLOCK`/`EAGAIN`, and `seek`/`truncate`/`write`/`flush` failing (a full or read-only
+> tempfs — `ENOSPC`, `EDQUOT`, `EIO`). ORDINARY contention (`EWOULDBLOCK`/`EAGAIN`) stays SILENT
+> by design: a warning there would fire on every concurrent run and be noise. It is logged, not
 > prevented. Cross-uid non-interference of the DESTRUCTION paths is likewise NOT established by
 > this PR — that is the open provenance question tracked by #4136; the only thing claimed here is
 > that a foreign uid's sweeper shares no lock with ours.

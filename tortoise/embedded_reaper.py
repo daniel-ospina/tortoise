@@ -51,6 +51,7 @@ skipped, never killed.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import math
@@ -2081,7 +2082,19 @@ class _ReaperLock:
         self.path = path
         self._fh = None
 
-    def _refuse(self, reason: str) -> bool:
+    def _close_fh_quietly(self) -> None:
+        # #4098 review: `close()` can itself raise (EINTR/EIO, plausible
+        # right after a failed truncate/flush on a struggling filesystem).
+        # Unguarded, it would REPLACE the in-flight exception and escape
+        # `acquire()` — turning a fail-closed refusal into a startup crash.
+        if self._fh is not None:
+            try:  # noqa: SIM105
+                self._fh.close()
+            except OSError:
+                pass
+        self._fh = None
+
+    def _refuse(self, reason: str, foreign_owned: bool = False) -> bool:
         # #4098 review: EVERY refusal must be LOUD. A silent `return False`
         # is indistinguishable from "another sweeper holds the lock", and on
         # a shared `/tmp` this path is attacker-triggerable and PERMANENT: a
@@ -2091,10 +2104,18 @@ class _ReaperLock:
         # intervenes. Say so, and do not prescribe an action this uid cannot
         # perform.
         logger.warning(
-            "reaper lock unavailable (%s) at %s — refusing to lock; this "
-            "path is owned by another uid and can only be removed by its "
-            "owner or root, so sweeps are skipped until then",
-            reason, self.path)
+            "reaper lock unavailable (%s) at %s — refusing to lock; %s",
+            reason, self.path,
+            # #4098 review: attribute ownership ONLY where it was established.
+            # "cannot wrap the lock fd" / "not a regular file" are reachable
+            # only AFTER `st_uid == geteuid` passed on a 0700 dir, so those
+            # artifacts can only be ours — blaming a foreign uid there would
+            # be a false diagnosis of our own stale FIFO or fd failure.
+            ("this path is owned by another uid and can only be removed by "
+             "its owner or root, so sweeps are skipped until then")
+            if foreign_owned else
+            ("this uid cannot clear the cause, so sweeps are skipped until "
+             "it is fixed"))
         self._fh = None
         return False
 
@@ -2125,7 +2146,9 @@ class _ReaperLock:
             # uid-scoped name means this needs a deliberate, targeted
             # pre-creation, not the ordinary shared-`/tmp` case.
             if os.fstat(dir_fd).st_uid != os.geteuid():
-                return self._refuse("the lock directory is not owned by this uid")
+                return self._refuse(
+                    "the lock directory is not owned by this uid",
+                    foreign_owned=True)
             # Best-effort tighten of a PRE-EXISTING dir. Done through the fd:
             # chmod(2) FOLLOWS a symlink and Linux has no lchmod, so a path
             # chmod would run before the O_NOFOLLOW gate and let a planted
@@ -2164,22 +2187,30 @@ class _ReaperLock:
             # A FIFO opens fine O_RDWR without blocking — never treat it as
             # the lock. Closed exactly once, here; an OSError from close must
             # not turn a fail-closed refusal into an exception.
-            try:  # noqa: SIM105
-                self._fh.close()
-            except OSError:
-                pass
+            self._close_fh_quietly()
             return self._refuse("the lock path is not a regular file")
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            # #4098 review: split CONTENTION from FAILURE. `EWOULDBLOCK` is
+            # the ordinary "another sweeper holds the lock" exit and must
+            # stay SILENT (a warning here would fire on every concurrent
+            # run). Every OTHER errno — EINTR/EIO from flock, or any failure
+            # later in this block — is a real fault that must be LOUD, or it
+            # is indistinguishable from contention.
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                self._close_fh_quietly()
+                return False
+            return self._refuse(f"cannot take the lock: {exc}")
+        try:
             self._fh.seek(0)
             self._fh.truncate()
             self._fh.write(str(os.getpid()))
             self._fh.flush()
-            return True
-        except OSError:
-            self._fh.close()
-            self._fh = None
-            return False
+        except OSError as exc:
+            # A full/read-only tempfs (ENOSPC/EDQUOT/EIO) reaches here.
+            return self._refuse(f"cannot write the lock file: {exc}")
+        return True
 
     def release(self) -> None:
         import fcntl
