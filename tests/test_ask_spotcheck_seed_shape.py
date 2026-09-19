@@ -26,10 +26,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.ask_spotcheck import _seed_memory  # noqa: E402, RUF100
-from tortoise.sdk import (  # noqa: E402, RUF100
-    TortoiseSDK,
+from tortoise.ask_lane import (  # noqa: E402, RUF100
     _reset_ask_reader_cache_for_tests,
+    run_ask_lane,
 )
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 #: A question in the committed composition's schema (the keys
 #: ``_seed_memory`` consumes), small enough to seed per test.
@@ -97,7 +98,7 @@ def seeded(tmp_path):
 
 
 def _install_fake_reader(monkeypatch) -> _FakeReader:
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
 
     fake = _FakeReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
@@ -125,9 +126,9 @@ def _wire(sdk: TortoiseSDK, query: str, *, want: set[str],
 
 def _ask(sdk: TortoiseSDK, query: str, *, want_evidence: str,
          want_ids: set[str] | None = None, attempts: int = 3) -> dict:
-    """``sdk.ask`` on the local lane, retried (same flake class as
-    ``_wire``) until the reader's context carries the seeded text AND — when
-    ``want_ids`` is given — the identity set under test.
+    """``run_ask_lane`` on the eval-only local lane, retried (same flake
+    class as ``_wire``) until the reader's context carries the seeded text
+    AND — when ``want_ids`` is given — the identity set under test.
 
     Retrying on the ASSERTED value matters in both directions: a PARTIAL
     pool (one strategy down, others continue) would otherwise read as a
@@ -136,7 +137,7 @@ def _ask(sdk: TortoiseSDK, query: str, *, want_evidence: str,
     """
     result: dict = {"evidence": "", "retrieved_session_ids": []}
     for _ in range(attempts):
-        result = sdk.ask(query, question_date="2023-05-22")
+        result = run_ask_lane(sdk, query, question_date="2023-05-22")
         ids = set(result.get("retrieved_session_ids") or [])
         if want_evidence in result.get("evidence", "") and (
                 want_ids is None or ids == want_ids):
@@ -192,7 +193,7 @@ def test_identity_resolves_from_the_edge_and_vanishes_without_it(seeded,
     """The fixture is faithful when the SHIPPING read resolves the seeded
     session from the ``CONTAINS`` edge — and RED when that edge is deleted.
 
-    Both readers are the existing internal ones: ``sdk.ask`` (the product
+    Both readers are the existing internal ones: ``run_ask_lane`` (the eval
     lane's structured ``retrieved_session_ids`` + rendered evidence tags) and
     the shared point fetch behind ``tortoise_fts_query`` (the ``/v1/search``
     payload). No new surface is exercised.
