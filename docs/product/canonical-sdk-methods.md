@@ -74,6 +74,26 @@ name**, and only the SDK-only groups (no tool exposes them) have names of their 
 Members are the current method names — this is a collapse of names that already exist, not a
 design of new ones. Names are verb-first, 2–3 words, no internal jargon.
 
+### The naming rules
+
+Three rules, each of which caught a real error in this document.
+
+1. **One name per capability, across both layers.** Every group whose capability has an
+   approved MCP tool carries that tool's name. An earlier revision invented a second SDK
+   vocabulary (`search`, `get`, `traverse`, `dream`, `create_source`), so the same capability
+   answered to two names depending on which layer you were reading — and the generic SDK
+   `get`/`delete`/`update` collided with real methods of those names.
+2. **No node types in method names.** A name says what is done, not what it is done to.
+   `retract_point` implied `retract_object`, `retract_subject` and so on; it is folded into
+   `revise_knowledge`. The same rule retired `create_point`, `delete_point`, `update_point`,
+   `supersede_point` — if we later retract a Source, the name already works.
+3. **Verb-first, 2–3 words, no internal jargon.** `stabilize_beliefs` not `dream`;
+   `adjust_relationship` not `operator_action`; `write_knowledge` not `ingest`. Three words are
+   fine when they remove an ambiguity — `capture_session_local` / `capture_session_hosted`
+   are worth the extra length because the choice is then unmissable at the call site. The
+   cost is a few tokens in a tool list; the prefix/suffix length effect on agent selection is
+   measured as negligible and model-dependent.
+
 ### READ
 
 | # | Canonical | MCP tool | Members (current names) | Action |
@@ -93,24 +113,22 @@ design of new ones. Names are verb-first, 2–3 words, no internal jargon.
 | # | Canonical | MCP tool | Members (current names) | Action |
 |---|---|---|---|---|
 | W1 | `create_entity` | #10 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | keep — `create_point` and `create_event` survive as warning aliases (#3883), the eval harness calls them by name |
-| W2 | `register_source` | #11 | `create_source`, `complete_source` | keep — **not foldable** |
-| W3 | `index_files` | #12 | `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
-| W4 | `capture_knowledge` | #13 | `capture_session`, `checkpoint`, `diary_write`, `diary_read`, `ingest` | keep — **`ingest` is the batch-with-relationships call and is under-named here; see Open items** |
-| W5 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
-| W6 | `link_entities` | #15 | `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **the two creators are not foldable into each other**, but they share one name at the surface |
-| W7 | `record_decision` | #16 | `file_decision`, `file_human_approval` | keep, collapse |
-| W8 | `revise_knowledge` | #17 | `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |
-| W9 | `delete_knowledge` | #18 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
-| W10 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | keep — **`compute_confidence` mislabelled read** |
-| W11 | `approve_merge` | #20 | `approve_merge` | keep |
-| W12 | `adjust_relationship` | #21 | `operator_action`, `mitigate_operator`, `annotate_operator` | keep, collapse |
-| W13 | `manage_deployment` | #22 | `org_*`, `graph_*`, `membership_*`, `apikey_*`, `invitation_*`, `signup_token_*` | keep, **namespaced** |
-| W14 | `commit_session` | — | `commit_session` | keep — **SDK-only**, no MCP tool: it extracts locally then POSTs to `/v1/sessions/commit`, needing a hosted endpoint and an API key |
-| W15 | utilities | — | `ulid`, `close` | `close` is core lifecycle; **`ulid` is a removal candidate** |
-
-### SDK-only — no MCP tool exposes these
-
-`commit_session` · the control-plane namespaces under `manage_deployment` · `ulid`, `close`.
+| W2 | `write_knowledge` | — | `ingest` | keep — **SDK-only name.** The batch call: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so connections can address nodes created in the same call. Not to be called `ingest_bundle` (jargon) or `write_graph` (collides with `graph_overview` and the graph admin namespace) |
+| W3 | `register_source` | #11 | `create_source`, `complete_source` | keep — **not foldable**: the URL is the node identity |
+| W4 | `index_files` | #12 | `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
+| W5 | `capture_knowledge` | #13 | `checkpoint`, `diary_write`, `diary_read` | keep — session-adjacent capture artifacts |
+| W6 | `capture_session_local` | — | `capture_session` | keep — **SDK-only name.** Writes the session into your own graph |
+| W7 | `capture_session_hosted` | — | `commit_session` | keep — **SDK-only name.** Extracts locally, validates, then POSTs to `/v1/sessions/commit`; needs a hosted endpoint and an API key |
+| W8 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
+| W9 | `link_entities` | #15 | `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **one call, dispatching internally on `kind=`**: epistemic relations build a reified operator node, structural ones a bare edge. The caller never sees the split |
+| W10 | `record_decision` | #16 | `file_decision`, `file_human_approval` | keep, collapse |
+| W11 | `revise_knowledge` | #17 | `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |
+| W12 | `delete_knowledge` | #18 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
+| W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | keep — **`compute_confidence` mislabelled read** |
+| W14 | `approve_merge` | #20 | `approve_merge` | keep |
+| W15 | `adjust_relationship` | #21 | `operator_action`, `mitigate_operator`, `annotate_operator` | keep, collapse |
+| W16 | `manage_deployment` | #22 | `org_*`, `graph_*`, `membership_*`, `apikey_*`, `invitation_*`, `signup_token_*` | keep, **namespaced** |
+| W17 | utilities | — | `ulid`, `close` | `close` is core lifecycle; **`ulid` is a removal candidate** |
 
 ### Control plane — the `manage_deployment` members, namespaced
 
@@ -214,8 +232,8 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 **Where this lands for us.** 150 public methods on one flat class is ~5.5× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The target list above does exactly that: **35 groups over 149
-names** — 28 memory-facing (R1–R9, W1–W19) and 7 control-plane namespaces (N1–N7) —
+**collapse the aliases**. The target list above does exactly that: **32 groups over 149
+names** — 26 memory-facing (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
 reached by grouping and merging, with the primitives still reachable and `backfill_v25`
 archived. The
 control plane is what moves behind namespaces; the memory surface
@@ -379,7 +397,7 @@ justified as one.
 | `get_confidence` / `compute_confidence` / `get_source_reliability` | a decision: fix the declaration, or add a `write_back: bool` parameter — until then the read/write guarantee does not hold |
 | The control-plane cold-handle write | approval of a fix, or an explicit exemption for operator-only surfaces |
 | Five phantom `sdk_method` registry values | folded into #4035's class of defect |
-| 28 memory-facing groups vs the approved 23 tools | whether the SDK mirrors the tool list 1:1 or stays a superset |
+| 26 memory-facing groups vs the approved 23 tools | whether the SDK mirrors the tool list 1:1 or stays a superset |
 | `list_graphs` vs `graph_list` | a naming decision — raw DB names vs control-plane rows |
 | `ulid`, `close`, `test_guard` | whether utilities belong on the public surface at all |
 
