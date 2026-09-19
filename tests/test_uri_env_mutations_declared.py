@@ -231,7 +231,7 @@ _EXEMPT_FROM_ENV_MUTATION_GUARD = frozenset() | {
     "test_wipe_server.py",
     "test_round_trip_parity.py",
     "test_loopback_predicate_single_source.py",
-    # documented lifecycle carve-outs (Task 9 17-file set)
+    # documented lifecycle carve-outs (Task 9 carve-out set)
     "test_embedded_lifecycle.py",
     "test_embedded_lifecycle_fast_close.py",
     "test_reaper.py",
