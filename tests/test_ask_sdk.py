@@ -942,7 +942,16 @@ def test_2000_char_boundary(monkeypatch):
 
 def test_oversized_hit_skip_and_caps(monkeypatch):
     """8k/40 caps honored; the byte cap (32 KiB) binds independently; the
-    evidence never splits a character (no U+FFFD)."""
+    evidence never splits a character (no U+FFFD).
+
+    The caps are SET explicitly: #4105 raised the ask-lane defaults to
+    200/200/16000/128KiB, and this test pins the CAP-BINDING mechanism at a
+    known small shape rather than depending on the product defaults."""
+    monkeypatch.setenv("TORTOISE_ASK_RETRIEVAL_LIMIT", "40")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", "40")
+    monkeypatch.setenv("TORTOISE_ASK_POOL_SIZE", "120")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_TOKEN_CAP", "8000")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_BYTE_CAP", "32768")
     sdk = _new_sdk()
     proj = sdk._get_proj()
     # a pathological CJK-heavy pool (unspaced runs — the word-based estimate
