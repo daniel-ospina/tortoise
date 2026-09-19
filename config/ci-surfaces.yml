@@ -778,6 +778,10 @@ surfaces:
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
   - test_env_truthy.py
   - test_admin_return_to.py
+  # #4171: the retired admin origin's single-hop redirect (executes
+  # website/functions/_middleware.ts under Node) and the console's move to the
+  # app origin. Pure/harness — no wrangler, no network.
+  - test_admin_origin_redirect.py
   - test_dashboard_unknown_address.py
   - test_github_connect.py
   - test_github_connector.py
@@ -1233,6 +1237,7 @@ durations:
   test_pack_state.py: 4.5
   test_skip_guard.py: 4.4
   test_admin_return_to.py: 4.3
+  test_admin_origin_redirect.py: 8.0
   test_longmem_usage_e2e.py: 4.3
   test_init_apikey_validation.py: 4.2
   test_orient_direct_consolidation.py: 4.2

@@ -2,7 +2,10 @@
 
 React + Vite + TypeScript + Tailwind + shadcn-style UI + TipTap admin SPA for the
 Tortoise blog CMS (issue #1798, epic `docs/epics/2026-08-27-tortoise-blog-cms/03-plan.md`).
-Served by the admin gate Function (`website/functions/admin/[[path]].ts`) at `/admin/*`.
+Served by the admin gate Function
+(`website/apps/dashboard/functions/admin/[[path]].ts`) at `/admin/*` on the APP
+origin (`app.premiselabs.co`) — same-origin with the `__Host-session` cookie
+(#4171). The marketing origin 301s `tortoise.premiselabs.co/admin` here.
 
 ## Dev
 

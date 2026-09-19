@@ -47,8 +47,14 @@ LEGACY_TOKEN_MARKERS = (
 )
 
 # Browser surfaces that are MIGRATED (or must be). These are the files the BFF owns.
+#
+# #4054: `website/signup.html` is the /auth page — the FRONT DOOR — and it was missing
+# from this list, so the gate could not see that it was still on the legacy client
+# (it loads /assets/supabase-session.js and calls supabaseClient.auth.* in 5 places).
+# Listing it is what makes the gate able to fail on the file that matters most.
 MIGRATED_SURFACES = (
-    "website/welcome.html",
+    "website/apps/dashboard/public/welcome.html",
+    "website/apps/dashboard/public/signup.html",
     "website/apps/blog-admin/src/lib/blog-api.ts",
     "website/apps/blog-admin/src/hooks/useAuth.ts",
     "website/apps/dashboard/src/main.jsx",
@@ -57,10 +63,62 @@ MIGRATED_SURFACES = (
 # The proxy endpoint every migrated client data call must route through.
 PROXY_PREFIX = "/api/v1"
 
-# Client-surface migration is tracked in #3559. These five invariants fail until the
-# remaining browser surfaces migrate. They are xfail — NOT deleted and NOT skipped —
-# so the obligation stays visible and the gate keeps naming the offenders. Flip to
-# strict, then remove the markers, when #3559 lands.
+# Server-side Pages Functions trees. Browser-reachable source and server source are
+# DIFFERENT trust domains: the BFF legitimately builds `Authorization: Bearer …`
+# (that is how it talks to GoTrue) and it contains PROXY_PREFIX because it IS the
+# proxy. Both facts are defects in a browser file and correct in a server file, so
+# these trees are excluded from the browser-source assertions.
+#
+# #4054: the BFF moved from the marketing project (`website/functions/`) to the app
+# project (`website/apps/dashboard/functions/`). Both roots are listed because
+# `blog/**` deliberately remains in the former (and #4171 moved `admin/**` to the
+# latter with the console) — dropping either root would start scanning those
+# server functions as browser code.
+SERVER_FUNCTION_ROOTS = (
+    "website/functions/",
+    "website/apps/dashboard/functions/",
+)
+
+
+def _is_server_source(p: Path) -> bool:
+    """True when the file is server-side Functions code, not browser source."""
+    return str(p.relative_to(REPO)).startswith(SERVER_FUNCTION_ROOTS)
+
+
+# Copy/display modules: they contain `Authorization: Bearer …` strings because they SHOW
+# the user how to configure *their own* agent — the harness install snippets, and a
+# truncated `curl` example rendered in a <code> element. The credential in those strings
+# is the user's agent key (`TORTOISE_API_KEY`), not the dashboard session, and none of
+# these files performs network I/O, so none can be a credential path.
+#
+# This is NOT a blanket escape from the assertion. The exemption is guarded by
+# `test_copy_only_exemptions_perform_no_network_io`, which is deliberately UNMARKED (no
+# xfail): it asserts every file listed here performs no network I/O, so the moment one
+# gains a `fetch` the suite turns red and the exemption must be removed. It USED to be a
+# loop inside `test_no_client_holds_a_bearer_token`, which is `xfail(strict=False)` — a
+# non-strict xfail reports the guard's assertion failure as XFAIL, so the run stayed green
+# (appending `fetch("/x")` to harnesses.js yielded `1 xfailed`, exit 0). A guard that
+# cannot fail is not a guard. A new offender anywhere else still fails normally.
+COPY_ONLY_SOURCES = (
+    "website/apps/dashboard/src/harnesses.js",
+    "website/apps/dashboard/src/harnesses.test.js",
+    "website/apps/dashboard/src/overviewEmptyAction.js",
+)
+
+_NETWORK_IO = re.compile(
+    r"\b(?:fetch|XMLHttpRequest|axios|sendBeacon)\s*[(.]|\bcredentials\s*:|\bnavigator\.sendBeacon"
+)
+
+# Client-surface migration is tracked in #3559. TWO invariants still fail because the
+# remaining browser surfaces have not migrated; they are xfail — NOT deleted and NOT
+# skipped — so the obligation stays visible and the gate keeps naming the offenders.
+#
+# The other three checks in this file whose surfaces DID migrate carry NO marker:
+# a non-strict xfail cannot fail, so it is not a gate — the moment a regression
+# appears it flips XFAIL and CI stays green. Removing the marker is the only state in
+# which the check can actually redden. Do the same for each remaining marker when its
+# invariant passes; do NOT "flip to strict" — a strict xfail still reports a passing
+# test as XPASS and still cannot gate a regression.
 CLIENT_MIGRATION = "client-surface migration outstanding — see #3559"
 
 
@@ -138,7 +196,22 @@ def test_no_legacy_js_readable_token_anywhere(sources):
     )
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
+def test_migrated_surfaces_exist():
+    """Every surface the BFF owns must still exist, so the migration gate cannot pass vacuously.
+
+    `test_migrated_surfaces_do_not_use_supabase_auth_client` records a missing surface as an
+    offender too, but this dedicated test keeps the failure independent of the scan
+    patterns and names the vanished surface directly, so a renamed or deleted surface is a
+    hard failure rather than a silently empty migration check.
+    """
+    missing = [rel for rel in MIGRATED_SURFACES if not (REPO / rel).exists()]
+    assert not missing, (
+        "the BFF-owned surfaces below are missing, so the migration gate would pass "
+        "vacuously (a surface that no longer exists cannot be checked for a legacy client):\n"
+        + "\n".join(f"  {rel}" for rel in missing)
+    )
+
+
 def test_migrated_surfaces_do_not_use_supabase_auth_client():
     """(A) No `supabase.auth` client session in a migrated surface.
 
@@ -166,7 +239,37 @@ def test_migrated_surfaces_do_not_use_supabase_auth_client():
     )
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
+def test_copy_only_exemptions_perform_no_network_io(sources):
+    """The COPY_ONLY_SOURCES exemption must be able to FAIL.
+
+    This test is deliberately UNMARKED. The same assertion used to live inside
+    `test_no_client_holds_a_bearer_token` while that test was `xfail(strict=False)` — so a
+    copy-only file gaining a network call made it fail *as expected* and the suite stayed
+    green. A non-strict xfail turns the guard's failure into XFAIL, and a guard that cannot
+    fail is not a guard (the exact class this PR exists to close). Keeping this guard in a
+    test that carries no marker means it can redden even while the two remaining #3559
+    invariants are still xfail.
+
+    Taking `sources` here also pins the module-level non-vacuity assertion (the
+    browser-source scan found >40 files) to a test that cannot be xfailed, so a broken glob
+    can no longer hide behind the two remaining xfail markers either.
+    """
+    scanned = {str(p.relative_to(REPO)) for p in sources}
+    for rel in COPY_ONLY_SOURCES:
+        p = REPO / rel
+        assert p.exists(), f"copy-only exemption lists a missing file: {rel}"
+        assert rel in scanned, (
+            f"{rel} is exempt from the Bearer check, but the browser-source scan never "
+            "sees it — a dead exemption leaves the file silently unguarded"
+        )
+        hit = _NETWORK_IO.search(_code(p))
+        assert not hit, (
+            f"{rel} is exempt from the Bearer check as a copy-only module, but it now "
+            f"performs network I/O (`{hit.group(0)}`) — the exemption is no longer safe. "
+            "Migrate the call to the BFF and remove it from COPY_ONLY_SOURCES."
+        )
+
+
 def test_no_client_holds_a_bearer_token(sources):
     """(A) No browser surface may construct an Authorization header from client state.
 
@@ -174,13 +277,20 @@ def test_no_client_holds_a_bearer_token(sources):
     holding a token it should not have, or sending a header that will be discarded — both
     indicate the surface was not migrated.
     """
+    # Non-vacuity for the COPY_ONLY exemption lives in the UNMARKED
+    # `test_copy_only_exemptions_perform_no_network_io` — it must not sit inside a test
+    # that cannot fail, where its failure would be swallowed as XFAIL.
     pat = re.compile(r"Bearer\s*\$\{")
+
     offenders = []
     for p in sources:
         # Server code is ALLOWED to build a Bearer header — that is how the BFF talks to
         # GoTrue/api.premiselabs.co, and it is the whole point of the proxy. Only a
         # *browser* building one is a defect, because it means the browser holds a token.
-        if str(p.relative_to(REPO)).startswith("website/functions/"):
+        if _is_server_source(p):
+            continue
+        # Copy-only display modules (guarded above).
+        if str(p.relative_to(REPO)) in COPY_ONLY_SOURCES:
             continue
         text = _read(p)
         for m in pat.finditer(text):
@@ -189,7 +299,6 @@ def test_no_client_holds_a_bearer_token(sources):
     assert not offenders, "client-constructed Bearer headers remain:\n" + "\n".join(offenders)
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_the_proxy_has_a_caller(sources):
     """(B) The BFF proxy must actually be used by a client.
 
@@ -203,7 +312,7 @@ def test_the_proxy_has_a_caller(sources):
         if PROXY_PREFIX in _read(p)
         # Server code is not a caller. The proxy source itself contains the string, so
         # scanning it would let the proxy "prove" its own existence — a false pass.
-        and not str(p.relative_to(REPO)).startswith("website/functions/")
+        and not _is_server_source(p)
     ]
     assert callers, (
         f"no client surface calls {PROXY_PREFIX} — the W6 proxy has no caller, so every "
@@ -242,7 +351,9 @@ def test_welcome_page_does_not_load_a_client_auth_library():
     defined in a script the page never loaded — so every successful login fell into the
     "temporarily unavailable" branch. That is the #3485 loop's sibling.
     """
-    p = REPO / "website/welcome.html"
+    # #4054: /welcome moved to the APP origin with the rest of the BFF surfaces
+    # (it is served by `functions/welcome.ts` from the dashboard project).
+    p = REPO / "website/apps/dashboard/public/welcome.html"
     assert p.exists(), f"{p} missing"
     text = _code(p)
     offenders = []
