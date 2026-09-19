@@ -172,6 +172,20 @@ SOURCE_PATTERNS = {
                    "website/security.html", "website/tos.html",
                    "website/license.html", "website/dpa.html",
                    "website/aviso-privacidad.html",
+                   # #3436: the two remaining top-level pages, listed for the
+                   # same reason as every other page entry in this tuple — they
+                   # are covered by the site-wide element-id uniqueness guard
+                   # (tests/test_website_docs_consistency.py), whose scope is
+                   # DERIVED as `website/*.html`. Their absence was verified
+                   # before listing: `select(["website/invite-accept.html"])`
+                   # returned surfaces=[] with the guard absent from
+                   # test_files, so a duplicate id could land on the invite
+                   # landing page without the guard running on the PR that
+                   # added it. Both are `noindex` pages, which keeps them out of
+                   # the blog guard's scope, not out of this one: a noindex page
+                   # is still a served document, and duplicate ids are invalid in
+                   # it.
+                   "website/404.html", "website/invite-accept.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
