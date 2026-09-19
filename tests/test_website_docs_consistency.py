@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -977,4 +978,208 @@ def test_product_hero_offers_the_blog() -> None:
         "owner's report was 'cannot find the blog or how to reach it' — a footer "
         "link at the end of the scroll narrative is not a sufficient answer on the "
         "landing page. Keep the hero's secondary-link row entry."
+    )
+
+
+# ── #3436: duplicate element ids across the public site ─────────────────────
+#
+# A duplicate `id` is invalid HTML and makes every lookup ambiguous:
+# `getElementById` returns only the FIRST match (so a script silently binds the
+# wrong element), an in-page anchor lands on an arbitrary one, and
+# `aria-labelledby`/`aria-controls` lose their target. #3436 reported
+# `id="beta-gate"` twice in `website/signup.html`.
+#
+# The real markup never had two such elements. A raw-text scan counted a
+# REMOVAL NOTE that quoted `<section id="beta-gate">` inside an HTML comment
+# (verified across all 55 revisions of that file: 0 revisions ever carried two
+# real `id="beta-gate"` elements). One comment occurrence pinned the whole
+# class and `website/*.html` was the class's only real home, so the guard below
+# is parser-based rather than regex-based, and the comment case is pinned in
+# `test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id` — a regex
+# guard reds on any page that documents its own ids.
+
+
+class _IdCollector(HTMLParser):
+    """The `id` of every element the parser attaches to the document.
+
+    `handle_starttag` is the right hook: the tokenizer emits no start tag inside
+    a comment, and `script`/`style` are the stdlib's CDATA set
+    (`HTMLParser.CDATA_CONTENT_ELEMENTS`), so an `id="…"` quoted in either can
+    never reach this method. The comment case is exactly the #3436 false
+    positive — a raw-text scan counted the removal note that quoted
+    `<section id="beta-gate">` as a second element.
+
+    Only the FIRST `id` on a tag is recorded. The stdlib hands the collector
+    BOTH attributes of `<div id="a" id="b">` (verified), but the tokenizer drops
+    the duplicate before a browser ever sees it — counting the second would
+    invent a duplicate the document does not have.
+
+    Deliberately OVER-counted, and pinned in
+    `test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id` so the
+    choice is explicit rather than accidental: the stdlib parses as ordinary
+    markup three things a browser does not expose as document elements —
+    `<template>` content (an inert fragment that `getElementById` never reaches),
+    `<noscript>` content (RAWTEXT with scripting enabled, the browser default),
+    and the obsolete raw-text elements (`xmp`, `plaintext`). An `id` shared with
+    one of those is legal but reds the guard. That is the safe direction: a
+    static duplicate-id guard may fail LOUD (a red test a human reads), but it
+    must never pass a real duplicate silently, and no page uses any of the three
+    today.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ids: list[tuple[str, int]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name == "id" and value:
+                self.ids.append((value, self.getpos()[0]))
+                return
+
+
+def _duplicate_element_ids(html: str) -> dict[str, list[int]]:
+    """{id: [line, …]} for every id declared on more than one element."""
+    collector = _IdCollector()
+    collector.feed(html)
+    lines: dict[str, list[int]] = {}
+    for value, line in collector.ids:
+        lines.setdefault(value, []).append(line)
+    return {value: at for value, at in lines.items() if len(at) > 1}
+
+
+def _all_website_pages() -> list[Path]:
+    """Every checked-in top-level page — DERIVED from disk, never listed.
+
+    Wider than `_in_scope_pages()` on purpose. That scope (public + indexable +
+    served) is the blog guard's question — where a link can be followed — but an
+    id collision is a property of the DOCUMENT: `404.html` is served on every
+    miss and `invite-accept.html` on every invite link, and a `noindex` page is
+    still a page whose own script runs. Derivation is what makes this a guard
+    rather than a list that rots; `test_id_guard_covers_every_website_page` pins
+    the result so it cannot silently SHRINK either.
+
+    Scope is the TOP LEVEL, matching the issue's `website/*.html` — plus a pin,
+    because `*.html` silently ignores a page added as `website/promo.htm` or
+    nested (`website/legal/x.html`). Pages under `website/apps/` are outside
+    this guard by declaration: one of them is committed build output
+    (`apps/blog-admin/dist/index.html`), which is regenerated, not authored.
+    """
+    return sorted(WEBSITE.glob("*.html"))
+
+
+@pytest.mark.parametrize("page", _all_website_pages(), ids=lambda p: p.name)
+def test_website_pages_have_no_duplicate_element_ids(page: Path) -> None:
+    """#3436 acceptance: no page declares the same id on two elements."""
+    duplicates = _duplicate_element_ids(_read(page))
+    assert not duplicates, (
+        f"website/{page.name} declares the same id on more than one element: "
+        f"{duplicates}. Duplicate ids are invalid HTML and make "
+        f"getElementById, in-page anchors and aria references resolve to an "
+        f"arbitrary element. Give one of the elements a distinct id and update "
+        f"whatever references it (#3436)."
+    )
+
+
+def test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id() -> None:
+    """#3436 acceptance: the guard must red on the defect it names.
+
+    Both directions are pinned, because a guard that cannot fail on a duplicated
+    id is the same as no guard, and a guard that reds on the non-element
+    occurrences would be the false positive that produced #3436 in the first
+    place.
+    """
+    assert _duplicate_element_ids(
+        '<div id="dup"></div><span id="dup"></span>'
+    ) == {"dup": [1, 1]}
+    assert _duplicate_element_ids('<div id="a"></div><span id="b"></span>') == {}
+    # The #3436 false positive: a comment QUOTING an element is not an element.
+    assert _duplicate_element_ids(
+        '<!-- <section id="dup"></section> --><section id="dup"></section>'
+    ) == {}
+    # RAWTEXT containers: `id=` in a script string or a CSS comment is text.
+    assert _duplicate_element_ids(
+        '<script>const h = \'<div id="dup">\';</script><div id="dup"></div>'
+    ) == {}
+    assert _duplicate_element_ids(
+        '<style>/* <div id="dup"> */</style><div id="dup"></div>'
+    ) == {}
+    # A repeated ATTRIBUTE is dropped by the tokenizer before a browser sees it.
+    assert _duplicate_element_ids('<div id="dup" id="dup"></div>') == {}
+    # Deliberately OVER-counted shapes (see `_IdCollector`): a browser exposes
+    # none of these ids as document elements, so pinning the over-count keeps the
+    # choice explicit. Over-counting fails LOUD; a silent under-count would be
+    # the dangerous direction, and no case of it is known.
+    assert _duplicate_element_ids(
+        '<template><div id="dup"></div></template><div id="dup"></div>'
+    ) == {"dup": [1, 1]}
+    assert _duplicate_element_ids(
+        '<noscript><div id="dup"></div></noscript><div id="dup"></div>'
+    ) == {"dup": [1, 1]}
+
+
+# The top-level page set as of #3436 (2026-09-18). This pins the DERIVATION'S
+# OUTPUT (not an allowlist the guard consults): a guard whose page set silently
+# shrinks is a guard that silently stops covering a page, and the scope and its
+# CI ratchet share one derivation, so they would shrink in lockstep unnoticed.
+_ALL_WEBSITE_PAGES_AT_3436 = frozenset({
+    "404.html", "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html",
+    "index.html", "invite-accept.html", "license.html", "privacy.html",
+    "product.html", "security.html", "self-hosted.html", "signin.html",
+    "signup.html", "tos.html", "welcome.html",
+})
+
+
+def test_id_guard_covers_every_website_page() -> None:
+    """Guard the guard: `_all_website_pages()` must not silently shrink.
+
+    A narrow derivation would make the guard pass by covering less, and the
+    ratchet below cannot notice because it reads the SAME derivation. The pin is
+    an EQUALITY, so a page entering the site requires this edit in the same PR —
+    the addition becomes a decision rather than a page that quietly changes what
+    "covered" means. Removal is the same edit with a stated reason.
+
+    It also closes the two shapes `website/*.html` cannot see and that no other
+    test pins: a page added as `website/promo.htm`, and a page added nested
+    (`website/legal/x.html`). Both now fail here and force a deliberate answer
+    (widen the glob, or add the page to this pin's reasoning) instead of landing
+    unguarded.
+    """
+    got = {page.name for page in _all_website_pages()}
+    assert got == set(_ALL_WEBSITE_PAGES_AT_3436), (
+        f"the id guard's page set changed: "
+        f"missing={sorted(_ALL_WEBSITE_PAGES_AT_3436 - got)} "
+        f"added={sorted(got - _ALL_WEBSITE_PAGES_AT_3436)}. If a page genuinely "
+        f"left the site, update `_ALL_WEBSITE_PAGES_AT_3436` in the same PR and "
+        f"say why. If one was ADDED, check it against the two shapes the glob "
+        f"cannot see — a `.htm` extension and a nested path — and widen "
+        f"`_all_website_pages()` if it should be covered."
+    )
+
+
+def test_every_website_page_is_selectable_by_ci() -> None:
+    """Reverse ratchet for the id guard: every page it covers must run this file.
+
+    The guard's scope is DERIVED, so a page added later is covered without
+    editing a list — but if no `SOURCE_PATTERNS['onboarding']` entry matches that
+    page, a PR touching only it selects no surface (`surfaces=[]`, `full=False`)
+    and this file never runs. The guard then silently stops covering the page it
+    was written for — the #1349/#3332/#3616 silent-drop class. Verified before
+    listing: `select(["website/invite-accept.html"], …)` returned `surfaces=[]`
+    with this file absent from `test_files`.
+
+    The assertion is on `test_files` rather than `surfaces`, for the reason
+    `_guard_reachable_for` documents: a page that selects a DIFFERENT surface
+    keeps `surfaces` non-empty while this file still never executes.
+    """
+    unselectable = [
+        f"website/{page.name}"
+        for page in _all_website_pages()
+        if not _guard_reachable_for(f"website/{page.name}")
+    ]
+    assert not unselectable, (
+        f"page(s) covered by the id guard whose PR does not run this file: "
+        f"{unselectable}. A duplicate id can then land on that page without the "
+        f"guard ever executing. Add them to SOURCE_PATTERNS['onboarding'] in "
+        f"tools/ci_selection.py."
     )
