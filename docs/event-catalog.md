@@ -55,15 +55,22 @@ the payload does not name:
   is a 0-row NO-OP, never interpolated into Cypher).
 - **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
   live capture MERGE is a raw write). Fields: `id`, `created_at`,
-  `turn_count`, `harness`, `actor_user_id`. Folded by
+  `turn_count`, `harness`, `actor_user_id`, and (on the follow-up emission)
+  `entity_links_attempted` / `entity_links_created`. Folded by
   `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
   `id` (with `is_episodic=true`), coalesce-preserving `created_at` /
-  `actor_user_id` and taking `turn_count` from the latest record.
+  `actor_user_id` and taking `turn_count` from the latest record. The capture
+  emits a **second** `SessionRecorded` after the entity-linking pass carrying
+  the two outcome counters, so those fields are durable on the
+  `apply()`-based engines too (the first record is emitted before the link
+  result is known and cannot carry them).
 
 **Replay ordering.** `EntityLinked` is deferred to a trailing sweep by every
 replay engine (`rebuild_all`, and the `apply()`-based `rebuild` /
-`recover_from_log`), so a link whose endpoint is created LATER in the journal
-still folds.
+`recover_from_log` / `backup.restore`'s JSONL fallback), so a link whose
+endpoint is created LATER in the journal still folds. On `rebuild_all` the
+sweep runs AFTER pass 2, so a `:Session` source recreated from a
+`contains_session` turn link exists before the fold.
 
 **No down-version guarantee for new folded record types.** An older binary
 rebuilding a journal written by a newer one warns `unrecognized event type 'X'

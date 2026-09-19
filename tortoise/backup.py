@@ -150,8 +150,26 @@ def restore(backup_dir: str, db_path: str,
         # JSONL replay fallback (no RDB, or RDB was empty)
         proj = FalkorProjection(db_path)
         try:
+            # #3664: ``apply()`` is a one-record API, so an ``EntityLinked``
+            # whose endpoint is created LATER in the journal folds to nothing
+            # inline. This is the FOURTH whole-journal replay engine (besides
+            # ``rebuild`` / ``rebuild_all`` / ``recover_from_log``) — buffer
+            # the records and fold them AFTER the pass, the same trailing
+            # sweep the other three give the type. A fold failure is logged,
+            # never raised: restore must not abort on one unreplayable link.
+            deferred_links: list = []
             for ev in EventLog(events_path).read_all():
+                if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                    deferred_links.append(ev)
+                    continue
                 proj.apply(ev)
+            if deferred_links:
+                try:
+                    proj.fold_deferred_entity_links(deferred_links)
+                except Exception:
+                    logger.exception(
+                        "restore: deferred EntityLinked fold failed; %d "
+                        "link(s) not replayed", len(deferred_links))
         finally:
             proj.close()
 

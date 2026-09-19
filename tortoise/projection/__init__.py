@@ -2975,11 +2975,16 @@ class FalkorProjection(
                 self._upsert_point_props(p)
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
-        # #3664: EntityLinked records are deferred to a trailing sweep (after
-        # every ObjectRegistered/DocumentCreated event has run) so a link
-        # whose target is created later in the journal still folds — the fold
-        # is an idempotent MERGE, so ordering vs its own target creation is
-        # irrelevant and later creations are caught.
+        # #3664: EntityLinked records are deferred to a trailing sweep that
+        # runs after PASS 2 (see the sweep before pass 2b). Deferral is needed
+        # for BOTH endpoints: the TARGET is created by pass-1b
+        # ObjectRegistered/DocumentCreated, but a Session SOURCE may exist
+        # only because pass 2's `_upsert_point_edges(contains_session=…)`
+        # recreated it (`_link_session`) — folding at the end of pass 1b
+        # MATCHed neither endpoint and silently dropped the journaled
+        # `(Session)-[:aboutObject]->(Object)` edge whenever the journal had
+        # no `SessionRecorded` for it. The fold is an idempotent MERGE, so
+        # running it later changes nothing else.
         entity_link_events: list = []
         # #2488: ONE cross-family deferred list for point re-stamp folds —
         # PointSuperseded (#2423) + PointInvalidated (#2488) — carrying the
@@ -3273,18 +3278,7 @@ class FalkorProjection(
                 # vocabulary must not be dropped silently.
                 logger.warning("unrecognized event type %r — skipped", t)
 
-        # ── Pass 1b entity-link sweep (#3664) ─────────────────────────────
-        # Every object/document creation event has now run; fold each
-        # EntityLinked record into its idempotent about* edge. A 0-row fold
-        # means the target was never re-created by any journaled event
-        # (pre-#2194 journal, unjournaled producer, delete race) — honest:
-        # the journal could not reproduce that attachment. No warning here:
-        # unlike a supersession fold-miss (which means a claim of state was
-        # lost), an absent link target is simply an absent entity.
-        for ev in entity_link_events:
-            self._fold_entity_linked(ev)
-
-        # Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
+        # ── Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
         # creation events (see the branch above). Warn on 0-row folds — a
         # fold that matched nothing during rebuild means the journal claims
         # a supersession whose Object never re-existed. Since #2194,
@@ -3550,6 +3544,27 @@ class FalkorProjection(
                     # disabling the guard for that class (review P2-1).
                     operator_created_seq.setdefault(p["id"], seq)
                 self._upsert_point_edges(p, contains_session=raw_contains_session)
+
+        # ── Pass 2 entity-link sweep (#3664) ──────────────────────────────
+        # Fold each deferred EntityLinked record into its idempotent about*
+        # edge. Placed HERE — after pass 2 recreated every `:Session`
+        # container (`_upsert_point_edges(contains_session=…)` →
+        # `_link_session`), and after the pre-wipe snapshot restore above —
+        # and BEFORE pass 2b's create-before-transfer sweep (which the
+        # DirectEdgeRepoint structural leg relies on: it re-points/deletes
+        # `about*` edges whose base edge must already exist). Folding at the
+        # end of pass 1b matched only the TARGET endpoint: a `:Session`
+        # source that exists solely because a PointAdded carried
+        # `contains_session` was not yet created there, so the journaled
+        # `(Session)-[:aboutObject]->(Object)` edge was silently lost.
+        # A 0-row fold now means the target was never re-created by any
+        # journaled event (pre-#2194 journal, unjournaled producer, delete
+        # race) — honest: the journal could not reproduce that attachment.
+        # No warning here: unlike a supersession fold-miss (which means a
+        # claim of state was lost), an absent link target is simply an
+        # absent entity.
+        for ev in entity_link_events:
+            self._fold_entity_linked(ev)
 
         # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator

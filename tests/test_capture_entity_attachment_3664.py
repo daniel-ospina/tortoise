@@ -73,6 +73,14 @@ def _object_id(g, name: str) -> str:
     return rows[0][0]
 
 
+# The FULL Session property set the capture path writes — the durability
+# invariant is "live == replay" for the whole node, not just the two fields
+# one earlier revision happened to assert (review P2).
+_SESSION_PROPS_SQL = (
+    "MATCH (s:Session {id:$sid}) RETURN s.turn_count, s.is_episodic, "
+    "s.created_at, s.entity_links_attempted, s.entity_links_created")
+
+
 # ── SCOPE: the SDK capture writes the attachment at all ───────────────────
 
 def test_sdk_capture_links_session_and_turn_to_referenced_entity(journal_sdk):
@@ -126,9 +134,7 @@ def test_capture_about_edges_and_session_survive_rebuild(journal_sdk):
     g = sdk._get_proj().g
     sid = _capture(sdk, "s-3664-rebuild")
     live_edges = _about_edges(g)
-    live_session = g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.turn_count, s.is_episodic",
-        params={"sid": sid}).result_set
+    live_session = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
     assert live_edges, "capture wrote no aboutObject edge to begin with"
 
     sdk._get_proj().rebuild_all(str(events))
@@ -136,11 +142,38 @@ def test_capture_about_edges_and_session_survive_rebuild(journal_sdk):
     assert _about_edges(g) == live_edges, (
         f"about-edge drift across rebuild\n live={live_edges}\n "
         f"post={_about_edges(g)}")
-    post_session = g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.turn_count, s.is_episodic",
-        params={"sid": sid}).result_set
+    post_session = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
     assert post_session, "Session node lost on rebuild"
     assert tuple(post_session[0]) == tuple(live_session[0])
+
+
+def test_session_outcome_counters_survive_recover_from_log(journal_sdk):
+    """The Session's entity-link outcome counters
+    (``entity_links_attempted`` / ``entity_links_created``) are written LIVE by
+    ``capture_session``; they must be JOURNALED so the apply()-based
+    ``recover_from_log`` restores the FULL Session property set, not a node
+    with both fields null.
+
+    MUTATION: drop the follow-up ``SessionRecorded`` emission in
+    ``sdk.capture_session`` (the counters were never in the FIRST record, which
+    is emitted BEFORE the link pass) → the wiped+recovered Session has null
+    counters and this REDs.
+    """
+    from tortoise.consistency import recover_from_log
+
+    sdk, events = journal_sdk
+    proj = sdk._get_proj()
+    g = proj.g
+    sid = _capture(sdk, "s-3664-counters")
+    live = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
+    assert live and live[0][3] is not None and live[0][4] is not None, (
+        "capture did not record the entity-link outcome counters", live)
+
+    g.query("MATCH (n) DETACH DELETE n")
+    r = recover_from_log(str(events), proj)
+    assert r["recovered"] is True, r
+    post = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
+    assert post and tuple(post[0]) == tuple(live[0]), (live, post)
 
 
 def test_capture_about_edges_survive_recover_from_log(journal_sdk, tmp_path):
@@ -307,7 +340,114 @@ def test_entity_linked_fold_noop_on_nonstring_fields(journal_sdk):
         "edge_type": "aboutObject"}) == 0
 
 
+def test_entity_linked_fold_noop_on_unwritable_ids(journal_sdk):
+    """An ``EntityLinked`` id that is a ``str`` but NOT writable (NUL or lone
+    surrogate) must fold to 0, never raise: the id rides as a Cypher
+    parameter, and ``rebuild_all``'s sweep has no try/except, so a raise
+    aborts the rebuild AFTER the wipe. Mirrors the sibling folds' use of
+    ``_writable_id``.
+
+    MUTATION: replace the ``_writable_id`` gate with a bare
+    ``isinstance(..., str)`` → ``p\x00`` raises ``ResponseError: Failed to
+    parse query parameter`` and the lone surrogate raises
+    ``UnicodeEncodeError``; this REDs.
+    """
+    sdk, _ = journal_sdk
+    proj = sdk._get_proj()
+    for bad in ("p\x00", "\ud800"):
+        assert proj._fold_entity_linked({
+            "type": "EntityLinked", "id": bad, "source_label": "Point",
+            "target_label": "Object", "target_id": "o",
+            "edge_type": "aboutObject"}) == 0
+        assert proj._fold_entity_linked({
+            "type": "EntityLinked", "id": "p", "source_label": "Point",
+            "target_label": "Object", "target_id": bad,
+            "edge_type": "aboutObject"}) == 0
+
+
+def test_session_recorded_fold_omits_unwritable_values(journal_sdk):
+    """A ``SessionRecorded`` whose id is unwritable folds to 0; a record whose
+    optional FIELDS are unwritable STILL creates the node and OMITS the bad
+    values — never raises. ``rebuild_all`` folds this record INLINE after the
+    wipe, so a raise leaves a half-restored graph.
+
+    MUTATION: drop the ``_writable_id`` / ``_annotator_value_ok`` gates → the
+    NUL id raises, and the map-valued ``created_at`` / ``harness`` /
+    ``actor_user_id`` and the list-of-map ``turn_count`` each raise
+    ``ResponseError: Property values can only be of primitive types``; this
+    REDs.
+    """
+    sdk, _ = journal_sdk
+    proj = sdk._get_proj()
+    # Unwritable id → NO-OP.
+    assert proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": "s\x00"}) == 0
+    assert proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": "\ud800"}) == 0
+    # Unwritable FIELDS → node created, bad fields OMITTED.
+    assert proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": "s-badfields",
+        "created_at": {"a": 1}, "turn_count": [{"a": 1}],
+        "harness": {"a": 1}, "actor_user_id": {"a": 1}}) == 1
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'s-badfields'}) RETURN "
+        "s.created_at, s.turn_count, s.harness, s.actor_user_id, "
+        "s.is_episodic").result_set
+    assert rows and tuple(rows[0]) == (None, None, None, None, True), rows
+
+
 # ── ORDERING: every replay engine defers EntityLinked to a trailing sweep ──
+
+
+def test_entity_linked_session_source_without_session_recorded_survives_rebuild_all(
+        tmp_path):
+    """A journaled ``(Session)-[:aboutObject]->(Object)`` edge whose Session
+    source exists ONLY because a ``PointAdded`` carried ``contains_session``
+    (NO ``SessionRecorded``) must survive ``rebuild_all`` — the production
+    path (``tortoise rebuild --dir``, ``migrate_db.py``, ``consistency.py``).
+
+    The sweep used to run at the end of pass 1b, BEFORE pass 2's
+    ``_upsert_point_edges`` recreated the ``:Session`` from
+    ``contains_session`` — so ``_fold_entity_linked`` MATCHed neither endpoint
+    and the edge was silently dropped (``rebuild`` reproduced it; the existing
+    ``test_capture_about_edges_and_session_survive_rebuild`` could not catch
+    it because its journal always carries a ``SessionRecorded``).
+
+    MUTATION: fold the deferred records at the end of pass 1b (the pre-fix
+    placement) → session=1 but edge=0 and this REDs.
+    """
+    import json
+
+    sdk = TortoiseSDK(str(tmp_path / "e2e.db"))
+    try:
+        proj = sdk._get_proj()
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        events = [
+            {"type": "PointAdded",
+             "point": {"id": "s1_t0", "content": "turn",
+                       "pointKind": "statement"},
+             "contains_session": "s1"},
+            {"type": "ObjectRegistered", "id": "obj-1", "name": "e2e-obj"},
+            {"type": "EntityLinked", "id": "s1", "source_id": "s1",
+             "source_label": "Session", "target_label": "Object",
+             "target_id": "obj-1", "edge_type": "aboutObject"},
+        ]
+        with open(events_dir / "events.jsonl", "w", encoding="utf-8") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild_all(str(events_dir))
+        assert proj.g.query(
+            "MATCH (:Session {id:'s1'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+        assert proj.g.query(
+            "MATCH (:Session {id:'s1'})-[:aboutObject]->"
+            "(:Object {id:'obj-1'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+    finally:
+        sdk.close()
+
 
 def test_entity_linked_forward_reference_folds_in_rebuild(tmp_path):
     """An ``EntityLinked`` whose endpoint is created LATER in the journal must
@@ -381,6 +521,65 @@ def test_entity_linked_forward_reference_folds_in_recover_from_log(tmp_path):
             "(:Object {id:'obj-fwd2'}) RETURN count(*)").result_set[0][0] == 1
     finally:
         sdk.close()
+
+
+# ── BACKUP: the fourth whole-journal replay engine defers too ─────────────
+
+def test_backup_jsonl_restore_replays_forward_reference_entity_link(tmp_path):
+    """The backup JSONL restore (``backup.restore``'s ``into_falkor``
+    fallback) is a whole-journal replay engine like ``rebuild`` /
+    ``rebuild_all`` / ``recover_from_log`` and must give ``EntityLinked`` the
+    same trailing sweep — otherwise a forward-reference link is lost on a
+    JSONL-only restore while the other three reproduce it.
+
+    MUTATION: fold ``EntityLinked`` inline via ``proj.apply`` → the edge is
+    lost and this REDs.
+    """
+    import json
+
+    from tortoise.backup import restore
+    from tortoise.projection import FalkorProjection
+
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir()
+    events = [
+        {"type": "PointAdded",
+         "point": {"id": "pt-bk", "content": "c",
+                   "pointKind": "statement"}},
+        # The link precedes the Object it points at (forward reference).
+        {"type": "EntityLinked", "id": "pt-bk", "source_id": "pt-bk",
+         "source_label": "Point", "target_label": "Object",
+         "target_id": "obj-bk", "edge_type": "aboutObject"},
+        {"type": "ObjectRegistered", "id": "obj-bk", "name": "bk"},
+    ]
+    with open(backup_dir / "events.jsonl", "w", encoding="utf-8") as fh:
+        for ev in events:
+            fh.write(json.dumps(ev) + "\n")
+    (backup_dir / "manifest.json").write_text(
+        json.dumps({"db": "tortoise.db"}))
+
+    # Isolate the restored DB from ANY adjacent .jsonl: opening an embedded
+    # projection auto-runs recover_from_log when a `.jsonl` sits in the DB's
+    # own directory (``_auto_health_recover``), which has its OWN deferral and
+    # would mask this engine's inline-fold bug. Keep the DB in a directory
+    # that holds no log.
+    db_dir = tmp_path / "restored"
+    db_dir.mkdir()
+    ev_dir = tmp_path / "ev"
+    ev_dir.mkdir()
+    target = db_dir / "restored.db"
+    r = restore(str(backup_dir), str(target),
+                events_path=str(ev_dir / "restored-events.jsonl"),
+                into_falkor=True)
+    assert r["status"] == "ok", r
+    proj = FalkorProjection(str(target))
+    try:
+        n = proj.g.query(
+            "MATCH (:Point {id:'pt-bk'})-[:aboutObject]->"
+            "(:Object {id:'obj-bk'}) RETURN count(*)").result_set[0][0]
+    finally:
+        proj.close()
+    assert n == 1
 
 
 # ── VOCABULARY: writer / fold / security sets must not drift ──────────────

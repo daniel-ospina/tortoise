@@ -562,7 +562,16 @@ class _EntityHandlers:
         (live == rebuild). Returns 1 when the edge exists after the fold, 0
         when the record is malformed or an endpoint is absent (honest — the
         target was not re-created by any journaled event).
+
+        The two ids come from a journal FILE and ride as Cypher parameters,
+        so they get the SAME ``_writable_id`` gate the sibling folds use
+        (``_revise_point`` / ``_apply_annotator`` / PointRetracted): a NUL or
+        lone-surrogate id raises at parameter parse, and ``rebuild_all``'s
+        sweep has no try/except — that raise would abort the rebuild AFTER
+        the wipe. A malformed id is a NO-OP here.
         """
+        from tortoise.projection import _writable_id
+
         if not isinstance(ev, dict):
             return 0
         rel = ev.get("edge_type", "aboutObject")
@@ -584,7 +593,7 @@ class _EntityHandlers:
             return 0
         sid = ev.get("source_id") or ev.get("id")
         tid = ev.get("target_id")
-        if not isinstance(sid, str) or not isinstance(tid, str):
+        if not _writable_id(sid) or not _writable_id(tid):
             return 0
         r = self.g.query(
             f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
@@ -619,24 +628,45 @@ class _EntityHandlers:
         mirroring the live merge), ``turn_count`` tracks the latest journaled
         capture. Returns 1 when the node exists after the fold, 0 on a
         malformed record.
+
+        BOTH the id and every journal-derived property value are gated for
+        WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
+        a map-valued ``created_at`` / ``turn_count`` / ``harness`` /
+        ``actor_user_id`` payload each raise at parameter parse, and ``rebuild_all`` folds this
+        record INLINE (no try/except) AFTER the wipe. A malformed id is a
+        NO-OP (return 0); a malformed field is OMITTED, never bound.
+
+        ``entity_links_attempted`` / ``entity_links_created`` are carried by a
+        SECOND ``SessionRecorded`` the capture emits after the link pass
+        (``sdk.capture_session``), so the counters the live raw SET writes are
+        durable too — ``recover_from_log`` / a journal-only ``rebuild()``
+        otherwise came back with them null (review P2, #3722).
         """
+        from tortoise.projection import _annotator_value_ok, _writable_id
+
         if not isinstance(ev, dict):
             return 0
         sid = ev.get("id")
-        if not isinstance(sid, str) or not sid:
+        if not _writable_id(sid) or not sid:
             return 0
-        sets = ["s.created_at=coalesce(s.created_at, $created_at)"]
-        params: dict = {"sid": sid, "created_at": ev.get("created_at")}
-        if ev.get("turn_count") is not None:
-            sets.append("s.turn_count=$turn_count")
-            params["turn_count"] = ev["turn_count"]
+        sets: list[str] = []
+        params: dict = {"sid": sid}
+        created_at = ev.get("created_at")
+        if created_at is not None and _annotator_value_ok(created_at):
+            sets.append("s.created_at=coalesce(s.created_at, $created_at)")
+            params["created_at"] = created_at
+        for prop in ("turn_count", "harness", "entity_links_attempted",
+                     "entity_links_created"):
+            val = ev.get(prop)
+            if val is not None and _annotator_value_ok(val):
+                sets.append(f"s.{prop}=$v_{prop}")
+                params[f"v_{prop}"] = val
         sets.append("s.is_episodic=true")
-        if ev.get("harness") is not None:
-            sets.append("s.harness=$harness")
-            params["harness"] = ev["harness"]
         if ev.get("actor_user_id") is not None:
-            sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
-            params["uid"] = ev["actor_user_id"]
+            uid = ev["actor_user_id"]
+            if _annotator_value_ok(uid):
+                sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
+                params["uid"] = uid
         r = self.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(sets)} "
             "RETURN count(s)",
