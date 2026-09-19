@@ -172,6 +172,20 @@ _CAPTURE_NO_PROVIDER_WARNING = (
 #: zero-extraction states ("empty", "error", "replayed").
 _CAPTURE_NO_PROVIDER_MODE = "no-provider"
 
+#: #3892: a keyless session re-captured WITH a key while the deployment is on
+#: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
+#: mint duplicate claims), so the re-capture replays — said OUT LOUD, because
+#: "already captured" would be a false statement of this state and the remedy
+#: is one env var away. Shared by ``sdk.capture_session`` and the hosted
+#: capture lane so the two surfaces disclose the SAME state in the SAME words.
+_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING = (
+    "this session's turns were stored WITHOUT a provider key and no "
+    "extraction has ever run for it; extraction was NOT re-attempted "
+    "because TORTOISE_SESSION_EXTRACTOR=m2 selects a non-convergent lane "
+    "(re-running it could mint duplicate claims) — unset it and re-capture, "
+    "or capture the session under a convergent lane, to extract"
+)
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider
@@ -3136,14 +3150,13 @@ class TortoiseSDK:
         ``_CAPTURE_NO_PROVIDER_WARNING``). The key gates extraction, not
         storage: the stored turns are searchable with no key at all (FTS is
         DB-side; the dense leg is a local sentence-transformers model).
-        With a provider key present, behaviour is UNCHANGED. This is a
-        DELIBERATE divergence from the hosted lane — ``hosted_api.
-        _capture_session_impl`` keeps its 503-first refusal, because a hosted
-        deploy must never store a session its org did not ask to pay to
-        extract. A keyless capture records ``capture_ok=False`` +
-        ``capture_extractor="none"`` (no extraction lane ran), so a LATER
-        capture of the same session WITH a key re-attempts extraction through
-        the existing #2335 TRUE-retry path instead of silently replaying.
+        With a provider key present, behaviour is UNCHANGED. BOTH lanes share
+        this keyless contract — the hosted lane stores-and-skips too (#4188;
+        it no longer keeps a 503-first refusal). A keyless capture records
+        ``capture_ok=False`` + ``capture_extractor="none"`` (no extraction
+        lane ran), so a LATER capture of the same session WITH a key
+        re-attempts extraction through the existing #2335 TRUE-retry path
+        instead of silently replaying.
         """
         import uuid
         from datetime import datetime, timezone
@@ -3273,17 +3286,18 @@ class TortoiseSDK:
         # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
         # None (legacy sessions, pre-#2335) replays — backward compat with
         # the #1727 invariant (a legacy session is presumed captured).
-        # Review (PR #2473): TRUE retry is gated to the v2 lane — the ONLY
-        # convergent lane. v2 point ids are content-addressed (pt_<sha>) and
+        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or
+        # the keyless "none" lane, #3892). v2 point ids are content-addressed
+        # (pt_<sha>) and
         # its dedup resolves against the GRAPH (content_hash MATCH), so a
         # re-attempt folds the failed attempt's partial claims onto the same
         # nodes (0 duplicates). The M2 lane mints non-deterministic time-ULID
         # ids with IN-CAPTURE-ONLY dedup, and _extract_session_llm folds
         # partial emissions live even on raise — a failed M2 attempt leaves
         # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
-        # #1727 hole the replay skip closed). Retry fires only when BOTH the
-        # prior attempt ran v2 (capture_extractor recorded) AND this request
-        # runs v2 (env != m2) — otherwise replay (safe no-op).
+        # #1727 hole the replay skip closed). Retry fires only when the prior
+        # attempt ran a CONVERGENT lane (v2, or the keyless "none" lane —
+        # #3892) AND this request runs v2 (env != m2) — otherwise replay.
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
         # #3892: a keyless capture records lane "none" (no lane ran), and a
@@ -3486,14 +3500,10 @@ class TortoiseSDK:
                 # refused only because this process is configured to the
                 # NON-convergent M2 lane (see the retry gate above). Said OUT
                 # LOUD: "already captured" would be a false statement of this
-                # state, and the user's remedy is one env var away.
+                # state, and the user's remedy is one env var away. Shared
+                # constant so the hosted lane discloses the SAME state.
                 _replay_warnings.append(
-                    "this session's turns were stored WITHOUT a provider key "
-                    "and no extraction has ever run for it; extraction was "
-                    "NOT re-attempted because TORTOISE_SESSION_EXTRACTOR=m2 "
-                    "selects a non-convergent lane (re-running it could mint "
-                    "duplicate claims) — unset it and re-capture, or capture "
-                    "the session under a convergent lane, to extract")
+                    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
             meta = {
                 "provider": None, "route": None, "failover_used": False,
                 "errors": [], "warnings": _replay_warnings, "mode": "replayed",
@@ -3762,7 +3772,8 @@ class TortoiseSDK:
             # (zero-write no-op; the stored value — True or legacy None —
             # stays untouched, matching the replay posture).
             # Review (PR #2473): the SET also records the extractor lane that
-            # RAN (v2/m2) so the retry gate (above) can require a v2 prior —
+            # RAN (v2/m2/none) so the retry gate (above) can require a
+            # convergent prior —
             # the M2 lane's partial emissions are non-convergent ULID claims,
             # never retried.
             # Non-fatal bookkeeping (codebase posture: receipt/last-error/

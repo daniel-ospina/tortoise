@@ -3830,26 +3830,24 @@ def test_receipt_requires_durable_data(consent_client):
         "bare receipt written on the converged 2xx (harness-less retry)"
 
 
-def test_receipt_2xx_only_and_last_error_lifecycle(consent_client, monkeypatch):
+def test_receipt_2xx_only_and_last_error_lifecycle(consent_client):
     """Task 11 (T1-P12 + cycle-4 P1-2): receipt set ONLY on 2xx; per-harness
-    last-error set on non-2xx and CLEARED on 2xx."""
+    last-error set on non-2xx and CLEARED on 2xx.
+
+    #4188: the non-2xx trigger is the empty-conversation 422 — the old
+    no-provider trigger is now a 2xx (the capture is STORED and only
+    extraction is skipped)."""
     _opt_in()
-    # non-2xx: no provider (mock seam off AND no real keys) → 503 →
-    # last_error set, no receipt
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    # non-2xx: empty conversation → 422 → last_error set, no receipt
     r = consent_client.post("/v1/sessions",
-                            json={"conversation": _CONV, "harness": "claude"})
-    assert r.status_code == 503, r.text
+                            json={"conversation": [], "harness": "claude"})
+    assert r.status_code == 422, r.text
     st = _state()
     assert st.get("session_capture_last_error_claude"), \
-        "503 must set session_capture_last_error_claude"
+        "non-2xx must set session_capture_last_error_claude"
     assert st.get("session_capture_receipt_claude") is None, \
         "no receipt on a non-2xx"
-    # 2xx: mock seam back on → receipt set, last_error cleared
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # 2xx: a real conversation → receipt set, last_error cleared
     r2 = consent_client.post("/v1/sessions",
                              json={"conversation": _CONV, "harness": "claude"})
     assert r2.status_code == 200, r2.text
@@ -3884,7 +3882,8 @@ def test_off_switch_keeps_existing_sessions(consent_client):
 
 def test_off_switch_409_first_before_provider_gate(consent_client, monkeypatch):
     """#1927 (review P2): the 409 opt-out check is FIRST in the gate stack —
-    a disabled team with NO provider key gets 409, not the provider 503."""
+    a disabled team with NO provider key gets 409, never the stored keyless
+    capture path."""
     _opt_in(enabled=False)
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
