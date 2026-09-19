@@ -50,8 +50,11 @@ READER — REAL, PINNED, ASSERTED
   ``deepseek/deepseek-v4-flash``. Because the ladder puts all three keyed
   providers into a rotating pool, the pin is ENFORCED by narrowing the other
   provider keys out of the build environment (recorded in the receipt) and
-  then ASSERTED per question: ``provider != "deepseek-direct"`` on ANY
-  question makes the run VOID, not a low rate.
+  then ASSERTED per question on every question that RETURNS A RESULT: a
+  result whose ``provider != "deepseek-direct"`` makes the run VOID, not a
+  low rate. A per-question EXCEPTION is a FAIL (see THE RATE) — the two are
+  kept distinct so a low rate is never laundered as a void, nor a void as a
+  low rate.
 
 MOVEMENT CONTROL (§32) — before the rate means anything
   Known-GREEN: the four committed recorded transports
@@ -467,9 +470,21 @@ def _handler_session_ids(mcp_mod, sdk, question: dict) -> dict:
 
 def evaluate_question(sdk, question: dict, *, reader_mode: str,
                       probe=None, mcp_mod=None) -> dict:
-    """Run one question end-to-end and evaluate L1/L2/L3. ``reader_mode`` is
-    ``live`` (the pinned real reader) or ``probe`` (a deterministic
-    evidence-aware transport for the movement control)."""
+    """Run one question end-to-end and evaluate L1/L2/L3.
+
+    ``reader_mode`` is the caller's LABEL for the transport this question
+    runs under: ``"live"`` (the pinned real reader), ``"probe"`` (a
+    deterministic evidence-aware probe — requires ``probe``) or ``"blank"``
+    (the blank transport that reproduces the pre-#2280 collapse). The
+    transport itself is installed by the caller's monkeypatch, so this
+    function ASSERTS the label and the supplied ``probe`` agree — a
+    mislabelled run fails loud instead of silently measuring the wrong
+    reader.
+    """
+    if reader_mode == "probe" and probe is None:
+        raise ValueError("reader_mode='probe' requires a probe transport")
+    if reader_mode != "probe" and probe is not None:
+        raise ValueError(f"reader_mode={reader_mode!r} takes no probe")
     from tortoise.reader import _looks_abstained
     qid = question.get("question_id") or ""
     gold = gold_sessions(question)
@@ -845,9 +860,9 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
                 mutation(sdk, q)
             import tortoise.mcp_server as mcp_mod
             with _shipping_handlers(sdk):
-                rec = evaluate_question(sdk, q, reader_mode="probe",
-                                        probe=reader if not blank else None,
-                                        mcp_mod=mcp_mod)
+                rec = evaluate_question(
+                    sdk, q, reader_mode="blank" if blank else "probe",
+                    probe=reader if not blank else None, mcp_mod=mcp_mod)
             records.append(rec)
         finally:
             sdk_mod._ask_reader_complete = saved_arc
