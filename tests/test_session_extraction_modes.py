@@ -401,6 +401,51 @@ def test_keyless_recapture_of_unchanged_transcript_meters_nothing(
     )
 
 
+def test_prior_turn_count_read_failure_does_not_500_a_recapture(
+        monkeypatch, client):
+    """#4188 (review cycle 3): the prior-stored-turn read feeds ONLY the
+    write-op meter, and it runs AFTER the Session MERGE has committed. A
+    transient graph error there must not 500 the capture, and must not abort
+    the keyless→keyed upgrade; it falls back to 0, which makes the meter
+    OVER-count (the documented conservative posture) rather than skip."""
+    import tortoise.hosted_api as ha_mod
+    from tortoise.projection import _GuardedGraph
+
+    meter: list = []
+    monkeypatch.setattr(
+        ha_mod, "_record_write_op",
+        lambda org, nodes_written=0: meter.append(
+            (org["org_id"], nodes_written)))
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    conv = [{"role": "user", "content": "prior-read failure probe"}]
+    r1 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-priorread"})
+    assert r1.status_code == 200, r1.text
+
+    real_query = _GuardedGraph.query
+
+    def flaky(self, cypher, *a, **kw):
+        if "is_episodic = true RETURN count(t)" in cypher:
+            raise RuntimeError("transient graph error (test)")
+        return real_query(self, cypher, *a, **kw)
+
+    monkeypatch.setattr(_GuardedGraph, "query", flaky)
+    meter.clear()
+    r2 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-priorread"})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["extraction_mode"] == "no-provider", r2.json()
+    assert meter, (
+        "the failed prior-count read must fall back to 0 and let the meter "
+        "OVER-count — never 500 and never silently skip"
+    )
+
+
 def test_default_llm_with_provider_key_422_on_empty(monkeypatch, client):
     """P1 #1529: an EMPTY conversation is now rejected with 422 before any
     write (the old "graceful" 200 + extracted:0 is the E2E-8 owned negative

@@ -286,10 +286,9 @@ extraction-bearing path is bounded IN ORDER:
 2. **Points quota (pre-write estimate)** — `402` when the extraction-aware
    estimate exceeds the team's points quota. Estimate:
    `est = 3 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
-   (the ×3 is the DEFAULT v2 lane — points + operators + the entities/events
-   allowance; the M2 lane uses ×2, `tortoise/sdk.py::_session_extraction_estimate`.
-   Sentence count is capped per turn — the #329 flood gate). Skipped entirely
-   on the keyless path, which extracts nothing.
+   (`sdk._session_extraction_estimate` — the default v2 lane; sentence count
+   is capped per turn — the #329 flood gate). Skipped entirely on the keyless
+   path, which extracts nothing.
 
 No sessions quota: the flat `max_sessions = 1000` was removed in **#4010** —
 sessions are unlimited for every tier, and a stored `Team.max_sessions` is
