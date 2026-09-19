@@ -88,12 +88,12 @@ must never be read as "it is ours".
 The claim pattern is ``origin/main``'s, UNCHANGED. It is broad by design and
 false-positives on ordinary prose ("taking this into account", "in progress",
 "already fixing"); that is the SAFER direction — a missed duplicate is worse
-than an unnecessary manual check — and every refusal carries a REMEDY line
-naming the comment that caused it. Tightening it into a tiered classifier is
-NOT sufficient here: the exit-code consumers (``issue-workflow`` /
+than an unnecessary manual check — and a refusal driven by a claim-shaped
+comment carries a REMEDY line naming that comment. Tightening it into a tiered
+classifier is NOT sufficient here: the exit-code consumers (``issue-workflow`` /
 ``executing-plans``) act on the exit code ALONE, so an advisory "weak" tier
 would not block and would not be seen by the dispatcher. Claim precision is
-tracked in its own issue.
+tracked in tortoise #4224.
 
 Number matching is applied to full refs/paths/PR text; keyword matching is
 applied only to NAME-LIKE fields (branch refs, worktree basenames, PR head
@@ -403,24 +403,31 @@ _CLAIM_RE = re.compile(
 )
 
 
-# The span of a claim, EXTENDED to the end of its sentence or line. Used only
-# for marker-to-claim tie detection in `claim_attribution`; it does not change
-# which comments are hits (`_CLAIM_RE.search` alone decides that). The
-# extension matters because `_CLAIM_RE` matches the claim PHRASE (`claiming`),
-# so a session marker immediately after the object — `claiming this (session
-# <uuid>)` — would otherwise sit OUTSIDE the match and read as another lane
-# merely naming us. The CLAUSE, not the phrase, is the claim.
+# The claim OBJECT, for marker-to-claim tie detection only. `_CLAIM_RE`
+# matches the bare `claim` verb, so a marker attached to the object —
+# `claiming this (session <uuid>)` — would sit outside the match and read as
+# another lane merely naming us. Cycle 4 fixed that by extending EVERY span to
+# its clause end; that over-tied (see `_claim_spans`). This span source keeps
+# the object for the `claim` verb. Span-only: classification stays `_CLAIM_RE`.
+_CLAIM_OBJECT_RE = re.compile(r"(?i)\bclaim(?:ing|ed)?\s+(?:this|it|#\d+)\b")
+
+
 def _claim_spans(body: str) -> list[tuple[int, int]]:
-    """Spans of every claim-shaped match, extended to its clause end."""
+    """Spans of every claim-shaped match, claim OBJECT included.
+
+    Cycle 4 extended each span to the CLAUSE END so that a marker following
+    the object would count as tied. That over-tied: a marker INSIDE the
+    extended span made the marker-to-claim gap `''`, and
+    `_IDENTITY_LINK_RE.fullmatch('')` is True — so ANY marker later in the
+    sentence counted as ours. A comment that DISCLAIMED our lane ("I'll take
+    this on lane W3, not lane W0") then suppressed the collision and the run
+    exited CLEAN, the only outcome that authorizes dispatch. The clause
+    extension is removed; the object span is kept.
+    """
     text = _strip_control_sequences(body)
-    spans: list[tuple[int, int]] = []
-    for match in _CLAIM_RE.finditer(text):
-        stop = len(text)
-        for delim in re.finditer(r"[.!?\n]", text[match.end():]):
-            stop = match.end() + delim.start()
-            break
-        spans.append((match.start(), stop))
-    return spans
+    spans = {(m.start(), m.end()) for m in _CLAIM_RE.finditer(text)}
+    spans.update((m.start(), m.end()) for m in _CLAIM_OBJECT_RE.finditer(text))
+    return sorted(spans)
 
 
 class SurfaceError(Exception):
@@ -532,12 +539,12 @@ _ESCAPE_RE = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC … BEL | ST
     r"|\x1b\[[0-?]*[ -/]*[@-~]"            # CSI …
     r"|\x1b[@-Z\\-_]"                      # Fe escape
-    # Any other ESC + ONE character — but never whitespace. Plain `\x1b.` ate
-    # the space after a bare ESC and merged the words around it ("I'll take
-    # this\x1b now" became "I'll take thisnow"), which both corrupted the
-    # sanitised text and hid the claim from a clause-anchored pattern. A bare
-    # ESC is removed by `_CONTROL_RE` below, so no control byte is left behind.
-    r"|\x1b[^\s]"
+    # NO fallback for any other ESC + one char. That alternative consumed the
+    # character AFTER a bare ESC, so an ESC sitting just before a claim hid it
+    # ("\x1bon it now" -> "n it now" — no match) — a fail-open divergence
+    # from `main`, which matches that body. A bare ESC is removed by
+    # `_CONTROL_RE` below instead, which drops the byte and KEEPS the
+    # following character; whole escape SEQUENCES are still stripped above.
 )
 
 
@@ -1549,7 +1556,10 @@ def format_report(
         # design, so a claim-shaped hit can be ordinary prose; this gate has NO
         # dismissal switch (no `--ignore` / advisory flag), so the honest
         # remedy is to name the exact comment and say it must be verified by
-        # hand — not to imply a re-run flag that does not exist.
+        # hand — not to imply a re-run flag that does not exist. It names only
+        # the CLAIM-shaped hits: a refusal can also be forced by a non-claim
+        # hit (an open PR, a branch), so it must not read as "removing this
+        # comment clears the refusal".
         claim_hits = [
             h for h in strong if h.detail.startswith("claim-style comment")
         ]
@@ -1560,12 +1570,13 @@ def format_report(
             if len(claim_hits) > MAX_HITS_SHOWN:
                 named += f"; … +{len(claim_hits) - MAX_HITS_SHOWN} more"
             lines.append(
-                "  REMEDY: the refusal is forced by these claim-shaped "
-                f"comment(s): {named}. There is NO dismissal switch — a body "
-                "matching the claim pattern blocks by design (a missed "
-                "duplicate is worse than a false alarm). Open each named "
-                "comment and verify it by hand; if it is ordinary prose, "
-                "coordinate on the issue before dispatching."
+                "  REMEDY: claim-shaped comment(s) also matched: "
+                f"{named}. There is NO dismissal switch — a body matching the "
+                "claim pattern blocks by design (a missed duplicate is worse "
+                "than a false alarm). Open each named comment and verify it by "
+                "hand; if it is ordinary prose, coordinate on the issue before "
+                "dispatching. This line names only the claim-shaped hits; the "
+                "refusal may also be forced by a non-claim hit above."
             )
         if incomplete:
             lines.append(

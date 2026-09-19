@@ -1035,8 +1035,10 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_classification_is_main_claim_re_without_tiers(self):
         # The reverted contract, asserted directly so a future re-introduction
         # of tiering cannot land silently: classification is exactly
-        # `_CLAIM_RE` — no `classify_claim`, no strong/weak split. Every
-        # claim-shaped body is a blocking hit; a non-matching body is silent.
+        # `_CLAIM_RE` — no `classify_claim`, no strong/weak split. These two
+        # groups only assert MATCHING; whether a match BLOCKS is decided
+        # separately by attribution (a `self` claim is `own_ignored`, not a
+        # hit), asserted in the attribution tests above.
         cp = _tool_module()
         self.assertFalse(hasattr(cp, "classify_claim"))
         self.assertFalse(hasattr(cp, "_CLAIM_WEAK_RE"))
@@ -1075,6 +1077,11 @@ class CollisionPreflightTest(unittest.TestCase):
         cleaned = cp._strip_control_sequences("I'll take this\x1b now")
         self.assertEqual(cleaned, "I'll take this now")
         self.assertIsNotNone(cp._CLAIM_RE.search(cleaned))
+        # A BARE ESC directly before a claim must not hide it: the pre-fix
+        # fallback consumed the following character ("\x1bon it now" ->
+        # "n it now"), and the gate read CLEAN on a real claim.
+        self.assertEqual(cp._strip_control_sequences("\x1bon it now"), "on it now")
+        self.assertIsNotNone(cp._CLAIM_RE.search(cp._strip_control_sequences("\x1bon it now")))
         # The classification path applies the same stripper, so the end-to-end
         # run sees the claim too rather than a merged "thisnow".
         self.gh_fixtures(issue=self.issue_payload(comments=[
@@ -1102,11 +1109,15 @@ class CollisionPreflightTest(unittest.TestCase):
         # A shared-account comment that merely MENTIONS our lane id / session
         # UUID (a pasted fleet board) is a READER, not a holder. Merely naming
         # our marker must NOT suppress the collision — the reader-vs-holder
-        # confusion the #1233 session surface was rejected for.
+        # confusion the #1233 session surface was rejected for. The third body
+        # is the shape a clause-extended claim span over-tied: our marker sits
+        # AFTER the claim in the same sentence and the comment DISCLAIMS our
+        # lane, so it must still collide.
         real_session = "01a0b01d-ab9f-74d8-bbe1-1e218fc752b2"
         for body in (
             f"Claiming this.\n\nFLEET BOARD — lane table W0 session `{real_session}`",
             "lane W0 is done here — I'll take this",
+            "I'll take this on lane W3, not lane W0.",
         ):
             with self.subTest(body=body):
                 self.gh_fixtures(issue=self.issue_payload(comments=[
