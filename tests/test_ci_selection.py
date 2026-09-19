@@ -56,9 +56,10 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     added; no slow leg, no carve-out leg.
     """
     for changed in (["website/docs.html"], ["website/faq.html"],
-                    ["website/welcome.html"], ["website/self-hosted.html"],
+                    ["website/apps/dashboard/public/welcome.html"],
+                    ["website/self-hosted.html"],
                     ["website/product.html"], ["website/index.html"],
-                    ["website/signup.html"], ["website/signin.html"],
+                    ["website/apps/dashboard/public/signup.html"],
                     ["website/privacy.html"],
                     ["docs/README.md", "website/self-hosted.html"]):
         r = _sel(changed)
@@ -101,6 +102,97 @@ def test_every_source_pattern_is_selectable():
     )
 
 
+def _tracked_files(root: Path) -> list[str]:
+    """The TRACKED file set — what `select()` reasons about, and what CI sees.
+
+    `git ls-files`, deliberately not `os.walk`. A walk is both slower and WRONG:
+    it counts untracked local build artifacts, and this repo carries ~148 sibling
+    checkouts under `.worktrees/` (measured: ~720k files / ~23s walked, vs ~2.4k
+    files / ~0.9s tracked). A dead entry could then look alive locally while
+    failing in CI — a false negative in exactly the environment a developer runs
+    in. `node_modules` is NOT excluded either: parts of it are tracked here, so
+    excluding it would diverge from git in the other direction.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:  # no git binary at all
+        raise AssertionError(
+            "git is not on PATH, so the tracked set is unknown — this test "
+            f"cannot decide liveness: {exc}"
+        ) from exc
+    # check=False + an explicit assert, rather than check=True: check=True would
+    # raise a bare CalledProcessError with no context, so an sdist export with no
+    # `.git`, or `fatal: detected dubious ownership`, would look like every entry
+    # being dead rather than like a broken environment.
+    assert proc.returncode == 0, (
+        "git ls-files failed, so the tracked set is unknown — this test cannot "
+        "decide liveness and must not report every entry as dead: "
+        + proc.stderr.decode("utf-8", "replace").strip()
+    )
+    return [p for p in proc.stdout.decode("utf-8").split("\0") if p]
+
+
+def test_source_patterns_all_name_something_real():
+    """Every SOURCE_PATTERNS entry must name a file (or directory) that EXISTS.
+
+    Why this exists — #4171. The admin-origin move DELETED
+    `website/functions/admin/[[path]].ts`, and its SOURCE_PATTERNS entry stayed.
+    That is not cosmetic staleness: entries are matched with `startswith`, never
+    against the filesystem, so a deleted path keeps "selecting" its surface for a
+    file nobody can edit. The PR that moves a guarded file to a new path
+    therefore selects NO surface for the new location, and the guard written for
+    that exact file silently stops running — the #1349/#3332 silent-drop class,
+    reached through a door the existing ratchet does not cover.
+
+    `test_every_source_pattern_is_selectable` cannot see this failure: a dead
+    path still matches its OWN pattern, so it "runs" its surface fine — there is
+    simply nothing left that can edit it. This is a third FORWARD check
+    (entry -> exists), NOT the reverse direction (guarded path -> has an entry),
+    which is still hand-pinned per guard wherever an author remembered to (see
+    `test_website_docs_consistency.py::test_every_guard_input_is_selectable_by_ci`).
+    The reverse direction remains the open half of this class.
+
+    Existence is checked against the tracked set, in the two shapes
+    SOURCE_PATTERNS actually uses. No glob branch: no entry is a glob, and
+    `select()` itself has no glob support, so a glob-shaped entry satisfied here
+    would still select nothing — the test would bless a dead entry.
+    """
+    root = Path(__file__).resolve().parents[1]
+    tracked = set(_tracked_files(root))
+
+    def names_something_real(pattern: str) -> bool:
+        # A real tracked path is always live.
+        if pattern in tracked:
+            return True
+        # Otherwise it must name a SUBTREE, anchored on the separator. `select()`
+        # matches with `startswith`, so a directory entry is live with OR without
+        # its trailing slash (`tortoise/onboarding` and `tortoise/onboarding/`
+        # both match). Reporting the slash-less form as "names NOTHING" would be
+        # false — it IS live — and would disagree with
+        # `test_every_source_pattern_is_selectable`, which accepts it.
+        return any(f.startswith(pattern.rstrip("/") + "/") for f in tracked)
+
+    dead = sorted(
+        f"[{surface}] {pat}"
+        for surface, pats in SOURCE_PATTERNS.items()
+        for pat in pats
+        if not names_something_real(pat)
+    )
+
+    assert not dead, (
+        "SOURCE_PATTERNS entries naming NOTHING tracked — a deleted or moved "
+        "guarded path keeps its entry, so a change to the file's NEW location "
+        "selects no surface and its guard silently stops running (#4171). "
+        "Repoint the entry at the new path, or delete it:\n  "
+        + "\n  ".join(dead)
+    )
+
+
 def test_unrelated_website_change_stays_tier1():
     """SITE_CARVEOUTS is not a wholesale `website/` removal.
 
@@ -123,7 +215,7 @@ def test_onboarding_change_selects_onboarding():
 
 
 def test_ep_change_selects_ep():
-    r = _sel(["tortoise/decide.py"])
+    r = _sel(["tortoise/ranking.py"])
     assert r["full"] is False
     assert r["surfaces"] == ["ep"]
     assert "test_decide.py" in r["test_files"]
@@ -199,7 +291,7 @@ def test_session_import_change_selects_the_window_guard():
 
 
 def test_two_surfaces_union():
-    r = _sel(["tortoise/decide.py", "tortoise/onboarding/SKILL.md"])
+    r = _sel(["tortoise/ranking.py", "tortoise/onboarding/SKILL.md"])
     assert r["full"] is False
     assert set(r["surfaces"]) == {"ep", "onboarding"}
 
@@ -382,13 +474,13 @@ def test_slow_files_never_in_fast_gate_selections():
     assert slow, "slow_files must be non-empty"
     assert not (set(m["tier1"]) & slow), "tier1 leaks a slow file"
 
-    docs = _sel(["docs/README.md", "website/welcome.html"])
+    docs = _sel(["docs/README.md", "website/apps/dashboard/public/welcome.html"])
     assert not (set(docs["test_files"]) & slow), "docs-only tier-1 leaks slow files"
 
     core = _sel(["tortoise/graph.py", "tortoise/ingest.py"])
     assert not (set(core["test_files"]) & slow), "tier-2 core leaks slow files"
 
-    ep = _sel(["tortoise/decide.py", "tortoise/ranking.py"])
+    ep = _sel(["tortoise/ranking.py", "tortoise/analyze.py"])
     assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
 
 
@@ -403,7 +495,7 @@ def test_slow_files_emitted_on_every_return_path():
         (["docs/README.md"], "pull_request"),
         (["tortoise/sdk.py"], "pull_request"),
         (["mystery-dir/x.py"], "pull_request"),
-        (["tortoise/decide.py"], "pull_request"),
+        (["tortoise/ranking.py"], "pull_request"),
     ]:
         r = select(changed, event, m)
         assert "slow_files" in r, f"missing slow_files for {changed}/{event}"
@@ -424,7 +516,7 @@ def test_diff_gate_keys_emitted_on_every_return_path():
         (["docs/README.md"], "pull_request"),
         (["tortoise/sdk.py"], "pull_request"),
         (["mystery-dir/x.py"], "pull_request"),
-        (["tortoise/decide.py"], "pull_request"),
+        (["tortoise/ranking.py"], "pull_request"),
     ]:
         r = select(changed, event, m)
         for key in ("slow_run", "slow_selected", "carve_out_run"):
@@ -473,9 +565,9 @@ def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
 def test_tier2_slow_run_scoped_to_matched_surfaces():
     """#2148: tier-2 PRs run only their matched surfaces' slow files. ep
     owns test_dream / test_ep_sources / test_source_inheritance_own — a
-    decide.py-only PR selects exactly those (never the full 24-file leg
+    ranking.py-only PR selects exactly those (never the full 24-file leg
     set), and the carve-out job skips (ep owns no carve-out file)."""
-    r = _sel(["tortoise/decide.py"])
+    r = _sel(["tortoise/ranking.py"])
     assert r["full"] is False and r["surfaces"] == ["ep"]
     assert r["slow_run"] is True
     assert r["carve_out_run"] is False
@@ -1756,7 +1848,7 @@ def test_drift_gate_cannot_skip_the_test_matrix():
 _AUDIT_SOURCES = {
     "tortoise/hosted_api.py": "",
     "tortoise/api.py": "",
-    "tortoise/decide.py": "",
+    "tortoise/ranking.py": "",
     "tortoise/sdk.py": "",
     "tortoise/ep.py": "",
     "tortoise/exceptions.py": "",

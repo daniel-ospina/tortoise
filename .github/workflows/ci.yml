@@ -742,6 +742,19 @@ jobs:
       # this step reds welcome-e2e — it is load-bearing, not belt-and-braces.
       - name: Install wrangler on PATH (required by the #3501 auth suites)
         run: npm install -g wrangler@4.127.0
+      # #4054: the auth suites serve the dashboard's BUILT `dist/` root
+      # (tests/e2e/auth/conftest.py -> ensure_dashboard_dist()). Without a
+      # lockfile-pinned install here, that helper's `npm run build` has no local
+      # vite and fails; it used to run `npx vite build`, which silently did an
+      # AD-HOC install that omitted rollup's platform binary
+      # (`@rollup/rollup-linux-x64-gnu`, the npm optional-dependency gap) and
+      # errored the whole suite at fixture setup. `npm ci` is the same
+      # lockfile-pinned install dashboard-e2e and dashboard-js-tests use, and it
+      # is what provides the platform binary.
+      - name: Install dashboard dependencies (lockfile-pinned, #4054)
+        run: |
+          cd website/apps/dashboard
+          npm ci
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -908,6 +921,43 @@ jobs:
           cat /tmp/wrangler.log || true
           echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
+      # #4054: the auth surface (/auth, /signup, /welcome, /invite-accept) moved
+      # to the `tortoise-dashboard` Pages project, so this suite needs a LOCAL
+      # app origin too. Without it the app-surface tests followed the marketing
+      # origin's 301 to DEPLOYED PRODUCTION and asserted against whatever main
+      # had last shipped (they passed that way, which is the worst outcome).
+      - name: Install + build the dashboard bundle (app origin, #4054)
+        run: |
+          cd website/apps/dashboard
+          npm ci
+          npm run build
+      - name: Start wrangler pages dev preview (dashboard dist = app origin, :8790)
+        run: |
+          cd website/apps/dashboard
+          # `--d1 SESSIONS`: the auth pages' session probe is `/api/session`,
+          # which resolves the HttpOnly `__Host-session` cookie against the D1
+          # `sessions` table. Without the binding a request carrying a cookie
+          # answers 503 ("store unreachable") instead of 401/200.
+          for attempt in 1 2; do
+            npx --yes wrangler@4.127.0 pages dev dist --port 8790 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 --d1 SESSIONS \
+              > /tmp/wrangler-app.log 2>&1 &
+            echo $! > /tmp/wrangler-app.pid
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
+                echo "wrangler (app) ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8790' 2>/dev/null || true
+            sleep 3
+          done
+          echo "::error::wrangler (app) dev server failed to start (2 attempts)"
+          tail -50 /tmp/wrangler-app.log || true
+          exit 1
       - name: Run legal pages E2E suite (#657)
         # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
         # crawl fetches unauthenticated production URLs (github.com/LICENSE,
@@ -919,6 +969,7 @@ jobs:
         # before (welcome-e2e collects it without RUN_LEGAL_E2E → self-skips).
         run: >
           RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788
+          APP_BASE_URL=http://127.0.0.1:8790
           TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
           python -m pytest tests/e2e/test_legal_pages.py tests/e2e/test_signup_form_safety_e2e.py
@@ -933,7 +984,9 @@ jobs:
         # runner VM, so pkill can't touch other jobs)
         run: |
           kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
           pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill -f 'wrangler.*8790' 2>/dev/null || true
           pkill workerd 2>/dev/null || true
           true
 
@@ -1012,8 +1065,15 @@ jobs:
         run: |
           cd website/apps/dashboard
           for attempt in 1 2; do
+            # #3501/#4054: `--d1 SESSIONS` is load-bearing. The dashboard's
+            # session gate is `/api/session`, which resolves the HttpOnly
+            # `__Host-session` cookie against the D1 `sessions` table; without
+            # the binding a request carrying that cookie answers 503 ("store
+            # unreachable") instead of 200, so the suite's seeded-session
+            # fixtures can never render the shell. The harness seeds the row it
+            # reads (tests/e2e/test_session_login_flow.py).
             npx --yes wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 \
-              --compatibility-date=2024-09-23 \
+              --compatibility-date=2024-09-23 --d1 SESSIONS \
               > /tmp/wrangler-dash.log 2>&1 &
             echo $! > /tmp/wrangler-dash.pid
             for i in $(seq 1 240); do
