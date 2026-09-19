@@ -471,14 +471,17 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Deletion / Invalidation ───────────────────────────────────
     ToolDefinition(
         name="tortoise_delete_point",
-        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone.",
+        description="Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. "
+                    "dry_run=True previews the blast radius (the point and every edge that "
+                    "would be removed) and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_point_wrapped",
     ),
     ToolDefinition(
         name="tortoise_invalidate",
-        description="Mark a Point outdated with a CORRECTS edge from the correcting Point.",
+        description="Mark a Point outdated with a CORRECTS edge from the correcting Point. "
+                    "dry_run=True previews the one-point transition + one edge and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="invalidate_point",
@@ -488,7 +491,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         description="Atomically replace old Point with new — CORRECTS edge + outdated flag. "
                     "transfer_edges=True (default): full supersede — all edges move from "
                     "old to new. transfer_edges=False: invalidate behavior — outdated flag "
-                    "+ CORRECTS edge only, no edge transfer.",
+                    "+ CORRECTS edge only, no edge transfer. "
+                    "dry_run=True previews exactly which edges would transfer and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="supersede",
@@ -509,7 +513,8 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         name="tortoise_retract_point",
         description="Tombstone-retract a Point — status='retracted' (point stays "
                     "in graph, excluded from default surfaces). Terminal; cannot "
-                    "retract operators or already-terminal points.",
+                    "retract operators or already-terminal points. "
+                    "dry_run=True previews the status transition and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="retract_point",
@@ -889,7 +894,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_delete_entity",
-        description="Delete any entity by ID.",
+        description="Delete any entity by ID. DESTRUCTIVE — cannot be undone. "
+                    "dry_run=True previews the node(s) and every edge that would be "
+                    "removed and changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete_entity",
@@ -916,7 +923,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_delete",
         description="Delete a Point or entity by id. DESTRUCTIVE — requires human "
-                    "confirmation. Cannot be undone.",
+                    "confirmation. Cannot be undone. dry_run=True previews the blast "
+                    "radius (which node resolves, and every edge that would go) and "
+                    "changes nothing.",
         annotations=_rw(),
         http_policy=True,
         sdk_method="delete",
