@@ -102,11 +102,11 @@ The #526 package split ships the engine as a server-only distribution
   and relicense the driver with no file-level copyleft obligations — the
   right shape for a thin network driver whose only job is to connect.
   MPL-2.0 (HashiCorp's SDK precedent) would impose file-level copyleft on a
-  ~3-module package with no offsetting benefit for the consumer.
+  ~4-module package with no offsetting benefit for the consumer.
 - **Boundary is physical, not behavioral:** the client dist contains ONLY
-  the client modules (mcp_client, config, exceptions) re-licensed under
-  Apache-2.0; engine code (sdk, projection, EP) never ships in the client
-  wheel. A client-only install cannot contain BSL code.
+  the client modules (mcp_client, config, exceptions, status_vocabulary)
+  re-licensed under Apache-2.0; engine code (sdk, projection, EP) never ships
+  in the client wheel. A client-only install cannot contain BSL code.
 - **Backstop:** `validation/check-license-surface.py` now asserts the client
   surfaces (client/LICENSE, client/pyproject.toml, client/README.md) declare
   Apache-2.0, and `client/verify_client.sh` (CI) proves no engine module or

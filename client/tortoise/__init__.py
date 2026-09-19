@@ -1,7 +1,8 @@
 """Tortoise — thin client namespace (tortoise-client distribution, #526).
 
 This is the CLIENT-ONLY `tortoise` namespace: it ships ONLY the modules a
-network driver needs (mcp_client + config + exceptions) so that
+network driver needs (mcp_client + config + exceptions + the recorded
+status_vocabulary) so that
 ``import tortoise.mcp_client`` works in a client-only environment. It is
 deliberately NOT the engine's `tortoise/__init__.py` (which imports
 redislite and the SDK guard machinery) — the engine stays in the

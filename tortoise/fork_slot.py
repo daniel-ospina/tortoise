@@ -159,7 +159,13 @@ def _list_processes() -> list[tuple[int, int, float | None, str]]:
     """
     try:
         out = subprocess.run(
-            ["ps", "-A", "-o", "pid=,ppid=,etime=,command="],
+            # -ww: unlimited width (#4070). Without it `ps` truncates `command`
+            # to the reporting width (COLUMNS, or the terminal), which cuts the
+            # socket path off a long title and makes a genuinely hung child
+            # invisible to the `socket_path not in command` filter below — a
+            # wedge scanner must not depend on the width. GNU ps and macOS/BSD ps
+            # both read `-ww` as "as many columns as necessary".
+            ["ps", "-A", "-ww", "-o", "pid=,ppid=,etime=,command="],
             capture_output=True, text=True, timeout=10, check=False,
         ).stdout
     except Exception:
