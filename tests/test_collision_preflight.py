@@ -165,9 +165,9 @@ _TOOL_MODULE = None
 
 def _tool_module():
     """Import `tools/collision_preflight.py` (hyphenated name) once, so the
-    claim-classifier corpora can be asserted directly without spawning the
-    tool 40 times. The module has no import-time side effects (its `main()` is
-    guarded)."""
+    claim pattern and the escape stripper can be asserted directly without
+    spawning the tool 40 times. The module has no import-time side effects (its
+    `main()` is guarded)."""
     global _TOOL_MODULE
     if _TOOL_MODULE is None:
         import importlib.util
@@ -221,6 +221,9 @@ class CollisionPreflightTest(unittest.TestCase):
         defect 3, so the author must be controllable."""
         rendered = []
         for comment in comments:
+            if isinstance(comment, dict):
+                rendered.append(comment)
+                continue
             if isinstance(comment, tuple):
                 author, body = comment
             else:
@@ -943,13 +946,12 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_second_party_claim_still_collides(self):
         # The other direction, and the one that must never weaken: a claim by a
-        # DIFFERENT party still blocks, loudly — for every UNAMBIGUOUS claim
-        # phrasing, so tightening the regex cannot quietly disable the surface.
-        # The second group is the set the over-narrowed regex had DROPPED
-        # (fail-open) and that the anchored restore brings back. The ambiguous
-        # `assigned to this` is deliberately NOT here: it is reported as a weak
-        # advisory (see test_weak_claim_is_reported_but_not_a_collision),
-        # because "another session was assigned to this" is ordinary prose.
+        # DIFFERENT party still blocks. Every body below matches origin/main's
+        # `_CLAIM_RE`, which is the pattern this PR keeps for classification
+        # (cycle 4). `we'll fix this` is deliberately NOT here: that was a
+        # cycle-3 grammar arm's shape and main's regex never matched it, so
+        # asserting a collision on it would pin behaviour the reverted pattern
+        # does not have.
         for body in ("/claim", "I'll take this", "working on this now",
                      "dispatching #3061", "taking this", "Claiming this.",
                      "I will implement this", "assigned to me",
@@ -968,9 +970,9 @@ class CollisionPreflightTest(unittest.TestCase):
                      "dispatching a session for this",
                      "assigned to #3061",
                      "will fix it",
-                     # Cycle-3 grammar locks: the first-person, line-start
-                     # imperative and modal arms in their cleanest shapes.
-                     "I'll take this.", "we'll fix this",
+                     # Cycle-3 grammar shapes that ALSO match main's pattern —
+                     # first-person, line-start imperative and modal arms.
+                     "I'll take this.",
                      "I am working on this", "working on #4027",
                      "Working on this now.", "Claiming this"):
             with self.subTest(body=body):
@@ -994,179 +996,107 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("unknown attribution", out)
 
-    def test_prose_that_matches_the_old_regex_is_not_a_claim(self):
-        # The real #3827 wording, verbatim: every one of these matched the old
-        # regex and forced a false COLLISION on the lane's own artifact. The
-        # "claiming that" forms are the ordinary-English shape the docstring
-        # said the regex excluded while the code still matched `that`.
+    def test_claim_pattern_is_main_and_false_positives_carry_a_remedy(self):
+        # Cycle-4 scoping decision: classification is origin/main's `_CLAIM_RE`,
+        # unchanged. It is broad by design and DOES match ordinary prose — the
+        # sentences below forced a false COLLISION on main and still do. That
+        # is accepted: a missed duplicate (false negative) is the worse
+        # failure, and the exit-code consumers (issue-workflow / executing-plans)
+        # cannot act on an advisory tier without a contract change in
+        # agent-infra. What must hold is that the false positive is CHEAPLY
+        # DISMISSIBLE: the refusal names the comment and states plainly that no
+        # dismissal switch exists, so the reader must verify it by hand.
         for body in (
-            "the config comment claiming a carve_out pin that does not exist",
-            "was a claim about the hour",
-            "a green on it would be a vacuous certificate",
-            "A coverage claim must be stated PER ITEM, not counted.",
-            "claiming that X",
-            "I am claiming that the tool is broken",
-            "the PR claims that the surface is complete",
-            "the PR claims it is complete",
-            "Source A is claiming that the timeout is fine; that is not enough.",
-            # Cycle-2 reviewer reproductions: the cycle-1 BARE restore sent the
-            # gate straight back into the false-positive class. These are the
-            # exact bodies it hit end-to-end; none is a claim. `still working
-            # on it` is why the bare `working on (?:this|it|#\d+)` anchor is
-            # not enough — `it` is a pronoun prose uses too.
-            "after working on the docs we found this",
-            "the tests will fix the drift later",
-            "the issue was assigned to another account by a bot",
-            "while working on that, we noticed a flake",
-            "still working on it",
-            # The dispatching claim-nouns require an article.
-            "the scheduler is dispatching session tokens",
-            "the run is dispatching workstream events",
-            # `handling this` is strong only when the clause ENDS at the
-            # object (+ an optional temporal adverb); a first-person subject
-            # alone is not enough, so this descriptive `we are … carefully in
-            # review` clause is a weak advisory, not a claim.
-            "we are handling this carefully in review",
-            # Cycle-3 reviewer reproductions, verbatim. These are the six
-            # sentences that still produced a false COLLISION after cycles 1
-            # and 2 patched alternations; the positive grammar must not force
-            # a collision on any of them.
             "Taking this into account, the drift is expected.",
             "The regression started this morning.",
             "Let's work this out before the release.",
             "Handling this kind of error requires a retry loop.",
             "The team is already fixing the drift.",
             "The migration is in progress upstream; nothing for us to do.",
+            # cycle-1/2 reproductions that main's pattern also matches
+            "after working on the docs we found this",
+            "the tests will fix the drift later",
+            "the issue was assigned to another account by a bot",
+            "still working on it",
         ):
             with self.subTest(body=body):
                 self.gh_fixtures(issue=self.issue_payload(comments=[
-                    ("test-agent", body),
+                    ("other-agent", body),
                 ]))
                 rc, out = self.run_tool()
-                self.assertEqual(rc, 0, out)
-                self.assertIn("VERDICT: CLEAN", out)
-                self.assertNotIn("do NOT dispatch", out)
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("REMEDY", out)
+                self.assertIn("comment by other-agent", out)
+                self.assertIn("NO dismissal switch", out)
 
-    # ── cycle 3: positive grammar + confidence tiers ─────────────────────
+    # ── claim classification: origin/main's pattern, no tiers (cycle 4) ────
 
-    # Ordinary English that shares words with a claim. NONE of these may be
-    # classified STRONG — a weak advisory is allowed and is reported, a
-    # collision is not. 43 invented bodies across third person, gerunds,
-    # "taking this…", "in progress", "already fixing", "started this",
-    # "work this out", "handling this kind of…", past tense and quoted speech.
-    ADVERSE_PROSE = (
-        # the six cycle-3 reviewer reproductions, verbatim
-        "Taking this into account, the drift is expected.",
-        "The regression started this morning.",
-        "Let's work this out before the release.",
-        "Handling this kind of error requires a retry loop.",
-        "The team is already fixing the drift.",
-        "The migration is in progress upstream; nothing for us to do.",
-        # third person / descriptive
-        "After working on the docs we found this flake.",
-        "The tests will fix the drift later.",
-        "The issue was assigned to another account by a bot.",
-        "While working on that, we noticed a flake.",
-        "The scheduler is dispatching session tokens.",
-        "The run is dispatching workstream events.",
-        "The author started this refactor months ago.",
-        "The fix is in progress and the CI is green.",
-        "He was assigned to the migration team.",
-        "The on-call engineer picked this apart in the retro.",
-        # gerunds / participial adjuncts
-        "Working on this revealed a subtle bug in the parser.",
-        "Taking this route avoids the deadlock.",
-        "Handling this case is deferred to a follow-up issue.",
-        "Most of the engineering work this quarter is cleanup.",
-        # first person, but descriptive rather than a claim
-        "We are handling this carefully in review.",
-        "I read that the migration is in progress.",
-        "We saw that the team is already fixing the drift.",
-        "I think the tests will fix the drift later.",
-        "I agree that handling this kind of error needs a retry loop.",
-        # past-tense descriptions
-        "The lane claimed this last week and then parked it.",
-        "Another session was assigned to this yesterday.",
-        "I noted that the branch already fixed the lint warnings.",
-        "We observed that the drift had started this morning.",
-        # quoted speech / reported claims
-        'The reviewer asked whether the drift is "in progress" or expected.',
-        'He described the state as "already fixing itself".',
-        'The board entry read "work this out later".',
-        'She said "I\'ll take this."',
-        'He wrote that "I am handling this" in the handoff.',
-        # ordinary-English "claim" / "on it" shapes
-        "The config comment claiming a carve_out pin that does not exist.",
-        "Was a claim about the hour.",
-        "A green on it would be a vacuous certificate.",
-        "A coverage claim must be stated PER ITEM, not counted.",
-        "The PR claims that the surface is complete.",
-        "The PR claims it is complete.",
-        "Source A is claiming that the timeout is fine; that is not enough.",
-        "Claiming this as a bug would be premature.",
-        "The on it checkbox is unchecked.",
-    )
-
-    def test_broad_prose_is_never_a_strong_claim(self):
-        # Direction (a): a blocklist cannot keep closing this class, so lock
-        # the POSITIVE grammar — every one of these 43 ordinary-English bodies
-        # must be anything BUT a strong claim. (A weak hit is fine: it is
-        # reported and does not block.)
+    def test_classification_is_main_claim_re_without_tiers(self):
+        # The reverted contract, asserted directly so a future re-introduction
+        # of tiering cannot land silently: classification is exactly
+        # `_CLAIM_RE` — no `classify_claim`, no strong/weak split. Every
+        # claim-shaped body is a blocking hit; a non-matching body is silent.
         cp = _tool_module()
-        for body in self.ADVERSE_PROSE:
-            with self.subTest(body=body):
-                self.assertNotEqual(
-                    cp.classify_claim(body), "strong",
-                    f"ordinary prose classified as a STRONG claim: {body!r}")
-
-    def test_every_genuine_claim_shape_is_still_strong(self):
-        # Direction (b): the shapes the earlier cycles asserted must remain
-        # STRONG (not merely weak), or a real second-party claim stops
-        # blocking. This is the exact complement of the prose list above.
-        cp = _tool_module()
-        strong = (
-            "/claim", "I'll take this", "I'll take this.",
-            "Claiming this.", "Claiming this", "taking this", "Taking this",
+        self.assertFalse(hasattr(cp, "classify_claim"))
+        self.assertFalse(hasattr(cp, "_CLAIM_WEAK_RE"))
+        self.assertFalse(hasattr(cp, "_CLAIM_STRONG_RES"))
+        for body in (
+            "/claim", "I'll take this.", "Claiming this.", "taking this",
             "Handling this", "On it!", "I'm on it", "I am on it",
             "working on this now", "Working on this now.",
-            "working on #3061", "working on #4027",
-            "I'm working on it", "I'm working on this now.",
-            "I am working on this",
-            "I'm working on the collision preflight fix",
-            "I will implement this", "we'll fix this",
+            "working on #3061", "I'm working on it",
+            "I am working on this", "I will implement this",
             "we will fix this today", "will fix this", "will fix it",
             "dispatching #3061", "dispatching a sub-agent for #3061",
-            "dispatching a lane for #4027",
-            "dispatching a workstream for #3061",
-            "dispatching a session for this",
             "assigned to me", "assigned to @daniel-ospina",
             "assigned to lane W3", "assigned to #3061",
-        )
-        for body in strong:
+        ):
             with self.subTest(body=body):
-                self.assertEqual(cp.classify_claim(body), "strong", body)
-        # An ambiguous shape is still DETECTED — just at the advisory tier.
-        for body in ("assigned to this", "another session was assigned to "
-                     "this yesterday", "the team is already fixing the drift"):
+                self.assertIsNotNone(cp._CLAIM_RE.search(body), body)
+        for body in (
+            "The PR claims that the surface is complete.",  # `claims` != `claim`
+            "the PR claims it is complete",
+            "we'll fix this",  # a cycle-3 arm shape main never matched
+        ):
             with self.subTest(body=body):
-                self.assertEqual(cp.classify_claim(body), "weak", body)
+                self.assertIsNone(cp._CLAIM_RE.search(body), body)
 
-    def test_weak_claim_is_reported_but_not_a_collision(self):
-        # End-to-end wiring for the tier: an ambiguous claim-shaped comment is
-        # PRINTED as an advisory hit with the `(weak)` tag, while the verdict
-        # stays CLEAN and the tool never says "do NOT dispatch".
-        body = "another session was assigned to this yesterday"
-        self.gh_fixtures(issue=self.issue_payload(comments=[("test-agent", body)]))
+    def test_escape_stripper_keeps_whitespace_and_still_removes_sequences(self):
+        # Cycle-3 regression fixed: the `\x1b.` alternative consumed ESC plus
+        # the FOLLOWING character, so a bare ESC before whitespace merged two
+        # words ("I'll take this\x1b now" -> "I'll take thisnow"). Both
+        # directions are proved: real sequences are still stripped whole (a CSI
+        # sequence and an OSC 52 clipboard payload), and a bare ESC no longer
+        # eats the space, so the claim still reads and matches.
+        cp = _tool_module()
+        self.assertEqual(cp._strip_control_sequences("a\x1b[2Kb"), "ab")
+        self.assertEqual(cp._strip_control_sequences("a\x1b]52;c;AAAA\x07b"), "ab")
+        cleaned = cp._strip_control_sequences("I'll take this\x1b now")
+        self.assertEqual(cleaned, "I'll take this now")
+        self.assertIsNotNone(cp._CLAIM_RE.search(cleaned))
+        # The classification path applies the same stripper, so the end-to-end
+        # run sees the claim too rather than a merged "thisnow".
+        self.gh_fixtures(issue=self.issue_payload(comments=[
+            ("other-agent", "I'll take this\x1b now"),
+        ]))
         rc, out = self.run_tool()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
-        self.assertNotIn("do NOT dispatch", out)
-        self.assertNotIn("VERDICT: COLLISION", out)
-        # Reported, not silent:
-        self.assertIn("weak/ambiguous claim-shaped comment", out)
-        self.assertIn("advisory only", out)
-        self.assertIn("WEAK SIGNALS", out)
-        self.assertIn("verify manually", out)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_claim_hit_report_names_the_comment_id(self):
+        # The REMEDY line tells the reader to open the comment that caused the
+        # refusal, so the hit must be identified specifically — a bare author
+        # login is not enough on a fleet sharing one account.
+        self.gh_fixtures(issue=self.issue_payload(comments=[{
+            "id": "IC_kwDOAAA123",
+            "author": {"login": "other-agent"},
+            "body": "I'll take this.",
+        }]))
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("comment by other-agent [id IC_kwDOAAA123]", out)
+        self.assertIn("REMEDY", out)
 
     def test_other_lane_marker_quoting_fleet_board_still_collides(self):
         # A shared-account comment that merely MENTIONS our lane id / session

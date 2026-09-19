@@ -83,11 +83,17 @@ this lane only on POSITIVE evidence — a session UUID equal to this session's
 (``$PI_SESSION_ID`` / ``--session``) or a lane marker equal to ours
 (``$COLLISION_PREFLIGHT_LANE`` / ``--lane``). Anything else, including a
 same-account comment with no marker, is NOT ours: "we cannot tell whose it is"
-must never be read as "it is ours". The claim regex itself is deliberately
-narrow — it matches intent assertions ("claiming this", "/claim", "working on
-this") and NOT the ordinary English noun/verb ("a coverage claim", "claiming
-that X", "a green on it"), which is what made a lane's own long scoping /
-verdict comment fire a false COLLISION on #3827.
+must never be read as "it is ours".
+
+The claim pattern is ``origin/main``'s, UNCHANGED. It is broad by design and
+false-positives on ordinary prose ("taking this into account", "in progress",
+"already fixing"); that is the SAFER direction — a missed duplicate is worse
+than an unnecessary manual check — and every refusal carries a REMEDY line
+naming the comment that caused it. Tightening it into a tiered classifier is
+NOT sufficient here: the exit-code consumers (``issue-workflow`` /
+``executing-plans``) act on the exit code ALONE, so an advisory "weak" tier
+would not block and would not be seen by the dispatcher. Claim precision is
+tracked in its own issue.
 
 Number matching is applied to full refs/paths/PR text; keyword matching is
 applied only to NAME-LIKE fields (branch refs, worktree basenames, PR head
@@ -367,168 +373,54 @@ _STRUCTURAL = {
 }
 
 # Claim-shaped comments. This is a GATE, so BOTH failure directions are
-# defects and the corpus is asserted in both: prose that must NOT force a
-# COLLISION, and genuine claims that must still be DETECTED.
+# defects: prose that must NOT force a COLLISION, and genuine claims that must
+# still be DETECTED.
 #
-# WHY A BLOCKLIST FAILED (cycles 1-2). Each earlier round added a negative
-# alternation for the prose that had just tripped the gate ("taking this" →
-# exclude "into account"; "handling this" → exclude "kind of"; …). The next
-# verifier always produced another ordinary-English sentence sharing the same
-# words, because a blocklist of phrasings cannot separate "a lane is claiming
-# this issue" from "a sentence that merely contains those words". Cycle 3
-# replaces the blocklist with a POSITIVE grammar plus TIERS.
-#
-# POSITIVE GRAMMAR (STRONG). A comment is strong evidence of a claim only
-# when it carries a grammatical signal ordinary description does not. The
-# arms below (`_CLAIM_STRONG_RES`) are, in order:
-#   1. the explicit command `/claim`;
-#   2. an ASSIGNMENT that names the holder: `assigned to me` / `@user` /
-#      `lane W3` / `#N`;
-#   3. a FIRST-PERSON subject (`I`, `I'm`, `I am`, `I will`, `we`, `we are`)
-#      with an intent verb and a DEICTIC object (`this`/`it`/`#N`),
-#      clause-final — the speaker asserts they are the agent;
-#   4. first-person `I'm on it` / `I am on it` (here the intent phrase is
-#      the particle `on`, so it takes its own arm);
-#   5. a line-start imperative/gerund CLAIM marker (`Claiming this.`,
-#      `Taking this`, `Handling this`, `Working on this now`, `On it!`),
-#      clause-final — an imperative has no subject and ends its clause;
-#   6. a line-start bare modal (`will fix this`);
-#   7. `dispatching` a claim object (`this`/`it`/`#N`, or `a`/`the` + a
-#      claim-noun: `lane`/`sub-agent`/`workstream`/`session`).
-# Arms 3 and 5 end their pattern at the line end (`$`) after the object
-# (optionally plus one temporal adverb). That clause boundary is what
-# separates a claim from a description sharing the words: in "Taking this
-# into account", "Handling this kind of error" and "working on this revealed
-# a bug" the object is followed by more clause, so neither arm matches. The
-# assignment arm likewise excludes the deictic `assigned to this` — "another
-# session was assigned to this" describes; it does not assign.
-#
-# TIERS (WEAK). A regex cannot be certain, so `classify_claim` returns
-# `"strong"`, `"weak"`, or None. Only STRONG forces `VERDICT: COLLISION`.
-# Every other claim-shaped body — `working on`, `will fix`, `already fixing`,
-# `in progress`, `started this`, `taking this`/`handling this` mid-clause, and
-# any strong arm whose match lies inside double quotes — is WEAK: printed as
-# an advisory hit, never blocking on its own (`_CLAIM_WEAK_RE` is the broad
-# net that keeps an ambiguous form visible instead of silent).
-#
-# The corpus lives in tests/test_collision_preflight.py:
-#   * test_broad_prose_is_never_a_strong_claim asserts the 43 invented
-#     ordinary-English bodies are NOT strong;
-#   * test_every_genuine_claim_shape_is_still_strong asserts every unambiguous
-#     claim shape stays STRONG (and an ambiguous one is at least WEAK);
-#   * test_weak_claim_is_reported_but_not_a_collision asserts an ambiguous
-#     claim appears as a weak advisory while the verdict stays CLEAN;
-#   * test_second_party_claim_still_collides asserts end-to-end that every
-#     unambiguous claim by another party still blocks.
-_DEICTIC = r"(?:this|it|#\d+)"
-# Optional temporal adjunct a genuine claim may carry ("we will fix this
-# today"). Closed class, so it cannot swallow a following clause.
-_CLAIM_TAIL = r"(?:\s+(?:now|today|tonight|tomorrow|soon|next|first|immediately|right\s+away))?"
-_FIRST_PERSON = r"(?:i|we)(?:['’](?:m|ll|d|ve|re))?"
-_INTENT_VERB = (
-    r"(?:take|taking|handle|handling|fix|fixing|implement|implementing|"
-    r"work|working|pick|picking|own|owning|do|doing|claim|claiming)"
-)
-_CLAIM_STRONG_RES: tuple[re.Pattern[str], ...] = (
-    # 1. explicit command form.
-    re.compile(r"(?im)(?:^|\s)/claim\b"),
-    # 2. assignment naming the holder (NOT a bare `assigned to`, and not the
-    #    deictic `assigned to this` — "another session was assigned to this"
-    #    is descriptive; both live in the weak net instead).
-    re.compile(r"(?im)\bassigned\s+to\s+(?:me\b|@\S+|lane\s+\S+|#\d+)"),
-    # 3. first-person subject + intent verb + deictic object, clause-final.
-    re.compile(
-        r"(?im)\b" + _FIRST_PERSON
-        + r"\s+(?:(?:am|are|will|would|can|shall|'ll|'m|'re)\s+)?"
-        + _INTENT_VERB + r"\b\s+(?:"
-        + _DEICTIC
-        + r"|on\s+" + _DEICTIC
-        + r"|on\s+the\s+[^.!?\n]+?)"
-        + _CLAIM_TAIL + r"\s*[.!?]?\s*$"
-    ),
-    # 4. first-person "on it".
-    re.compile(
-        r"(?im)\b" + _FIRST_PERSON + r"\s+(?:(?:am|are)\s+)?on\s+it\b"
-    ),
-    # 5. line-start imperative/gerund claim marker, clause-final.
-    re.compile(
-        r"(?im)^\s*(?:claiming|taking|handling|working\s+on|on\s+it)\b"
-        r"\s*(?:" + _DEICTIC + r"|on\s+" + _DEICTIC + r")?"
-        + _CLAIM_TAIL + r"\s*[.!?]?\s*$"
-    ),
-    # 6. line-start bare modal claim.
-    re.compile(
-        r"(?im)^\s*will\s+(?:fix|implement|handle|take|do)\s+" + _DEICTIC + r"\b"
-    ),
-    # 7. `dispatching` a claim object (a claim-noun needs an article).
-    re.compile(
-        r"(?im)\bdispatch(?:ing)?\s+(?:this|it|#\d+|(?:a|the)\s+"
-        r"(?:lane|sub-?agent|workstream|session))\b"
-    ),
-)
-
-# The WEAK net: broad, claim-SHAPED phrases. A match here is an advisory, not
-# a collision. It deliberately over-matches (`working on`, `will fix`,
-# `assigned to`, `in progress`) because a false advisory is cheap and silence
-# is not — but nothing in this net can force `VERDICT: COLLISION`.
-_CLAIM_WEAK_RE = re.compile(
-    r"(?im)(?:"
+# CLASSIFICATION IS `origin/main`'s, UNCHANGED (cycle-4 decision). Three review
+# cycles tried to sharpen this pattern — a tiered positive grammar with
+# strong/weak confidence — and each closed some false positives while the next
+# verifier found new ones. The tiering was refuted at its foundation: the
+# CONSUMERS of this gate read the EXIT CODE, not the report text.
+# `~/.pi/agent/skills/issue-workflow/SKILL.md` and `executing-plans/SKILL.md`
+# treat exit 0 / CLEAN as the only outcome that authorizes dispatch and stop on
+# ANY non-zero exit. A weak hit yields exit 0, so a dispatcher proceeds however
+# the advisory text is worded — "a weak hit is still reported" was true of the
+# REPORT and false of the DISPATCHER. Making an advisory tier work needs a
+# third verdict in the consuming contract, which lives in agent-infra and is
+# out of scope for this PR. Precision work is filed separately; until then the
+# gate keeps main's pattern, where a false positive is the SAFER direction (a
+# missed duplicate is worse than an unnecessary manual check) and the refusal
+# carries a REMEDY line naming the comment that caused it.
+_CLAIM_RE = re.compile(
+    r"(?i)(?:"
     r"/claim\b|"
-    r"\bclaim(?:ing|ed|s)?\s+(?:this|it|#\d+)\b|"
-    r"\btaking\s+(?:this|it)\b|"
-    r"\bhandling\s+this\b|"
-    r"\bworking\s+on\b|"
-    r"\bwork(?:ing)?\s+this\b|"
-    r"\bon\s+it\b|"
-    r"\bpick(?:ed|ing)?\s+(?:this|it)\s+up\b|"
-    r"\bdispatch(?:ing)?\b|"
-    r"\bstarted\s+(?:on\s+)?this\b|"
-    r"\balready\s+(?:fixing|working|implementing)\b|"
-    r"\bassigned\s+to\b|"
-    r"\bwill\s+(?:fix|implement|handle|take|do)\b|"
-    r"\bin\s+progress\b|"
-    r"\b(?:i|we)(?:['’](?:m|ll|d|ve|re))?\s+"
-    r"(?:(?:am|are|will|would|can)\s+)?"
-    r"(?:take|handle|fix|implement|work|pick|own|do|claim)\b"
+    r"\bworking on\b|\bwork(?:ing)? this\b|\bon it\b|\bin progress\b|"
+    r"\btaking (?:this|it)\b|\bi'?ll (?:take|do|handle|fix)\b|\bclaim(?:ing)?\b|"
+    r"\bassigned to\b|\bdispatching\b|\bpicked (?:this|it) up\b|"
+    r"\bhandling this\b|\bwill (?:fix|implement|handle)\b|"
+    r"\bstarted (?:on )?this\b|\balready (?:fixing|working|implementing)\b"
     r")"
 )
 
-# A same-line double-quoted span is REPORTED, not claimed: `She said "I'll
-# take this"` is a quotation, so any strong arm landing inside one is
-# downgraded to weak. Unpaired quotes leave no span, so such a match stays
-# strong (fail closed).
-_QUOTED_RE = re.compile(r'"[^"\n]*"')
 
-
-def _inside_quotes(body: str, start: int) -> bool:
-    """True when `start` falls inside a same-line double-quoted span."""
-    return any(m.start() < start < m.end() for m in _QUOTED_RE.finditer(body))
-
-
-def classify_claim(body: str) -> str | None:
-    """Tier a comment body: ``"strong"`` | ``"weak"`` | None.
-
-    STRONG is the only tier that forces ``VERDICT: COLLISION``. WEAK is
-    reported as an advisory and never blocks on its own. None is silence.
-    """
-    text = _strip_control_sequences(body)
-    for pattern in _CLAIM_STRONG_RES:
-        for match in pattern.finditer(text):
-            if not _inside_quotes(text, match.start()):
-                return "strong"
-    return "weak" if _CLAIM_WEAK_RE.search(text) else None
-
-
+# The span of a claim, EXTENDED to the end of its sentence or line. Used only
+# for marker-to-claim tie detection in `claim_attribution`; it does not change
+# which comments are hits (`_CLAIM_RE.search` alone decides that). The
+# extension matters because `_CLAIM_RE` matches the claim PHRASE (`claiming`),
+# so a session marker immediately after the object — `claiming this (session
+# <uuid>)` — would otherwise sit OUTSIDE the match and read as another lane
+# merely naming us. The CLAUSE, not the phrase, is the claim.
 def _claim_spans(body: str) -> list[tuple[int, int]]:
-    """Spans of every claim-shaped match, for marker-to-claim tie detection."""
+    """Spans of every claim-shaped match, extended to its clause end."""
     text = _strip_control_sequences(body)
-    spans = {
-        (m.start(), m.end())
-        for pattern in _CLAIM_STRONG_RES
-        for m in pattern.finditer(text)
-    }
-    spans.update((m.start(), m.end()) for m in _CLAIM_WEAK_RE.finditer(text))
-    return sorted(spans)
+    spans: list[tuple[int, int]] = []
+    for match in _CLAIM_RE.finditer(text):
+        stop = len(text)
+        for delim in re.finditer(r"[.!?\n]", text[match.end():]):
+            stop = match.end() + delim.start()
+            break
+        spans.append((match.start(), stop))
+    return spans
 
 
 class SurfaceError(Exception):
@@ -640,7 +532,12 @@ _ESCAPE_RE = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC … BEL | ST
     r"|\x1b\[[0-?]*[ -/]*[@-~]"            # CSI …
     r"|\x1b[@-Z\\-_]"                      # Fe escape
-    r"|\x1b."                              # any other ESC + one char
+    # Any other ESC + ONE character — but never whitespace. Plain `\x1b.` ate
+    # the space after a bare ESC and merged the words around it ("I'll take
+    # this\x1b now" became "I'll take thisnow"), which both corrupted the
+    # sanitised text and hid the claim from a clause-anchored pattern. A bare
+    # ESC is removed by `_CONTROL_RE` below, so no control byte is left behind.
+    r"|\x1b[^\s]"
 )
 
 
@@ -1090,6 +987,25 @@ def assignee_attribution(login: str | None, identity: Identity) -> str:
     return "unknown"
 
 
+def _comment_ref(comment: dict, login: str | None) -> str:
+    """A stable label for a claim comment, for the HITS and REMEDY lines.
+
+    The comment ID is included when GitHub supplies one (a node id on `gh
+    issue view --json comments`; some payloads carry the numeric id in `url`),
+    because the REMEDY line tells the reader to open THIS comment by hand and
+    a bare author login is not specific enough on a fleet that shares one
+    account.
+    """
+    label = f"comment by {login or 'unknown'}"
+    cid = comment.get("id")
+    if not cid:
+        m = re.search(r"#issuecomment-(\d+)", comment.get("url") or "")
+        cid = m.group(1) if m else None
+    if cid:
+        label += f" [id {_sanitize(str(cid))}]"
+    return label
+
+
 def scan_issue_surface(
     surface: Surface, issue_data: dict, identity: Identity,
 ) -> None:
@@ -1129,8 +1045,10 @@ def scan_issue_surface(
             )
     for comment in issue_data.get("comments") or []:
         body = comment.get("body") or ""
-        tier = classify_claim(body)
-        if tier is None:
+        # Classification is `_CLAIM_RE` (origin/main's pattern), run on the
+        # de-sequenced text so an escape sequence spliced into a claim cannot
+        # hide it. One kind of hit — a claim-shaped comment — no tiers.
+        if not _CLAIM_RE.search(_strip_control_sequences(body)):
             continue
         author = comment.get("author") or {}
         login = author.get("login") if isinstance(author, dict) else (
@@ -1143,20 +1061,12 @@ def scan_issue_surface(
                 f"(session/lane marker): {_one_line(body, 90)}"
             )
             continue
-        if tier == "strong":
-            surface.add(
-                f"comment by {login or 'unknown'}",
-                f"claim-style comment ({who} attribution — not this lane): "
-                + _one_line(body, 90),
-                "strong",
-            )
-        else:
-            surface.add(
-                f"comment by {login or 'unknown'}",
-                f"weak/ambiguous claim-shaped comment ({who} attribution — "
-                "advisory only, does not block by itself): " + _one_line(body, 90),
-                "weak",
-            )
+        surface.add(
+            _comment_ref(comment, login),
+            f"claim-style comment ({who} attribution — not this lane): "
+            + _one_line(body, 90),
+            "strong",
+        )
     if not surface.hits:
         state = issue_data.get("state")
         if state and state.upper() != "OPEN":
@@ -1620,10 +1530,8 @@ def format_report(
         lines.append("")
         lines.append("WEAK SIGNALS (non-blocking — prose is not work)")
         lines.append(
-            f"  {len(weak)} non-blocking weak signal(s) (cross-reference prose "
-            f"and/or ambiguous claim-shaped prose) for #{issue}; no title / "
-            "branch / worktree / strong-claim / closing-reference match. These "
-            "do NOT block — read the `(weak)` hits above and verify manually."
+            f"  {len(weak)} prose-only cross-reference(s) of #{issue}; no title / "
+            "branch / worktree / closing-reference match. These do NOT block."
         )
     if incomplete:
         lines.append("")
@@ -1637,6 +1545,28 @@ def format_report(
             f"{len({h.surface for h in hits})} surface(s) for #{issue} in {slug}; "
             "do NOT dispatch"
         )
+        # The remedy belongs at the POINT OF REFUSAL. `_CLAIM_RE` is broad by
+        # design, so a claim-shaped hit can be ordinary prose; this gate has NO
+        # dismissal switch (no `--ignore` / advisory flag), so the honest
+        # remedy is to name the exact comment and say it must be verified by
+        # hand — not to imply a re-run flag that does not exist.
+        claim_hits = [
+            h for h in strong if h.detail.startswith("claim-style comment")
+        ]
+        if claim_hits:
+            named = "; ".join(
+                _sanitize(h.ref) for h in claim_hits[:MAX_HITS_SHOWN]
+            )
+            if len(claim_hits) > MAX_HITS_SHOWN:
+                named += f"; … +{len(claim_hits) - MAX_HITS_SHOWN} more"
+            lines.append(
+                "  REMEDY: the refusal is forced by these claim-shaped "
+                f"comment(s): {named}. There is NO dismissal switch — a body "
+                "matching the claim pattern blocks by design (a missed "
+                "duplicate is worse than a false alarm). Open each named "
+                "comment and verify it by hand; if it is ordinary prose, "
+                "coordinate on the issue before dispatching."
+            )
         if incomplete:
             lines.append(
                 f"  ALSO INCOMPLETE: {len(incomplete)} surface(s) could not be queried "
@@ -1664,8 +1594,8 @@ def format_report(
         return "\n".join(lines) + "\n", EXIT_INCOMPLETE
     if weak:
         lines.append(
-            f"NOTE: {len(weak)} weak signal(s) ignored — cross-reference prose "
-            "and/or ambiguous claim-shaped prose is not work; non-blocking"
+            f"NOTE: {len(weak)} weak prose signal(s) ignored (cross-reference prose "
+            "is not work; non-blocking)"
         )
     lines.append(
         f"VERDICT: CLEAN (exit {EXIT_CLEAN}) — {len(ordered)}/{len(ALL_SURFACES)} surfaces "
