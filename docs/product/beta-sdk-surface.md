@@ -45,7 +45,7 @@ call the memory API, because the memory API is what their product is built on.
 | 4 | `list_knowledge` | Browse and filter without text search; page results | `list_knowledge` | agent, builder |
 | 5 | `check_confidence` | What is held and how confident it is, with the operators, NANDs and mitigations behind each item | `check_confidence` | agent |
 | 6 | `get_entity` | Fetch one node by id, any kind | `get_entity` | agent, builder |
-| 7 | `get_version_at` | **What a claim said on a given date.** Walks the revision chain to the version valid then | `get_version_at` | agent |
+| 7 | `get_historical_knowledge` | **What a claim said on a given date.** Walks the revision chain to the version valid then | `get_historical_knowledge` | agent |
 | 8 | `explore_connections` | Walk outward from a node through its links | `explore_connections` | agent |
 | 9 | `graph_overview` | What is in this memory graph and how it is shaped: taxonomy, structure, kinds, tags, namespaces, graph counts | `graph_overview` | agent, builder |
 | 10 | `list_sources` | Enumerate the sources this memory graph holds, **each with its credibility tier** | `list_sources` | agent, builder |
@@ -56,9 +56,9 @@ call the memory API, because the memory API is what their product is built on.
 | 14 | `create_entity` | Add one node — a claim, or a referent (subject, object, event, document) | `create_entity` | agent, builder |
 | 15 | `write_knowledge_batch` | Write many interconnected things in one call: points, entities, sources *and the links between them*, atomically | — | builder |
 | 16 | `register_source` | Declare a source exists. The URL is its identity. **Trust defaults from the source kind**; `tier=` overrides | `register_source` | agent, builder |
-| 17 | `index_sources` | Read files off disk and register each as a source with its content in memory. Batched, resumable | `index_sources` | builder |
-| 18 | `ingest_session` | Turn **one conversation** into memory, extracting its claims and links. **The backend is the target graph's configuration, not a call parameter** | `ingest_knowledge` | agent, builder |
-| 19 | `ingest_transcripts` | The same for a **directory of conversation transcript files** | `ingest_transcripts` | builder |
+| 17 | `index_sources_from_directory` | Read files off disk and register each as a source with its content in memory. **Nothing is extracted.** Batched, resumable | `index_sources_from_directory` | builder |
+| 18 | `mine_knowledge_from_session` | Turn **one conversation** into memory, extracting its claims, operators and entities. **The backend is the target graph's configuration, not a call parameter** | `mine_knowledge_from_session` | agent, builder |
+| 19 | `mine_knowledge_from_directory` | The same for a **folder of files**, each mined by its own content type | `mine_knowledge_from_directory` | builder |
 | 20 | `manage_source_trust` | Set how reliable a source is; read the score back | `manage_source_trust` | agent |
 | 21 | `link_entities` | Connect two nodes. An epistemic relation builds an operator, anything else a plain edge — the caller does not choose | `link_entities` | agent |
 | 22 | `write_question` | **File a question with its options and the evidence behind them.** This is not a decision — a decision happens later or not at all | `write_question` | agent, builder |
@@ -94,13 +94,25 @@ call the memory API, because the memory API is what their product is built on.
 
 **The backend is configuration, not a call parameter.** It is a property of each memory
 graph, set at creation or during onboarding — and **one organisation account can hold both a
-local and a hosted memory graph.** So `ingest_session` is one method that routes on the
+local and a hosted memory graph.** So `mine_knowledge_from_session` is one method that routes on the
 target graph's configuration. An agent does not choose a backend; the connection knows.
 
-**`get_version_at` is the read side of the revise block.** Every revise stamps validity
-windows; without this, revision history is unreadable — you can revise a claim ten times and
-never ask what it said before. It was previously named `restore_point_at`, which reads as a
-write and is not one: nothing is mutated.
+**`get_historical_knowledge` is the read side of the revise block.** Every revise stamps
+validity windows; without this, revision history is unreadable — you can revise a claim ten
+times and never ask what it said before. It was previously named `restore_point_at`, which
+reads as a write and is not one: nothing is mutated.
+
+**`index_*` and `mine_*` are different work, and the names now say so.**
+`index_sources_from_directory` registers files as sources and stores their content — nothing
+is extracted. `mine_knowledge_from_*` reads an artifact and pulls claims, operators and
+entities out of it. Same shape of name (`[verb]_[what it produces]_from_[input shape]`),
+different verb, different product, unmissable without a description.
+
+**The suffix names the input shape, not the content type — deliberately.** Today the two
+shapes are a conversation and a folder of files. When chat-platform exports (Slack, Discord,
+Telegram), CRM records and task-manager data (Asana, Linear) arrive, they arrive as one of
+those two shapes, so **neither method changes**. `mine_knowledge_from_slack` would be the
+mistake to avoid: that would re-create the per-archetype family this pass exists to remove.
 
 ## Questions and decisions
 
@@ -185,8 +197,8 @@ Recorded so they are not silently dropped. None is required for beta:
 | `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` | 4 | → `link_entities`, which dispatches on the relation. Reification is our implementation detail. |
 | `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship`. `operator_action(**kwargs)` currently **accepts and silently ignores** `credibility` — a bug. |
 | `file_human_approval` | 1 | → `record_decision` plus an approval record. |
-| `ingest_corpus`, `index_file`, `session_index_health` | 3 | → `index_sources`. |
-| `mine_corpus` | 1 | → `ingest_transcripts`. It is the **batch form of `ingest_session`**, not a kind of indexing — it reads conversations and extracts their structure. ("corpus" was the cryptic part.) |
+| `ingest_corpus`, `index_file`, `session_index_health` | 3 | → `index_sources_from_directory`. |
+| `mine_corpus` | 1 | → `mine_knowledge_from_directory`. It is the **batch form of `mine_knowledge_from_session`**, not a kind of indexing — it reads artifacts and extracts their structure. ("corpus" was the cryptic part.) |
 | narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) | ~8 | → `get_entity`, except where a genuinely different shape is returned. |
 | `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` | ~5 | → `graph_overview` where they are orientation; the diagnostics are the open question under "Named but not solved". |
 | `recall_gaps`, `recall_subgraph`, `recall_state`, `retrieval_legs`, `calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence`. **`recall_subgraph` is dropped, not folded** — `explore_connections` already answers that question. |
@@ -213,7 +225,7 @@ Recorded so they are not silently dropped. None is required for beta:
 |---|---|
 | `events_poll` | Realigned to the MCP name → row 12 `poll_events`. |
 | `test_guard` | **Kept and relocated.** It guards the production-wipe incident, so the code must survive — but it is *test infrastructure* and moves out of the product SDK into test support. |
-| `restore_point_at` | → row 7 **`get_version_at`**. It is a **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. "restore" made it read as a write. |
+| `restore_point_at` | → row 7 **`get_historical_knowledge`**. It is a **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. "restore" made it read as a write. |
 | `file_decision` | → rows 22/23 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. |
 | `graph_delete`, `graph_restore`, `graph_list`, `graph_count`, `graph_set_name` | → rows 35–37 `*_memory_graph*`. Renamed to the canonical term. |
 | narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` | **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. This is noise elimination — the agreed list does not change. |
@@ -222,11 +234,12 @@ Recorded so they are not silently dropped. None is required for beta:
 
 ## Open items
 
-### Needs the owner's ruling
+### Settled
 
-1. **`ingest_transcripts`** — accepted as the replacement for `mine_corpus`. Noted for
-   consistency: the single-conversation method is `ingest_session`, so the pair is
-   `ingest_session` / `ingest_transcripts` rather than a plural pair. Confirm.
+Naming is closed. The `mine_knowledge_from_*` family is systematic: the suffix names the
+**input shape** (a conversation, a folder), never the content archetype, so future data
+types — chat-platform exports, CRM records, task-manager data — arrive as one of the two
+existing shapes and add no methods.
 
 ### Approved and folded in
 
@@ -234,12 +247,13 @@ Recorded so they are not silently dropped. None is required for beta:
   A belief is a Point; what a caller wants to know is confidence. Dropping the subgraph mode
   made the recall name honest.
 - `write_knowledge` → **`write_knowledge_batch`** (the batching was invisible).
-- `index_files` → **`index_sources`** (verified: `file_indexer.py` derives a source url per file
-  and writes `sourceKind` on the **Source** node).
-- `capture_session_local` / `_hosted` → **`ingest_session`**, one method. The backend is the
-  target memory graph's configuration; **one organisation account can hold both a local and a
-  hosted graph**. Verified: `mcp_server.py:2986` shares `_capture_session_impl` with the hosted
-  API *"so the two surfaces can never drift"* — the handler already routes internally.
+- `index_files` → **`index_sources_from_directory`** (verified: `file_indexer.py` derives a
+  source url per file and writes `sourceKind` on the **Source** node).
+- `capture_session_local` / `_hosted` → **`mine_knowledge_from_session`**, one method. The
+  backend is the target memory graph's configuration; **one organisation account can hold both
+  a local and a hosted graph**. Verified: `mcp_server.py:2986` shares `_capture_session_impl`
+  with the hosted API *"so the two surfaces can never drift"* — the handler already routes
+  internally.
 - `record_decision` **takes the single-call shortcut** — it can file the question and resolve
   it at once when the answer is already known.
 - Isolation is **`check_key`** in the key block, not a new capability — the read side of
@@ -266,7 +280,7 @@ Recorded so they are not silently dropped. None is required for beta:
    route appears only where the source is not a real entity (Mem0 has no documents resource at
    all). **No product in the field returns a per-source trust tier in a listing** — so
    returning the tier is a differentiator, not parity.
-2. **`ingest_transcripts`** joins `ingest_knowledge` for the batch case.
+2. **`mine_knowledge_from_directory`** is added for the batch case.
 
 The session split stays SDK-only. The tenancy block is **one** MCP tool, `manage_deployment`,
 since an agent never provisions.
