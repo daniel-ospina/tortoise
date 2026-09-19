@@ -7,11 +7,11 @@
  * there is no token to read and no Supabase client to ask.
  *
  * `isAdmin` is now inferred rather than re-checked client-side: this SPA is only
- * ever served by `functions/admin/[[path]].ts`, which has ALREADY enforced the
- * blog_admins allowlist and answers a non-admin with 403 before any asset is
- * returned. Re-asking from the client would require handing the browser a token
- * — reintroducing exactly the exposure this redesign removes. RLS remains the
- * real authorization boundary; this is the UX gate.
+ * ever served by `apps/dashboard/functions/admin/[[path]].ts`, which has ALREADY
+ * enforced the blog_admins allowlist and answers a non-admin with 403 before any
+ * asset is returned. Re-asking from the client would require handing the browser
+ * a token — reintroducing exactly the exposure this redesign removes. RLS remains
+ * the real authorization boundary; this is the UX gate.
  *
  * Redirect policy (the #3485 rule): redirect on 401 ONLY.
  * A 503 means the session store is unreachable — redirecting then would log the
