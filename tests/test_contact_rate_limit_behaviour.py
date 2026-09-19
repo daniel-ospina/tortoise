@@ -348,13 +348,27 @@ observations.refusedKeySurvived = hits.has(CLIENT_K);
 
 // 9. The sweep is GUARDED, and the guard is the point: the limiter's comment rejects
 // a full O(cap) walk on every request, so the sweep runs only once the map is over
-// the cap. An expired key under the cap therefore lingers until it is — observable as
-// its presence after an unrelated call. Hoisting the sweep out of the guard changes
-// that, and costs every request the walk.
+// the cap. An expired key under the cap therefore lingers — observable as its presence
+// after an unrelated call, and hoisting the sweep out of the guard changes that.
 hits.clear();
 hits.set("stale", [T0 - RATE_WINDOW_MS - 1]);
 rateLimited("unrelated", T0);
 observations.staleKeyLingeredUnderCap = hits.has("stale");
+
+// 10. The guard's BOUND, which is the difference between "only over the cap" and "over
+// some smaller number": at EXACTLY the cap the sweep must still not run. The map is
+// filled to the cap with a stale key in it, then an EXISTING address submits again —
+// re-setting a key adds none, so the guard is evaluated at exactly the cap and the
+// stale key must survive. One more key crosses the cap and the sweep must take it, so
+// `>` and `>=` (and any lower threshold) disagree here.
+hits.clear();
+hits.set("stale-under", [T0 - RATE_WINDOW_MS - 1]);
+rateLimited(CLIENT_G, T0);
+for (let i = 0; i < cap - 2; i++) rateLimited("pad" + i, T0);
+rateLimited(CLIENT_G, T0 + 1);
+observations.staleLingeredAtCap = hits.has("stale-under");
+rateLimited("pushes-over", T0);
+observations.staleSweptOverCap = hits.has("stale-under");
 
 console.log(JSON.stringify(observations));
 """
@@ -553,17 +567,27 @@ def _check_refusal_position(observed: dict) -> None:
 
 
 def _check_guarded_sweep(observed: dict) -> None:
-    """The sweep is lazy: it runs when the map is over the cap, not on every call.
+    """The sweep is lazy, and its threshold is the CAP — not some smaller number.
 
-    The limiter's comment rejects "a full O(n) rebuild on every request", so an
-    expired key under the cap stays until the map is over. That is the cheap design;
-    this pins it, so an eager sweep has to be a decision someone states rather than a
-    silent cost added to every request.
+    The limiter's comment rejects "a full O(n) rebuild on every request", so the sweep
+    runs only once the map is OVER the cap. Both sides of that are pinned: an expired
+    key lingers while the map is under the cap, still lingers at exactly the cap, and is
+    taken as soon as one more key crosses it. That is what separates `>` from `>=` and
+    from any lower threshold — a threshold of 100 would otherwise run the walk on
+    nearly every request and no invariant would see it.
     """
     assert observed["staleKeyLingeredUnderCap"] is True, (
         "an expired key under the cap is expected to linger (the sweep is guarded to "
         "avoid an O(cap) walk on every request) — if it is now swept eagerly, that "
         "decision changed and the limiter's comment must say so with it"
+    )
+    assert observed["staleLingeredAtCap"] is True, (
+        "at EXACTLY the cap the sweep must still not run — a threshold at or below the "
+        "cap walks the whole map on nearly every request"
+    )
+    assert observed["staleSweptOverCap"] is False, (
+        "one key over the cap the sweep must run and take the expired key — otherwise "
+        "the map never does shed expired entries"
     )
 
 
@@ -638,7 +662,7 @@ def test_the_refusal_path_does_not_re_insert(behaviour: dict) -> None:
 
 
 def test_the_sweep_is_guarded_by_the_cap(behaviour: dict) -> None:
-    """Expired keys are swept when the map is over the cap, not on every request."""
+    """The sweep runs over the cap and not at or under it."""
     _check_guarded_sweep(behaviour)
 
 
@@ -744,6 +768,16 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "expired sweep hoisted out of the cap guard",
         r"if\s*\(\s*hits\.size\s*>\s*MAX_RATE_KEYS\s*\)\s*\{",
         "{",
+    ),
+    (
+        "sweep guard widened to `>=`",
+        r"if\s*\(\s*hits\.size\s*>\s*MAX_RATE_KEYS\s*\)\s*\{",
+        "if (hits.size >= MAX_RATE_KEYS) {",
+    ),
+    (
+        "sweep guard threshold lowered",
+        r"if\s*\(\s*hits\.size\s*>\s*MAX_RATE_KEYS\s*\)\s*\{",
+        "if (hits.size > 100) {",
     ),
     (
         "read bucket derived from the address",
