@@ -535,16 +535,21 @@ def test_resolver_empty_candidates_never_fire_current_state():
 
 
 def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
-    """#3317 pin — the resolver's unresolvable set must stay a SUBSET of the
-    file's wider Object recall-exclusion set.
+    """#3317 pin — the resolver's unresolvable set is EXACTLY ``{retracted}``.
 
-    The two sets are different by design (the resolver's is the Object-SEARCH
-    boundary, ``{retracted}``; ``_RECALL_OBJECT_EXCLUDED_STATUSES`` is the
-    five-status successor-probe view). The invariant that must hold is
-    direction, not equality: a status the read surfaces consider VISIBLE must
-    never be made unresolvable here (that is what forbids widening to
-    ``outdated``, and what would break the pinned ``superseded``
-    current-state render).
+    The two Object sets in this file are different by design (the resolver's
+    is the Object-SEARCH boundary, ``{retracted}``;
+    ``_RECALL_OBJECT_EXCLUDED_STATUSES`` is the five-status successor-probe
+    view). Together these three assertions PIN the resolver set without
+    restating a literal: subset of the recall-excluded set (plus
+    ``retracted`` present) and each of the other four members explicitly
+    absent ⇒ exactly ``{retracted}``.
+
+    The subset direction alone is NOT the oracle for ``outdated`` — the recall
+    set CONTAINS it — so every status whose exclusion is a decision is named
+    here rather than left implied. Widening to ``superseded`` would also break
+    the pinned current-state render (`test_resolver_docker_exact_and_both_halves`),
+    but that is a docker-lane consequence; this pure pin is the fast one.
     """
     from tortoise.assembly import (
         _RECALL_OBJECT_EXCLUDED_STATUSES,
@@ -555,7 +560,8 @@ def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
         <= _RECALL_OBJECT_EXCLUDED_STATUSES
     )
     assert "retracted" in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
-    assert "superseded" not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+    for st in ("superseded", "deprecated", "archived", "outdated"):
+        assert st not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
 
 
 # ── docker-lane resolver legs (fixture substrate; skip when the shared
