@@ -269,6 +269,7 @@ const CLIENT_V6_B = "2001:db8:85a3:0:0:8a2e:370:7433";
 // full-form literals alone (`replace("::", ":")`, `replace(/^::ffff:/, "")`).
 const CLIENT_V6_C = "2001:db8::1";
 const CLIENT_V6_D = "::ffff:203.0.113.9";
+const CLIENT_BURST = "203.0.113.201";
 
 // The loops must not scale with a bumped constant: a huge RATE_LIMIT or
 // MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
@@ -508,6 +509,16 @@ observations.mappedV6Trips = (() => {
   return rateLimited(CLIENT_V6_D, T0 + limit);
 })();
 
+// 15. A BURST inside one millisecond. Real submissions can share a `now` — a scripted
+// flood certainly will — so the window must count SUBMISSIONS, not distinct timestamps. A
+// push guarded by `if (!recent.includes(now))` stores one entry per millisecond instead,
+// and `RATE_LIMIT` never trips on a same-millisecond burst. Every other scenario advances
+// `now` per call, so nothing else can see this.
+hits.clear();
+for (let i = 0; i < limit; i++) rateLimited(CLIENT_BURST, T0);
+observations.burstStored = (hits.get(CLIENT_BURST) || []).length;
+observations.burstRefuses = rateLimited(CLIENT_BURST, T0);
+
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
 // this call — `Date.now()` stepping backwards is reachable under NTP, a VM restore or a
 // manual clock set — must still be counted and refused. The property under test is that
@@ -579,6 +590,14 @@ def _check_accumulation(observed: dict) -> None:
     assert observed["growth"] == list(range(1, limit + 1)), (
         "the stored window must grow by one per submission, got "
         f"{observed['growth']!r} — the history is being emptied"
+    )
+    assert observed["burstStored"] == limit, (
+        f"{limit} submissions sharing the SAME millisecond must be stored as {limit} "
+        f"entries, got {observed['burstStored']} — deduplicating them lets a burst through"
+    )
+    assert observed["burstRefuses"] is True, (
+        "the submission after a same-millisecond burst must be refused: counting distinct "
+        "timestamps instead of submissions is the bypass"
     )
     assert observed["storedAfterTrip"] == limit, (
         f"after the refusal the stored window must hold {limit} entries, got "
@@ -937,13 +956,15 @@ def _predicate_failures(code: str) -> list[str]:
     that adds a `now`-based clause must be detected by SOMETHING, and beyond the seeded
     distance this is the only thing that can detect it.
     """
-    match = re.search(r"\.filter\(\s*\(t\)\s*=>\s*(.+?)\)\s*;", _limiter_source(code))
-    if match is None:
+    body = _limiter_source(code)
+    matches = re.findall(r"\.filter\(\s*\(t\)\s*=>\s*(.+?)\)\s*;", body)
+    if len(matches) != 1:
         return [
-            "the read-path filter is not the shape this check anchors on — update the "
-            "check rather than leaving it unable to look"
+            f"expected exactly ONE read-path filter expression, found {len(matches)} — a "
+            "second one (a decoy, or a second read path) would let this check grade the "
+            "wrong expression while the real one decides expiry"
         ]
-    predicate = match.group(1).strip()
+    predicate = matches[0].strip()
     # EXACTLY `t > cutoff` — not "an expression mentioning cutoff and no extra
     # identifier", which was beaten twice: `t <= now + ...` (the token `now`), then
     # `t <= tolerance` (a `now`-derived alias), then `t <= cutoff + 700000000` (a bound
@@ -1152,6 +1173,17 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "the limiter is re-bound after its declaration",
         r"\n  return false;\n\}",
         "\n  return false;\n}\nrateLimited = function (ip, now) { return false; };",
+    ),
+    (
+        "read predicate hidden behind a decoy filter",
+        r"const recent = \(hits\.get\(ip\) \|\| \[\]\)\.filter\(\(t\) => t > cutoff\);",
+        "const live = [].filter((t) => t > cutoff);\n"
+        "  const recent = (hits.get(ip) || []).filter((t) => t > cutoff && t <= now + 1001 * RATE_WINDOW_MS);",
+    ),
+    (
+        "burst timestamps are deduplicated",
+        r"recent\.push\(now\);",
+        "if (!recent.includes(now)) recent.push(now);",
     ),
     (
         "eviction decrements by two",
