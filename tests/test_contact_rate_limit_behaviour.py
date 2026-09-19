@@ -52,13 +52,13 @@ skipped write-back on the refusal path, an over-eager sweep one millisecond insi
 the window — because an invariant is only as strong as the state the DRIVER builds
 for it. A new class is caught when someone adds its scenario, and the battery's
 presence assertion makes a stale anchor say so out loud rather than pass quietly.
-Two refusal-path details are knowingly NOT covered by a mutation, though both are
-observed: the refusal path does not re-insert the key (so at the cap the refused
-address is the next eviction victim — the cap's documented tradeoff, pinned as a
-behaviour above) and it skips the cap block entirely (it cannot add a key, so there
-is nothing for the cap to bound). The invariants are therefore not a completeness
-proof; they are the behaviours that were demonstrably reachable, pinned where a
-mutation cannot reach them undetected.
+One refusal-path detail is knowingly NOT covered by a mutation, though it is observed:
+the refusal path does not re-insert the key, so at the cap the refused address is the
+next eviction victim — the cap's documented tradeoff, pinned as a behaviour above.
+The other omission (the refusal path skips the cap block) is inert by construction:
+that branch cannot add a key, so there is nothing for the cap to bound. The
+invariants are therefore not a completeness proof; they are the behaviours that were
+demonstrably reachable, pinned where a mutation cannot reach them undetected.
 
 Node is required and the tests SKIP with a reason when it is absent, rather than
 passing silently.
@@ -346,6 +346,16 @@ observations.refusedAtCap = rateLimited(CLIENT_K, T0 + limit);
 rateLimited("another", T0);
 observations.refusedKeySurvived = hits.has(CLIENT_K);
 
+// 9. The sweep is GUARDED, and the guard is the point: the limiter's comment rejects
+// a full O(cap) walk on every request, so the sweep runs only once the map is over
+// the cap. An expired key under the cap therefore lingers until it is — observable as
+// its presence after an unrelated call. Hoisting the sweep out of the guard changes
+// that, and costs every request the walk.
+hits.clear();
+hits.set("stale", [T0 - RATE_WINDOW_MS - 1]);
+rateLimited("unrelated", T0);
+observations.staleKeyLingeredUnderCap = hits.has("stale");
+
 console.log(JSON.stringify(observations));
 """
 
@@ -542,6 +552,21 @@ def _check_refusal_position(observed: dict) -> None:
     )
 
 
+def _check_guarded_sweep(observed: dict) -> None:
+    """The sweep is lazy: it runs when the map is over the cap, not on every call.
+
+    The limiter's comment rejects "a full O(n) rebuild on every request", so an
+    expired key under the cap stays until the map is over. That is the cheap design;
+    this pins it, so an eager sweep has to be a decision someone states rather than a
+    silent cost added to every request.
+    """
+    assert observed["staleKeyLingeredUnderCap"] is True, (
+        "an expired key under the cap is expected to linger (the sweep is guarded to "
+        "avoid an O(cap) walk on every request) — if it is now swept eagerly, that "
+        "decision changed and the limiter's comment must say so with it"
+    )
+
+
 INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
     ("threshold", _check_threshold),
     ("accumulation", _check_accumulation),
@@ -551,6 +576,7 @@ INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
     ("sweep", _check_sweep),
     ("re-insert", _check_reinsert),
     ("refusal-position", _check_refusal_position),
+    ("guarded-sweep", _check_guarded_sweep),
 )
 
 
@@ -609,6 +635,11 @@ def test_a_resubmitting_address_keeps_its_history(behaviour: dict) -> None:
 def test_the_refusal_path_does_not_re_insert(behaviour: dict) -> None:
     """A refused address keeps its position, so the cap may evict it — by design."""
     _check_refusal_position(behaviour)
+
+
+def test_the_sweep_is_guarded_by_the_cap(behaviour: dict) -> None:
+    """Expired keys are swept when the map is over the cap, not on every request."""
+    _check_guarded_sweep(behaviour)
 
 
 # These are the escapes from the #2409 pin history plus the ones review found here, as
@@ -708,6 +739,11 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "the limit is shared, not per address",
         r"hits\.get\(ip\)",
         'hits.get("shared")',
+    ),
+    (
+        "expired sweep hoisted out of the cap guard",
+        r"if\s*\(\s*hits\.size\s*>\s*MAX_RATE_KEYS\s*\)\s*\{",
+        "{",
     ),
     (
         "read bucket derived from the address",
