@@ -180,12 +180,13 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_guard",
     "test_hard_reject",
     # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
-    # MCP ``tortoise_list_graphs`` HTTP filter and the namespace probe. The
-    # class-level test redirect renames every path-built graph to
-    # ``test_<stem>_<hash(path+name)>`` (see projection/__init__._resolve_caller_stem),
-    # so under a server URI no production name exists and the strict scoping
-    # assertions FAIL — a hard RED, not a false pass. Same carve-out rationale
-    # as test_hosted_backup.
+    # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
+    # opener. The class-level test redirect (the redirect block in
+    # ``Projection.__init__``, projection/__init__.py) renames every path-built
+    # graph to ``test_{db-file-basename}_{sha1(session+path+name)[:12]}``, so
+    # under a server URI no production name exists: the probe's ``own=True``
+    # and the listing filter assert FAIL, and the opener returns None. A hard
+    # RED, never a false pass. Same carve-out rationale as test_hosted_backup.
     "test_cross_tenant_read_isolation",
     "test_hosted_backup",
     "test_migrate_db",

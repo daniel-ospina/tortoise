@@ -26,8 +26,8 @@ transport mode, or the namespace opener's graph mapping — and asserts the
 paired isolation checker goes RED. A green test that cannot go red is not
 evidence.
 
-WHY THIS IS NOT A DUPLICATE (the class docstring of
-``tests/test_hosted_api.py::TestCrossTenantIsolation`` and the tests it names):
+WHY THIS IS NOT A DUPLICATE — the cross-tenant coverage that already exists in
+``tests/test_hosted_api.py`` and ``tests/test_mcp_http.py``:
 
 - ``test_hosted_api.TestCrossTenantIsolation.test_team_isolation`` builds two
   random SDK namespaces and asserts, via a RAW graph query, that A's graph does
@@ -57,10 +57,11 @@ and the ``hosted_api`` dependency-override auth seam (shared with
 Lane note: this module is a redirect carve-out (``tests/_embedded.py``
 ``TEST_NO_REDIRECT_STEMS``). It asserts PRODUCTION graph names (``org_{org_id}``);
 the class-level test redirect renames every path-built graph to
-``test_<stem>_<hash>``, so under a server URI **no production name exists** and
-the strict scoping assertions (``own=True``, own graph in the listing, opener
-own-marker) FAIL — a hard RED, never a false pass. The carve-out is what keeps
-the module's own exit-evidence command runnable.
+``test_{db-file-basename}_{hash}``, so under a server URI **no production name
+exists** and the scoping assertions FAIL — the probe's ``own=True``, the own
+graph in the listing, and ``_open_org_graph_sdk`` returning ``None`` for the
+opener — a hard RED, never a false pass. The carve-out is what keeps the
+module's own exit-evidence command runnable.
 """
 from __future__ import annotations
 
@@ -602,10 +603,15 @@ def test_negative_control_routed_reads_are_detected(xtenant, monkeypatch):
 
     Reuses the module's seeded tenants (no re-capture — the v2 extractor's
     process-global consolidation state makes a second identical capture a
-    silent no-op under the server lane). Mutates the ONE seam every data-plane
-    read surface shares (``_data_sdk``) so tenant A's reads open tenant B's
-    graph, then asserts the shared checker raises with the cross-tenant
-    message.
+    silent no-op under the server lane). Mutates the ``_data_sdk`` seam — the
+    one the retrieval and both session surfaces share — so tenant A's reads
+    open tenant B's graph, then asserts the shared checker raises with the
+    cross-tenant message.
+
+    Scope: ``_data_sdk`` ONLY. The export path (``_make_sdk`` by graph name,
+    behind its own owner gate), the archive store prefix, the MCP listing
+    filter and the namespace opener each have their own negative control
+    below — this control does not exercise them.
     """
     real_make_sdk = ha._make_sdk
 
