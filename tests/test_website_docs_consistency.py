@@ -1007,10 +1007,10 @@ class _IdCollector(HTMLParser):
     counted the removal note quoting `<section id="beta-gate">` as a second
     element.
 
-    Only the FIRST `id` on a tag is recorded. The stdlib hands the collector
-    BOTH attributes of `<div id="a" id="b">` (verified), but the tokenizer drops
-    the duplicate before a browser ever sees it — counting the second would
-    invent a duplicate the document does not have.
+    Only the FIRST `id` attribute on a tag is read — the tokenizer drops the
+    rest — and an empty value is treated as no id at all, because
+    `getElementById("")` matches nothing and two elements with `id=""` are not
+    a collision a script can observe.
 
     Deliberately OVER-counted, and it fails LOUD when it is: the collector can
     count an `id` a browser does not expose as a document element. `<template>`
@@ -1034,8 +1034,11 @@ class _IdCollector(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         for name, value in attrs:
-            if name == "id" and value:
-                self.ids.append((value, self.getpos()[0]))
+            if name == "id":
+                # FIRST id wins, empty or not: the tokenizer drops a duplicate
+                # attribute, so `id="" id="x"` leaves the element with no id.
+                if value:
+                    self.ids.append((value, self.getpos()[0]))
                 return
 
 
@@ -1138,25 +1141,38 @@ def test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id() -> None:
 _FOREIGN_ROOTS = frozenset({"svg", "math"})
 
 
-class _ForeignRawtextProbe(HTMLParser):
-    """Raw-text start tags opened while a foreign-content root is open.
+class _ForeignRawtextProbe(_IdCollector):
+    """Raw-text switches the tokenizer makes while foreign content is open.
+
+    `set_cdata_mode` IS the suppression event: it is the tokenizer's own call,
+    made for every tag whose content it then refuses to parse as markup. Hooking
+    it, rather than listing tag names, is what makes this probe complete — an
+    earlier revision checked `HTMLParser.CDATA_CONTENT_ELEMENTS` and was blind to
+    `title`, `textarea` and `plaintext`, which the stdlib suppresses through
+    `RCDATA_CONTENT_ELEMENTS` and its own plaintext rule (review finding). A tag
+    the collector suppresses cannot be missed here, because both read the same
+    call.
 
     A nesting-insensitive counter is enough for a PRE-CONDITION check: it can
     over-report (a 13.2.6.5 breakout leaves the browser in HTML content while
-    this counter still counts the root as open) and never under-reports, and
-    over-reporting only asks for a hand check.
+    this counter still counts the root as open), and over-reporting only asks
+    for a hand check.
     """
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        super().__init__()
         self.depth = 0
         self.hits: list[tuple[str, int]] = []
+
+    def set_cdata_mode(self, elem: str, *args: object, **kwargs: object) -> None:
+        if self.depth:
+            self.hits.append((elem, self.getpos()[0]))
+        super().set_cdata_mode(elem, *args, **kwargs)  # type: ignore[arg-type]
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _FOREIGN_ROOTS:
             self.depth += 1
-        elif self.depth and tag in self.CDATA_CONTENT_ELEMENTS:
-            self.hits.append((tag, self.getpos()[0]))
+        super().handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _FOREIGN_ROOTS and self.depth:
