@@ -98,6 +98,9 @@ REPLY_PROMISE_VERBS = (
     + r"|\byou(?:'ll| will)\b[^.!?]{0,25}?" + REPLY_WORD
 )
 
+#: A quoted string in CSS/JS source, one group per quote style, escapes included.
+_QUOTED = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|\'([^\'\\]*(?:\\.[^\'\\]*)*)\'')
+
 #: The confirmation the visitor sees on success, pinned as a VALUE. It states
 #: receipt and nothing more: a reply is the exception (outbound email belongs to
 #: answering a user who wrote first), and while the reader gap is open
@@ -446,20 +449,28 @@ def test_the_confirmation_promises_no_reply() -> None:
     # the block: `.lede::after { content: "We'll reply within two business days." }`
     # showed the promise to every visitor while every pin stayed green, because
     # `<style>` was dropped wholesale (cycle-10 review).
+    # EVERY quoted string inside a `<style>` block is scanned, not just the ones
+    # in a `content:` declaration — the property-name shape is refused by
+    # construction instead of spelled out, which is what the last three cycles
+    # kept finding one spelling at a time:
+    #   * CSS property names are ASCII case-insensitive (`CONTENT:` renders).
+    #   * A `content` VALUE is a LIST of strings that CONCATENATE: `content:
+    #     "Thanks! " "We'll reply soon."` is one promise, and a first-string-only
+    #     scan stayed green (cycle-12 review).
+    #   * Copy is reachable through a custom property — `--msg: "We'll reply
+    #     soon."; content: var(--msg)` — so scoping to `content:` misses it.
+    # Each block contributes its strings AND their concatenation (so a promise
+    # split at a string boundary is still assembled), and comments are stripped
+    # first: they cannot render, and a rule documented in one must not fail the
+    # suite (cycle-10 review).
     css_text = " ".join(
-        unescape(m.group(1) or m.group(2))
+        text
         for block in re.findall(r"<style\b[^>]*>(.*?)</style>", html_src, flags=re.S | re.I)
-        # Comments cannot render, so they are stripped first — a CSS comment
-        # documenting the rule must not fail the suite, exactly as with the TS and
-        # script scans (cycle-10 review).
-        for m in re.finditer(
-            r'''content\s*:\s*(?:"([^"]*)"|'([^']*)')''',
-            re.sub(r"/\*.*?\*/", "", block, flags=re.S),
-            # CSS property names are ASCII case-insensitive, so the scan must be
-            # too: `CONTENT: "We'll reply within two business days."` renders to
-            # the visitor and stayed green without this flag (cycle-11 review).
-            re.I,
-        )
+        for stripped in [re.sub(r"/\*.*?\*/", "", block, flags=re.S)]
+        for strings in [
+            [unescape(q.group(1) or q.group(2) or "") for q in _QUOTED.finditer(stripped)]
+        ]
+        for text in [*strings, " ".join(strings)]
     )
     # ATTRIBUTE-carried copy is visitor-facing too (cycle-5 review): the meta
     # description is what search engines and link previews show, and a
