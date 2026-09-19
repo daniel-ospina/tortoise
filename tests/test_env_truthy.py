@@ -507,16 +507,22 @@ def _module_string_constants(tree: ast.Module) -> dict[str, str]:
 
 
 def _module_const_assigns(tree: ast.Module):
-    """Yield `(value, targets)` for every module-level assignment, plain or ANNOTATED.
+    """Yield `(value, targets)` for the assignment NODES that may define a constant.
 
-    `ast.Assign` alone missed the annotated house idiom (`TRUTHY: frozenset[str] = ...`),
-    so `_ONE: str = "1"` was invisible as an anchor while the docstring claimed annotated
-    assignment was resolved (code review, cycle 5).
+    Plain assignments first, then ANNOTATED ones (the house idiom —
+    `TRUTHY: frozenset[str] = ...`), which the scalar/collection constant maps did not
+    resolve at all until review cycle 5. Both are walked over the whole file, so the
+    order matters: the consumers use first-wins `setdefault`, and yielding the two forms
+    interleaved let an EARLIER annotated binding (e.g. a function-local `x: T = ...`)
+    shadow a LATER module-level `x = ...`, silently losing a narrow anchor. Yielding
+    every plain assignment first keeps the pre-cycle-5 precedence for that form and makes
+    the annotated form a pure fallback.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             yield node.value, node.targets
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign) and node.value is not None:
             yield node.value, [node.target]
 
 
@@ -819,6 +825,12 @@ _SYNTHETIC_SHAPES = [
      "annotated module constant membership anchor"),
     ('NAME: str = "TORTOISE_SYNTH"\nif os.environ.get(NAME) == "1":\n    pass\n',
      "annotated module constant name"),
+    ('_ONE: str = "true"\n_ONE = "1"\n'
+     'if os.environ.get("TORTOISE_SYNTH") == _ONE:\n    pass\n',
+     "plain anchor wins over an earlier annotated shadow"),
+    ('_ONES: tuple = ("yes", "no")\n_ONES = ("1",)\n'
+     'if os.environ.get("TORTOISE_SYNTH") in _ONES:\n    pass\n',
+     "plain membership anchor wins over an earlier annotated shadow"),
 ]
 
 
