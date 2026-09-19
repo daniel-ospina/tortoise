@@ -497,6 +497,25 @@ def _enforce_quota(resource: str = "points") -> None:
     enforce_org_limit(limits, resource, sdk=_get_org_sdk())
 
 
+def _alert_unmetered(lane: str, org_id: str | None,
+                     error: BaseException) -> None:
+    """Emit the #3981 operator alert for a dropped increment, never raising.
+
+    The import is itself guarded: ``tortoise.metering`` may be the thing that
+    failed, and an unguarded import inside an ``except`` would turn a
+    bookkeeping fault into the user-facing failure the owner's ruling forbids.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+    except Exception:  # noqa: BLE001, RUF100 — the alert must never raise
+        logging.getLogger("tortoise.metering").error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
+            "(metering module unavailable)", lane, org_id or "<none>",
+            type(error).__name__, error)
+        return
+    report_unmetered_increment(lane=lane, org_id=org_id, error=error)
+
+
 def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """Wrap a bound SDK method with a pre-write quota check + metering.
 
@@ -505,8 +524,12 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     error dicts (see _safe's QuotaExceededError/QuotaCheckError mapping).
 
     #681: after a successful write (fn returns without raising), records a
-    write op for overage metering. Best-effort — metering failures are
-    swallowed and never block the tool.
+    write op for overage metering. Best-effort — the increment never blocks the
+    tool, and the drop is never silent (#3981): when the increment cannot be
+    recorded the operator is alerted (lane=mcp_write_op) and the error is
+    absorbed. The raise from an unresolvable metering window is a SIGNAL, not a
+    refusal; the user-facing refusal here is ``_enforce_quota`` above, which
+    runs BEFORE the write.
 
     #308 (R1, scoping delta 8): ``abuse_weight`` records a WEIGHTED
     point_create event after a successful Point-creating write — int for a
@@ -517,24 +540,33 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
         result = fn(*args, **kwargs)
-        # Metering (#681): best-effort, after successful write
         try:
-            from tortoise.mcp_auth import _current_org_id, _current_org_limits
+            from tortoise.mcp_auth import _current_org_id
             org_id = _current_org_id.get()
-            if org_id:
+        except Exception:  # noqa: BLE001, RUF100 — no org context; metering is skipped
+            org_id = None
+        # Metering (#681): best-effort, after successful write
+        if org_id:
+            try:
+                from tortoise.mcp_auth import _current_org_limits
                 limits = _current_org_limits.get() or {}
                 from tortoise.metering import record_write_ops
                 record_write_ops(org_id, tier=limits.get("tier"))
-                # #308 (R1): weighted point_create recording + evaluation.
-                # The engine piggybacks R2 evaluation on the same call.
+            except Exception as e:  # noqa: BLE001, RUF100 — never block the tool
+                _alert_unmetered("mcp_write_op", org_id, e)
+            # #308 (R1): weighted point_create recording + evaluation. The
+            # engine piggybacks R2 evaluation on the same call. Its OWN
+            # best-effort block — an abuse-recording failure is not a dropped
+            # increment and must never be reported as one (#3981).
+            try:
                 if abuse_weight is not None and not _abuse_off():
                     n = (int(abuse_weight(result, args, kwargs) or 0)
                          if callable(abuse_weight) else int(abuse_weight))
                     if n > 0:
                         from tortoise import abuse as _abuse
                         _abuse.get_engine().record_point_create(org_id, n)
-        except Exception:
-            pass  # best-effort — never block the tool
+            except Exception:
+                pass  # best-effort — never block the tool
         return result
     return _gated
 

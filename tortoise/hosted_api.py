@@ -49,6 +49,12 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import API_KEY_PREFIXES, hash_api_key
+from tortoise.capture_receipts import (  # #3809: ONE key definition
+    capture_last_error_key as _capture_last_error_key,
+)
+from tortoise.capture_receipts import (
+    capture_receipt_key as _capture_receipt_key,
+)
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.hosted_backup import (
     MemoryStorage,
@@ -82,6 +88,7 @@ from tortoise.projection import (
     _journal_append_product,  # #1686: org_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
+from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
@@ -100,6 +107,13 @@ from tortoise.sdk import (
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.supabase_control import _service_key  # #3677
+
+# #4179: the team-account and user-account restore windows derive from the ONE
+# authority (tortoise/retention.py). Do not hard-code a window here — see
+# docs/retention-and-deletion.md. The user-account constant records the promise
+# for the support/email deletion path (there is no self-service deletion yet).
+TEAM_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
+USER_ACCOUNT_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
 
 _logger = logging.getLogger(__name__)
 
@@ -3879,23 +3893,93 @@ def _check_org_limit(org: dict, resource: str) -> None:
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
 
 
+def _alert_unmetered(lane: str, org_id: str | None,
+                     error: BaseException) -> None:
+    """Emit the #3981 operator alert for a dropped increment, never raising.
+
+    The alert lives in ``tortoise.metering`` — but that module may be the very
+    thing that failed to import (or a partial deploy may predate
+    ``report_unmetered_increment``). Importing it unguarded inside an
+    ``except`` handler would then turn a bookkeeping fault into the
+    user-facing failure the owner's ruling forbids, so the import gets its own
+    guard and the fallback logs directly.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+    except Exception:  # noqa: BLE001, RUF100 — the alert must never raise
+        logging.getLogger("tortoise.metering").error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
+            "(metering module unavailable)", lane, org_id or "<none>",
+            type(error).__name__, error)
+        return
+    report_unmetered_increment(lane=lane, org_id=org_id, error=error)
+
+
 def _record_write_op(org: dict, nodes_written: int = 0) -> None:
     """Best-effort write-op metering for overage billing (#681).
 
-    Call AFTER a successful write. Non-fatal — metering failures are logged
-    and swallowed; they never block the caller.
+    Call AFTER a successful write. The increment never blocks the caller — a
+    bookkeeping fault of ours must not fail a committed write — but the drop is
+    never SILENT (#3981): when the increment cannot be recorded the operator is
+    alerted (lane=write_op) and the error is absorbed here.
+
+    Note what the raise from window resolution IS: a SIGNAL, not a refusal. The
+    user-facing refusal, where one exists, is the pre-spend admission gate
+    (``_check_org_limit`` / the armed cohort cap), which runs BEFORE the write;
+    this function is downstream of it and can refuse nothing.
 
     nodes_written: net-new non-episodic nodes written by this call (the
     value-first commit cost driver, epic #909 §4.4/W-4/PL4 — the commit
     endpoint passes the reconciled net-new delta; hold commits bill 0 and
     skip this entirely).
     """
+    org_id = org.get("org_id", "")
     try:
         from tortoise.metering import record_write_ops
-        record_write_ops(org.get("org_id", ""), tier=org.get("tier"),
+        record_write_ops(org_id, tier=org.get("tier"),
                          nodes_written=nodes_written)
-    except Exception:
-        pass  # best-effort — never block the write path
+    except Exception as e:  # noqa: BLE001, RUF100 — never block the write path
+        _alert_unmetered("write_op", org_id, e)
+
+
+async def _emit_capture_ledger(org_id: str, session_id: str,
+                               meta: dict) -> None:
+    """Write a capture's MEASURED cost onto the durable per-period ledger.
+
+    #3665 (lane B7): the SAME measured cost as the analytics row, beside it.
+    #3359's analytics row is a measurement, not a ledger: nothing keyed by
+    org+period, so a spend CEILING could read it only by scanning every capture
+    row in the period. This row is one per (org, period) — the read side
+    ``cohort_cost.enforce_cohort_cost_cap`` gates on.
+
+    Best-effort by contract: a committed capture is never failed by bookkeeping.
+    The drop is NOT silent (#3981) — ``record_capture_usage`` raises on an
+    unresolvable metering window (a SIGNAL, not a refusal), and the handler
+    below reports lane=capture_ledger to the operator instead of swallowing it.
+
+    Both writes run off the event loop: the Supabase RPC / embedded registry
+    write and ``_track_analytics_event``'s synchronous ``httpx.Client`` POST are
+    blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
+    class). The analytics emit keeps its OWN best-effort handler — a ledger
+    failure is not an analytics failure and must not be labelled one.
+    """
+    try:
+        _cost_props = _capture_cost_props(session_id, meta)
+        if _cost_props is None:
+            return
+        from tortoise.metering import record_capture_usage
+        await asyncio.to_thread(
+            record_capture_usage, org_id,
+            cost_usd=float(_cost_props.get("cost_usd") or 0.0))
+    except Exception as e:  # noqa: BLE001, RUF100 — never block a committed capture
+        _alert_unmetered("capture_ledger", org_id, e)
+        return
+    try:
+        await asyncio.to_thread(
+            _track_analytics_event, org_id, "capture_cost", _cost_props)
+    except Exception:  # noqa: BLE001, RUF100 — never block capture
+        logging.getLogger("tortoise.api").exception(
+            "capture_cost analytics emit failed (non-fatal)")
 
 
 def _suspended_detail() -> dict:
@@ -4462,7 +4546,7 @@ def _control_plane_unavailable() -> HTTPException:
     handler as a raw 500, which the client rendered as the misleading
     "Invalid API key.". This 503 carries a structured error_code the client
     maps to the unified unavailable copy (copy-string contract with
-    website/signup.html: "Sign-in is temporarily unavailable — try again in
+    website/apps/dashboard/public/signup.html: "Sign-in is temporarily unavailable — try again in
     a moment.").
     """
     return HTTPException(
@@ -4801,10 +4885,14 @@ async def create_object(body: CreateObjectRequest, request: Request,
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     # #1643 (review P2-4): mirror the points handler's bookkeeping — object
     # writes must count toward metering + leave an audit trail.
-    try:  # noqa: SIM105
+    try:
         _record_write_op(org, nodes_written=1)
-    except Exception:
-        pass  # metering is best-effort — never fail the write
+    except Exception as e:  # noqa: BLE001, RUF100
+        # #3981: this outer guard exists so metering can never fail the write.
+        # ``_record_write_op`` already absorbs its own failures and alerts the
+        # operator (lane=write_op); if it ever escapes past that, the increment
+        # is dropped a second time and must not be silent either.
+        _alert_unmetered("object_write_op", org.get("org_id"), e)
     await _async_audit(request, org["org_id"], "object_create",
                        resource_id=node.get("id") or body.name,
                        detail={"name": body.name, "objectKind": body.objectKind})
@@ -4838,10 +4926,11 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
-    try:  # noqa: SIM105
+    try:
         _record_write_op(org, nodes_written=1)
-    except Exception:
-        pass  # metering is best-effort — never fail the write
+    except Exception as e:  # noqa: BLE001, RUF100
+        # #3981: same second-line guard as create_object above.
+        _alert_unmetered("subject_write_op", org.get("org_id"), e)
     await _async_audit(request, org["org_id"], "subject_create",
                        resource_id=node.get("id") or body.name,
                        detail={"name": body.name, "subjectKind": body.subjectKind})
@@ -8863,53 +8952,39 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt.
         _record_write_op(org)
-        # #3359: one capture_cost row per capture ATTEMPT that ran an
-        # extraction (successful or errored — a failed extraction that made
-        # provider calls has real spend, and the deadline/deadline_aborts
-        # disclosure depends on that row existing). A ZERO-CALL capture —
-        # the empty-transcript / keyless path — carries no
-        # extractor telemetry and emits nothing; an M2 capture DOES make
+        # #3359/#3665: one measured-cost ledger + analytics row per capture
+        # ATTEMPT that ran an extraction (successful or errored — a failed
+        # extraction that made provider calls has real spend, and the
+        # deadline/deadline_aborts disclosure depends on that row existing).
+        # A ZERO-CALL capture — the empty-transcript / keyless path — carries
+        # no extractor telemetry and emits nothing; an M2 capture DOES make
         # provider calls, so since #3824 it emits a row carrying its call
         # count as ``unattributed`` rather than vanishing into the same
-        # silence as a zero-call capture. Idempotent for free: this
-        # sits behind the SAME replay guard the write-op meter uses, so a
+        # silence as a zero-call capture. Idempotent for free: this sits
+        # behind the SAME replay guard the write-op meter uses, so a
         # zero-node re-POST writes no second row; a genuine retry (#2335
         # WI-2b) does write a second row, which is why the report aggregates
-        # by session_id before percentiling. Best-effort — analytics must
+        # by session_id before percentiling. Best-effort — bookkeeping must
         # never block a committed capture.
-        try:
-            _cost_props = _capture_cost_props(session_id, meta)
-            if _cost_props is not None:
-                # #3665 (lane B7): the SAME measured cost onto the durable
-                # per-period LEDGER, beside the analytics row it already
-                # writes. #3359's analytics row is a measurement, not a
-                # ledger: nothing keyed by org+period, so a spend CEILING
-                # could only read it by scanning every capture row in the
-                # period. The ledger row is one per (org, period) — the read
-                # side `cohort_cost.enforce_cohort_cost_cap` gates on.
-                # Best-effort by contract (record_capture_usage swallows its
-                # own failures): metering never blocks a committed capture.
-                # Off the event loop for the same reason as the emit below —
-                # the Supabase RPC and the embedded registry write are both
-                # blocking I/O and this API runs a single uvicorn worker.
-                from tortoise.metering import record_capture_usage
-                await asyncio.to_thread(
-                    record_capture_usage, org["org_id"],
-                    cost_usd=float(_cost_props.get("cost_usd") or 0.0))
-                # Off the event loop: `_track_analytics_event` POSTs
-                # synchronously (`httpx.Client`), and this API runs a single
-                # uvicorn worker — calling it inline stalls EVERY concurrent
-                # request for the duration of a Supabase round-trip (the
-                # #2988 / #3498 class of sync-HTTP-on-the-loop bug). This is
-                # the first call site on the highest-frequency path, so it is
-                # routed through `asyncio.to_thread` (the house style).
-                await asyncio.to_thread(
-                    _track_analytics_event,
-                    org["org_id"], "capture_cost", _cost_props)
-        except Exception:  # noqa: BLE001, RUF100 — never block capture
-            import logging
-            logging.getLogger("tortoise.api").exception(
-                "capture_cost analytics emit failed (non-fatal)")
+        #
+        # #3665 (lane B7): the SAME measured cost onto the durable per-period
+        # LEDGER, beside the analytics row. #3359's analytics row is a
+        # measurement, not a ledger: nothing keyed by org+period, so a spend
+        # CEILING could only read it by scanning every capture row in the
+        # period. The ledger row is one per (org, period) — the read side
+        # `cohort_cost.enforce_cohort_cost_cap` gates on. Both writes run off
+        # the event loop (`asyncio.to_thread`): the Supabase RPC / embedded
+        # registry write and `_track_analytics_event`'s synchronous
+        # `httpx.Client` POST are blocking I/O, and this API runs a single
+        # uvicorn worker (the #2988 / #3498 class of sync-HTTP-on-the-loop
+        # bug).
+        #
+        # #3825/#3981: the ledger half raises on an unresolvable window; that
+        # raise is a SIGNAL, and ``_emit_capture_ledger`` reports the dropped
+        # increment to the operator (lane=capture_ledger) instead of leaving
+        # a silent short ledger row behind. A ledger failure is not an
+        # analytics failure and is never labelled one.
+        await _emit_capture_ledger(org["org_id"], session_id, meta)
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -9370,20 +9445,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # REGISTERED onboarding state keys (Task 11's registration table) — an
 # unregistered key would be silently dropped by the _update_onboarding_state
 # allowlist filter.
-
-def _capture_receipt_key(harness: str | None) -> str:
-    """Receipt state key for a harness — per-harness when present, the bare
-    legacy key for no-harness hooks (T1-P3 None-guard)."""
-    return f"session_capture_receipt_{harness}" if harness else \
-        "session_capture_receipt"
-
-
-def _capture_last_error_key(harness: str | None) -> str | None:
-    """Per-harness last-error state key. No bare variant is registered — a
-    legacy no-harness hook has no per-harness dashboard row to read it."""
-    if not harness:
-        return None
-    return f"session_capture_last_error_{harness}"
+#
+# #3809: the key SPELLING lives in ONE place — ``tortoise.capture_receipts``
+# — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
+# so both this server and ``tortoise session verify`` derive the same name.
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,
@@ -10341,6 +10406,25 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             "created_at": er[3],
         })
 
+    # #3809: the session's graph SOURCE node (`session:<id>`, ontology v3.6 §4.6
+    # agentSession) — so `tortoise session verify` can prove the session
+    # "appears in the graph as a source" over the REST surface rather than
+    # inferring it from the presence of turn points. Additive: a degraded
+    # capture that never materialized the Source reports `source: null`,
+    # never a fabricated stub.
+    source = None
+    source_rows = proj.g.query(
+        "MATCH (src:Source {url:$url}) "
+        "RETURN src.url, src.sourceKind, src.eventId",
+        params={"url": f"session:{session_id}"},
+    ).result_set
+    if source_rows:
+        source = {
+            "url": source_rows[0][0],
+            "sourceKind": source_rows[0][1],
+            "eventId": source_rows[0][2],
+        }
+
     return {
         "id": sess[0],
         "created_at": sess[1],
@@ -10357,6 +10441,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,
+        "source": source,
     }
 
 
@@ -12138,7 +12223,7 @@ async def delete_graph(graph_id: str, org_id: str,
 
 # ── #2304 trash surface (delete = quarantine → restore within grace) ───────
 # Owner Option C: a deleted custom graph sits in the org's TRASH for a
-# disclosed recovery window (default 7 days — the purge grace), then is
+# disclosed recovery window (default _TRASH_GRACE_DAYS — the purge grace), then is
 # physically erased. These endpoints are the owner/admin RESTORE surfaces:
 # they are SESSION-ONLY (a revoked graph key can never reach a tombstone)
 # and role-gated owner/admin (mirrors delete_graph's session branch). Keys
@@ -12312,7 +12397,7 @@ async def list_trash(org_id: str,
     graph can never be here. ``deleted_at`` absent = legacy tombstone
     (predates #2304 — treated as past-grace by the purge). Past-window and
     legacy rows remain LISTED (pending the purge) but are NOT restorable:
-    restore 410s them (#2465 — the 7-day window is a hard server-side
+    restore 410s them (#2465 — the _TRASH_GRACE_DAYS window is a hard server-side
     bound); the purge erases them on its cadence."""
     await _require_owner_admin_session(user, org_id)
     org = await _org_node(org_id)
@@ -12406,14 +12491,14 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             detail="Graph was purged (data physically erased) — not "
                    "restorable; re-create it from scratch")
     # #2465: the recovery window is a HARD server-side bound — a row past
-    # its 7 days (or a legacy tombstone with no deleted_at) is pending
+    # its _TRASH_GRACE_DAYS window (or a legacy tombstone with no deleted_at) is pending
     # permanent erasure and no longer restorable, matching the UI copy and
     # privacy §6 ("refused for restoration once the window has passed").
     # Only the purge clears these rows (operator cadence — #2317).
     if _trash_grace_expired(row.get("deleted_at")):
         raise HTTPException(
             status_code=410,
-            detail="The 7-day recovery window has passed — this graph is "
+            detail=f"The {_TRASH_GRACE_DAYS}-day recovery window has passed — this graph is "
                    "pending permanent erasure and can no longer be restored")
     name = (row.get("name") or "").strip()
     if name and await _trash_name_conflict(org_id, name, graph_id):
@@ -15747,7 +15832,7 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
 @app.delete("/v1/organizations/{org_id}", status_code=202)
 async def delete_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
-    """E2E-6-D — owner-only org deletion (soft delete → 24h grace → hard delete).
+    """E2E-6-D — owner-only org deletion (soft delete → TEAM_DELETE_GRACE_HOURS grace → hard delete).
 
     Immediate cascade, access-kill first: all API keys revoked (tt_ auth
     fails closed), active memberships marked removed (JWT-session access
@@ -15755,10 +15840,11 @@ async def delete_org(org_id: str, request: Request,
     promised ``grace_hours`` stamped LAST — a partial failure leaves the
     org not marked deleted and retries re-run the full cascade. The boot
     + hourly purge hard-deletes the org graph and control-plane rows once
-    the stored grace window elapses — deletion is irreversible within 24
-    hours (issue #302 indicator); the purge honors the stored window even
-    if the env var changes mid-grace. Immutable audit_events rows are
-    preserved by design (the delete trail survives).
+    the stored grace window elapses — the deletion then becomes irreversible
+    (issue #302 indicator, harmonised by #4179); the purge honors the
+    stored window even if the env default changes mid-grace (the env var is
+    only the fallback for rows with no stored grace). Immutable audit_events
+    rows are preserved by design (the delete trail survives).
 
     AuthZ-first: non-owners get 403 whether or not the org exists or is
     delete-pending (no existence oracle). Idempotent: repeat calls by the
@@ -15776,7 +15862,8 @@ async def delete_org(org_id: str, request: Request,
     if org_node is None:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
+    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
+                                       str(TEAM_DELETE_GRACE_HOURS)))
     if deleted_at:
         # Idempotent replay: already scheduled — same grace answer (200),
         # using the STORED grace window (promise made at schedule time).
@@ -15971,9 +16058,12 @@ def _purge_deleted_orgs() -> None:
 
     Runs at boot + hourly inside the event-retention loop (via
     asyncio.to_thread — sync DB work must not block the loop, #310). The
-    env cutoff pre-filters, then each org's STORED grace_hours (the
-    promise made at schedule time) decides — a config change mid-grace can
-    never hard-delete an org before its promised hard_delete_after.
+    fetch is a SUPERSET of every soft-deleted row (``deleted_at <= now``);
+    each org's STORED grace_hours (the promise made at schedule time) is
+    the sole authority, and the env var is only the fallback for rows that
+    carry no stored grace. A config change mid-grace therefore neither
+    hard-deletes an org before its promised hard_delete_after NOR defers
+    it past that promise (#4179).
 
     Registry mode cascades Membership/APIKey/Invitation nodes and drops
     the org graph; Supabase mode sweeps the registry nodes provision_tenant
@@ -15987,9 +16077,18 @@ def _purge_deleted_orgs() -> None:
     a purge failure never crashes the loop.
     """
     try:
-        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
-        env_cutoff = (datetime.now(UTC) - timedelta(hours=env_grace)).isoformat()
+        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
+                                          str(TEAM_DELETE_GRACE_HOURS)))
         now_dt = datetime.now(UTC)
+        # #4179 P1: the fetch must be a SUPERSET of every stored promise. The
+        # env default is only the fallback for a row with no stored
+        # grace_hours, so it must never pre-filter a row whose STORED promise
+        # already expired — a `now - env_grace` cutoff deferred a legacy
+        # 24h-stamped org by up to (env - stored) when
+        # TEAM_DELETE_GRACE_HOURS grew 24h→168h, purging it ~144h PAST its
+        # hard_delete_after. `deleted_at <= now` selects every soft-deleted
+        # row; `_past_grace` then decides each one on its own stored window.
+        scan_cutoff = now_dt.isoformat()
 
         def _past_grace(row_deleted_at, row_grace_hours) -> bool:
             """Stored grace (promised at schedule time) wins over env."""
@@ -16013,11 +16112,11 @@ def _purge_deleted_orgs() -> None:
             for row in cp.query(
                 "organizations",
                 select=["id", "graph_name", "grace_hours", "deleted_at"],
-                filters=[("deleted_at", "lte", env_cutoff)],
+                filters=[("deleted_at", "lte", scan_cutoff)],
             ):
                 org_id = row["id"]
                 if not _past_grace(row.get("deleted_at"), row.get("grace_hours")):
-                    continue  # env shrank — honor the stored promise
+                    continue  # stored promise decides (env = fallback only)
                 try:
                     # Registry cascade FIRST, control-plane LAST: the orgs
                     # row is the retry anchor — a failed registry purge or
@@ -16054,11 +16153,11 @@ def _purge_deleted_orgs() -> None:
             "MATCH (t:Team) WHERE t.deleted_at IS NOT NULL "
             "AND t.deleted_at < $cutoff "
             "RETURN t.id, t.graph_name, t.grace_hours, t.deleted_at",
-            params={"cutoff": env_cutoff},
+            params={"cutoff": scan_cutoff},
         ).result_set
         for org_id, graph_name, stored_grace, row_deleted_at in rows:
             if not _past_grace(row_deleted_at, stored_grace):
-                continue  # env shrank — honor the stored promise
+                continue  # stored promise decides (env = fallback only)
             try:
                 _purge_registry_org(sdk, org_id, graph_name)
                 _audit_logger.append(
@@ -23222,7 +23321,7 @@ async def backups_sweep(request: Request):
 async def backups_purge(request: Request, body: dict | None = None):
     """#2304 — trash purge: physically erase every expired tombstone
     (custom graphs deleted > grace_days ago, plus legacy tombstones).
-    Internal-key only. Optional ``{"grace_days": N}`` overrides the 7-day
+    Internal-key only. Optional ``{"grace_days": N}`` overrides the _TRASH_GRACE_DAYS
     default (operator drills). Ownership-guarded namespace drops, idempotent,
     per-org/`-graph isolation; purged rows are stamped (kept — audit).
     In-flight guard: a concurrent purge returns 202.
@@ -24528,6 +24627,16 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             updates["subscription_id"] = data["id"]
         if data.get("current_period_end"):
             updates["current_period_end"] = data["current_period_end"]
+        # #3825 / D10: the METER WINDOW ANCHOR. The cost meter totals usage
+        # over the subscription's OWN billing period so it reconciles with the
+        # invoice line, and only the period END was persisted — leaving the
+        # window half-known, which ``metering._current_period`` refuses to
+        # guess at (a derived start is wrong for annual plans and plan
+        # changes, and a calendar-month fallback would put a paying org's
+        # spend on a row the cap's window read never looks at). This event
+        # carries the authoritative start next to the end already written here.
+        if data.get("current_period_start"):
+            updates["current_period_start"] = data["current_period_start"]
         if status:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be

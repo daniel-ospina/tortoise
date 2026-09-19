@@ -24,7 +24,7 @@ aboutObjects: tortoise
 | **A/B/C context-assembly pre-registration** — verbatim vs epistemic subgraph vs union (#2976/#2978/#2683) | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` |
 | Competitor analysis — 14 profiles incl. the four-epistemic-primitives matrix (Kumiho/Cognee/Mem0/HippoRAG/GraphRAG/Emergence/Letta) | `product/competition/_analysis.md` · `product/competition/_index.md` |
 | Decision evidence — #2952 (degraded retrieval) + #2976 (temporal retrieval) from competitors (Hindsight TEMPR temporal leg, Zep bi-temporal, supermemory "dreaming") | `docs/research/2026-09-11-decisions-2952-2976-competitor-evidence.md` |
-| Auth architecture — standard patterns vs Tortoise (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
+| Auth architecture — **current: server-side BFF + HttpOnly `__Host-session` on `app.premiselabs.co` (#4054)**; historical client-side head-gate design (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | CI audit — measured runner-cost/lane analysis, read-only (2026-09-02) | `docs/research/2026-09-02-ci-audit.md` |
@@ -51,6 +51,7 @@ aboutObjects: tortoise
 | Capture consent — separating the MCP Bearer credential from session-capture authorization (#3615, 2026-09-16) | `docs/research/2026-09-16-3615-capture-consent.md` |
 | Kinds classification-later deep research (#1695) | `docs/research/2026-08-26-classification-later.md` |
 | Reaper race scoping/research (#1658) | `docs/scoping/2026-08-24-1658-reaper-race-scoping.md` |
+| Reaper destruction-path threat model on a shared `$TMPDIR` — demonstrated CWE-377 symlink-write + attacker-chosen kill/rmtree, and the escalated provenance-guard decision (#4098) | `docs/scoping/2026-09-18-4098-tmpdir-hardening-scoping.md` |
 | Test (b) lane 403/export-delete scoping (#2090) | `docs/scoping/2026-09-01-2090-test-b-lane-scoping.md` |
 | Test B-wave shared-fixture scoping (#2127) | `docs/scoping/2026-09-02-2127-b-waves-scoping.md` |
 | Ingest contract (`tortoise_ingest` / `sdk.ingest` bundle API) | `docs/INGEST_CONTRACT.md` |
@@ -67,3 +68,4 @@ aboutObjects: tortoise
 | #2600 Attribution Phase 1 scoping — resolver human actor; sessions + write-events stamped (epic #2554 v1 gate) | `docs/scoping-2600-attribution-phase1.md` |
 | #2789 one free organization per person — scoping (double diamond, Design 2 = webhook-provisioned org) | `docs/scoping/2026-09-10-2789-one-free-org.md` |
 | #2789 one free organization per person — implementation plan | `docs/plans/2026-09-10-2789-one-free-org.md` |
+| Retention and deletion — the one promise (canonical) | `docs/retention-and-deletion.md` |

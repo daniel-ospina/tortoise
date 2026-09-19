@@ -80,11 +80,12 @@ from tests.e2e.test_dashboard_onboarding import (
     _wire,
 )
 from tests.e2e.test_session_login_flow import (
-    API_HOST,
     APP_HOST,
     AUTH_HOST,
     AUTH_ORIGIN,
     DASHBOARD_URL,
+    _bff_path,
+    _is_bff_api,
     _preflight_local_servers,
     _seed_local_session_cookie,
     _session_json,
@@ -128,9 +129,28 @@ POINT_COUNT_WITH_OVERVIEW = 1
 # the dashboard server at a mutated COPY of the real bundle.
 class _Handler(http.server.SimpleHTTPRequestHandler):
     routes: ClassVar[dict[str, str]] = {}
+    # Same-origin BFF routes the app calls while it boots. A static server's 404
+    # is `unavailable`, not `signed-out`, so the client gate cannot act on it;
+    # `/api/session` must answer a real STATUS (the app-origin handlers below
+    # carry it) or a clean browser renders the retry card instead of the page
+    # under test.
+    bff: ClassVar[dict[str, tuple[int, dict]]] = {}
 
     def __init__(self, *a, directory=None, **kw):
         super().__init__(*a, directory=directory, **kw)
+
+    def do_GET(self):  # SimpleHTTPRequestHandler's own spelling
+        route = self.bff.get(urllib.parse.urlparse(self.path).path)
+        if route is None:
+            super().do_GET()
+            return
+        status, payload = route
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def translate_path(self, path: str) -> str:
         target = self.routes.get(urllib.parse.urlparse(path).path)
@@ -143,7 +163,16 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
 
 class _AuthHandler(_Handler):
+    # #4054: the auth surface is the APP origin's — `/auth` is the moved
+    # `signup.html` (served from the dashboard dist, not the marketing site),
+    # and the page's session probe asks `/api/session`. A clean browser must get
+    # a 401 there ("not signed in"), never a 404 ("store unreachable") — the
+    # latter would render the retry card and hide the signup CTA this suite
+    # asserts is reachable.
     routes: ClassVar[dict[str, str]] = {"/auth": "signup.html"}
+    bff: ClassVar[dict[str, tuple[int, dict]]] = {
+        "/api/session": (401, {"error": "not_signed_in"}),
+    }
 
 
 def _port_serving(port: int) -> bool:
@@ -205,8 +234,11 @@ def _preview_servers():
     ]
     # ... and ALWAYS serve the auth site on a port this module owns, so the
     # front-door assertion is independent of the shared port's occupant.
+    # #4054: the auth page moved to the dashboard project, so the owned server
+    # serves DIST_DIR (where `/auth` -> signup.html actually lives) — serving
+    # `website/` would 404 the CTA the assertion exists to find.
     own_srv, OWN_AUTH_URL = _serve_ephemeral(
-        SITE_DIR, functools.partial(_AuthHandler, directory=str(SITE_DIR)))
+        DIST_DIR, functools.partial(_AuthHandler, directory=str(DIST_DIR)))
     started.append(own_srv)
     _preflight_local_servers()
     yield
@@ -222,9 +254,9 @@ def _api_route(route, projection: dict | None, point_count: int,
     True when handled. Unknown API paths get a deterministic 401 so the app
     shell renders without a real network round trip."""
     url = route.request.url
-    if not url.startswith(API_HOST):
+    if not _is_bff_api(url):
         return False
-    path = url.split("?", 1)[0]
+    path = _bff_path(url)
     if path.endswith("/v1/onboarding/state") and route.request.method == "GET":
         if state_status != 200:
             route.fulfill(status=state_status, content_type="application/json",
@@ -467,9 +499,22 @@ def _serve_dist(dist: Path) -> tuple[http.server.ThreadingHTTPServer, str]:
 def _probe_overview_claim(page: Page, base: str, projection: dict) -> tuple[str, object]:
     """Load the bundle at `base`, seed a session, and read the connection card
     through the instrument's OWN reader."""
-    page.route("**/*", lambda route: (
-        _api_route(route, projection, POINT_COUNT_WITH_OVERVIEW) or route.continue_()))
-    _seed_ship_session(page, "u-ship-mut", url=base)
+    def handle(route):
+        url = route.request.url
+        # `base` is a PLAIN static server over a mutated COPY of dist (no
+        # Functions, no D1), so the real session gate cannot run there — it is
+        # answered directly. The gate's own contract belongs to
+        # test_session_login_flow / tests/e2e/auth, not to this mutation probe.
+        if urllib.parse.urlsplit(url).path == "/api/session":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"user": {"id": "u-ship-mut",
+                                                    "email": "u-ship-mut@premise-labs.dev"}}))
+            return
+        if _api_route(route, projection, POINT_COUNT_WITH_OVERVIEW):
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
     page.goto(base, wait_until="domcontentloaded", timeout=30_000)
     ui = _settle_overview(page)
     return ui, judge(ui, projection)

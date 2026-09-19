@@ -50,6 +50,15 @@ from tests._html_links import (  # noqa: E402
 
 WEBSITE = REPO_ROOT / "website"
 FUNCTIONS = WEBSITE / "functions"
+# #4054: the repo now ships TWO Pages Functions trees. The BFF (auth, session,
+# api/v1) moved to the app project, so `/welcome` and `/auth/*` are served from
+# `website/apps/dashboard/functions/`. #4171 moved the blog admin gate there too
+# (`/admin`), so only `/blog` stays in `website/functions/`. A resolver that only
+# knew one tree would read a correct link as dangling.
+FUNCTION_ROOTS = (
+    FUNCTIONS,
+    WEBSITE / "apps" / "dashboard" / "functions",
+)
 PRODUCT = WEBSITE / "product.html"
 DOCS = WEBSITE / "docs.html"
 FAQ = WEBSITE / "faq.html"
@@ -259,10 +268,12 @@ def _function_serves(path: str) -> bool:
         # satisfied the dangling-link guard it should have failed (review finding,
         # #3962).
         return False
-    targets = [FUNCTIONS.joinpath(*parts)]
-    for depth in range(len(parts), 0, -1):
-        targets.append(FUNCTIONS.joinpath(*parts[:depth], "index"))
-        targets.append(FUNCTIONS.joinpath(*parts[:depth], "[[path]]"))
+    targets = []
+    for root in FUNCTION_ROOTS:
+        targets.append(root.joinpath(*parts))
+        for depth in range(len(parts), 0, -1):
+            targets.append(root.joinpath(*parts[:depth], "index"))
+            targets.append(root.joinpath(*parts[:depth], "[[path]]"))
     return any(t.with_name(t.name + ext).is_file()
                for t in targets for ext in (".ts", ".js"))
 
@@ -459,7 +470,11 @@ def _offers_blog_entry(page: Path) -> bool:
 _IN_SCOPE_AT_3950 = frozenset({
     "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html", "index.html",
     "license.html", "privacy.html", "product.html", "security.html",
-    "self-hosted.html", "signup.html", "tos.html",
+    "self-hosted.html", "tos.html",
+    # ⚠️ `signup.html` LEFT this set in #4054: the page (the `/auth` screen)
+    # moved to the app project at `website/apps/dashboard/public/signup.html`,
+    # so it is no longer a page `website/` serves and no longer this guard's
+    # subject. Its route now lives at https://app.premiselabs.co/auth.
 })
 
 
@@ -1098,13 +1113,20 @@ def _all_website_pages() -> list[Path]:
     rather than a list that rots; `test_id_guard_covers_every_website_page` pins
     the result so it cannot silently SHRINK either.
 
-    Scope is the TOP LEVEL, matching the issue's `website/*.html`; a page added
-    with another extension (`.htm`) or nested (`website/legal/x.html`) is NOT
-    covered — an open gap tracked in #4111. Pages under `website/apps/` are
-    likewise out of scope: one of them is committed build output
-    (`apps/blog-admin/dist/index.html`), which is regenerated, not authored.
+    Scope is the top level plus the app project's AUTHORED page root; a page
+    added with another extension (`.htm`) or nested (`website/legal/x.html`) is
+    NOT covered — an open gap tracked in #4111. `website/apps/blog-admin/dist/`
+    stays out: that is committed build output, regenerated rather than authored.
+    `website/apps/dashboard/public/` is IN — #4054 moved the auth pages there
+    (`welcome.html`, `signup.html`, `invite-accept.html`), and they are authored
+    and served exactly as before, so the id collision they could carry is the
+    same property as any other page's. Leaving them out would have shrunk this
+    guard's coverage as a silent side effect of the move.
     """
-    return sorted(WEBSITE.glob("*.html"))
+    return sorted([
+        *WEBSITE.glob("*.html"),
+        *(WEBSITE / "apps" / "dashboard" / "public").glob("*.html"),
+    ])
 
 
 def _assert_no_duplicate_ids(page_name: str, html: str) -> None:
@@ -1284,10 +1306,14 @@ def test_the_declared_limit_probe_fires_on_the_construct_it_names() -> None:
 # OUTPUT (not an allowlist the guard consults): a guard whose page set silently
 # shrinks is a guard that silently stops covering a page, and the scope and its
 # CI ratchet share one derivation, so they would shrink in lockstep unnoticed.
+# `signin.html` was DELETED by #4054 (its route 301'd to /auth and was dead) — a
+# page that is gone, not moved. `welcome.html`, `signup.html` and
+# `invite-accept.html` MOVED to `website/apps/dashboard/public/` and are still
+# covered, because `_all_website_pages()` now derives that root too.
 _ALL_WEBSITE_PAGES_AT_3436 = frozenset({
     "404.html", "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html",
     "index.html", "invite-accept.html", "license.html", "privacy.html",
-    "product.html", "security.html", "self-hosted.html", "signin.html",
+    "product.html", "security.html", "self-hosted.html",
     "signup.html", "tos.html", "welcome.html",
 })
 
@@ -1338,10 +1364,15 @@ def test_every_website_page_is_selectable_by_ci() -> None:
     documents the BLOG guard's scope, and deleting a `#3950` ratchet inside an
     id-uniqueness change would be scope creep, not a simplification.
     """
+    # NOTE: the path must be the page's REAL location, not `website/{name}`.
+    # That assumption held only while every covered page was top-level; #4054
+    # moved pages to `website/apps/dashboard/public/`, and a name-based path then
+    # checks a file that does not exist (a permanently "unselectable" report that
+    # no entry can satisfy).
     unselectable = [
-        f"website/{page.name}"
-        for page in _all_website_pages()
-        if not _guard_reachable_for(f"website/{page.name}")
+        rel
+        for rel in (p.relative_to(REPO_ROOT).as_posix() for p in _all_website_pages())
+        if not _guard_reachable_for(rel)
     ]
     assert not unselectable, (
         f"page(s) covered by the id guard whose PR does not run this file: "

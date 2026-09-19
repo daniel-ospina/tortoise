@@ -916,8 +916,13 @@ def _token_is_our_script(tok: str, script_name: str, hooks_dir: str | None,
 
 def _invokes_script(command: str, script_name: str,
                     hooks_dir: str | None,
-                    root: str | os.PathLike[str] | None = None) -> bool:
+                    root: str | os.PathLike[str] | None = None,
+                    *, matched: list[str] | None = None) -> bool:
     """True when a command line EXECUTES our script under ``hooks_dir``.
+
+    ``matched``, when given, receives the raw token the classifier resolved as
+    our script (the first one, matching this predicate's first-hit semantics).
+    It is informational only and does not change the verdict.
 
     THE RULE: walk the token stream and ask, at each position, whether the token
     that BASH would resolve as an executed command names our hook.  A token is in
@@ -983,7 +988,8 @@ def _invokes_script(command: str, script_name: str,
             # Trailing tokens after a ``-c`` command string are the child
             # shell's positional args ($0, $1, …), not commands.
             expect_cmd = False
-            if _invokes_script(tok, script_name, hooks_dir, root):
+            if _invokes_script(tok, script_name, hooks_dir, root,
+                               matched=matched):
                 return True
             continue
         if skip_next:
@@ -1068,6 +1074,8 @@ def _invokes_script(command: str, script_name: str,
             continue
         expect_cmd = False
         if _token_is_our_script(tok, script_name, hooks_dir, root):
+            if matched is not None:
+                matched.append(tok)
             return True
     return False
 
@@ -1177,6 +1185,47 @@ def _entry_is_ours(entry: object, script_name: str,
     """True when an entry invokes our ``script_name`` under ``hooks_dir``."""
     return _entry_command_dict(entry, script_name, hooks_dir, root,
                                flat=flat) is not None
+
+
+def registered_commands(root: str | os.PathLike[str],
+                        harness: str = "claude",
+                        ) -> list[tuple[str, str]]:
+    """Every ``(event, command)`` the harness will RUN for this installed seam.
+
+    Reads the harness's OWN registration file through the SAME loader helpers
+    ``detect_install`` classifies with (``_entry_command_dicts`` /
+    ``_entry_is_ours``), so the command ``tortoise session verify`` fires is
+    byte-identical to the one ``detect_install`` judged current — no second
+    parser that could disagree about which entry is ours.
+
+    Returns ``[]`` for a scripts-only layout (no settings file), an absent
+    file, an unreadable/malformed file, or when no entry invokes our script.
+    Read-only; never raises for a user file (a malformed file is simply no
+    registration to report).
+    """
+    layout = get_layout(harness)
+    settings_path = layout.settings_path(Path(root))
+    if settings_path is None:
+        return []
+    data, _refusal = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return []
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    commands: list[tuple[str, str]] = []
+    for spec in layout.scripts:
+        entries = hooks.get(spec.event)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            for inner in _entry_command_dicts(
+                    entry, spec.name, layout.hooks_dir, Path(root),
+                    flat=layout.flat_entry):
+                command = inner.get("command")
+                if isinstance(command, str) and command.strip():
+                    commands.append((spec.event, command))
+    return commands
 
 
 def _load_settings(path: Path | None) -> tuple[dict | None, str | None]:

@@ -79,11 +79,12 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from tests.e2e.test_session_login_flow import (
-    API_HOST,
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _bff_path,
     _goto_local_dashboard,
+    _is_bff_api,
     _preflight_local_servers,
     _proxy_body,
     _seed_local_session_cookie,
@@ -255,10 +256,10 @@ def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = 
 
     def handle(route):
         url = route.request.url
-        if url.startswith(API_HOST):
+        if _is_bff_api(url):
             # #1828: loadAll pins ?org_id= on overview reads — match on the
             # path so /v1/team/keys?org_id=… still resolves.
-            path = urllib.parse.urlsplit(url).path
+            path = _bff_path(url)
             auth = (route.request.headers.get("authorization") or "")
             if auth.startswith("Bearer tt_"):
                 # #2246: NO key-authed request may fire in session mode —
@@ -487,8 +488,8 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
 
     def handle(route):
         url = route.request.url
-        if url.startswith(API_HOST):
-            path = urllib.parse.urlsplit(url).path
+        if _is_bff_api(url):
+            path = _bff_path(url)
             method = route.request.method
             auth = (route.request.headers.get("authorization") or "")
             if auth.startswith("Bearer tt_"):
@@ -620,8 +621,8 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
 
     def handle(route):
         url = route.request.url
-        if url.startswith(API_HOST):
-            path = urllib.parse.urlsplit(url).path
+        if _is_bff_api(url):
+            path = _bff_path(url)
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
             tid = (qs.get("org_id") or ["team_a"])[0]
             if path.endswith("/v1/session/key") and route.request.method == "POST":
@@ -733,8 +734,8 @@ def test_two_team_key_writes_pin_selected_team(page: Page) -> None:
 
     def handle(route):
         url = route.request.url
-        if url.startswith(API_HOST):
-            path = urllib.parse.urlsplit(url).path
+        if _is_bff_api(url):
+            path = _bff_path(url)
             method = route.request.method
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
             tid = (qs.get("org_id") or ["team_a"])[0]

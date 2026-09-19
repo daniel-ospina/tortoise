@@ -33,6 +33,8 @@ surfaces:
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
+  - test_metering_period_window.py
+  - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
   - test_onboarding_email_http.py
   - test_sentry.py
   - test_telemetry_registration.py
@@ -73,6 +75,10 @@ surfaces:
   - test_eval_ingest_retry.py
   - test_eval_extraction_health.py
   - test_resume_gate_parity.py
+  # #4179: constants agree (7-day restore) — docs/retention-and-deletion.md;
+  # user account, graph, team account; frontend window bound; anti-scatter scan.
+  # Dual-registered in `core` (docs scan) and `onboarding` (website/privacy.html).
+  - test_retention_promise.py
   - test_per_session_census.py
   - test_graph_integrity_gate.py
   - test_cli_claim.py
@@ -252,6 +258,13 @@ surfaces:
   # into the HOME-scoped ~/.cursor. Same dual registration as
   # test_capture_install.py.
   - test_cursor_capture_hook.py
+  # #3809: `tortoise session verify` — the one-command install verification
+  # that drives the REAL installed hook and the real `tortoise` CLI. Its
+  # sources are tortoise/session_verify.py (an ENGINE path matching no
+  # SOURCE_PATTERNS entry, so `core` via the `tortoise/` fallback) plus the
+  # `session verify` wiring in tortoise/__main__.py, which selects `api`.
+  # Same dual registration as test_capture_install.py.
+  - test_session_verify.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -392,6 +405,7 @@ surfaces:
   - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api
   - test_rebuild_turn_points_3947.py
   - test_restore_container_recovery.py
+  - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
   - test_tmpdir_hygiene_4096.py  # #4096: AST guard — no pytest fixture may mkdtemp a tree without reclaiming it (meta test; reads tests/**, no DB)
@@ -422,6 +436,13 @@ surfaces:
   # into the HOME-scoped ~/.cursor. Same dual registration as
   # test_capture_install.py.
   - test_cursor_capture_hook.py
+  # #3809: `tortoise session verify` — the one-command install verification
+  # that drives the REAL installed hook and the real `tortoise` CLI. Its
+  # sources are tortoise/session_verify.py (an ENGINE path matching no
+  # SOURCE_PATTERNS entry, so `core` via the `tortoise/` fallback) plus the
+  # `session verify` wiring in tortoise/__main__.py, which selects `api`.
+  # Same dual registration as test_capture_install.py.
+  - test_session_verify.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -779,6 +800,10 @@ surfaces:
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
   - test_env_truthy.py
   - test_admin_return_to.py
+  # #4171: the retired admin origin's single-hop redirect (executes
+  # website/functions/_middleware.ts under Node) and the console's move to the
+  # app origin. Pure/harness — no wrangler, no network.
+  - test_admin_origin_redirect.py
   - test_dashboard_unknown_address.py
   - test_github_connect.py
   - test_github_connector.py
@@ -810,6 +835,7 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
+  - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py
   # #3485: dual-registered with `api` (cross-surface registration is deliberate,
   # #2913). This is the website-guard home for the shared session-bridge asset:
@@ -1234,6 +1260,7 @@ durations:
   test_pack_state.py: 4.5
   test_skip_guard.py: 4.4
   test_admin_return_to.py: 4.3
+  test_admin_origin_redirect.py: 8.0
   test_longmem_usage_e2e.py: 4.3
   test_init_apikey_validation.py: 4.2
   test_orient_direct_consolidation.py: 4.2

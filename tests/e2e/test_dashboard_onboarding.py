@@ -67,7 +67,9 @@ from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _bff_path,
     _goto_local_dashboard,
+    _is_bff_api,
     _preflight_local_servers,
     _proxy_body,
     _seed_local_session_cookie,
@@ -158,8 +160,8 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
         method = route.request.method
         # #1828: loadAll pins ?org_id= on overview reads — match on the
         # query-stripped path so /v1/team/keys?org_id=… still resolves.
-        path = url.split("?", 1)[0]
-        if "api.premiselabs.co" in url:
+        path = _bff_path(url)
+        if _is_bff_api(url):
             if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([org_row]))

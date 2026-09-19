@@ -644,6 +644,11 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     # #2069: the record's cost_usd is metered at the SERVING lane's
     # family rates (``select_ask_meter_rates`` on ``_LockedReader.model``
     # — the strong lane never under-counts at the deepseek envelope).
+    # #3981: metering never blocks the answer — but a dropped increment is
+    # never silent. ``record_ask_usage`` raises on an unresolvable metering
+    # window; that raise is a SIGNAL, not a refusal (the answer is already
+    # produced by this point), so it is absorbed here and reported to the
+    # operator as lane=ask_ledger.
     if org_id:
         try:
             from tortoise.metering import record_ask_usage
@@ -658,8 +663,20 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
                     rates=select_ask_meter_rates(
                         getattr(model, "model", None) or "")),
                 _selfhost_transport=_selfhost_transport)
-        except Exception:  # noqa: BLE001, RUF100 — metering never blocks
-            pass
+        except Exception as e:  # noqa: BLE001, RUF100 — never blocks
+            # #3981: the alert import is itself guarded — the metering
+            # module may be the thing that failed, and an unguarded import
+            # inside this handler would lose the already-produced answer.
+            try:
+                from tortoise.metering import report_unmetered_increment
+            except Exception:  # noqa: BLE001, RUF100 — never blocks
+                _logger.error(
+                    "UNMETERED INCREMENT (#3981): lane=ask_ledger "
+                    "team=%s error=%s: %s (metering module unavailable)",
+                    org_id or "<none>", type(e).__name__, e)
+            else:
+                report_unmetered_increment(lane="ask_ledger",
+                                           org_id=org_id, error=e)
 
     # 8. Degradation signal (leg_trace + D8-decoration-unavailable).
     degraded = any(bool(leg.get("degraded")) for leg in leg_trace)

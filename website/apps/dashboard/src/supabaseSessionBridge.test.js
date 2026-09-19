@@ -1,5 +1,5 @@
 // supabaseSessionBridge.test.js — #3485 behavioural execution tests for the
-// cross-subdomain session bridge (website/assets/supabase-session.js).
+// retained cross-subdomain session bridge (website/assets/supabase-session.js).
 //
 // WHY THIS FILE EXECUTES THE REAL SCRIPT. The pins it replaces were TEXT
 // extractors — brace counting plus substring counts. Three review cycles each
@@ -19,6 +19,28 @@
 // RFC 6265 4096-byte per-cookie cap, so an oversized write is DROPPED like a
 // browser drops it) and `history.replaceState`. `URL`/`URLSearchParams` are
 // passed in because a fresh vm context has neither.
+//
+// #4054 — WHY THIS SUITE IS RESTORED, AND WHY THE SUBJECT IS THE SHARED FILE.
+// This file was deleted with the dashboard's COPY of the bridge
+// (website/apps/dashboard/public/assets/supabase-session.js), but
+// website/assets/supabase-session.js itself is RETAINED (and still served from
+// premiselabs.co). Deleting the only executing test of a retained artifact is
+// how it silently rots, so the suite is restored against the shared file.
+//
+// The dashboard no longer loads the bridge — it is BFF-migrated — and NEITHER
+// DOES blog-admin: blog-admin ships its own adapter
+// (website/apps/blog-admin/src/lib/supabase.ts) which only shares the COOKIE
+// NAME; it has no <script src="/assets/supabase-session.js"> and no import of
+// the bridge. The reasons the shared bridge is retained are different and
+// concrete: tortoise/oauth.py's live consent-page client is a faithful inline
+// PORT of its adapter (parity pinned by tests/test_cross_subdomain_cookie_sync.py),
+// the dashboard's live `tt_claim_pending` marker helpers mirror its
+// host-conditional helpers (same test), and this file is the subject of the #3503
+// fragment-retention gate (tests/test_session_bridge_fragment_retention.py).
+// It lives in the dashboard suite because that is the repo's node test runner —
+// `.github/workflows/ci.yml` predicates the `dashboard-js-tests` job on a change
+// to website/assets/supabase-session.js precisely so this suite runs for it.
+// The path below resolves from here to website/assets/supabase-session.js.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'

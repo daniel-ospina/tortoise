@@ -1733,7 +1733,7 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
 
 
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
-    """MCP config for one harness — mirrors website/welcome.html (#497/#529).
+    """MCP config for one harness — mirrors website/apps/dashboard/public/welcome.html (#497/#529).
 
     Hosted (HTTP) shapes — pinned by tests/test_onboarding_variants.py T3:
     - claude: {"mcpServers": {"tortoise": {"type": "http", ...}}} — a url
@@ -1790,7 +1790,7 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
     """Print per-harness MCP config (hosted HTTP shape, #304/#981).
 
     With --harness, print only that harness; without, print the selector UI.
-    Shapes mirror website/welcome.html Block A (T3-pinned): claude's CLI
+    Shapes mirror website/apps/dashboard/public/welcome.html Block A (T3-pinned): claude's CLI
     one-liner + type:http .mcp.json alternative, env-expansion forms for
     cursor/pi, codex mcp add command.
     """
@@ -3254,13 +3254,58 @@ def _cmd_session(args) -> int:
         return _cmd_session_capture(args, api_key, api_url)
     elif args.session_cmd == "probe":
         return _cmd_session_probe(args, api_key, api_url)
+    elif args.session_cmd == "verify":
+        return _cmd_session_verify(args, api_key, api_url)
     elif args.session_cmd == "list":
         return _cmd_session_list(api_key, api_url)
     elif args.session_cmd == "view":
         return _cmd_session_view(args, api_key, api_url)
     else:
-        print("Unknown session command. Try capture, probe, list, or view.", file=sys.stderr)
+        print("Unknown session command. Try capture, probe, verify, list, or "
+              "view.", file=sys.stderr)
         return 1
+
+
+def _cmd_session_verify(args, api_key: str, api_url: str) -> int:
+    """`tortoise session verify` — one-command behavioural install check.
+
+    Thin CLI boundary over :func:`tortoise.session_verify.verify_session_capture`:
+    the whole chain runs inside ONE catch-all, so every failure on the
+    resolve/fire/observe path is a populated message plus a non-zero exit —
+    never an uncaught traceback out of the CLI.  A ``MemoryError`` is
+    re-raised first (resource exhaustion is not a refusal; the handler
+    allocates).  Deliberately NOT an ``except (A, B)`` tuple — the next
+    unenumerated member refutes a finite enumeration (#3987/#3988 class).
+    """
+    from pathlib import Path
+
+    from tortoise.session_verify import (
+        EXIT_BROKEN,
+        render_report,
+        verify_session_capture,
+    )
+
+    try:
+        report = verify_session_capture(
+            args.harness,
+            api_key=api_key,
+            api_url=api_url,
+            home=Path.home(),
+            install_dir=getattr(args, "dir", None),
+            timeout=float(getattr(args, "timeout", 90.0)),
+            keep=bool(getattr(args, "keep", False)),
+        )
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(f"verify failed: {e.__class__.__name__}: {e}", file=sys.stderr)
+        return EXIT_BROKEN
+    if getattr(args, "json", False):
+        import json as _json
+        print(_json.dumps(report, indent=2))
+    else:
+        print(render_report(report))
+    return int(report.get("exit_code", EXIT_BROKEN))
 
 
 def _parse_transcript(text: str) -> list:
@@ -6500,6 +6545,11 @@ def _flush_pending_capture_notice() -> None:
 def main(argv: list[str] | None = None) -> int:
     import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
+    # #3809: the harness choices for `session verify` come from the module's
+    # single HARNESSES tuple, which is itself derived from
+    # capture_install.CAPTURE_SEAM — one definition, never a second list that
+    # could drift.
+    from tortoise.session_verify import HARNESSES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
@@ -6769,6 +6819,34 @@ def main(argv: list[str] | None = None) -> int:
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
+    # #3809: one-command behavioural install verification — fire the installed
+    # seam and assert installed -> captured -> in-memory, exiting non-zero on
+    # any broken link. Named `verify` to sit in the existing
+    # `session capture|probe|list|view` grammar (a noun-verb subcommand of the
+    # session surface); NOT a new top-level verb, which would duplicate the
+    # session namespace `capture`/`probe` already own.
+    session_verify = session_sp.add_parser(
+        "verify",
+        help="Verify a harness install end-to-end: installed -> captured -> "
+             "in memory (#3809)")
+    session_verify.add_argument(
+        "--harness", required=True, choices=list(HARNESSES),
+        help="Harness to verify (claude | codex | cursor | pi)")
+    session_verify.add_argument(
+        "--dir", default=None,
+        help="Install root to verify (claude: project dir; codex: $CODEX_HOME; "
+             "cursor: ~/.cursor; pi: ~/.pi/agent/extensions) — default: the "
+             "harness's own root")
+    session_verify.add_argument(
+        "--timeout", type=float, default=90.0,
+        help="Seconds to wait for the fired seam's capture (default: 90)")
+    session_verify.add_argument(
+        "--keep", action="store_true",
+        help="Do NOT delete the probe session after asserting (it is "
+             "reported, never silently left behind)")
+    session_verify.add_argument(
+        "--json", action="store_true",
+        help="Emit the machine-readable report (for CI)")
     # #1727 Slice 2 (Task 15): T2 backfill — `tortoise sessions import`
     # (plural — the plan's pinned CLI shape) ingests historical transcripts
     # from harness stores (codex / claude-desktop / cursor / pi).

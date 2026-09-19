@@ -10,10 +10,11 @@ a sibling origin (`api.premiselabs.co` from `app.premiselabs.co`), which would
 mean the BFF session cannot authenticate the dashboard's own API calls.
 
 This is asserted by OBSERVATION here, not by argument: the mock echoes the exact
-Cookie header the browser sent to a different port (a different origin).
+Cookie header the browser sent to a different ORIGIN.
 
-The sibling port stands in for api.premiselabs.co: what matters is the cookie
-scope rule, which is host-based, not the specific hostname.
+The sibling origin stands in for api.premiselabs.co: what matters is the cookie
+scope rule, which is host-based — so the stand-in must differ by HOSTNAME, not
+merely by port (cookies ignore the port, RFC 6265 §5.1.3).
 """
 from __future__ import annotations
 
@@ -28,8 +29,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.auth.bff_test_helpers import ensure_dashboard_dist
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WEBSITE_DIR = REPO_ROOT / "website"
+# #4054: the BFF moved to the `tortoise-dashboard` project. These suites
+# must boot THAT Pages project — serving website/ would answer /auth/*
+# with the SPA fallback and no session would ever be minted.
+DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
 APP_PORT = int(os.environ.get("AUTH_CX_APP_PORT", "8993"))
@@ -87,6 +93,11 @@ def two_origins():
                 "set AUTH_ALLOW_NO_TOOLCHAIN=1 to opt out explicitly."
             )
 
+    # `wrangler pages dev dist` needs the built root (vite copies public/ into
+    # dist/); building here keeps the suite self-sufficient rather than depending
+    # on `tests/e2e/auth/` having run first in the same job.
+    ensure_dashboard_dist()
+
     mock_env = os.environ.copy()
     mock_env["MOCK_PORT"] = str(API_PORT)
     # The app's Supabase calls also go to the "api" origin here.
@@ -98,7 +109,7 @@ def two_origins():
 
     app = subprocess.Popen(
         [
-            shutil.which("wrangler"), "pages", "dev", ".",
+            shutil.which("wrangler"), "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
             "-b", f"SUPABASE_URL={API}",
@@ -110,7 +121,7 @@ def two_origins():
         # config-not-literal change from SCOPE.md 6.
         "-b", f"APP_ORIGIN={APP}",
         ],
-        cwd=str(WEBSITE_DIR),
+        cwd=str(DASHBOARD_DIR),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
     if not _wait(APP_PORT):
