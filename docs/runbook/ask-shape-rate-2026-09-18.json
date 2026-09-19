@@ -1,7 +1,7 @@
 {
   "instrument": "tools/ask_shape_rate.py",
-  "instrument_sha256": "a8e4125544d9c2c3e547537473f70689abd2c542d077aeff7fb346177359fd1a",
-  "generated_at": "2026-09-19T00:31:03.754287+00:00",
+  "instrument_sha256": "23e585d55b1cce4710252eaf6d169ac035ed339ef5b61f11b17dcf573b4946c2",
+  "generated_at": "2026-09-19T00:47:47.440675+00:00",
   "fixture": {
     "path": "tests/fixtures/ask_spotcheck_composition.json",
     "sha256": "7f4062643323af4e5d0fec0b98bb3e3ca8499362c3f7e07a83c55f07633d15fa",
@@ -13,7 +13,7 @@
     "n_turns": 10470,
     "tree_pin": {
       "asserted": true,
-      "sha": "9a4ba7abe6158d42bc479a25b799bb76d07b73a2"
+      "sha": "0881dca355914a1eef650e2ecd5fb88569fe9786"
     }
   },
   "decision_rule": {
@@ -55,11 +55,11 @@
       {
         "question_id": "0100672e",
         "turns": 486,
-        "seed_s": 1.9
+        "seed_s": 1.56
       }
     ],
     "total_turns_all_21": 10470,
-    "extrapolated_full_21_s": 40.9
+    "extrapolated_full_21_s": 33.6
   },
   "known_green": {
     "ok": true,
@@ -311,6 +311,9 @@
         "must_not_abstain_green": 18,
         "must_not_abstain_red": 0
       },
+      "baseline_errors": 0,
+      "mutated_errors": 0,
+      "excluded_errors": [],
       "per_question": [
         {
           "question_id": "0100672e",
@@ -535,6 +538,9 @@
         "must_not_abstain_green": 0,
         "must_not_abstain_red": 18
       },
+      "baseline_errors": 0,
+      "mutated_errors": 0,
+      "excluded_errors": [],
       "per_question": [
         {
           "question_id": "0100672e",
@@ -708,7 +714,18 @@
     },
     "M2_control": {
       "named_leg": "L1",
-      "named_leg_flips": [
+      "named_leg_flips": [],
+      "named_leg_moved": false,
+      "collateral": {},
+      "l1_directions": {
+        "must_abstain_green": 0,
+        "must_abstain_red": 3,
+        "must_not_abstain_green": 0,
+        "must_not_abstain_red": 18
+      },
+      "baseline_errors": 0,
+      "mutated_errors": 21,
+      "excluded_errors": [
         "0100672e",
         "0a995998",
         "1d4e3b97",
@@ -731,60 +748,6 @@
         "gpt4_93159ced_abs",
         "gpt4_d84a3211"
       ],
-      "named_leg_moved": true,
-      "collateral": {
-        "L2": [
-          "0100672e",
-          "0a995998",
-          "1d4e3b97",
-          "1de5cff2",
-          "2133c1b5",
-          "26bdc477",
-          "830ce83f",
-          "b0479f84",
-          "ba358f49_abs",
-          "ceb54acb",
-          "d6233ab6",
-          "e4e14d04",
-          "e831120c",
-          "e9327a54",
-          "eace081b",
-          "f4f1d8a4_abs",
-          "gpt4_6ed717ea",
-          "gpt4_7a0daae1",
-          "gpt4_8279ba02",
-          "gpt4_93159ced_abs",
-          "gpt4_d84a3211"
-        ],
-        "L3": [
-          "0100672e",
-          "0a995998",
-          "1d4e3b97",
-          "1de5cff2",
-          "2133c1b5",
-          "26bdc477",
-          "830ce83f",
-          "b0479f84",
-          "ceb54acb",
-          "d6233ab6",
-          "e4e14d04",
-          "e831120c",
-          "e9327a54",
-          "eace081b",
-          "f4f1d8a4_abs",
-          "gpt4_6ed717ea",
-          "gpt4_7a0daae1",
-          "gpt4_8279ba02",
-          "gpt4_93159ced_abs",
-          "gpt4_d84a3211"
-        ]
-      },
-      "l1_directions": {
-        "must_abstain_green": 0,
-        "must_abstain_red": 3,
-        "must_not_abstain_green": 0,
-        "must_not_abstain_red": 18
-      },
       "per_question": [
         {
           "question_id": "0100672e",
@@ -1031,7 +994,10 @@
         "must_abstain_red": 0,
         "must_not_abstain_green": 0,
         "must_not_abstain_red": 18
-      }
+      },
+      "baseline_errors": 0,
+      "mutated_errors": 0,
+      "excluded_errors": []
     },
     "M3_L1": {
       "named_leg": "L1",
@@ -1108,7 +1074,10 @@
         "must_abstain_red": 0,
         "must_not_abstain_green": 0,
         "must_not_abstain_red": 18
-      }
+      },
+      "baseline_errors": 0,
+      "mutated_errors": 0,
+      "excluded_errors": []
     },
     "M3": {
       "per_question": [
@@ -1287,6 +1256,9 @@
       "M2_l1_red": true,
       "M3_l3_red": true,
       "M3_l1_red": true,
+      "arms_error_free": true,
+      "faulted_arms": [],
+      "M2_control_expected_failures": 21,
       "all": true
     },
     "substitution_signature": {
@@ -1302,11 +1274,11 @@
         "question_id": "0100672e",
         "expected_abstain": false,
         "abstained": false,
-        "answer_head": "You spent $60 total on coffee mugs for your coworkers, but the context does not state a per-mug price.",
+        "answer_head": "$60 on coffee mugs for my coworkers.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1431,
+        "duration_ms": 1484,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1400,10 +1372,10 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "on coffee mugs for",
-          "shared_span_words": 4,
-          "longest_common_span": "on coffee mugs for",
-          "longest_common_span_words": 4,
+          "shared_span": "60 on coffee mugs for my coworkers",
+          "shared_span_words": 7,
+          "longest_common_span": "60 on coffee mugs for my coworkers",
+          "longest_common_span_words": 7,
           "ok": true
         },
         "gold_answer_span": null,
@@ -1420,7 +1392,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1439,
+        "duration_ms": 1467,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1539,11 +1511,11 @@
         "question_id": "1d4e3b97",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "The context does not contain any information about why the user's bike performs better during Sunday group rides.",
+        "answer_head": "The context does not contain any information about why the user's bike would be performing better during Sunday group rides.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1149,
+        "duration_ms": 1564,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1662,7 +1634,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1433,
+        "duration_ms": 1469,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1775,7 +1747,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1287,
+        "duration_ms": 1429,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1891,7 +1863,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1853,
+        "duration_ms": 1189,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2006,7 +1978,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1467,
+        "duration_ms": 1424,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2118,11 +2090,11 @@
         "question_id": "b0479f84",
         "expected_abstain": false,
         "abstained": false,
-        "answer_head": "Based on your interest in nature and wildlife documentaries, **Dynasties** and **Chasing Coral** are both excellent recommendations.",
+        "answer_head": "Based on your interest in nature documentaries, **Dynasties** and **Chasing Coral** are both recommended. **Dynasties** focuses on family dynamics and intimate,",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1234,
+        "duration_ms": 1897,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2220,10 +2192,10 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "dynasties and chasing coral are both",
-          "shared_span_words": 6,
-          "longest_common_span": "dynasties and chasing coral are both",
-          "longest_common_span_words": 6,
+          "shared_span": "chimpanzees lions wolves tigers and emperor penguins",
+          "shared_span_words": 7,
+          "longest_common_span": "chimpanzees lions wolves tigers and emperor penguins",
+          "longest_common_span_words": 7,
           "ok": true
         },
         "gold_answer_span": "that are similar",
@@ -2240,7 +2212,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1220,
+        "duration_ms": 1432,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -2355,11 +2327,11 @@
         "question_id": "ceb54acb",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "I don't know. The context only mentions \"sexual compulsions\" as a shorter term; it does not list the other four options.",
+        "answer_head": "The context does not contain the other four options \u2014 it only mentions \"sexual compulsions\" as a shorter term, with no list of additional alternatives.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1309,
+        "duration_ms": 1536,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2461,7 +2433,7 @@
           "gold_turn_head_present": true,
           "shared_span": null,
           "shared_span_words": 0,
-          "longest_common_span": "i don t",
+          "longest_common_span": "a shorter term",
           "longest_common_span_words": 3,
           "ok": false
         },
@@ -2475,11 +2447,11 @@
         "question_id": "d6233ab6",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "The context does not contain information about whether attending a high school reunion would be a good idea. It does mention the user's happy high school memori",
+        "answer_head": "The context does not contain information about whether attending a high school reunion would be a good idea. It does mention the user's happy high school experi",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1737,
+        "duration_ms": 1652,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2578,14 +2550,14 @@
         "l2a_ask_gold": true,
         "l2b_search": true,
         "l2b_recall": true,
-        "l3_grounding": false,
+        "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": null,
-          "shared_span_words": 0,
-          "longest_common_span": "happy high school",
-          "longest_common_span_words": 3,
-          "ok": false
+          "shared_span": "happy high school experiences",
+          "shared_span_words": 4,
+          "longest_common_span": "happy high school experiences",
+          "longest_common_span_words": 4,
+          "ok": true
         },
         "gold_answer_span": "high school experiences such as being part of the debate team and taking advanced placement courses",
         "gold_answer_span_words": 16,
@@ -2601,7 +2573,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1597,
+        "duration_ms": 1584,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2707,11 +2679,11 @@
         "question_id": "e831120c",
         "expected_abstain": false,
         "abstained": false,
-        "answer_head": "The context does not state how many weeks it took you to watch the Marvel Cinematic Universe movies and the main Star Wars films. It only mentions that you watc",
+        "answer_head": "The context does not specify how many weeks it took you to watch the main Star Wars films. It only mentions that you watched all 22 Marvel Cinematic Universe mo",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1350,
+        "duration_ms": 1207,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2809,10 +2781,10 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "marvel cinematic universe movies",
-          "shared_span_words": 4,
-          "longest_common_span": "marvel cinematic universe movies",
-          "longest_common_span_words": 4,
+          "shared_span": "watched all 22 marvel cinematic universe movies in two weeks",
+          "shared_span_words": 10,
+          "longest_common_span": "watched all 22 marvel cinematic universe movies in two weeks",
+          "longest_common_span_words": 10,
           "ok": true
         },
         "gold_answer_span": "5",
@@ -2829,7 +2801,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1310,
+        "duration_ms": 1352,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2945,7 +2917,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1257,
+        "duration_ms": 1229,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3057,11 +3029,11 @@
         "question_id": "f4f1d8a4_abs",
         "expected_abstain": true,
         "abstained": true,
-        "answer_head": "The context does not mention a birthday gift from your dad. It mentions a stand mixer given by your sister and a silver necklace given to your sister, but nothi",
+        "answer_head": "The context does not mention a birthday gift from your dad. It mentions a stand mixer given by your sister and a silver necklace given to your sister.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1758,
+        "duration_ms": 1521,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -3175,7 +3147,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1421,
+        "duration_ms": 1542,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3285,7 +3257,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1686,
+        "duration_ms": 1641,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3386,10 +3358,10 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "i just received my new tennis racket today",
-          "shared_span_words": 8,
-          "longest_common_span": "i just received my new tennis racket today",
-          "longest_common_span_words": 8,
+          "shared_span": "bought a new tennis racket online",
+          "shared_span_words": 6,
+          "longest_common_span": "bought a new tennis racket online",
+          "longest_common_span_words": 6,
           "ok": true
         },
         "gold_answer_span": "1",
@@ -3402,11 +3374,11 @@
         "question_id": "gpt4_8279ba02",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "I don't know \u2014 the context mentions that you got a smoker \"today,\" but it doesn't provide a date for that session, so the number of days ago can't be determined",
+        "answer_head": "I don't know \u2014 the context mentions that you just got a smoker today, but it doesn't provide a date for that purchase, so the number of days ago can't be determ",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1567,
+        "duration_ms": 1445,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3495,10 +3467,10 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "got a smoker today",
-          "shared_span_words": 4,
-          "longest_common_span": "got a smoker today",
-          "longest_common_span_words": 4,
+          "shared_span": "just got a smoker today",
+          "shared_span_words": 5,
+          "longest_common_span": "just got a smoker today",
+          "longest_common_span_words": 5,
           "ok": true
         },
         "gold_answer_span": "the last",
@@ -3515,7 +3487,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1553,
+        "duration_ms": 1446,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -3633,7 +3605,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1433,
+        "duration_ms": 1481,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3742,7 +3714,6 @@
       }
     ],
     "shape_rate": 0.2857142857142857,
-    "substrate_errors": [],
     "abstain_pn": {
       "passed": 11,
       "n": 21,
@@ -3754,9 +3725,9 @@
       "rate": 1.0
     },
     "grounding_pn": {
-      "passed": 10,
+      "passed": 11,
       "n": 21,
-      "rate": 0.47619047619047616
+      "rate": 0.5238095238095238
     },
     "ctx_recall_pn": {
       "passed": 21,
@@ -3804,18 +3775,19 @@
         "n": 21
       },
       "span_ge_4_words": {
-        "passed": 10,
+        "passed": 11,
         "n": 21
       },
       "span_ge_5_words": {
-        "passed": 5,
+        "passed": 8,
         "n": 21
       },
       "span_ge_6_words": {
-        "passed": 4,
+        "passed": 6,
         "n": 21
       }
-    }
+    },
+    "substrate_errors": []
   },
   "caveats": [
     "L3 is a LEXICAL FLOOR, not semantic entailment: the gold turn head must be in evidence AND the evidence and the committed answer must share >= 4 contiguous words.",
@@ -3828,7 +3800,7 @@
     "reasons": [
       "shape_rate 0.286 < 0.80",
       "abstain 11/21 < 21/21",
-      "grounding 10/21 < 18/21"
+      "grounding 11/21 < 18/21"
     ],
     "claim_allowed": null
   },
