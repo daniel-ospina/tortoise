@@ -88,6 +88,8 @@ from tortoise.sdk import (
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
+    _capture_turn_embeddings,  # #4194: local-embedder batch for stored turn Points
+    _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
@@ -8403,19 +8405,37 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
     # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
     # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
-    # since #3914. #3551 tracks collapsing all three onto one shared
+    # since #3914. It deliberately omits Source/extraction and — until
+    # #4197's backfill decision — the embedding, so it keeps modelling the
+    # un-backfilled / no-embedder store the shipping ask lane still reads.
+    # #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    # #4194: embed the whole window in ONE local-model call BEFORE the loop —
+    # the stored text of each turn, exactly as the loop writes it. Batched so
+    # the added work on this already-hot synchronous path (#3086 measures
+    # ~4.75 s for a 500-turn capture) is one model call rather than one per
+    # turn. Same local embedder (and same vector) `create_point` stores, and
+    # the same one the read path encodes a query with. Fail-soft: `None` per
+    # turn when no embedder is available — the turn is still stored and the
+    # read path declares its vector leg impaired.
+    #
+    # #4194/#3086: the encode runs OFF the event loop on the capture pool. The
+    # turn loop itself is a tracked on-loop residual (#3086); a local-model
+    # encode over a whole capture window must not add to it. SDK
+    # `capture_session` is synchronous (there is no loop to free) and calls the
+    # same helper inline — the two share the helper, not the scheduling.
+    _turn_texts = _capture_turn_texts(windowed)
+    _turn_embs = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts)
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
-        # P1 #1529 (D10, #721 parity): isinstance-first content coercion — a
-        # non-string content can NEVER crash the loop into a raw 500 after the
-        # Session MERGE (partial write). The window helper already coerced
-        # None/int/bool/dict content and truncated to the 5000-char cap — this
-        # readback is the idempotent same-shape guard.
-        raw_content = turn.get("content", "")
-        content = raw_content if isinstance(raw_content, str) else (
-            "" if raw_content is None else str(raw_content))
+        # P1 #1529 (D10, #721 parity): the stored text (and its isinstance-first
+        # coercion — a non-string content can NEVER crash the loop into a raw
+        # 500 after the Session MERGE) comes from the shared
+        # `_capture_turn_texts`, one definition shared with the embedding batch
+        # above (#4194), so the vector is always computed over the string
+        # actually stored.
 
         # #490: turn Points are the episodic turn stream OF THIS SESSION —
         # keyed deterministically by {session_id}_t{i} so re-capturing the
@@ -8426,7 +8446,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # path MERGE (s)-[:CONTAINS]->(t) with a missing edge makes FalkorDB
         # create the whole path from scratch, duplicating the Point node.
         turn_id = f"{session_id}_t{i}"
-        turn_text = f"[{role}] {content[:5000]}"
+        turn_text = _turn_texts[i]
+        turn_embedding = _turn_embs[i]
         _turn_rows = proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
@@ -8434,11 +8455,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch "
+            "    t.updatedAt=$now, t.content_hash=$ch, "
+            # #4194: CASE-guarded so a RE-capture without an embedder
+            # preserves an already-stored vector instead of nulling it
+            # (`vecf32(null)` would REMOVE the property). The same guard
+            # `_upsert_point_props` uses, so live == rebuild.
+            "    t.embedding=CASE WHEN $emb IS NOT NULL "
+            "        THEN vecf32($emb) ELSE t.embedding END "
             "RETURN t.createdAt AS createdAt, t.status AS status",
             params={"id": turn_id, "c": turn_text, "k": "event",
                     "speaker": role, "s": "draft", "now": now,
-                    "ch": _content_hash(turn_text)},
+                    "ch": _content_hash(turn_text),
+                    "emb": turn_embedding},
         ).result_set
         # #3947 review (F4 + parity): the write's COALESCE owns the stored
         # timestamp and status — a RE-capture keeps the original createdAt and
