@@ -265,6 +265,10 @@ const CLIENT_Z = "198.51.100.30";
 // to contain one.
 const CLIENT_V6_A = "2001:db8:85a3:0:0:8a2e:370:7334";
 const CLIENT_V6_B = "2001:db8:85a3:0:0:8a2e:370:7433";
+// …and the COMPRESSED and IPv4-mapped forms, because a transform can be the identity on
+// full-form literals alone (`replace("::", ":")`, `replace(/^::ffff:/, "")`).
+const CLIENT_V6_C = "2001:db8::1";
+const CLIENT_V6_D = "::ffff:203.0.113.9";
 
 // The loops must not scale with a bumped constant: a huge RATE_LIMIT or
 // MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
@@ -493,6 +497,16 @@ hits.clear();
 for (let i = 0; i < limit; i++) rateLimited(CLIENT_V6_A, T0 + i);
 observations.ipv6Trips = rateLimited(CLIENT_V6_A, T0 + limit);
 observations.ipv6OtherOk = !rateLimited(CLIENT_V6_B, T0 + limit);
+observations.compressedV6Trips = (() => {
+  hits.clear();
+  for (let i = 0; i < limit; i++) rateLimited(CLIENT_V6_C, T0 + i);
+  return rateLimited(CLIENT_V6_C, T0 + limit);
+})();
+observations.mappedV6Trips = (() => {
+  hits.clear();
+  for (let i = 0; i < limit; i++) rateLimited(CLIENT_V6_D, T0 + i);
+  return rateLimited(CLIENT_V6_D, T0 + limit);
+})();
 
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
 // this call — `Date.now()` stepping backwards is reachable under NTP, a VM restore or a
@@ -555,7 +569,12 @@ def _check_threshold(observed: dict) -> None:
 
 
 def _check_accumulation(observed: dict) -> None:
-    """The map holds the window BY REFERENCE, so an emptied array is a silent no-op."""
+    """Every accepted submission must lengthen the stored window.
+
+    The map holds the array BY REFERENCE, so emptying it in place is the quiet way to
+    disable the limiter: the array the map points at becomes shorter than the number of
+    accepted submissions. That is why the growth is observed rather than assumed.
+    """
     limit = observed["limit"]
     assert observed["growth"] == list(range(1, limit + 1)), (
         "the stored window must grow by one per submission, got "
@@ -634,6 +653,14 @@ def _check_isolation(observed: dict) -> None:
     )
     assert observed["ipv6OtherOk"] is True, (
         "a different IPv6 address must not be refused by another's history"
+    )
+    assert observed["compressedV6Trips"] is True, (
+        "a COMPRESSED IPv6 client (`2001:db8::1`) must be throttled — a transform such "
+        "as `replace('::', ':')` is the identity on full-form literals only"
+    )
+    assert observed["mappedV6Trips"] is True, (
+        "an IPv4-mapped IPv6 client (`::ffff:203.0.113.9`) must be throttled — a "
+        "transform such as `replace(/^::ffff:/, '')` is the identity on everything else"
     )
 
 
@@ -799,6 +826,79 @@ INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
 )
 
 
+def _key_failures(code: str) -> list[str]:
+    """Every store key must be exactly the address — no derived, sliced or normalised key.
+
+    A read key that is the identity on the corpus but not on real input is a bypass the
+    scenarios cannot be relied on to expose: `String(ip).slice(0, 15)` and
+    `String(ip).split(":")[0]` are the identity on every short IPv4 literal, and
+    `String(ip).replace("::", ":")` is the identity on every FULL-form IPv6 literal, so
+    each new corpus shape only moves the escape. What actually matters is that the read
+    key and the write key are the same value, so the keys are read: `hits.get(ip)`,
+    `hits.set(ip, ...)` and `hits.delete(ip)`.
+    """
+    body = _limiter_source(code)
+    calls = re.findall(r"hits\.(get|set|delete)\(([^,)]*)", body)
+    assert len(calls) >= 4, (
+        f"expected the limiter's store call sites, found {calls!r} — the key check "
+        "cannot certify a limiter whose store it cannot find"
+    )
+    # `delete` is exempt from `ip`: the sweep and the eviction delete keys they are
+    # iterating (`k`), which is the whole point of those loops. The address-keyed
+    # operations — the read, and both writes — are what must agree on the key.
+    return [
+        f"the store is {method}-ed with {argument.strip()!r}, not the address — a key "
+        "derived from the address reads a bucket nothing writes and refuses nobody"
+        for method, argument in calls
+        if argument.strip() != "ip" and not (method == "delete" and argument.strip() == "k")
+    ]
+
+
+def _binding_failures(code: str) -> list[str]:
+    """`rateLimited` must be the single function declaration, never re-bound.
+
+    Extraction slices the `function rateLimited` text, so a later assignment
+    (`rateLimited = function () { return false; };`) is invisible to it while the module
+    calls the override at request time — the harness would certify a limiter the module
+    does not use. A second DEFINITION is refused by uniqueness; a second BINDING of the
+    same name is refused here.
+    """
+    masked = _mask_strings(_strip_comments(code))
+    failures = []
+    if re.search(r"\brateLimited\s*=(?!=)", masked):
+        failures.append(
+            "the module re-binds `rateLimited` (an assignment) — the extracted function "
+            "would not be the one the request path calls"
+        )
+    if masked.count("function rateLimited") != 1:
+        failures.append("expected exactly one `function rateLimited` definition")
+    if masked.count("rateLimited(") < 2:
+        failures.append(
+            "the limiter is never called in this module — the call site is the only "
+            "evidence that the extracted function is the one in use"
+        )
+    return failures
+
+
+def _key_failures_only(code: str) -> list[str]:
+    """`_key_failures` plus `_binding_failures`, for the battery's catch set.
+
+    Both read the module rather than observing a run, so they catch a defect (a derived
+    key, a re-bound binding) that no amount of scenario-building is guaranteed to reach.
+    """
+    return _key_failures(code) + _binding_failures(code)
+
+
+def test_the_store_is_keyed_by_the_address_alone() -> None:
+    """`_key_failures` on the real limiter — the by-construction half of the IPv6 corpus."""
+    assert _key_failures(CONTACT_TS.read_text(encoding="utf-8")) == []
+
+
+def test_the_limiter_binding_is_never_reassigned() -> None:
+    """`_binding_failures` on the real limiter — extraction must see the function in use."""
+    assert _binding_failures(CONTACT_TS.read_text(encoding="utf-8")) == []
+
+
 def test_a_store_hidden_in_a_string_literal_is_not_mistaken_for_the_store() -> None:
     """A decoy `const hits = new Map();` inside a STRING must not be extracted.
 
@@ -960,8 +1060,13 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "\\g<0>\n  recent.length = 0;",
     ),
     (
-        "emptied history after the write-back",
-        r"hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
+        "emptied history after the REFUSAL-path write-back",
+        r"if \(recent\.length >= RATE_LIMIT\) \{\s*\n\s*hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
+        "\\g<0>\n    recent.length = 0;",
+    ),
+    (
+        "emptied history after the ALLOWED-path write-back",
+        r"hits\.delete\(\s*ip\s*\)\s*;\s*\n\s*hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
         "\\g<0>\n  recent.length = 0;",
     ),
     (
@@ -1027,6 +1132,26 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "read key split at the first colon",
         r"hits\.get\(ip\)",
         'hits.get(String(ip).split(":")[0])',
+    ),
+    (
+        "read key collapses the compressed form",
+        r"hits\.get\(ip\)",
+        'hits.get(String(ip).replace("::", ":"))',
+    ),
+    (
+        "read key strips the IPv4-mapped prefix",
+        r"hits\.get\(ip\)",
+        'hits.get(String(ip).replace(/^::ffff:/, ""))',
+    ),
+    (
+        "refusal write-back key truncated",
+        r"hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;\s*\n\s*return true;",
+        "hits.set(String(ip).slice(0, 15), recent);\n    return true;",
+    ),
+    (
+        "the limiter is re-bound after its declaration",
+        r"\n  return false;\n\}",
+        "\n  return false;\n}\nrateLimited = function (ip, now) { return false; };",
     ),
     (
         "eviction decrements by two",
@@ -1247,6 +1372,6 @@ def test_the_harness_catches_a_behavioural_break(label: str, pattern: str, repla
             "it to MAY_FAIL_TO_RUN; otherwise the mutation is broken, not caught"
         )
         return
-    assert _failures(observed) or _predicate_failures(mutated), (
-        f"{label!r} escaped the harness: {observed!r}"
-    )
+    assert (
+        _failures(observed) or _predicate_failures(mutated) or _key_failures_only(mutated)
+    ), f"{label!r} escaped the harness: {observed!r}"
