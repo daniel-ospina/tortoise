@@ -131,7 +131,7 @@ _ESCAPE = re.compile(
 def _decode_escapes(text: str) -> str:
     """Decode the escape spellings a browser renders as other characters."""
 
-    def repl(m: "re.Match[str]") -> str:
+    def repl(m: re.Match[str]) -> str:
         digits = next(g for g in m.groups() if g is not None)
         codepoint = int(digits, 16)
         return chr(codepoint) if 0 < codepoint <= 0x10FFFF else ""
@@ -759,6 +759,23 @@ def test_rate_limit_map_is_bounded() -> None:
     assert re.search(r"\breturn true;", trip.group(0)), (
         "the limiter's trip must RETURN TRUE: `return false;` there never throttles "
         "anyone while every other pin stays green"
+    )
+    # `recent` is the trip's INPUT, and an untrippable input makes the trip a dead
+    # branch: `filter(() => false)` leaves it permanently empty, so
+    # `recent.length >= RATE_LIMIT` can never be true while every assertion here
+    # still holds — `cutoff` stays "used" by the sweep, so nothing else notices
+    # (cycle-15 review). The window's own shape is pinned, and the entry it gains
+    # must carry the CURRENT timestamp.
+    window = re.search(
+        r"\(?\s*([A-Za-z_$][\w$]*)\s*(?::\s*[^)=]+)?\s*\)?\s*=>\s*\1\s*>=?\s*cutoff",
+        body,
+    )
+    assert window is not None, (
+        "the rate window must keep only entries newer than `cutoff` — an empty filter "
+        "turns the trip into a dead branch and the limiter into a no-op"
+    )
+    assert re.search(r"recent\.push\(\s*now\s*\)", body), (
+        "the window must be extended with the CURRENT timestamp, or the limiter never trips"
     )
     # The GUARD is part of the cap: inverting it (`<` instead of `>`) disables
     # eviction entirely while the loop below still reads correctly, and the guard
