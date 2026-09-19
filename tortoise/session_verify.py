@@ -24,20 +24,26 @@ comes from ``tortoise.capture_receipts``, the same definition the server uses.
 HERMETICITY.  The probe transcript and the event payload are synthesized; the
 seam execution is real.  This module never writes the user's install.  The one
 write is the probe SESSION, which is unmistakably named
-``verify-<harness>-<timestamp>`` and deleted whenever a fire was ATTEMPTED —
-keyed on the capture attempt, never on whether the fire *reported* success (a
-timed-out fire has still launched the seam) and never on whether the read
-observed it.  The fire and the observation share ONE ``try``/``finally``, so
-cleanup runs on every path and there is no second site that could drift.  The
-deletion is reported, and a failed deletion is surfaced (exit non-zero), never
-swallowed.
+``verify-<harness>-<timestamp>`` and deleted whenever a fire was LAUNCHED —
+keyed on the launch outcome, never on whether the fire *reported* success and
+never on whether the read observed it.  The fire and the observation share ONE
+``try``/``finally``, so cleanup runs on every path and there is no second site
+that could drift.  The deletion is reported, and a failed deletion is surfaced
+(exit non-zero), never swallowed.
 
-DETACHING SEAMS.  Codex's (and Cursor's) seam hands its capture to a worker
-that OUTLIVES the hook (``nohup … & disown``), so the capture can land after
-this command has returned.  For those harnesses a ``DELETE 404`` is NOT proof
-that nothing was left behind — it only proves nothing had landed yet — and the
-report says the capture was still in flight rather than claiming a clean
-delete the code cannot honour.
+LAUNCH OUTCOME, NOT A PROXY.  ``_fire`` reports which of three mutually
+exclusive things happened to the registered command — it was NOT LAUNCHED (the
+OS refused to execute it), it was launched and TIMED OUT (killed at the
+bound), or it was launched and EXITED (with its return code) — and every
+message, disclosure and cleanup decision keys on that value instead of on a
+boolean success flag or a per-harness table.  A ``DELETE 404`` proves nothing
+was left behind ONLY for ``NOT_LAUNCHED``: a launched command can still write,
+because ``subprocess`` SIGKILLs only its DIRECT child (the shipped Claude hook
+FORKS its capture step, which outlives the kill) and any seam may ``nohup … &
+disown`` a worker and exit immediately (the shipped Codex and Cursor hooks
+do).  So after any launch — and after a fire that never returned — the 404 is
+reported as "may still be in flight", never as a clean delete the code cannot
+honour, and there is deliberately no per-harness detach table to drift.
 
 HONEST DISCLOSURE.  A harness whose seam cannot be fired headlessly is NOT
 faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
@@ -49,12 +55,14 @@ link is only ever ``PROVEN`` when the path actually ran.
 from __future__ import annotations
 
 import atexit
+import enum
 import json as _json
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -109,18 +117,6 @@ HEADLESS_FIRABLE: dict[str, bool] = {
     "cursor": False,
     "pi": False,
 }
-
-#: Harnesses whose capture seam DETACHES a background worker that outlives the
-#: hook — Codex's ``session-end.sh`` and Cursor's hand the slow capture to
-#: ``nohup … & disown`` because the harness kills the hook before a network
-#: POST could finish.  For a detaching harness the capture can land AFTER
-#: ``verify`` has returned, so a cleanup ``DELETE 404`` is not a guarantee: it
-#: proves only that nothing had landed *yet*.  The cleanup report must say the
-#: capture is still in flight, never the false "nothing was left behind".
-#: A per-harness fact table beside ``HEADLESS_FIRABLE``/``_CAPTURE_EVENT`` —
-#: the detach is a property of the shipped hook script, which this module
-#: deliberately never greps (behavioural verification, not a source scan).
-DETACHING_HARNESSES: frozenset[str] = frozenset({"codex", "cursor"})
 
 #: Why a non-firable harness's links are UNVERIFIABLE.  Named per harness so
 #: the report says exactly what is missing, never a generic shrug.
@@ -311,9 +307,155 @@ def _fire_env(base_env: dict[str, str] | None) -> dict[str, str]:
     return env
 
 
+class LaunchOutcome(enum.Enum):
+    """Whether the registered command actually RAN — the only launch fact.
+
+    The three members are mutually exclusive and exhaustive, and they are the
+    one thing every message, disclosure and cleanup decision may key on.  An
+    ``ok: bool`` collapsed all of them (plus rc≠0) into one value, which let a
+    message claim a seam "did not run" while it was running and a cleanup
+    claim "nothing was left behind" while a descendant was still alive
+    (#3809 rr3).  A fourth outcome may be added only with its own entry in
+    :data:`_OUTCOME_PROVES_NOTHING_CAN_LAND` and its own message in
+    :func:`_capture_failed_detail` / :func:`_not_yet_disclosure`, which raise
+    on an unclassified member rather than inheriting a sibling's semantics.
+    """
+
+    #: The OS refused to execute the command (``OSError`` out of
+    #: ``subprocess.run``).  No process ever ran, so no capture was made and
+    #: none can follow: the ONE case where "nothing was left behind" is
+    #: provable rather than merely hoped for.
+    NOT_LAUNCHED = "not-launched"
+
+    #: Launched, then killed at the timeout.  ``subprocess`` SIGKILLs only the
+    #: DIRECT child, so a forked descendant can outlive it and write later —
+    #: the shipped Claude hook forks its capture step (its line ends
+    #: ``|| exit 0``, which forbids bash from ``exec``-ing it).
+    TIMED_OUT = "timed-out"
+
+    #: Launched and RETURNED.  The return code travels separately, because
+    #: rc≠0 is a different axis from "did it run", and an exit does not bound
+    #: the descendants either: a seam may ``nohup … & disown`` a worker and
+    #: exit immediately (the shipped Codex and Cursor hooks do exactly that).
+    EXITED = "exited"
+
+
+#: What each outcome PROVES about a write that can still land.  Keyed
+#: exhaustively on the members: a new outcome with no entry raises ``KeyError``
+#: at the first fire rather than silently inheriting a sibling's certainty —
+#: the collapse this table exists to prevent.
+_OUTCOME_PROVES_NOTHING_CAN_LAND: dict[LaunchOutcome, bool] = {
+    LaunchOutcome.NOT_LAUNCHED: True,
+    LaunchOutcome.TIMED_OUT: False,
+    LaunchOutcome.EXITED: False,
+}
+
+
+def _proves_nothing_can_land(launch: LaunchOutcome | None) -> bool:
+    """Whether the launch fact PROVES no write can still land.
+
+    The ONE place that certainty is decided.  ``None`` (the fire never
+    returned) is unknown, never proof.  Keyed on
+    :data:`_OUTCOME_PROVES_NOTHING_CAN_LAND`, so an outcome added without its
+    own decision raises here instead of defaulting into a sibling's.
+    """
+    return launch is not None and _OUTCOME_PROVES_NOTHING_CAN_LAND[launch]
+
+
+@dataclass(frozen=True)
+class FireResult:
+    """One ``_fire``: the launch outcome plus the evidence for it.
+
+    ``succeeded`` is derived (launched AND rc=0) and is used ONLY to pick the
+    PROVEN/FAIL branch; no message, disclosure or cleanup decision may key on
+    it, because success/failure is orthogonal to whether a descendant can
+    still write.
+    """
+
+    outcome: LaunchOutcome
+    detail: str
+    returncode: int | None = None
+    stdout: str = ""
+    timeout: float | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return (self.outcome is LaunchOutcome.EXITED
+                and self.returncode == 0)
+
+    @property
+    def proves_nothing_can_land(self) -> bool:
+        return _proves_nothing_can_land(self.outcome)
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON-ready form for the report (``--json`` serializes it)."""
+        return {
+            "outcome": self.outcome.value,
+            "detail": self.detail,
+            "returncode": self.returncode,
+            "stdout": self.stdout,
+            "timeout": self.timeout,
+        }
+
+
+def _capture_failed_detail(result: FireResult) -> str:
+    """What is KNOWABLE about the capture after a fire that did not succeed.
+
+    Keyed on the launch outcome, never on a success flag: only a seam that
+    never launched is a definite "no capture was made"; a launched one may
+    have filed it before dying (timed out) or exiting (rc≠0).
+    """
+    if result.outcome is LaunchOutcome.NOT_LAUNCHED:
+        return ("the seam could not be launched, so no capture was made and "
+                "none can follow — the session definitely does not exist")
+    if result.outcome is LaunchOutcome.TIMED_OUT:
+        return ("not observed — the seam was launched and killed at the "
+                f"{result.timeout:g}s timeout, so it may have filed the "
+                "capture before the kill, and a forked child can still file "
+                "one")
+    if result.outcome is LaunchOutcome.EXITED:
+        return ("not observed — the seam ran and exited "
+                f"(rc={result.returncode}), so it may or may not have filed "
+                "the capture")
+    raise AssertionError(
+        f"unhandled launch outcome {result.outcome!r} — a new outcome must "
+        "decide its own fire-failure message, never inherit a sibling's")
+
+
+def _not_yet_disclosure(launch: LaunchOutcome | None, probe_id: str) -> str:
+    """Why a ``DELETE 404`` is not proof after a launch — keyed on the fact.
+
+    One explanation per launch outcome (plus "the fire never returned"), so a
+    new outcome cannot reuse an existing one.
+    """
+    if launch is LaunchOutcome.TIMED_OUT:
+        why = ("the seam was launched and killed at the timeout, and the kill "
+               "reaches only the direct child — a forked capture step "
+               "survives it and can still file the capture")
+    elif launch is LaunchOutcome.EXITED:
+        why = ("the seam ran and exited, and a fired seam is free to hand its "
+               "capture to a worker that outlives it (the shipped Codex and "
+               "Cursor hooks disown one), so a capture may or may not follow")
+    elif launch is None:
+        why = ("the fire did not return, so whether the seam is still "
+               "running is unknown")
+    else:
+        raise AssertionError(
+            f"unhandled launch outcome {launch!r} — a new outcome must decide "
+            "its own cleanup disclosure, never inherit a sibling's")
+    return (f"no probe session {probe_id} had landed at cleanup time "
+            f"(DELETE 404) — {why}; the capture may still be in flight and "
+            "the probe session may appear after verify returned.")
+
+
 def _fire(root: Path, command: str, payload: dict[str, Any],
-          env: dict[str, str], timeout: float) -> dict[str, Any]:
-    """Execute the REGISTERED command with the harness's event on stdin."""
+          env: dict[str, str], timeout: float) -> FireResult:
+    """Execute the REGISTERED command with the harness's event on stdin.
+
+    Returns a :class:`FireResult` whose ``outcome`` is the LAUNCH fact — what
+    every caller must key on.  The three outcomes are produced here and
+    nowhere else, so there is exactly one place that tells them apart.
+    """
     try:
         proc = subprocess.run(
             ["/bin/bash", "-c", command],
@@ -325,18 +467,23 @@ def _fire(root: Path, command: str, payload: dict[str, Any],
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "detail": (
-            f"the registered command did not return within {timeout:g}s")}
+        return FireResult(
+            LaunchOutcome.TIMED_OUT,
+            f"the registered command did not return within {timeout:g}s "
+            "(it was launched and killed at the timeout)",
+            timeout=timeout)
     except OSError as e:
-        return {"ok": False, "detail": f"cannot execute the seam: {e}"}
-    detail = (
-        f"executed {command!r} (rc={proc.returncode})")
+        return FireResult(
+            LaunchOutcome.NOT_LAUNCHED, f"cannot execute the seam: {e}")
+    detail = f"executed {command!r} (rc={proc.returncode})"
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return {"ok": False, "detail": (
-            f"{detail}; stderr: {tail[-1] if tail else '<empty>'}")}
-    return {"ok": True, "detail": detail, "returncode": proc.returncode,
-            "stdout": proc.stdout}
+        return FireResult(
+            LaunchOutcome.EXITED,
+            f"{detail}; stderr: {tail[-1] if tail else '<empty>'}",
+            returncode=proc.returncode)
+    return FireResult(LaunchOutcome.EXITED, detail,
+                      returncode=proc.returncode, stdout=proc.stdout)
 
 
 # ── hosted API reads (receipt / session / delete) ─────────────────────────
@@ -493,35 +640,34 @@ def verify_session_capture(harness: str,
         return report
 
     # ── the fire and the observation share ONE try/finally ───────────────
-    # The capture ATTEMPT is recorded BEFORE ``_fire`` is invoked: a fire that
-    # times out (or is killed) has still LAUNCHED the registered command, and
-    # the seam may have POSTed before it died — so cleanup must run on that
-    # path too.  Keying the attempt on ``fired["ok"]`` left the probe orphaned
-    # on exactly that path (#3809 rr2, the same class as the read-keyed
-    # cleanup).  Fire + observation therefore live in this single ``try``, and
-    # the ``finally`` below is the ONE cleanup site — reached on every exit:
-    # fire failure, observation failure, ``_ApiError``, or an unexpected raise.
-    report["capture_attempted"] = True
+    # Fire + observation live in this single ``try``, and the ``finally`` below
+    # is the ONE cleanup site — reached on every exit: fire failure,
+    # observation failure, ``_ApiError``, or an unexpected raise.  The launch
+    # outcome is recorded the moment ``_fire`` returns and is what cleanup
+    # keys on; if ``_fire`` itself raises, ``launch`` stays ``None``, which
+    # cleanup reads as "unknown — assume it may have run" and never as proof.
+    launch: LaunchOutcome | None = None
     detail: dict[str, Any] | None = None
     try:
         fired = _fire(root, command, payload, _fire_env(env), timeout)
-        report["fire"] = fired
-        if not fired["ok"]:
+        launch = fired.outcome
+        report["fire"] = fired.as_dict()
+        if not fired.succeeded:
             report["links"]["installed"] = _link(
-                STATUS_FAIL, fired["detail"])
-            # The command WAS launched — only the observation is missing.  The
-            # message must not claim the seam "did not run" (false when it
-            # timed out after POSTing): say exactly what is known.
+                STATUS_FAIL, fired.detail)
+            # The message is derived from the LAUNCH fact, never from a
+            # success flag: a launched-but-timed-out seam may already have
+            # filed the capture, while a seam that never launched definitely
+            # did not (#3809 rr3).
             report["links"]["captured"] = _link(
-                STATUS_FAIL,
-                "not observed — the installed seam was launched but the fire "
-                "did not complete, so the capture is unknown")
+                STATUS_FAIL, _capture_failed_detail(fired))
             report["links"]["memory"] = _link(
-                STATUS_FAIL, "not reachable — the fire did not complete")
+                STATUS_FAIL,
+                "not reachable — the capture was not observed on this run")
             return report
         report["links"]["installed"] = _link(
             STATUS_PROVEN,
-            f"present, registered, and fired: {fired['detail']}")
+            f"present, registered, and fired: {fired.detail}")
 
         # ── link 2: captured ─────────────────────────────────────────────
         deadline = time.monotonic() + max(1.0, timeout)
@@ -617,14 +763,13 @@ def verify_session_capture(harness: str,
             STATUS_FAIL, "not reachable — the session read failed")
     finally:
         # ── cleanup: the ONE site, reached on EVERY path above ───────────
-        # The probe session is deleted whenever a fire was attempted, and the
-        # exit code is settled here too so the early fire-failure return gets
-        # it.  There is deliberately no other cleanup call to drift from this
-        # one.
+        # The probe session is deleted whenever the seam was launched, and
+        # conservatively when the fire never returned (nothing then proves the
+        # seal did not run).  The exit code is settled here too so the early
+        # fire-failure return gets it.  There is deliberately no other cleanup
+        # call to drift from this one.
         report["cleanup"] = _cleanup(
-            api_url, api_key, probe_id, keep=keep,
-            capture_attempted=report["capture_attempted"],
-            detaching=harness in DETACHING_HARNESSES)
+            api_url, api_key, probe_id, keep=keep, launch=launch)
         report["exit_code"] = _exit_code(report)
     return report
 
@@ -641,34 +786,37 @@ def _probe_id(harness: str) -> str:
 
 
 def _cleanup(api_url: str, api_key: str, probe_id: str, *,
-             keep: bool, capture_attempted: bool,
-             detaching: bool = False) -> dict[str, Any]:
+             keep: bool,
+             launch: LaunchOutcome | None) -> dict[str, Any]:
     """Delete the probe session (and its local import receipt).
 
-    Deletion is keyed on whether a fire was ATTEMPTED (``capture_attempted``),
-    NOT on whether the fire reported success and NOT on whether the GET
-    observed a session: a failed read must never leave a write behind, and the
-    report must never claim "nothing to delete" when the seam actually ran.
-    ``keep`` skips the deletion by operator request, and the report then says
-    so — an intentional keep is not a silent leak.  A failed deletion is
-    REPORTED and turns the command non-zero (it left a write in the graph); it
-    is never swallowed.
+    Deletion is keyed on the LAUNCH OUTCOME — whether the registered command
+    actually ran — never on a success flag and never on a per-harness table.
+    The DELETE is always attempted (so even a mis-classified "not launched"
+    fails safe: a real write is deleted by the 200 branch), ``keep`` skips it
+    by operator request and the report says so, and a failed deletion is
+    REPORTED and turns the command non-zero (it left a write in the graph);
+    it is never swallowed.
 
-    A ``DELETE 404`` means the probe session does not exist *now*.  For a
-    non-detaching seam that is proof nothing was left behind.  For a
-    DETACHING seam (``detaching``) the capture may land after this command
-    returns, so the 404 is only "not yet": the report says the capture is in
-    flight and marks ``in_flight`` (which turns the command non-zero) instead
-    of claiming a clean delete it cannot honour.
+    A ``DELETE 404`` means the probe session does not exist *now*.  That is
+    proof nothing was left behind ONLY when the seam was never LAUNCHED.
+    After a launch it is only "not yet": ``subprocess`` SIGKILLs only the
+    direct child (the shipped Claude hook's capture step is FORKED and
+    survives the timeout) and a seam may ``nohup … & disown`` a worker and
+    exit at once (the shipped Codex and Cursor hooks do), so the capture may
+    land after this command has returned.  For any launch — and for a fire
+    that never returned — the report says so and marks ``in_flight`` (which
+    turns the command non-zero) instead of claiming a clean delete it cannot
+    honour (#3809 rr3).
     """
-    result: dict[str, Any] = {"attempted": False, "deleted": False,
-                              "session_id": probe_id, "kept": False}
+    result: dict[str, Any] = {
+        "attempted": False, "deleted": False, "session_id": probe_id,
+        "kept": False,
+        "launch": launch.value if launch is not None else "unknown",
+    }
     if keep:
         result["kept"] = True
         result["detail"] = "kept by --keep (the probe session was NOT deleted)"
-        return result
-    if not capture_attempted:
-        result["detail"] = "no capture was attempted — nothing to delete"
         return result
     result["attempted"] = True
     try:
@@ -676,23 +824,15 @@ def _cleanup(api_url: str, api_key: str, probe_id: str, *,
                     method="DELETE")
     except _ApiError as e:
         if e.status == 404:
-            if detaching:
-                # The seam hands off to a worker that OUTLIVES the hook, so a
-                # 404 proves only that nothing had landed YET.  An honest "in
-                # flight" beats a "nothing was left behind" the code cannot
-                # honour (#3809 rr2).
-                result["in_flight"] = True
+            if _proves_nothing_can_land(launch):
                 result["detail"] = (
-                    f"the seam detaches a worker that outlives the hook; no "
-                    f"probe session {probe_id} had landed at cleanup time "
-                    "(DELETE 404) — the capture was still in flight when "
-                    "verify returned and the probe session may appear after it. "
-                    "A bounded grace cannot fix this: any finite wait is "
-                    "outlived by a slower worker.")
+                    f"no probe session {probe_id} to delete (DELETE 404) — "
+                    "the seam was never launched, so no capture was made and "
+                    "nothing was left behind")
                 return result
-            result["detail"] = (
-                f"no probe session {probe_id} to delete (DELETE 404) — "
-                "nothing was left behind")
+            # Launched (or the fire never returned): the 404 is "not yet".
+            result["in_flight"] = True
+            result["detail"] = _not_yet_disclosure(launch, probe_id)
             return result
         result["detail"] = f"DELETE failed: {e} — the probe session remains"
         result["error"] = True
@@ -728,11 +868,11 @@ def _exit_code(report: dict[str, Any]) -> int:
     if STATUS_FAIL in statuses:
         return EXIT_BROKEN
     # A leaked write is a BROKEN link, not an unverifiable one: exit 2 means
-    # "nothing provably broken", and a failed DELETE proves the opposite.  An
-    # in-flight capture for a detaching seam is the same class — the probe may
-    # remain, so the caller must not read the run as clean.  Both are checked
-    # BEFORE the UNVERIFIABLE branch so an old API build (memory UNVERIFIABLE)
-    # plus a failed/uncertain cleanup still exits 1.
+    # "nothing provably broken", and a failed DELETE proves the opposite.  A
+    # launched fire whose probe had not landed is the same class — it may land
+    # after verify returned, so the caller must not read the run as clean.
+    # Both are checked BEFORE the UNVERIFIABLE branch so an old API build
+    # (memory UNVERIFIABLE) plus a failed/uncertain cleanup still exits 1.
     cleanup = report.get("cleanup") or {}
     if cleanup.get("error") or cleanup.get("in_flight"):
         return EXIT_BROKEN

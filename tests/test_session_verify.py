@@ -66,9 +66,6 @@ class _Graph:
         #: — lets a test drive ``_fire`` past its timeout while the seam has
         #: really captured (the orphan-on-timeout reproduction).
         self.post_delay = 0.0
-        #: When set, a POST blocks here BEFORE storing (or counting) anything —
-        #: the "detached worker has not landed yet" reproduction.
-        self.post_gate: threading.Event | None = None
         self._clock = 0
 
     def tick(self) -> str:
@@ -103,8 +100,6 @@ def _make_handlers(graph: _Graph):
                 if graph.fail_post:
                     self._send(500, {"detail": "capture refused (test)"})
                     return
-                if graph.post_gate is not None:
-                    graph.post_gate.wait(timeout=30)
                 graph.posts.append(body)
                 sid = body.get("session_id") or "unnamed"
                 harness = body.get("harness")
@@ -211,13 +206,26 @@ that parse — never from a payload hardcoded here.  Only the hook's background
 corpus re-index (`index`/`context`) and the unrelated probe beacon (`session
 probe`) are skipped: they are not the path under verification and would touch
 a real graph.
+
+`TORTOISE_TEST_CAPTURE_DELAY` sleeps CLIENT-side, inside the fired hook's own
+capture child, BEFORE delegating to the CLI.  That makes "did a descendant of
+the killed/short-lived hook survive?" a real process question: the delay lives
+in the child, never in the server, so a late POST proves the child outlived
+``_fire`` (a server-side gate would prove only that this server was still
+working).
 """
+import os
 import sys
+import time
 
 argv = sys.argv[1:]
 if argv and (argv[0] == "index" or argv[0] == "context"
              or argv[0] == "session" and len(argv) > 1 and argv[1] == "probe"):
     sys.exit(0)
+
+delay = float(os.environ.get("TORTOISE_TEST_CAPTURE_DELAY") or 0)
+if delay > 0 and argv and argv[0] in ("session", "sessions"):
+    time.sleep(delay)
 
 sys.path.insert(0, "__SRC__")
 from tortoise.__main__ import main  # noqa: E402
@@ -261,13 +269,16 @@ def _root_for(home: Path, harness: str) -> Path:
     return resolve_install_root(harness, home=home)
 
 
-def _verify(hosted, home, harness, root, *, timeout=20.0, **kw):
+def _verify(hosted, home, harness, root, *, timeout=20.0, extra_env=None,
+            **kw):
     _graph, api_url = hosted
+    env = {**os.environ, "HOME": str(home),
+           "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url}
+    env.update(extra_env or {})
     return verify_session_capture(
         harness, api_key="tt_test", api_url=api_url, home=home,
         install_dir=root, timeout=timeout,
-        env={**os.environ, "HOME": str(home),
-             "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url},
+        env=env,
         **kw)
 
 
@@ -289,6 +300,9 @@ def test_claude_chain_is_proven_and_the_probe_is_deleted(hosted, setup):
     assert report["cleanup"]["deleted"] is True
     assert report["session_id"] in graph.deletes
     assert report["session_id"].startswith("verify-claude-")
+    # The report is what `--json` serializes: the launch outcome is a plain
+    # string and carries no un-serializable object.
+    assert json.loads(json.dumps(report))["fire"]["outcome"] == "exited"
 
 
 def test_codex_chain_is_proven_through_the_detaching_hook(hosted, setup):
@@ -340,7 +354,16 @@ def test_guard_tampered_artifact_reds_installed(hosted, setup):
 def test_guard_unexecutable_seam_reds_installed(hosted, setup, monkeypatch):
     """Mutation: the registered command cannot be executed at all
     (``subprocess.run`` raises ``OSError``) — the four on-disk checks pass,
-    but the FIRING leg fails, so ``installed`` FAILs and nothing is captured."""
+    but the FIRING leg fails, so ``installed`` FAILs and nothing is captured.
+
+    The launch outcome is ``NOT_LAUNCHED``, so the SAME report must not claim
+    the seam ran: ``captured`` says the capture definitively did not happen,
+    and cleanup is a definite "nothing was left behind" (no ``in_flight``).
+    Mutation: key the fire-failure message on the success flag (the old "the
+    installed seam was launched but the fire did not complete") — the
+    "never launched" assertions RED.  Reverting the cleanup certainty to a
+    launched-fire shape (``in_flight`` on any 404) REDs the cleanup asserts.
+    """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     import tortoise.session_verify as sv
@@ -354,6 +377,46 @@ def test_guard_unexecutable_seam_reds_installed(hosted, setup, monkeypatch):
     assert report["exit_code"] == EXIT_BROKEN, report
     assert report["links"]["installed"]["status"] == "FAIL"
     assert "cannot execute the seam" in report["links"]["installed"]["detail"]
+    assert report["fire"]["outcome"] == "not-launched", report["fire"]
+    captured = report["links"]["captured"]["detail"]
+    assert "could not be launched" in captured, captured
+    assert "definitely does not exist" in captured, captured
+    assert "was launched" not in captured, captured
+    cleanup = report["cleanup"]
+    assert cleanup["launch"] == "not-launched", cleanup
+    assert cleanup.get("in_flight") is None, cleanup
+    assert "nothing was left behind" in cleanup["detail"], cleanup
+    assert graph.posts == []
+
+
+def test_guard_never_launched_is_not_in_flight_for_the_detaching_shape(
+        hosted, setup, monkeypatch):
+    """Nothing was launched, so nothing can be in flight — for Codex too.
+
+    The detaching seam's shape must not turn a pre-exec failure into "still in
+    flight": no worker was ever detached, so the report is the same definite
+    "never launched" as any other harness.
+
+    Mutation: set ``in_flight`` on the 404 branch whenever the harness is in a
+    static detach table (or whenever ``launch is not None`` is not consulted)
+    — Codex reports ``in_flight=True`` with no worker and this REDs.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "codex")
+    import tortoise.session_verify as sv
+
+    monkeypatch.setattr(
+        sv.subprocess, "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("cannot exec (test)")))
+    graph, _url = hosted
+    report = _verify(hosted, home, "codex", root)
+    assert report["exit_code"] == EXIT_BROKEN, report
+    assert report["fire"]["outcome"] == "not-launched", report["fire"]
+    assert report["links"]["captured"]["detail"].startswith(
+        "the seam could not be launched"), report["links"]["captured"]
+    cleanup = report["cleanup"]
+    assert cleanup.get("in_flight") is None, cleanup
+    assert "nothing was left behind" in cleanup["detail"], cleanup
     assert graph.posts == []
 
 
@@ -578,11 +641,11 @@ def test_guard_read_failure_after_capture_still_deletes_the_probe(
 
 def test_guard_never_claims_nothing_to_delete_after_a_capture(
         hosted, setup):
-    """A persistent 404 must not be reported as "nothing to delete".
+    """A persistent GET 404 must not stop the probe from being deleted.
 
-    Deletion is keyed on the fired seam, not the observation.  Mutation:
-    key cleanup on ``detail is not None`` — the report claims "no session was
-    created — nothing to delete" with ``POSTS=1`` and this REDs.
+    Deletion is keyed on the fired seam, not the observation.  Mutation: key
+    cleanup on ``detail is not None`` — the probe is never deleted (POSTS=1)
+    and this REDs.
     """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
@@ -628,12 +691,12 @@ def test_guard_fire_timeout_after_a_capture_still_deletes_the_probe(
     fire timeout — so ``_fire`` reports failure after a capture that really
     happened.
 
-    Mutation: set ``report["capture_attempted"] = True`` only after
-    ``fired["ok"]`` (and return early before the shared ``try``) — the probe is
-    orphaned (``cleanup.attempted`` is False, ``graph.deletes == []``, the probe
-    session survives) and this REDs.  Reverting the captured message to the old
-    "not fired — the installed seam did not run" wording REDs the "was
-    launched" assertion.
+    Mutation: restore the old ``fired["ok"]`` keying by returning early
+    ("no capture was attempted — nothing to delete") from ``_cleanup``
+    whenever ``launch is LaunchOutcome.TIMED_OUT`` — the probe is orphaned
+    (``cleanup.attempted`` False, ``graph.deletes == []``, the session
+    survives) and this REDs.  Reverting the captured message to the old "the
+    installed seam did not run" wording REDs the "was launched" assertion.
     """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
@@ -643,6 +706,7 @@ def test_guard_fire_timeout_after_a_capture_still_deletes_the_probe(
     assert len(graph.posts) == 1, "the seam really captured before the timeout"
     assert report["links"]["installed"]["status"] == "FAIL", report
     assert "did not return within" in report["links"]["installed"]["detail"]
+    assert report["fire"]["outcome"] == "timed-out", report.get("fire")
     assert report["cleanup"]["attempted"] is True, report["cleanup"]
     assert report["cleanup"]["deleted"] is True, report["cleanup"]
     assert report["session_id"] in graph.deletes
@@ -652,49 +716,144 @@ def test_guard_fire_timeout_after_a_capture_still_deletes_the_probe(
     assert report["exit_code"] == EXIT_BROKEN
 
 
-# ── P2-1: a detaching seam is not a "nothing was left behind" ───────────
+# ── P1 (rr3): only NOT_LAUNCHED can prove "nothing was left behind" ──
+
+
+def test_guard_timed_out_fire_never_claims_nothing_was_left_behind(
+        hosted, setup):
+    """A FORKED capture child outlives the SIGKILL — a DELETE 404 is not proof.
+
+    The SHIPPED Claude hook forks its capture step (the line ends ``|| exit
+    0``, so bash cannot ``exec`` it).  The delay is CLIENT-side in the shim,
+    so with ``timeout=1.0`` the kill reaches only ``/bin/bash``: the forked
+    child survives, the probe has not landed at cleanup time, and then the
+    orphan POSTs.  A server-side gate could not show this — it would prove
+    only that this server was still working.
+
+    Mutation: key the cleanup disclosure on a harness property (e.g. "is this
+    a detaching harness?") or on the success flag instead of the launch
+    outcome — Claude is not detaching and the fire reported failure, so the
+    report claims "nothing was left behind" while the orphan is still alive
+    and this REDs.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    report = _verify(hosted, home, "claude", root, timeout=1.0,
+                     extra_env={"TORTOISE_TEST_CAPTURE_DELAY": "4"})
+    assert report["fire"]["outcome"] == "timed-out", report.get("fire")
+    assert report["links"]["installed"]["status"] == "FAIL"
+    assert "did not return within" in report["links"]["installed"]["detail"]
+    captured = report["links"]["captured"]["detail"]
+    assert "was launched" in captured and "did not run" not in captured
+    cleanup = report["cleanup"]
+    assert cleanup["launch"] == "timed-out", cleanup
+    assert cleanup.get("in_flight") is True, cleanup
+    assert "nothing was left behind" not in cleanup["detail"], cleanup
+    assert "in flight" in cleanup["detail"], cleanup
+    assert report["exit_code"] == EXIT_BROKEN, report
+    assert graph.posts == [], "the capture had not landed at cleanup time"
+    # The forked capture child is STILL ALIVE: it POSTs after verify returned.
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline and not graph.posts:
+        time.sleep(0.1)
+    assert len(graph.posts) == 1, "the forked child POSTed after verify"
+    assert report["session_id"] in graph.sessions
 
 
 def test_guard_detaching_seam_reports_in_flight_not_nothing_left_behind(
         hosted, setup):
-    """Codex's detached worker can POST AFTER verify returns — say so.
+    """Codex's disowned worker outlives a CLEAN exit — say so, do not claim.
 
-    The capture POST is held at the server until the test releases it, so at
-    cleanup time nothing has landed and DELETE 404s.  For a DETACHING seam
-    that 404 is "not yet", not "nothing was left behind": the report must say
-    the capture was still in flight and the command must exit non-zero.
+    The delay is CLIENT-side in the shim's ``sessions import``, so the Codex
+    hook exits 0 immediately after ``nohup … & disown`` while its worker is
+    still sleeping: the late POST proves the worker really survived ``_fire``
+    (a server-side gate would not).
 
-    Mutation: drop the ``detaching`` branch in ``_cleanup`` (or pass
-    ``detaching=False``) — the report claims "nothing was left behind", the
-    ``in_flight``/message assertions RED, and the late POST still lands
-    (``posts == 1``).  (The exit-code assertion holds either way in THIS
-    scenario only because the unobserved capture already FAILs `captured`;
-    ``test_guard_in_flight_cleanup_is_broken_not_a_clean_exit`` covers the
-    ``_exit_code`` branch that makes an in-flight cleanup non-zero on its own.)
+    Mutation: treat ``EXITED`` as proof (drop the launch-outcome branch in
+    ``_cleanup``) — the report claims "nothing was left behind", the
+    ``in_flight``/message assertions RED, and the late POST still lands.
     """
     home, _bindir, _fake = setup
     root = _install(home, "codex")
     graph, _url = hosted
-    gate = threading.Event()
-    graph.post_gate = gate
-    try:
-        report = _verify(hosted, home, "codex", root, timeout=2.0)
-        assert graph.posts == [], "the worker had not landed at cleanup time"
-        assert report["links"]["captured"]["status"] == "FAIL", report
-        assert report["cleanup"]["attempted"] is True, report["cleanup"]
-        assert report["cleanup"].get("in_flight") is True, report["cleanup"]
-        assert "nothing was left behind" not in report["cleanup"]["detail"]
-        assert "in flight" in report["cleanup"]["detail"]
-        assert report["exit_code"] == EXIT_BROKEN, report
-        # Release the detached worker: the late capture really does land.
-        gate.set()
-        deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline and not graph.posts:
-            time.sleep(0.1)
-        assert len(graph.posts) == 1, "the detached worker POSTed after verify"
-        assert report["session_id"] in graph.sessions
-    finally:
-        gate.set()
+    report = _verify(hosted, home, "codex", root, timeout=2.0,
+                     extra_env={"TORTOISE_TEST_CAPTURE_DELAY": "4"})
+    assert report["fire"]["outcome"] == "exited", report.get("fire")
+    assert report["fire"]["returncode"] == 0, report.get("fire")
+    assert graph.posts == [], "the worker had not landed at cleanup time"
+    assert report["links"]["captured"]["status"] == "FAIL", report
+    cleanup = report["cleanup"]
+    assert cleanup["launch"] == "exited", cleanup
+    assert cleanup.get("in_flight") is True, cleanup
+    assert "nothing was left behind" not in cleanup["detail"]
+    assert "in flight" in cleanup["detail"]
+    assert report["exit_code"] == EXIT_BROKEN, report
+    # Release the disowned worker: the late capture really does land.
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline and not graph.posts:
+        time.sleep(0.1)
+    assert len(graph.posts) == 1, "the disowned worker POSTed after verify"
+    assert report["session_id"] in graph.sessions
+
+
+def test_guard_nonzero_exit_is_not_reported_as_did_not_run(
+        hosted, setup, monkeypatch):
+    """``EXITED`` with rc≠0 is NOT the same launch fact as ``NOT_LAUNCHED``.
+
+    The command really ran and returned 7, so the capture may have been filed
+    before the failure: the message must say it ran and exited, never that it
+    did not run (or did not complete).  The command is monkeypatched so the
+    failure is the COMMAND's, not the OS's, with the install still current.
+
+    Mutation: fold an rc≠0 exit into ``NOT_LAUNCHED`` (or reuse the generic
+    "the installed seam did not run") — the "ran and exited"/"was launched"
+    assertions RED.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    import tortoise.session_verify as sv
+
+    monkeypatch.setattr(sv, "_registered_capture_command",
+                        lambda _h, _r: "exit 7")
+    report = _verify(hosted, home, "claude", root)
+    assert report["fire"]["outcome"] == "exited", report.get("fire")
+    assert report["fire"]["returncode"] == 7, report.get("fire")
+    assert "rc=7" in report["links"]["installed"]["detail"]
+    captured = report["links"]["captured"]["detail"]
+    assert "ran and exited" in captured, captured
+    assert "rc=7" in captured, captured
+    assert "did not run" not in captured, captured
+    assert "could not be launched" not in captured, captured
+    assert report["cleanup"].get("in_flight") is True, report["cleanup"]
+    assert report["exit_code"] == EXIT_BROKEN, report
+
+
+def test_launch_outcomes_are_exhaustively_classified():
+    """A fourth launch outcome cannot silently inherit a sibling's semantics.
+
+    The cleanup-certainty table is keyed on EVERY member, and a member with no
+    entry raises ``KeyError`` instead of defaulting.  Mutation: add a fourth
+    ``LaunchOutcome`` (e.g. ``SIGNALLED``) without deciding its cleanup
+    certainty — the set equality REDs and the lookup raises.
+    """
+    from tortoise import session_verify as sv
+
+    assert set(sv._OUTCOME_PROVES_NOTHING_CAN_LAND) == set(sv.LaunchOutcome)
+    assert sv._proves_nothing_can_land(sv.LaunchOutcome.NOT_LAUNCHED) is True
+    assert sv._proves_nothing_can_land(sv.LaunchOutcome.TIMED_OUT) is False
+    assert sv._proves_nothing_can_land(sv.LaunchOutcome.EXITED) is False
+    assert sv._proves_nothing_can_land(None) is False
+    assert sv.FireResult(sv.LaunchOutcome.NOT_LAUNCHED, "x").proves_nothing_can_land
+    assert not sv.FireResult(sv.LaunchOutcome.TIMED_OUT, "x").proves_nothing_can_land
+    assert not sv.FireResult(
+        sv.LaunchOutcome.EXITED, "x", returncode=0).proves_nothing_can_land
+
+    class _Fourth(str, __import__("enum").Enum):
+        SIGNALLED = "signalled"
+
+    with pytest.raises(KeyError):
+        sv._proves_nothing_can_land(_Fourth.SIGNALLED)
 
 
 def test_guard_in_flight_cleanup_is_broken_not_a_clean_exit():
