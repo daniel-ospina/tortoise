@@ -157,10 +157,12 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
                 _registry_for,
                 _scan_socket_dirs,
             )
-            # #3752: `budget` is a DURATION, and the walk takes its deadline
-            # after root discovery — so this must pass the budget, never a
-            # pre-computed absolute cutoff (which the walk has no parameter
-            # for since the nested-session-root merge).
+            # #3752: the walk takes its own deadline AFTER root discovery, so
+            # it supplies its own default budget. Never pass a pre-computed
+            # absolute cutoff here — `_scan_socket_dirs` has no parameter for
+            # one since the nested-session-root merge (the merge renamed
+            # `deadline` to the DURATION `budget`, which is what broke this
+            # call with a TypeError until it was fixed).
             scan = _scan_socket_dirs(
                 __import__("tempfile").gettempdir(), full_scan=True)
             census_truncated = not scan.complete

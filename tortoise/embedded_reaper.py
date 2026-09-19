@@ -148,7 +148,8 @@ EPHEMERAL_PREFIXES = (
 # keeps its cheap maxdepth-2 global pass and adds a bounded maxdepth-2 pass per
 # matching root; see _socket_walk_roots for the measurement that rules out
 # simply walking deeper (on a 23k-entry tempdir the depth-3 walk blew past
-# SOCKET_WALK_TIMEOUT, which also fails the walk closed). Deliberately a
+# SOCKET_WALK_TIMEOUT and never finished, losing the un-enumerated tail).
+# Deliberately a
 # SUBSET of EPHEMERAL_PREFIXES: each entry costs one extra depth-1 scan per
 # matching tempdir child, and the members omitted here hold their socket dirs
 # directly.
@@ -1329,14 +1330,17 @@ def _iter_candidate_dirs_over_roots(tmpdir: str, *, predicate,
 
     Each recognised session root therefore gets its OWN depth-1 scan rather
     than walking the tempdir deeper: on a 23k-entry tempdir the depth-3 walk
-    measured 53-55s against a 20s ``SOCKET_WALK_TIMEOUT``, and a timed-out
-    walk FAILS CLOSED — the #1449 pollution-disables-cleanup mode this whole
-    walk exists to prevent. See ``_socket_walk_roots`` for the root set and
+    measured 53-55s against a 20s ``SOCKET_WALK_TIMEOUT`` and never
+    finished — the #1449 pollution-disables-cleanup mode this whole walk
+    exists to prevent (a blown budget loses the un-enumerated tail; the
+    partial set is still returned and reaped, and ``complete=False`` only
+    marks the sweep truncated). See ``_socket_walk_roots`` for the root set and
     the reason `tt_` alone is not a sufficient filter.
 
     Roots are scanned nested-first, and a nested root may only spend
     ``min(GLOBAL_WALK_RESERVE_S, budget / 2)`` less than the global pass's
-    deadline, so it can never starve the global pass — which is the only one that reaches non-session dirs. ``complete``
+    deadline, so it can never starve the global pass, which is the only one
+    that reaches non-session dirs. ``complete``
     is the AND over every root: a partial set from ANY root is never
     reported as a finished scan.
 
@@ -1344,9 +1348,11 @@ def _iter_candidate_dirs_over_roots(tmpdir: str, *, predicate,
     unbounded), not an absolute cutoff, and the deadline is taken AFTER
     ``_socket_walk_roots`` has run. Root discovery does real I/O — a scandir
     of the tempdir plus a stat per ``tt_*`` candidate — so charging it to the
-    walk let a slow discovery leave the walk with ZERO budget, which is the
-    #1449 pollution-disables-cleanup failure this walk exists to prevent
-    (#3752 review cycles 3-4).
+    walk let a slow discovery leave the walk with ZERO budget, losing the
+    whole enumeration and with it the tail of the #1449 cleanup this walk
+    exists to prevent (#3752 review cycles 3-4). Expiry is not fail-closed in
+    the deleting sense: the partial set is returned and reaped, and
+    ``complete=False`` only marks the sweep truncated in the summary.
     """
     if budget is None:
         budget = SOCKET_WALK_TIMEOUT
@@ -1441,17 +1447,21 @@ def _socket_walk_roots(tmpdir: str) -> list[str]:
 
     Widening the single walk to maxdepth 3 is NOT the fix: on a 23k-entry
     tempdir the depth-3 walk measured 53-55s across two independent runs on a
-    loaded box — over ``SOCKET_WALK_TIMEOUT``, and a timed-out walk FAILS
-    CLOSED — while depth 2 measured 6.2s
+    loaded box — over ``SOCKET_WALK_TIMEOUT``, so it never finished — while
+    depth 2 measured 6.2s
     under light load and 18.0s under heavy load on the same tree. The
-    load-bearing figure is the depth-3 blow-out past the 20s budget (a
-    timed-out walk fails closed — pre-#4068 it returned `[]`, post-#4068 it
-    returns the partial set with `complete=False`, and neither is reaped
-    from), which is exactly the
+    load-bearing figure is the depth-3 blow-out past the 20s budget: the walk
+    is BUDGETED, and a budget that expires mid-walk loses the un-enumerated
+    remainder (pre-#4068 a timed-out walk returned `[]` and so lost
+    everything; post-#4068 it returns the PARTIAL set with
+    `complete=False`). Note `complete` is REPORT-ONLY — the partial set is
+    still classified and reaped, and the flag only drives the
+    ``— SCAN TRUNCATED`` summary — so a blown budget bounds a sweep's reach
+    rather than disabling it, which is exactly the
     pollution-disables-cleanup failure mode of #1449; the depth-2 variance is
     why the budget is a deadline rather than a per-invocation timeout. So the
     global pass keeps its cheap depth and each recognised scratch root gets
-    its own bounded depth-2 walk instead.
+    its own bounded depth-1 scan instead.
 
     The nested roots come FIRST so a slow global pass cannot consume the
     shared budget before the dirs only the nested pass can reach are walked —
