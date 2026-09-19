@@ -202,7 +202,7 @@ def resolve_ask_retrieval_caps() -> dict:
     """A6 (#2070): resolve the ask lane's retrieval-window limit + assembly
     caps IN TANDEM (env-gated, default OFF = 40/40/8000). Returns
     ``{"limit", "context_item_cap", "context_token_cap"}`` — the single
-    resolution ``ask()`` threads into BOTH ``tortoise_fts_query(limit=…)``
+    resolution ``run_ask_lane()`` threads into BOTH ``tortoise_fts_query(limit=…)``
     (the ``result_ids[:limit]`` cut INSIDE the retrieval call) and
     ``assemble_context``, so a cap raise can never be half-applied."""
     return {
@@ -470,7 +470,7 @@ def hit_session_id(h: dict) -> str:
     """The session identity a hit carries — read from EXPLICIT identity keys
     only, never inferred from an id's shape.
 
-    D3 (#1540) session identity: the product ask lane rendered ``[session ?]``
+    D3 (#1540) session identity: the ask lane rendered ``[session ?]``
     for every captured turn because the only identity such a row carries is
     the ``(:Session)-[:CONTAINS]->(:Point)`` edge the capture loop writes
     (turn Points carry no ``sessionId`` prop and no ``eventId``, so the
@@ -540,7 +540,7 @@ def _render_block(h: dict) -> str:
     ``[session N]``, anything else (including an explicit ``None``, the
     connected-assembly spine's spelling) is ``[session ?]`` — so the eval /
     assembly lanes are byte-identical. Only a hit with the key ABSENT (the
-    product ask/search case) is tagged with the derived session id
+    ask/search case) is tagged with the derived session id
     (:func:`hit_session_id`), falling back to ``[session ?]`` when the
     identity is unknown."""
     if "lme_session_index" in h:

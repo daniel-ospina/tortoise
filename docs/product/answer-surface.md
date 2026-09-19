@@ -11,35 +11,42 @@ aboutObjects: tortoise-ask, tortoise-search
 
 # Ask Answer Surface (#1987)
 
-> The product answer surface: an LLM reader that ANSWERS questions about
-> captured memory — one bounded retrieve-then-read pass, built from the
-> LongMemEval-benchmarked two-phase reader (0.83 accuracy on the
-> integrity-valid run; the eval now re-exports the product reader so prompt
-> drift is impossible by construction).
+> ⛔ **EVAL-ONLY (#3849, owner-directed).** The ask lane is NOT a product
+> surface: there is **no `/v1/ask` REST route** (hosted or self-host), **no
+> SDK `ask()`/`ask_assembled()` method**, and **no MCP ask tool** — removal,
+> not a gated dormant surface. It survives as the eval-only entry point
+> `tortoise/ask_lane.py`, driven by the LongMemEval A/B assembly arm
+> (`tests/longmem_eval/test_assembly_arm.py`) and `tools/ask_spotcheck.py`.
 >
-> ⛔ **#2013 PRODUCT-GATING (2026-08-30): the HOSTED ask EXPOSURE is OFF by
-> default.** The READER ships (it is the eval's reader — the 500-Q
-> LongMemEval benchmark runs through it); the customer-facing ask exposure
-> is gated until the reader-model decision is made (the benchmark will use
-> a strong reader model). No `/v1/ask` route and no `tortoise_ask` in the
-> default hosted MCP tool group unless `TORTOISE_ENABLE_ASK=1` (tests/dev).
-> The capability stays in the codebase, tested, ready.
+> The READER still ships (`tortoise/reader.py`): it is the eval's reader, and
+> the 500-Q LongMemEval benchmark measures it directly; the eval re-exports
+> the product reader so prompt drift is impossible by construction (0.83
+> accuracy on the integrity-valid run).
+>
+> The pipeline below describes that eval lane (behaviour unchanged). The
+> removed product surface — the `TORTOISE_ENABLE_ASK` gate, the per-team ask
+> budget/metering, and the `_post_ask` hosted client — is gone.
 
 ## Surfaces
 
 | Surface | Where | Notes |
 |---|---|---|
-| `POST /v1/ask` (hosted) | `tortoise/hosted_api.py` | **GATED (#2013): not registered unless `TORTOISE_ENABLE_ASK=1` — 404 by default.** Team-scoped (tt_ key or session JWT), budgeted (60/min/team → 429 + Retry-After), metered per-query |
-| `TortoiseSDK.ask()` | `tortoise/sdk.py` | **GATED/EXPERIMENTAL (#2013): the eval's reader path — stays shipped, not for production use until the reader-model decision.** Local lane (embedded/selfhost, BYOK) — full pipeline, no hosted API; hosted mode when `TORTOISE_API_URL` is set |
-| MCP `tortoise_ask` | `tortoise/mcp_server.py` | **GATED (#2013): own curation group `"ask"`, excluded from the default hosted /mcp surface unless `TORTOISE_ENABLE_ASK=1`; an explicit `tool_group="ask"` server (dev/eval) serves it.** Read-classified; same budget bounds. The selfhost /mcp DEFAULT surface is gated identically (list hidden + call ERR_EXCLUDED); selfhost MCP opt-in is `tool_group="ask"` (`TORTOISE_TOOL_GROUP=ask`), while selfhost REST /v1/ask stays unmetered |
-| `POST /v1/ask` (self-host REST) | `tortoise/selfhost_api.py` | Stays — the local-lane REST parity surface. Static-key auth; local lane; NO team budget; unmetered (zero records) |
-| `GET /v1/team` ask-usage | `tortoise/hosted_api.py` | `ask_calls/ask_tokens_in/ask_tokens_out/ask_cost_usd` for the current period; zeros for fresh teams |
+| `tortoise/ask_lane.py` (eval-only lane) | `tortoise/ask_lane.py` | **The ONLY home of the ask pipeline (#3849).** `run_ask_lane(sdk, …)` (13-field response) + `run_ask_assembled(sdk, …)` (connected assembly). Local graph only — hosted client mode (`TORTOISE_API_URL`) raises. Callers: eval/test code only — the LongMemEval A/B arm, `tools/ask_spotcheck.py` and the lane's own suites |
+| `POST /v1/ask` (hosted) | — | **REMOVED (#3849)** — no route, no handler, no path-scoped error translation |
+| `TortoiseSDK.ask()` / `.ask_assembled()` | — | **REMOVED (#3849)** — no ask ENTRY POINT: the names do not resolve. The ask-path helpers the lane calls (`annotate_ask_hits`, the A1/A4 retrieval knobs) remain in `tortoise/sdk.py` |
+| MCP ask tool | — | **REMOVED (#3849)** — no registry entry, so absent from `tools/list` and `tools/call`; the `"ask"` curation group is gone |
+| `POST /v1/ask` (self-host REST) | — | **REMOVED (#3849)** alongside the hosted route |
+| `GET /v1/team` ask-usage | `tortoise/hosted_api.py` | `ask_calls/ask_tokens_in/ask_tokens_out/ask_cost_usd` for the current period; zeros for fresh teams (telemetry-follow-up scope) |
 
 **both-not-either:** `tortoise_search` / `GET /v1/search` / `tortoise_recall`
-stay LLM-free and unmetered; `/v1/ask` is the distinct metered answer
-surface — never the implicit answer path for search.
+stay LLM-free and unmetered; the eval-only ask lane is never the implicit
+answer path for search.
 
-## Request schema (`AskRequest`)
+## Question schema (eval-only lane)
+
+> **Status codes in this section are the retired wire framing.** The eval-only
+> lane is a Python entry point and never returns an HTTP status — it raises
+> `AskValidationError` carrying the same code as `.code`.
 
 ```json
 { "question": "what did we decide about the API?",   // required, 1..2000 chars
@@ -79,8 +86,8 @@ surface — never the implicit answer path for search.
 | `model` | The RESOLVED spec (the serving lane's wire id — bare `deepseek-v4-flash` on the direct lane, the full spec on OpenRouter) |
 | `provider` / `route` | The lane that actually served — a FAILOVER answer reports the SURVIVING lane; recovery reports the primary lane again |
 | `cost_estimate_usd` | An ESTIMATE at the ×1.5 over-cover rate (see Cost) — never an exact bill |
-| `duration_ms` | Wall-clock: local lane = `ask()` entry → response; hosted HTTP = request receipt → response; hosted MCP = in-process local-lane wall-clock (the MCP handler runs the SDK local lane in-process). Reader-only breakdown deferred |
-| `retrieval_degraded` | True when any retrieval leg degraded or D8 decoration was unavailable → 200 success with degraded evidence, **metered as success**; raised retrieval/annotation failure → 502 `retrieval_unavailable` |
+| `duration_ms` | Wall-clock: `run_ask_lane` entry → response |
+| `retrieval_degraded` | True when any retrieval leg degraded or D8 decoration was unavailable → the lane answers on the degraded evidence; a raised retrieval/annotation failure → `AskRetrievalUnavailable` (`.code = retrieval_unavailable`) |
 | `retrieved_session_ids` | The DISTINCT session ids DERIVED for the assembled `evidence`, in the order the evidence presents them (the legacy lane's own post-dedup ranking order — post-boost, and when enabled post-rerank (A7) / post-package (A8) — **not** raw RRF once `apply_evidence_boost` or the A7 rerank reorders the pool; the subject-major `post_cap_lines` order of the connected-assembly fired branch) — built from the same hit list the evidence was rendered from, never inferred from an id's shape. Derived means read from an explicit identity only: an explicit `session_id` already on the hit (the `annotate_ask_hits` Event join — which also supplies a Point's own camel `sessionId` prop whenever the Event arm yields no `sessionId`: no matching Event, or a matching Event without the prop), else the hit's `sessionId` (the Point's own prop, else the `:Session` `CONTAINS` edge). A hit whose identity cannot be derived contributes nothing, so `[]` is honest. Independently, the value is sanitized: anything outside `[A-Za-z0-9._:@+\-]{1,128}` after stripping surrounding whitespace is **dropped** on both surfaces — reported as unknown whenever no other safe identity source exists for that hit (a safe sibling source is used instead). That is a sanitizer rule, not a divergence. This sanitizer covers the **session id only** — `session_date` and `speaker` are interpolated into the same annotation zone unsanitized (a pre-existing, separately-tracked gap: #3844). **The field is NOT a mirror of the tags — only the honest set of identities the retrieved hits carry.** The two should be read together, because a hit carrying the eval/assembly lanes' `lme_session_index` keeps its historical tag (byte-identical to the pre-change expression per the R17 assembly goldens) regardless of the id it names, in both directions: (a) a RENDERING index (`>= 0`) shows `[session <index>]`, so the field can be empty while the evidence names sessions, or can name a session the reader was never shown — the D3 defect (the evidence does not name the true session) still stands for such rows, because the index wins the tag; (b) a NON-RENDERING index (the eval lane's `-1` sentinel, or an explicit `None` — the connected-assembly spine's spelling) shows `[session ?]` while the field still names the id. Consequence for the whole-hit caps — BYTE cap only: the derived tag is part of the byte accounting (`assemble_context` accounts `len(_render_block(h).encode())`), so `[session <uuid>]` is ~35 B wider than `[session ?]` and a pool already at the 32 KiB byte ceiling can admit **fewer** hits than pre-change (measured at the production cap: 40 → 38 of the same 40-hit pool). The 8K token cap is unaffected — it accounts `len(block.split())`, and the tag replaces one word with one word, so it adds bytes, not whitespace words. Cap VALUES and the admission mechanism are unchanged; the post-cap byte outcome is not, and that shrink is the accepted price of naming the session. |
 
 `/v1/search`'s `sessionId` is populated from the Point's `sessionId` prop, else the `:Session` `CONTAINS` edge, and passes through the same sanitizer (as does the `entity_type='document'` branch of the same agent-consumed MCP/`tortoise_search` path). Because the ask lane additionally prefers an explicit `session_id`, the two surfaces can name a different (both graph-derived) session for the same point. The **self-host** `/v1/search` response (`selfhost_api.PointResponse` = `id`/`content`/`kind`/`created_at`) does not carry a session id — a deliberate pre-existing narrow contract, out of scope for this change.
@@ -99,9 +106,11 @@ surface — never the implicit answer path for search.
   absence, #1775) IS the no-evidence answer. `abstained` is best-effort
   heuristic sugar, NEVER a gate. **Do not market abstention as a trust
   guarantee before the Task 12 gate passes.**
-- **429 is quota, explicitly NOT an abstention.** The abstention census is
-  the graded `_abs` eval run only; production 429s/abstained labels never
-  pollute it.
+- **No production 429 path exists any more** — the 60/min ask budget retired
+  with the product surface (#3849; the machinery's purge is tracked as §7
+  D5), so `quota_exceeded`/`in_flight_limit` have no raiser. The abstention
+  census is the graded `_abs` eval run only; `abstained` labels never pollute
+  it.
 - The `abstained` heuristic has two error modes: a false positive (a
   confident answer whose phrasing hits the phrase list) and a false
   negative (a genuine abstention phrased off-list). Treat the label as
@@ -149,7 +158,7 @@ measurement justifies a change.
   TANDEM with the assembly caps — raising only the assemble cap changes
   nothing. Measurement-gated: defaults stay OFF until the runbook
   baseline justifies a raise.
-- **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 product
+- **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 eval-lane
   cross-encoder rerank (eval R6 port, `tortoise/rerank.py` — the ONE
   implementation, re-exported by the eval lane). Truthy-only; needs the
   `embeddings` extra. Degrades to untouched on any scorer failure (never
@@ -169,8 +178,10 @@ measurement justifies a change.
 ## Cost & budget
 
 - **Per-query cost ≤ $0.01 target is structural:** 8000-token context cap +
-  40-item cap + 500-token output cap + the 60/min/team budget. Worst case
-  ~$0.0014–0.0023/query at the over-covered rate (5–7× under target).
+  40-item cap + 500-token output cap (the 60/min/team LLM budget was
+  retired with the product surface in #3849 — see *Budget* below).
+  Worst case ~$0.0014–0.0023/query at the over-covered rate (5–7× under
+  target).
 - **Rates:** `ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m":
   0.42}` — verified deepseek-direct $0.14/$0.28 × a documented ×1.5 safety
   factor (covers the OpenRouter fallback markup). The meter over-covers.
@@ -182,7 +193,8 @@ measurement justifies a change.
   same ×1.5 over-cover); everything else (bare ids, `deepseek/*` — incl. a
   deepseek spec forced to openrouter via `TORTOISE_ASK_PROVIDER`) stays on
   the default envelope. Both `estimate_ask_cost_usd` call sites in
-  `sdk.ask` (the metering record + the response `cost_estimate_usd`) select
+  `tortoise/ask_lane.py` (`run_ask_lane`: the metering record + the response
+  `cost_estimate_usd`) select
   via `select_ask_meter_rates(model.model)` — a strong-lane query never
   under-counts at the deepseek envelope (~10× under-count pre-fix).
 - **#2069 — the strong lane BREAKS the $0.01/query structural target:**
@@ -190,62 +202,67 @@ measurement justifies a change.
   qwen rates worst ~$0.021; typical ~$0.012 at STRONG. Recorded owner
   decision (pending, runbook §#2069): tighten the strong lane's context
   cap, exploit OpenRouter's $0.25/M cache-read, or re-baseline the target
-  for the strong lane. The 60/min dollar blast radius grows from ~$0.14 to
-  ~$1.28/min/team worst case.
-- **Budget:** `MAX_ASK_LLM_PER_MIN = 60` per team, per process (a
-  multi-worker uvicorn deployment scales the bound ×workers). Past budget →
-  **429 `quota_exceeded` + Retry-After** (the window self-heals). Per-team
-  in-flight cap 4 → 429 `in_flight_limit`. Global Semaphore(8) + 60s total
-  per-request bound → 504 `timeout` (queueing counts against the clock).
-- **Metering:** per-query record via `record_ask_usage` (best-effort,
-  non-fatal — metering failures never block the answer). Recorded when the
-  SDK call completes successfully (the single call site: the SDK local lane
-  with an explicit `org_id`); zero records when the reader/retrieval call
-  FAILS. Selfhost (HTTP MCP + REST + stdio) records nothing — the
+  for the strong lane. At the then-live 60/min budget the dollar blast
+  radius would have grown from ~$0.14 to ~$1.28/min/team worst case; that
+  budget retired with the product surface (#3849 — see Budget below), so the
+  exposure is now bounded only by the eval lane's own call volume.
+- **Budget (RETIRED with the product surface, #3849):** `MAX_ASK_LLM_PER_MIN
+  = 60` per team, per process, the per-team in-flight cap 4, and the global
+  Semaphore(8) + 60s bound all lived on the hosted `/v1/ask` and MCP ask
+  handlers, which no longer exist. `quota.run_ask_bounded` and the budget
+  helpers now have no PRODUCT caller (the only caller left of
+  `run_ask_bounded` is `tests/test_quota.py`, which pins its exec-floor
+  guarantee), so no product path can emit 429 `quota_exceeded` /
+  `in_flight_limit` or 504 `timeout`. The eval-only lane
+  (`ask_lane.run_ask_lane`) is unbudgeted. The orphaned
+  `quota.py`/`metering.py` ask cluster is retained pending the #3849 §7 D5
+  purge follow-up.
+- **Metering (retained mechanism, no PRODUCT caller passes an org):** per-query
+  record via `record_ask_usage` (best-effort, non-fatal — metering failures
+  never block the answer). The single call site is now
+  `ask_lane.run_ask_lane` (the SDK held it before #3849); the lane's real
+  callers (`tools/ask_spotcheck.py`, the LongMemEval assembly arm) pass no
+  `org_id`, so nothing is metered on a real run — `tests/test_ask_sdk.py`
+  drives the record path with an explicit `org_id` to pin it. Zero records when
+  the reader/retrieval call FAILS. Selfhost records nothing — the
   transport-keyed `_selfhost_transport` exemption, never a value-keyed
-  "selfhost" check (a hosted team literally named "selfhost" records usage
-  and is budget-charged).
+  "selfhost" check (a hosted team literally named "selfhost" was
+  record-and-budget-charged before #3849; no product caller meters today).
 
-## Error vocabulary (10 codes)
+## Error vocabulary
 
-Standard non-leaking error body — `{"error": {"code": …, "retry_after": …}}`
-with NO provider/model internals (#329 scrub). The canonical body ships
-ONLY on `/v1/ask`; ALL other endpoints keep FastAPI's default
-`{"detail": …}` — callers must NOT depend on a uniform body shape. The 403
-suspended-team on `/v1/ask` passes through untranslated as the
-`_suspended_detail()` dict — `{"detail": {"code": "SUSPENDED", …}}` (no
-11th code; the SDK maps a code-less 403 via its status-derived fallback).
+The canonical codes below are the ask vocabulary, defined in
+`tortoise/exceptions.py`. Only the rows marked *(lane)* can be raised by the
+eval-only lane (`tortoise/ask_lane.py`) and carried as `.code`; the rows
+marked *(RETIRED)* belonged to the removed product surfaces and have no
+raiser left. No HTTP body ships any of them any more: the `/v1/ask` route
+and its path-scoped 400/429/502/504 translation were removed in #3849.
 
 | Status | Code | Meaning |
 |---|---|---|
-| 400 | `invalid_question` | empty/whitespace/missing/wrong-type/control-char/malformed-JSON question |
-| 400 | `question_too_long` | > 2000 chars |
-| 400 | `invalid_question_type` | unknown question_type (valid list included) |
-| 400 | `invalid_question_date` | malformed/calendar-impossible date |
-| 401 | `unauthorized` | missing/invalid/expired key or session |
-| 429 | `quota_exceeded` | per-minute ask budget spent (Retry-After present) |
-| 429 | `in_flight_limit` | per-team in-flight cap (4) full (Retry-After omitted) |
-| 502 | `reader_unavailable` | LLM reader failed with no surviving lane |
-| 502 | `retrieval_unavailable` | retrieval/annotation/context assembly failed wholesale |
-| 504 | `timeout` | bounded section exceeded 60s (queue or reader) |
+| 400 | `invalid_question` | *(lane)* empty/whitespace/missing/wrong-type/control-char question |
+| 400 | `question_too_long` | *(lane)* > 2000 chars |
+| 400 | `invalid_question_type` | *(lane)* unknown question_type (valid list included) |
+| 400 | `invalid_question_date` | *(lane)* malformed/calendar-impossible date |
+| 401 | `unauthorized` | *(RETIRED)* removed HTTP auth path — no raiser |
+| 429 | `quota_exceeded` | *(RETIRED)* retired ask budget — no raiser |
+| 429 | `in_flight_limit` | *(RETIRED)* retired per-team in-flight cap — no raiser |
+| 502 | `reader_unavailable` | *(lane)* LLM reader failed with no surviving lane |
+| 502 | `retrieval_unavailable` | *(lane)* retrieval/annotation/context assembly failed wholesale |
+| 504 | `timeout` | *(RETIRED)* retired bounded section — no raiser |
 
-## SDK mapping (`_post_ask`)
+## Hosted delegation (removed)
 
-Hosted-mode `ask()` maps statuses to typed exceptions
-(`tortoise/exceptions.py`, re-exported from `tortoise/schemas.py`):
-429 → `AskQuotaExceeded` (retry_after) / `AskInFlightLimit`; 400/401/403/422
-→ `AskValidationError` (code carried; code-less → status-derived default
-400→`invalid_question`, 401/403→`unauthorized`); code-less 402 →
-`AskReaderUnavailable` (server-side provider-billing condition); 502 →
-`AskReaderUnavailable`/`AskRetrievalUnavailable`; 504 → `AskTimeout`
-(`source` marks client-fired vs server-504-fired). No auto-retry v1
-(`tortoise/retry.py` is the documented follow-up). The SDK-side timeout is
-75s — strictly greater than the server's 60s — so the server's 504 is
-always receivable.
+Earlier revisions mapped hosted `/v1/ask` statuses to typed exceptions in a
+`_post_ask` client. That path is **removed (#3849)**: the eval-only lane
+requires a local graph, and `run_ask_lane` raises `AskRetrievalUnavailable`
+when `TORTOISE_API_URL` is set. The ask lane's auto-retry-v1 follow-up is
+closed with it (the underlying `tortoise/retry.py` SDK write-path wiring
+remains open — see `docs/parity/2026-08-29-retrieval-inversion.md`).
 
 ## Notes
 
-- **Connected-assembly branch (#2165 Task 6, `TORTOISE_ASK_CONNECTED_ASSEMBLY`, default OFF):** the ask() local lane slots a deterministic pre-retrieval branch AFTER validation. Flag ON + a routed shape (current-state / ordering / interval) + BOTH subject halves resolved → the evidence is ASSEMBLED from typed slices (state header `STATE (couch): superseded by sofa on 2026-09-01` + chronological dated spine) instead of the legacy FTS pool; flag OFF / unrouted / unresolved → legacy byte-identical by construction. `sdk.ask_assembled()` exposes the same pipeline in PURE-ASSEMBLY mode (no reader; the eval arm reads `post_cap_lines` for gold-id admission) or with a `_reader_factory`. The fired path passes `[]` to the D8-decoration-unavailable gate → a fired render NEVER reports `retrieval_degraded` (R11). Response shape is `retrieved_session_ids`-inclusive (13 fields) — hosted /v1/ask and MCP `tortoise_ask` inherit the branch in-process.
+- **Connected-assembly branch (#2165 Task 6, `TORTOISE_ASK_CONNECTED_ASSEMBLY`, default OFF):** the `run_ask_lane()` local lane slots a deterministic pre-retrieval branch AFTER validation. Flag ON + a routed shape (current-state / ordering / interval) + BOTH subject halves resolved → the evidence is ASSEMBLED from typed slices (state header `STATE (couch): superseded by sofa on 2026-09-01` + chronological dated spine) instead of the legacy FTS pool; flag OFF / unrouted / unresolved → legacy byte-identical by construction. `ask_lane.run_ask_assembled()` exposes the same pipeline in PURE-ASSEMBLY mode (no reader; the eval arm reads `post_cap_lines` for gold-id admission) or with a `_reader_factory`. The fired path passes `[]` to the D8-decoration-unavailable gate → a fired render NEVER reports `retrieval_degraded` (R11). Response shape is `retrieved_session_ids`-inclusive (13 fields).
 - **Real-lane caveats (documented, R12/R17 DA P2-4):** the assembled evidence trusts write-side state: (1) the supersession fold's `supersededAt` is authoritative for state headers but object-level evidence carries neutral-0.5 EP until write-side EP lands; (2) sparse extractor `when` (D3) makes many rows tier-created/undated — chronological spines reflect `createdAt`/`startedAt` where `when` is absent; (3) alias cold-start — the resolver's alias leg needs anchored `search_keys` on the Object (high/FTS legs are alias-independent). Byte-golden tests pin the fixture's dated rows; real graphs with wall-clock timestamps should set `question_date` explicitly for deterministic as-of windows.
 - **JSON-mode pin:** the ask lane pins `json_mode=False` STRUCTURALLY (the
   `_should_send_json_mode` content heuristic would fire on "json" inside
@@ -253,7 +270,8 @@ always receivable.
   extraction lane is unchanged (default None).
 - **Standalone context (`GET /v1/context`, G7)** is the documented follow-up
   — `evidence` in the ask response delivers the trust property today.
-- **Tier-based ask budgets are OUT of v1** — the budget is per-team-flat.
+- **Tier-based ask budgets were OUT of v1** — the budget was per-team-flat
+  (60/min). RETIRED with the product surface in #3849 — see *Budget* above.
 - **Abstention measurement:** the graded `_abs` eval run is the census
   authority (product `abstained` label count + the judge-marker subset
   both reported); see `docs/runbook/1987-ask-abstention-check.md`.
