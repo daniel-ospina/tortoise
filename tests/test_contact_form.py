@@ -371,6 +371,14 @@ def test_the_confirmation_promises_no_reply() -> None:
         assert not re.search(REPLY_PROMISE_VERBS, text, re.I), (
             f"contact.ts carries a reply promise the visitor could be shown: {text}"
         )
+    # …and the WHOLE comment-stripped source too, so a promise SPLIT at a literal
+    # boundary is still seen: `"Thanks…" + " " + "We'll " + "reply soon."` passes a
+    # per-literal scan (cycle-8 review) while the assembled message the server
+    # returns is a promise.
+    assembled = re.search(REPLY_PROMISE_VERBS, code, re.I)
+    assert assembled is None, (
+        f"contact.ts assembles a reply promise: {assembled and assembled.group(0)!r}"
+    )
     # The visitor-facing confirmation has TWO surfaces: the server literal above,
     # and the client that displays it. Cycle-3 review shipped a promise by editing
     # ONLY the client — `show(msg, "Thanks — we'll reply within two business
@@ -378,10 +386,17 @@ def test_the_confirmation_promises_no_reply() -> None:
     # server's message, and its fallback is pinned BY VALUE among the scanned
     # literals (a hoisted constant is a legitimate edit; cycle-7 review).
     script = html_src[html_src.index("<script>") :]
-    assert re.search(r"show\(\s*msg\s*,\s*data\.message\s*\|\|", script), (
+    # Comments are stripped from the SCRIPT the same way as the TS file, and the
+    # structural pins read the STRIPPED text: a commented-out
+    # `// show(msg, data.message || "Thanks — your message is on its way.")`
+    # satisfied both of them while the live branch showed something else
+    # (cycle-8 review).
+    script_code = re.sub(r"/\*.*?\*/", "", script, flags=re.S)
+    script_code = re.sub(r"//[^\n]*", "", script_code)
+    assert re.search(r"show\(\s*msg\s*,\s*data\.message\s*\|\|", script_code), (
         "the success branch must display the server's message (`data.message`)"
     )
-    assert '"Thanks — your message is on its way."' in script, (
+    assert '"Thanks — your message is on its way."' in script_code, (
         "the success branch's own fallback must stay the reviewed, promise-free text"
     )
     # The whole PAGE is visitor-facing, not just its script: the static copy, the
@@ -411,13 +426,10 @@ def test_the_confirmation_promises_no_reply() -> None:
     assert found is None, (
         f"the contact page promises a reply (in its text or an attribute): {found and found.group(0)!r}"
     )
-    # No client-side string may promise a reply either. Comments are stripped from
-    # the SCRIPT the same way as the TS file: the earlier line-prefix filter left
-    # a trailing `// …` comment and a `/* … */` block's continuation lines in the
-    # scanned code (cycle-5 review), so a comment documenting the rule reddened
-    # the suite.
-    script_code = re.sub(r"/\*.*?\*/", "", script, flags=re.S)
-    script_code = re.sub(r"//[^\n]*", "", script_code)
+    # No client-side string may promise a reply either — and the scan runs over
+    # the whole stripped script as well as each literal, because a promise SPLIT at
+    # a literal boundary (`"We'll " + "reply soon."`) passes a per-literal scan
+    # (cycle-8 review) while the assembled text the visitor reads is a promise.
     client_strings = re.findall(
         r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`)', script_code
     )
@@ -556,10 +568,15 @@ def test_rate_limit_map_is_bounded() -> None:
     """
     src = _src(FUNCTION_TS)
     assert "MAX_RATE_KEYS" in src
+    # Strip BOTH comment forms FIRST — every assertion below reads `code`, because a
+    # comment can otherwise satisfy any token test: it did for the eviction loop
+    # (cycles 2/4) and for the cap VALUE itself (cycle-8 review).
+    code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
     # The cap VALUE matters too: a 1000x bump bounds nothing in practice, and the
     # token assertions below would all still hold (cycle-4 review, honourable
     # mention).
-    cap_value = re.search(r"MAX_RATE_KEYS\s*=\s*(\d+)", src)
+    cap_value = re.search(r"MAX_RATE_KEYS\s*=\s*(\d+)", code)
     assert cap_value is not None, "MAX_RATE_KEYS must have a numeric value"
     assert 100 <= int(cap_value.group(1)) <= 50_000, (
         f"MAX_RATE_KEYS must be a real bound, got {cap_value.group(1)}"
@@ -568,8 +585,6 @@ def test_rate_limit_map_is_bounded() -> None:
     # pinned token as TEXT and kept an earlier version of this pin green (cycle-2
     # review), and stripping only `//` left `/* … */` able to do the same
     # (cycle-4 review).
-    code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    code = re.sub(r"//[^\n]*", "", code)
     # A disabled branch keeps every token readable while eviction never runs —
     # `if (false) if (hits.size > MAX_RATE_KEYS) { … }` passed an earlier version
     # of this pin (cycle-4 review), and so did `if (!true)` (cycle-6), which no
