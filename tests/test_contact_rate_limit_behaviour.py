@@ -56,20 +56,20 @@ constant's magnitude is a product choice pinned only loosely in
 
 THE DECLARED LIMIT. `MUTATIONS` is not a proof that the invariants catch every
 reachable change: it is the list of LIMITER-LEVEL escapes we know, each asserted
-caught. Review
-cycles here have each found a class the previous battery missed — a predicate
-inspecting one entry rather than all of them, an eviction ordered by key name, a
-skipped write-back on the refusal path, an over-eager sweep one millisecond inside
-the window — because an invariant is only as strong as the state the DRIVER builds
-for it. A new class is caught when someone adds its scenario, and the battery's
-presence assertion makes a stale anchor say so out loud rather than pass quietly.
-One refusal-path detail is knowingly NOT covered by a mutation, though it is observed:
-the refusal path does not re-insert the key, so at the cap the refused address is the
-next eviction victim — the cap's documented tradeoff, pinned as a behaviour above.
-The other omission (the refusal path skips the cap block) is inert by construction:
-that branch cannot add a key, so there is nothing for the cap to bound. The
-invariants are therefore not a completeness proof; they are the behaviours that were
-demonstrably reachable, pinned where a mutation cannot reach them undetected.
+caught. Review cycles here have each found a class the previous battery missed — a
+predicate inspecting one entry rather than all of them, an eviction ordered by key
+name, a skipped write-back on the refusal path, an over-eager sweep one millisecond
+inside the window, an eviction stop that only held at exactly zero — because an
+invariant is only as strong as the state the DRIVER builds for it. A new class is
+caught when someone adds its scenario, and the battery's presence assertion makes a
+stale anchor say so out loud rather than pass quietly.
+
+The one limiter statement with no mutation of its own is the refusal path's skipping of
+the cap block, which is inert by construction: that branch adds no key, so there is
+nothing for the cap to bound. Every other statement and branch the limiter executes has
+a case that reds when it changes. That is still not a completeness proof — it is the
+behaviours that were demonstrably reachable, pinned where a mutation cannot reach them
+undetected.
 
 Node is required and the tests SKIP with a reason when it is absent, rather than
 passing silently.
@@ -370,14 +370,16 @@ observations.staleKeyLingeredUnderCap = hits.has("stale");
 
 // 10. The guard's BOUND, which is the difference between "only over the cap" and "over
 // some smaller number": at EXACTLY the cap the sweep must still not run. The map is
-// filled to the cap with a stale key in it, then an EXISTING address submits again —
-// re-setting a key adds none, so the guard is evaluated at exactly the cap and the
-// stale key must survive. One more key crosses the cap and the sweep must take it, so
-// `>` and `>=` (and any lower threshold) disagree here.
+// filled to just under the cap, the expired key is inserted LAST, and an EXISTING
+// address then submits again — re-setting a key adds none, so the guard is evaluated at
+// exactly the cap and the expired key must survive. One more key crosses the cap, and
+// the expired key must go: it is the NEWEST by insertion order, so ordinary eviction
+// would take an older LIVE key first — only the sweep can reach it, which is what makes
+// this assertion about the sweep rather than about eviction.
 hits.clear();
-hits.set("stale-under", [T0 - RATE_WINDOW_MS - 1]);
 rateLimited(CLIENT_G, T0);
 for (let i = 0; i < cap - 2; i++) rateLimited("pad" + i, T0);
+hits.set("stale-under", [T0 - RATE_WINDOW_MS - 1]);
 rateLimited(CLIENT_G, T0 + 1);
 observations.staleLingeredAtCap = hits.has("stale-under");
 rateLimited("pushes-over", T0);
@@ -617,8 +619,9 @@ def _check_guarded_sweep(observed: dict) -> None:
         "cap walks the whole map on nearly every request"
     )
     assert observed["staleSweptOverCap"] is False, (
-        "one key over the cap the sweep must run and take the expired key — otherwise "
-        "the map never does shed expired entries"
+        "one key over the cap the expired key must go — and it is the NEWEST by "
+        "insertion order here, so eviction cannot reach it first: only the sweep can, "
+        "which is what this asserts"
     )
 
 
@@ -792,6 +795,11 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "sweep inspects one timestamp only",
         r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
         "v.length === 1 && v[0] <= cutoff",
+    ),
+    (
+        "refusal path re-inserts the key",
+        r"if\s*\(recent\.length\s*>=\s*RATE_LIMIT\)\s*\{\s*hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
+        "if (recent.length >= RATE_LIMIT) { hits.delete(ip); hits.set(ip, recent);",
     ),
     (
         "refusal path skips the pruning write-back",
