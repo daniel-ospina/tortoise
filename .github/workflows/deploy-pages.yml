@@ -7,6 +7,12 @@ on:
     paths:
       - 'website/**'
       - 'tortoise/onboarding/**'
+      # #3775: product/pricing.json is bundled into the DASHBOARD at build time
+      # (website/apps/dashboard/src/pricing.js imports it), so a pricing-only
+      # change changes the served app.premiselabs.co bundle. Before #3775 the
+      # committed dist carried that signal under website/**; the artifact is
+      # untracked now, so the input is named explicitly.
+      - 'product/pricing.json'
       # #1118: workflow changes must self-deploy — the #1113 merge (which
       # added the dashboard job) did NOT trigger this workflow because the
       # workflow file wasn't in its own paths filter; it required manual
@@ -124,10 +130,97 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
+      # #3620: the staged-upload DENYLIST has one residual hole — a NEW top-level
+      # entry under `website/` is uploaded unless it is excluded. The pytest
+      # ratchet pins that case, but this job runs no pytest and does not depend
+      # on python-ci, so a push adding an unclassified entry would publish it and
+      # only red afterwards. This step closes it BEFORE the upload: the tracked
+      # top-level entries under `website/` are compared against the reviewed
+      # classification in config/pages-upload-classification.txt. No pytest, no
+      # network, no third-party deps (stdlib + git) — ~1s.
+      - name: Preflight — every website/ top-level entry is classified (#3620)
+        run: python3 tools/check_pages_upload_root.py
+      # #3620: `wrangler pages deploy .` uploaded EVERY file under `website/`.
+      # There is no ignore mechanism on the Pages upload path — wrangler uses a
+      # hardcoded IGNORE_LIST and the string `wranglerignore` appears in 0 files
+      # across every installed bundle — so `website/.wranglerignore` never
+      # excluded anything (the file itself answered 200 in production) and these
+      # were publicly served: README.md (deploy instructions + secret names +
+      # the Supabase project ref), website_architecture.md, the re-auth plan,
+      # migrations/0001_auth_sessions.sql (the full session DDL), and the
+      # dashboard/blog-admin sources under apps/ (including a committed
+      # node_modules tree).
+      #
+      # So the upload root is STAGED instead: copy the intended public surface
+      # into a temp directory and upload THAT.
+      #
+      # DENYLIST, NOT ALLOWLIST — deliberate. These entries MUST stay in the
+      # upload root and are exactly what an allowlist forgets:
+      #   * functions/ — Pages compiles Functions FROM the process CWD, not from
+      #     the directory being uploaded (`path.join(process.cwd(), "functions")`;
+      #     `pages deploy` has no `--functions-directory`, only the global
+      #     `--cwd`). Its IGNORE_LIST also means `functions/` is never uploaded as
+      #     an asset. So the step below `cd`s into the stage: run it from the repo
+      #     root and wrangler finds no functions/ and silently deploys a site with
+      #     NO Functions — every /auth/*, /api/*, /blog/* and /admin/* route 404s
+      #     while the deploy stays green. (The old `cd website` + `deploy .` got
+      #     this right by accident.) The survival guards below assert the staged
+      #     `functions/` — the tree wrangler will actually compile now.
+      #   * _redirects / _headers — consumed from the upload root; dropping them
+      #     silently discards the redirect + security-header contracts.
+      #   * admin/ — generated into the upload root by the blog-admin build step
+      #     above; dropping it breaks the admin gate's ASSETS read.
+      # A denylist fails LOUD: an over-eager exclusion 404s a page that the
+      # verify-legal job already covers. An allowlist fails SILENT: dead auth.
+      # The five survival guards below are what keep the denylist honest.
+      #
+      # RESIDUAL RISK: a NEW top-level entry under `website/` is staged unless it
+      # is excluded — but it can no longer ship on a green deploy. The preflight
+      # step above compares the tracked top-level entries against
+      # `config/pages-upload-classification.txt` BEFORE the upload, so an
+      # unclassified entry fails the deploy (the pytest ratchet in
+      # tests/test_pages_bindings.py pins the same table). What remains unpinned
+      # entirely is a new NESTED file under an already-public directory (e.g.
+      # `website/blog/internal.txt`): the classification is top-level only, so a
+      # nested internal file must be added to the exclude list AND to the 404
+      # assertion step below by hand — the 404 probe asserts a fixed
+      # enumeration, so it cannot notice a nested file on its own.
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
-          cd website
-          npx --yes wrangler@4 pages deploy . --project-name=premise-labs --branch=main
+          # `${RUNNER_TEMP:?}` and not `$RUNNER_TEMP`: the next command is
+          # `rm -rf "$STAGE"`, and an unset RUNNER_TEMP would make that a delete
+          # of `/pages-upload`. Runners always set it; fail fast if one does not.
+          STAGE="${RUNNER_TEMP:?RUNNER_TEMP is set by the runner — refusing to derive a stage path from an empty value}/pages-upload"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          rsync -a \
+            --exclude='/apps/' \
+            --exclude='/migrations/' \
+            --exclude='node_modules/' \
+            --exclude='/.wranglerignore' \
+            --exclude='*.md' \
+            website/ "$STAGE/"
+          # Fail LOUD, and before the upload, if a load-bearing entry did not
+          # survive the copy. A bare `test` would abort under `bash -e` with an
+          # empty log, so every guard carries its own operator-facing reason.
+          test -d "$STAGE/functions" \
+            || { echo '::error::functions/ did not survive staging — Pages compiles Functions from the cwd (`cd "$STAGE"` below), so every /auth/*, /api/*, /blog/* and /admin/* route would 404 (#3620)'; exit 1; }
+          test -f "$STAGE/functions/_middleware.ts" \
+            || { echo '::error::functions/_middleware.ts is missing — host routing and the admin gate would be gone (#3620)'; exit 1; }
+          test -f "$STAGE/_redirects" \
+            || { echo '::error::_redirects did not survive staging — the redirect contract is gone (#3620)'; exit 1; }
+          test -f "$STAGE/_headers" \
+            || { echo '::error::_headers did not survive staging — the security-header contract is gone (#3620)'; exit 1; }
+          test -d "$STAGE/admin" \
+            || { echo '::error::admin/ did not survive staging — the blog-admin build step above did not stage it (#3620)'; exit 1; }
+          # wrangler resolves `functions/` against the PROCESS CWD, not against
+          # the directory argument, so the cwd must be the upload root. Without
+          # this `cd`, wrangler looks for `<repo root>/functions` (absent), omits
+          # the worker bundle entirely, and deploys a site with NO Functions —
+          # every /auth/*, /api/*, /blog/* and /admin/* route 404s on a green
+          # deploy. tests/test_pages_bindings.py pins this cwd by execution.
+          cd "$STAGE"
+          npx --yes wrangler@4 pages deploy "$STAGE" --project-name=premise-labs --branch=main
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
@@ -146,10 +239,13 @@ jobs:
       # what a still-propagating PREVIOUS deployment also returns. It therefore
       # cannot distinguish the new deployment from the old one, so a regression
       # in the new build can be masked if Pages is still serving the previous
-      # one. Detecting that needs the deployment id from the upload step, which
-      # `wrangler pages deploy` does not hand back in a form this step can read.
-      # The probe catches "the site cannot sign anyone in at all", not "this
-      # particular build broke sign-in".
+      # one. Closing that needs the deployment id, which `wrangler pages deploy`
+      # does not surface: it prints a deployment URL and alias but has NO `--json`
+      # flag (`Unknown argument: json`), so the id is only available from
+      # `wrangler pages deployment list --json` or the Pages deployments API — so
+      # today the probe catches "the site cannot sign anyone in at all", not
+      # "this particular build broke sign-in". Same shape as the leak probe's
+      # KNOWN LIMIT below.
       - name: Post-deploy — sign-in is actually reachable
         run: |
           url=https://tortoise.premiselabs.co/auth/start
@@ -210,12 +306,103 @@ jobs:
           fi
           echo "✅ sign-in reachable, SESSIONS write succeeded, PKCE challenge issued"
 
+      # #3620: the deploy step above stages an explicit upload set. This is the
+      # gate that proves it — the paths below were verified LIVE at 200 while
+      # `wrangler pages deploy .` was in use (issue #3620).
+      #
+      #   * 404 is asserted EXACTLY, not "any non-2xx": `curl -sf` (the obvious
+      #     spelling) treats a 5xx as a PASS, and a 5xx means the file could not
+      #     be read back — not that it is absent.
+      #   * a transport failure fails CLOSED, matching
+      #     tools/check_pages_bindings.py's exit-2 contract: not knowing is not
+      #     the same as knowing it is fine.
+      #   * `|| curl_rc=$?` is required — GitHub's default shell is `bash -e`, so
+      #     a bare `code=$(curl ...)` whose substitution fails ABORTS the step and
+      #     the remaining paths go unchecked. Same trap the sign-in probe above
+      #     documents; tests/test_pages_bindings.py executes both blocks.
+      #   * it POLLS, like the sign-in probe above. Pages can briefly serve the
+      #     PREVIOUS deployment after upload, and that cuts both ways: on THIS
+      #     deploy the previous deployment is the leaking one (a single-shot
+      #     probe reds the very fix that removes the leak), and on a deploy that
+      #     re-introduces a leak the previous deployment is the clean one (a
+      #     single-shot probe silently PASSES the regression — fail-open). The
+      #     final attempt's verdict is the step's verdict.
+      #     KNOWN LIMIT (unpinned): the loop stops at the first fully-404 attempt,
+      #     so a PARTIALLY propagated edge could satisfy it while another edge
+      #     still serves the old, leaking deployment. A per-deployment URL does
+      #     NOT attest that the custom-domain edges have been cut over (wrangler
+      #     prints a deployment URL/alias and the API exposes a deployment id, but
+      #     neither proves edge cutover), so the cheap close is N-consecutive-clean
+      #     attempts — deferred, as it multiplies the step's runtime on every
+      #     deploy. Same limitation the sign-in probe above documents.
+      #
+      # `if: always()` so a failing sign-in probe cannot MASK a leak: the two
+      # assertions are independent, and a served internal file cannot be
+      # un-published by retrying the other one.
+      - name: Post-deploy — internal paths are not publicly served (#3620)
+        if: always()
+        run: |
+          base=https://tortoise.premiselabs.co
+          MAX_ATTEMPTS=10
+          leaks=0
+          failing=""
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            leaks=0
+            failing=""
+            for p in \
+              /.wranglerignore \
+              /README.md \
+              /website_architecture.md \
+              /2479-re-auth-implementation-plan.md \
+              /migrations/0001_auth_sessions.sql \
+              /apps/dashboard/src/main.jsx \
+              /apps/blog-admin/src/App.tsx \
+              /apps/dashboard/package.json \
+              /apps/blog-admin/package.json; do
+              code=000
+              curl_rc=0
+              code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$base$p") \
+                || curl_rc=$?
+              if [ "$curl_rc" -ne 0 ]; then
+                echo "::warning::attempt $attempt: could not verify $p (curl rc=$curl_rc) — a leak check that cannot run must not pass (#3620)"
+                failing="$failing $p(unverifiable)"
+                leaks=$((leaks + 1))
+                continue
+              fi
+              case "$code" in
+                404)
+                  :
+                  ;;
+                2*|3*)
+                  echo "::warning::attempt $attempt: $p is publicly served (HTTP $code) (#3620)"
+                  failing="$failing $p(HTTP $code)"
+                  leaks=$((leaks + 1))
+                  ;;
+                *)
+                  echo "::warning::attempt $attempt: $p did not return 404 (HTTP $code) — refusing to pass a leak check it could not run (#3620)"
+                  failing="$failing $p(HTTP $code)"
+                  leaks=$((leaks + 1))
+                  ;;
+              esac
+            done
+            [ "$leaks" -eq 0 ] && break
+            # No sleep after the FINAL attempt — it would delay the failure by
+            # 15s for nothing.
+            [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep 15
+          done
+          if [ "$leaks" -ne 0 ]; then
+            echo "::error::the Pages upload root is not controlled — still not 404 after $MAX_ATTEMPTS attempts:$failing (#3620)"
+            exit 1
+          fi
+          echo "✅ every internal path returns 404"
+
   # ── Dashboard (app.premiselabs.co → tortoise-dashboard Pages) ──────────
   # #1112: wire the dashboard into CI — closes #1086 + #1109 (two
-  # stale-bundle incidents caused by the manual-only deploy.sh). The
-  # dashboard's dist/ IS committed (merges carry it); this job rebuilds +
-  # redeploys it on every website/** change. Same wrangler auth pattern as
-  # the premise-labs job above (no new secrets).
+  # stale-bundle incidents caused by the manual-only deploy.sh). Since #3775
+  # dist/ is a build artifact (untracked) and this job is its only producer
+  # for the deploy — it rebuilds + redeploys on a website/** or
+  # product/pricing.json change. Same wrangler auth pattern as the
+  # premise-labs job above (no new secrets).
   deploy-dashboard:
     runs-on: ubuntu-latest
     steps:
@@ -271,8 +458,9 @@ jobs:
       - name: Post-deploy poll (app.premiselabs.co serves the new bundle hash)
         # The failure mode of both #1086 and #1109: nothing verified the
         # dashboard deploy. Poll until the served index.html references the
-        # bundle hash we JUST BUILT (build step runs before this — the
-        # committed dist hash is stale by definition).
+        # bundle hash we JUST BUILT (the "Build dashboard (vite)" step above
+        # runs before this and is the ONLY source of dist/ — since #3775 the
+        # bundle is untracked, so there is no committed hash to go stale).
         #
         # #2688 fix: added retry + diagnostics for the local file read edge
         # case (CI filesystem timing) and better mismatch logging showing

@@ -27,7 +27,7 @@ import os
 import re
 import threading
 import time
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
@@ -40,6 +40,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 import tortoise
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
+from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
     first_api_call,
@@ -68,6 +69,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
+    record_analytics_outcome,  # #3820 analytics-sink outcome counter
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
@@ -79,10 +81,6 @@ from tortoise.projection import (
     _journal_append_product,  # #1686: org_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
-from tortoise.quota import (
-    DEFAULT_MAX_SESSIONS,  # used by get_current_org (#754 P0: missing import → 500 on every agent_signup auth)
-)
-from tortoise.schemas import AskRequest
 from tortoise.sdk import (
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
@@ -100,7 +98,7 @@ from tortoise.sdk import (
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
-from tortoise.transport import ask_exposure_enabled
+from tortoise.supabase_control import _service_key  # #3677
 
 _logger = logging.getLogger(__name__)
 
@@ -173,8 +171,8 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
 # deadline, retried) and every later capture then waits forever while holding
 # its stored-window transcript (~MBs) on a 4GB VM, up to fly.toml's
 # hard_limit. Reject instead of enqueueing: at capacity the request fails fast
-# with 429 + Retry-After (the ask lane's quota 429 precedent,
-# `CODE_QUOTA_EXCEEDED` — its in-flight-limit 429 carries no Retry-After).
+# with 429 + Retry-After (the 429+Retry-After convention the pre-#3849 ask
+# lane set — both of its 429 paths were removed with the product surface).
 # Counting is a plain locked int, NOT an asyncio.Semaphore — the latter binds
 # to the first event loop it waits on (mixins._LoopBoundMixin), which breaks
 # across the per-test loops.
@@ -1480,77 +1478,6 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         },
     )
 
-
-# ── #1987 Task 7: path-scoped /v1/ask exception handlers ───────────────────
-# The canonical error body ({"error": {"code": …, "retry_after": …}}) ships
-# ONLY on /v1/ask; every other path/status keeps FastAPI's default
-# {"detail": …} via the CAPTURED default handler (P1-3). Mechanism pinned:
-# (i) capture the ORIGINAL default handler BEFORE registering the override —
-# keyed on the STARLETTE HTTPException class (fastapi.HTTPException is a
-# distinct subclass; the dict lookup would KeyError — P1-4); (ii) translate
-# by STATUS with a detail check; (iii) everything else → the captured
-# default's response, awaited (the default handler is a coroutine — P1-4),
-# with exc.headers preserved; never re-raise (→ ServerErrorMiddleware → the
-# app-wide handler → 500), never middleware.
-import starlette.exceptions as _starlette_exceptions  # noqa: E402
-from fastapi.exceptions import RequestValidationError as _RequestValidationError  # noqa: E402
-
-_ask_default_http_exc_handler = app.exception_handlers[
-    _starlette_exceptions.HTTPException]
-_ask_default_validation_handler = app.exception_handlers.get(
-    _RequestValidationError)
-
-
-@app.exception_handler(_starlette_exceptions.HTTPException)
-async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
-    """Path-scoped translation: /v1/ask → the canonical error body for the
-    ask lane's OWN statuses (401 STATUS-derived — the auth dependency's
-    401 details are non-canonical, P1-3; 400 detail-keyed only when the
-    detail IS a canonical code; 429/502/504 with a canonical detail).
-    EVERYTHING else (incl. the 403 suspended-org passthrough — the
-    ``_suspended_detail()`` DICT) → the captured default handler's response
-    with ``exc.headers`` preserved."""
-    from tortoise.schemas import (  # noqa: I001
-        ASK_ERROR_CODES, CODE_QUOTA_EXCEEDED, CODE_UNAUTHORIZED,
-    )
-    if request.url.path == "/v1/ask":
-        status = exc.status_code
-        detail = exc.detail
-        if status == 401:
-            return JSONResponse({"error": {"code": CODE_UNAUTHORIZED}},
-                                status_code=401, headers=exc.headers)
-        if (status in (400, 429, 502, 504)
-                and isinstance(detail, str) and detail in ASK_ERROR_CODES):
-            body = {"error": {"code": detail}}
-            # The documented 429 body contract ships ``retry_after`` IN THE
-            # BODY (the MCP surface reads it from the body; the SDK falls
-            # back to it when the header is unparseable) — the header alone
-            # would leave the body field absent (P2). Mirror the seconds
-            # when the Retry-After header is present.
-            if (status == 429 and detail == CODE_QUOTA_EXCEEDED
-                    and exc.headers and exc.headers.get("Retry-After")):
-                # RFC 7231 allows an HTTP-date Retry-After — the body field
-                # is omitted when it cannot be parsed as seconds.
-                with suppress(TypeError, ValueError):
-                    body["error"]["retry_after"] = int(
-                        float(exc.headers["Retry-After"]))
-            return JSONResponse(body, status_code=status, headers=exc.headers)
-    return await _ask_default_http_exc_handler(request, exc)
-
-
-@app.exception_handler(_RequestValidationError)
-async def _ask_path_scoped_validation_handler(request: Request,
-                                              exc: _RequestValidationError):
-    """Malformed JSON body on /v1/ask → 400 ``invalid_question`` (raised at
-    body-PARSE time, before any field validator runs — P1-3); other paths
-    keep FastAPI's default 422 behavior via the captured default handler."""
-    from tortoise.schemas import CODE_INVALID_QUESTION
-    if request.url.path == "/v1/ask":
-        return JSONResponse({"error": {"code": CODE_INVALID_QUESTION}},
-                            status_code=400)
-    if _ask_default_validation_handler is not None:
-        return await _ask_default_validation_handler(request, exc)
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 # ── Dreaming queue (#85) ────────────────────────────────────────────────
 # Per-tenant async queue: writes enqueue the affected roots; a cooperative
@@ -2995,8 +2922,8 @@ SKIP_AUTH = {"/health", "/health/ready", "/v1/version", "/docs", "/openapi.json"
 
 async def _invoke_override(override, request: Request) -> dict:
     """Invoke a dependency override the way FastAPI DI would. Overrides
-    declared with a ``request`` parameter (e.g. test_ask_api's
-    _suspended(request: Request)) get the Request injected; zero-arg
+    declared with a ``request`` parameter (a real ``request: Request``
+    dependency override) get the Request injected; zero-arg
     lambdas (the common auth-bypass override) are called bare. Mirrors
     FastAPI's behavior so DIRECT calls from the C2 gated/session deps
     behave identically to Depends()-resolved overrides."""
@@ -3005,8 +2932,8 @@ async def _invoke_override(override, request: Request) -> dict:
         params = list(sig.parameters.values())
         first = params[0] if params else None
         # Pass the Request ONLY when the first param is REQUIRED and
-        # position-callable (a real ``request: Request`` override like
-        # test_ask_api's _suspended). Optional-keyword lambdas
+        # position-callable (a real ``request: Request`` override).
+        # Optional-keyword lambdas
         # (``lambda tid=tid: ...`` — the common auth-bypass override) must
         # be called bare: binding the Request to their first optional
         # param would silently corrupt the org dict (test_onboarding
@@ -3177,10 +3104,10 @@ async def get_current_org(request: Request) -> dict:
         )
         row = org.result_set[0] if org.result_set else None
         if row:
-            (tier, mu, mg, mp, mak, ms, t_suspended, t_flagged, t_email,
+            (tier, mu, mg, mp, mak, _ms, t_suspended, t_flagged, t_email,
              t_sub_status, t_customer_email, t_graph_name) = row
         else:
-            tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
+            tier, mu, mg, mp, mak, _ms = ("free", None, None, None, None, None)
             t_suspended = t_flagged = t_email = None
             t_sub_status = t_customer_email = None
             t_graph_name = None
@@ -3218,7 +3145,13 @@ async def get_current_org(request: Request) -> dict:
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+                # #4010: sessions are UNLIMITED for every tier — the flat
+                # 1000 was an inherited code fallback, never a ratified cap
+                # (see the module comment in tortoise/quota.py). `_ms` (the
+                # stored t.max_sessions) is read so the removal is visible at
+                # the exact site, and then NOT honoured — a stored 1000 must
+                # never re-cap an org after the constant is gone.
+                "max_sessions": None,
                 # #1748: key creator's user UUID rides the org dict (Supabase
                 # resolve_api_key parity) so session-user-owned endpoints can
                 # identify the owner from a key-auth request (onboarding
@@ -3518,13 +3451,28 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     _mp = row.get("max_points")
     if _mp is None:
         _mp = row.get("graph_size_cap")
+    # #3874: the key allowance is resolved through the MINT GATE's own
+    # resolver (_org_node_sync_limits → _org_limits_from_node) rather than a
+    # precedence copied here. The gate is the authority on the cap, so the
+    # pre-cap surface cannot advertise a value the gate would not enforce:
+    # there is ONE resolver, so the two cannot drift. A None/missing result
+    # (the resolver could not read the org) falls back to the pricing tier
+    # default — it must never pass a bare None, because a PRESENT-and-None
+    # limit means UNLIMITED to the quota gate (enforce_org_limit) and would
+    # fail OPEN.
+    _gate_limits = _org_node_sync_limits(org_id)
     org = {
         "org_id": org_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
         "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
         "max_points": int(_mp) if _mp is not None else lim["max_graph_nodes"],
-        "max_api_keys": lim["max_api_keys"],
-        "max_sessions": DEFAULT_MAX_SESSIONS,
+        "max_api_keys": (_gate_limits["max_api_keys"]
+                         if _gate_limits.get("max_api_keys") is not None
+                         else lim["max_api_keys"]),
+        # #4010: sessions are unlimited for every tier — no cap of any kind,
+        # so the resolved value is always the explicit None (the pre-#4010
+        # `DEFAULT_MAX_SESSIONS` fallback is deleted, not relocated).
+        "max_sessions": None,
         "suspended_at": row.get("suspended_at"),
         "flagged_at": row.get("flagged_at"),
         "email": row.get("email"),
@@ -4100,6 +4048,14 @@ class OrgInfoResponse(BaseModel):
     tier: str
     max_users: int
     max_graphs: int | None
+    # #3874: the org's API-key allowance — exposed so the keys surface can
+    # state "you get N keys" BEFORE the create call refuses at the cap.
+    # Resolved by the auth lane from the SAME limits source the mint gate
+    # (_mint_key → _org_node_sync_limits) enforces: the stored org limit
+    # with a pricing.json tier fallback. None only when a legacy/override
+    # dict predates the field — the client must then stay silent rather
+    # than fabricate a number.
+    max_api_keys: int | None = None
     max_orgs: int | None
     # #308 (R7): "active" | "flagged" over HTTP — a suspended org never
     # reaches this handler (403 SUSPENDED fires in get_current_org first);
@@ -5220,129 +5176,6 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     return {"results": out, "count": len(out)}
 
 
-# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE is off by default ──────
-# The READER (tortoise/reader.py) stays shipped — it is the eval's reader
-# (the 500-Q LongMemEval benchmark runs through it; the eval re-exports the
-# product reader). The HOSTED ask EXPOSURE is gated: no /v1/ask route in
-# the served app unless TORTOISE_ENABLE_ASK=1 (tests/dev). The route
-# handler + the path-scoped error translation stay in the codebase,
-# tested, ready — just not served to customers until the reader-model
-# decision is made (the benchmark will use a strong reader model).
-
-
-_ASK_ROUTE_REGISTERED = False
-
-
-def _register_ask_route() -> None:
-    """Register the /v1/ask route on the module-level app (idempotent).
-    Called at import when ``TORTOISE_ENABLE_ASK=1``; tests call it to
-    exercise the ON state without a subprocess re-import."""
-    global _ASK_ROUTE_REGISTERED
-    if _ASK_ROUTE_REGISTERED:
-        return
-    app.add_api_route("/v1/ask", ask_question, methods=["POST"],
-                      response_model=None)
-    _ASK_ROUTE_REGISTERED = True
-
-
-async def ask_question(body: AskRequest,
-                       org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """Org-scoped answer surface (#1987 Task 7): one bounded RAG pass over
-    the org's memory — retrieval → annotation → dedup → context assembly →
-    ONE LLM reader call (the two-phase commit/abstain discipline) → metered
-    per-query cost.
-
-    Budget: per-org per-minute LLM budget (60/min) → 429 ``quota_exceeded``
-    + Retry-After; per-org in-flight cap 4 → 429 ``in_flight_limit``; the
-    shared ``run_ask_bounded`` wrapper bounds concurrency (global
-    Semaphore(8)) and total per-request latency (``_ASK_TIMEOUT_S`` → 504
-    ``timeout``). Error body: ``{"error": {"code": …, "retry_after": …}}``
-    with NO provider/model internals (the #329 scrub) — via the path-scoped
-    HTTPException handler. Metering: ``sdk.ask(org_id=org["org_id"])`` —
-    the SINGLE call site (the SDK local lane records with an explicit
-    org_id; ``org["org_id"]`` from the auth dependency — the /v1/search
-    pattern, NOT ``_current_org_id.get()`` which is MCP-only, P1-2); zero
-    records when the reader/retrieval call FAILS (honest metering).
-    """
-    import logging as _ask_log  # noqa: I001
-    from datetime import datetime as _dt2
-    from tortoise.quota import (
-        AskBoundedTimeoutError,
-        AskInFlightLimitError,
-        ask_budget_retry_after,
-        ask_in_flight_capacity,
-        ask_llm_budget_available,
-        run_ask_bounded,
-    )
-    from tortoise.schemas import (
-        CODE_IN_FLIGHT_LIMIT,
-        CODE_QUOTA_EXCEEDED,
-        CODE_READER_UNAVAILABLE,
-        CODE_RETRIEVAL_UNAVAILABLE,
-        CODE_TIMEOUT,
-    )
-    from tortoise.exceptions import (
-        AskQuotaExceeded,
-        AskReaderUnavailable,
-        AskRetrievalUnavailable,
-        AskValidationError,
-    )
-
-    org_id = org.get("org_id")
-    # Budget gate (per-org per-minute — shared with the MCP handler) — BUT
-    # only charge a slot when the per-org in-flight cap still has room: a
-    # request run_ask_bounded will 429 ``in_flight_limit`` must not burn
-    # budget (P2).
-    if ask_in_flight_capacity(org_id) and not ask_llm_budget_available(org_id):
-        raise HTTPException(
-            status_code=429, detail=CODE_QUOTA_EXCEEDED,
-            headers={"Retry-After": str(int(ask_budget_retry_after(org_id)))})
-    t0 = _dt2.now(UTC)
-    _require_scope(org, "graphs:read", "ask_question")
-    sdk = _data_sdk(org)
-    try:
-        result = await run_ask_bounded(
-            sdk.ask, org_id, body.question,
-            question_type=body.question_type,
-            question_date=body.question_date,
-            _sdk_org_id=org_id,
-        )
-    except AskValidationError as e:
-        raise HTTPException(status_code=400, detail=e.code) from e
-    except AskQuotaExceeded:
-        raise HTTPException(
-            status_code=429, detail=CODE_QUOTA_EXCEEDED,
-            headers={"Retry-After": str(int(ask_budget_retry_after(org_id)))}) from None
-    except AskInFlightLimitError:
-        raise HTTPException(status_code=429,
-                            detail=CODE_IN_FLIGHT_LIMIT) from None
-    except AskBoundedTimeoutError:
-        raise HTTPException(status_code=504, detail=CODE_TIMEOUT) from None
-    except AskReaderUnavailable:
-        raise HTTPException(status_code=502,
-                            detail=CODE_READER_UNAVAILABLE) from None
-    except AskRetrievalUnavailable:
-        raise HTTPException(status_code=502,
-                            detail=CODE_RETRIEVAL_UNAVAILABLE) from None
-    except Exception:
-        _ask_log.getLogger("tortoise.api").exception(
-            "ask failed (unexpected): team=%s", org_id)
-        raise
-    finally:
-        sdk.close()
-    # ``duration_ms`` = hosted wall-clock from request receipt to response.
-    result["duration_ms"] = max(0, int((_dt2.now(UTC) - t0).total_seconds() * 1000))
-    return result
-
-
-# #2013 PRODUCT-GATING: the /v1/ask route is served ONLY when the exposure
-# flag is on (the handler above is defined unconditionally — the route is
-# what is gated). TORTOISE_ENABLE_ASK=1 (tests/dev) registers it; the
-# default hosted app serves no /v1/ask (404).
-if ask_exposure_enabled():
-    _register_ask_route()
-
-
 @app.get("/v1/topics/{topic}/summary")
 async def topic_summary(
     topic: str,
@@ -5431,6 +5264,12 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         tier=org["tier"],
         max_users=org["max_users"],
         max_graphs=org["max_graphs"],
+        # #3874: the key allowance rides the overview read — the value is
+        # already resolved by get_current_org / _session_user_org from the
+        # org's stored limit (pricing tier fallback), the identical source
+        # _mint_key's cap gate counts against, so the pre-cap surface and
+        # the at-cap 402 detail cannot silently desync.
+        max_api_keys=org.get("max_api_keys"),
         # #308 (R7): flagged status rides /v1/team (suspended never reaches
         # here — the auth dependency 403s first; scoping delta 12).
         status="flagged" if org.get("flagged_at") is not None else "active",
@@ -8603,7 +8442,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # role normalization (None -> "unknown", truthy non-strings -> str()), and
     # the same `speaker` property write (delta 5 — hosted previously wrote no
     # speaker tag). Hosted additionally adds quota/auth bounds + a pre-write
-    # estimate. Keep the two in sync. The LLM extraction that follows the
+    # estimate. Keep the two in sync — and note the THIRD copy:
+    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
+    # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
+    # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
+    # since #3914. #3551 tracks collapsing all three onto one shared
+    # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
@@ -8626,23 +8470,68 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # create the whole path from scratch, duplicating the Point node.
         turn_id = f"{session_id}_t{i}"
         turn_text = f"[{role}] {content[:5000]}"
-        proj.g.query(
+        _turn_rows = proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
             "    t.speaker=$speaker, "
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch",
+            "    t.updatedAt=$now, t.content_hash=$ch "
+            "RETURN t.createdAt AS createdAt, t.status AS status",
             params={"id": turn_id, "c": turn_text, "k": "event",
                     "speaker": role, "s": "draft", "now": now,
                     "ch": _content_hash(turn_text)},
-        )
+        ).result_set
+        # #3947 review (F4 + parity): the write's COALESCE owns the stored
+        # timestamp and status — a RE-capture keeps the original createdAt and
+        # any promoted status, so journal what the graph holds. Emitting the
+        # literal `now`/`draft` regresses a promoted turn to draft and drifts
+        # createdAt on every replay (parity with sdk.py's loop, #1532).
+        turn_created_at = (
+            _turn_rows[0][0]
+            if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
+            else now)
+        turn_status = (
+            _turn_rows[0][1]
+            if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
+            else "draft")
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
             "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": session_id, "tid": turn_id},
         )
+        # #3947: journal the turn write so a rebuild can recreate it (parity
+        # with sdk.capture_session's loop — the two are kept identical by
+        # design, #1532). The raw Cypher writes above are unchanged; this is
+        # the missing RECORD. `contains_session` rides the event envelope so
+        # the projection's edge fold restores the CONTAINS link without a
+        # node property the live write never sets.
+        #
+        # #3947 review (cycle 2, #3086): gated on a configured journal, exactly
+        # as in sdk.py — on this lane `_make_sdk`/`_data_sdk` pass no
+        # `event_log_path`, so the JSONL half is a no-op and the `:GraphEvent`
+        # half is not a rebuild source (the wipe takes it with the graph). The
+        # per-turn `ensure_event_schema` + `next_seq` + `append_event` cost was
+        # pure overhead on the lane #3086 measures as already blocking the
+        # event loop. The residual — hosted captures have no rebuild-durable
+        # turn record until a journal is wired here — is unchanged by this PR.
+        if sdk._get_event_log() is not None:
+            sdk._emit_event(
+                "PointAdded",
+                {"id": turn_id, "kind": "event",
+                 "content_hash": _content_hash(turn_text)},
+                point={
+                    "id": turn_id,
+                    "content": turn_text,
+                    "pointKind": "event",
+                    "speaker": role,
+                    "is_episodic": True,
+                    "status": turn_status,
+                    "createdAt": turn_created_at,
+                },
+                contains_session=session_id,
+            )
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -10037,19 +9926,19 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     422 field reasons incl. commit_id_mismatch + calibration_mismatch;
     retry-once semantics documented) → [2] L1 replay via :CommitRecord
     (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
-    [3] L2 reconciliation IN MEMORY → [4] sessions quota (402) + budget
-    adjudication on the reconciled net-new delta (soft 15 → WARN telemetry;
-    >25 first-adjudication → held[], NOT written; >50 → 402) → [5] the
-    four-node chain + entities + operators + supersede_point + Session
-    counters → [6] metering (write_ops +1 non-duplicate; nodes_written
-    += net-new; held bills 0 → write_ops_billed:0) + content-free telemetry.
+    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract +
+    budget adjudication on the reconciled net-new delta (soft 15 → WARN
+    telemetry; >25 first-adjudication → held[], NOT written; >50 → 402) →
+    [5] the four-node chain + entities + operators + supersede_point +
+    Session counters → [6] metering (write_ops +1 non-duplicate;
+    nodes_written += net-new; held bills 0 → write_ops_billed:0) +
+    content-free telemetry.
 
     Response contract (§6.1): 200 {session_id, commit_id, nodes_created,
     nodes_merged, held[], duplicate} · 400 missing required fields ·
-    401 bad/missing key (get_current_org) · 402 budget ceiling or sessions
-    quota · 422 Layer-1 (retry once; code calibration_mismatch /
-    commit_id_mismatch) · 429 dedicated 300/min/key bucket (R-13) ·
-    500 fail-closed, redacted.
+    401 bad/missing key (get_current_org) · 402 budget ceiling · 422 Layer-1
+    (retry once; code calibration_mismatch / commit_id_mismatch) · 429
+    dedicated 300/min/key bucket (R-13) · 500 fail-closed, redacted.
     """
     # #1927: commit_session is a session-content write surface that needs NO
     # consent gate — session_recording is default-ON (ToS-covered) with an
@@ -10128,8 +10017,12 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     if plan.duplicate:
         return _commit_response(payload, duplicate=True, warnings=warnings)
 
-    # [4a] Sessions quota (post-fix count — 402). Replays already returned
-    # above: quota never gates a duplicate (zero writes).
+    # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
+    # unlimited for every tier, so every resolver supplies an explicit None
+    # and this call cannot 402; it remains the fail-closed presence check
+    # (#310 GAP-B) that a limits dict built without the key does not slip
+    # past. Replays already returned above: quota never gates a duplicate
+    # (zero writes).
     _check_org_limit(org, "sessions")
 
     # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
@@ -10729,7 +10622,6 @@ def _org_limits_from_node(org_node: dict) -> dict:
     tier_limits from pricing.json when a stored value is None/missing.
     """
     from tortoise.pricing import tier_limits
-    from tortoise.quota import DEFAULT_MAX_SESSIONS
     tier = org_node.get("tier", "free")
     lim = tier_limits(tier)
     # Fetch each field; use `is None` to preserve None (unlimited) and explicit 0.
@@ -10737,7 +10629,6 @@ def _org_limits_from_node(org_node: dict) -> dict:
     mg = org_node.get("max_graphs")
     mp = org_node.get("max_points")
     mak = org_node.get("max_api_keys")
-    ms = org_node.get("max_sessions")
     return {
         "org_id": org_node["id"],
         "tier": tier,
@@ -10748,7 +10639,9 @@ def _org_limits_from_node(org_node: dict) -> dict:
         # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
         "max_points": mp if mp is not None else lim["max_graph_nodes"],
         "max_api_keys": mak if mak is not None else lim["max_api_keys"],
-        "max_sessions": ms if ms is not None else DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier — the stored value is
+        # deliberately NOT honoured as a cap (see quota.resolve_org_limits).
+        "max_sessions": None,
     }
 
 
@@ -18291,7 +18184,15 @@ def _write_onboarding_state(org_id: str, state: dict) -> None:
     jsonb NEVER holds FLOW state (the router branches before the allowlist
     filter; this is the belt-and-braces backstop the registration-split
     negatives pin)."""
-    if any(k in state for k in _os.FLOW_KEYS) or any(k in state for k in _os.STEP_IDS):
+    _stripped_flow = {k for k in state
+                      if k in _os.FLOW_KEYS or k in _os.STEP_IDS}
+    if _stripped_flow:
+        # #3821: this is the last chance to learn the router leaked a FLOW
+        # key. The strip itself is unchanged (jsonb NEVER holds FLOW state);
+        # the drop is now reported instead of silent — it was the
+        # "defensive" backstop with no observer.
+        _report_unregistered(
+            "onboarding_state", "flow_keys_stripped_at_write", _stripped_flow)
         state = {k: v for k, v in state.items()
                  if k not in _os.FLOW_KEYS and k not in _os.STEP_IDS}
     from tortoise.supabase_control import (
@@ -18358,7 +18259,8 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     infra); FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
     → graph writers. Branches BEFORE the allowlist filter so FLOW keys can
     never round-trip into jsonb. Unknown keys are dropped (fail-closed,
-    never default-to-FLOW). Returns the MERGED PROJECTION — the writer echo
+    never default-to-FLOW) and the drop is REPORTED (raised instead under
+    strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
 
     NOTE: step-edge writes via this router (PATCH catalog-presented) trigger
@@ -18373,10 +18275,17 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
         elif k in _os.FLOW_KEYS:
             # only step-edge keys are routable here; scalar FLOW keys are
             # rejected by the PATCH surface / checkpoint before reaching
-            # this point (defensive: silently skip — never default-to-jsonb)
-            pass
+            # this point (never default-to-jsonb). #3821: the rejection is
+            # reported with its OWN reason, so a scalar FLOW key stays
+            # distinguishable from a typo'd operational key.
+            _report_unregistered(
+                "onboarding_state", "flow_scalar_rejected_at_router", {k})
         elif k in _ALLOWED_STATE_KEYS:
             jsonb_fields[k] = v
+        else:
+            # #3821: the negative branch that used to be nothing. An
+            # unregistered key matched no arm and vanished with no observer.
+            _report_unregistered("onboarding_state", "unknown_key", {k})
     if jsonb_fields:
         state = _get_onboarding_state(org_id)
         for k, v in jsonb_fields.items():
@@ -18670,6 +18579,26 @@ class OnboardingStatePatchRequest(BaseModel):
     # a stray PATCH is REJECTED loudly (403 server-owned) like the siblings.
     fork_unsure_at: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _report_unknown_patch_fields(cls, data):
+        """#3821 (the front door): pydantic's default ``extra='ignore'``
+        drops an unknown PATCH field BEFORE `_update_onboarding_state` ever
+        runs, so the router's new negative branch could never see it.
+
+        This validator keeps the drop — it does NOT switch to
+        ``extra='forbid'``, which would make an unknown client field an
+        unconditional 422 (the owner ruled against unconditional
+        user-facing refusals) — but makes it observable: the offending
+        field name(s) are counted and reported through the same choke point.
+        Strict mode raises."""
+        if isinstance(data, dict):
+            unknown = set(data) - set(cls.model_fields)
+            if unknown:
+                _report_unregistered("onboarding_state_patch",
+                                     "unknown_field", unknown)
+        return data
+
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
 # where (per-step write-surface ownership, scope pin 7/8).
@@ -18748,13 +18677,28 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     updates.pop("org_created", None)
     # Epic #529 copy-attribution beacon: analytics-only fields — pop before
     # the state merge (email pattern) and emit artifact_copied for enum-valid
-    # pairs; invalid values are ignored (no event, no error) so a stale or
-    # malformed beacon can never break the copy UX or pollute state.
+    # pairs; invalid values still emit no event and change no state, so IN
+    # NORMAL MODE a stale or malformed beacon cannot pollute state. #3821:
+    # the rejection is now REPORTED instead of vanishing without an observer —
+    # and because this raise is in the endpoint BODY (not a pydantic
+    # validator) strict mode turns it into a 500, which is why strict is off
+    # by default and never set in production.
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
         _track_analytics_event(org["org_id"], "artifact_copied",
                                {"harness": harness, "section": section})
+    elif harness is not None or section is not None:
+        # #3821: an enum-invalid beacon used to produce NO event and NO
+        # observer — indistinguishable from a beacon that never fired. The
+        # event still does not fire (the enum check is unchanged); the
+        # rejected value(s) are now reported.
+        _report_unregistered(
+            "artifact_copied", "invalid_enum",
+            {name for name, value, allowed in (
+                ("harness", harness, _HARNESS_ANALYTICS_VALUES),
+                ("section", section, _SECTION_ANALYTICS_VALUES))
+             if value is not None and value not in allowed})
     # #1997 (W1): accept-and-drop (plan T7) — a client PATCH
     # onboarding_complete on a NODE-PRESENT org is DROPPED (accepted 200;
     # the echo is node-governed — the legacy jsonb flag is inert there).
@@ -19686,19 +19630,411 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "deadline_aborts", "by_stage",
+    # #3821: billing attribution. The Stripe webhook emits `plan` and `tier`
+    # (the notify_kind row at the billing emit), but they were never
+    # registered — so billing analytics rows have been written STRIPPED since
+    # c928b0316 (2026-08-09), despite
+    # docs/plans/2026-08-08-310-stripe-billing.md mandating those fields.
+    # Registering them here repairs that shipped, silent loss; the structural
+    # registration test is what keeps the two sets from drifting again.
+    "plan", "tier",
 }
+
+# ── #3821: the unregistered-key choke point ─────────────────────────────
+# Every allowlist filter in this module has the same shape: a membership
+# test with no `else`. Before this, a key that failed the test was simply
+# gone — no error, no counter, no log — so a dropped signal was
+# indistinguishable from an event that never fired, and the debugging
+# direction was inverted (you hunt a product bug while the product is fine
+# and the INSTRUMENT ate the event).
+#
+# The adopted standard is the OpenTelemetry attribute-limit rule: an
+# attribute that cannot be carried MUST NOT be discarded silently, and the
+# message MUST be printed at most once per record. The rule has four parts:
+#   1. never forward the key  (the PII guarantee is unchanged),
+#   2. always count it        (the drop is distinguishable from never-fired),
+#   3. report it once         (bounded — a hot emit site cannot flood),
+#   4. raise only in strict mode (an explicit dev/test opt-in, read at call
+#      time so a test can flip it and prod cannot accidentally be strict).
+_TELEMETRY_STRICT_ENV = "TORTOISE_TELEMETRY_STRICT"
+
+# (where, subject, bounded sorted unknown keys) -> drop count. Monotonic —
+# reads never reset it. The key is BOUNDED (see `_telemetry_drop_fingerprint`)
+# and the dict is capped, because one call site (the PATCH front door) derives
+# its keys from a request body: without a bound, an authenticated caller could
+# grow both structures without limit and emit an unbounded warning line.
+_TELEMETRY_DROP_COUNTS: Counter[tuple[str, str, tuple[str, ...]]] = Counter()
+
+# (where, subject, bounded key fingerprint) already warned — the OTel
+# "at most once per record" dedup, kept PER SITE. A single global set let the
+# client-controlled PATCH front door consume the whole warning budget and
+# silence EVERY other site's first warning — a per-site budget keeps one
+# noisy surface from blinding the others.
+_TELEMETRY_DROP_REPORTED: dict[tuple[str, str], set[tuple[str, ...]]] = {}
+
+# Guards the count and the warn-dedup so "always counted" and "reported at
+# most once" hold under the threaded emit sites (`asyncio.to_thread`, the
+# MCP executor). Contended only on a drop — rare by construction — never on
+# the happy path.
+_TELEMETRY_DROP_LOCK = threading.Lock()
+
+# Cardinality bounds. The counter retains at most `_TELEMETRY_DROP_MAX_MARKERS`
+# distinct key-sets PLUS one shared overflow entry; the per-site dedup dict
+# retains at most `_TELEMETRY_DROP_MAX_SITES` sites PLUS one shared overflow
+# site, each with at most `_TELEMETRY_DROP_MAX_PER_SITE` fingerprints; and at
+# most `_TELEMETRY_DROP_MAX_KEYS` keys are named in one counter key / log line,
+# each truncated to `_TELEMETRY_DROP_MAX_KEY_LEN` characters.
+# Together these mean a CALLER-SUPPLIED key name (or site label) can never make
+# the reporter retain or log without bound.
+_TELEMETRY_DROP_MAX_MARKERS = 512
+_TELEMETRY_DROP_MAX_SITES = 64
+_TELEMETRY_DROP_MAX_PER_SITE = 64
+_TELEMETRY_DROP_MAX_KEYS = 20
+_TELEMETRY_DROP_MAX_KEY_LEN = 128
+
+# The sentinels a capped structure folds into — SHARED, so each structure is
+# bounded overall rather than bounded-per-key.
+_TELEMETRY_DROP_OVERFLOW: tuple[str, str, tuple[str, ...]] = (
+    "<overflow>", "<overflow>", ())
+_TELEMETRY_DROP_SITE_OVERFLOW: tuple[str, str] = (
+    "<site-overflow>", "<site-overflow>")
+
+
+def _truncate_label(text: str) -> str:
+    """Truncate an over-long label, keeping a length suffix in the rendering."""
+    if len(text) <= _TELEMETRY_DROP_MAX_KEY_LEN:
+        return text
+    return (text[:_TELEMETRY_DROP_MAX_KEY_LEN]
+            + f"...(+{len(text) - _TELEMETRY_DROP_MAX_KEY_LEN} more)")
+
+
+def _cap_dropped_key(key: object) -> object:
+    """Truncate ONE over-long dropped key name so a fingerprint stays bounded.
+
+    A key at or under ``_TELEMETRY_DROP_MAX_KEY_LEN`` is returned UNCHANGED, so
+    a normal short key's fingerprint — and every assertion on it — is
+    byte-identical to before; only an over-long rendering is truncated, with a
+    length suffix so the log line still says how much was elided."""
+    rendered = key if isinstance(key, str) else str(key)
+    if len(rendered) <= _TELEMETRY_DROP_MAX_KEY_LEN:
+        return key
+    return _truncate_label(rendered)
+
+
+def _telemetry_drop_fingerprint(keys: frozenset[str] | set[str]) -> tuple[str, ...]:
+    """A BOUNDED, comparable rendering of a dropped key set.
+
+    ``key=str`` keeps the sort total for a non-string key (a caller-supplied
+    props dict is only membership-checked, so a mixed-type key set must not
+    make the reporter itself raise). TWO caps are needed because the PATCH
+    front door feeds this from a request body: ``_TELEMETRY_DROP_MAX_KEYS``
+    bounds the COUNT of keys named, and ``_TELEMETRY_DROP_MAX_KEY_LEN`` bounds
+    each name's LENGTH — without the second, one 1 MiB field name would become
+    one 1 MiB retained fingerprint entry and log line.
+    """
+    ordered = sorted(keys, key=str)
+    marker = None
+    if len(ordered) > _TELEMETRY_DROP_MAX_KEYS:
+        extra = len(ordered) - _TELEMETRY_DROP_MAX_KEYS
+        ordered = ordered[:_TELEMETRY_DROP_MAX_KEYS]
+        marker = f"...(+{extra} more)"
+    rendered = tuple(_cap_dropped_key(k) for k in ordered)
+    return (*rendered, marker) if marker is not None else rendered
+
+
+class UnregisteredTelemetryKey(ValueError):
+    """Raised by ``_report_unregistered`` ONLY in strict mode.
+
+    Subclasses ``ValueError`` so a raise inside
+    ``OnboardingStatePatchRequest``'s pydantic before-validator surfaces as a
+    validation error rather than an opaque 500; every other raise site
+    propagates it as-is."""
+
+    def __init__(self, where: str, subject: str, unknown: set[str]) -> None:
+        self.where = where
+        self.subject = subject
+        self.unknown = frozenset(unknown)
+        super().__init__(
+            f"unregistered telemetry key(s) at {where} (subject={subject}): "
+            f"{sorted(map(str, unknown))}")
+
+
+def _telemetry_strict() -> bool:
+    """Strictness is read AT CALL TIME.
+
+    Reading it at import time would both (a) make the flag untestable and
+    (b) let a dev flag set before boot survive into production."""
+    return os.environ.get(_TELEMETRY_STRICT_ENV) == "1"
+
+
+def _report_unregistered(where: str, subject: str,
+                         unknown: set[str] | frozenset[str] | None) -> None:
+    """Account for allowlist-dropped telemetry keys — and never forward them.
+
+    Contract (issue #3821), in order:
+
+    1. ALWAYS counts — the bounded key fingerprint is incremented before any
+       escalation, so the drop is visible even when strict mode raises.
+    2. Reports AT MOST ONCE per ``(where, subject, key-fingerprint)`` per
+       process — the OTel bound, so an emit site in a hot loop cannot flood
+       the log.
+    3. Raises ``UnregisteredTelemetryKey`` ONLY when strict mode is on at call
+       time; otherwise returns.
+    4. NEVER forwards the key: the caller's filtered props are byte-identical
+       to before, preserving the PII guarantee.
+
+    Every retained structure is bounded: ``_TELEMETRY_DROP_COUNTS`` by
+    ``_TELEMETRY_DROP_MAX_MARKERS`` plus one shared overflow entry,
+    ``_TELEMETRY_DROP_REPORTED`` by ``_TELEMETRY_DROP_MAX_SITES`` sites (plus a
+    shared overflow site) each capped at ``_TELEMETRY_DROP_MAX_PER_SITE``
+    fingerprints, and the fingerprint's key names by ``_TELEMETRY_DROP_MAX_KEYS``
+    names (plus one ``...(+N more)`` marker), each capped at
+    ``_TELEMETRY_DROP_MAX_KEY_LEN`` characters.
+    The PATCH front door feeds this from a request body, so an authenticated
+    caller must not be able to grow process-global state or a log line without
+    bound by sending unique unknown field names.
+
+    An empty/``None`` ``unknown`` is a no-op — a fully-registered event must
+    leave the counter at zero, or the counter itself is unreadable.
+    """
+    if not unknown:
+        return
+    # A site label is a code literal at every CURRENT call site, but the
+    # boundedness contract must not depend on that — cap it exactly as a key
+    # name is capped, so a future request-derived label cannot grow the
+    # counter, the per-site dict, or the log line without bound.
+    where = _truncate_label(where)
+    subject = _truncate_label(subject)
+    fingerprint = _telemetry_drop_fingerprint(frozenset(unknown))
+    with _TELEMETRY_DROP_LOCK:
+        counter_key = (where, subject, fingerprint)
+        if (counter_key not in _TELEMETRY_DROP_COUNTS
+                and len(_TELEMETRY_DROP_COUNTS) >= _TELEMETRY_DROP_MAX_MARKERS):
+            counter_key = _TELEMETRY_DROP_OVERFLOW
+        _TELEMETRY_DROP_COUNTS[counter_key] += 1
+        site = (where, subject)
+        if (site not in _TELEMETRY_DROP_REPORTED
+                and len(_TELEMETRY_DROP_REPORTED) >= _TELEMETRY_DROP_MAX_SITES):
+            site = _TELEMETRY_DROP_SITE_OVERFLOW
+        reported = _TELEMETRY_DROP_REPORTED.setdefault(site, set())
+        report = (fingerprint not in reported
+                  and len(reported) < _TELEMETRY_DROP_MAX_PER_SITE)
+        if report:
+            reported.add(fingerprint)
+    if report:
+        _logger.warning(
+            "unregistered telemetry key(s) dropped at %s (subject=%s): %s — "
+            "NOT forwarded; if the loss is unintended, register them in "
+            "_ALLOWED_ANALYTICS_PROPS (props) or _ALLOWED_STATE_KEYS (state)",
+            where, subject, list(fingerprint))
+    if _telemetry_strict():
+        raise UnregisteredTelemetryKey(where, subject, set(unknown))
+
 
 _ANALYTICS_FALLBACK_PATH = None
 
+# #3820: the CLOSED outcome vocabulary of an analytics write. Every exit of
+# `_track_analytics_event` returns exactly one member, so its caller — and the
+# outcome counter — can tell "delivered" from "degraded" from "no sink
+# configured by design" from "lost entirely". Before this, every one of the
+# four exits returned bare `None`: a Supabase outage, a revoked key and an
+# unwritable JSONL were indistinguishable from success, which is why #3677 was
+# discoverable only by a human reading a filesystem on the production machine
+# (2,464 events / 568,889 bytes on an ephemeral Fly rootfs).
+_ANALYTICS_OUTCOMES = ("supabase", "fallback", "unconfigured", "dropped")
+
+# #3820: the incident kind for a degraded sink. Subject-less, platform-level —
+# like DRIVER_DOWN / R2_DOWN — because the analytics sink is shared by every
+# org: a per-org subject would fan one degradation out into one issue per
+# tenant.
+_ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
+
+# #3820 (D2/P2-1): a single 5s POST timeout must not open a GitHub issue,
+# but a persistent outage must be visible within seconds. The trigger is a
+# STREAK, not a transition: `_ANALYTICS_DEGRADED_STREAK` counts consecutive
+# degraded writes since the last delivered one, and `fallback` alerts when the
+# streak reaches `_ANALYTICS_FALLBACK_ALERT_AFTER`. The review's P2-1 finding
+# was that the earlier "first fallback after a success" arm opened an incident
+# on ONE event, contradicting this decision's own rationale; a saturated
+# stream still reaches the threshold within ~15s. `dropped` — the event is
+# unrecoverable — alerts at once. The in-process gate that keeps it to ONE
+# incident per episode is the `_ANALYTICS_RESOLVE_NOT_BEFORE` arm (see the
+# state table below); the AlertStore's own dedup cannot substitute, because a
+# per-event call costs an R2 conditional PUT + a GitHub search + Telegram on
+# EVERY event of an outage (seconds each, once per event).
+#
+# #3820 (D5b — the ABSENCE half is DEFERRED, and recorded here rather than
+# dropped): D5b also asks for a sink that silently STOPS emitting to be caught
+# by a last-success timestamp against a wide cadence-derived threshold. That is
+# not implementable at this seam: analytics writes are user-driven with no
+# fixed cadence, so "no writes for N minutes" is indistinguishable from a
+# healthy idle process, and a real absence check needs a heartbeat the sink
+# does not emit — a new signal plus a timer, i.e. a separate change. The
+# transition INTO degradation (the next write) is covered by the streak below.
+# TRACKED: #3944 — the deferral must not evaporate with the #3820 branch.
+_ANALYTICS_FALLBACK_ALERT_AFTER = 3
+# The alert-trigger streak — NOT part of the resolve state below: it counts
+# consecutive degraded writes and is reset by a delivered one.
+_ANALYTICS_DEGRADED_STREAK = 0
+# #3820 (cycle-7): the resolve state machine is TWO globals, not five. The
+# previous shape carried `_ANALYTICS_INCIDENT_OPEN` + `_ANALYTICS_RESOLVE_
+# PROBED` + `_ANALYTICS_RESOLVE_ATTEMPTS` + `_ANALYTICS_RESOLVE_RETRY_AT` +
+# `_ANALYTICS_FIRST_DELIVERED_AT` — five coupled flags encoding ONE intention,
+# "an incident may be open and there may have to be a resolve". No test could
+# pin their cross-product, and each fix to one path broke the invariant the
+# others assumed: the same P1 class (an episode silently absorbed) reappeared
+# inside the fix for the previous one, four cycles running (latch → probe →
+# release → skip). The cross-product is gone; the whole state is these two:
+#
+#   PENDING     NOT_BEFORE    meaning
+#   ───────────────────────────────────────────────────────────────────────
+#   False       None          CLEAN. Nothing known open; an alert may file.
+#   True        None          UNKNOWN. A pre-restart incident MAY exist and no
+#                             resolve has run yet. The next delivered write
+#                             probes; an alert may file (the store dedups).
+#   True        t             OPEN. An incident is (or may be) open in the
+#                             store. Alerts are suppressed for this episode;
+#                             a resolve is eligible once `monotonic() >= t`.
+#
+# The invariant that replaces the cross-product: **`NOT_BEFORE is not None` ⇒
+# this process has RECORDED an incident open**. One direction only, deliberately:
+# the UNKNOWN row above and a pre-restart CLEAN state both carry `NOT_BEFORE is
+# None` while an incident MAY still exist in the store — a stored fact this
+# process has not read. What the gate can trust is what this process has SEEN:
+# arming it (at a completed alert dispatch, with `t = now` so the resolve stays
+# immediately eligible) is what keeps a degradation episode to ONE dispatch —
+# the in-process gate the per-event R2 PUT + GitHub search + Telegram cost
+# requires — and it doubles as the read bound. NOTHING is ever retired: a
+# delayed resolve is never a lost one.
+#
+# `PENDING` (bool) is the only "is there something to resolve" flag — set at
+# process start (a restart must probe the DURABLE incident the dead process
+# left open) and whenever `_analytics_open_incident` completes. It is cleared
+# ONLY by the store's own report that nothing is open (`RESOLVED` / `ABSENT`),
+# never by a guess — driving it from a guess is what re-absorbed the episode.
+_ANALYTICS_RESOLVE_PENDING = True
+# `NOT_BEFORE` (monotonic deadline | None) is the only bound: the earliest a
+# resolve may be attempted. `None` additionally means "nothing on record".
+_ANALYTICS_RESOLVE_NOT_BEFORE = None
+# The ONE window, and the pre-fix burst is gone. With an incident on record,
+# an inconclusive attempt re-arms ``NOT_BEFORE`` this far ahead, so the RESOLVE
+# reads the store at most once per window — where the old code allowed
+# `_ANALYTICS_RESOLVE_MAX_ATTEMPTS` reads per window while the comment above it
+# claimed one. #3820 (cycle-11 P2): a delivered write on the MOVED-window path
+# (the stale-fact guard) adds ONE more read-only presence check
+# (``AlertStore.incident_open``), so the honest bound is "the resolve reads at
+# most once per window" — NOT "at most once per delivered write", which holds
+# only when the window did not move under the resolve. The single exception is
+# the process-start UNKNOWN state, where a failed read arms nothing (the window
+# doubles as the alert gate): there a delivered write retries until the store
+# answers, and each retry pays a fresh store CONSTRUCTION plus one read
+# (`_analytics_alert_store()` rebuilds the channel and `_backup_storage()`
+# builds a new object-store client per attempt) — not the R2 PUT + GitHub
+# search + Telegram a dispatch costs. An honest bound, chosen over a window
+# that would silence a real episode.
+_ANALYTICS_RESOLVE_BACKOFF_S = 300
+# #3820 (cycle-8 P1): the resolve is serialized by its OWN lock — separate from
+# `_ANALYTICS_ALERT_LOCK` so the claim cannot be blocked by the counters or the
+# degradation gate. The claim is taken under this lock and the store call runs
+# without it, so a second concurrent delivered write sees `INFLIGHT` and skips
+# rather than acting on a decision taken before the first writer's arm. Lock
+# order is resolve -> alert everywhere; never the reverse.
+_ANALYTICS_RESOLVE_LOCK = threading.Lock()
+# #3820 (cycle-9 P2-2): the resolve MUST NOT hold `_ANALYTICS_RESOLVE_LOCK`
+# across its store call. That call is an R2 read whose boto3 client sets no
+# explicit timeout (`hosted_backup.py` `R2Storage._s3()` — botocore defaults
+# 60 s connect / 60 s read), so holding the lock across it serialized EVERY
+# concurrent delivered write — the OAuth-callback path — behind one hang.
+# `INFLIGHT` carries the serialization instead: set under the lock, checked
+# under the lock, cleared in a `finally` so a raise cannot wedge the resolve.
+# The lock is then held for microseconds, never across I/O.
+_ANALYTICS_RESOLVE_INFLIGHT = False
+# #3820 (cycle-4 P2-2): DERIVED from the declared vocabulary — never re-typed.
+# A hand-written dict here (or a hand-written key list in
+# `_analytics_incident_detail`) means adding a fifth outcome raises `KeyError`
+# on the increment, outside every guard, straight into the GitHub OAuth
+# callback the never-raise contract exists to protect.
+_ANALYTICS_COUNTS = {o: 0 for o in _ANALYTICS_OUTCOMES}
+_ANALYTICS_ALERT_LOCK = threading.Lock()
+
+# #3677: bounded POST timeout. It is asserted (not merely tuned): a timeout
+# short enough to expire in production makes EVERY write fall through to the
+# ephemeral JSONL — #3677's symptom reached by a different route.
+_ANALYTICS_POST_TIMEOUT_S = 5
+
 
 def _track_analytics_event(org_id: str, event_name: str,
-                           properties: dict | None = None) -> None:
+                           properties: dict | None = None) -> str:
     """Record a funnel event. PII-free; graceful when Supabase is unconfigured.
 
-    Writes to Supabase analytics_events when SUPABASE_URL + SUPABASE_SERVICE_KEY
-    are set; otherwise appends to a local JSONL fallback. Never raises — the
-    onboarding flow must not break because analytics failed.
+    Writes to Supabase analytics_events when SUPABASE_URL + a service key are
+    set (either name in ``supabase_control._SERVICE_KEY_ENV``); otherwise
+    appends to a local JSONL fallback. Never raises **except**
+    ``UnregisteredTelemetryKey`` under ``TORTOISE_TELEMETRY_STRICT=1`` — the
+    registration guard (``_report_unregistered``) raises before any row is
+    written, so it is the one documented non-return exit and it is off by
+    default in production (see its own docstring).
+
+    #3677: this site read ONLY the legacy ``SUPABASE_SERVICE_KEY`` while the
+    hosted deployment sets ``SUPABASE_SERVICE_ROLE_KEY`` — so in production
+    the key was never found, every event fell through to the JSONL fallback on
+    an ephemeral VM, and the whole analytics stream was silently discarded
+    (2,464 events were found in that file on the production machine, and none
+    of them in ``analytics_events``).
+
+    #3820: RETURN CONTRACT — the terminal outcome, exactly one member of
+    ``_ANALYTICS_OUTCOMES`` (the vocabulary is closed; callers may branch on
+    it, and no branch invents a value):
+
+    * ``"supabase"``     — delivered to the real store (2xx).
+    * ``"fallback"``     — Supabase was configured but the write degraded
+                           (transport error, or a non-2xx that ``post`` does
+                           not raise on); the event is on local disk instead.
+                           A HALF-configured env — ``SUPABASE_URL`` without a
+                           service key, or a key without a URL — is this arm
+                           too, with reason ``supabase_env_incomplete``. That
+                           is #3677's own failure shape (the URL was set and
+                           the key resolved to ``""``), and classifying it as
+                           ``unconfigured`` would make this signal BLIND to
+                           the very incident that created it.
+    * ``"unconfigured"`` — no URL/key at all (selfhost/dev). NOT a
+                           degradation: the JSONL is the intended sink, so no
+                           incident is ever filed for it (an alert here would
+                           fire on every such process and drown the real one).
+    * ``"dropped"``      — the event reached NO sink (no writable fallback
+                           directory, or the JSONL append itself failed). This
+                           is #3677's loss class, and it is unrecoverable.
+
+    ``fallback``/``dropped`` additionally increment
+    ``monitoring.ANALYTICS_OUTCOME_COUNT`` and, at most once per degradation
+    episode, file ``ANALYTICS_SINK_DEGRADED``. That alert leg is best-effort —
+    it adds no non-return exit of its own (the contract above has exactly ONE:
+    strict mode's registration guard) and it is NOT conditioned on the alert
+    channel existing: counting happens either way.
+
+    #3820 (D5a): the alert leg is also NOT conditioned on the backup sweep
+    being enabled. ``_backup_config_safe()`` returns ``None`` whenever
+    ``BACKUP_SWEEP_ENABLED`` is false (the default), and a channel built on it
+    would therefore never file on such a deployment — re-creating #3677's loss
+    class through the alert channel, which is exactly what D5a forbade. The
+    channel's own credentials are read ungated (``backup_config.load_alert_
+    config``); the residual is its CONSTRUCTION — no ``DR_ISSUES_PAT`` (no
+    filer) or an unusable object store (``R2_*`` missing/typoed; the
+    ``AlertStore``'s dedup needs ``_backup_storage()``, and ``R2Storage``
+    raises without all four) — leaving the counter + WARNING.
     """
+    if not isinstance(properties, dict):
+        # The contract is never-raise; a non-dict would raise AttributeError
+        # from `.items()` straight out of it. Every in-repo caller passes a
+        # dict — this pins the contract for callers added later.
+        properties = None
+    # #3821: observe the drop BEFORE the filter below removes it. The filter
+    # itself is unchanged — an unknown key is still never forwarded, so the
+    # PII guarantee is byte-identical. Reporting first also means strict mode
+    # raises before any row is written.
+    _report_unregistered(
+        "analytics_props", event_name,
+        set(properties or {}) - _ALLOWED_ANALYTICS_PROPS)
     props = {k: v for k, v in (properties or {}).items()
              if k in _ALLOWED_ANALYTICS_PROPS}
     event = {
@@ -19708,33 +20044,554 @@ def _track_analytics_event(org_id: str, event_name: str,
         "created_at": datetime.now(UTC).isoformat(),
     }
     url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_KEY")
-    if url and key:
+    # The service-key names and their precedence come from one seam
+    # (`supabase_control._service_key()`): #3677 was exactly this site reading a
+    # name the hosted deployment never sets. Older sibling sites still
+    # hand-roll the same pair — see #3677's sibling audit.
+    key = _service_key()
+    # #3820 (D1): remember whether a sink was ATTEMPTED at all. This one
+    # boolean is what separates `fallback` (configured, but degraded — alert)
+    # from `unconfigured` (no sink by design — never alert).
+    configured = bool(url and key)
+    # #3820 (P1-2): a HALF-configured env is the FIFTH silent path. The
+    # docstring of `unconfigured` is "no URL/key AT ALL", but `configured`
+    # implements "both present" — so `SUPABASE_URL` set with the key missing
+    # (or renamed/#3677's `""`) fell through to `unconfigured`, `should_alert
+    # = False`, and the stream silently diverted to the ephemeral JSONL with no
+    # incident. That is #3677 itself, and it made this signal blind to the very
+    # failure that created the issue: with exactly one of the pair set, a sink
+    # was clearly INTENDED, so the write is a degradation.
+    misconfigured = bool(url) != bool(key)
+    if configured:
+        # #3820 (cycle-4 P2-1): the guard covers the NETWORK CALL only. The
+        # delivered branch used to sit inside it, so a raise in the success leg
+        # (`return _analytics_note_success()` — the counter, the lock, the store
+        # build, the resolve) was swallowed and fell through to the JSONL: a
+        # DELIVERED event was duplicated to disk and misreported as `fallback`,
+        # which can file an incident for a healthy sink.
+        delivered = False
         try:
             import httpx
-            with httpx.Client(timeout=5) as client:
-                client.post(
+            with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
+                resp = client.post(
                     f"{url}/rest/v1/analytics_events",
                     json=event,
                     headers={"apikey": key, "Authorization": f"Bearer {key}",
                              "Content-Type": "application/json",
                              "Prefer": "return=minimal"},
                 )
-            return
+            # #3677: a REJECTED write is still a lost event. `post` does not
+            # raise on a 4xx/5xx, so without this check the event was silently
+            # discarded — the #3677 loss class, reachable whenever the key is
+            # revoked or INSERT-denied (a 401 returns no exception). Fall
+            # through to the local JSONL instead of dropping it.
+            delivered = 200 <= resp.status_code < 300
         except Exception:
-            pass  # fall through to JSONL
+            delivered = False  # fall through to JSONL
+        if delivered:
+            # A raise here must NOT re-route a delivered event to the JSONL.
+            # The event reached the sink, so the outcome is known regardless;
+            # the never-raise contract still covers this leg.
+            try:
+                return _analytics_note_success()
+            except Exception as e:  # bookkeeping is best-effort
+                _logger.warning("analytics success bookkeeping failed: %s", e)
+                return "supabase"
     # JSONL fallback (~/.tortoise/analytics_fallback.jsonl)
     global _ANALYTICS_FALLBACK_PATH
     if _ANALYTICS_FALLBACK_PATH is None:
-        fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
-        os.makedirs(fallback_dir, exist_ok=True)
-        _ANALYTICS_FALLBACK_PATH = os.path.join(fallback_dir, "analytics_fallback.jsonl")
+        # Directory creation belongs INSIDE the best-effort guard: it used to
+        # sit outside it, so a read-only HOME raised straight out of a function
+        # documented never to raise (and into the GitHub OAuth callback).
+        try:
+            fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
+            os.makedirs(fallback_dir, exist_ok=True)
+            _ANALYTICS_FALLBACK_PATH = os.path.join(
+                fallback_dir, "analytics_fallback.jsonl")
+        except Exception:
+            # #3820: the FOURTH silent path — the issue's table names three.
+            # Pre-#3820 this was a bare `return`: the event was dropped with no
+            # fallback line, no counter and no log — the same loss class as the
+            # append failure below, and the reason this exit now routes through
+            # the shared `_analytics_sink_dropped` helper.
+            return _analytics_sink_dropped("fallback_dir_unavailable")
     try:
         import json as _json
         with open(_ANALYTICS_FALLBACK_PATH, "a") as f:
             f.write(_json.dumps(event) + "\n")
     except Exception:
-        pass
+        # #3677 swallowed this; #3820 swallows it AND counts it — the event
+        # reached no sink at all.
+        return _analytics_sink_dropped("fallback_append_failed")
+    if misconfigured:
+        # #3820 (P1-2): a sink was clearly INTENDED, so this is a degradation
+        # with its own reason code — never `unconfigured`.
+        return _analytics_note_degradation("fallback", "supabase_env_incomplete")
+    return _analytics_note_degradation(
+        "fallback" if configured else "unconfigured")
+
+
+def _analytics_note_success() -> str:
+    """Record a delivered write; resolve an open sink incident. Never raises.
+
+    #3820 (D4): the resolve is what makes the NEXT loss a NEW incident. The
+    AlertStore resolves by delete, so leaving an incident open means every
+    later degradation is absorbed into a stale issue — the silent-loss class,
+    reintroduced through the alert channel. ``resolve_incident`` begins with an
+    R2 download, so this is NOT called per event: it runs while
+    ``_ANALYTICS_RESOLVE_PENDING`` says there is (or may be) something to
+    resolve, bounded by the single ``_ANALYTICS_RESOLVE_NOT_BEFORE`` window so
+    a delivered write inside a just-spent window costs nothing.
+
+    #3820 (cycle-8 P1): the resolve is SERIALIZED by an in-flight claim taken
+    under ``_ANALYTICS_RESOLVE_LOCK`` — the decision and the claim are one
+    atomic step, so two concurrent delivered writes cannot both read the store.
+    The lock is NOT held across the store call (cycle-9 P2-2): that call is an
+    R2 read botocore bounds only at its 60 s defaults, and holding the lock
+    across it serialized every delivered write behind one hang. The claim is
+    cleared in a ``finally``. Without any serialization, a reader that saw
+    ``ABSENT`` before a fresh incident was filed could land after the
+    ``SKIPPED_FRESH`` completion armed the window and clear it: an incident
+    open in the store with ``PENDING=False``, and the next episode deduped into
+    it (the D4/#3677 absorbed-episode class).
+
+    #3820 (cycle-9 P1): the ``armed_at_decision`` guard is not taken on faith.
+    When the window moved during the store call, the CLEAR is withheld only if
+    an incident is still ON RECORD — a concurrent degradation may have DEDUPED
+    onto the very incident this resolve then deleted, so the moved arm would
+    otherwise hold the alert gate shut with nothing behind it and a still-
+    degraded sink would file nothing, indefinitely (D4 again). The withheld
+    clear therefore asks the store, read-only, whether the incident still
+    exists (``AlertStore.incident_open``) and clears when it does not. A
+    residual same-process ordering — a degradation that arms AFTER this clear,
+    having deduped an object the resolve then deleted — is NOT closed by it;
+    it is pre-existing (same rate in the cycle-8 shape) and tracked as #3969.
+
+    #3820 (cycle-7): the outcome of the store's resolve DRIVES the state — it
+    is never inferred. ``resolve_incident_state`` reports WHICH fact holds:
+
+    * ``RESOLVED`` / ``ABSENT`` — nothing is open any more → CLEAN
+      (``PENDING=False``, ``NOT_BEFORE=None``).
+    * ``SKIPPED_FRESH`` — an incident IS open; it was filed at/after this
+      attempt's bound, so it was deliberately left alone. The state STAYS
+      pending and the next attempt is a window away. The pre-collapse code
+      cleared the episode latch here, so the fresh incident was never resolved
+      by this process and the following episode was absorbed into it (cycle-7
+      P1).
+    * a raise, or no usable store — the truth is unknown → also stay pending.
+      When an incident is already on record the attempt re-arms the window
+      (bounded reads); from the process-start UNKNOWN state nothing is armed,
+      so the next delivered write retries. That asymmetric arm is deliberate:
+      the window is ALSO the alert gate, and an uncertainty must never close
+      it — see ``_analytics_note_degradation``. Nothing is ever retired on a
+      failure: a delayed resolve is not a lost one.
+
+    The ``before`` bound is the instant this attempt DECIDED to resolve (not a
+    once-per-process stamp): an incident that predates the decision is the one
+    this attempt may close, and anything filed after it is a fresh episode the
+    Store reports back as ``SKIPPED_FRESH``. That keeps the cross-restart
+    resolve (cycle-4 P1-1) and the fresh-incident guard (cycle-5 P1-2) in ONE
+    rule instead of a latch/probe split.
+    """
+    global _ANALYTICS_DEGRADED_STREAK, _ANALYTICS_RESOLVE_PENDING
+    global _ANALYTICS_RESOLVE_NOT_BEFORE, _ANALYTICS_RESOLVE_INFLIGHT
+    with _ANALYTICS_ALERT_LOCK:
+        _ANALYTICS_COUNTS["supabase"] += 1
+        _ANALYTICS_DEGRADED_STREAK = 0
+    _analytics_count_outcome("supabase")
+    # #3820 (cycle-8 P1 / cycle-9 P2-2): the resolve is SERIALIZED by an
+    # IN-FLIGHT claim taken under `_ANALYTICS_RESOLVE_LOCK` — never by holding
+    # that lock across the store call. Without serialization, N concurrent
+    # delivered writes all evaluate the decision against an UNSPENT window and
+    # all read the store, so a reader that saw `ABSENT` before a fresh incident
+    # was filed could land AFTER the `SKIPPED_FRESH` completion armed the window
+    # and clear it — an incident open with `PENDING=False` and the alert gate
+    # open, so the next episode is deduped into the stale incident (the
+    # D4/#3677 absorbed-episode class). Taking the claim under the lock makes
+    # the second writer see it and SKIP.
+    #
+    # The lock is held for the CLAIM ONLY (microseconds), not across the store
+    # call: that call is an R2 read whose boto3 client sets no explicit timeout
+    # (botocore defaults 60 s connect / 60 s read), so holding the lock across
+    # it serialized every delivered write — the OAuth-callback path — behind
+    # one hang (cycle-9 P2-2). The flag carries the serialization instead and
+    # is cleared in a `finally`, so a raise cannot wedge the resolve forever.
+    # Lock order is always resolve → alert (never the reverse), and the only
+    # nested acquisition is the claim below, so the pair cannot deadlock.
+    with _ANALYTICS_RESOLVE_LOCK, _ANALYTICS_ALERT_LOCK:
+        # ONE decision, from the single pending flag and the single bound.
+        # ``time.monotonic`` is read once, under the claim lock.
+        resolve = _ANALYTICS_RESOLVE_PENDING and (
+            _ANALYTICS_RESOLVE_NOT_BEFORE is None
+            or time.monotonic() >= _ANALYTICS_RESOLVE_NOT_BEFORE)
+        # A second concurrent delivered write must re-read the state under
+        # the lock and SKIP — but it must not BLOCK: the claim, not the
+        # lock, is what serializes the store call.
+        claimed = resolve and not _ANALYTICS_RESOLVE_INFLIGHT
+        if claimed:
+            _ANALYTICS_RESOLVE_INFLIGHT = True
+            before = datetime.now(UTC)
+            # The state this decision was taken against. The CLEAR below is
+            # applied only if nothing moved the window while the store call
+            # was in flight: a DEGRADATION can file an incident and arm the
+            # window during that call, and `_analytics_open_incident` is not
+            # — and must not be — serialized on the resolve lock, because it
+            # does network I/O and holding the lock across it would block
+            # the analytics write path.
+            armed_at_decision = _ANALYTICS_RESOLVE_NOT_BEFORE
+        else:
+            before = None
+            armed_at_decision = None
+    if not claimed:
+        # Either nothing is eligible, or another delivered write holds the
+        # in-flight claim and is performing exactly this resolve — so skip.
+        return "supabase"
+    try:
+        outcome = None
+        store = None
+        try:
+            store = _analytics_alert_store()
+            if store is not None:
+                outcome = store.resolve_incident_state(
+                    _ANALYTICS_INCIDENT_KIND, "", before=before)
+                if outcome is ResolveOutcome.RESOLVED:
+                    _logger.info("analytics sink recovered — %s resolved",
+                                 _ANALYTICS_INCIDENT_KIND)
+                elif outcome is ResolveOutcome.SKIPPED_FRESH:
+                    _logger.info(
+                        "analytics sink resolve skipped a FRESH %s — it "
+                        "stays open, keeping the resolve pending",
+                        _ANALYTICS_INCIDENT_KIND)
+        except Exception as e:  # best-effort, never raises
+            _logger.warning("analytics sink resolve failed: %s", e)
+        # The CLEAR is applied only if the fact is not STALE. `armed_at_decision`
+        # is the window the decision was taken against; a DEGRADATION can arm
+        # the window (and file or dedup an incident) while the store call is in
+        # flight. An unconditional clear there leaves an incident OPEN in the
+        # store with `PENDING=False`, which no delivered write would ever
+        # resolve (cycle-8 criterion 2, pinned by T34).
+        clear = False
+        check_presence = False
+        # #3820 (cycle-11 P1): the window value the CLEAR below is validated
+        # against. `time.monotonic()` never repeats, so a late arm always
+        # changes it — which is what makes the clear ATOMIC with the arm
+        # instead of merely concurrent with it.
+        moved_to = None
+        with _ANALYTICS_ALERT_LOCK:
+            if (outcome is ResolveOutcome.RESOLVED
+                    or outcome is ResolveOutcome.ABSENT):
+                if armed_at_decision == _ANALYTICS_RESOLVE_NOT_BEFORE:
+                    # The store's OWN report: nothing is open. This is the only
+                    # way the pending flag is cleared — never a guess. The
+                    # value is re-checked against `moved_to` under the lock
+                    # before the write, because the two lock acquisitions are
+                    # not one atomic step: a degradation can arm in between.
+                    clear = True
+                    moved_to = _ANALYTICS_RESOLVE_NOT_BEFORE
+                else:
+                    # The window moved while this attempt was in flight, so the
+                    # fact it established is STALE. The arm belongs to a
+                    # concurrent degradation — but that degradation may have
+                    # DEDUPED onto the very incident this resolve just deleted,
+                    # so confirm an incident is still on record before keeping
+                    # the arm. Keeping it on faith would leave the alert gate
+                    # shut with NOTHING on record, and a still-degraded sink
+                    # would file nothing, indefinitely (cycle-9 P1; D4/#3677
+                    # absorbed-episode class). The presence read is read-only
+                    # and is taken OFF the alert lock, below.
+                    #
+                    # #3820 (cycle-11 P1): this is the value the presence
+                    # check is a fact ABOUT. The read below runs off-lock, so
+                    # a late arm can move the window again before the CLEAR
+                    # writes; snapshotting the mover's value lets the write
+                    # detect exactly that.
+                    check_presence = True
+                    moved_to = _ANALYTICS_RESOLVE_NOT_BEFORE
+            else:
+                # SKIPPED_FRESH means an incident IS open; a raise or a
+                # missing store leaves the truth UNKNOWN. Either way the
+                # resolve stays PENDING. Arm the ONE window only when an
+                # incident is on record — SKIPPED_FRESH just established
+                # one, or NOT_BEFORE was already armed by a dispatch. From
+                # the process-start UNKNOWN state nothing is armed, because
+                # `NOT_BEFORE is not None` is ALSO the alert gate
+                # (`_analytics_note_degradation`): an uncertainty must not
+                # silence a real episode, so that state retries on the next
+                # delivered write instead.
+                if (outcome is ResolveOutcome.SKIPPED_FRESH
+                        or _ANALYTICS_RESOLVE_NOT_BEFORE is not None):
+                    _ANALYTICS_RESOLVE_NOT_BEFORE = (
+                        time.monotonic() + _ANALYTICS_RESOLVE_BACKOFF_S)
+        if check_presence:
+            # Read-only presence check, OFF every lock: the alert lock must not
+            # be held across a store read (the same I/O rule as the resolve
+            # lock above). The value CAN move while this read is in flight —
+            # the arm site takes its `known_open` DECISION under the alert
+            # lock, but its WRITE lands only after `_analytics_open_incident`
+            # returns (a GitHub search, a file, a Telegram push), so the two
+            # are not atomic with this read. The CLEAR below is therefore
+            # re-validated against `moved_to` under the lock (cycle-11 P1);
+            # #3969 tracks the durable epoch/generation fix for the whole
+            # class. A raise or a store without the probe keeps the arm: an
+            # unknown is never treated as CLEAN.
+            probe = getattr(store, "incident_open", None) if store else None
+            if probe is None:
+                clear = False
+            else:
+                try:
+                    clear = not probe(_ANALYTICS_INCIDENT_KIND, "")
+                except Exception as e:  # unknown → keep the arm
+                    clear = False
+                    _logger.warning(
+                        "analytics sink resolve presence check failed: %s", e)
+        if clear:
+            with _ANALYTICS_ALERT_LOCK:
+                # #3820 (cycle-11 P1): the clear is applied ONLY if the value it
+                # was established against still holds. The presence probe above
+                # runs OFF every lock, and the arm site does NOT re-check
+                # `NOT_BEFORE is None`, so a degradation whose `should_alert`
+                # decision was taken while the window was UNSET (`NOT_BEFORE is
+                # None`) can file and arm after the probe's read and before
+                # this write — a scheduler preemption across an I/O-free gap is
+                # enough. Clearing then leaves an incident open in the store
+                # with `PENDING=False`, which no delivered write ever resolves
+                # and the next episode dedups into (cycle-8 criterion 2,
+                # pinned by T34/T37). `moved_to` re-validation keeps BOTH the
+                # arm and the object behind it.
+                if moved_to == _ANALYTICS_RESOLVE_NOT_BEFORE:
+                    _ANALYTICS_RESOLVE_PENDING = False
+                    _ANALYTICS_RESOLVE_NOT_BEFORE = None
+    finally:
+        # The claim is released on EVERY exit — a raise in the store call or in
+        # the presence probe must not leave the resolve wedge-closed.
+        with _ANALYTICS_RESOLVE_LOCK:
+            _ANALYTICS_RESOLVE_INFLIGHT = False
+    return "supabase"
+
+
+def _analytics_sink_dropped(reason: str) -> str:
+    """Count + alert a write that reached NO sink; returns ``"dropped"``.
+
+    #3820: used by both unrecoverable exits (no fallback directory, failed
+    JSONL append) so the reason code, the count and the alert live in one
+    place — the two sites cannot drift apart.
+    """
+    return _analytics_note_degradation("dropped", reason)
+
+
+def _analytics_count_outcome(outcome: str) -> None:
+    """Increment the outcome counter; never raises (#3820 P2-3).
+
+    The counter leg used to sit OUTSIDE every guard in the two note helpers,
+    so a raise from the metrics library would have escaped a function whose
+    stated contract — the reason it exists — is never to raise into the GitHub
+    OAuth callback.
+    """
+    try:
+        record_analytics_outcome(outcome)
+    except Exception as e:
+        _logger.warning("analytics outcome counter failed (%s): %s", outcome, e)
+
+
+def _analytics_note_degradation(outcome: str, reason: str = "") -> str:
+    """Count a degraded analytics write and alert if warranted.
+
+    Returns ``outcome`` unchanged so the write path can
+    ``return _analytics_note_degradation(...)``. Never raises.
+
+    #3820 (D2/P2-1): ``fallback`` needs a STREAK of
+    ``_ANALYTICS_FALLBACK_ALERT_AFTER`` consecutive degraded writes; ``dropped``
+    is unrecoverable and alerts on the first one. ``unconfigured`` never alerts.
+    #3820 (P2-2): the episode gate is armed only when the dispatch actually
+    SUCCEEDED — it used to be armed before the dispatch, so a raising
+    ``open_incident`` (or an unavailable channel) silenced the whole episode and
+    the store's own retry never got a second call.
+    #3820 (cycle-7): the gate is the ONE state global — ``NOT_BEFORE is not
+    None`` means this process has RECORDED an incident open (see the state
+    table at the globals; the UNKNOWN row and a pre-restart CLEAN state carry
+    ``NOT_BEFORE is None`` with an incident possibly still in the store).
+    Arming it with ``t = now`` keeps the resolve immediately eligible
+    while closing the alert gate, so one episode pays for exactly one dispatch
+    (R2 PUT + GitHub search + Telegram) and the resolve still fires on the
+    recovered write. There is no separate latch to go stale: a resolve that
+    ends CLEAN disarms it, which is exactly when a new episode must file.
+    #3820 (cycle-8 P2-1): the arm happens only when the store reports an
+    incident IS on record. A paused kind creates NOTHING, so arming on that
+    path left the gate closed with no incident behind it — and if the pause
+    were lifted while the sink was still degraded, nothing could ever reopen
+    it (only a delivered write disarms the gate, and a writing sink is the
+    one thing the outage forbids).
+    """
+    global _ANALYTICS_DEGRADED_STREAK, _ANALYTICS_RESOLVE_PENDING
+    global _ANALYTICS_RESOLVE_NOT_BEFORE
+    with _ANALYTICS_ALERT_LOCK:
+        _ANALYTICS_COUNTS[outcome] += 1
+        if outcome == "unconfigured":
+            # The local JSONL IS the intended sink — never an alert.
+            should_alert = False
+        else:
+            _ANALYTICS_DEGRADED_STREAK += 1
+            # An incident is on record open ⇒ this episode has been filed and
+            # must not re-pay the alert cost per event.
+            known_open = _ANALYTICS_RESOLVE_NOT_BEFORE is not None
+            if outcome == "dropped":
+                # Unrecoverable: the event is gone. Alert at once, but still
+                # only once per episode.
+                should_alert = not known_open
+            else:  # "fallback" — the event is safe on disk; wait for a streak
+                should_alert = (
+                    not known_open
+                    and _ANALYTICS_DEGRADED_STREAK
+                    >= _ANALYTICS_FALLBACK_ALERT_AFTER)
+    _analytics_count_outcome(outcome)
+    if should_alert and _analytics_open_incident(outcome, reason):
+        with _ANALYTICS_ALERT_LOCK:
+            _ANALYTICS_RESOLVE_PENDING = True
+            # Eligible to resolve NOW (t = now), but the alert gate above is
+            # closed until a resolve reports the incident CLEAN.
+            _ANALYTICS_RESOLVE_NOT_BEFORE = time.monotonic()
+    return outcome
+
+
+def _analytics_open_incident(outcome: str, reason: str) -> bool:
+    """Best-effort ``ANALYTICS_SINK_DEGRADED`` incident. Never raises (#3820).
+
+    Returns ``True`` only when an incident is ON RECORD — the dispatch
+    completed without raising AND the store did not decline because the kind
+    is paused. The caller uses that to arm the episode gate (P2-2), so a
+    failure, or a suppressed kind, leaves the next event free to retry rather
+    than closing the gate on nothing (cycle-8 P2-1).
+
+    The alert does NOT ride the failing sink (an analytics event filed through
+    ``_track_analytics_event`` would land in the same ephemeral file #3677's
+    2,464 events were found in) — it goes to the AlertStore, which has the
+    properties the signal needs: create-if-not-exists dedup per (kind,
+    subject), ``ops/suppression.json`` to pause a kind, delete-to-resolve, a
+    pending-push retry when Telegram fails, and a GitHub issue the fleet's
+    triage agents can read.
+    """
+    try:
+        # P2-3: inside the guard — building the detail takes the alert lock and
+        # used to run BEFORE the try, outside every guard.
+        detail = _analytics_incident_detail(outcome, reason)
+        store = _analytics_alert_store()
+        if store is None:
+            _logger.warning(
+                "analytics sink degraded (%s%s) — no alert store available "
+                "(no alert credentials, or the object store is unusable); the "
+                "counter tortoise_analytics_events_total is the only signal: "
+                "%s",
+                outcome, f"/{reason}" if reason else "", detail)
+            return False
+        # #3820 (cycle-5 P1-3): `open_incident` returns False on a DEDUP hit
+        # (the dedup object already exists). Ignoring that boolean made the
+        # audit trail claim `filed` on EVERY dedup path, not only the restart
+        # one — it must distinguish a new issue from an already-open one.
+        # #3820 (cycle-6 P2-1): False is AMBIGUOUS — a SUPPRESSED kind (a
+        # pause in `ops/suppression.json`) also returns it, with NO issue and
+        # NO dedup object. Reporting that as `already open (dedup)` sent an
+        # operator who set a pause hunting for an issue that does not exist.
+        # #3820 (cycle-8 P2-2): ask the store for the FACT, in one call.
+        # Re-asking `suppression_active` at a LATER instant can disagree with
+        # the decision `open_incident` already made (a pause withdrawn in
+        # between), which reports a dedup hit for an incident that was never
+        # created; `open_incident_state` reads the predicate once, at the
+        # instant that matters. The `getattr` fallback keeps a store without
+        # the probe (test doubles) working; the calls sit inside the
+        # never-raise try.
+        opener = getattr(store, "open_incident_state", None)
+        if opener is not None:
+            fact = opener(_ANALYTICS_INCIDENT_KIND, "", detail)
+        else:
+            probe = getattr(store, "suppression_active", None)
+            if store.open_incident(_ANALYTICS_INCIDENT_KIND, "", detail):
+                fact = OpenOutcome.FILED
+            elif probe is not None and probe(_ANALYTICS_INCIDENT_KIND):
+                fact = OpenOutcome.SUPPRESSED
+            else:
+                fact = OpenOutcome.DEDUP
+        if fact is OpenOutcome.FILED:
+            disposition = "filed"
+        elif fact is OpenOutcome.SUPPRESSED:
+            disposition = "suppressed (kind paused)"
+        else:
+            disposition = "already open (dedup)"
+        _logger.warning(
+            "analytics sink degraded (%s%s) — %s %s: %s",
+            outcome, f"/{reason}" if reason else "",
+            disposition,
+            _ANALYTICS_INCIDENT_KIND, detail)
+        # #3820 (cycle-8 P2-1): the gate may be armed ONLY when an incident is
+        # on record. The store's own fact says which: SUPPRESSED created no
+        # object, so the caller must not set `NOT_BEFORE` (the alert gate) on
+        # that path — a paused kind would otherwise hold the gate shut with
+        # nothing behind it, and a pause lifted mid-outage could never be
+        # reopened (only a delivered write disarms the gate, which is exactly
+        # what a degraded sink cannot produce). FILED and DEDUP both mean an
+        # incident IS on record, so both arm it.
+        return fact is not OpenOutcome.SUPPRESSED
+    except Exception as e:  # the write path must never raise
+        _logger.warning("analytics sink alert failed (%s): %s", outcome, e)
+        return False
+
+
+def _analytics_incident_detail(outcome: str, reason: str) -> dict:
+    """Counts and reason codes ONLY — never event content (#3820 D5).
+
+    The incident body is ``json.dumps(detail)`` rendered into a GitHub issue
+    that fleet agents read (``alert_store._body``). ``_ALLOWED_ANALYTICS_PROPS``
+    contains user-derived keys (``answer``, ``questions``, ``error_type``), so
+    passing the event's properties through would publish user content into an
+    issue and open a prompt-injection channel into the triage agent. Never the
+    URL, the key, the event name, or the properties.
+    """
+    with _ANALYTICS_ALERT_LOCK:
+        # #3820 (cycle-4 P2-2): derived from the declared vocabulary, so the
+        # detail can never drift from `_ANALYTICS_OUTCOMES` (a hand-written key
+        # list raised `KeyError` when the vocabulary grew).
+        return {
+            "outcome": outcome,
+            "reason": reason,
+            **{o: _ANALYTICS_COUNTS[o] for o in _ANALYTICS_OUTCOMES},
+        }
+
+
+def _analytics_alert_store():
+    """The AlertStore for sink incidents, or ``None`` when unavailable.
+
+    #3820: the indirection seam — tests monkeypatch THIS, never
+    ``_alert_store_from``.
+
+    #3820 (D5a): the channel is built from the ALERT credentials, NEVER from
+    the backup-sweep gate. ``_backup_config_safe()`` is ``None`` whenever
+    ``BACKUP_SWEEP_ENABLED`` is false — the default — and building this on it
+    meant an incident was never filed on such a deployment, leaving only an
+    unscraped counter and a log on an ephemeral Fly rootfs: #3677's loss class,
+    re-created through the alert channel. When the sweep is enabled its config
+    is used as-is (same env contract); otherwise, and when it is invalid,
+    ``load_alert_config()`` reads the alert credentials ungated. What remains
+    is the CHANNEL's own construction, not a feature switch: no
+    ``DR_ISSUES_PAT`` means no filer, and an unusable object store (missing or
+    typoed ``R2_*`` — ``_alert_store_from`` builds ``R2Storage``, whose
+    ``__init__`` raises unless all four R2 vars are set) means no dedup seam,
+    so the store cannot be built and the counter + WARNING are the residual.
+    The D6 residue is therefore "no PAT **or** no usable object store" — a real
+    physical limit, not "no PAT" alone.
+
+    Counting must never be conditioned on this returning a store.
+    """
+    try:
+        cfg = _backup_config_safe()
+        if cfg is None:
+            from tortoise.backup_config import load_alert_config
+
+            cfg = load_alert_config()
+        if cfg is None:
+            return None
+        return _alert_store_from(cfg)
+    except Exception as e:  # absence of a channel is not a loss
+        _logger.warning("analytics alert store unavailable: %s", e)
+        return None
 
 
 def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
@@ -19777,9 +20634,17 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
 
 
 def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
-    """Convenience: track with the current org, swallowing errors."""
-    try:  # noqa: SIM105
+    """Convenience: track with the current org, swallowing errors.
+
+    #3821: the ONE exception that must escape this swallow is
+    ``UnregisteredTelemetryKey`` — strict mode exists precisely so a
+    misregistered prop cannot be silently swallowed by this wrapper.
+    Everything else is still swallowed (analytics must never break the
+    onboarding flow)."""
+    try:
         _track_analytics_event(org["org_id"], event_name, props or None)
+    except UnregisteredTelemetryKey:
+        raise
     except Exception:
         pass
 
@@ -22542,10 +23407,17 @@ def _drill_execute(
     except Exception:
         pass
     within_rto = duration_s <= _DRILL_RTO_S
+    # #3845: surface a wedge distinctly — "fork slot wedged" must never be
+    # readable as a plain "copy failed". Absent on the clean path, so a healthy
+    # drill record is unchanged.
+    detail = {k: v for k, v in (
+        ("restored", result.get("restored")),
+        ("fork_slot", result.get("fork_slot")),
+    ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",
         org_id=org_id, graph_id=graph_id, backup_key=backup_key,
-        duration_s=duration_s, detail={"restored": result.get("restored")},
+        duration_s=duration_s, detail=detail,
     )
     _write_drill_record(storage, record)
     return {

@@ -7,13 +7,13 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-09-12
+updated: 2026-09-19
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
 
 **Epic:** #7711 (legacy provisioning epic — provenance) · availability watchdog: #2850
-**Last updated:** 2026-09-12
+**Last updated:** 2026-09-19
 
 ## 1. Initial Provisioning
 
@@ -58,6 +58,68 @@ wrangler r2 bucket create tortoise-backups
 |------|------|--------|
 | CNAME | api | tortoise-api.fly.dev |
 | CNAME | app | tortoise-dashboard.pages.dev |
+
+### Canonical API host — and why `tortoise.dev` is not ours (recorded 2026-09-19, #3474)
+
+**The canonical hosted API base URL is `https://api.premiselabs.co`** (MCP at
+`https://api.premiselabs.co/mcp/`). The client-facing surfaces that declare the API base
+agree on that spelling — `.mcp.json`, `README.md`, `client/README.md`,
+`docs/INGEST_CONTRACT.md`, `docs/data-safety.md`, and the availability watchdog's
+`DEFAULT_PROBE_URL` (`.github/scripts/availability-watchdog.sh`). Other hostnames are
+different surfaces, **not** competing client-facing API bases —
+`tortoise.premiselabs.co` (landing / legal / auth, Cloudflare Pages),
+`app.premiselabs.co` (dashboard), and `tortoise-y4mjjq.fly.dev` (the Fly app host, also
+used as a server-side/internal base such as `INTERNAL_API_URL`).
+
+⛔ **`tortoise.dev` is a third party's zone. Never point a client, a doc, or a DNS
+record at `api.tortoise.dev`, and do not add a record for it.** Recorded so this is not
+investigated a third time. The probes below are reproducible and were taken
+2026-09-19 03:23 UTC (timings are single samples).
+
+```bash
+dig +short api.tortoise.dev          # 172.67.211.252, 104.21.53.100 + 2 IPv6 — Cloudflare anycast
+echo | openssl s_client -connect api.tortoise.dev:443 -servername api.tortoise.dev
+                                     # handshake COMPLETES; "Verify return code: 0 (ok)";
+                                     # cert CN=tortoise.dev, SAN tortoise.dev + *.tortoise.dev
+curl -sS -i https://api.tortoise.dev/health      # HTTP 522 "error code: 522" — a LOUD status
+                                                 # code, not a hang; 16-byte body in ~20s
+curl -sS -i https://tortoise.dev/                # HTTP 200, 0 bytes, x-turbo-charged-by: LiteSpeed
+                                                 # → a third-party shared host, not Fly, not Pages
+curl -sS https://api.premiselabs.co/health       # HTTP 200 (0.24s) — the canonical host, healthy
+curl -sS https://tortoise-y4mjjq.fly.dev/health  # HTTP 200 (0.32s) — the Fly app itself
+```
+
+Ownership — reproducible evidence first, credential-gated evidence labelled as such:
+
+- *(reproducible with Fly credentials)* `fly certs list -a tortoise-y4mjjq` →
+  `api.premiselabs.co` only, and `fly certs check api.tortoise.dev` → *certificate not
+  found*. Certificate Transparency (`crt.sh`) holds **no `api.tortoise.dev` SAN** — only
+  `tortoise.dev`, `*.tortoise.dev`, `www…` names. Fly has never served this name.
+- *(reproducible)* Registrar RDAP (`rdap.dynadot.com`, 2026-09-19): **Dynadot LLC**; the
+  registrant is a privacy service (`Super Privacy Service LTD c/o Dynadot`), registered
+  2024-05-19, expires 2027-05-19. Nothing in it identifies an owner we know.
+- *(reproducible)* With this record excluded, nothing in the repo or its history has ever
+  offered the name: `git grep -I 'api\.tortoise\.dev' -- ':!docs/infra-runbook.md'` →
+  **0 hits**, and
+  `git log -S'tortoise.dev' --all -- . ':(exclude)docs/infra-runbook.md'` → **0 commits**.
+- *(operator-verified, credential-gated — not reproducible without Cloudflare access)*
+  `GET /zones` on our Cloudflare account returned exactly `dmeer.app`, `eldato.com.mx`,
+  `premiselabs.co`: **`tortoise.dev` is absent from our account.** Nameserver pairs are
+  *not* used as evidence here — this account issues more than one pair (`everton`/`sonia`
+  for `premiselabs.co`, `elisa`/`woz` for `eldato.com.mx`), so a different pair proves
+  nothing on its own.
+
+**Consequence: there is no in-repo fix and no DNS change for us to make.** #3831
+reached the same conclusion — its earlier "remove the record" decision is VOID, because
+the owner never owned the name. The issue's original "TLS black-hole" framing is also
+**stale**: the host now fails *loudly* with a 522 in ~20 s instead of hanging.
+
+*Adjacent work owned elsewhere — do not re-fix it in this section:* the
+`tortoise-api.fly.dev` target in the table above does not resolve (`dig +short
+tortoise-api.fly.dev` → empty; the Fly app is `tortoise-y4mjjq` per `fly.toml`),
+tracked by **#3046**. A host that answers slowly instead of failing fast is the
+client-contract defect tracked by **#3805** (one canonical base URL + bounded
+fail-fast).
 
 ### GitHub Actions
 Set these secrets in repo Settings → Secrets and variables → Actions:
@@ -219,7 +281,10 @@ Bounds are enforced IN ORDER by `capture_session` (tortoise/hosted_api.py):
    `est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
    (the ×2 covers the M2 relations stage's IMPL/NAND operator nodes; sentence
    count is capped per turn — the #329 flood gate).
-4. **Sessions quota** — `DEFAULT_MAX_SESSIONS = 1000` (`_check_team_limit`).
+
+No sessions quota: the flat `max_sessions = 1000` was removed in **#4010** —
+sessions are unlimited for every tier, and a stored `Team.max_sessions` is
+deliberately not honoured as a cap.
 
 Free-tier interplay (product/pricing.json): `max_graph_nodes: 10000` is the
 points-quota numerator for NON-episodic Points only (turn Points / Session /
@@ -288,22 +353,24 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 
 **App:** `tortoise-y4mjjq` (region `iad`). **Status:** 2026-09-12 — the routing
 check was changed from HTTP to TCP, and the machine lifecycle policy was made
-explicit (§6.2, §6.4). A separate non-routing `[checks.loop_liveness]` entry was
-**designed but is deferred to a follow-up PR** (§6.0, §6.4): it is deploy-gating
-and depends on the 9090 listener added by #3062 (not yet deployed). Genuine
+explicit (§6.2, §6.4). A separate non-routing `[checks.loop_liveness]` entry is
+now **live** (§6.0, §6.4): it is deploy-gating and targets the 9090 listener
+added by #3062, whose precondition was verified on the live machine 2026-09-17
+(§6.0). Genuine
 2-machine redundancy
 is still **not** achievable as a config-only change — §6.3 says exactly what
 blocks it and what would have to change. The redundancy work remains an operator
 decision; it was not attempted here.
 
-### 6.0 Merge order — this PR is independent; the follow-up is not
+### 6.0 Merge order — the #2850 fix landed independently; the follow-up is now live
 
-**The top-level `[checks.loop_liveness]` entry is NOT in this PR.** It was
-removed and deferred to a follow-up PR (the block is preserved verbatim in a
-`fly.toml` comment). This PR ships only the TCP routing check and the explicit
-lifecycle policy — the actual #2850 fix — which carry **zero deploy-gate risk**.
+**The top-level `[checks.loop_liveness]` entry is now LIVE (#3447, 2026-09-17).**
+It landed only after its #3062 precondition was verified on the live machine
+(evidence below). The #2850 core fix — the TCP routing check and the explicit
+lifecycle policy — shipped first and independently, carrying **zero deploy-gate
+risk**; that check was the only deploy-gate hazard, and it is now safe to gate on.
 
-**Why it was split out.** `flyctl`'s deploy health wait
+**Why it was split out (historical).** `flyctl`'s deploy health wait
 (`WaitForHealthchecksToPass`, `internal/machine/leasable_machine.go`, called from
 `machines_deploymachinesapp.go`) counts **`len(cfg.Checks)`** — the top-level
 `[checks]` table — *plus* service checks, and then requires **every reported
@@ -315,34 +382,37 @@ added by #3062) would fail the deploy after `--wait-timeout 420`, retry **5×**
 with a 45 s sleep — **~35 minutes of failing deploys, each retry
 rolling/replacing the sole production machine** (~85 s cold-boot outage each
 time). Routing was never at risk; the deploy gate was. Deferring the check
-removes the only source of that hazard from this PR.
+removed the only source of that hazard from that PR; #3447 landed it once the
+precondition below was verified.
 
 - **This PR is safe to merge and deploy independently.** The TCP routing check
   rides `internal_port = 8000`, which the deployed image already listens on, so
   the deploy gate passes with **no dependency on #3062**.
   `deploy-hosted.yml` will auto-deploy on merge — that is expected and safe.
-- **The ordering constraint moves to the follow-up.** The follow-up PR that
-  restores `[checks.loop_liveness]` MUST merge and deploy only **after** #3062
-  is deployed. `#3062` ships `monitoring.start_health_listener`
+- **The ordering constraint is now SATISFIED (#3447).** The check landed only
+  after #3062 was deployed, so the image and the check are in sync. `#3062`
+  ships `monitoring.start_health_listener`
   (`_HealthzHandler`, bound to `0.0.0.0` via `HEALTHZ_BIND` /
-  `TORTOISE_HEALTHZ_BIND`, serving unauthenticated `/healthz`). Gating
-  precondition — verify **before** merging the follow-up:
+  `TORTOISE_HEALTHZ_BIND`, serving unauthenticated `/healthz`). Verification
+  evidence, captured 2026-09-17 against `tortoise-y4mjjq`:
 
   ```bash
-  # Expect a line whose LOCAL address is 00000000:2382 (= 0.0.0.0:9090). The
-  # check asserts BOTH facts that matter: the port is listening, AND it is bound
-  # on the wildcard address rather than loopback-only (0100007F:2382 would mean
-  # a Fly check can never reach it, §6.4). `/proc/net/tcp` and `grep` are both
+  # VERIFIED: LOCAL address 00000000:2382 (= 0.0.0.0:9090), not the
+  # loopback-only 0100007F:2382. The check asserts BOTH facts that matter: the
+  # port is listening, AND it is bound on the wildcard address rather than
+  # loopback. `/proc/net/tcp` and `grep` are both
   # present in the image; `ss`/iproute2 is NOT (Dockerfile.hosted installs only
   # curl + build-essential), so an `ss` probe prints "ss: not found":
   fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"
-  # Expect 200 from a token-less request (contract: 200 progressing / 503 stalled):
+  # VERIFIED: http=200 from a token-less request — {"status":"ok",
+  # "loop_age_ms":67.7,"loop_stale":false}:
   fly ssh console -a tortoise-y4mjjq -C "python3 -c \"import urllib.request as u;print(u.urlopen('http://127.0.0.1:9090/healthz',timeout=5).status)\""
   ```
 
-  If both outputs are as expected, the follow-up may land. Otherwise it stays
-  blocked, or must be merged and deployed in the **same batch** as #3062 so the
-  image and the check are never out of sync.
+  Both outputs were as expected, so the follow-up (#3447) landed. #3062 merged
+  2026-09-13T02:45:10Z and the machine was redeployed after it (last update
+  2026-09-16T18:49:30Z), so the listener is **deployed**, not merely present in
+  the image.
 
 ### 6.1 What happened (2026-09-10, ~19:10–20:35 UTC)
 
@@ -373,7 +443,7 @@ The flap only became an outage because of three independent defects:
 | # | Defect | Status |
 |---|---|---|
 | 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`) |
-| 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level probe is **deferred** to a follow-up non-routing check (§6.0/§6.4), so nothing probes the application today |
+| 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level liveness signal is the now-**live** non-routing `[checks.loop_liveness]` check (§6.0/§6.4), which cannot affect routing |
 | 3 | One machine + an implicit, undeclared lifecycle policy | policy now explicit (§6.2); machine redundancy **blocked** (§6.3) |
 
 ### 6.2 Machine lifecycle policy — now declared in `fly.toml`
@@ -503,13 +573,12 @@ not something to enable quietly. What was done instead costs **$0** and removes
 the dominant failure mode (§6.2 + the app-side `/health` fix + the TCP routing
 check in §6.4).
 
-### 6.4 Health checks — the TCP routing check (non-routing liveness check deferred)
+### 6.4 Health checks — the TCP routing check and the live loop-liveness check
 
-`fly.toml` carries **one check**: the kernel-served TCP routing check, which is
-not an HTTP probe of the application on the routing path. A second, non-routing
-top-level liveness check is **designed but not shipped here** — it is deferred to
-a follow-up (§6.0); its contract and rationale are recorded at the end of this
-section so the follow-up can restore it.
+`fly.toml` carries **two checks**: the kernel-served TCP routing check, which is
+not an HTTP probe of the application on the routing path, and the now-**live**
+non-routing top-level `[checks.loop_liveness]` check (#3447), whose contract and
+rationale are recorded at the end of this section.
 
 **Routing check — `[[services.tcp_checks]]`** (rides the service's
 `internal_port = 8000`; `interval = "15s"`, `timeout = "5s"`,
@@ -530,8 +599,8 @@ section so the follow-up can restore it.
   listening process — accepting connections, doing no useful work — passes this
   check and therefore stays routable. That is the accepted price of never
   letting application latency remove the only route; the readiness signal
-  deliberately lives elsewhere (`/health/ready`, and the deferred 9090 liveness
-  check in §6.4).
+  deliberately lives elsewhere (`/health/ready`, and the 9090 liveness check in
+  §6.4).
 - Fly's documented semantics for a failing *service* check are that the proxy
   stops routing to the Machine and the Machine is not restarted or stopped — so
   with an HTTP check, application latency could **de-register the only machine**
@@ -553,11 +622,10 @@ section so the follow-up can restore it.
   `[deploy] wait_timeout = "5m"` (CI passes 420 s) still exceeds boot +
   `grace_period` under either reading of §6.4.1.
 
-**Deferred — non-routing check, top-level `[checks.loop_liveness]` (NOT in this
-PR).** Shape when restored: `type = "http"`, `port = 9090`, `path = "/healthz"`,
-`interval = "15s"`, `timeout = "5s"`, `grace_period = "180s"`. The block is
-preserved verbatim in a `fly.toml` comment; the follow-up merges only after the
-§6.0 precondition holds.
+**Live — non-routing check, top-level `[checks.loop_liveness]` (#3447).** Shape:
+`type = "http"`, `port = 9090`, `path = "/healthz"`, `interval = "15s"`,
+`timeout = "5s"`, `grace_period = "180s"`. It shipped in `fly.toml` only after
+the §6.0 precondition was verified (2026-09-17: `00000000:2382` and `http=200`).
 
 - **Top-level checks do not affect request routing — but they DO gate
   `fly deploy`.** Fly's config reference scopes them to "independent health
@@ -567,16 +635,20 @@ preserved verbatim in a `fly.toml` comment; the follow-up merges only after the
   counts top-level checks too (see the "Determined" block in §6.9 and §6.0), so
   a failing or mis-bound `loop_liveness` check **blocks a deploy** even though it
   cannot de-register the machine. The check is therefore **routing-inert but
-  deploy-gating** — which is exactly why it is deferred out of this PR and must
-  land only after its 9090 listener (from #3062) is deployed.
+  deploy-gating** — which is exactly why it was deferred until its 9090 listener
+  (from #3062) was deployed and verified on the live machine (§6.0).
 - Top-level checks **require** `port`, and Fly requires that port to be bound on
   **`0.0.0.0`**. The application-side contract is
   `monitoring.start_health_listener` (added by **#3062**): it binds `0.0.0.0`
   (`HEALTHZ_BIND`, overridable via `TORTOISE_HEALTHZ_BIND`) and serves `/healthz`
-  **unauthenticated by construction**; the only residual is deployed-image
-  verification (§6.9 #2).
-- The interface contract for the listener is: `GET /healthz` returns **200**
-  when the event loop is progressing and **503** when it has stalled.
+  **unauthenticated by construction**; that deployed-image verification is now
+  complete (§6.9 #2).
+- The interface contract for the listener is: `GET /healthz` returns **503**
+  only when the loop is STALE **AND** IDLE, else **200**
+  (`503 if (stale and idle) else 200` — `tortoise/monitoring.py`). A stale loop
+  with a request in flight still reports 200, so this check does **not**
+  reliably surface a true wedge; it errs toward 200, the safe direction for the
+  deploy gate it feeds.
 
 #### 6.4.1 The `grace_period` clamp — an open, testable question (NOT a fact)
 
@@ -728,8 +800,10 @@ and are recorded at the end of this section instead of being left open.
    reports the two checks independently. Until that is observed, treat
    "multiple service checks are independent" as an assumption.
 2. **Is the 9090 listener bound on `0.0.0.0` and `/healthz` unauthenticated in
-   the deployed image?** (This gates the **follow-up** PR that restores
-   `[checks.loop_liveness]` — §6.0 — not this PR.) The bind-address and auth
+   the deployed image?** (This gated the **follow-up** PR that restored
+   `[checks.loop_liveness]` — §6.0. It was **verified 2026-09-17**:
+   `grep ':2382' /proc/net/tcp` → `00000000:2382`, and `http=200` from
+   `/healthz`.) The bind-address and auth
    *design* concerns are resolved
    by **#3062**, not open. The listener serving 9090 in production is
    **`monitoring.start_health_listener`** (`_HealthzHandler`), added by #3062: it
@@ -739,14 +813,14 @@ and are recorded at the end of this section instead of being left open.
    `monitoring._Handler`, exposing only the loop heartbeat. The older
    `monitoring.serve_health(port=9090, bind="127.0.0.1")` is **not** on this
    path: it is started only by the standalone CLI (`tortoise health-server`,
-   `tortoise/__main__.py`), which the hosted app never invokes. The remaining
-   item is verification of the deployed image: the 9090 port accepts a
+   `tortoise/__main__.py`), which the hosted app never invokes. The deployed-image
+   verification was completed 2026-09-17: the 9090 port accepted a
    connection from inside the machine —
    `fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"`
-   (expect a line whose local address is `00000000:2382` — i.e. `0.0.0.0:9090`,
+   (observed a line whose local address is `00000000:2382` — i.e. `0.0.0.0:9090`,
    not the loopback-only `0100007F:2382`; `ss` is not in the image, `grep` and
    `/proc/net/tcp` are) — then a
-   token-less request from inside the machine (expect 200).
+   token-less request from inside the machine (observed 200).
 3. **The `grace_period` clamp** — §6.4.1. The genuinely `flyd`-internal residual
    is **what status a check reports *during* grace_period**: if an undocumented
    server-side clamp exists, the effective window is shorter than configured.
@@ -762,8 +836,8 @@ and are recorded at the end of this section instead of being left open.
   checks and then requires every reported check to pass; it does not consult
   `kind` and has no informational/readiness filter. So a top-level check is
   **routing-inert but deploy-gating**: it can never de-register the machine, and
-  it *can* fail a deploy. That is why the check is **deferred to a follow-up**
-  that merges only after #3062 (§6.0), rather than shipped in this PR.
+  it *can* fail a deploy. That is why the check was **deferred to a follow-up**
+  that merged only after #3062 was verified (§6.0) — #3447 landed it 2026-09-17.
 - **Is the loopback/401-auth risk real for the hosted app?** No — **#3062
   resolves it** via `start_health_listener` / `TORTOISE_HEALTHZ_BIND` /
   `_HealthzHandler` (see #2 above). The earlier framing of
@@ -818,6 +892,42 @@ machine is never de-registered for an app-level reason": the in-memory `/health`
 check `flyctl machine status` (`Checks [0/1]`) and correlate with `PR01` in
 `flyctl logs` — do not look for it in the app's own 503s.
 
+## 6.11 MCP auth-plane 503 — the `Retry-After` contract (#3144 / #3812)
+
+**Symptom.** An MCP client's startup connect to `/mcp` fails and the whole
+session runs with **zero** Tortoise tools. Pi's `mcp-client` connects eagerly at
+startup with a 15 s budget and **no retry**, so a single 503 during org
+resolution is a silent loss of the entire tool surface — the client-visible
+impact #3144 records.
+
+**Cause.** `OrgResolutionMiddleware` (`tortoise/mcp_auth.py`) resolves the
+bearer token against the control plane (Supabase) or the registry, and re-runs
+that resolution whenever its per-token cache entry is older than **60 s** —
+which is exactly the first request after an idle period. When the lookup raises
+(cold / unreachable dependency), the middleware answers a JSON-RPC `503`
+`ERR_REGISTRY` … which carried **no `Retry-After`**. A well-behaved client had
+no instruction to back off and could not distinguish a recoverable dependency
+outage from a hard outage.
+
+**What changed.** The auth-plane 503 now carries `Retry-After` (integer seconds,
+per RFC 7231 §7.1.3) from `TORTOISE_MCP_AUTH_RETRY_AFTER` (default `5`, clamped
+to `1..3600`). The contract is **executed**, not asserted against source text:
+`tests/test_mcp_http.py::TestAuthRetryAfterContract` drives the real mounted MCP
+app through warm resolution → cache aged past the 60 s TTL (the idle state) → a
+cold re-resolve that fails → asserts the 503's parseable `Retry-After` in a sane
+range → heals the dependency and asserts the retry, after exactly the advertised
+delay, **resolves** (not a mocked acknowledgement). Removing the header turns
+that test red (#3812).
+
+**Still not app-fixable.** The zero-byte shape in §6.10 is generated by Fly's
+proxy before the app sees the request — the app cannot attach a header to it.
+This section is the **app-side** half of the same objective for the hosted
+tenant surface: the auth-plane 503 a connecting MCP client can actually
+receive is retryable. (`StaticKeyMiddleware` — self-host `auth_mode="static"`
+— also answers a 503 with no `Retry-After`; that is a deliberate fail-closed
+*configuration* error, not a retryable dependency outage, and it is outside the
+hosted `/mcp` connect path this section covers.)
+
 ## 7. Out-of-band availability watchdog (#2850)
 
 The 2026-09-10 outage (~19:10–19:55 UTC, ~45 min) took `https://api.premiselabs.co`
@@ -834,7 +944,27 @@ every 5 minutes.
 - **Logic + limits:** `.github/scripts/availability-watchdog.sh`
 - **Harness (runs in CI job `availability-watchdog`):** `bash .github/scripts/availability-watchdog.test.sh`
 
+**Two production targets (#3628).** The watchdog now drives TWO surfaces, as two
+steps of the same job: the Fly API probe (§7.1a) and the Cloudflare Pages auth
+surface probe (§7.1b). They alert **independently** (the auth step runs even if
+the API step failed) and each files its **own** incident, keyed by its own host
+label — the two never share an issue. Only the Fly API target is restartable;
+the auth target is **hard-disarmed** from the restart leg (§7.4).
+
+> **The `PROD DOWN` path has never fired; `PROD DEGRADED` fired once.**
+> `gh issue list --state all --search '"[monitor] PROD DOWN" in:title'` returns
+> `[]`, but `"[monitor] PROD DEGRADED"` matches **#3637** (2026-09-16T07:34:59Z,
+> now closed) — the only production exercise of the alerting machinery. There is
+> **no `[monitor] DRILL` incident at all**, so the drill path (§7.7) has not been
+> exercised and is *not* the proven route the production incident is. That makes
+> it all the more important that `is_prod` is a **set membership** test rather
+> than a boolean flag: an unrecognised URL must stay a DRILL, so a misconfigured
+> or newly-added target can never arm self-heal against an unexpected host (fail
+> closed).
+
 ### 7.1 What the probe checks
+
+#### 7.1a The Fly API target (default)
 
 `GET https://api.premiselabs.co/v1/organizations` with **no auth** — the real user
 path (an authenticated API route served by the app), not just an open socket.
@@ -856,6 +986,50 @@ suspension) answers `401` and therefore reads UP.
 A generous per-request timeout (25 s) plus 3 attempts ~10 s apart must all fail
 before the run declares DOWN, so a single transient blip cannot fire an alarm.
 
+#### 7.1b The Pages auth target (#3628)
+
+The second step probes `GET https://tortoise.premiselabs.co/auth/start`
+(Cloudflare Pages). It exists because of the **#3616 sign-in outage** (~35 min):
+only `/auth/start` revealed it. The other candidate routes stayed GREEN the
+whole time — this is the trap to remember when tempted to probe something
+cheaper:
+
+| Route | Status during #3616 | Reads as |
+|---|---|---|
+| `/auth/start` | **503** `session_store_unavailable` | **DOWN/DEGRADED — the only revealing route** |
+| `/welcome` | 302 | UP (a bare liveness probe is blind) |
+| `/api/session` (anon) | 401 `not_signed_in` | UP — its missing-cookie branch precedes the binding check (`functions/api/session.ts`) |
+| `/auth` | 200 | UP |
+
+The auth target's UP contract is **narrower and stronger** than the API's:
+
+| | Value | Why |
+|---|---|---|
+| `PROBE_EXPECT_STATUS` | `302` | A healthy `/auth/start` is a redirect, not a 200. The watchdog's built-in arms classify 3xx as UNEXPECTED, so **without this allow-list a healthy site would page** — the #1 way to get this wrong |
+| `PROBE_REQUIRE_HEADER` | `code_challenge_method=s256` | Proof the PKCE flow row was actually written to D1. A 302 **without** it is an *answered-but-wrong* (UNEXPECTED → `PROD DEGRADED`) verdict, not an outage — “the site is up but nobody can sign in”, the entire lesson of #3616 |
+| `PROBE_HOST_LABEL` | `tortoise.premiselabs.co` | The incident **title is the dedupe key**. Two production targets must not share one label or they would fight over a single issue |
+
+The allow-list replaces **only** the UP arms: `000`/`5xx` are checked **first**
+and stay **DOWN** even if listed, and any other status stays **UNEXPECTED**. A
+malformed allow-list therefore fails closed (a genuine outage still alerts,
+never a silent disarm).
+
+That 302 + `code_challenge_method=s256` contract is exactly what the deploy
+gate already asserts (`tests/e2e/auth/test_bff_flow.py` — “expected redirect from
+/auth/start” and “S256 only” in the `Location` header); the watchdog is the
+**scheduled twin of the deploy gate**, pointed at the same tuple so the same
+fault is caught after a deploy as well as during one (#3618 blocks deploying it,
+this blocks living with it).
+
+**Never restartable.** The auth surface has **no Fly machine** behind it; a `503`
+there means a missing/renamed binding (D1/KV) or a Pages routing change, which
+`flyctl machine restart` on the API app cannot repair and which would restart an
+**unrelated service**. The auth URL is in the production set but **not** in the
+restartable set; on a **DOWN** verdict the run log / incident body say
+`disarmed:no_machine` explicitly (§7.4), while an answered-but-wrong
+(**DEGRADED**) verdict logs `disarmed:unexpected` — the restart leg is off the
+table either way.
+
 ### 7.2 How to read a failure
 
 1. **The workflow run goes RED** — that is the alert (enable GitHub Actions
@@ -863,6 +1037,10 @@ before the run declares DOWN, so a single transient blip cannot fire an alarm.
 2. **One GitHub issue** appears (or an existing one gets a comment):
    `[monitor] PROD DOWN — api.premiselabs.co is not answering the availability
    probe` (or `PROD DEGRADED` for the UNEXPECTED class), labelled `auto-filed`.
+   The auth target files a **separate** incident with its own host in the title
+   (`[monitor] PROD DOWN — tortoise.premiselabs.co is not answering the
+   availability probe`). An external page (Telegram) also fires on the
+   transition when the paging secrets are set.
 3. The issue **body** is machine-managed and carries the verdict, the first
    observation time, the failing-run count, the raw probe evidence, and the
    self-healing state. Read it first; add human notes as **comments**.
@@ -918,9 +1096,15 @@ velocity and involve a human when the cap is hit).
 
 Override them in the `env:` block of `availability-watchdog.yml`. The watchdog
 restarts **only**: (a) on a DOWN verdict — never on UNEXPECTED, where a restart
-cannot help; (b) when `PROBE_URL` is the production endpoint — a drill
-automatically disarms the restart leg; (c) when the failure is one a restart
-cannot fix — `classify_failure()` maps curl's exit code to a class, and **DNS**
+cannot help; (b) when `PROBE_URL` is a **restartable member of the production
+set** — an unrecognised URL is a drill and a drill automatically disarms the
+restart leg, and a production URL that is **not** restartable (the Pages auth
+surface — no Fly machine behind it, so a restart of the API app cannot repair a
+missing binding and would restart an unrelated service) is hard disarmed
+regardless of the failure class (`disarmed:no_machine` on a DOWN verdict,
+`disarmed:unexpected` on a DEGRADED one); (c) when the failure is
+one a restart cannot fix — `classify_failure()` maps curl's exit code to a
+class, and **DNS**
 (6) and **TLS/certificate** (35, 51, 58–60, 66, 77, 80, 82–83, 90–91) failures
 disarm the restart leg (`disarmed:unfixable`). The incident is still filed and
 its body names the class and why nothing was restarted: restarting a machine
@@ -958,8 +1142,8 @@ Three further safeguards worth knowing:
 
 | Secret | Needed for | If missing |
 |---|---|---|
-| `FLY_API_TOKEN` | the automated restart | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | optional paging on transitions | Page skipped with a log line (reuses the DR driver's secrets) |
+| `FLY_API_TOKEN` | the automated restart of the **Fly API** target — **not** the Pages auth step, which is hard-disarmed regardless | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | optional paging on transitions | Page skipped with a log line (reuses the DR driver's secrets). Both probe steps get them at STEP level |
 
 `GITHUB_TOKEN` is supplied by Actions and needs `issues: write` (granted in the
 workflow). A missing `GH_TOKEN` fails the run before probing — a monitor that
@@ -968,9 +1152,14 @@ cannot file is a deaf monitor.
 ### 7.6 When restarts do not help
 
 The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
-that as “this is not a wedged process”. Three disarm reasons also land here
+that as “this is not a wedged process”. Four disarm reasons also land here
 without the cap being reached, and all are named in the incident body and the
-run log: **`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
+run log: **`disarmed:no_machine`** (a production surface with no Fly machine —
+the Pages auth target on a **DOWN** verdict: repair the binding/route, there is
+nothing to restart; the same target logs `disarmed:unexpected` on a DEGRADED
+verdict, because a restart is off the table before the no-machine guard is even
+reached),
+**`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
 resolver or the certificate; a restart is not the fix), **`disarmed:no_ledger`**
 (the prior incident's restart ledger could not be read), and
 **`disarmed:corrupt_ledger`** (the ledger was read but not fully parseable —
@@ -1031,13 +1220,39 @@ To check the *paging* path, set the repo secrets (`gh secret set
 TELEGRAM_BOT_TOKEN`) — a dispatched workflow uses the repository secrets, not
 your shell environment. `gh workflow run` cannot pass them inline.
 
+**The `PROD DOWN` path has never fired; `PROD DEGRADED` fired once (#3637,
+2026-09-16T07:34:59Z)** — `gh issue list --state all --search '"[monitor] PROD
+DOWN" in:title'` returns `[]`, and **no `[monitor] DRILL` incident exists**, so
+the production DEGRADED incident is the only *proven* exercise of the alerting
+machinery (§7, §7.7). Two consequences:
+
+1. **Drill the drill before trusting a change.** A reverted/mis-wired
+   `is_prod` set would make every production run a silent drill (no PROD page),
+   and nothing in the live path would tell you — the drill is where you notice.
+2. **Widening the production set must not let a drill arm self-heal.** The set
+   (`PROD_PROBE_URLS`) and the restartable set (`RESTARTABLE_PROBE_URLS`) are
+   separate; only exact members of the production set are PROD, and only exact
+   members of the restartable set may restart. An unrecognised URL stays a
+   DRILL with self-heal disarmed — never add a flag, never loosen this to a
+   prefix/wildcard match, and never let a drill URL appear in either set.
+
+**Both targets are probed on every run**, drills included: the auth step always
+uses its production URL and is hard-disarmed from the restart leg. Note the auth
+probe is **not** side-effect-free — asserting the PKCE header means the GET must
+reach `/auth/start`, which **writes an `auth_flows` row** (one per run; expired
+rows are currently not garbage-collected — tracked in #3647). A drill therefore
+exercises the API drill path while still alerting on a genuinely-down auth
+surface.
+
 ### 7.8 Known limits
 
-- **Single-route, unauthenticated blindness.** The probe checks ONE route
-  (`/v1/organizations`) and only its no-auth branch. An outage that leaves that route
-  answering `401` while other routes fail reads as UP (green) — and so does an
-  auth-leg break that rejects every *real* token. The probe proves liveness and
-  route presence, not end-to-end authenticated traffic.
+- **Two probes, still narrow.** The API probe checks ONE route
+  (`/v1/organizations`) and only its no-auth branch; the auth probe checks ONE
+  route (`/auth/start`) and asserts 302 + the PKCE header. An outage that leaves
+  either route answering as expected while other routes fail reads as UP
+  (green) — and so does an auth-leg break that rejects every *real* token (the
+  probe sends none). Together they cover the two paths where a silent outage is
+  worst, not the whole surface.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
   `CONTROL_URL` check). Alerting still fires; no restart is issued. The
   escalation page is throttled (at most once per `CAP_RENOTIFY_MINUTES`) and the
@@ -1164,6 +1379,6 @@ Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive 
 - [ ] `fly.toml` declares `auto_stop_machines` / `auto_start_machines` / `min_machines_running` explicitly (no implicit platform defaults) and `fly config show` matches (§6.2)
 - [ ] Every machine has its own volume (`fly volumes list` count == `fly machines list` count) — a machine sharing `tortoise_api_data` is impossible and must never be attempted (§6.3)
 - [ ] Routing check is `[[services.tcp_checks]]` (kernel-served: **not starved by event-loop/thread-pool scheduling** — it can still fail if the accept backlog saturates) and no `[[services.http_checks]]` entry remains (§6.4)
-- [ ] **Deferred check absent from this PR:** `fly.toml` has no top-level `[checks]`; the follow-up that restores `[checks.loop_liveness]` merges only after #3062 is deployed and the 9090 port is listening **on `0.0.0.0`** — `fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"` shows a line whose local address is `00000000:2382` (not the loopback-only `0100007F:2382`) (§6.0, §6.4)
-- [ ] **(Follow-up only)** Top-level `[checks.loop_liveness]` targets port 9090 / path `/healthz`; the listener (`monitoring.start_health_listener`, #3062) binds `0.0.0.0` and `/healthz` is unauthenticated 200/503 (§6.4, §6.9)
+- [ ] **Loop-liveness precondition satisfied:** the top-level `[checks.loop_liveness]` check (#3447) shipped only after #3062 was deployed and the 9090 port was verified listening **on `0.0.0.0`** — `fly ssh console -a tortoise-y4mjjq -C "grep ':2382' /proc/net/tcp"` showed local address `00000000:2382` (not the loopback-only `0100007F:2382`), and a token-less `/healthz` returned 200 (verified 2026-09-17) (§6.0, §6.4)
+- [ ] Top-level `[checks.loop_liveness]` targets port 9090 / path `/healthz`; the listener (`monitoring.start_health_listener`, #3062) binds `0.0.0.0` and `/healthz` returns 503 only for STALE **AND** IDLE, else 200 (§6.4, §6.9)
 - [ ] A deliberately failing second `[[services]]` check does **not** de-register the primary service (§6.9 — open until observed)

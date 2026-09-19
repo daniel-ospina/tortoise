@@ -14,7 +14,7 @@ the read-side seam the hosted auth paths use AFTER the flip:
 - Tier/quota come from the ``teams`` row (max_users/max_graphs/
   graph_size_cap); max_points (the 20260817000001 points-cap override
   column) takes precedence over graph_size_cap, which falls back to
-  ``tortoise.pricing.tier_limits`` defaults (max_api_keys/max_sessions
+  ``tortoise.pricing.tier_limits`` defaults (max_api_keys
   always fall back to pricing) — mirroring the registry path.
 - Invitations (plan Task 4): mint/accept/rescind live here too — pending
   invitations are redeemed by plaintext token via indexed lookup_hash
@@ -568,12 +568,12 @@ def resolve_api_key(cp, token: str) -> dict | None:
 
     Returns the same dict shape as the registry get_current_org path
     (org_id, key_id, tier, max_users, max_graphs, max_points, max_api_keys,
-    max_sessions) plus additive metadata (key_prefix/created_via/created_by)
+    max_sessions — always None: unlimited, #4010) plus additive metadata
+    (key_prefix/created_via/created_by)
     plus the C1 tenancy fields (graph_id, graph_namespace, scopes,
     legacy_full_access, delegation_depth, created_by_key_id).
     """
     from tortoise.auth import lookup_hash
-    from tortoise.quota import DEFAULT_MAX_SESSIONS
 
     now = datetime.now(UTC)
     h = lookup_hash(token)
@@ -743,9 +743,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
         # forces the reduced node cap.
         "max_points": (int(lim["max_graph_nodes"]) if anon_override
                        else (int(max_points) if max_points is not None else lim["max_graph_nodes"])),
-        # 0006 orgs has no max_api_keys/max_sessions columns — pricing/defaults
+        # 0006 orgs has no max_api_keys column — pricing resolves it.
+        # #4010: sessions are UNLIMITED for every tier; max_sessions has no
+        # column either, and no constant supplies one.
         "max_api_keys": lim["max_api_keys"],
-        "max_sessions": DEFAULT_MAX_SESSIONS,
+        "max_sessions": None,
         # additive metadata (not part of the registry dict contract)
         "key_prefix": key_prefix,
         "created_via": created_via,

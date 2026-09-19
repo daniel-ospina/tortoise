@@ -38,6 +38,39 @@ EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 NEAR_DUPLICATE_THRESHOLD = 0.89
 DEFAULT_THRESHOLD = 0.72
 
+# #4028: the OPT-IN retrieval relevance floor (cosine) for the vector leg.
+# NOT a default — see the measured reason below. Set
+# TORTOISE_VECTOR_MIN_SIMILARITY to a value (this constant is the calibrated
+# starting point) to enable it; unset → no floor (the pre-#4028 behaviour).
+#
+# Below this, a nearest-neighbour hit carries no relevance signal. It is
+# distinct from DEFAULT_THRESHOLD above (the symmetric PARAPHRASE band, two
+# short sentences about the same thing); this is the asymmetric
+# QUERY->DOCUMENT noise ceiling, which sits lower.
+#
+# Calibration: bge-small-en-v1.5 (the pinned EMBEDDING_MODEL). On
+# tests/fixtures/labeled_pairs.jsonl the UNRELATED band tops out at 0.580
+# (37/37 below 0.60) while every paraphrase pair is >= 0.653 — a clean
+# separation on that fixture.
+#
+# ⛔ WHY IT IS NOT DEFAULT-ON: that clean separation does NOT survive the
+# query->document retrieval shape, where the bands OVERLAP. Two independent
+# real measurements: the LongMemEval-v2 fixture's gold hits run down to
+# 0.461 (median 0.693) against non-gold hard negatives up to 0.795, and a
+# real relevant pair at 0.536 (query "Which programming language does this
+# person prefer for coding?" -> "I really enjoy building side projects with
+# Elixir these days.") sits BELOW the 0.580 unrelated ceiling. No floor can
+# both drop the #4028 residue (observed up to 0.606) and keep those answers,
+# so defaulting it on turns real reads empty (it fails
+# tests/test_longmem_runner.py::test_vector_strategy_verified_in_eval_path).
+# #4028's own store defect is a DATA defect (test residue), fixed by
+# tools/purge_test_residue.py; this knob is defence-in-depth for an operator
+# who has measured their own corpus.
+#
+# Recalibrate when the embedder is swapped (same rule as the thresholds
+# above).
+VECTOR_RELEVANCE_FLOOR = 0.60
+
 
 class EmbeddingModel:
     """Lazy-loaded embedding model singleton.

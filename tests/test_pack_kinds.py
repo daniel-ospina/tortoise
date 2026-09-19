@@ -111,7 +111,9 @@ def v3_registry():
     _write_pack(d, "product-strategy", V3_PS)
     registry = PackRegistry(d)
     registry.load_all()
-    return registry
+    yield registry
+    # #4096: reclaim this fixture's temp pack tree on teardown.
+    shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
@@ -152,7 +154,9 @@ def registry():
             yaml.dump(data, f)
     registry = PackRegistry(d)
     registry.load_all()
-    return registry
+    yield registry
+    # #4096: reclaim this fixture's temp pack tree on teardown.
+    shutil.rmtree(d, ignore_errors=True)
 
 
 class TestPackLoading:

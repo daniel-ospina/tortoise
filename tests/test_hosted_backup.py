@@ -694,7 +694,7 @@ def test_restore_integrity_failure_keeps_live_graph(monkeypatch):
 
 def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
     """Swap failure: live graph deleted, verified temp graph remains recoverable."""
-    from falkordb import Graph
+    import tortoise.hosted_backup as hb
 
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
@@ -706,13 +706,17 @@ def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
         create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
-        def _boom_copy(self, clone):
-            if clone == "tortoise":  # only the temp→live promotion fails
-                raise RuntimeError("copy boom")
-            return real_copy(self, clone)
+        real_copy = hb._issue_graph_copy
 
-        real_copy = Graph.copy
-        monkeypatch.setattr(Graph, "copy", _boom_copy)
+        def _boom_copy(redis_client, src_name, dst_name):
+            if dst_name == "tortoise":  # only the temp→live promotion fails
+                raise RuntimeError("copy boom")
+            return real_copy(redis_client, src_name, dst_name)
+
+        # #3813: the swap's GRAPH.COPY is now issued through the restore's own
+        # client (its own read bound), so the failpoint lives at that seam
+        # instead of ``falkordb.Graph.copy``.
+        monkeypatch.setattr(hb, "_issue_graph_copy", _boom_copy)
         with pytest.raises(RuntimeError, match="copy boom"):
             restore_backup(
                 proj.db, registry, store, dump_key,

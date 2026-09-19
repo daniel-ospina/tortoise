@@ -47,7 +47,12 @@ def test_tortoise_client_diagnostic_reports_db_path(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_PATH", "/tc-canonical.db")
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     src = open("tortoise/tortoise_client.py").read()  # noqa: SIM115
-    assert 'os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH"' in src
+    # Anchor on the EXPRESSION, not its line wrapping: `ruff format` reflows the
+    # URI-or-PATH fallback across lines without changing the diagnostic payload,
+    # so flatten whitespace before matching (stale line-anchor broke when
+    # 7b452c0c7 reformatted this call).
+    flat = " ".join(src.split())
+    assert 'os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH"' in flat
 
 
 def test_init_docker_mode_does_not_set_db_path_env(monkeypatch):

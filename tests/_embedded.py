@@ -20,6 +20,7 @@ import contextlib
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 
@@ -27,6 +28,42 @@ import pytest
 
 from tortoise.config import is_db_uri
 from tortoise.projection import FalkorProjection
+
+# #4096: session-scoped test trees created by fixtures in this module and in
+# tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
+# which `_redislite_hygiene` declares as a dependency so pytest's reverse-order
+# teardown runs it LAST — after `_redislite_hygiene` / `_server_graph_hygiene` have
+# used the socket/pid evidence inside these trees. A local `rmtree` in the shared
+# fixture's own finalizer would run first, destroy that evidence, and could orphan
+# a live redislite server (the #4068/#1005 class).
+SESSION_TMPDIRS: list[str] = []
+
+
+def register_session_tmpdir(path: str) -> None:
+    """Register a session-scoped test tree for end-of-session reclamation."""
+    SESSION_TMPDIRS.append(path)
+
+
+def reclaim_tmpdirs(dirs: list[str]) -> int:
+    """rmtree each tree in ``dirs`` (best-effort) and return the count.
+
+    Split out from the session reclaimer so the removal primitive is unit-
+    testable without draining the live ``SESSION_TMPDIRS`` registry mid-session.
+    """
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    return len(dirs)
+
+
+def drain_session_tmpdirs() -> int:
+    """Drain + reclaim ``SESSION_TMPDIRS`` (the session reclaimer's body).
+
+    Split from the fixture so the drain-and-clear behaviour is unit-testable
+    without driving a session-scoped pytest fixture.
+    """
+    dirs, SESSION_TMPDIRS[:] = list(SESSION_TMPDIRS), []
+    return reclaim_tmpdirs(dirs)
+
 
 # ── #3546: ONE process-wide embedded construction lock ────────────────────
 # Consolidated here from the two per-file copies that #3511 installed
@@ -179,10 +216,25 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_graph_integrity_gate",
     "test_guard",
     "test_hard_reject",
+    # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
+    # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
+    # opener — which is only possible BECAUSE this stem is exempt. Without the
+    # exemption the redirect (the ``FalkorProjection.__init__`` block) would
+    # rename every path-built graph to a per-path ``test_*`` name, so under a
+    # server URI no production name would exist: the probe's ``own=True`` and
+    # the listing filter would assert FAIL, and the opener would return None.
+    # A hard RED, never a false pass. Same carve-out rationale as
+    # test_hosted_backup.
+    "test_cross_tenant_read_isolation",
     "test_hosted_backup",
     "test_migrate_db",
     "test_ops_safety",
     "test_per_session_census",
+    # #4028: the surface half asserts embedded brute-force floor semantics
+    # (the docker sig-A vector branch returns no absolute similarity, so the
+    # floor cannot be applied there) — it must construct a real embedded
+    # store, not a redirected server graph.
+    "test_precision_leak_4028",
     "test_pre_migration_safety",
     # #3350: the embedded lane's socket timeout / retry-bound assertions are
     # embedded-only (a redirected construction would run against the docker
@@ -232,10 +284,16 @@ def has_falkor() -> bool:
     if _HAS_FALKOR is None:
         try:
             from redislite.falkordb_client import FalkorDB  # noqa: F401
-            db_path = os.path.join(
-                tempfile.mkdtemp(prefix="tortoise_probe_"), "probe.db")
-            proj = FalkorProjection(db_path, graph_name="test")
-            proj.close()
+            tmpdir = tempfile.mkdtemp(prefix="tortoise_probe_")
+            try:
+                db_path = os.path.join(tmpdir, "probe.db")
+                proj = FalkorProjection(db_path, graph_name="test")
+                proj.close()
+            finally:
+                # #4096: reclaim the probe tree even if construction/close raises
+                # — one per process before _HAS_FALKOR caches, and the reaper
+                # never reaps a .db-only tree.
+                shutil.rmtree(tmpdir, ignore_errors=True)
             _HAS_FALKOR = True
         except Exception:
             _HAS_FALKOR = False
@@ -1075,8 +1133,9 @@ def shared_proj():
     if not has_falkor():
         yield None
         return
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_shared_embedded_")
+    register_session_tmpdir(tmpdir)
+    db_path = os.path.join(tmpdir, "shared.db")
     proj = FalkorProjection(db_path, graph_name="test")
     yield proj
     proj.close()

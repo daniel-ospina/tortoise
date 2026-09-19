@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,7 @@ def sdk():
     s.test_guard = lambda: None  # destructive teardown safety for tests
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _proj(sdk):

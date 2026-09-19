@@ -1,4 +1,4 @@
-"""A7/#2976 — product reranker seam: tri-state gate, budget guard, one impl.
+"""A7/#2976 — ask-lane (eval-only) reranker seam: tri-state gate, budget guard, one impl.
 
 Hermetic (no DB, no model, no network): the cross-encoder is never loaded —
 the deterministic in-repo ``FakeScorer`` is injected through the

@@ -77,11 +77,49 @@ test('last-error sub-line reads the REGISTERED per-harness key, not client state
 test('#3428: the capture claim is present-tense ONLY on an observed receipt', () => {
   const withReceipt = { session_recording: true, session_capture_receipt_claude: '2026-09-16T00:00:00Z' }
   assert.equal(captureClaimForHarness(withReceipt, 'claude'), 'present')
-  // every non-receipt state is future-tense — never present
-  assert.equal(captureClaimForHarness({ session_recording: true }, 'claude'), 'future')
+  // a PROBE (install confirmed server-side) may print the future-tense claim…
   assert.equal(captureClaimForHarness({ session_recording: true, install_probe_claude: 't' }, 'claude'), 'future')
+  // …but NOTHING observed is 'install-pending' (#3782), never a promise
+  assert.equal(captureClaimForHarness({ session_recording: true }, 'claude'), 'install-pending')
   // a receipt for a DIFFERENT harness must not leak the tense across harnesses
-  assert.equal(captureClaimForHarness({ session_recording: true, session_capture_receipt_cursor: 't' }, 'claude'), 'future')
+  assert.equal(captureClaimForHarness({ session_recording: true, session_capture_receipt_cursor: 't' }, 'claude'), 'install-pending')
+})
+
+// ── #3782: the collapse that made the success screen promise an unobserved ──
+// capture. The deployed screen printed "Tortoise will capture your agent's
+// sessions." for a projection where BOTH `install_probe_claude` and
+// `session_capture_receipt_claude` were null, while the SAME deployment's
+// Settings page said Claude Code was "not installed yet".
+// `captureStatusForHarness` already computed the truthful `install-pending`;
+// `captureClaimForHarness` collapsed it (and `waiting`) into `'future'`, so
+// "nothing observed" and "install detected, capture pending" printed the
+// identical promise. This test EXECUTES the real function over the three states
+// the issue measured, so a source-text scan cannot pass it vacuously.
+//
+// NAMED MUTATION that reinstates the defect — must RED this test:
+//   CLAIM_INSTALL_PENDING_AS_FUTURE
+//   In `captureClaimForHarness`, replace
+//     `if (status === 'install-pending') return 'install-pending'`
+//   with the old catch-all `return 'future'` (re-collapsing the honest state
+//   into the promise). Verified RED before this change was committed; reverting
+//   the line restores GREEN.
+test('#3782: an UNOBSERVED harness resolves to install-pending, not a future promise', () => {
+  // (1) a receipt WAS observed → the present-tense sentence is truthful
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, session_capture_receipt_claude: '2026-09-17T00:00:00Z' }, 'claude'),
+    'present',
+    'an observed receipt yields the present-tense sentence')
+  // (2) the EXACT live state from #3782: recording on, probe null, receipt null
+  //     → the honest pending state Settings renders as "not installed yet"
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, install_probe_claude: null, session_capture_receipt_claude: null }, 'claude'),
+    'install-pending',
+    'nothing observed must NOT be reported as a future capture (#3782)')
+  // (3) no capture install path at all (capability false) → no sentence
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, install_probe_claude: 't' }, 'cursor'),
+    'none',
+    'a harness with no install path prints no capture sentence')
 })
 
 test('#3428: an unknown projection prints NO capture sentence (fail-honest)', () => {
@@ -97,13 +135,41 @@ test('#3428: a harness with no capture install path prints NO capture sentence',
   // HARNESS_CAPTURE_SUPPORT false (Cursor's spike verdict, the backfill-only
   // leaves) ⇒ 'none' EVEN with a stray receipt: capability decides whether any
   // capture sentence may be printed at all.
-  for (const h of ['cursor', 'codex', 'claude-desktop', 'claude-web', 'chatgpt']) {
+  // #3818: codex LEFT this loop — it now has a capture seam
+  // (tortoise/codex-hooks/session-end.sh) and is asserted as capture-capable
+  // in its own test below. It is NOT a member of this 'none' set any more.
+  for (const h of ['cursor', 'claude-desktop', 'claude-web', 'chatgpt']) {
     assert.equal(
       captureClaimForHarness({ session_recording: true, [`session_capture_receipt_${h}`]: 't' }, h),
       'none', `${h} must print no capture sentence`)
   }
   // 'codexDesktop' is a UI-only leaf with no capability entry — same rule
   assert.equal(captureClaimForHarness({ session_recording: true }, 'codexDesktop'), 'none')
+})
+
+test('#3818: codex is capture-capable — the tense follows the RECEIPT, never the flag alone', () => {
+  // #3818 wired tortoise/codex-hooks/session-end.sh into HARNESS_CAPTURE_SEAM,
+  // so HARNESS_CAPTURE_SUPPORT.codex derives true and codex joins the
+  // claude/pi class: it MAY print a capture sentence. The #3428/#3782 invariant
+  // is unchanged on BOTH sides of that flag — capability is a PRECONDITION,
+  // never a claim, so with NOTHING observed codex can not reach the
+  // present-tense sentence, and only an observed receipt unlocks it.
+  //
+  // boundary (capability true, no receipt): NO present-tense claim
+  assert.equal(
+    captureClaimForHarness({ session_recording: true }, 'codex'),
+    'install-pending',
+    'codex with no receipt must NOT claim a present-tense capture (#3428/#3782)')
+  // an observed probe states the future — still not the present tense
+  assert.equal(captureClaimForHarness({ session_recording: true, install_probe_codex: 't' }, 'codex'), 'future')
+  // a receipt for a DIFFERENT harness must not leak the tense across harnesses
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, session_capture_receipt_claude: 't' }, 'codex'),
+    'install-pending')
+  // an observed codex receipt is what unlocks the present-tense sentence
+  assert.equal(
+    captureClaimForHarness({ session_recording: true, session_capture_receipt_codex: '2026-09-17T00:00:00Z' }, 'codex'),
+    'present')
 })
 
 test('#3428: the recording off-switch silences the claim entirely', () => {
@@ -116,8 +182,9 @@ test('#3428 / #3575 boundary: Pi cannot reach the present-tense claim today', ()
   // seam (#3575, lane B1), so no receipt can be produced and the present-tense
   // sentence is UNREACHABLE for Pi — without this lane touching the install
   // seam or the capability flag (#3575 requires that flag be *derived*).
-  // Pi's only reachable projection state today:
-  assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'future')
+  // Pi's only reachable projection states today: nothing observed → the honest
+  // 'install-pending' (#3782), a probe with no receipt → 'future'.
+  assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'install-pending')
   assert.equal(captureClaimForHarness({ session_recording: true, install_probe_pi: 't' }, 'pi'), 'future')
 })
 
@@ -129,11 +196,11 @@ test('#3428: GIVEN capture capability, the tense follows the RECEIPT', () => {
   // the test requires the flag to stay true (the receipt-less-'none' case is
   // pinned by the loops above, e.g. cursor with a receipt).
   // Guards the seam with B1: if #3575 is ever 'fixed' by flipping the flag
-  // rather than deriving the seam, a receipt-less Pi must still read 'future'
-  // (never 'present'), so the screen cannot start claiming an unobserved
-  // capture. Both sides of that boundary are asserted here (review cycle 3,
-  // P2-5 — the comment described the receipt-less case while the only
-  // assertion pinned the receipt-bearing one).
-  assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'future')
+  // rather than deriving the seam, a receipt-less Pi must still read
+  // 'install-pending' (#3782 — never 'present', never a promise), so the screen
+  // cannot start claiming an unobserved capture. Both sides of that boundary
+  // are asserted here (review cycle 3, P2-5 — the comment described the
+  // receipt-less case while the only assertion pinned the receipt-bearing one).
+  assert.equal(captureClaimForHarness({ session_recording: true }, 'pi'), 'install-pending')
   assert.equal(captureClaimForHarness({ session_recording: true, session_capture_receipt_pi: 't' }, 'pi'), 'present')
 })

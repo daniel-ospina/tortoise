@@ -59,8 +59,14 @@ _S2 = ('{"entities": [], "events": [], "operators": [], '
 
 
 def _org(org_id: str) -> dict:
+    # #4010 (merged after this branch): the resolved-limits shape now ALWAYS
+    # carries `max_sessions` — the key is present and explicitly None
+    # (unlimited). A MISSING key is fail-closed (500), so a hand-built limits
+    # dict that omits it no longer models the real resolver
+    # (tortoise/quota.py `resolve_org_limits`).
     return {"org_id": org_id, "tier": "free", "key_id": "k-3665",
-            "legacy_full_access": True, "max_points": 100000}
+            "legacy_full_access": True, "max_points": 100000,
+            "max_sessions": None}
 
 
 def _provision(org_id: str, created_at: str) -> None:
@@ -348,7 +354,8 @@ def test_mcp_capture_reports_err_quota_when_cohort_is_over_cap(
         _spend(COHORT_ORG, CAP_USD + 1.0)
         tok_t = _current_org_id.set(COHORT_ORG)
         tok_l = _current_org_limits.set(
-            {"org_id": COHORT_ORG, "tier": "free", "max_points": 100000})
+            {"org_id": COHORT_ORG, "tier": "free", "max_points": 100000,
+             "max_sessions": None})
         try:
             result = tortoise_session_capture(
                 conversation=_CONV, harness="claude", session_id="s-3665-mcp")

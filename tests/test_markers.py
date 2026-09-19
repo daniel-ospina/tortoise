@@ -16,8 +16,8 @@ Guards (the census's executable form — cycle-5 P1-5 / cycle-6 P2-10/P2-15):
   test_select_graph_literals_guard_passing_or_routed
       grep every select_graph("team_*/"registry_*") literal (plain + f-string)
       in migrated files; each must be ROUTED through the per-test seam,
-      DECLARED read-only/unit-mock/endpoint-constrained, or a projection-
-      constructed name. A new un-routed WRITE site reds.
+      DECLARED read-only/unit-mock/endpoint-constrained/test-constructed, or a
+      projection-constructed name. A new un-routed WRITE site reds.
 """
 from __future__ import annotations
 
@@ -56,6 +56,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
     "test_capture_session.py": {"registry": "session-capture"},
+    # #3665: `_provision` seeds the org's REAL `created_at` into the registry
+    # graph (the column the cohort is derived from) and the cap's cohort
+    # resolution reads that same graph, so the literal IS the seed→resolution
+    # coupling — a test_* rename would seed a different graph than the code
+    # resolves. Same class as test_quota/test_commit_endpoint.
+    "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
+    "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_index_docs_api.py": {"registry": "index-docs"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
@@ -77,6 +84,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
     "test_import_endpoint.py": {"registry": "import-ledger"},
+    "test_issue_4010_sessions_unlimited.py": {"registry": "prod-coupled"},  # #4010: registry seeding (org_create + registry-lane auth) mirrors test_quota/test_commit_endpoint
     "test_index_mcp.py": {"registry": "prod-coupled",
                            "e2e-900": "redirect-derived per-path"},
     "test_invites_email_http.py": {"registry": "prod-coupled"},
@@ -84,13 +92,24 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_invite_fusion_http.py": {"registry": "prod-coupled"},    # #2003 (W7): registry lane invite-fusion HTTP tests
     "test_invite_fusion_docker.py": {"registry": "prod-coupled"}, # #2003 (W7): docker-lane fusion journeys
     "test_mcp_http.py": {"registry": "prod-coupled"},
-    "test_mcp_server_auth_modes.py": {"registry": "prod-coupled",
-                                     "selfhost": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern; #2657 TestAskConnectedAssemblyExposure auth_mode="none" resolves the canonical selfhost namespace (graph team_selfhost on the env URI)
+    "test_mcp_server_auth_modes.py": {"registry": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern (the #2657 TestAskConnectedAssemblyExposure selfhost site went with the ask surface, #3849)
     "test_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
     "test_onboarding_integration.py": {"registry": "prod-coupled"},
+    # #3912 repair guard: TestGuardHelpers.test_registry_cross_check_keys_on_
+    # namespace_not_display_name seeds a `Graph` row into the registry graph and
+    # then calls `_has_scoped_graphs`, whose OWN body constructs
+    # `TortoiseSDK(namespace="registry")` (sdk.py L1784 maps that literal to
+    # `registry_tortoise`). Seed and read must therefore be the SAME graph: a
+    # test_* rename would seed a verbatim test_* graph while the guard still
+    # read `registry_tortoise`: the first arm then passes VACUOUSLY (the seeded
+    # row is invisible, so nothing is "scoped") and the second goes red
+    # (`assert False is True`) — the custom-graph row is never found. Renaming
+    # breaks the coupling; the namespace IS the identity here. VERIFIED by
+    # rename probe this task.
+    "test_onboarding_false_completion_repair.py": {"registry": "prod-coupled"},  # #3912: registry seed read back by the guard's own TortoiseSDK(namespace="registry")
     "test_onboarding_seed_endpoint.py": {"registry": "prod-coupled"},  # #1999 (W3): seed/decide endpoint tests
     "test_onboarding_state_split.py": {"registry": "prod-coupled"},
     "test_onboarding_state.py": {"registry": "unit-only"},
@@ -146,6 +165,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
 #                              endpoint dumps teams.graph_name). Renaming
 #                              breaks the endpoint contract (VERIFIED this
 #                              task) — declared, never silent.
+#   "test-constructed"       — the test builds its OWN dedicated server graph
+#                              and hands its name straight to the code under
+#                              test; NOT production-shape, and no endpoint or
+#                              registry resolves it — so no contract fixes the
+#                              name, but it must stay CONSISTENT between the
+#                              seed, the call and the read-back assert.
 ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     "test_dr_endpoints.py": {
         'f"org_{org_id}"': "endpoint-constrained",  # seed write — drill/backup resolve org_{id}
@@ -160,6 +185,16 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # #2304 tombstoned-oldest sweep E2E — custom-graph seed named
         # team_team_x_g_dead (namespace registry row kind:'custom')
         '"team_team_x_g_dead"': "endpoint-constrained",  # custom drill seed write
+        # #3813 read-bound guards — these call `_restore_into_temp_verify_swap`
+        # DIRECTLY (never the drill endpoint): the test seeds a raw source and
+        # a raw stale target, hands the target's name to the helper as
+        # `live_name`, and reads it back. Test-constructed, not
+        # production-shape — nothing resolves org_swap_*/org_bound_* from a
+        # registry, so `endpoint-constrained` would be false here.
+        '"org_swap_source"': "test-constructed",   # seeded source for the swap
+        '"org_swap_target"': "test-constructed",   # live target + read-back
+        '"org_bound_source"': "test-constructed",  # seeded source (ordinary-bound guard)
+        '"org_bound_target"': "test-constructed",  # live target (ordinary-bound guard)
     },
     "test_eval_ingest_cache.py": {
         'f"org_{namespace}"': "endpoint-constrained",  # #2626 regression — own-graph cleanup delete (namespace=icache-<tag>-<uuid>, docker lane)
@@ -172,11 +207,6 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # otherwise, #1970 main hygiene).
         'f"org_{org_id}"': "endpoint-constrained",
     },
-    "test_mcp_server_auth_modes.py": {
-        # #2657 TestAskConnectedAssemblyExposure finally-cleanup — deletes the
-        # team_selfhost graph seeded by the auth_mode="none" ask fixture.
-        '"org_selfhost"': "endpoint-constrained",  # fixture's own seeded graph delete
-    },
     "test_onboarding_state_split.py": {
         'f"org_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
         'f"org_{org_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
@@ -184,8 +214,28 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     "test_pack_state.py": {
         "legacy_graph": "read-only",  # variable — legacy-graph PackInstall assert
     },
+    # #3845 fork-slot wedge: the harness builds its OWN dedicated graphs — one
+    # per round (wedge / nofork / retry) — because the defect being reproduced
+    # is a GRAPH.COPY module fork, so the round must own the live destination
+    # the fork child was told to copy. The names are test-constructed, not
+    # production-shape: nothing outside the harness resolves them, and they
+    # must stay byte-for-byte because the reap is keyed to THIS daemon's socket
+    # prefix and each round's assertions read back the same graph it seeded.
+    # Renaming would not break a prod contract, it would silently turn a
+    # wedge round into a no-op against an empty graph.
+    "test_fork_slot_wedge_3845.py": {
+        '"org_wedge"': "test-constructed",    # round 1 — the graph the fork copies
+        '"org_nofork"': "test-constructed",   # rounds 2-3 — control + post-copy read
+        '"org_retry"': "test-constructed",    # round 4 — retry-after-reap target
+    },
     "test_navigation.py": {
         "name (MagicMock param)": "unit-mock",
+    },
+    "test_dump_edge_asymmetry_3895.py": {
+        # #3895: a scratch registry handle for the create_backup stamp seam
+        # (`_stamp_backup_latest` MATCHes Team.id) — the test seeds it itself
+        # and no production seam resolves the name.
+        '"registry_3895"': "test-constructed",  # scratch registry handle for create_backup's stamp seam
     },
 }
 
@@ -302,9 +352,9 @@ def test_namespace_routing_table_keys_exist():
 def test_select_graph_literals_guard_passing_or_routed():
     """Cycle-6 P2-10: every select_graph("team_*/registry_*") literal in a
     migrated file is ROUTED through the per-test seam, DECLARED
-    read-only/unit-mock/endpoint-constrained, or a projection-constructed
-    name. A new un-routed site reds — the cycle-6 P2-10 census becomes
-    executable."""
+    read-only/unit-mock/endpoint-constrained/test-constructed, or a
+    projection-constructed name. A new un-routed site reds — the cycle-6 P2-10
+    census becomes executable."""
     violations = []
     for fname, lineno, literal in _select_graph_literals():
         routed = ROUTED_SELECT_GRAPH_SITES.get(fname, {}).get(literal)
@@ -452,6 +502,20 @@ def test_no_redirect_stems_registry_exact():
         # TEST_NO_REDIRECT_STEMS but this pin was not updated, so the
         # repo-wide markers gate red'd on every PR until reconciled here.
         "test_projection_embedded_socket_timeout",
+        # 2026-09-18 #4028: the surface half asserts embedded brute-force
+        # relevance-floor semantics (the docker sig-A vector branch returns no
+        # absolute similarity), so the module joins the carve-out lane —
+        # registered in ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS.
+        "test_precision_leak_4028",
+        # #3663: the cross-tenant read-isolation proof asserts PRODUCTION
+        # graph names (org_{org_id}) on the MCP list_graphs filter, the
+        # namespace probe and its opener. The exemption is load-bearing:
+        # without it the class-level test redirect would rename path-built
+        # graphs to test_<hash>, so under a server URI no production name
+        # would exist and those assertions would FAIL — a hard RED, not a false
+        # pass. Runs embedded in every lane (same rationale as
+        # test_hosted_backup).
+        "test_cross_tenant_read_isolation",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

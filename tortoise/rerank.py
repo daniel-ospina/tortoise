@@ -1,7 +1,7 @@
 """A7 (#2070) — ask-lane cross-encoder + MMR rerank (eval R6 port).
 
 The eval's proven rerank stage (``tools/longmem_eval/rerank.py``, R6 #1545)
-ported onto the PRODUCT ask lane: a cross-encoder scorer
+ported onto the eval-only ask lane: a cross-encoder scorer
 (``cross-encoder/ms-marco-MiniLM-L6-v2`` — ships in the ``embeddings``
 extra, NO new third-party dependency) + greedy MMR diversity, gated
 ``TORTOISE_ASK_RERANK`` (fail-safe OFF — phase 2 of the scoping package,
@@ -27,8 +27,8 @@ ONE implementation (issue #2976): this module is the single owner of the
 scoring logic (``CrossEncoderScorer`` / ``FakeScorer`` / ``mmr_select`` /
 ``_pair_sim`` / ``rerank_hits`` / ``load_scorer``). The eval lane
 (``tools/longmem_eval/rerank.py``) imports and re-exports these names — it
-keeps only its own env namespace and gate adapter, so the product and the
-harness measure the SAME scorer and MMR code (no fork).
+keeps only its own env namespace and gate adapter, so the eval-only ask lane
+and the harness measure the SAME scorer and MMR code (no fork).
 
 The ``retrieval_degraded`` flag on the ask response is untouched by design
 (A2): a vector-leg-absent lane stays degraded and the rerank is never a
@@ -425,14 +425,14 @@ def ask_lane_rerank(
     max_context_bytes: int | None = None,
     question_date: str | None = None,
 ) -> tuple[list[dict], dict]:
-    """A7 product entry: the ask lane's rerank stage, gated + degrade-safe.
+    """A7 eval-lane entry: the ask lane's rerank stage, gated + degrade-safe.
 
     Resolves the ask-lane knobs (``TORTOISE_ASK_RERANK`` gate,
     ``TORTOISE_ASK_RERANK_MODEL`` / ``_CAP`` / ``_LAMBDA``), loads the TTL-
     cached scorer, and reranks the deduped pool to ``top_k``. Every failure
     path returns ``(hits, stats)`` with ``applied: False`` + a reason — the
     caller keeps the untouched pool (degrade-to-current). Returns the
-    rerank stats for logging; the response shape (12 fields) is unchanged.
+    rerank stats for logging; the ask response shape is unchanged.
 
     Budget guard (issue #2976): the measured rerank lever costs ~6.6x
     context, so when ``max_context_tokens`` / ``max_context_bytes`` are
