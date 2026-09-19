@@ -440,6 +440,20 @@ def _shipping_handlers(sdk):
             os.environ["TORTOISE_API_KEY"] = saved_key
 
 
+def _envelope(payload) -> dict:
+    """A bounded, JSON-safe description of a handler payload that is NOT the
+    expected list/results shape — so the receipt can distinguish a handler
+    that returned an ERROR envelope from one with an unexpected shape. Without
+    this the two are both recorded as ``null`` and the failure is
+    untriageable (found by the run itself on gpt4_7a0daae1)."""
+    if isinstance(payload, dict):
+        if "error" in payload:
+            return {"kind": "error",
+                    "error": str(payload.get("error"))[:300]}
+        return {"kind": "dict", "keys": sorted(str(k) for k in payload)[:12]}
+    return {"kind": type(payload).__name__, "repr": str(payload)[:200]}
+
+
 def _handler_session_ids(mcp_mod, sdk, question: dict) -> dict:
     """The ``sessionId`` set each SHIPPING handler carries for this question.
     Resolved by name so the instrument survives #3929's removal of the MCP
@@ -454,6 +468,8 @@ def _handler_session_ids(mcp_mod, sdk, question: dict) -> dict:
         out["search"] = {"ids": [h.get("sessionId") or ""
                                  for h in hits if isinstance(h, dict)],
                          "n_hits": len(hits)}
+    elif hits is not None:
+        out["search"] = _envelope(hits)
     try:
         rec = mcp_mod.tortoise_recall(question["question"], mode="state",
                                       limit=10)
@@ -465,6 +481,8 @@ def _handler_session_ids(mcp_mod, sdk, question: dict) -> dict:
             "ids": [r.get("sessionId") or ""
                     for r in rec["results"] if isinstance(r, dict)],
             "n_hits": len(rec["results"])}
+    elif rec is not None:
+        out["recall"] = _envelope(rec)
     return out
 
 
