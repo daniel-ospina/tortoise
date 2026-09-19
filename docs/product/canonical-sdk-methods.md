@@ -47,7 +47,8 @@ the SDK exposes **no** `ask` method. Nothing is unaccounted for in the manifest.
 the eval lane. That was wrong, and how it arose is worth naming: the method count was
 extracted from the **hub working copy** of `tortoise/sdk.py`, stale at a pre-#3929 state,
 while the manifest row was read from `origin/main`. Mixing two revisions produced a
-discrepancy that does not exist. Every figure here is now derived from `origin/main`.
+discrepancy that does not exist. Every **method** figure here is now derived from
+`origin/main` (the competitor figures are prior analysis — see Verification notes).
 
 ## The principle
 
@@ -70,7 +71,7 @@ this is a collapse of names that already exist, not a design of new ones.
 
 | # | Canonical | Members (current names) | Action |
 |---|---|---|---|
-| R1 | `search` | `tortoise_fts_query`, `query`, `paginated_query`, `query_points_by_tag`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse |
+| R1 | `search` | `tortoise_fts_query`, `query`, `paginated_query`, `query_points_by_tag`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse — **`search` is a new name** (no SDK `search` exists) |
 | R2 | `recall(mode=)` | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context` | keep, **new dispatcher** |
 | R3 | `get(type=)` | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, **new dispatcher** |
 | R4 | `traverse` | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |
@@ -134,25 +135,27 @@ flag — never by capability. The discriminator is a parameter that **already ex
 
 | Members | Discriminator | Evidence |
 |---|---|---|
-| `create_or_update_point` → `create_point` | `dedup: bool = True` | single-statement delegate |
+| `create_or_update_point` → `create_point` | `dedup` — a `**props` key popped with default **`False`** (not a declared parameter) | single-statement delegate |
 | `batch_create_points` → `create_point` / `ingest` | — | comprehension, no batch semantics |
 | `create_subject` / `create_object` / `create_document` → `create_entity` | `type ∈ {subject, object, event, document}` | explicit raise on anything else |
 | `create_derivation` → `create_edge` | `relation = 'wasDerivedFrom'` | already in the edge allowlist |
 | `delete_point_wrapped` → `delete` | return shape | MCP-layer adapter |
 | `index_sessions` / `ingest_corpus` → `index_directory` | `file_type` | both self-declared DEPRECATED in their own docstrings |
-| `supersede_point` / `invalidate_point` → `supersede` | `transfer_edges: bool` | dispatcher exists |
-| `mitigate_operator` / `annotate_operator` → `operator_action` | `action ∈ {mitigate, annotate}` | 2-branch dispatcher exists |
+| `supersede_point` / `invalidate_point` → `supersede` | `transfer_edges: bool` — **but `supersede_point` also carries `valid_from`** (kw-only, the bi-temporal window stamp) that `supersede` does not forward. The collapse is **lossy**: `supersede(old, new, valid_from=…)` raises `TypeError` | dispatcher exists; `valid_from` must be added to it |
+| `mitigate_operator` / `annotate_operator` → `operator_action` | `action ∈ {mitigate, annotate}` — **but `mitigate_operator` takes `credibility`**, which drives the mitigation's Beta baseline and which `operator_action` does not forward. Because `operator_action` accepts `**kwargs`, passing it is **accepted and ignored** — a silent behaviour change | dispatcher exists; `credibility` must be forwarded first (the MCP handler has the same hole) |
 | `update_point` / `update_entity` → `update` | node label, auto-resolved | dispatcher exists |
 | `delete_point` / `delete_entity` → `delete` | node label, auto-resolved | dispatcher exists |
-| `invitation_get_by_token` / `_by_id` → `invitation_get` | lookup key | two 2–3 statement lookups |
+| `invitation_get_by_token` / `_by_id` → `invitation_get` | **no discriminator yet — `invitation_get` is a new name.** The two paths are not interchangeable: one verifies a salted hash, the other matches a ULID in the registry | the two lookups differ; merging is a design decision, not a rename |
 
-**The highest-leverage item in this document.** Three of the collapses above —
+**The highest-leverage item in this document.** Four of the group canonicals — `search`,
 `get(type=)`, `overview(section=)`, `recall(mode=)` — are *already implemented in the MCP
-handlers* (`mcp_server.py` dispatches `tortoise_get` over 7 types, `tortoise_overview`
-over 12 sections, and `tortoise_recall` over 4 modes). The SDK never grew the mirror.
-Adding those three dispatchers to the SDK is **purely additive** — it breaks no caller,
-notably not the eval harness, which drives `TortoiseSDK` by method name. It presents the
-consolidated surface without touching a single existing call site.
+handlers* (`mcp_server.py` dispatches `tortoise_search`, `tortoise_get` over 7 types,
+`tortoise_overview` over 12 sections, and `tortoise_recall` over 4 modes). The SDK never
+grew the mirror for any of them. Adding those four dispatchers to the SDK is **purely
+additive** — it breaks no caller, notably not the eval harness, which drives `TortoiseSDK`
+by method name. It presents the consolidated surface without touching a single existing
+call site. All four are **new SDK names**, so all four need explicit approval under the
+#3863 freeze.
 
 ## What does *not* merge
 
@@ -167,7 +170,6 @@ We have been wrong about this twice already, so the blockers are recorded explic
 | `promote_point` ↔ `update_point(status='live')` | promote also promotes incident operators, under reviewer gating |
 | `capture_session` ↔ `commit_session` | local extraction vs extractor-v2 + Layer-1 POST |
 | `provenance` ↔ `get_provenance_chain` | different edge chains: who-decided vs extracted-from |
-| `ask` ↔ `ask_assembled` | full reader path vs connected-assembly eval arm |
 | `list_graphs` ↔ `graph_list` | raw DB graph names vs control-plane rows — **same problem as the tool layer's `get_entity`** |
 | `compute_confidence` ↔ `get_confidence` | eager run vs lazy read — both write (below) |
 | control-plane CRUD families | different labels, validation and audit per family |
@@ -198,7 +200,7 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 
 1. **Small closed verb vocabulary — 14/14.** Nobody invents a domain verb for the happy path.
 2. **Verb-first, snake_case — 13/14.** The exception is the tool-first product, because an LLM selects from its list.
-3. **Above ~30 methods, everyone namespaces — 6/6. No counterexample.**
+3. **Above ~30 methods, the pattern is to namespace** — Zep (95), Letta (16 resources), Supermemory (36 across 5 resources) and Weaviate all use namespaces or resource trees. Cognee is the counterexample on this table's own evidence: ~40 exports exposed as **free functions**, flat and untenanted. This is a tendency, not a rule — and it is this document's reading of the table, not a finding of the source.
 4. **Flat classes cluster at 13–27 — 5/5.** The largest flat object surveyed is Pinecone's `Index` at 27; the largest flat *memory* client is MemOS at 26.
 5. **One high-level call with many effects is the default; primitives stay public — 11/14. Nobody hides them.**
 6. **Read/write separation is by naming or namespace — 14/14. Never separate client classes.**
@@ -231,9 +233,11 @@ Found while building this list. None is fixed here — this document changes no 
    handlers reach the projection or a module function directly. Each is annotated in-source
    as deliberate (`# navigation.entityProfile — not a direct SDK method`, `# pack_state
    helper, not an SDK method`), and `tools/surface-guard.py` treats `sdk_method` as part of
-   the frozen baseline, so these are **declarations that do not resolve** rather than defects
-   to "fix" — listed here so the bridge table knows those five bindings are by handler, not
-   by method name.
+   the frozen baseline. So the annotations and the defect coexist: the *comment* is
+deliberate, the *unresolvable binding* is still wrong — the manifest itself carries
+`recommendation: fix-declaration` on all five, and the open item below folds them into
+#4035's class. Listed here so the bridge table knows those five bindings are by handler,
+not by method name.
 4. **Exactly one method has no code caller:** `complete_source` — no call site in
    `battery/`, `tools/`, `tortoise/`, or `tests/`. It is named in the generated manifest
    and in docs, but a mention is not a caller. Every other method on the surface is reached
@@ -254,7 +258,9 @@ at the tool layer:
 
 | Item | Needs |
 |---|---|
-| The three new dispatchers (`get(type=)`, `overview(section=)`, `recall(mode=)`) | approval — additive, but they add names to a frozen surface |
+| The **four** new dispatchers (`search`, `get(type=)`, `overview(section=)`, `recall(mode=)`) | approval — additive, but they add names to a frozen surface |
+| `invitation_get` | approval — a new name; the two lookup paths differ (salted-hash verify vs ULID match), so this is a design decision, not a rename |
+| `supersede` / `operator_action` parameter forwarding | `valid_from` and `credibility` must be forwarded before those two collapses are safe — today each is either a `TypeError` or silently ignored |
 | `get_confidence` / `compute_confidence` / `get_source_reliability` | a decision: fix the declaration, or add a `write_back: bool` parameter — until then the read/write guarantee does not hold |
 | The control-plane cold-handle write | approval of a fix, or an explicit exemption for operator-only surfaces |
 | Five phantom `sdk_method` registry values | folded into #4035's class of defect |
