@@ -1,30 +1,33 @@
-"""Cross-tenant READ isolation over the capture -> answer path (#3663, B5).
+"""Cross-tenant READ isolation over the capture -> read path (#3663, B5).
 
 Proves, by test, that a read as tenant A cannot observe tenant B's captured
-data through every read surface the B5 beta gate names:
+data through every read surface this module covers:
 
-- the answer/ask path (``POST /v1/ask``) over content the other tenant captured;
 - retrieval (``GET /v1/search``);
 - session listing + retrieval by id (``GET /v1/sessions``, ``/v1/sessions/{id}``)
   — a guessed/leaked id must 404 across tenants;
-- graph listing/scoping (MCP ``tortoise_list_graphs`` HTTP prefix filter, the
+- graph listing/scoping (MCP ``tortoise_list_graphs`` HTTP exact-name filter, the
   namespace probe ``_graph_has_org_namespace`` and its opener
   ``_open_org_graph_sdk``);
 - the export path (``GET /v1/organizations/{org_id}/export``) — both the
-  caller's own export content and a leaked cross-tenant org_id.
+  caller's own export content and a leaked cross-tenant org_id;
+- the archive path (``GET /backups``) — the backup id (``org/graph/run``) is a
+  leaked handle a listing must not cross either.
 
 Both directions (A->B and B->A) are covered, each with the present/absent pair
 asserted TOGETHER in one test: the caller's own marker must be visible AND the
 other tenant's marker must be absent. A test that only asserted "0 rows" would
 pass trivially when the seed never landed, so the presence half is mandatory.
 
-The negative control (per the B5 exit-evidence rule) lives in
-``test_negative_control_*``: it points the data-plane read seam at the OTHER
-tenant and asserts the shared isolation checker goes RED. A green test that
-cannot go red is not evidence.
+The negative controls (per the B5 exit-evidence rule) live in
+``test_negative_control_*``: each breaks ONE isolation seam — the shared
+data-plane SDK, the archive store prefix, the export owner gate, the MCP
+transport mode, or the namespace opener's graph mapping — and asserts the
+paired isolation checker goes RED. A green test that cannot go red is not
+evidence.
 
-WHY THIS IS NOT A DUPLICATE (see the module-level comment in
-``tests/test_hosted_api.py::TestCrossTenantIsolation``):
+WHY THIS IS NOT A DUPLICATE (the class docstring of
+``tests/test_hosted_api.py::TestCrossTenantIsolation`` and the tests it names):
 
 - ``test_hosted_api.TestCrossTenantIsolation.test_team_isolation`` builds two
   random SDK namespaces and asserts, via a RAW graph query, that A's graph does
@@ -34,20 +37,22 @@ WHY THIS IS NOT A DUPLICATE (see the module-level comment in
   read surface (issue-insight) cross-team.
 - ``test_mcp_http.TestGraphName.test_http_graph_name_injection_blocked`` asserts
   a user-supplied ``graph_name`` argument cannot redirect a read — and
-  ``test_mcp_http.TestQuota...test_list_graphs_scoped_to_team`` asserts only
-  ``all(g.startswith("org_"))``, which passes VACUOUSLY on ``[]``. Neither has a
+  ``test_mcp_http.TestQuota...test_list_graphs_scoped_to_team`` asserts
+  ``all(g.startswith("org_"))`` plus a ``registry``-leak check — both vacuously
+  true on ``[]``. Neither has a
   seeded present/absent pair or a negative control.
 - ``tests/test_hosted_backup.py`` covers cross-tenant BACKUP RESTORE rejection
-  at the function level (out of this module's scope: it is not the
-  capture->answer read path).
+  at the function level (out of this module's scope: it is not a
+  capture->read surface).
 
-None of them exercises capture -> answer/ask, session retrieval by leaked id,
-graph listing, or export with a seeded marker pair and a negative control.
+None of them exercises capture -> read across the retrieval, listing, leaked-id,
+graph-listing, export or archive surfaces with a seeded marker pair and a
+negative control.
 
 Harness: the canonical ``tests._http_fixtures.patched_tortoise_sdk`` seam
-(beside ``tests/fake_control_plane.py``), an embedded temp DB per test, and the
-``hosted_api`` dependency-override auth seam (shared with
-``tests/test_hosted_api.py`` / ``tests/test_ask_api.py``).
+(beside ``tests/fake_control_plane.py``), an embedded temp DB per test module,
+and the ``hosted_api`` dependency-override auth seam (shared with
+``tests/test_hosted_api.py``).
 
 Lane note: this module is a redirect carve-out (``tests/_embedded.py``
 ``TEST_NO_REDIRECT_STEMS``). It asserts PRODUCTION graph names (``org_{org_id}``);
@@ -82,10 +87,6 @@ from tortoise import hosted_api as ha
 
 from tests._http_fixtures import patched_tortoise_sdk
 
-# #2013 PRODUCT-GATING: /v1/ask is OFF by default; register it explicitly
-# (idempotent) so this module always exercises the served route.
-ha._register_ask_route()
-
 # ── Tenants ──────────────────────────────────────────────────────────────────
 _ORG_A = "xtenant-team-a"
 _ORG_B = "xtenant-team-b"
@@ -118,21 +119,21 @@ _OTHER = {"A": "B", "B": "A"}
 # half). ``sessions.detail[leaked_id]`` and ``export.leaked_org`` are
 # deliberately excluded — they are absence-only (they must never resolve).
 _PRESENCE_SURFACES = (
-    "ask.evidence", "search", "sessions.detail[own_id]", "export.own",
+    "search", "sessions.detail[own_id]", "export.own",
 )
 
 
 class _TenantHarness:
-    """Switchable-tenant TestClient harness with per-test unique markers.
+    """Switchable-tenant TestClient harness with per-module unique markers.
 
     ``as_tenant(t)`` flips BOTH auth overrides (org + user) so the NEXT request
     is served as tenant ``t``. The dependency overrides are read per-request,
     so flipping between requests is exact and order-independent.
 
-    Markers and session ids are UNIQUE PER TEST (a fresh 12-hex nonce): the
+    Markers and session ids are unique PER MODULE (a fresh 12-hex nonce): the
     capture pipeline keeps process-global content/session dedup state, and a
-    repeated literal across tests made a later capture a silent no-op
-    (extracted=0) under the server lane.
+    repeated literal made a later capture a silent no-op (extracted=0) under the
+    server lane — which is also why ``xtenant`` is module-scoped and seeds once.
     """
 
     def __init__(self, client: TestClient, nonce: str):
@@ -153,42 +154,19 @@ class _TenantHarness:
         return self.client
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _hermetic_no_hosted_api():
-    """#3663 (review cycle-1 P1): never take the hosted-delegated ask branch.
-
-    ``TORTOISE_API_URL`` is set on dev boxes (https://api.premiselabs.co).
-    When present, ``TortoiseSDK.ask`` short-circuits to ``POST {url}/v1/ask``
-    (``tortoise/sdk.py``, the hosted-delegated branch) and the offline test
-    reader installed by ``ask_reader`` is never consulted — the request 502s
-    ``{"error":{"code":"reader_unavailable"}}`` and this module's own
-    exit-evidence command false-FAILS. Save + remove the var for the module's
-    duration and restore it on teardown, so the removal never leaks into
-    sibling test modules. Unlike this file's other env vars (deliberately
-    process-wide ``setdefault``s that are not restored), this one must not
-    outlive the module.
-    """
-    saved = os.environ.pop("TORTOISE_API_URL", None)
-    try:
-        yield
-    finally:
-        if saved is not None:
-            os.environ["TORTOISE_API_URL"] = saved
-
-
 @pytest.fixture(autouse=True)
 def _hermetic_retrieval_leg(force_sparse_tfidf):
     """#3663 (CI carve-out RED): pin the retrieval leg to the degraded lane.
 
-    The ask surface is queried with the OTHER tenant's marker — a rare token
+    The retrieval surface is queried with the OTHER tenant's marker — a rare token
     with no lexical overlap with the caller's own captured turns. The absence
     half is the leak check; the presence half (own marker PRESENT) is the
     anti-vacuity guard and is only satisfied by the embedded lane's DEGRADED
     fallback: ``tortoise_fts_query`` then returns no hits, retrieval drops to
-    the in-memory ``fallback_snapshot`` lane (``retrieval_degraded: True``),
-    and that lane scores the WHOLE graph corpus — including both raw turn
-    Points, whose content carries the caller's marker, at similarity 0.0,
-    which ``search_snapshot``'s ``threshold=0.0`` still admits.
+    the in-memory ``fallback_snapshot`` lane, and that lane scores the WHOLE
+    graph corpus — including both raw turn Points, whose content carries the
+    caller's marker, at similarity 0.0, which ``search_snapshot``'s
+    ``threshold=0.0`` still admits.
 
     That degraded lane is entered ONLY when ``raw_results`` is empty, and that
     is the environment-dependent part. In the embedded lane the FTS and
@@ -200,8 +178,8 @@ def _hermetic_retrieval_leg(force_sparse_tfidf):
     written by the capture turn loop's direct ``MERGE``, which bypasses the
     embedding write path). The vector leg therefore returns exactly that one
     marker-less point, ``raw_results`` is non-empty, the degraded all-corpus
-    lane is SKIPPED, and ``ask.evidence`` carries only the extractor's generic
-    point — the caller's marker-bearing turn Points never surface, so the
+    lane is SKIPPED, and the search response carries only the extractor's
+    generic point — the caller's marker-bearing turn Points never surface, so the
     presence assertion REDs for a reason unrelated to tenancy isolation.
     With the embedder absent (or pinned off) every leg fails on a no-overlap
     query, the degraded lane runs, and the corpus-based evidence is
@@ -218,41 +196,14 @@ def _hermetic_retrieval_leg(force_sparse_tfidf):
 
 
 @pytest.fixture(scope="module")
-def ask_reader():
-    """Install a deterministic offline reader (the test_ask_api seam).
-
-    Only the READER is faked — retrieval, annotation, dedup and assembly run
-    the real product path, so ``evidence`` is genuine retrieval output.
-    Module-scoped so the seeded module fixture and both tests share it.
-    """
-    import tortoise.sdk as sdk_mod
-
-    class _R:
-        model = "xtenant-fake-reader"
-        route = "test"
-        last_completion_tokens = 3
-
-        def complete(self, *, system, user):
-            return "OK"
-
-        def close(self):
-            pass
-
-    mp = pytest.MonkeyPatch()
-    mp.setattr(sdk_mod, "_default_ask_reader_factory", lambda: _R())
-    yield
-    mp.undo()
-
-
-@pytest.fixture(scope="module")
-def xtenant(tmp_path_factory, ask_reader, _hermetic_no_hosted_api):
+def xtenant(tmp_path_factory):
     """Two tenants A and B on one embedded temp DB (canonical SDK seam).
 
     MODULE-scoped and seeded ONCE: the v2 extraction pipeline carries
     process-global consolidation state, so re-capturing the same shape in a
     later test made the second capture a silent no-op under the server lane.
-    Both tests therefore share one seeded fixture (the negative control only
-    re-reads, it never re-captures).
+    All nine tests therefore share one seeded fixture (the negative controls
+    only re-read; none re-captures).
     """
     # Offline M2 extraction (the #822 LLM-mock test seam) — no network.
     os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
@@ -307,25 +258,7 @@ def xtenant(tmp_path_factory, ask_reader, _hermetic_no_hosted_api):
                     seed_sdks.pop().close()
 
 
-@pytest.fixture(autouse=True)
-def _clean_ask_state():
-    """Reset per-process ask budget/in-flight/reader caches (test_ask_api)."""
-    from tortoise.quota import (
-        _reset_ask_budget_for_tests,
-        _reset_ask_loop_state_for_tests,
-    )
-    from tortoise.sdk import _reset_ask_reader_cache_for_tests
-
-    _reset_ask_budget_for_tests()
-    _reset_ask_loop_state_for_tests()
-    _reset_ask_reader_cache_for_tests()
-    yield
-    _reset_ask_budget_for_tests()
-    _reset_ask_loop_state_for_tests()
-    _reset_ask_reader_cache_for_tests()
-
-
-# ── Capture (the "capture" half of capture -> answer) ────────────────────────
+# ── Capture (the "capture" half of capture -> read) ──────────────────────────
 
 def _capture(h: _TenantHarness, tenant: str) -> None:
     """Capture a session as `tenant` whose transcript carries its marker."""
@@ -357,8 +290,8 @@ def _seed_both_tenants(h: _TenantHarness) -> None:
 
 def _read_surfaces(h: _TenantHarness, tenant: str) -> dict[str, str]:
     """Marker-bearing read surfaces, read AS `tenant` over the OTHER's
-    captured content. Values are the exact wire payloads (or the rendered ask
-    evidence), so presence/absence is tested, never inferred.
+    captured content. Values are the exact wire payloads, so presence/absence
+    is tested, never inferred.
 
     Session LISTING is metadata-only (no content), so it is asserted by id in
     the caller, not here. Status-based contracts (leaked-id 404, leaked-org
@@ -368,31 +301,26 @@ def _read_surfaces(h: _TenantHarness, tenant: str) -> dict[str, str]:
     client = h.as_tenant(tenant)
     out: dict[str, str] = {}
 
-    # 1. answer/ask path — rendered retrieval evidence.
-    r = client.post("/v1/ask", json={"question": h.markers[other]})
-    assert r.status_code == 200, f"ask as {tenant}: {r.status_code} {r.text}"
-    out["ask.evidence"] = r.json().get("evidence") or ""
-
-    # 2. retrieval.
+    # 1. retrieval.
     r = client.get("/v1/search", params={"q": h.markers[other]})
     assert r.status_code == 200, f"search as {tenant}: {r.status_code} {r.text}"
     out["search"] = json.dumps(r.json())
 
-    # 3. session listing (id-based; kept for the caller's id/status checks).
+    # 2. session listing (id-based; kept for the caller's id/status checks).
     r = client.get("/v1/sessions")
     assert r.status_code == 200, f"list sessions as {tenant}: {r.text}"
     out["sessions.list"] = json.dumps(r.json())
 
-    # 4. session retrieval by id — own (content) and the LEAKED other id.
+    # 3. session retrieval by id — own (content) and the LEAKED other id.
     out["sessions.detail[leaked_id]"] = client.get(
         f"/v1/sessions/{h.sessions[other]}").text
     out["sessions.detail[own_id]"] = client.get(
         f"/v1/sessions/{h.sessions[tenant]}").text
 
-    # 5. export of the caller's OWN org (content).
+    # 4. export of the caller's OWN org (content).
     out["export.own"] = client.get(
         f"/v1/organizations/{_ORG_IDS[tenant]}/export").text
-    # 6. export of the OTHER tenant's org — a guessed/leaked org_id.
+    # 5. export of the OTHER tenant's org — a guessed/leaked org_id.
     out["export.leaked_org"] = client.get(
         f"/v1/organizations/{_ORG_IDS[other]}/export").text
 
@@ -414,7 +342,8 @@ def _read_graph_listing(tenant: str) -> str:
     """MCP ``tortoise_list_graphs`` over the HTTP transport.
 
     ``list_graphs`` returns the SERVER-WIDE graph list; the HTTP branch must
-    filter it down to the calling tenant's own ``org_*``/``team_*`` names.
+    filter it down to the calling tenant's own ``org_{org_id}`` / legacy
+    ``team_{org_id}`` names by EXACT membership (``g in own``), not by prefix.
     """
     from tortoise import mcp_server
     from tortoise.mcp_auth import _current_org_id, _transport_mode
@@ -556,7 +485,7 @@ def _namespace_probe_read(tenant: str) -> str:
 
 # ── The isolation test (both directions, present+absent together) ─────────────
 
-def test_capture_to_answer_reads_do_not_cross_tenants_both_directions(
+def test_captured_reads_do_not_cross_tenants_both_directions(
         xtenant):
     for tenant in ("A", "B"):
         other = _OTHER[tenant]
