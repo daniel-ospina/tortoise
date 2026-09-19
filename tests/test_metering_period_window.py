@@ -685,3 +685,76 @@ def test_migration_rekeys_the_ledger_and_the_cohort_read_to_a_window():
             "- interval '1 month') AT TIME ZONE 'UTC'") in flat
     assert ("(((period || '-01T00:00:00+00:00')::timestamptz "
             "AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC'") in flat
+
+
+# ── #4216 — a subscription AUTHORING path must write a COMPLETE window ───────
+
+
+def test_checkout_webhook_writes_both_period_bounds(supabase_mode, monkeypatch):
+    """#4216 → mutation: revert ``checkout.session.completed`` to writing only
+    ``subscription_id`` (no period).
+
+    Checkout is an AUTHORING path for the subscription: a just-checked-out
+    PAYING org used to persist the id and NO period, so
+    ``metering._current_period`` raised for it, its increments were dropped and
+    the cohort cap could never be enforced for it (#3981 absorbed + alerted the
+    symptom; this is the DATA defect). Driven through the REAL
+    signature-verified endpoint with an existing org, then resolved through the
+    REAL meter.
+
+    RED: both ``current_period_start`` and ``current_period_end`` stay NULL and
+    ``_current_period`` raises.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    import tortoise.metering as m
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-checkout", "stripe_customer_id": "cus_4216"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+
+    start = int(datetime.fromisoformat(SUB_START).timestamp())
+    end = int(datetime.fromisoformat(SUB_END).timestamp())
+    # items empty → the tier cannot resolve, so this exercises ONLY the window
+    # write (no apply_limits / notify side path).
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {"id": "sub_4216", "status": "active",
+                                           "current_period_start": start,
+                                           "current_period_end": end,
+                                           "items": {"data": []}})
+    payload = {
+        "id": "evt_4216_checkout",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-checkout",
+            "customer": "cus_4216",
+            "customer_details": {"email": "o@e.com"},
+            "subscription": "sub_4216",
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    assert resp.status_code == 200, resp.text
+
+    row = fake.tables["organizations"][0]
+    assert row.get("subscription_id") == "sub_4216"
+    assert row.get("current_period_start") == start
+    assert row.get("current_period_end") == end
+
+    # The whole point: the org's window now RESOLVES (no raise), so its ledger
+    # rows are addressable and the cap can measure it.
+    window = m._current_period("org-4216-checkout")
+    assert window.start_iso == SUB_START
+    assert window.end_iso == SUB_END
+

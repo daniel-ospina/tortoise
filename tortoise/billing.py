@@ -541,26 +541,29 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     params: dict = {
         "id": org_id,
         "status": status,
-        "period_end": sub.get("current_period_end"),
         "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
     }
     set_fields = (
-        "SET t.subscription_status=$status, t.current_period_end=$period_end, "
-        "t.cancel_at_period_end=$cancel_at_period_end"
+        "SET t.subscription_status=$status, t.cancel_at_period_end=$cancel_at_period_end"
     )
     if sub.get("id"):
         set_fields += ", t.subscription_id=$subscription_id"
         params["subscription_id"] = sub["id"]
-    # #3825 (D10): the METER WINDOW ANCHOR — the registry twin of
-    # ``organizations.current_period_start``. Written only when the payload
-    # carries it, so a subscription object that omits the field cannot NULL
-    # out an anchor the meter depends on (``metering._current_period`` RAISES
-    # on a half-known anchor rather than metering on a month bucket — a SIGNAL,
-    # not enforcement: every production caller absorbs it and alerts the
-    # operator, #3981).
+    # #3825 (D10) / #4216: the METER WINDOW ANCHOR is a PAIR — the registry
+    # twin of ``organizations.current_period_start`` / ``current_period_end``.
+    # ``metering._current_period`` resolves a subscription org's window from
+    # BOTH bounds and RAISES for a half-known anchor (a SIGNAL: every caller
+    # absorbs it, alerts the operator and serves — #3981), so a mirror that
+    # writes only one leaves the org permanently window-unresolvable and its
+    # cohort cap unenforceable. Each bound is written ONLY when the payload
+    # carries it, so a partial subscription object can neither NULL out nor
+    # half-fill an anchor the meter depends on.
     if sub.get("current_period_start"):
         set_fields += ", t.current_period_start=$period_start"
         params["period_start"] = sub["current_period_start"]
+    if sub.get("current_period_end"):
+        set_fields += ", t.current_period_end=$period_end"
+        params["period_end"] = sub["current_period_end"]
     if customer_email:
         set_fields += ", t.customer_email=$customer_email"
         params["customer_email"] = customer_email

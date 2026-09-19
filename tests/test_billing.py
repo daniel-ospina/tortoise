@@ -922,6 +922,49 @@ class TestBootReconcile:
             "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}).result_set
         assert row[0][0] == "solo", "mirror must converge to Stripe truth"
 
+    def test_boot_reconcile_writes_both_period_bounds(self, monkeypatch, billing_client):
+        """#4216 → mutation: drop the ``current_period_end`` bind from
+        ``mirror_subscription`` (the half-known anchor the issue describes).
+
+        ``mirror_subscription`` is an AUTHORING path for the subscription: the
+        authoritative push must persist the meter window as a PAIR, because
+        ``metering._current_period`` RAISES for a subscription org whose
+        half-open interval is incomplete — its increments are dropped and the
+        cohort cap cannot be enforced for it. Driven through the REAL
+        ``reconcile_org`` (whose only writer is the mirror).
+
+        RED: ``current_period_end`` stays NULL after a mirror that carried it.
+        """
+        from datetime import datetime
+
+        from tortoise import billing as bl
+
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        start = int(datetime.fromisoformat(
+            "2026-09-03T00:00:00+00:00").timestamp())
+        end = int(datetime.fromisoformat(
+            "2026-10-03T00:00:00+00:00").timestamp())
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_4216_mirror", "status": "active",
+                                "current_period_start": start,
+                                "current_period_end": end,
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_4216_mirror'",
+            params={"id": org_id})
+
+        summary = bl.reconcile_org(sdk, org_id)
+        assert summary["action"] == "mirror_subscription"
+
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
+            "t.current_period_end", params={"id": org_id}).result_set[0]
+        assert row[0] == start, row
+        assert row[1] == end, row
+
     def test_boot_reconcile_repairs_customer_only_team(self, monkeypatch, billing_client):
         """Missed checkout.session.completed: only stripe_customer_id exists."""
         from tortoise import billing as bl
