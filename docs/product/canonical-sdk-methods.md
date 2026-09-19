@@ -36,12 +36,18 @@ what comparable products converge on.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (per `ast`, no leading underscore) | **152** |
-| Rows in `config/surface-manifest.yml` | **150** |
-| Difference | `ask`, `ask_assembled` — the eval-lane pair, excluded from the manifest after #3849 |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **150** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **150** |
 
-The 150-vs-152 discrepancy is not drift; it is the manifest deliberately excluding two
-eval-only methods. Both numbers are correct.
+The two agree exactly. `TortoiseSDK.ask` and `TortoiseSDK.ask_assembled` were removed at
+the SDK layer by #3849 (PR #3929) — the ask pipeline moved to `tortoise/ask_lane.py`, so
+the SDK exposes **no** `ask` method. Nothing is unaccounted for in the manifest.
+
+> A previous draft reported 152 and explained the two-method gap as the manifest excluding
+the eval lane. That was wrong, and how it arose is worth naming: the method count was
+extracted from the **hub working copy** of `tortoise/sdk.py`, stale at a pre-#3929 state,
+while the manifest row was read from `origin/main`. Mixing two revisions produced a
+discrepancy that does not exist. Every figure here is now derived from `origin/main`.
 
 ## The principle
 
@@ -64,7 +70,7 @@ this is a collapse of names that already exist, not a design of new ones.
 
 | # | Canonical | Members (current names) | Action |
 |---|---|---|---|
-| R1 | `search` | `tortoise_fts_query`, `query`, `paginated_query`, `query_points_by_tag`, `suggest_entry_points`, `search_sessions`, `issue_insight` | keep, collapse |
+| R1 | `search` | `tortoise_fts_query`, `query`, `paginated_query`, `query_points_by_tag`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse |
 | R2 | `recall(mode=)` | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context` | keep, **new dispatcher** |
 | R3 | `get(type=)` | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, **new dispatcher** |
 | R4 | `traverse` | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |
@@ -72,7 +78,7 @@ this is a collapse of names that already exist, not a design of new ones.
 | R6 | `review_connections` | `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
 | R7 | `provenance` | `get_provenance_chain`, `belief_timeline`, `restore_point_at` | keep — **both provenance methods stay** |
 | R8 | `events_poll`, `list_batches` | `events_poll`, `list_batch`, `list_batches` | keep |
-| R9 | confidence **read** | `get_confidence`, `calibrate_summary` | keep — see **Declaration defects** |
+| R9 | confidence **read** | `get_confidence`, `calibrate_summary`, `calibration_passed` | keep — see **Declaration defects** |
 
 ### WRITE
 
@@ -83,7 +89,7 @@ this is a collapse of names that already exist, not a design of new ones.
 | W3 | `create_source` | `create_source`, `complete_source` | keep — **not foldable** (below) |
 | W4 | `create_edge(relation=)` | `create_edge`, `create_derivation`, `link_source_to_entity` | keep + collapse |
 | W5 | `create_operator(op_type=)` | `create_operator`, `create_direct_edge` | keep — **not foldable** (below) |
-| W6 | `index_directory` | `index_file`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health` | keep — **2 self-declared DEPRECATED** |
+| W6 | `index_directory` | `index_file`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
 | W7 | `ingest` | `ingest` | keep |
 | W8 | `capture_session` | `capture_session`, `checkpoint`, `diary_write`, `diary_read` | keep |
 | W9 | `commit_session` | `commit_session` | keep — **not foldable into W8** |
@@ -114,6 +120,12 @@ namespace rather than flattened onto the same object as `search`.
 | N5 | `invitation` | `invitation_create`, `invitation_list`, `invitation_get_by_token`, `invitation_get_by_id`, `invitation_accept`, `invitation_revoke`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` |
 | N6 | `signup_token` | `signup_token_lookup`, `signup_token_recover`, `signup_token_revoke` |
 | N7 | utilities | `ulid`, `close` |
+
+### Archived
+
+| Method | Why it is not on the target surface |
+|---|---|
+| `backfill_v25` | A one-shot migration setting `status='live'` where NULL and backfilling `pointKind` — targeting `ONTOLOGY_v2.5` while the schema is **v3.13**. Zero customers, pre-beta. The approved MCP list already archives its tool (`tortoise_backfill_v25`). A migration written against a schema several versions old is a liability, not a capability. |
 
 ## What collapses — and what the discriminator is
 
@@ -187,19 +199,20 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 1. **Small closed verb vocabulary — 14/14.** Nobody invents a domain verb for the happy path.
 2. **Verb-first, snake_case — 13/14.** The exception is the tool-first product, because an LLM selects from its list.
 3. **Above ~30 methods, everyone namespaces — 6/6. No counterexample.**
-4. **Flat classes cluster at 13–27 — 5/5.** The largest flat memory client is 26; the largest flat service client is 14.
+4. **Flat classes cluster at 13–27 — 5/5.** The largest flat object surveyed is Pinecone's `Index` at 27; the largest flat *memory* client is MemOS at 26.
 5. **One high-level call with many effects is the default; primitives stay public — 11/14. Nobody hides them.**
 6. **Read/write separation is by naming or namespace — 14/14. Never separate client classes.**
 7. **Every retirement observed involved a warning or a parallel surface — never a silent rename.**
 8. **A raw escape hatch exists in the majority — 9/14**.
 
-**Where this lands for us.** 152 public methods on one flat class is **~5.6× the largest
-flat surface observed**, and no surveyed product ships a flat class above 27. But the
+**Where this lands for us.** 150 public methods on one flat class is ~5.5× the largest flat
+surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The target list above does exactly that: 27 named groups over
-152 names, reached by grouping and merging, with the primitives still reachable. The
-control plane (N1–N7) is what moves behind namespaces; the memory surface (R1–W20) is
-what mirrors the approved 23-tool list.
+**collapse the aliases**. The target list above does exactly that: **36 groups over 150
+names** — 29 memory-facing (R1–R9, W1–W20) and 7 control-plane namespaces (N1–N7) —
+reached by grouping and merging, with the primitives still reachable. The
+control plane is what moves behind namespaces; the memory surface
+is what mirrors the approved 23-tool list.
 
 ## Declaration defects
 
@@ -214,12 +227,17 @@ Found while building this list. None is fixed here — this document changes no 
    `graph_list`, `apikey_list`, `membership_list`, `invitation_list`, and others) calls into
    a registry helper that on a cold handle issues `CREATE INDEX` statements. Idempotent, but
    a read that writes.
-3. **Five registry `sdk_method` values are phantoms** — they name methods that do not exist
-   on `TortoiseSDK`; the handlers reach the projection or a module function directly. This is
-   the same class of defect as #4035.
-4. **Only one method is genuinely unreferenced:** `complete_source` — zero callers anywhere
-   in the repo. Everything else is called by something: the eval harness, tooling, the
-   hosted REST layer, tests, or documentation.
+3. **Five registry `sdk_method` values resolve to no method on `TortoiseSDK`** — their
+   handlers reach the projection or a module function directly. Each is annotated in-source
+   as deliberate (`# navigation.entityProfile — not a direct SDK method`, `# pack_state
+   helper, not an SDK method`), and `tools/surface-guard.py` treats `sdk_method` as part of
+   the frozen baseline, so these are **declarations that do not resolve** rather than defects
+   to "fix" — listed here so the bridge table knows those five bindings are by handler, not
+   by method name.
+4. **Exactly one method has no code caller:** `complete_source` — no call site in
+   `battery/`, `tools/`, `tortoise/`, or `tests/`. It is named in the generated manifest
+   and in docs, but a mention is not a caller. Every other method on the surface is reached
+   by the eval harness, tooling, the hosted REST layer, or tests.
 
 ## Callers that must not break
 
@@ -240,7 +258,7 @@ at the tool layer:
 | `get_confidence` / `compute_confidence` / `get_source_reliability` | a decision: fix the declaration, or add a `write_back: bool` parameter — until then the read/write guarantee does not hold |
 | The control-plane cold-handle write | approval of a fix, or an explicit exemption for operator-only surfaces |
 | Five phantom `sdk_method` registry values | folded into #4035's class of defect |
-| 27 groups vs the approved 23 tools | whether the SDK mirrors the tool list 1:1 or stays a superset |
+| 29 memory-facing groups vs the approved 23 tools | whether the SDK mirrors the tool list 1:1 or stays a superset |
 | `list_graphs` vs `graph_list` | a naming decision — raw DB names vs control-plane rows |
 | `ulid`, `close`, `test_guard` | whether utilities belong on the public surface at all |
 
@@ -259,6 +277,9 @@ at the tool layer:
 - The merge verdicts were checked against the method bodies, following delegation one level
   into helpers — not inferred from names. This is how `get_confidence`'s write was found.
 - Caller evidence is a repo-wide search for each method name across every tracked file.
-- Competitor counts were derived the same way, from each project's source on its default
-  branch; where a figure is approximate or a namespace makes a flat integer misleading, the
-  table says so.
+- Competitor counts come from a **prior external analysis pass** — an `ast` parse of each
+  project's source on its default branch. They are **UNVERIFIED in this repo**: nothing here
+  reproduces them, and the per-product figures should be treated as reported rather than
+  confirmed. The *converged patterns* drawn from them are this document's inference, not the
+  source's conclusion. Where a figure is approximate, or a namespace makes a flat integer
+  misleading, the table says so.
