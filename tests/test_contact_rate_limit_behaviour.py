@@ -416,15 +416,18 @@ observations.negativeExcessExpected = liveSeed + 1;
 
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
 // this call — `Date.now()` stepping backwards is reachable under NTP, a VM restore or a
-// manual clock set — must still be counted and refused. A predicate that also requires
-// `t <= now` drops the whole history on that call and lets the submission through.
-// The seeds deliberately straddle MORE THAN ONE WINDOW ahead: with a step back of only a
-// second or two, a predicate that merely forgives a bounded amount of clock skew (say
-// `t <= now + RATE_WINDOW_MS`) still agrees with the real limiter, so the escape would
-// not be observed.
+// manual clock set — must still be counted and refused. The property under test is that
+// the read-path filter consults `cutoff` and NOT `now`: any additional `now`-based clause
+// forgiving a bounded amount of skew drops the whole history on that call and lets the
+// submission through. Because a bound can always be raised, the seeds are placed
+// SKEW_AHEAD_MS (~7 days) ahead, which defeats every skew tolerance up to a week; a
+// predicate forgiving more than that is not a tolerance but a blanket `t <= now`, which
+// is its own battery entry. Three bounded-skew entries (1, 2 and 1000 windows) are in
+// the battery: with seeds this far out, each is observed rather than agreed with.
 hits.clear();
+const SKEW_AHEAD_MS = 1000 * RATE_WINDOW_MS;
 for (let i = 0; i < limit; i++) {
-  rateLimited(CLIENT_Z, T0 + RATE_WINDOW_MS + 1000 + i);
+  rateLimited(CLIENT_Z, T0 + SKEW_AHEAD_MS + i);
 }
 observations.clockStepBackRefuses = rateLimited(CLIENT_Z, T0);
 observations.clockStepBackStored = (hits.get(CLIENT_Z) || []).length;
@@ -764,14 +767,19 @@ def test_eviction_stops_when_the_sweep_has_done_the_work(behaviour: dict) -> Non
 
 
 # These are the escapes from the #2409 pin history plus the ones review found here, as
-# an executable battery. Every case is caught by one of the invariants, except where
-# the mutation cannot run at all (e.g. a store that rejects string keys): that case reds
-# the driver's failure-to-run assertion, since a limiter the harness cannot execute is
-# not one it can certify. Patterns are
+# an executable battery. Every case is caught by one of the invariants, except the one
+# entry in MAY_FAIL_TO_RUN, which cannot be executed at all: that case reds the driver's
+# failure-to-run assertion, since a limiter the harness cannot execute is not one it can
+# certify. Every other entry must red an INVARIANT — a run failure there means the
+# mutation broke the harness, not that the harness caught the mutation. Patterns are
 # REGEXES with flexible whitespace (`\s*` / `\s+`), so re-indenting or re-wrapping an
 # expression does not break the battery — the harness asserts behaviour, not layout —
 # and each pattern is asserted present, so a mutation that stops applying fails
 # loudly with the instruction to update it instead of proving nothing.
+# An entry that cannot RUN at all is an acceptable catch only if it is declared here, so
+# that a mutated limiter the harness cannot execute is never silently counted as caught.
+MAY_FAIL_TO_RUN: frozenset[str] = frozenset({"store that cannot hold string keys"})
+
 MUTATIONS: tuple[tuple[str, str, str], ...] = (
     (
         "emptied history after the filter",
@@ -790,8 +798,18 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "predicate forgives a bounded clock skew",
-        r"\.filter\(\(t\) => t > cutoff\)",
+        r"\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
         ".filter((t) => t > cutoff && t <= now + RATE_WINDOW_MS)",
+    ),
+    (
+        "predicate forgives a two-window clock skew",
+        r"\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
+        ".filter((t) => t > cutoff && t <= now + 2 * RATE_WINDOW_MS)",
+    ),
+    (
+        "predicate forgives a thousand-window clock skew",
+        r"\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
+        ".filter((t) => t > cutoff && t <= now + 1000 * RATE_WINDOW_MS)",
     ),
     (
         "predicate drops future-dated entries",
@@ -854,7 +872,7 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "sweep bounded by the excess",
-        r"for \(const \[k, v\] of hits\) \{\s*\n\s*if \(v\.every\(\(t\) => t <= cutoff\)\) hits\.delete\(k\);\s*\n\s*\}\s*\n\s*let excess = hits\.size - MAX_RATE_KEYS;",
+        r"for\s*\(\s*const\s*\[k,\s*v\]\s*of\s*hits\s*\)\s*\{\s*\n\s*if\s*\(v\.every\(\(t\)\s*=>\s*t\s*<=\s*cutoff\)\)\s*hits\.delete\(k\);\s*\n\s*\}\s*\n\s*let excess\s*=\s*hits\.size\s*-\s*MAX_RATE_KEYS;",
         "let excess = hits.size - MAX_RATE_KEYS;\n"
         "    for (const [k, v] of hits) {\n"
         "      if (excess <= 0) break;\n"
@@ -959,9 +977,15 @@ def test_the_harness_catches_a_behavioural_break(label: str, pattern: str, repla
     mutated = re.sub(pattern, replacement, source, count=1)
     try:
         observed = _observe(mutated)
-    except AssertionError:
-        # The mutated limiter could not be extracted or run at all: a store that
-        # cannot hold the address keys, say. Caught — the harness refuses to
-        # certify a limiter it cannot execute rather than passing it.
+    except AssertionError as exc:
+        # The mutated limiter could not be extracted or run at all. That is an
+        # acceptable catch only where the entry SAYS so: a limiter the harness cannot
+        # execute is one it cannot certify. For every other entry a run failure means
+        # the mutation broke the harness rather than beating it, so it must not be
+        # counted as a detection.
+        assert label in MAY_FAIL_TO_RUN, (
+            f"{label!r} could not run ({exc}) — if that is the point of the entry, add "
+            "it to MAY_FAIL_TO_RUN; otherwise the mutation is broken, not caught"
+        )
         return
     assert _failures(observed), f"{label!r} escaped the harness: {observed!r}"
