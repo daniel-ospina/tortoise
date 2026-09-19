@@ -183,6 +183,11 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_migrate_db",
     "test_ops_safety",
     "test_per_session_census",
+    # #4028: the surface half asserts embedded brute-force floor semantics
+    # (the docker sig-A vector branch returns no absolute similarity, so the
+    # floor cannot be applied there) — it must construct a real embedded
+    # store, not a redirected server graph.
+    "test_precision_leak_4028",
     "test_pre_migration_safety",
     # #3350: the embedded lane's socket timeout / retry-bound assertions are
     # embedded-only (a redirected construction would run against the docker
