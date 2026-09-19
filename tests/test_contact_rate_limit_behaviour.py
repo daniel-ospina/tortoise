@@ -64,12 +64,13 @@ invariant is only as strong as the state the DRIVER builds for it. A new class i
 caught when someone adds its scenario, and the battery's presence assertion makes a
 stale anchor say so out loud rather than pass quietly.
 
-The one limiter statement with no mutation of its own is the refusal path's skipping of
-the cap block, which is inert by construction: that branch adds no key, so there is
-nothing for the cap to bound. That is still not a completeness proof — it is the
-behaviours that were demonstrably reachable, pinned where a mutation cannot reach them
-undetected, and two earlier versions of this paragraph made a broader claim that review
-then falsified.
+The refusal path's skipping of the cap block has no mutation of its own, and is argued
+rather than mutated: that branch adds no key, so there is nothing for the cap to bound.
+That is one statement, not a count of every unmutated statement, and none of this is a
+completeness proof. It says what is checked: the behaviours that were demonstrably
+reachable, pinned where a mutation cannot reach them undetected, plus the classes review
+found afterwards. Three earlier versions of this paragraph made a broader claim, and
+review falsified each one, so it now claims only what the checks do.
 
 Node is required and the tests SKIP with a reason when it is absent, rather than
 passing silently.
@@ -257,6 +258,13 @@ const CLIENT_V = "203.0.113.77";
 const CLIENT_R = "198.51.100.9";
 const CLIENT_K = "203.0.113.200";
 const CLIENT_Z = "198.51.100.30";
+// IPv6 clients on purpose. Every IPv4 literal above is at most 15 characters, so a
+// read-side key transform that is the identity on them — `String(ip).slice(0, 15)`,
+// `String(ip).split(":")[0]` — buckets a REAL IPv6 address onto a key nothing writes and
+// the limiter stops refusing anyone. `CF-Connecting-IP` carries IPv6, so the corpus has
+// to contain one.
+const CLIENT_V6_A = "2001:db8:85a3:0:0:8a2e:370:7334";
+const CLIENT_V6_B = "2001:db8:85a3:0:0:8a2e:370:7433";
 
 // The loops must not scale with a bumped constant: a huge RATE_LIMIT or
 // MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
@@ -477,6 +485,15 @@ let snapshotExpired = 0;
 for (const k of hits.keys()) if (k.startsWith("early")) snapshotExpired++;
 observations.snapshotExpiredLeft = snapshotExpired;
 
+// 14. IPv6, where the read key and the write key diverge under a transform that is the
+// identity on short IPv4 literals. Same call sequence as §1 and §3 — the difference is
+// the address, which is the whole point: a truncated or port-split read key refuses
+// nobody here while every IPv4 scenario stays green.
+hits.clear();
+for (let i = 0; i < limit; i++) rateLimited(CLIENT_V6_A, T0 + i);
+observations.ipv6Trips = rateLimited(CLIENT_V6_A, T0 + limit);
+observations.ipv6OtherOk = !rateLimited(CLIENT_V6_B, T0 + limit);
+
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
 // this call — `Date.now()` stepping backwards is reachable under NTP, a VM restore or a
 // manual clock set — must still be counted and refused. The property under test is that
@@ -598,15 +615,25 @@ def _check_window(observed: dict) -> None:
 
 
 def _check_isolation(observed: dict) -> None:
-    """The limit is per address, not global.
+    """The limit is per address, not global — and the corpus includes IPv6.
 
-    Only `otherAddressOk` is asserted here. A "the over-limit address still trips"
-    assertion would add nothing: §1 and §3 run the SAME call sequence on two address
-    literals, so the outcome is implied by `_check_threshold`'s `firstTripIndex`, and an
-    implication is not a second guard.
+    Only per-address outcomes are asserted here. A "the over-limit address still trips"
+    assertion on the IPv4 client would add nothing: §1 and §3 run the SAME call sequence
+    on two IPv4 literals, so the outcome is implied by `_check_threshold`'s
+    `firstTripIndex`, and an implication is not a second guard. The IPv6 half is not
+    implied — it is the case where a read-side key transform that is the identity on
+    every IPv4 literal in this file stops being the identity.
     """
     assert observed["otherAddressOk"] is True, (
         "a different address must not be refused by another address's history"
+    )
+    assert observed["ipv6Trips"] is True, (
+        "an IPv6 client must be throttled like any other — a read key that is truncated "
+        "(a 15-character slice) or split on ':' is the identity on every IPv4 literal "
+        "here and buckets a real IPv6 address onto a key nothing ever writes"
+    )
+    assert observed["ipv6OtherOk"] is True, (
+        "a different IPv6 address must not be refused by another's history"
     )
 
 
@@ -816,22 +843,21 @@ def _predicate_failures(code: str) -> list[str]:
             "the read-path filter is not the shape this check anchors on — update the "
             "check rather than leaving it unable to look"
         ]
-    predicate = match.group(1)
-    failures = []
-    if "cutoff" not in predicate:
-        failures.append(f"read-path predicate no longer decides on `cutoff`: {predicate!r}")
-    # A WHITELIST, not a ban on the spelling `now`: rejecting only `\bnow\b` was beaten
-    # by an alias (`const tolerance = now + 1001 * RATE_WINDOW_MS`) and by reading the
-    # clock directly (`new Date().getTime()`). Requiring every identifier to be `t` or
-    # `cutoff` refuses the whole class, whatever it is called.
-    unexpected = sorted(set(re.findall(r"[A-Za-z_$][\w$]*", predicate)) - {"t", "cutoff"})
-    if unexpected:
-        failures.append(
-            f"read-path predicate refers to {unexpected!r} ({predicate!r}) — the expiry "
-            "decision must be `t` against `cutoff` ALONE, so that no bound, alias or "
-            "clock read can grant a skew tolerance"
-        )
-    return failures
+    predicate = match.group(1).strip()
+    # EXACTLY `t > cutoff` — not "an expression mentioning cutoff and no extra
+    # identifier", which was beaten twice: `t <= now + ...` (the token `now`), then
+    # `t <= tolerance` (a `now`-derived alias), then `t <= cutoff + 700000000` (a bound
+    # spelled with a literal, so every identifier was still in the whitelist). Requiring
+    # the predicate to BE the comparison refuses every additional clause at once, whatever
+    # it is written with: any second bound is a skew tolerance, and a skew tolerance
+    # discards history that still counts.
+    if not re.fullmatch(r"t\s*>\s*cutoff", predicate):
+        return [
+            f"read-path predicate is {predicate!r}, not `t > cutoff` — the expiry decision "
+            "must be that comparison alone, so that no additional bound, alias or clock "
+            "read can grant a skew tolerance"
+        ]
+    return []
 
 
 def _failures(observed: dict) -> list[str]:
@@ -902,19 +928,19 @@ def test_eviction_stops_when_the_sweep_has_done_the_work(behaviour: dict) -> Non
 
 
 # These are the escapes from the #2409 pin history plus the ones review found here, as
-# an executable battery. Every case is caught by one of the invariants, except the one
-# entry in MAY_FAIL_TO_RUN, which cannot be executed at all: that case reds the driver's
-# failure-to-run assertion, since a limiter the harness cannot execute is not one it can
-# certify. Every other entry must red an INVARIANT — a run failure there means the
-# mutation broke the harness, not that the harness caught the mutation. Patterns are
+# an executable battery. Every case is caught — by one of the invariants, by the read-path
+# predicate check, or (for the entries declared in MAY_FAIL_TO_RUN) by failing to run, since
+# a limiter the harness cannot execute is not one it can certify. An entry must not be a
+# no-op: this test is where a mutation that proves nothing shows up. Patterns are
 # REGEXES with flexible whitespace (`\s*` / `\s+`), so re-indenting or re-wrapping an
 # expression does not break the battery — the harness asserts behaviour, not layout —
 # and each pattern is asserted present, so a mutation that stops applying fails
 # loudly with the instruction to update it instead of proving nothing.
 # An entry that cannot RUN at all is an acceptable catch only if it is declared here, so
 # that a mutated limiter the harness cannot execute is never silently counted as caught.
-# The two extraction-integrity entries belong here: they cannot execute precisely BECAUSE
-# the harness refuses to pick a store when the file offers it more than one.
+# Two members, for two different reasons: a store that cannot hold the keys fails at
+# runtime (`hits.clear()` is not a function), and a factory-local store beside the real one
+# is refused by extraction, which will not pick a store when the module offers more than one.
 MAY_FAIL_TO_RUN: frozenset[str] = frozenset(
     {
         "store that cannot hold string keys",
@@ -986,6 +1012,31 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "    }\n"
         "    let excess = hits.size - MAX_RATE_KEYS;\n"
         "    for (const k of cachedKeys) {",
+    ),
+    (
+        "predicate bounds the tolerance with a literal",
+        r"\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
+        ".filter((t) => t > cutoff && t <= cutoff + 700000000)",
+    ),
+    (
+        "read key truncated",
+        r"hits\.get\(ip\)",
+        "hits.get(String(ip).slice(0, 15))",
+    ),
+    (
+        "read key split at the first colon",
+        r"hits\.get\(ip\)",
+        'hits.get(String(ip).split(":")[0])',
+    ),
+    (
+        "eviction decrements by two",
+        r"excess--;",
+        "excess -= 2;",
+    ),
+    (
+        "the allowed path returns refused",
+        r"\n  return false;\n\}",
+        "\n  return true;\n}",
     ),
     (
         "predicate drops future-dated entries",
@@ -1170,7 +1221,7 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
 )
 def test_the_harness_catches_a_behavioural_break(label: str, pattern: str, replacement: str) -> None:
     """Each mutation of the limiter must be caught — by an invariant, by the read-path
-    predicate check, or (for one declared entry) by failing to run.
+    predicate check, or (for the entries declared in MAY_FAIL_TO_RUN) by failing to run.
 
     This is the harness's own discriminating power, asserted. A mutation that leaves
     everything green is a hole in the guard, and this test is where it shows up rather
