@@ -1888,10 +1888,11 @@ class TestKeyAllowance3874:
         Pinned sharply by substituting the gate resolver: a session lane
         with its own source would return the tier default (2), not 9.
         """
-        import tortoise.hosted_api as ha_mod
-        import tortoise.supabase_control as sc
         from starlette.datastructures import Headers
         from starlette.requests import Request
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
         from tests.fake_control_plane import FakeControlPlane
 
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")

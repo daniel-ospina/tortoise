@@ -342,6 +342,7 @@ surfaces:
   # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
+  - test_embedder_provision.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -375,6 +376,7 @@ surfaces:
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
+  - test_tmpdir_hygiene_4096.py  # #4096: AST guard — no pytest fixture may mkdtemp a tree without reclaiming it (meta test; reads tests/**, no DB)
   # #3755: session-start.sh must fire the install-probe beacon even when
   # `tortoise context` fails (the digest was `|| exit 0`, which skipped the
   # probe). Registered under `core` because `tortoise/claude-hooks/` is an
@@ -752,6 +754,7 @@ surfaces:
   - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
   - test_onboarding_analytics_patch.py
   - test_onboarding_endpoints.py
+  - test_onboarding_false_completion_repair.py  # #3912: false decide-completed repair + guard (docker-lane)
   - test_onboarding_health_flip.py
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
@@ -1070,6 +1073,7 @@ durations:
   test_doctor.py: 44.8
   test_onboarding_w6_capture_disclosure.py: 43.2
   test_onboarding_w4_settings.py: 38.8
+  test_onboarding_false_completion_repair.py: 42.1  # #3912: 48 docker-lane tests (SDK round-trips per org)
   test_graph_diagnostics.py: 37.3
   eval/write_path/test_write_path_runner.py: 36.0
   test_write_verb.py: 35.7

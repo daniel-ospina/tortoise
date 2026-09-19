@@ -172,6 +172,20 @@ SOURCE_PATTERNS = {
                    "website/security.html", "website/tos.html",
                    "website/license.html", "website/dpa.html",
                    "website/aviso-privacidad.html",
+                   # #3436: the two remaining top-level pages, listed for the
+                   # same reason as every other page entry in this tuple — they
+                   # are covered by the site-wide element-id uniqueness guard
+                   # (tests/test_website_docs_consistency.py), whose scope is
+                   # DERIVED as `website/*.html`. Their absence was verified
+                   # before listing: `select(["website/invite-accept.html"])`
+                   # returned surfaces=[] with the guard absent from
+                   # test_files, so a duplicate id could land on the invite
+                   # landing page without the guard running on the PR that
+                   # added it. Both are `noindex` pages, which keeps them out of
+                   # the blog guard's scope, not out of this one: a noindex page
+                   # is still a served document, and duplicate ids are invalid in
+                   # it.
+                   "website/404.html", "website/invite-accept.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
@@ -419,6 +433,13 @@ TOOL_CARVEOUTS = (
     # A narrower core-only mapping is possible but not needed: a
     # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
+    # #2573: the CI embedder gate (tools/embedder_provision.py) owns
+    # tests/test_embedder_provision.py. Same silent-drop class as the
+    # preflight carve-out above: no SOURCE_PATTERNS entry matches it, so a
+    # change to the gate alone would classify as docs-only (surfaces=[] ->
+    # tier-1 smoke) and its own wiring/behaviour tests would never run on the
+    # PR that edits it.
+    "tools/embedder_provision.py",
 )
 
 
