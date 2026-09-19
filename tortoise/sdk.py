@@ -4771,6 +4771,17 @@ class TortoiseSDK:
         back to now — monotone, never a gap). Additive-only: no behavior
         change for callers that don't pass the kwarg.
 
+        The kwarg is a CLAIM about the successor's window start, so when the
+        successor carries a stored ``validFrom`` the two must be parseable
+        timestamps naming the SAME instant (compared by instant via
+        ``_created_sort_key`` — the measure ``restore_point_at``'s ``_covers``
+        uses). A disagreement raises ``ValueError`` BEFORE any mutation: a
+        predecessor ``validTo`` that disagrees either leaves a GAP (a query
+        instant covered by neither window) or an OVERLAP (two covering
+        candidates ⇒ ``ambiguous``). The kwarg remains the SOLE source when
+        the successor carries no stored ``validFrom`` (an undated successor),
+        unchanged. See docs/ONTOLOGY.md §4.7 (``validTo``).
+
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx
           - Plain structural edges (aboutSubject, aboutObject, aboutAction,
@@ -4823,19 +4834,92 @@ class TortoiseSDK:
         # E6 (#1538) D2: resolve the successor's validFrom (window contiguity
         # source) BEFORE the emit so the event payload carries the same
         # values the stamp block writes (read-only — no ordering impact).
+        #
+        # The resolution ORDER below is the documented one and is unchanged
+        # (ONTOLOGY.md §4.1/§4.7 `validTo` row: `valid_from` kwarg →
+        # successor validFrom → successor createdAt → now). What IS new is a
+        # PRECONDITION on the kwarg, now stated in that row too: trusting it
+        # verbatim broke chain contiguity silently in BOTH directions — an
+        # EARLIER kwarg left a GAP (a query instant covered by neither
+        # window, so `restore_point_at` reports honest absence for a period
+        # that was in fact covered) and a LATER kwarg left an OVERLAP (two
+        # covering candidates ⇒ every instant inside it reads `ambiguous`).
+        # The successor's STORED validFrom is the value every read path
+        # computes its window start from (`restore_point_at` → `_covers`), so
+        # a disagreeing kwarg can only ever make the chain wrong. Refuse it
+        # BEFORE any mutation rather than pick a winner: picking the store
+        # would invert the documented order, picking the kwarg re-creates the
+        # defect.
+        #
+        # The comparison keys on ``str(valid_from)`` — the value the stamp
+        # block PERSISTS — not the caller's object, and requires BOTH sides to
+        # be parseable to the same instant. Both halves are load-bearing:
+        #   * keying the caller's object blesses a value the write
+        #     metamorphoses. A numeric-epoch kwarg parses as an instant, but
+        #     the ``str()`` that lands in ``validTo`` is UNPARSEABLE to
+        #     ``_created_sort_key`` (its ISO branch needs a ``-`` or ``T``),
+        #     i.e. an unbounded predecessor window — the exact OVERLAP this
+        #     guard exists to prevent.
+        #   * an unparseable side cannot be shown to name the same instant,
+        #     and ``_covers`` cannot order it either, so agreeing to write it
+        #     would be the silent wrong answer the read path refuses.
+        # ``_created_sort_key`` is the SAME measure ``_covers`` uses, so the
+        # guard's agreement boundary IS the read path's contiguity boundary.
+        # It normalizes a purely cosmetic encoding difference
+        # ("…T00:00:00Z" vs "…T00:00:00+00:00") and that is therefore
+        # accepted. It parses a DATE-ONLY value as LOCAL midnight (issue
+        # #3982), so a date-only-vs-offset-aware pair is a real instant
+        # difference off UTC — refused there, accepted on a UTC host. That is
+        # deliberate: `_covers` has the same host-dependence, so a
+        # host-independent verdict here would disagree with the read path.
+        # #3982 owns the decision on date-only semantics.
+        #
+        # The guard's PRESENCE predicate is the read path's, not the
+        # resolution branch's. `_covers` gates on `vf is not None`, so a
+        # falsey-but-PRESENT stored value is a REAL window start there: `0`
+        # keys as the parseable epoch-0 instant, and `""` keys as an
+        # unparseable start that covers no PARSEABLE instant
+        # (`_created_sort_key("")` = `(1, "")`, and `(1, x) > (0, y)` is
+        # always True) — an unparseable QUERY instant also keys as
+        # `(1, <text>)` and IS covered by it, so `""` only hides the successor
+        # from parseable queries, which land in the predecessor's window end
+        # instead. The resolution
+        # branch below gates on TRUTHINESS instead (`elif stored_vf:`), so for
+        # those two values it falls through to `createdAt`. The guard follows
+        # `_covers`: with a kwarg present it refuses rather than allow an
+        # unchecked window end against a start the read path treats as real
+        # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
+        # predecessor end the kwarg writes at or after epoch 0, and gaps
+        # before it). The no-kwarg falsey case keeps
+        # the pre-existing truthiness fallback — its read/write divergence is
+        # real and tracked in #3985, not silently redefined here.
+        vf_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
+            params={"id": new_id},
+        ).result_set
+        stored_vf = vf_rows[0][0] if vf_rows else None
+        if valid_from is not None and stored_vf is not None:
+            from .search_engine import _created_sort_key
+            k_kwarg = _created_sort_key(str(valid_from))
+            k_stored = _created_sort_key(stored_vf)
+            if not (k_kwarg[0] == 0 and k_stored[0] == 0
+                    and k_kwarg[1] == k_stored[1]):
+                raise ValueError(
+                    f"supersede_point: valid_from {valid_from!r} disagrees "
+                    f"with successor {new_id}'s stored validFrom "
+                    f"{stored_vf!r} — both must be parseable timestamps "
+                    f"naming the same instant, else the predecessor's "
+                    f"validTo gaps or overlaps the chain (read paths use "
+                    f"the stored window start)"
+                )
         if valid_from is not None:
             succ_vf = str(valid_from)
+        elif stored_vf:
+            succ_vf = stored_vf
+        elif vf_rows and vf_rows[0][1]:
+            succ_vf = vf_rows[0][1]
         else:
-            vf_rows = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
-                params={"id": new_id},
-            ).result_set
-            if vf_rows and vf_rows[0][0]:
-                succ_vf = vf_rows[0][0]
-            elif vf_rows and vf_rows[0][1]:
-                succ_vf = vf_rows[0][1]
-            else:
-                succ_vf = now  # monotone fallback — never a gap
+            succ_vf = now  # monotone fallback — never a gap
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the
