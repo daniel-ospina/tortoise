@@ -60,7 +60,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import os
 import socket
 import threading
 import time
@@ -68,6 +67,8 @@ from collections import OrderedDict
 from urllib.parse import unquote, urlparse
 
 import httpcore
+
+from .env_truthy import env_flag  # #4097: the declared truthy contract
 
 __all__ = [
     "CimdError",
@@ -106,25 +107,28 @@ class CimdError(Exception):
     """A CIMD fetch or validation refusal. Never caches, always fail-closed."""
 
 
-def _env_flag(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in ("0", "false", "no", "off", "")
-
-
 def cimd_enabled() -> bool:
     """Is CIMD advertised and accepted? Default ON (#2847 indicator); the env
-    is the reversible lever, not a deployment."""
-    return _env_flag("TORTOISE_OAUTH_CIMD", True)
+    is the reversible lever, not a deployment.
+
+    #4097: through the declared truthy contract. NOTE the deliberate change — a
+    BLANK value (``TORTOISE_OAUTH_CIMD=``) is now *unset* (→ default ON) rather
+    than an explicit off; ``0``/``false``/``no``/``off`` still disable it.
+    """
+    return env_flag("TORTOISE_OAUTH_CIMD", True)
 
 
 def same_origin_redirects_required() -> bool:
     """Require non-loopback ``redirect_uris`` to be same-origin with the
     client_id URL. Default ON (Anthropic's own guidance for CIMD). This is the
     single reversible lever if a future client's document legitimately spans
-    hosts — see ``docs/oauth-mcp.md``."""
-    return _env_flag("TORTOISE_OAUTH_CIMD_SAME_ORIGIN", True)
+    hosts — see ``docs/oauth-mcp.md``.
+
+    #4097: through the declared truthy contract. A BLANK value is now *unset*
+    (→ default ON = required); before #4097 blank relaxed this guard, which was
+    the fail-OPEN direction.
+    """
+    return env_flag("TORTOISE_OAUTH_CIMD_SAME_ORIGIN", True)
 
 
 def client_id_metadata_document_supported() -> bool:

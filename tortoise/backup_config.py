@@ -17,6 +17,8 @@ import hashlib
 import os
 from dataclasses import dataclass
 
+from .env_truthy import env_flag  # #4097: the declared truthy contract
+
 _AES_KEY_SIZE = 32
 
 # Secrets that the deploy workflow can sync from GH → Fly (the "syncable" set).
@@ -105,13 +107,6 @@ class BackupConfig:
     mirror_access_key_id: str = ""
     mirror_secret_access_key: str = ""
     mirror_bucket: str = ""
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw in ("1", "true", "yes", "on")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -249,8 +244,8 @@ def load_alert_config(env: dict[str, str] | None = None) -> BackupConfig | None:
 
 
 def _load_from_env() -> BackupConfig:
-    enabled = _env_bool("BACKUP_SWEEP_ENABLED", default=False)
-    org_sweep_enabled = _env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False)
+    enabled = env_flag("BACKUP_SWEEP_ENABLED", False)
+    org_sweep_enabled = env_flag("BACKUP_TEAM_SWEEP_ENABLED", False)
     if not enabled:
         # Fail-closed default: build a disabled config with empty keys; the
         # app must not call into the sweep machinery when disabled.
@@ -271,7 +266,7 @@ def _load_from_env() -> BackupConfig:
         )
 
     # ── #2319 immutability contract (validated when the sweep is enabled). ──
-    lock_enabled = _env_bool("BACKUP_LOCK_ENABLED", default=False)
+    lock_enabled = env_flag("BACKUP_LOCK_ENABLED", False)
     lock_days = _env_int("BACKUP_LOCK_DAYS", DEFAULT_LOCK_DAYS)
     if lock_enabled and not (LOCK_DAYS_MIN <= lock_days <= LOCK_DAYS_MAX):
         raise ConfigError(
@@ -286,7 +281,7 @@ def _load_from_env() -> BackupConfig:
     cf_api_token = os.environ.get("CF_API_TOKEN", "").strip()
 
     # ── #2319 geo-mirror (second-store copy) — env-guarded, fail-closed. ──
-    mirror_enabled = _env_bool("BACKUP_MIRROR_ENABLED", default=False)
+    mirror_enabled = env_flag("BACKUP_MIRROR_ENABLED", False)
     mirror_account_id = os.environ.get("R2_MIRROR_ACCOUNT_ID", "").strip()
     mirror_access_key_id = os.environ.get("R2_MIRROR_ACCESS_KEY_ID", "").strip()
     mirror_secret_access_key = os.environ.get("R2_MIRROR_SECRET_ACCESS_KEY", "").strip()
@@ -425,8 +420,8 @@ def _load_from_env() -> BackupConfig:
         retention_hourly=_env_int("BACKUP_RETENTION_HOURLY", 24),
         retention_daily=_env_int("BACKUP_RETENTION_DAILY", 7),
         retention_weekly=_env_int("BACKUP_RETENTION_WEEKLY", 4),
-        simulate_enabled=_env_bool("BACKUP_SIMULATE_ENABLED", default=False),
-        org_sweep_enabled=_env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False),
+        simulate_enabled=env_flag("BACKUP_SIMULATE_ENABLED", False),
+        org_sweep_enabled=env_flag("BACKUP_TEAM_SWEEP_ENABLED", False),
         lock_enabled=lock_enabled,
         lock_days=lock_days,
         cf_api_token=cf_api_token,
