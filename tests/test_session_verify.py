@@ -23,6 +23,7 @@ verified RED individually.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -332,19 +333,49 @@ def _hook_fork_seconds(home, root, harness, tmp_path):
     return time.monotonic() - started
 
 
-#: The hook's time-to-fork per harness, measured once at the CURRENT load and
-#: reused.  The prologue is a property of this box and its load, not of an
-#: individual temp install, so one calibration run per harness replaces the
-#: per-guard measurement a fixed wall-clock constant used to force.
-_FORK_SECONDS: dict[str, float] = {}
+#: The hook's time-to-fork per SEAM, measured once at the CURRENT load and
+#: reused.  The prologue is a property of the registered command and the hook
+#: bytes — not of the harness — so keying on the harness alone let a guard
+#: that short-circuits the hook (``exit 3``) poison every later landing test's
+#: budget (#3809 rr6).  Fresh temp roots install the shipped hooks
+#: byte-identically, so the honest case still pays for one calibration run per
+#: harness.
+_FORK_SECONDS: dict[tuple[str, str], float] = {}
+
+
+def _seam_fingerprint(harness: str, root: Path) -> tuple[str, str]:
+    """Identity of the seam this root fires: the command AND the hook bytes.
+
+    Two roots that installed the same shipped hook hash the same and share one
+    calibration; a locally edited hook, or a substituted command (``exit 7``),
+    hashes differently and gets its own — never a landing test's throttled
+    value.
+    """
+    import tortoise.session_verify as sv
+
+    command = sv._registered_capture_command(harness, root) or ""
+    # Canonicalize the per-install root prefix away (Codex registers an
+    # absolute path), so two temp installs of the SAME shipped hook share one
+    # calibration while a substituted command still differs.
+    canonical = command.replace(str(root), "<root>")
+    digest = hashlib.sha256(canonical.encode("utf-8"))
+    artifact = Path(command)
+    if command and not artifact.is_absolute():
+        artifact = Path(root) / artifact
+    try:
+        digest.update(b"\0")
+        digest.update(artifact.read_bytes())
+    except OSError:
+        pass
+    return (harness, digest.hexdigest())
 
 
 def _prologue_seconds(home, root, harness):
-    """The hook's time-to-fork at the current load, cached per harness."""
-    if harness not in _FORK_SECONDS:
-        _FORK_SECONDS[harness] = _hook_fork_seconds(
-            home, root, harness, home)
-    return _FORK_SECONDS[harness]
+    """The hook's time-to-fork at the current load, cached per seam."""
+    key = _seam_fingerprint(harness, root)
+    if key not in _FORK_SECONDS:
+        _FORK_SECONDS[key] = _hook_fork_seconds(home, root, harness, home)
+    return _FORK_SECONDS[key]
 
 
 def _derived_fire_timeout(home, root, harness):
@@ -364,6 +395,47 @@ def _derived_fire_timeout(home, root, harness):
     if not sv._registered_capture_command(harness, root):
         return 20.0
     return 2.0 * _prologue_seconds(home, root, harness) + 15.0
+
+
+def test_guard_prologue_cache_is_keyed_on_the_seam_not_the_harness(
+        monkeypatch, tmp_path):
+    """A short-circuited hook cannot poison a later landing test's budget.
+
+    ``_prologue_seconds`` caches per SEAM (registered command + hook bytes),
+    not per harness.  A guard that rewrites the hook to ``exit 3`` — or swaps
+    the command for ``exit 7`` — measures a near-zero prologue; a harness-only
+    key then handed that value to every later claude landing test as its fire
+    budget, so it raced a wall clock again (#3809 rr6).  The seeder runs
+    first, then the intact seam is asked for ITS prologue.
+
+    Mutation: key ``_FORK_SECONDS`` on ``harness`` alone — the intact seam
+    reuses the tampered seam's 0.05 s and this REDs (5.0 expected).
+    """
+    this = sys.modules[__name__]
+    import tortoise.session_verify as sv
+
+    monkeypatch.setattr(this, "_FORK_SECONDS", {})
+    monkeypatch.setattr(
+        sv, "_registered_capture_command",
+        lambda _h, root: str(Path(root) / "session-end.sh"))
+
+    def _measured(_home, root, _harness, _tmp):
+        text = (Path(root) / "session-end.sh").read_text()
+        return 0.05 if "exit 3" in text else 5.0
+
+    monkeypatch.setattr(this, "_hook_fork_seconds", _measured)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    seeder = tmp_path / "seeder"
+    seeder.mkdir()
+    (seeder / "session-end.sh").write_text("set -euo pipefail\nexit 3\n")
+    assert this._prologue_seconds(home, seeder, "claude") == pytest.approx(0.05)
+
+    landing = tmp_path / "landing"
+    landing.mkdir()
+    (landing / "session-end.sh").write_text("set -euo pipefail\n")
+    assert this._prologue_seconds(home, landing, "claude") == pytest.approx(5.0)
 
 
 def test_default_fire_timeout_is_derived_not_a_wall_clock(monkeypatch, tmp_path):
@@ -534,7 +606,7 @@ def test_guard_never_launched_is_not_in_flight_for_the_detaching_shape(
 
 
 def test_guard_oserror_after_spawn_is_not_reported_as_never_launched(
-        hosted, setup, monkeypatch):
+        hosted, setup, monkeypatch, tmp_path):
     """An ``OSError`` from the WAIT is not proof the seam never ran.
 
     Only a SPAWN failure proves no process ever existed.  ``subprocess.run``
@@ -549,11 +621,24 @@ def test_guard_oserror_after_spawn_is_not_reported_as_never_launched(
     ``subprocess.run`` shape) — this monkeypatched post-spawn error is mapped
     to ``NOT_LAUNCHED`` and the guard REDs (``_verify`` returns instead of
     raising).
+
+    The fire budget is DERIVED from the hook's own prologue, measured BEFORE
+    ``Popen`` is replaced (the calibration path is itself a ``Popen`` caller).
+    A fixed 20 s raced the hook's real foreground capture — 6.68 s warm vs
+    15.47 s isolated at load ~22 — and a lost race made the real
+    ``communicate`` raise ``TimeoutExpired`` first, so ``_fire`` returned
+    ``TIMED_OUT`` instead of letting the post-spawn error propagate (#3809
+    rr6).
     """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
     import tortoise.session_verify as sv
+
+    # Measure the prologue BEFORE replacing Popen: subprocess.run (the
+    # calibration path) is itself a Popen caller.
+    prologue = _hook_fork_seconds(home, root, "claude", tmp_path)
+    timeout = 2.0 * prologue + 15.0
 
     real_popen = subprocess.Popen
 
@@ -577,10 +662,10 @@ def test_guard_oserror_after_spawn_is_not_reported_as_never_launched(
             return getattr(self._proc, name)
 
     monkeypatch.setattr(sv.subprocess, "Popen", _SpawnedThenWaitFails)
-    # Popen is replaced, so the prologue cannot be measured; the capture
-    # lands inside communicate() before the wait raises, so no load race.
+    # The real hook's foreground capture must land inside the derived budget;
+    # the wait then raises and the error propagates.
     with pytest.raises(OSError):
-        _verify(hosted, home, "claude", root, timeout=20.0)
+        _verify(hosted, home, "claude", root, timeout=timeout)
     assert len(graph.posts) == 1, "the seam really ran and captured"
     assert graph.sessions == {}, "cleanup still deleted what the fire wrote"
 
