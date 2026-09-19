@@ -119,12 +119,47 @@ for (const f of files) {
     if (f === '20260813000002_metering_nodes_written.sql') {
       await db.exec('DROP FUNCTION IF EXISTS public.metering_increment(text, text, integer);');
     }
+    if (f === '20260919000001_metering_period_end_repair.sql') {
+      // #4216: seed a HALF-KNOWN subscription anchor so this migration's
+      // DEPLOY-TIME one-time SELECT is exercised. The repair suites test the
+      // FUNCTION, not the wiring — without this seed, deleting the migration's
+      // trailing `SELECT public.metering_repair_period_bounds();` leaves the
+      // whole harness green while every pre-existing half-written row stays
+      // unmeterable (the symptom #4216 exists to remove).
+      await db.exec(`INSERT INTO public.organizations
+          (id, name, graph_name, subscription_id,
+           current_period_start, current_period_end)
+        VALUES ('4216-migrate-seed', '4216-migrate-seed',
+                'org_4216-migrate-seed', 'sub_migrate_seed',
+                '2026-11-15T00:00:00+00:00', NULL);`);
+    }
     await db.exec(sql);
     console.log(`✓ migration ${f}`);
   } catch (e) {
     console.error(`✗ migration ${f} FAILED:\n  ${e.message.split('\n').slice(0,3).join('\n  ')}`);
     process.exit(1);
   }
+}
+
+// ── #4216: the migration's DEPLOY-TIME repair actually ran ──────────────────
+// The seed above was inserted BEFORE `20260919000001`, so only the migration's
+// own one-time `SELECT` can have completed it. Asserted HERE — before any
+// suite — because the repair suite's own function call would otherwise mask a
+// missing SELECT.
+{
+  const r = await db.query(
+    "SELECT current_period_end FROM public.organizations WHERE id = '4216-migrate-seed'");
+  const got = r.rows[0] ? r.rows[0].current_period_end : undefined;
+  if (got === null || got === undefined) {
+    console.error('✗ #4216: the migration did NOT repair the seeded NULL-end org — its deploy-time SELECT did not run');
+    process.exit(1);
+  }
+  if (new Date(got).getTime() !== new Date('2026-12-15T00:00:00Z').getTime()) {
+    console.error(`✗ #4216: deploy-time repair derived ${got}, expected 2026-12-15T00:00:00Z`);
+    process.exit(1);
+  }
+  await db.exec("DELETE FROM public.organizations WHERE id = '4216-migrate-seed'");
+  console.log('✓ #4216: the migration\'s deploy-time repair completed the seeded NULL-end org');
 }
 
 // ── Run the assertion suites (0006–0009 from #769, 0010 from #770, then

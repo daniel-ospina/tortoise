@@ -7,16 +7,18 @@
 --   * end missing, start stored  → the end is DERIVED (the direction the
 --     20260918000001 backfill lacked — a partially-written anchor);
 --   * start missing, end stored  → the start is DERIVED;
---   * neither bound stored (the checkout shape) and start >= end (inverted)
---     → reported LOUDLY (returned + WARNING), NOT silently skipped, NOT
---     invented and NOT mutated;
+--   * neither bound stored (the checkout shape), start >= end (inverted), and
+--     start == end (zero-length) → reported LOUDLY (returned + WARNING), NOT
+--     silently skipped, NOT invented and NOT mutated;
 --   * a no-subscription org carrying one bound → untouched and not reported.
 --
 -- The session TimeZone is set to a DST-bearing zone so the ``AT TIME ZONE
--- 'UTC'`` normalisation is load-bearing: without it the derived instant drifts
--- by an hour across the DST boundary. Every assertion RAISE EXCEPTIONs on the
--- mutation it catches, so a green schema-drill means the artifact behaves —
--- not merely that it exists.
+-- 'UTC'`` normalisation is load-bearing in BOTH derivation branches: each has
+-- its own DST-spanning seed (`4216-dst-start` for branch 1, `4216-dst` for
+-- branch 2), because a derivation that sits inside one DST offset cancels the
+-- offset and would not catch a missing normalisation. Every assertion RAISE
+-- EXCEPTIONs on the mutation it catches, so a green schema-drill means the
+-- artifact behaves — not merely that it exists.
 
 SET TIME ZONE 'America/New_York';
 
@@ -30,13 +32,20 @@ VALUES
      '2026-01-31T00:00:00+00:00', NULL),
     ('4216-start-null', '4216-start-null', 'org_4216-start-null', 'sub_start_null',
      NULL, '2026-10-03T00:00:00+00:00'),
-    -- DST-spanning: the exact instant proves the UTC normalisation.
+    -- DST-spanning, one per derivation branch: the exact instant proves the
+    -- UTC normalisation. Under America/New_York an unnormalised derivation
+    -- yields 2026-10-14T23:00Z (branch 1) / 2026-03-14T23:00Z (branch 2).
+    ('4216-dst-start', '4216-dst-start', 'org_4216-dst-start', 'sub_dst_start',
+     NULL, '2026-11-15T00:00:00+00:00'),
     ('4216-dst', '4216-dst', 'org_4216-dst', 'sub_dst',
      '2026-02-15T00:00:00+00:00', NULL),
     ('4216-both-null', '4216-both-null', 'org_4216-both-null', 'sub_both_null',
      NULL, NULL),
     ('4216-inverted', '4216-inverted', 'org_4216-inverted', 'sub_inverted',
      '2026-10-03T00:00:00+00:00', '2026-09-03T00:00:00+00:00'),
+    -- zero-length (start == end) is refused by the resolver and must be reported.
+    ('4216-empty', '4216-empty', 'org_4216-empty', 'sub_empty',
+     '2026-06-01T00:00:00+00:00', '2026-06-01T00:00:00+00:00'),
     -- no subscription → must never be repaired from a single stray bound.
     ('4216-free-one-bound', '4216-free-one-bound', 'org_4216-free-one-bound',
      NULL, '2026-05-01T00:00:00+00:00', NULL);
@@ -50,15 +59,18 @@ BEGIN
     SELECT count(*), string_agg(org_id, ',' ORDER BY org_id)
       INTO n, ids
       FROM public.metering_repair_period_bounds();
-    IF n <> 2 THEN
-        RAISE EXCEPTION 'expected exactly 2 unusable orgs, got % (%)', n, ids;
+    IF n <> 3 THEN
+        RAISE EXCEPTION 'expected exactly 3 unusable orgs, got % (%)', n, ids;
     END IF;
-    IF ids <> '4216-both-null,4216-inverted' THEN
+    IF ids <> '4216-both-null,4216-empty,4216-inverted' THEN
         RAISE EXCEPTION 'unusable set was % — a derivable org was misreported', ids;
     END IF;
     SELECT reason INTO inv_reason
       FROM public.metering_repair_period_bounds()
      WHERE org_id = '4216-inverted';
+    IF inv_reason IS NULL THEN
+        RAISE EXCEPTION 'the inverted class was not returned at all';
+    END IF;
     IF inv_reason NOT LIKE '%inverted%' THEN
         RAISE EXCEPTION 'the inverted class was not named: %', inv_reason;
     END IF;
@@ -95,16 +107,22 @@ BEGIN
     END IF;
 END $$;
 
--- 3b) The derivation is UTC-normalised, not session-TimeZone-dependent.
---     Mutation caught: dropping either ``AT TIME ZONE 'UTC'`` — under
---     America/New_York the derived end becomes 2026-03-14T23:00Z.
+-- 3b) The derivation is UTC-normalised, not session-TimeZone-dependent — in
+--     BOTH branches. Mutation caught: dropping ``AT TIME ZONE 'UTC'`` in
+--     branch 2 (derived end becomes 2026-03-14T23:00Z under America/New_York)
+--     or in branch 1 (derived start becomes 2026-10-14T23:00Z).
 DO $$
-DECLARE v timestamptz;
+DECLARE e timestamptz; s timestamptz;
 BEGIN
-    SELECT current_period_end INTO v FROM public.organizations
+    SELECT current_period_end INTO e FROM public.organizations
      WHERE id = '4216-dst';
-    IF v <> '2026-03-15T00:00:00+00:00'::timestamptz THEN
-        RAISE EXCEPTION 'derived end % is session-TimeZone dependent', v;
+    IF e <> '2026-03-15T00:00:00+00:00'::timestamptz THEN
+        RAISE EXCEPTION 'derived end % is session-TimeZone dependent', e;
+    END IF;
+    SELECT current_period_start INTO s FROM public.organizations
+     WHERE id = '4216-dst-start';
+    IF s <> '2026-10-15T00:00:00+00:00'::timestamptz THEN
+        RAISE EXCEPTION 'derived start % is session-TimeZone dependent', s;
     END IF;
 END $$;
 
@@ -129,6 +147,13 @@ BEGIN
         RAISE EXCEPTION 'an inverted interval must be reported, not rewritten (% %)',
             i_s, i_e;
     END IF;
+    SELECT current_period_start, current_period_end INTO i_s, i_e
+      FROM public.organizations WHERE id = '4216-empty';
+    IF i_s <> '2026-06-01T00:00:00+00:00'::timestamptz
+       OR i_e <> '2026-06-01T00:00:00+00:00'::timestamptz THEN
+        RAISE EXCEPTION 'a zero-length interval must be reported, not rewritten (% %)',
+            i_s, i_e;
+    END IF;
     SELECT current_period_start, current_period_end INTO f_s, f_e
       FROM public.organizations WHERE id = '4216-free-one-bound';
     IF f_s <> '2026-05-01T00:00:00+00:00'::timestamptz OR f_e IS NOT NULL THEN
@@ -137,15 +162,23 @@ BEGIN
 END $$;
 
 -- 5) IDEMPOTENT: a second run derives nothing further and still reports the
---    same two; an already-derived month-end bound must not drift.
---    Mutation caught: an unguarded UPDATE that shifts an already-derived bound
---    on every run (the window would drift a month per invocation).
+--    same three. The bound checks pin that a re-run does not MOVE a value; the
+--    guard's primary catcher is test 1 (unguarding a branch rewrites the
+--    inverted/zero-length rows and drops the unusable count from 3), so this
+--    block is the anti-drift half, not the guard's only evidence.
 DO $$
 DECLARE n integer; end_after timestamptz; start_after timestamptz;
+        start_of_end_null timestamptz;
 BEGIN
     SELECT count(*) INTO n FROM public.metering_repair_period_bounds();
-    IF n <> 2 THEN
-        RAISE EXCEPTION 'second run reported % unusable org(s), expected 2', n;
+    IF n <> 3 THEN
+        RAISE EXCEPTION 'second run reported % unusable org(s), expected 3', n;
+    END IF;
+    SELECT current_period_start INTO start_of_end_null
+      FROM public.organizations WHERE id = '4216-end-null';
+    IF start_of_end_null <> '2026-01-31T00:00:00+00:00'::timestamptz THEN
+        RAISE EXCEPTION 'an unguarded start-derivation moved a full anchor to %',
+            start_of_end_null;
     END IF;
     SELECT current_period_end INTO end_after FROM public.organizations
      WHERE id = '4216-end-null';
@@ -183,4 +216,5 @@ SET TIME ZONE 'UTC';
 
 DELETE FROM public.organizations
  WHERE id IN ('4216-end-null', '4216-start-null', '4216-dst',
-              '4216-both-null', '4216-inverted', '4216-free-one-bound');
+              '4216-dst-start', '4216-both-null', '4216-inverted',
+              '4216-empty', '4216-free-one-bound');

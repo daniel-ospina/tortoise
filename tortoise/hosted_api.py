@@ -24549,8 +24549,15 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                 # removes). Both bounds come from the SAME authoritative Stripe
                 # subscription object the tier is resolved from. Only the bounds
                 # the payload CARRIES are written; a bound it omits is left
-                # alone (never NULLed). The write is ISOLATED from the tier path
-                # so a window-write failure cannot suppress the upgrade.
+                # alone (never NULLed). The window write is ISOLATED so its
+                # failure cannot suppress the upgrade below.
+                #
+                # NOTE (#4216 review): a failure of ``apply_limits`` /
+                # ``_set({"tier": ...})`` now PROPAGATES (the route 500s and
+                # Stripe redelivers) instead of being swallowed as a
+                # "subscription fetch failed" 200 — deliberate and consistent
+                # with #2789: a taken payment must never sit unretried on free
+                # limits. The previous outer except covered the whole block.
                 window = {k: sub[k] for k in
                           ("current_period_start", "current_period_end")
                           if sub.get(k)}

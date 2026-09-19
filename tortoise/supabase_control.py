@@ -3007,9 +3007,11 @@ def update_org_billing(cp, org_id: str, updates: dict) -> None:
     # PGlite. The REGISTRY twin stores the int verbatim because
     # ``metering._anchor_instant`` accepts both shapes, but the control plane
     # can only bind an ISO-8601 instant. Normalising HERE — the one seam every
-    # Supabase-lane billing write passes through (checkout,
-    # ``customer.subscription.updated``, the mirror) — fixes every writer at
-    # once without changing what the webhook handlers pass.
+    # Supabase-lane billing write passes through (checkout and
+    # ``customer.subscription.updated``) — fixes every writer at once without
+    # changing what the webhook handlers pass. (The registry twin does NOT use
+    # this seam: ``mirror_subscription`` writes the graph directly and
+    # ``_anchor_instant`` reads its epoch ints.)
     for _col in ("current_period_start", "current_period_end"):
         _v = body.get(_col)
         if isinstance(_v, (int, float)) and not isinstance(_v, bool):
