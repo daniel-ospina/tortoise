@@ -1984,10 +1984,13 @@ def _open_marker_no_follow(dir_fd: int) -> int | None:
     swapped parent directory either — `O_NOFOLLOW` alone protects only the
     basename (CVE-2018-6954 is the precedent for skipping `openat`).
 
-    NOTE: this is strictly TIGHTENING, not "no semantic change": a candidate
-    dir that is readable-but-not-writable, or not readable at all, now
-    abandons the record (the occupant cannot be unlinked) instead of writing
-    through it. Fail-closed, and unreachable for redislite/mkdtemp dirs.
+    NOTE: this is strictly TIGHTENING, not "no semantic change". A candidate dir
+    whose marker is ABSENT — or whose occupant must be `unlink`ed first — must be
+    writable, so a readable-but-not-writable or unreadable dir now abandons the
+    record instead of writing through it. A STALE REGULAR `nlink == 1` marker in
+    such a dir is still overwritten (`O_CREAT` on an existing owned file needs no
+    write permission on the directory). Fail-closed, and unreachable for
+    redislite/mkdtemp dirs.
     """
     flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
     for _attempt in (0, 1):
@@ -2056,9 +2059,18 @@ _LOCK_PATH = os.path.join(
     # target is tempfile.gettempdir() (machine-global on Linux) — a per-HOME
     # lock means two sweepers with different $HOME (parallel agents/users/
     # containers on a shared box) each flock a DIFFERENT inode and both run
-    # overlapping sweeps, reaping each other's live sockets. Same convention
-    # as ACTIVE_SUITES_DIR above (both under <tempdir>/.tortoise/).
-    os.path.realpath(tempfile.gettempdir()), ".tortoise", ".reaper.lock")
+    # overlapping sweeps, reaping each other's live sockets. Same tempdir root
+    # as ACTIVE_SUITES_DIR above; see the #4098 note below for why the lock DIR
+    # diverges from that sibling's `<tempdir>/.tortoise`.
+    #
+    # #4098: the lock DIR is uid-scoped (`.tortoise-reaper-<euid>`). On a
+    # shared `/tmp` any local uid can pre-create a fixed name, and the
+    # ownership gate below then fails closed forever — a permanent,
+    # zero-privilege denial of the victim's reaper. Because the tmpdir is
+    # ours on macOS and the file is 0700, the pre-existing
+    # `<tempdir>/.tortoise` is left to ACTIVE_SUITES_DIR.
+    os.path.realpath(tempfile.gettempdir()),
+    f".tortoise-reaper-{os.geteuid()}", ".reaper.lock")
 TIMEOUT_DEFAULT = 120
 
 
@@ -2088,13 +2100,19 @@ class _ReaperLock:
             self._fh = None
             return False
         try:
-            # #4098 review: a PRE-EXISTING `.tortoise` may have been created
-            # by another local uid (any local uid can `mkdir /tmp/.tortoise`),
+            # #4098 review: a PRE-EXISTING dir may have been created by another
+            # local uid (any local uid can `mkdir /tmp/.tortoise-reaper-<uid>`),
             # and `fchmod` tightens the mode without changing ownership — the
             # owner can chmod back and unlink/recreate the lock file, which
             # would break the singleton invariant (two reapers on two inodes).
-            # Require the dir to be OURS; otherwise fail closed.
+            # Require the dir to be OURS; otherwise fail closed LOUDLY — the
+            # uid-scoped name means this needs a deliberate, targeted
+            # pre-creation, not the ordinary shared-`/tmp` case.
             if os.fstat(dir_fd).st_uid != os.geteuid():
+                logger.warning(
+                    "reaper lock dir is not owned by this uid (%s) — refusing "
+                    "to lock (a foreign-owned dir can swap the lock inode "
+                    "under us); remove it to restore sweeps", lock_dir)
                 self._fh = None
                 return False
             # Best-effort tighten of a PRE-EXISTING dir. Done through the fd:
@@ -2827,10 +2845,12 @@ def _lock_holder_pid() -> str:
     # "unknown": it can never be the lock this module wrote.
     #
     # #4098 review: `O_NOFOLLOW` alone protects only the BASENAME, so a
-    # planted symlink at `<tempdir>/.tortoise` would still redirect the read
-    # (log spoofing) and could serve an arbitrarily large file before the
+    # planted symlink at the lock DIR would still redirect the read (log
+    # spoofing) and could serve an arbitrarily large file before the
     # watchdog is armed. Anchor on the dir fd and address the lock RELATIVE
-    # to it, exactly like `_ReaperLock.acquire` — and cap the read.
+    # to it, exactly like `_ReaperLock.acquire` — and cap the read, and
+    # require the dir to be ours (a foreign-owned dir's contents are
+    # attacker-authored).
     lock_dir = os.path.dirname(_LOCK_PATH)
     try:
         dir_fd = os.open(lock_dir,
@@ -2838,6 +2858,11 @@ def _lock_holder_pid() -> str:
     except OSError:
         return "unknown"
     try:
+        try:
+            if os.fstat(dir_fd).st_uid != os.geteuid():
+                return "unknown"
+        except OSError:
+            return "unknown"
         try:
             fd = os.open(os.path.basename(_LOCK_PATH),
                          os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,

@@ -102,7 +102,9 @@ singleton-lock `open` (T5).
 **Falsifier:** the framing dies if any destruction path already verifies that the candidate dir
 (or the pid it acts on) belongs to the reaper's uid — or if a recorded decision mandates
 cross-uid reaping on a shared tempdir. Both were checked and refuted:
-`grep -n 'geteuid\|st_uid\|getuid\|os.access' tortoise/embedded_reaper.py` → **no matches**;
+`grep -n 'geteuid\|st_uid\|getuid\|os.access' tortoise/embedded_reaper.py` → **no matches**
+(the grep was run at scoping time, against pre-#4098 code; this PR then ADDED `geteuid`/`st_uid`
+for the lock — that addition is the fix, not a refutation of the finding);
 no doc, comment, or `OVERRIDES` line mandates cross-uid reaping (the only related note,
 `docs/research/2026-08-24-1658-reaper-race/research.md`, flags the *absence* of a cross-user
 test, not a required behavior).
@@ -206,9 +208,9 @@ under any outcome of the escalation.
 | `_ReaperLock.acquire` (T5) | internal | this change (`O_NOFOLLOW` + 0700 dir + `dir_fd`; was `open(path, "a")`) | ✅ |
 | `_lock_holder_pid` | internal | this change (dir-fd-anchored, `O_NONBLOCK`, bounded read) | ✅ |
 | `_sweep_quarantine_dirs` marker **read** | internal | **unchanged and still attacker-satisfiable** — `os.path.exists` is `os.stat` and DOES follow a symlink (a planted marker symlink to any existing file passes it; only a dangling one fails). Non-destructive, so not a primitive; the provenance question is deferred with #4136 | ✅ (unchanged) |
-| `tests/test_reaper.py` | test | this change (10 new tests across the PR: 1 + 9) | ✅ |
+| `tests/test_reaper.py` | test | this change (11 new tests across the PR: 1 + 10) | ✅ |
 | `docs/scoping/2026-09-18-4098-tmpdir-hardening-scoping.md`, `docs/00_index.md` | docs | this change | ✅ |
-| `tools/install-reaper-schedule.sh` (stale lock-path comment), `docs/infra/embedded-reaper-cron.md` | scheduler/docs | lock-path comment corrected; cron doc unchanged | ✅ |
+| `tools/install-reaper-schedule.sh` (stale lock-path comment), `docs/infra/embedded-reaper-cron.md` | scheduler/docs | lock-path comment corrected in both; the cron doc's own stale lock-path citations (`~/.tortoise/.reaper.lock`, `<tempdir>/.tortoise/.reaper.lock`) were corrected to `<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`; the unrelated `~/.tortoise/reaper.log` LOG path is untouched | ✅ |
 | Escalated provenance guard (paths `reap`, `_classify`, `_remove_stale_socket_dir`, `_mark_orphan_confirmation`, `_sweep_quarantine_dirs`) | design decision | **not implemented** — human decision required (#4136) | ⏸ |
 
 ---
@@ -219,8 +221,10 @@ under any outcome of the escalation.
 user's uid — and if so, at what scope and with what escape hatch?** The full options, analysis and
 recommendation are filed as **#4136** (the T2/T3/T4 residual of this issue; #4098's own deliverable —
 the threat model plus the two mechanical symlink-write hardenings (marker + lock) — is complete
-here). This PR does **not** change the reaper's reach; it only removes the demonstrated
-symlink-follow writes.
+here). This PR does **not** change which candidate dirs the reaper may DESTROY — the destruction
+predicate is untouched, and the only reach change is the lock's uid-scoping (recorded in the
+`OVERRIDES` block below). What it changes is the WRITE path: the two demonstrated symlink-follow
+writes (marker, lock) are closed.
 
 The lock hardening was found by the **code-review gate's** security + architecture reviewers after
 the scoping pass had declared the surface; it is recorded here as T5 and fixed rather than
@@ -231,8 +235,12 @@ escalated, because it is the identical mechanical class on the scheduled path an
 
 > **OVERRIDES:** the pre-#4098 guard-6 marker write's *overwrite-in-place* semantics (plain
 > `open(path, "w")`, which follows a symlink at the marker path) — the marker is now opened
-> through an `O_NOFOLLOW`-anchored dir fd with `O_CREAT|O_TRUNC|O_NOFOLLOW|O_NONBLOCK`; an occupant
-> that is not a regular file is `unlink`ed (never followed) and retried once, fail-closed.
+> through an `O_NOFOLLOW`-anchored dir fd with `O_WRONLY|O_CREAT|O_NOFOLLOW|O_NONBLOCK`, truncated
+> only AFTER the open via `os.ftruncate` (never by `O_TRUNC`, which fires before any check). An
+> occupant that is not a regular file is `unlink`ed (never followed) and retried once; an occupant
+> that IS a regular file with `st_nlink > 1` — a planted HARDLINK, against which `O_NOFOLLOW` and
+> `S_ISREG` are both no defence, because the inode lives outside the candidate dir — is refused the
+> same way. Fail-closed after one retry.
 > Reason: on a shared world-writable tempdir a plain `w`-open is an arbitrary-file-truncation
 > primitive (CWE-377 / FIO21-C); the overwrite semantics are preserved for a regular marker (the
 > dir still ends up with exactly one `"reaper-owned\n"` regular file, and no write permission on
@@ -246,3 +254,12 @@ escalated, because it is the identical mechanical class on the scheduled path an
 > in the same shared world-writable tempdir (moved there by #1658), so it is the identical CWE-377
 > sink — a planted symlink truncated the target and a FIFO hung startup before the watchdog was
 > armed.
+>
+> **OVERRIDES:** the lock dir is now UID-SCOPED, `<tempdir>/.tortoise-reaper-<euid>` (it was the
+> fixed `<tempdir>/.tortoise`), and `acquire()` fails closed when that dir exists but is not owned
+> by our euid. Reason: a fixed name under a shared `/tmp` is pre-creatable by ANY local uid, and
+> combined with the ownership check that made the refusal permanent — a zero-privilege denial of
+> the victim's reaper. **This is a deliberate reduction in reach:** on a shared-tempdir box a
+> foreign uid's reaper no longer contends with ours (it cannot reap our sockets anyway), and a
+> hostile uid can still target our exact `<euid>` dir. That residual is accepted rather than
+> silently inherited, and it is LOGGED (a warning naming the path) instead of failing quietly.

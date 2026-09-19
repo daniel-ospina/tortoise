@@ -3338,9 +3338,34 @@ def test_lock_is_tempdir_scoped_not_home_scoped():
         f"_LOCK_PATH {lock_path!r} must be tempdir-scoped (was ~/.tortoise)"
     assert os.path.expanduser("~") not in lock_path, \
         f"_LOCK_PATH {lock_path!r} must not be HOME-scoped"
-    # It lives in the same <tempdir>/.tortoise/ dir as ACTIVE_SUITES_DIR.
-    assert os.path.dirname(lock_path) == os.path.dirname(er.ACTIVE_SUITES_DIR), \
-        "lock and active-suites dir must share the tempdir/.tortoise root"
+    # #4098: the lock DIR is uid-scoped. A fixed name under a shared /tmp is
+    # pre-creatable by any local uid, and the ownership gate in acquire()
+    # then fails closed FOREVER — a zero-privilege denial of the reaper.
+    assert f"-{os.geteuid()}" in os.path.basename(os.path.dirname(lock_path)), \
+        f"lock dir {os.path.dirname(lock_path)!r} must be uid-scoped (#4098)"
+
+
+def test_foreign_owned_lock_dir_fails_closed_and_warns(tmp_path, caplog, monkeypatch):
+    """#4098 review: a lock dir created by ANOTHER local uid must not be used
+    (its owner can chmod back and unlink/recreate the lock, splitting the
+    singleton flock across two inodes). Refuse — and say so, rather than
+    silently skipping every sweep for the rest of the machine's uptime."""
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    lock_dir = tmp_path / f".tortoise-reaper-{os.geteuid()}"
+    lock_dir.mkdir()
+    fake = er._ReaperLock(str(lock_dir / ".reaper.lock"))
+    real = os.geteuid()
+    # Simulate a dir owned by someone else by making the CALLER's euid look
+    # foreign — no root needed.
+    monkeypatch.setattr(os, "geteuid", lambda: real + 1)
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        assert fake.acquire() is False, "a foreign-owned lock dir must fail closed"
+    assert any("not owned by this uid" in r.message for r in caplog.records), \
+        "the refusal must be loud, not silent"
+    assert fake._fh is None, "no fd may be left open on the refusal path"
 
 
 def test_cross_home_sweepers_share_one_lock():

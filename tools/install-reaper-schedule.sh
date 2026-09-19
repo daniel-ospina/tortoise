@@ -18,7 +18,7 @@
 # every 10 minutes:
 #   - macOS  -> a launchd LaunchAgent (StartInterval 600)
 #   - Linux  -> a cron entry (*/10 * * * *)
-# The reaper's singleton lock (<tempdir>/.tortoise/.reaper.lock, fcntl;
+# The reaper's singleton lock (<tempdir>/.tortoise-reaper-<uid>/.reaper.lock, fcntl;
 # tempdir-scoped since #1658 — NOT ~/.tortoise) makes concurrent runs safe,
 # so the periodic run can overlap a suite-end sweep.
 # --only-safe is the concurrency-safe mode: it kills only orphan-CONFIRMED
