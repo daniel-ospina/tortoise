@@ -114,6 +114,44 @@ def _src(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _strip_comments(source: str) -> str:
+    """Remove TS/JS comments WITHOUT eating string content.
+
+    A `//` inside a literal is not a comment start — a URL (`https://…`) is the
+    everyday case — and stripping comments regex-first truncated the literal and
+    hid everything after it, including a reply promise appended to a
+    visitor-facing message (cycle-9 review, fail-open). So quoted spans are
+    copied verbatim and only real comments are dropped: line comments, block
+    comments, and backtick templates.
+    """
+    out: list[str] = []
+    i, n = 0, len(source)
+    while i < n:
+        ch = source[i]
+        if ch in "\"'`":
+            j = i + 1
+            while j < n:
+                if source[j] == "\\":
+                    j += 2
+                    continue
+                if source[j] == ch:
+                    j += 1
+                    break
+                j += 1
+            out.append(source[i:j])
+            i = j
+        elif source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        elif source.startswith("//", i):
+            end = source.find("\n", i)
+            i = n if end == -1 else end
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 # ── 1. Recipient is a constant, and it is the decided address ──────────────
 
 
@@ -226,8 +264,7 @@ def test_no_email_provider_or_send_capable_credential_in_the_form_path() -> None
         # submits an item and nothing else — send-capable provider headers stay
         # forbidden. Checked on COMMENT-STRIPPED code: a comment cannot travel,
         # so a note documenting the rule must not red the suite (cycle-6 review).
-        code_only = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-        code_only = re.sub(r"//[^\n]*", "", code_only)
+        code_only = _strip_comments(src)
         assert "Bearer" not in code_only, f"{path.name} constructs a bearer header"
         assert "Authorization" not in code_only, f"{path.name} sets an authorization header"
 
@@ -355,8 +392,7 @@ def test_the_confirmation_promises_no_reply() -> None:
     # handler (cycle-3), and a CONCATENATED promise (`"…received your message." +
     # " We'll reach out shortly."`), whose second half an anchored scan never reads
     # (cycle-3).
-    code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    code = re.sub(r"//[^\n]*", "", code)
+    code = _strip_comments(src)
     literals = re.findall(
         r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`', code, re.S
     )
@@ -391,8 +427,7 @@ def test_the_confirmation_promises_no_reply() -> None:
     # `// show(msg, data.message || "Thanks — your message is on its way.")`
     # satisfied both of them while the live branch showed something else
     # (cycle-8 review).
-    script_code = re.sub(r"/\*.*?\*/", "", script, flags=re.S)
-    script_code = re.sub(r"//[^\n]*", "", script_code)
+    script_code = _strip_comments(script)
     assert re.search(r"show\(\s*msg\s*,\s*data\.message\s*\|\|", script_code), (
         "the success branch must display the server's message (`data.message`)"
     )
@@ -568,11 +603,11 @@ def test_rate_limit_map_is_bounded() -> None:
     """
     src = _src(FUNCTION_TS)
     assert "MAX_RATE_KEYS" in src
-    # Strip BOTH comment forms FIRST — every assertion below reads `code`, because a
-    # comment can otherwise satisfy any token test: it did for the eviction loop
-    # (cycles 2/4) and for the cap VALUE itself (cycle-8 review).
-    code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    code = re.sub(r"//[^\n]*", "", code)
+    # Strip comments FIRST, with the scanner that leaves string content intact:
+    # every assertion below reads `code`, because a comment can otherwise satisfy
+    # any token test — it did for the eviction loop (cycles 2/4) and for the cap
+    # VALUE itself (cycle-8 review).
+    code = _strip_comments(src)
     # The cap VALUE matters too: a 1000x bump bounds nothing in practice, and the
     # token assertions below would all still hold (cycle-4 review, honourable
     # mention).
@@ -634,7 +669,7 @@ def test_rate_limit_map_is_bounded() -> None:
     assert not re.search(r"\b(?:if|while|for)\b", loop_stmt), (
         f"the eviction loop must not be the braceless body of another branch: {loop_stmt.strip()[:80]!r}"
     )
-    cap = code[guard_at:code.index("return false;")]
+    cap = code[guard_at : code.index("return false;", guard_at)]
     # Bind the initializer to the cap AND make it the only assignment: `excess = 0;`
     # after a correct `let excess = …` breaks out immediately, leaving the map
     # unbounded under live keys, while every token still appears (cycle-3 review).
