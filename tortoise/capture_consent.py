@@ -26,8 +26,9 @@ Consumers:
     tests/test_session_capture_e2e.py** (the truthy/falsy matrix); the CLI-side
     gate is covered by tests/test_capture_consent.py.
 
-The truthy set mirrors the existing in-repo convention
-(`tortoise/why.py::w4_enrichment_enabled`) — default OFF, presence-gated.
+The truthy vocabulary is NOT declared here: it delegates to the tree's single
+declared contract, `tortoise/env_truthy.py` (#4097), so this module cannot drift
+from it. Default OFF, presence-gated.
 """
 from __future__ import annotations
 
@@ -35,14 +36,14 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from tortoise.env_truthy import TRUTHY
+
 #: The opt-in variable. Deliberately a *capture* name — never a credential
 #: (`*_KEY`/`*_TOKEN`) name, so the two concepts cannot be confused.
 #: (Ambient `TORTOISE_CAPTURE_*` names exist for server-side capture tuning —
 #: `TORTOISE_CAPTURE_WORKERS` / `TORTOISE_CAPTURE_IN_FLIGHT` — the bare name is
 #: the consent switch.)
 CAPTURE_OPT_IN_ENV = "TORTOISE_CAPTURE"
-
-_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
 #: The whitespace trimmed before the truthy comparison. Deliberately the ASCII
 #: POSIX set (space/tab/CR/LF/VT/FF) and NOT `str.strip()`'s full `isspace()`
@@ -76,7 +77,7 @@ def capture_consent_enabled(env: Mapping[str, str] | None = None) -> bool:
     Default OFF: unset, empty, whitespace, or any unrecognised value is False.
     """
     source = os.environ if env is None else env
-    return str(source.get(CAPTURE_OPT_IN_ENV, "")).strip(_ASCII_WS).lower() in _TRUTHY
+    return str(source.get(CAPTURE_OPT_IN_ENV, "")).strip(_ASCII_WS).lower() in TRUTHY
 
 
 def capture_notice_path(home: Path | str | None = None) -> Path:
