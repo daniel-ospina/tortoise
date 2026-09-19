@@ -445,14 +445,26 @@ def _capture_turn_window(conversation: list[dict], cap: int = 5000) -> list[dict
     return out
 
 
+#: #4194: the capture turn-embed model-load bound. A capture must not stall on
+#: a cold ~57 s bge-small load the way it never did before #4194 — the keyless
+#: and replay lanes used to touch no embedder at all. A cold/unavailable model
+#: fails soft to `None` per turn and a later capture (after the engine-init
+#: warm-up, #2952) embeds; hosted pre-warms at container start. Deliberately
+#: shorter than the embedder's own default (its `_LOAD_TIMEOUT_S`), which the
+#: read path keeps.
+_CAPTURE_TURN_EMBED_LOAD_TIMEOUT_S = 10.0
+
+
 def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     """The exact stored turn text (``[role] <content>``) for each windowed turn.
 
     One definition shared by the turn-store write and the turn-embedding batch
-    (#4194) — the vector is computed over the SAME string the node stores, so a
-    dense (vector) hit can never resolve to a turn whose content differs from
-    what was encoded. Coercion is the loop's own (isinstance-first: None -> "",
-    truthy non-strings -> ``str()``, #721); the ``[:5000]`` is the idempotent
+    (#4194) — the vector is computed over the string the node stores (the
+    embedder applies its own 512-word cap; model/dimension/normalisation are
+    shared with the read path, the cap is write-side), so a dense (vector) hit
+    can never resolve to a turn whose stored content differs from what was
+    encoded. Coercion is the loop's own (isinstance-first: None -> "", truthy
+    non-strings -> ``str()``, #721); the ``[:5000]`` is the idempotent
     re-application of ``_capture_turn_window``'s cap (#1532 D1).
     """
     texts: list[str] = []
@@ -477,20 +489,77 @@ def _capture_turn_embeddings(turn_texts: list[str]) -> list[list[float] | None]:
     ⛔ The stored vector MUST match the query encoder in MODEL, DIMENSION and
     NORMALISATION. A mismatched vector still "runs" and returns garbage, which
     is worse than the previous honest zero. So this calls the same shared
-    ``compute_embeddings`` (same ``EmbeddingModel`` singleton, same truncation,
-    same un-normalised output) that ``compute_embedding`` delegates to — never
-    the TF-IDF ``_encode`` fallback, whose dimensionality is a vocabulary size
-    and would corrupt the dense leg silently.
+    ``compute_embeddings`` (same ``EmbeddingModel`` singleton, same
+    un-normalised output, dimension ENFORCED to :data:`EMBEDDING_DIM`) that
+    ``compute_embedding`` delegates to — never the TF-IDF ``_encode`` fallback,
+    whose dimensionality is a vocabulary size and would corrupt the dense leg
+    silently. The 512-word cap is WRITE-side (``_truncate_for_embedding``); the
+    read path encodes its query whole — model/dimension/normalisation are the
+    shared contract, the cap is not.
 
-    Fail-soft: when no embedder is available the turns are still stored — each
-    entry is ``None`` and the read path's own leg declaration reports the vector
-    leg as not-run/impaired (#3892 keyless posture).
+    ``load_timeout`` bounds the model load: a capture must not stall on a cold
+    ~57 s embedder the way it never did before #4194 (the keyless and replay
+    lanes used to touch no embedder at all). A cold/unavailable model fails
+    soft to ``None`` per turn; a later capture (after the engine-init warm-up)
+    embeds then. Hosted pre-warms the model at container start.
     """
     try:
         from .embeddings import compute_embeddings
-        return compute_embeddings(turn_texts)
+        return compute_embeddings(
+            turn_texts,
+            load_timeout=_CAPTURE_TURN_EMBED_LOAD_TIMEOUT_S)
     except Exception:  # noqa: BLE001, RUF100 — embedding is optional
         return [None] * len(turn_texts)
+
+
+def _existing_turn_state(proj, turn_ids: list[str]) -> dict[str, tuple]:
+    """id -> (stored content_hash, has_embedding) for the deterministic turn ids.
+
+    #4194: read BEFORE the turn MERGE so the write can tell a re-capture of
+    UNCHANGED content (safe to preserve a stored vector) from a re-capture of
+    CHANGED content (a preserved vector would rank the turn by text no longer
+    on the node — the dense-leg lie). An unreadable probe returns ``{}``, which
+    degrades to "no prior state" (vectors are then re-encoded, never reused).
+    """
+    if not turn_ids:
+        return {}
+    try:
+        rows = proj.g.query(
+            "MATCH (t:Point) WHERE t.id IN $ids "
+            "RETURN t.id, t.content_hash, t.embedding IS NOT NULL",
+            params={"ids": turn_ids}).result_set
+        return {r[0]: (r[1], bool(r[2])) for r in rows}
+    except Exception:  # noqa: BLE001, RUF100 — a probe failure must not
+        # drop the capture; it only costs a needless re-encode.
+        return {}
+
+
+def _capture_turn_embedding_plan(proj, session_id: str,
+                                 turn_texts: list[str]) -> tuple[list, list]:
+    """Per-turn (prior_hash, embedding) for the turn-write loop (#4194).
+
+    Encodes ONLY the turns that need it — new, content-changed, or previously
+    stored without a vector. An unchanged turn that already carries a vector is
+    left to the write's preserve branch, so an idempotent re-capture/replay
+    does not pay a model call or churn the vector index. Returns
+    ``(prior_hashes, embeddings)``, both aligned to ``turn_texts``.
+    """
+    turn_ids = [f"{session_id}_t{i}" for i in range(len(turn_texts))]
+    prior = _existing_turn_state(proj, turn_ids)
+    hashes = [_content_hash(t) for t in turn_texts]
+    need = [
+        i for i, tid in enumerate(turn_ids)
+        if tid not in prior or prior[tid][0] != hashes[i] or not prior[tid][1]
+    ]
+    encoded = _capture_turn_embeddings([turn_texts[i] for i in need])
+    embeddings: list = [None] * len(turn_texts)
+    for j, i in enumerate(need):
+        # ``_capture_turn_embeddings`` is length-invariant, but guard anyway:
+        # a short result must degrade that turn, never IndexError a capture.
+        embeddings[i] = encoded[j] if j < len(encoded) else None
+    prior_hashes: list = [prior[tid][0] if tid in prior else None
+                          for tid in turn_ids]
+    return prior_hashes, embeddings
 
 
 # #1352: minimal stopword set for the cheap session-Source topic derivation —
@@ -3373,16 +3442,19 @@ class TortoiseSDK:
         # stay identical, or the fixtures teach a shape capture no longer
         # produces (#3910). #3551 tracks collapsing all three onto one
         # shared primitive.
-        # #4194: embed the whole window in ONE local-model call BEFORE the
-        # loop — the stored text of each turn, exactly as the loop writes it.
-        # Batched so the added work on this already-hot synchronous path
+        # #4194: embed the window BEFORE the loop — only the turns that need
+        # it (new / content-changed / no stored vector), in ONE local-model
+        # call. Batched so the added work on this already-hot synchronous path
         # (#3086 measures ~4.75 s for a 500-turn capture) is one model call
-        # rather than one per turn. The vector is the same one `create_point`
-        # stores, from the same embedder the read path encodes a query with.
-        # Fail-soft: `None` per turn when no embedder is available — the turn
-        # is still stored and the read path declares its vector leg impaired.
+        # rather than one per turn, and an idempotent re-capture pays neither a
+        # model call nor a vector-index write. The vector is the same one
+        # `create_point` stores, from the same embedder the read path encodes a
+        # query with. Fail-soft: `None` per turn when no embedder is available
+        # — the turn is still stored and the read path declares its vector leg
+        # impaired.
         _turn_texts = _capture_turn_texts(windowed)
-        _turn_embs = _capture_turn_embeddings(_turn_texts)
+        _turn_prior_hashes, _turn_embs = _capture_turn_embedding_plan(
+            proj, session_id, _turn_texts)
         for i, turn in enumerate(windowed):
             # #721: _normalize_turn_role is the isinstance-first pattern — an
             # `or "unknown"` fallback only fixes falsy roles, but TRUTHY
@@ -3400,6 +3472,7 @@ class TortoiseSDK:
             # live in that one helper.
             turn_text = _turn_texts[i]
             turn_embedding = _turn_embs[i]
+            turn_prior_hash = _turn_prior_hashes[i]
 
             # Episodic turn point — deterministic id, structured speaker tag
             # (delta 5), content hash, session-scoped (never conflated across
@@ -3413,17 +3486,20 @@ class TortoiseSDK:
                 "    t.status=coalesce(t.status, $s), "
                 "    t.createdAt=coalesce(t.createdAt, $now), "
                 "    t.updatedAt=$now, t.content_hash=$ch, "
-                # #4194: CASE-guarded so a RE-capture without an embedder
-                # preserves an already-stored vector instead of nulling it
-                # (`vecf32(null)` would REMOVE the property). The same guard
-                # `_upsert_point_props` uses, so live == rebuild.
-                "    t.embedding=CASE WHEN $emb IS NOT NULL "
-                "        THEN vecf32($emb) ELSE t.embedding END "
+                # #4194: three-way guard. New vector if we encoded one; else
+                # PRESERVE the stored vector only when the content is UNCHANGED
+                # (`$prior_ch = $ch`, read pre-write — never `t.content_hash`,
+                # which this same SET reassigns); else CLEAR it, because a
+                # preserved vector for changed text would rank the turn by text
+                # no longer on the node (the dense-leg lie).
+                "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
+                "        WHEN $prior_ch = $ch THEN t.embedding ELSE NULL END "
                 "RETURN t.createdAt AS createdAt, t.status AS status",
                 params={"id": turn_id, "c": turn_text, "k": "event",
                         "speaker": role, "s": "draft", "now": now,
                         "ch": _content_hash(turn_text),
-                        "emb": turn_embedding},
+                        "emb": turn_embedding,
+                        "prior_ch": turn_prior_hash},
             ).result_set
             # #3947 review (F4 + parity): the write's COALESCE decides what the
             # graph holds — a RE-capture keeps the ORIGINAL createdAt AND the
