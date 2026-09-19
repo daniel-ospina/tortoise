@@ -150,9 +150,20 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
             except Exception:  # per-record isolation — never fail the census
                 unclassified += 1
         stale_dirs = []
+        census_truncated = False
         if deep:
-            from tortoise.embedded_reaper import _find_socket_dirs, _registry_for
-            for d in _find_socket_dirs(__import__("tempfile").gettempdir()):
+            import time as _time
+
+            from tortoise.embedded_reaper import (
+                SOCKET_WALK_TIMEOUT,
+                _registry_for,
+                _scan_socket_dirs,
+            )
+            scan = _scan_socket_dirs(
+                __import__("tempfile").gettempdir(), full_scan=True,
+                deadline=_time.monotonic() + SOCKET_WALK_TIMEOUT)
+            census_truncated = not scan.complete
+            for d in scan.dirs:
                 try:
                     reg = _registry_for(d)
                     if reg is None:
@@ -173,6 +184,10 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
         "unclassified": unclassified,
         "stale_socket_dirs": len(stale_dirs),
         "stale_socket_dir_sample": stale_dirs[:10],
+        # #4068: --deep is a detect-only full scan; if its bounded deadline
+        # expired the counts are a PARTIAL view, and a census must never
+        # report a truncated scan as a complete one.
+        "census_truncated": census_truncated,
     }
 
 
@@ -186,8 +201,10 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"Exit 1 when the orphan count exceeds this "
                              f"(default {DEFAULT_MAX_ORPHANS})")
     parser.add_argument("--deep", action="store_true",
-                        help="Also run the reaper's time-budgeted tempdir "
-                             "stale-socket walk (bounded, but not free)")
+                        help="Also run an unscoped, time-budgeted tempdir "
+                             "stale-socket scan (detect-only; bounded, but "
+                             "not free). A truncated scan is reported as "
+                             "census_truncated and warns on stderr")
     parser.add_argument("--jobs", type=int, default=8,
                         help="Reserved for parity with the reaper (default 8)")
     args = parser.parse_args(argv)
@@ -200,6 +217,13 @@ def main(argv: list[str] | None = None) -> int:
 
     result["max_orphans"] = args.max_orphans
     result["within_budget"] = result["orphans"] <= args.max_orphans
+    if result.get("census_truncated", False):
+        # Warn, do not change the exit contract: a truncated --deep scan is
+        # a partial view, not an inconclusive census ("stale_socket_dirs"
+        # never feeds within_budget/inconclusive).
+        print("embedded_orphans: WARNING — the --deep tempdir scan hit its "
+              "budget and returned a PARTIAL view; stale_socket_dirs is a "
+              "lower bound", file=sys.stderr)
     # A census whose every server was unclassifiable learned nothing about
     # the invariant — reporting exit 0 there is the fail-open this tool
     # exists to prevent (#3599 review).

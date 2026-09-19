@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Reaper pass-2 discovery is scoped and in-process (#4068)
+
+`discover()`'s stale-socket pass used to shell out to
+`find $TMPDIR -maxdepth 2 ( -name redis.socket -o -name redis.pid )` — on a
+churned dev-box tempdir that is ~230k stats and 10–25 s of metadata I/O per
+census, and it exceeded its own `SOCKET_WALK_TIMEOUT` and then returned `[]`
+silently. It is now a depth-1 `os.scandir` scoped to the ephemeral namespace,
+with a monotonic deadline.
+
+- **Scoped, and lossless for actionable records.** For a depth-1 entry
+  `_is_ephemeral_dir(dir, tmpdir)` is exactly
+  `basename.startswith(EPHEMERAL_PREFIXES)` — the predicate every destruction
+  path (kill-path cleanup, stale-dir Guard 1, quarantine) already requires —
+  so narrowing discovery loses no record the reaper can act on. Measured
+  10.6 s → 0.44 s (~24×) on the reported box.
+- **No `find` subprocess, and no silent `[]`.** `_iter_candidate_dirs` tests
+  `entry.name` before any stat, skips symlinked entries (parity with `find`
+  without `-L`), and on budget expiry/`OSError` logs a `WARNING` and returns
+  the PARTIAL set. `discover()`/`_run_sweep()` return a `_ScanAwareList`
+  (a `list` subclass) whose `.complete` flag is surfaced as `SCAN TRUNCATED`
+  in the sweep summary.
+- **`--full-scan` is operator-only and detect-only.** It broadens ENUMERATION
+  to every depth-1 entry (`TORTOISE_REAPER_FULL_SCAN` env; `[1,true,yes,on]`)
+  and adds no reaping capability. The scheduled launchd/cron sweep stays
+  scoped. `tools/embedded_orphans.py --deep` requests it and reports
+  `census_truncated`.
+- **`_sweep_quarantine_dirs`** uses the same primitive (its removal path
+  stays ephemeral-scoped), removing the second `find` and its timeout.
+
+
 ### Tenancy rename — the tenant is an organization, not a "team" (#3543)
 
 The tenant identifier is now `org` across the surfaces this slice owns. Renamed

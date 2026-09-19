@@ -62,6 +62,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,17 @@ OWNERS_DIRNAME = ".tortoise-owners"
 # same-suffix foreign dir (another tool's temp naming, a planted decoy) is
 # never touched.
 REAPER_OWNED_MARKER = ".reaper-owned"
+# #4068: the marker filenames that identify a dir carrying a redislite
+# server. Declared once so discovery and classification share one contract.
+SOCKET_MARKER = "redis.socket"
+PIDFILE_MARKER = "redis.pid"
+# NOTE (#4068): deliberately a STRICTER predicate than EPHEMERAL_PREFIXES.
+# This one is a name-SHAPE allowlist consumed by the classifier in the
+# no-registry / old-format branches, where a `redislite_*`/`tmp*` dir
+# OUTSIDE the tempdir must still read as auto-generated — the containment
+# check (_is_ephemeral_dir) cannot reach such a dir. DISCOVERY must not use
+# it: discovery is depth-1 and uses EPHEMERAL_PREFIXES, which is exactly
+# the predicate every destruction path requires there.
 _AUTOGEN_DIRNAME = re.compile(r"^(redislite_|tmp)[a-zA-Z0-9_]+$")
 
 # Ephemeral tmp-tree prefixes (under the system tempdir) that test code
@@ -158,10 +170,13 @@ ZERO_CLIENT_STATE_MAX_AGE = 7 * 86400.0
 ZERO_CLIENT_STATE_PATH = os.path.join(
     os.path.expanduser("~"), ".tortoise", "reaper-zero-client.json")
 
-# #1642 FIX 2 (#1449): time budget for the C-speed `find` socket-dir walk.
-# The walk no longer depends on the tempdir's total entry count (pollution
-# disabled cleanup — chicken-and-egg); the budget is the backstop against a
-# pathological tree, never an entry-count gate.
+# #1642 FIX 2 (#1449): time budget for the socket-dir walk. The walk is a
+# backstop, never a gate on the tempdir's entry count (pollution disabled
+# cleanup — chicken-and-egg).
+# #4068: the walk is now an IN-PROCESS `os.scandir` depth-1 enumeration, so
+# this is a monotonic DEADLINE (like reap()/_run_sweep) rather than a
+# `find` subprocess timeout — and it is sampled every iteration, so expiry
+# is always a loud WARNING + a partial result, never a silent [].
 SOCKET_WALK_TIMEOUT = 20.0
 
 
@@ -1000,20 +1015,25 @@ def _socket_dir_from_cmdline(pid: int) -> str | None:
     return None
 
 
-def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:
+def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
+             full_scan: bool = False) -> list[dict]:
     """Scan for redislite orphans; return classified records.
 
     Two passes (issue #1005 perf — the tempdir accumulates tens of thousands
     of stale dirs, making a full walk minutes-long under load):
       1. Live servers via pgrep + cmdline unixsocket extraction — O(servers).
-      2. Socket-bearing dirs via a time-budgeted `find` walk — O(socket
-         dirs) classification cost, independent of the tempdir's total
-         entry count (#1642 FIX 2: pollution no longer disables cleanup).
+      2. Socket-bearing dirs via a depth-1 `os.scandir` scoped to the
+         ephemeral namespace — independent of the tempdir's total entry
+         count (#1642 FIX 2: pollution no longer disables cleanup; #4068:
+         no `find` subprocess, no depth-2 lstat storm).
+
+    The returned list is a `_ScanAwareList` (still a `list`) whose
+    `.complete` flag is False when the bounded scan returned a partial set
+    — a truncated scan is never reported as a finished one.
 
     jobs>1 parallelizes per-dir classification. Fail-closed semantics are
     per-record and unchanged under parallelism.
     """
-    results = []  # noqa: F841
     tmpdir = _real_gettempdir()
 
     # Pass 1: live servers (authoritative pid comes from pgrep).
@@ -1024,23 +1044,27 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:
     global _PROC_INFO_CACHE
     _PROC_INFO_CACHE = _batch_process_info(live_pids)
     try:
-        return _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
-                                   max_tempdir_entries)
+        records, complete = _discover_from_live(
+            live_pids, jobs, tmpdir, seen_dirs, max_tempdir_entries,
+            full_scan=full_scan)
     finally:
         _PROC_INFO_CACHE = {}
+    out = _ScanAwareList(records)
+    out.complete = complete
+    return out
 
 
 def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
-                        max_tempdir_entries):
+                        max_tempdir_entries, full_scan: bool = False):
     """Classification half of discover() (separated so the proc-info cache
-    has a deterministic lifetime)."""
+    has a deterministic lifetime). Returns ``(records, scan_complete)``."""
     results = []
 
     def _classify_live(pid: int) -> dict | None:
         sock_dir = _socket_dir_from_cmdline(pid)
         if not sock_dir:
             return None
-        socket_path = os.path.join(sock_dir, "redis.socket")
+        socket_path = os.path.join(sock_dir, SOCKET_MARKER)
         # #1383: pass the pgrep pid as known_pid so a stale registry
         # pidfile can never misclassify a LIVE server as stale_socket.
         rec = _classify_dir(sock_dir, socket_path, known_pid=pid)
@@ -1064,16 +1088,20 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                 results.append(rec)
                 seen_dirs.add(os.path.dirname(rec["socket_path"]))
 
-    # Pass 2: tempdir stale-socket walk (stale sockets + synthetic dirs in
-    # tests). #1642 FIX 2 (#1449): the walk was previously SKIPPED wholesale
+    # Pass 2: tempdir stale-socket scan (stale sockets + synthetic dirs in
+    # tests). #1642 FIX 2 (#1449): the scan was previously SKIPPED wholesale
     # when the tempdir exceeded max_tempdir_entries (5000) — pollution
     # disabled the ONLY path that cleans killed-suite residue (chicken-and-
-    # egg). The walk now scans ONLY socket/pid-bearing dirs via a
-    # time-budgeted `find` subprocess (C-speed traversal; O(socket dirs)
-    # classification cost regardless of the total entry count), so a 32k-
-    # entry tempdir still converges. max_tempdir_entries is retained for API
-    # compatibility but no longer gates the walk.
-    socket_dirs = _find_socket_dirs(tmpdir)
+    # egg). #4068: it is now a depth-1 in-process `os.scandir` scoped to the
+    # ephemeral namespace (every destruction path requires exactly that
+    # predicate at depth 1), so a 32k-entry tempdir converges without
+    # lstat'ing the whole tree. `full_scan=True` broadens ENUMERATION only
+    # (detect-only). max_tempdir_entries is retained for API compatibility
+    # but no longer gates the walk.
+    scan = _scan_socket_dirs(
+        tmpdir, full_scan=full_scan,
+        deadline=time.monotonic() + SOCKET_WALK_TIMEOUT)
+    socket_dirs = scan.dirs
     dirs = []
     for d in socket_dirs:
         # #1383 plan-review P1: reaper-owned quarantine dirs (*.reaper-
@@ -1083,7 +1111,7 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
         if STALE_QUARANTINE_SUFFIX in os.path.basename(d):
             continue
         try:
-            socket_path = os.path.join(d, "redis.socket")
+            socket_path = os.path.join(d, SOCKET_MARKER)
             if not os.path.exists(socket_path):
                 continue
             if os.path.realpath(d) in seen_dirs:
@@ -1115,38 +1143,119 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                 continue
             if rec is not None:
                 results.append(rec)
-    return results
+    return results, scan.complete
 
 
-def _find_socket_dirs(tmpdir: str) -> list[str]:
+class _ScanResult(NamedTuple):
+    """A name-scoped scan's dirs plus whether it ran to completion."""
+
+    dirs: list[str]
+    complete: bool
+
+
+class _ScanAwareList(list):
+    """A list of records carrying the discovery scan's `complete` flag.
+
+    #4068: a `list` SUBCLASS, not a new return type — existing callers
+    (`len()`, iteration, `== []`, `isinstance(x, list)`) keep working
+    unchanged, while the sweep summary can report that a bounded scan
+    returned a partial set. Defaults to `False` (fail-closed): a
+    construction path that forgets to set it must not read as finished.
+    """
+
+    complete: bool = False
+
+
+def _always_match(name: str) -> bool:
+    """Detect-only discovery predicate (`--full-scan`)."""
+    return True
+
+
+def _ephemeral_name(name: str) -> bool:
+    """The depth-1 discovery predicate: the name half of `_is_ephemeral_dir`.
+
+    For a depth-1 entry the two are equivalent, which is why scoping
+    discovery to this loses no record any destruction path can act on.
+    """
+    return name.startswith(EPHEMERAL_PREFIXES)
+
+
+def _iter_candidate_dirs(tmpdir: str, *, predicate, deadline=None,
+                         ) -> _ScanResult:
+    """Depth-1 enumeration of tempdir entries whose NAME matches predicate.
+
+    #4068 — replaces the depth-2 `find` subprocess. The NAME test runs
+    FIRST, before `is_symlink()` and before any stat: a foreign entry costs
+    one readdir entry, never a metadata call (the old `find` lstats'd ~224k
+    entries and held a core for the life of the call). Only name-matching
+    entries are then tested for symlink-ness, and a symlinked entry is
+    SKIPPED — parity with `find` without `-L`, which does not descend a
+    symlinked dir. `deadline` is an ABSOLUTE monotonic cutoff (the
+    reap()/_run_sweep convention) sampled every iteration, so an
+    already-expired budget always yields `complete=False` + a WARNING.
+    """
+    dirs: list[str] = []
+    complete = True
+    try:
+        with os.scandir(tmpdir) as it:
+            for entry in it:
+                if deadline is not None and time.monotonic() >= deadline:
+                    complete = False
+                    logger.warning(
+                        "tempdir scan budget expired — returning partial "
+                        "name-scoped set (%d dirs so far)", len(dirs))
+                    break
+                if not predicate(entry.name):
+                    continue
+                if entry.is_symlink():
+                    continue
+                dirs.append(entry.path)
+    except OSError as exc:
+        logger.warning("tempdir scan failed for %s: %s", tmpdir, exc)
+        complete = False
+    return _ScanResult(dirs, complete)
+
+
+def _scan_socket_dirs(tmpdir: str, *, full_scan: bool = False,
+                      deadline: float | None = None) -> _ScanResult:
+    """Socket/pid-bearing dirs under ``tmpdir``, plus scan completeness.
+
+    #4068: scoped to the ephemeral namespace by default. That is provably
+    lossless for ACTIONABLE records: every destruction path requires
+    `_is_ephemeral_dir`, and for a depth-1 dir that is exactly
+    `basename.startswith(EPHEMERAL_PREFIXES)`. ``full_scan=True`` broadens
+    ENUMERATION only (detect-only — it can never widen a kill/rmtree); it
+    exists for the operator census (`tools/embedded_orphans.py --deep`) and
+    for dirs created outside the redislite `mkdtemp()` contract. The
+    return value carries ``complete`` so a truncated scan is visible rather
+    than reported as a finished one.
+    """
+    predicate = _always_match if full_scan else _ephemeral_name
+    res = _iter_candidate_dirs(tmpdir, predicate=predicate, deadline=deadline)
+    out: list[str] = []
+    for d in res.dirs:
+        try:
+            if os.path.exists(os.path.join(d, SOCKET_MARKER)) or \
+                    os.path.exists(os.path.join(d, PIDFILE_MARKER)):
+                out.append(d)
+        except OSError:
+            continue
+    return _ScanResult(sorted(out), res.complete)
+
+
+def _find_socket_dirs(tmpdir: str, *, full_scan: bool = False,
+                      deadline: float | None = None) -> list[str]:
     """Dirs directly under the tempdir that carry redis.socket/redis.pid.
 
-    #1642 FIX 2 (#1449): a C-speed `find` subprocess (time-budgeted) scans
-    for the socket/pid marker files — the stale-socket walk is no longer
-    gated on the tempdir's total entry count, so a 32k-entry polluted
-    tempdir still converges (the ONLY path that cleans killed-suite
-    residue previously skipped itself). Returns deduped dir paths, [] on
-    failure (fail closed — per-record classification still isolates
-    errors). Symlinked marker entries resolve to their dir (the classifier
-    realpaths before containment checks).
+    #1642 FIX 2 (#1449): a 32k-entry polluted tempdir still converges. The
+    walk is no longer gated on the tempdir's total entry count AND no
+    longer depends on coreutils `find` on the host (#4068). Returns dir
+    paths sorted; on scan failure or budget expiry it returns the PARTIAL
+    set and logs a WARNING (never a silent [] — per-record classification
+    still isolates errors).
     """
-    try:
-        out = subprocess.run(
-            # marker files live one level BELOW the tempdir root
-            # (T/<tmpXXXX>/redis.socket) -> maxdepth 2
-            ["find", tmpdir, "-maxdepth", "2", "(",
-             "-name", "redis.socket", "-o", "-name", "redis.pid", ")"],
-            capture_output=True, text=True, timeout=SOCKET_WALK_TIMEOUT,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        logger.warning("socket-dir walk failed/timeout for %s", tmpdir)
-        return []
-    dirs: set[str] = set()
-    for line in out.stdout.splitlines():
-        p = os.path.dirname(line)
-        if p and p != tmpdir:
-            dirs.add(p)
-    return sorted(dirs)
+    return _scan_socket_dirs(tmpdir, full_scan=full_scan,
+                             deadline=deadline).dirs
 
 
 def _classify_dir(dbdir: str, socket_path: str,
@@ -1693,7 +1802,7 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # pid is a recycled number, provably not the recorded server, so the
     # socket re-probe below remains the real gate).
     pid = None
-    pidfile = os.path.join(dbdir_real, "redis.pid")
+    pidfile = os.path.join(dbdir_real, PIDFILE_MARKER)
     try:
         pid = int(Path(pidfile).read_text().strip())
     except (OSError, ValueError):
@@ -1954,22 +2063,21 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
     the probe is authoritative) and remove only dead ones. Same budget
     CONSTANT as reap()'s stale branch but a SEPARATE counter — one sweep
     can remove up to 2xSTALE_SWEEP_BUDGET (plan-review cycle 2). Scanned
-    via the C-speed `find` walk (#1642 FIX 2 — no longer gated on the
-    tempdir entry count); symlinked entries are skipped (mirror discover
-    pass 2).
+    via the shared depth-1 `os.scandir` primitive (#4068, same primitive as
+    discover pass 2 — the scan is NOT namespace-scoped because a quarantine
+    rename preserves the dir's ephemeral name anyway, but the scan is
+    detect-only and every removal below is re-verified by
+    `_is_ephemeral_dir`); symlinked entries are skipped (mirror discover
+    pass 2). A truncated scan logs a WARNING and this pass converges on the
+    next sweep.
     """
     tmpdir = _real_gettempdir()
-    try:
-        out = subprocess.run(
-            ["find", tmpdir, "-maxdepth", "1", "-name",
-             f"*{STALE_QUARANTINE_SUFFIX}*"],
-            capture_output=True, text=True, timeout=SOCKET_WALK_TIMEOUT,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        logger.warning("quarantine find walk failed/timeout for %s", tmpdir)
-        return []
+    scan = _iter_candidate_dirs(
+        tmpdir,
+        predicate=lambda name: STALE_QUARANTINE_SUFFIX in name,
+        deadline=time.monotonic() + SOCKET_WALK_TIMEOUT)
     removed = []
-    for q in out.stdout.splitlines():
+    for q in scan.dirs:
         if len(removed) >= budget:
             break
         if os.path.islink(q) or not os.path.isdir(q):
@@ -1983,13 +2091,13 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
         if not _is_ephemeral_dir(os.path.realpath(q),
                                  os.path.realpath(tempfile.gettempdir())):
             continue  # containment re-verify (defense in depth)
-        qsock = os.path.join(q, "redis.socket")
+        qsock = os.path.join(q, SOCKET_MARKER)
         # Guard-8 equivalent (cycle-3 P1): a LIVE backlog-full server
         # answers ECONNREFUSED ('dead') — the moved pidfile is the
         # discriminator. A guard-8-preserved quarantine left by reap() in
         # the SAME sweep must never be rmtree'd here.
         try:
-            qpid = int(Path(os.path.join(q, "redis.pid")).read_text().strip())
+            qpid = int(Path(os.path.join(q, PIDFILE_MARKER)).read_text().strip())
         except (OSError, ValueError):
             qpid = None
         if qpid is not None and _pid_effectively_alive(qpid):
@@ -2033,7 +2141,8 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                jobs: int = 8, kill_pacing: float = KILL_PACING_DEFAULT,
                sweep_pid_files: bool = True,
                sigterm_timeout: float = 10.0,
-               deadline: float | None = None) -> list[dict]:
+               deadline: float | None = None,
+               full_scan: bool = False) -> list[dict]:
     """Discover + classify + reap; return acted-upon records.
 
     deadline: optional monotonic-clock cutoff threaded into reap() — a
@@ -2054,8 +2163,16 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     NOTE: the reaper singleton lock is held by main() (CLI); direct callers
     (tests, conftest session hygiene) run unlocked — pre-existing contract,
     unchanged by #1383.
+
+    #4068: `full_scan` is forwarded only when True, so the tests that
+    monkeypatch `discover` with a one-keyword `lambda jobs=1: [...]` seam
+    keep working; completeness is read with `getattr(..., True)` for the
+    same reason. The returned list is a `_ScanAwareList` carrying
+    `.complete` (False = the discovery scan returned a partial set).
     """
-    records = discover(jobs=jobs)
+    records = (discover(jobs=jobs, full_scan=True) if full_scan
+               else discover(jobs=jobs))
+    discovery_complete = getattr(records, "complete", True)
     # #1383: reapable classes are candidate (live orphan -> kill) and
     # stale_socket (dead-pid leftover dir -> guarded rmtree). Phase 1
     # resolves stale-pid records before any action.
@@ -2091,7 +2208,9 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                               "classification": "stale_pid_file"})
         except Exception as exc:  # never fail the sweep over pid hygiene
             logger.warning("index-pid sweep failed: %s", exc)
-    return acted
+    out = _ScanAwareList(acted)
+    out.complete = discovery_complete
+    return out
 
 
 def _zero_client_state_read() -> dict:
@@ -2416,12 +2535,21 @@ def main(argv: list[str] | None = None) -> int:
                              "scheduled-cron mode)")
     parser.add_argument("--json", action="store_true",
                         help="Machine-readable JSON output")
+    parser.add_argument("--full-scan", action="store_true",
+                        help="Broaden DISCOVERY to every depth-1 tempdir "
+                             "entry — DETECT-ONLY: it adds no reaping "
+                             "capability (every kill/rmtree still requires "
+                             "the ephemeral containment check). For the "
+                             "operator census; the scheduled sweep stays "
+                             "scoped. [env TORTOISE_REAPER_FULL_SCAN]")
     parser.add_argument("--timeout", type=str, default=None,
                         help=f"Sweep timeout in seconds (default "
                              f"{TIMEOUT_DEFAULT}; env TORTOISE_REAPER_TIMEOUT)")
     args = parser.parse_args(argv)
 
     timeout = _parse_timeout(args.timeout)
+    full_scan = args.full_scan or _env_truthy(
+        os.environ.get("TORTOISE_REAPER_FULL_SCAN"))
 
     # Singleton lock: second concurrent instance exits 0 with message.
     lock = _ReaperLock()
@@ -2440,7 +2568,8 @@ def main(argv: list[str] | None = None) -> int:
         acted = _run_sweep(dry_run=not args.no_dry_run,
                            batch_size=args.batch_size,
                            only_safe=args.only_safe,
-                           jobs=args.jobs)
+                           jobs=args.jobs,
+                           full_scan=full_scan)
         signal.alarm(0)
     finally:
         lock.release()
@@ -2462,9 +2591,25 @@ def main(argv: list[str] | None = None) -> int:
         killed = sum(1 for r in acted if r.get("classification") == "candidate")
         stale = sum(1 for r in acted if r.get("classification") in (
             "stale_socket", "stale_quarantine", "stale_pid_file"))
+        # #4068: a bounded scan that returned a partial set must never read
+        # as a finished sweep (the silent-[] failure class this change
+        # removes).
+        truncated = ("" if getattr(acted, "complete", True)
+                     else " — SCAN TRUNCATED (partial discovery)")
         print(f"[reaper] sweep complete: {len(acted)} acted "
-              f"({killed} killed, {stale} stale cleaned)")
+              f"({killed} killed, {stale} stale cleaned){truncated}")
     return 0
+
+
+def _env_truthy(raw: str | None) -> bool:
+    """Truthy env value: {1,true,yes,on}, case-insensitive.
+
+    #4068: `None` (unset) is False. Mirrors the repo's de-facto truthy
+    convention; the `--full-scan` flag takes precedence over the env var
+    (the `_parse_timeout` CLI > env > default shape).
+    """
+    return raw is not None and str(raw).strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def _lock_holder_pid() -> str:
