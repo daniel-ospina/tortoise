@@ -1093,6 +1093,43 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
 
+    def test_raw_body_match_survives_sanitisation(self):
+        # Cycle-7 regression. The sanitiser's whole-sequence rules accept a
+        # final byte in the Fe class `[@-Z\\-_]` and the CSI final byte
+        # `[@-~]`, both of which include WORD characters, so a stray sequence
+        # can MERGE a word boundary and DELETE a match that `origin/main`
+        # (which matches the RAW body) would find. Classification matches the
+        # raw body OR the de-sequenced text, which makes main's decision a
+        # SUBSET — sanitisation can only ADD matches. Each body below is a
+        # reverse divergence on the stripped-only predicate (raw matches, the
+        # de-sequenced text does NOT), so this pins the raw OR-leg as
+        # load-bearing AND proves the gate fails closed on it.
+        cp = _tool_module()
+        for body in (
+            "\x1bI'll take this",     # Fe escape deletes the leading 'I'
+            "I'll take\x1b_this",     # Fe escape merges the two-word arm
+            "claim\x1b[ing this",     # CSI introducer eats a letter
+            "will fix\x1b_this",      # Fe escape merges the two-word arm
+            "/claim\x1b_x",           # Fe escape merges the claim token
+            "working on\x1b_this",    # Fe escape merges the two-word arm
+        ):
+            with self.subTest(body=body):
+                stripped = cp._strip_control_sequences(body)
+                self.assertIsNotNone(cp._CLAIM_RE.search(body), body)
+                self.assertIsNone(
+                    cp._CLAIM_RE.search(stripped),
+                    f"premise: stripped must NOT match {stripped!r}")
+                self.assertIsNotNone(
+                    cp._CLAIM_RE.search(body)
+                    or cp._CLAIM_RE.search(stripped), body)
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("claim-style comment", out)
+
     def test_claim_hit_report_names_the_comment_id(self):
         # The REMEDY line tells the reader to open the comment that caused the
         # refusal, so the hit must be identified specifically — a bare author

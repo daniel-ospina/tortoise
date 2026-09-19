@@ -486,14 +486,19 @@ def _sanitize(text: str | None) -> str:
 
 # A whole ANSI escape SEQUENCE (its payload included), not just the ESC byte:
 # an OSC 52 clipboard overwrite is `ESC ] 52 ; c ; <payload> BEL`, and
-# stripping only the ESC/BEL leaves `<payload>` behind. Classification runs on
-# the de-sequenced text, which changes the match in BOTH directions versus
-# matching the raw body (`origin/main`): it RECOVERS a claim whose sequence sat
-# between separated words (`ta ESC king this` -> `taking this`, a body main
-# misses), and it can MERGE a word boundary and DROP a match main would find
-# (`I'll take ESC this` -> `I'll takethis`). A sequence spliced INSIDE a
-# two-word arm is not recovered (`on ESC it now` -> `onit now`) — and main
-# misses that raw body too.
+# stripping only the ESC/BEL leaves `<payload>` behind. Classification matches
+# the RAW body OR this de-sequenced text (see `scan_issue_surface`), because
+# de-sequencing CHANGES the match in BOTH directions versus matching the raw
+# body (`origin/main`): it RECOVERS a claim whose sequence sat between
+# separated words (`ta ESC king this` -> `taking this`, a body main misses),
+# but its whole-sequence rules accept a final byte in the Fe class
+# `[@-Z\\-_]` and the CSI final byte `[@-~]`, both of which include WORD
+# characters, so a stray sequence can MERGE a word boundary and DROP a match
+# main would find (`I'll take ESC this` -> `I'll takethis`; `ESC I'll take
+# this` -> `'ll take this`). Matching the raw body as well makes main's
+# decision a SUBSET of this predicate, so the sanitiser can only ADD matches
+# (fail closed) and can never remove one — a reverse divergence is impossible
+# by construction.
 _ESCAPE_RE = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC … BEL | ST
     r"|\x1b\[[0-?]*[ -/]*[@-~]"            # CSI …
@@ -930,9 +935,13 @@ def scan_issue_surface(
     for comment in issue_data.get("comments") or []:
         body = comment.get("body") or ""
         # Classification is `_CLAIM_RE` (origin/main's pattern), run on the
-        # de-sequenced text. A claim-shaped comment is a hit — no attribution,
-        # no tiers.
-        if not _CLAIM_RE.search(_strip_control_sequences(body)):
+        # RAW body OR the de-sequenced text. `origin/main` matches the raw
+        # body, which is a SUBSET of this predicate: de-sequencing can only
+        # ADD matches (`ta ESC king this`), never drop one (`I'll take ESC
+        # this`), so the gate cannot fail OPEN relative to main. A
+        # claim-shaped comment is a hit — no attribution, no tiers.
+        if not (_CLAIM_RE.search(body)
+                or _CLAIM_RE.search(_strip_control_sequences(body))):
             continue
         author = comment.get("author") or {}
         login = author.get("login") if isinstance(author, dict) else (
