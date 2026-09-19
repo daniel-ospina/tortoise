@@ -367,44 +367,168 @@ _STRUCTURAL = {
 }
 
 # Claim-shaped comments. This is a GATE, so BOTH failure directions are
-# defects and the corpus below is asserted in both: prose that must NOT hit
-# and genuine claims that MUST hit.
+# defects and the corpus is asserted in both: prose that must NOT force a
+# COLLISION, and genuine claims that must still be DETECTED.
 #
-# FALSE POSITIVE (the #3827 live bug): a lane's own long scoping /
-# research-verdict comment matched the old regex on "the config comment
-# claiming a carve_out", "was a claim about the hour", "a green on it would
-# be a vacuous certificate" and "A coverage claim must be stated PER ITEM" —
-# every one prose, none a claim. The old `\bclaim(?:ing)?\b` also matched the
-# ordinary English `"claiming that X"` the docstring said it excluded. Fixed
-# by requiring `claim` to take a deictic object (`this`/`it`/`#N`) and by NOT
-# matching third-person present (`"the PR claims it ..."`); bare mid-sentence
-# `on it` is prose and is only matched anchored.
+# WHY A BLOCKLIST FAILED (cycles 1-2). Each earlier round added a negative
+# alternation for the prose that had just tripped the gate ("taking this" →
+# exclude "into account"; "handling this" → exclude "kind of"; …). The next
+# verifier always produced another ordinary-English sentence sharing the same
+# words, because a blocklist of phrasings cannot separate "a lane is claiming
+# this issue" from "a sentence that merely contains those words". Cycle 3
+# replaces the blocklist with a POSITIVE grammar plus TIERS.
 #
-# FALSE NEGATIVE (the over-narrowing that followed): the fix had dropped
-# genuine claim forms the old regex caught (`"I'm on it"`, `"Handling this"`,
-# `"working on the fix"`, `"dispatching a lane for #N"`, `"will fix this"`,
-# `"assigned to …"`), so the gate stopped seeing real claims. They are
-# restored in an ANCHORED form below.
-_CLAIM_RE = re.compile(
+# POSITIVE GRAMMAR (STRONG). A comment is strong evidence of a claim only
+# when it carries a grammatical signal ordinary description does not. The
+# arms below (`_CLAIM_STRONG_RES`) are, in order:
+#   1. the explicit command `/claim`;
+#   2. an ASSIGNMENT that names the holder: `assigned to me` / `@user` /
+#      `lane W3` / `#N`;
+#   3. a FIRST-PERSON subject (`I`, `I'm`, `I am`, `I will`, `we`, `we are`)
+#      with an intent verb and a DEICTIC object (`this`/`it`/`#N`),
+#      clause-final — the speaker asserts they are the agent;
+#   4. first-person `I'm on it` / `I am on it` (here the intent phrase is
+#      the particle `on`, so it takes its own arm);
+#   5. a line-start imperative/gerund CLAIM marker (`Claiming this.`,
+#      `Taking this`, `Handling this`, `Working on this now`, `On it!`),
+#      clause-final — an imperative has no subject and ends its clause;
+#   6. a line-start bare modal (`will fix this`);
+#   7. `dispatching` a claim object (`this`/`it`/`#N`, or `a`/`the` + a
+#      claim-noun: `lane`/`sub-agent`/`workstream`/`session`).
+# Arms 3 and 5 end their pattern at the line end (`$`) after the object
+# (optionally plus one temporal adverb). That clause boundary is what
+# separates a claim from a description sharing the words: in "Taking this
+# into account", "Handling this kind of error" and "working on this revealed
+# a bug" the object is followed by more clause, so neither arm matches. The
+# assignment arm likewise excludes the deictic `assigned to this` — "another
+# session was assigned to this" describes; it does not assign.
+#
+# TIERS (WEAK). A regex cannot be certain, so `classify_claim` returns
+# `"strong"`, `"weak"`, or None. Only STRONG forces `VERDICT: COLLISION`.
+# Every other claim-shaped body — `working on`, `will fix`, `already fixing`,
+# `in progress`, `started this`, `taking this`/`handling this` mid-clause, and
+# any strong arm whose match lies inside double quotes — is WEAK: printed as
+# an advisory hit, never blocking on its own (`_CLAIM_WEAK_RE` is the broad
+# net that keeps an ambiguous form visible instead of silent).
+#
+# The corpus lives in tests/test_collision_preflight.py:
+#   * test_broad_prose_is_never_a_strong_claim asserts the 43 invented
+#     ordinary-English bodies are NOT strong;
+#   * test_every_genuine_claim_shape_is_still_strong asserts every unambiguous
+#     claim shape stays STRONG (and an ambiguous one is at least WEAK);
+#   * test_weak_claim_is_reported_but_not_a_collision asserts an ambiguous
+#     claim appears as a weak advisory while the verdict stays CLEAN;
+#   * test_second_party_claim_still_collides asserts end-to-end that every
+#     unambiguous claim by another party still blocks.
+_DEICTIC = r"(?:this|it|#\d+)"
+# Optional temporal adjunct a genuine claim may carry ("we will fix this
+# today"). Closed class, so it cannot swallow a following clause.
+_CLAIM_TAIL = r"(?:\s+(?:now|today|tonight|tomorrow|soon|next|first|immediately|right\s+away))?"
+_FIRST_PERSON = r"(?:i|we)(?:['’](?:m|ll|d|ve|re))?"
+_INTENT_VERB = (
+    r"(?:take|taking|handle|handling|fix|fixing|implement|implementing|"
+    r"work|working|pick|picking|own|owning|do|doing|claim|claiming)"
+)
+_CLAIM_STRONG_RES: tuple[re.Pattern[str], ...] = (
+    # 1. explicit command form.
+    re.compile(r"(?im)(?:^|\s)/claim\b"),
+    # 2. assignment naming the holder (NOT a bare `assigned to`, and not the
+    #    deictic `assigned to this` — "another session was assigned to this"
+    #    is descriptive; both live in the weak net instead).
+    re.compile(r"(?im)\bassigned\s+to\s+(?:me\b|@\S+|lane\s+\S+|#\d+)"),
+    # 3. first-person subject + intent verb + deictic object, clause-final.
+    re.compile(
+        r"(?im)\b" + _FIRST_PERSON
+        + r"\s+(?:(?:am|are|will|would|can|shall|'ll|'m|'re)\s+)?"
+        + _INTENT_VERB + r"\b\s+(?:"
+        + _DEICTIC
+        + r"|on\s+" + _DEICTIC
+        + r"|on\s+the\s+[^.!?\n]+?)"
+        + _CLAIM_TAIL + r"\s*[.!?]?\s*$"
+    ),
+    # 4. first-person "on it".
+    re.compile(
+        r"(?im)\b" + _FIRST_PERSON + r"\s+(?:(?:am|are)\s+)?on\s+it\b"
+    ),
+    # 5. line-start imperative/gerund claim marker, clause-final.
+    re.compile(
+        r"(?im)^\s*(?:claiming|taking|handling|working\s+on|on\s+it)\b"
+        r"\s*(?:" + _DEICTIC + r"|on\s+" + _DEICTIC + r")?"
+        + _CLAIM_TAIL + r"\s*[.!?]?\s*$"
+    ),
+    # 6. line-start bare modal claim.
+    re.compile(
+        r"(?im)^\s*will\s+(?:fix|implement|handle|take|do)\s+" + _DEICTIC + r"\b"
+    ),
+    # 7. `dispatching` a claim object (a claim-noun needs an article).
+    re.compile(
+        r"(?im)\bdispatch(?:ing)?\s+(?:this|it|#\d+|(?:a|the)\s+"
+        r"(?:lane|sub-?agent|workstream|session))\b"
+    ),
+)
+
+# The WEAK net: broad, claim-SHAPED phrases. A match here is an advisory, not
+# a collision. It deliberately over-matches (`working on`, `will fix`,
+# `assigned to`, `in progress`) because a false advisory is cheap and silence
+# is not — but nothing in this net can force `VERDICT: COLLISION`.
+_CLAIM_WEAK_RE = re.compile(
     r"(?im)(?:"
-    r"(?:^|\s)/claim\b|"
-    r"\bclaim(?:ing|ed)?\s+(?:this|it|#\d+)\b|"
-    r"\bi(?:'ll| will| am|'m|m)\s+(?:take|do|handle|fix|implement|work on|pick|own|get on|jump on)\b|"
-    r"\bworking on\b|"
-    r"\bwork(?:ing)?\s+this\b|"
-    r"\bi(?:'m| am)\s+on it\b|"
-    r"^\s*on it\b|"
-    r"\bpick(?:ed|ing)?\s+(?:this|it)\s+up\b|"
+    r"/claim\b|"
+    r"\bclaim(?:ing|ed|s)?\s+(?:this|it|#\d+)\b|"
     r"\btaking\s+(?:this|it)\b|"
     r"\bhandling\s+this\b|"
-    r"\bdispatch(?:ing)?\s+(?:(?:a|the)\s+)?(?:this|it|#\d+|lane|sub-?agent|workstream|session)\b|"
+    r"\bworking\s+on\b|"
+    r"\bwork(?:ing)?\s+this\b|"
+    r"\bon\s+it\b|"
+    r"\bpick(?:ed|ing)?\s+(?:this|it)\s+up\b|"
+    r"\bdispatch(?:ing)?\b|"
     r"\bstarted\s+(?:on\s+)?this\b|"
     r"\balready\s+(?:fixing|working|implementing)\b|"
     r"\bassigned\s+to\b|"
     r"\bwill\s+(?:fix|implement|handle|take|do)\b|"
-    r"\bin\s+progress\b"
+    r"\bin\s+progress\b|"
+    r"\b(?:i|we)(?:['’](?:m|ll|d|ve|re))?\s+"
+    r"(?:(?:am|are|will|would|can)\s+)?"
+    r"(?:take|handle|fix|implement|work|pick|own|do|claim)\b"
     r")"
 )
+
+# A same-line double-quoted span is REPORTED, not claimed: `She said "I'll
+# take this"` is a quotation, so any strong arm landing inside one is
+# downgraded to weak. Unpaired quotes leave no span, so such a match stays
+# strong (fail closed).
+_QUOTED_RE = re.compile(r'"[^"\n]*"')
+
+
+def _inside_quotes(body: str, start: int) -> bool:
+    """True when `start` falls inside a same-line double-quoted span."""
+    return any(m.start() < start < m.end() for m in _QUOTED_RE.finditer(body))
+
+
+def classify_claim(body: str) -> str | None:
+    """Tier a comment body: ``"strong"`` | ``"weak"`` | None.
+
+    STRONG is the only tier that forces ``VERDICT: COLLISION``. WEAK is
+    reported as an advisory and never blocks on its own. None is silence.
+    """
+    text = _strip_control_sequences(body)
+    for pattern in _CLAIM_STRONG_RES:
+        for match in pattern.finditer(text):
+            if not _inside_quotes(text, match.start()):
+                return "strong"
+    return "weak" if _CLAIM_WEAK_RE.search(text) else None
+
+
+def _claim_spans(body: str) -> list[tuple[int, int]]:
+    """Spans of every claim-shaped match, for marker-to-claim tie detection."""
+    text = _strip_control_sequences(body)
+    spans = {
+        (m.start(), m.end())
+        for pattern in _CLAIM_STRONG_RES
+        for m in pattern.finditer(text)
+    }
+    spans.update((m.start(), m.end()) for m in _CLAIM_WEAK_RE.finditer(text))
+    return sorted(spans)
 
 
 class SurfaceError(Exception):
@@ -505,6 +629,25 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 def _sanitize(text: str | None) -> str:
     """Strip terminal control characters from an untrusted string."""
     return _CONTROL_RE.sub("", text or "")
+
+
+# A whole ANSI escape SEQUENCE (its payload included), not just the ESC byte:
+# an OSC 52 clipboard overwrite is `ESC ] 52 ; c ; <payload> BEL`, and
+# stripping only the ESC/BEL leaves `<payload>` behind. Classification runs on
+# the de-sequenced text, so an escape sequence sitting between a claim's
+# object and its clause end cannot hide the claim (`I'll take this ESC… now`).
+_ESCAPE_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC … BEL | ST
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"            # CSI …
+    r"|\x1b[@-Z\\-_]"                      # Fe escape
+    r"|\x1b."                              # any other ESC + one char
+)
+
+
+def _strip_control_sequences(text: str | None) -> str:
+    """Remove whole ANSI escape sequences (payload included) plus any
+    remaining control character, for MATCHING. Display uses `_sanitize`."""
+    return _CONTROL_RE.sub("", _ESCAPE_RE.sub("", text or ""))
 
 
 def _one_line(text: str, limit: int = 200) -> str:
@@ -900,22 +1043,23 @@ def claim_attribution(body: str, login: str | None, identity: Identity) -> str:
         return "unknown"
     if login.strip().lower() != identity.login.strip().lower():
         return "other"
-    sessions, lanes = _identity_markers(body)
-    claim_spans = [(m.start(), m.end()) for m in _CLAIM_RE.finditer(body or "")]
+    clean = _strip_control_sequences(body)
+    sessions, lanes = _identity_markers(clean)
+    claim_spans = _claim_spans(clean)
     if identity.session_id:
         sid = identity.session_id.strip().lower()
         if sid in sessions and any(
             m.group(0).lower() == sid
-            and _marker_tied_to_claim(body, m.start(), m.end(), claim_spans)
-            for m in UUID_RE.finditer(body or "")
+            and _marker_tied_to_claim(clean, m.start(), m.end(), claim_spans)
+            for m in UUID_RE.finditer(clean)
         ):
             return "self"
     if identity.lane:
         lane = identity.lane.strip().upper()
         if lane in lanes and any(
             m.group(1).upper() == lane
-            and _marker_tied_to_claim(body, m.start(), m.end(), claim_spans)
-            for m in LANE_MARKER_RE.finditer(body or "")
+            and _marker_tied_to_claim(clean, m.start(), m.end(), claim_spans)
+            for m in LANE_MARKER_RE.finditer(clean)
         ):
             return "self"
     if sessions or lanes:
@@ -985,7 +1129,8 @@ def scan_issue_surface(
             )
     for comment in issue_data.get("comments") or []:
         body = comment.get("body") or ""
-        if not _CLAIM_RE.search(body):
+        tier = classify_claim(body)
+        if tier is None:
             continue
         author = comment.get("author") or {}
         login = author.get("login") if isinstance(author, dict) else (
@@ -998,16 +1143,24 @@ def scan_issue_surface(
                 f"(session/lane marker): {_one_line(body, 90)}"
             )
             continue
-        surface.add(
-            f"comment by {login or 'unknown'}",
-            f"claim-style comment ({who} attribution — not this lane): "
-            + _one_line(body, 90),
-            "strong",
-        )
+        if tier == "strong":
+            surface.add(
+                f"comment by {login or 'unknown'}",
+                f"claim-style comment ({who} attribution — not this lane): "
+                + _one_line(body, 90),
+                "strong",
+            )
+        else:
+            surface.add(
+                f"comment by {login or 'unknown'}",
+                f"weak/ambiguous claim-shaped comment ({who} attribution — "
+                "advisory only, does not block by itself): " + _one_line(body, 90),
+                "weak",
+            )
     if not surface.hits:
         state = issue_data.get("state")
         if state and state.upper() != "OPEN":
-            surface.note = f"issue state={state} (closed issues are warn-only, not a hit)"
+            surface.note = f"issue state={_sanitize(state)} (closed issues are warn-only, not a hit)"
 
 
 # ── target-repo resolution (#4027) ──────────────────────────────────────────
@@ -1467,8 +1620,10 @@ def format_report(
         lines.append("")
         lines.append("WEAK SIGNALS (non-blocking — prose is not work)")
         lines.append(
-            f"  {len(weak)} prose-only cross-reference(s) of #{issue}; no title / "
-            "branch / worktree / closing-reference match. These do NOT block."
+            f"  {len(weak)} non-blocking weak signal(s) (cross-reference prose "
+            f"and/or ambiguous claim-shaped prose) for #{issue}; no title / "
+            "branch / worktree / strong-claim / closing-reference match. These "
+            "do NOT block — read the `(weak)` hits above and verify manually."
         )
     if incomplete:
         lines.append("")
@@ -1509,8 +1664,8 @@ def format_report(
         return "\n".join(lines) + "\n", EXIT_INCOMPLETE
     if weak:
         lines.append(
-            f"NOTE: {len(weak)} weak prose signal(s) ignored (cross-reference prose "
-            "is not work; non-blocking)"
+            f"NOTE: {len(weak)} weak signal(s) ignored — cross-reference prose "
+            "and/or ambiguous claim-shaped prose is not work; non-blocking"
         )
     lines.append(
         f"VERDICT: CLEAN (exit {EXIT_CLEAN}) — {len(ordered)}/{len(ALL_SURFACES)} surfaces "
