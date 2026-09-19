@@ -455,8 +455,8 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
     GAP-B mapping: ``max_points := tier_limits(tier)["max_graph_nodes"]`` —
     the points quota counter counts graph nodes (see module docstring).
     ``max_sessions`` is written as **NULL (unlimited)** for every tier: the
-    flat 1000 was a recorded v1 decision that #4010 REOPENED and SUPERSEDED
-    (see the module comment in ``tortoise/quota.py``). Writing the NULL here
+    flat 1000 was an inherited code fallback, never a ratified cap (#4010 —
+    see the module comment in ``tortoise/quota.py``). Writing the NULL here
     also CLEARS any stored cap on the next tier change — the data half of the
     same fix (one-shot sweep: graph-scripts/clear_max_sessions_4010.py).
 
