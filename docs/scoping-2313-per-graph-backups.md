@@ -16,6 +16,8 @@ aboutObjects:
      Full verify gates (problem-verify / solution-verify) + parallel review run in the parent session on this artifact. -->
 # Scoping #2313 — Per-Graph Backup Coverage (fix the default-only sweep)
 
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
+
 > **Verdict: root-cause claim CONFIRMED on current main.** The backup sweep (hourly driver) enumerates **teams** and resolves **exactly one graph per team** (the default). Custom graphs (`kind='custom'`, namespaces `org_{tid}_{gid}`) are never enumerated by the sweep, so they have **no automated backup, no drift guard, no retention**. The C5 (#2114) graph-bound on-demand path is the *only* graph-aware backup path, and it still stores into the shared team-keyed pool. Evidence below.
 
 ## Confirmed Problem

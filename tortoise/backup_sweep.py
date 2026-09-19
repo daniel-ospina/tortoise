@@ -52,6 +52,7 @@ from .hosted_backup import (
     prune_backups,
     source_dialect,
 )
+from .retention import RESTORE_WINDOW_DAYS  # #4179 single window authority
 
 # #2562 (re-audit P3): the sweep/purge per-org acquisitions are TIMED too
 # — a stuck holder (a restore whose locked body wedged) must not block that
@@ -1386,7 +1387,9 @@ def run_backup_sweep(
 # auto-detected), ``db`` the data-plane FalkorDB handle (GRAPH.DELETE target),
 # ``storage`` the R2/artifact seam.
 
-_GRAPH_PURGE_GRACE_DAYS = 7  # the #2304 default recovery window
+# #4179: derived from the ONE authority (tortoise/retention.py) so the graph,
+# team, and user-account windows cannot drift — docs/retention-and-deletion.md.
+_GRAPH_PURGE_GRACE_DAYS = RESTORE_WINDOW_DAYS  # the #2304 recovery window
 
 logger = logging.getLogger(__name__)
 

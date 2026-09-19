@@ -2067,7 +2067,7 @@ function claimIntentInFlight() {
   const [editingGraphId, setEditingGraphId] = React.useState(null) // row in inline rename (null = none)
   const [editingGraphName, setEditingGraphName] = React.useState('')
   const graphRenameCancelRef = React.useRef(false) // Escape-in-edit suppresses the blur-save
-  // #2304 trash (delete = 7-day recovery window): rows + restore/inspect.
+  // #2304 trash (delete = 7-day recovery window; docs/retention-and-deletion.md): rows + restore/inspect.
   const [trash, setTrash] = React.useState([])
   const [trashStatus, setTrashStatus] = React.useState('closed') // closed|loading|ok|error
   const [confirmRestoreId, setConfirmRestoreId] = React.useState(null) // trash row awaiting restore confirm
