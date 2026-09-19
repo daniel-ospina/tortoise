@@ -237,6 +237,14 @@ SOURCE_PATTERNS = {
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
             "tortoise/reader.py", "tortoise/retrieval.py",
+            # #3849: the ask PIPELINE now lives here (moved out of
+            # tortoise/sdk.py, which is a shared module -> FULL matrix). It
+            # is the only home of run_ask_lane/run_ask_assembled, so an
+            # ask_lane-only change must select sdk — otherwise the lane's
+            # own suites (test_ask_sdk / test_assembly_sdk /
+            # test_ask_regression_llm / test_d3_session_identity) silently
+            # stop running (fallback to core ran NO ask tests).
+            "tortoise/ask_lane.py",
             # ask-lane shared vocabulary/gating: a PR touching ONLY these
             # must select sdk so test_ask_sdk.py (+ ask reader/calibration
             # pins) run — the old fallback to core ran NO ask tests.
@@ -244,7 +252,7 @@ SOURCE_PATTERNS = {
             # transport.py is dual-wired with api: its only direct unit test
             # is test_metering.py::test_selfhost_transport_exemption.
             "tortoise/schemas.py", "tortoise/transport.py",
-            # #2071: the spot-check tools are the product ask-lane QA — a
+            # #2071: the spot-check tools are the eval-lane ask QA — a
             # spot-check-only PR selects the sdk surface (its tests live
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
@@ -367,7 +375,7 @@ TOOL_CARVEOUTS = (
     "tools/embedder_probe.py",
     "tools/calibrate_thresholds.py",
     "tools/pair_label_runner.py",
-    # #2071: the product-lane QA spot-check tools (ask_spotcheck + the
+    # #2071: the eval-lane ask QA spot-check tools (ask_spotcheck + the
     # consistency/probe harnesses) use the eval judge and own the
     # test_ask_spotcheck_judge.py suite — a spot-check-only change must
     # select the sdk ask-lane surface, not drop to tier-1 smoke.

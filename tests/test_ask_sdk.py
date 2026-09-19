@@ -1,29 +1,28 @@
-"""Ask-lane SDK tests (#1987 Tasks 4-5) — annotate_ask_hits + TortoiseSDK.ask.
+"""Ask-lane eval-lane tests (#1987 Tasks 4-5) — annotate_ask_hits + run_ask_lane.
 
 Task 4 — ask-path-local hit annotation: session_date/speaker from the Event
 join + source-turn speaker, additive keys only, undated/null-join
 byte-identical, has_answer passthrough.
 
-Task 5 — the SDK answer surface: local-lane pipeline (validation FIRST,
+Task 5 — the eval-only ask lane (``tortoise/ask_lane.py``, #3849): local-lane
+pipeline (validation FIRST,
 exactly ONE model call incl. empty context — no pre-gate), 8k/40/32KiB caps,
 resolved question_date semantics, the per-namespace reader cache
-(tokens-race, key isolation, failed-build, lifecycle), hosted-mode _post_ask
-via a fake HTTP server (body+auth header; the pinned status mapping incl.
-code-less 429/402/422; client timeout), and both-not-either (search surfaces
-never invoke the reader).
+(tokens-race, key isolation, failed-build, lifecycle), and both-not-either
+(search surfaces
+never invoke the reader). The hosted-mode ``_post_ask`` client was removed
+with the REST surface (#3849).
 
 Runs on the docker lane (TORTOISE_DB_URI) — the #1987 test strategy's
 integration layer.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -31,12 +30,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.ask_spotcheck import merge_capture_session
+from tortoise.ask_lane import (
+    _reset_ask_reader_cache_for_tests,
+    run_ask_lane,
+)
 from tortoise.exceptions import (
-    AskInFlightLimit,
-    AskQuotaExceeded,
     AskReaderUnavailable,
-    AskRetrievalUnavailable,
-    AskTimeout,
     AskValidationError,
 )
 from tortoise.retrieval import estimate_tokens_ask
@@ -46,11 +45,7 @@ from tortoise.schemas import (
     CODE_INVALID_QUESTION_TYPE,
     CODE_QUESTION_TOO_LONG,
 )
-from tortoise.sdk import (
-    ASK_SDK_TIMEOUT_S,
-    TortoiseSDK,
-    _reset_ask_reader_cache_for_tests,
-)
+from tortoise.sdk import TortoiseSDK
 
 
 @pytest.fixture(autouse=True)
@@ -312,7 +307,7 @@ def test_annotate_dedup_key_order_pinning():
 # ── Task 5: local-lane ask pipeline ────────────────────────────────────────
 
 def _install_fake(sdk: TortoiseSDK, monkeypatch, reply="The gym schedule is Monday and Wednesday.", tokens_out=12) -> FakeReader:
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     fake = FakeReader(reply=reply, tokens_out=tokens_out)
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
     return fake
@@ -325,7 +320,7 @@ def test_local_lane_pipeline(monkeypatch):
          "eventId": "ev1", "session_date": "2026-08-01", "speaker": "user"},
     ])
     fake = _install_fake(sdk, monkeypatch)
-    result = sdk.ask("what is the gym schedule?", question_date="2026-08-29")
+    result = run_ask_lane(sdk, "what is the gym schedule?", question_date="2026-08-29")
     # the full 13-field shape
     assert set(result) == {"answer", "abstained", "question_type",
                            "question_date", "evidence", "context_tokens",
@@ -347,7 +342,7 @@ def test_cost_estimate_strong_rates_for_qwen_serving_reader(monkeypatch):
     ASK_METER_RATES_STRONG when the SERVING lane's wire id is a
     strong-family spec (``qwen/qwen3.8-max`` via ``_LockedReader.model``)
     — the strong lane never reports a deepseek-envelope estimate."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     from tortoise.metering import ASK_METER_RATES_STRONG, estimate_ask_cost_usd
     from tortoise.reader import system_prompt_for
 
@@ -361,7 +356,7 @@ def test_cost_estimate_strong_rates_for_qwen_serving_reader(monkeypatch):
     sdk = _new_sdk()
     fake = _StrongReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
-    result = sdk.ask("q")
+    result = run_ask_lane(sdk, "q")
     assert result["model"] == "qwen/qwen3.8-max"
     inp = (estimate_tokens_ask(system_prompt_for(result["question_type"]))
            + estimate_tokens_ask(result["evidence"]))
@@ -374,7 +369,7 @@ def test_cost_estimate_default_rates_for_deepseek_serving_reader(monkeypatch):
     lane — bare ``deepseek-v4-flash`` on deepseek-direct) keeps the deepseek
     envelope; the response cost_estimate_usd is unchanged for the default
     lane."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     from tortoise.metering import ASK_METER_RATES, estimate_ask_cost_usd
     from tortoise.reader import system_prompt_for
 
@@ -387,7 +382,7 @@ def test_cost_estimate_default_rates_for_deepseek_serving_reader(monkeypatch):
     sdk = _new_sdk()
     fake = _DeepSeekReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
-    result = sdk.ask("q")
+    result = run_ask_lane(sdk, "q")
     assert result["model"] == "deepseek-v4-flash"
     inp = (estimate_tokens_ask(system_prompt_for(result["question_type"]))
            + estimate_tokens_ask(result["evidence"]))
@@ -396,11 +391,11 @@ def test_cost_estimate_default_rates_for_deepseek_serving_reader(monkeypatch):
 
 
 def test_ask_record_path_uses_strong_rates(monkeypatch):
-    """#2069: the ask() metering RECORD call site (step 7 — the pinned
+    """#2069: the run_ask_lane() metering RECORD call site (step 7 — the pinned
     record path) meters the cost_usd at the SERVING lane's STRONG rates — a
     strong-lane query's cost_usd record never uses the deepseek envelope."""
+    import tortoise.ask_lane as sdk_mod
     import tortoise.metering as metering_mod
-    import tortoise.sdk as sdk_mod
     from tortoise.metering import (
         ASK_METER_RATES,
         ASK_METER_RATES_STRONG,
@@ -425,7 +420,7 @@ def test_ask_record_path_uses_strong_rates(monkeypatch):
     sdk = _new_sdk()
     fake = _StrongReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
-    sdk.ask("q", org_id="team-x")
+    run_ask_lane(sdk, "q", org_id="team-x")
     assert captured, "the record path must have run (explicit org_id)"
     expected = estimate_ask_cost_usd(
         captured["tokens_in"], captured["tokens_out"],
@@ -442,7 +437,7 @@ def test_local_lane_default_question_date_utc(monkeypatch):
     response); a non-UTC clock at a boundary time does not leak local date."""
     sdk = _new_sdk()
     _install_fake(sdk, monkeypatch)
-    result = sdk.ask("q")
+    result = run_ask_lane(sdk, "q")
     import re
     assert re.match(r"^\d{4}-\d{2}-\d{2}$", result["question_date"])
     assert result["evidence"].startswith(f"Current Date: {result['question_date']}")
@@ -453,7 +448,7 @@ def test_empty_context_single_call(monkeypatch):
     evidence present."""
     sdk = _new_sdk()
     fake = _install_fake(sdk, monkeypatch, reply="I do not know the answer.")
-    result = sdk.ask("something not in memory")
+    result = run_ask_lane(sdk, "something not in memory")
     assert fake.calls == 1
     assert result["abstained"] is True
     assert result["evidence"] is not None
@@ -469,10 +464,10 @@ def test_decoy_near_miss_exactly_one_call(monkeypatch):
     ])
     fake = _install_fake(sdk, monkeypatch, reply="I do not know.")
     # decoy: asks for a value that is a different attribute
-    r1 = sdk.ask("what is the bicycle's color?")
+    r1 = run_ask_lane(sdk, "what is the bicycle's color?")
     assert fake.calls == 1 and r1["abstained"] is True
     # near-miss: similar but different value present
-    r2 = sdk.ask("what is the car's color?")
+    r2 = run_ask_lane(sdk, "what is the car's color?")
     assert fake.calls == 2 and r2["abstained"] is True
 
 
@@ -498,11 +493,13 @@ def test_local_lane_validation_first_zero_calls(monkeypatch):
         ("a\x00b", {}, CODE_INVALID_QUESTION),
         ("\u200b", {}, CODE_INVALID_QUESTION),
         ("q", {"question_date": 20230101},
-         CODE_INVALID_QUESTION_DATE),  # non-str date → str()-coerced like the
-                                       # hosted AskRequest validator (P2)
+         CODE_INVALID_QUESTION_DATE),  # non-str date → str()-coerced by
+                                       # ask_lane._ask_validate (the removed
+                                       # hosted AskRequest validator behaved
+                                       # identically — P2)
     ]:
         with pytest.raises(AskValidationError) as ei:
-            sdk.ask(bad, **kw)
+            run_ask_lane(sdk, bad, **kw)
         assert ei.value.code == code, (bad, kw, ei.value.code)
     assert fake.calls == 0
     assert retrieved == []
@@ -511,9 +508,9 @@ def test_local_lane_validation_first_zero_calls(monkeypatch):
 def test_2000_char_boundary(monkeypatch):
     sdk = _new_sdk()
     fake = _install_fake(sdk, monkeypatch)
-    assert sdk.ask("x" * 2000)["answer"] == fake.reply  # passes
+    assert run_ask_lane(sdk, "x" * 2000)["answer"] == fake.reply  # passes
     with pytest.raises(AskValidationError):
-        sdk.ask("x" * 2001)
+        run_ask_lane(sdk, "x" * 2001)
 
 
 def test_oversized_hit_skip_and_caps(monkeypatch):
@@ -533,7 +530,7 @@ def test_oversized_hit_skip_and_caps(monkeypatch):
         "MERGE (e:Event {eventId: 'ev1'}) SET e.startedAt = '2026-08-01T10:00:00Z'",
     )
     fake = _install_fake(sdk, monkeypatch)
-    result = sdk.ask("office hours")
+    result = run_ask_lane(sdk, "office hours")
     assert len(result["evidence"].encode("utf-8")) <= 32768
     assert estimate_tokens_ask(result["evidence"]) <= 8000
     assert "\ufffd" not in result["evidence"]
@@ -544,7 +541,7 @@ def test_undated_hits(monkeypatch):
     sdk = _new_sdk()
     sdk.create_point("statement", "office hours are 9am")
     fake = _install_fake(sdk, monkeypatch)
-    result = sdk.ask("office hours?")
+    result = run_ask_lane(sdk, "office hours?")
     assert result["answer"] == fake.reply
     assert result["evidence"]
 
@@ -552,29 +549,29 @@ def test_undated_hits(monkeypatch):
 def test_question_type_passthrough_and_override(monkeypatch):
     sdk = _new_sdk()
     _install_fake(sdk, monkeypatch)
-    r = sdk.ask("how many days ago did we meet?")
+    r = run_ask_lane(sdk, "how many days ago did we meet?")
     assert r["question_type"] == "temporal-reasoning"
-    r2 = sdk.ask("how many days ago did we meet?",
+    r2 = run_ask_lane(sdk, "how many days ago did we meet?",
                  question_type="multi-session")
     assert r2["question_type"] == "multi-session"
 
 
 def test_reader_raise_maps_reader_unavailable(monkeypatch):
     sdk = _new_sdk()
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     class Boom(FakeReader):
         def complete(self, *, system, user):
             raise RuntimeError("provider down")
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: Boom())
     with pytest.raises(AskReaderUnavailable):
-        sdk.ask("q")
+        run_ask_lane(sdk, "q")
 
 
 def test_tokens_race_same_cached_instance(monkeypatch):
-    """2-3 concurrent ask() calls through ONE cached model instance → each
+    """2-3 concurrent run_ask_lane() calls through ONE cached model instance → each
     call's captured usage matches its own completion (the per-instance lock
     makes inner complete() + capture atomic)."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     sdk = _new_sdk()
     _seed_event_graph(sdk, [
         {"content": "the gym schedule is Monday", "eventId": "ev1",
@@ -608,7 +605,7 @@ def test_tokens_race_same_cached_instance(monkeypatch):
 
     def _ask(q):
         try:
-            results.append(sdk.ask(q))
+            results.append(run_ask_lane(sdk, q))
         except Exception as e:
             errors.append(e)
 
@@ -626,10 +623,11 @@ def test_tokens_race_same_cached_instance(monkeypatch):
 
 def test_cache_key_isolation():
     """Team A vs team B resolve to DIFFERENT cached model instances."""
+    from tortoise.ask_lane import _ask_reader_model
     sdk_a = TortoiseSDK(tempfile.mkdtemp() + "/a.db", namespace="team-a")
     sdk_b = TortoiseSDK(tempfile.mkdtemp() + "/b.db", namespace="team-b")
-    a = sdk_a._ask_reader_model()
-    b = sdk_b._ask_reader_model()
+    a = _ask_reader_model(sdk_a)
+    b = _ask_reader_model(sdk_b)
     assert a is not b
     sdk_a.close()
     sdk_b.close()
@@ -641,7 +639,7 @@ def test_failed_build_never_cached(monkeypatch):
     is ALSO popped on the failed build — it never lingers in the module
     dict (unbounded growth under sustained build failure across
     namespaces)."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     sdk = _new_sdk()
     state = {"fail": True}
     def _factory():
@@ -650,11 +648,11 @@ def test_failed_build_never_cached(monkeypatch):
         return FakeReader(reply="ok now")
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", _factory)
     with pytest.raises(AskReaderUnavailable):
-        sdk.ask("q")
+        run_ask_lane(sdk, "q")
     # P2: the failed build leaves NO cached entry AND no lingering lock
     assert sdk_mod._ask_build_locks == {}
     state["fail"] = False
-    result = sdk.ask("q")
+    result = run_ask_lane(sdk, "q")
     assert result["answer"] == "ok now"
 
 
@@ -662,7 +660,7 @@ def test_locked_reader_forwards_finish_reason(monkeypatch):
     """_LockedReader forwards the inner model's last_finish_reason from the
     same capture frame as the token usage (P2 — consumers previously got
     None because the attribute was never set)."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
 
     class FinishReader:
         def complete(self, *, system, user):
@@ -688,7 +686,7 @@ def test_locked_reader_forwards_finish_reason(monkeypatch):
 def test_locked_reader_forwards_max_tokens(monkeypatch):
     """#2280: _LockedReader forwards a per-call max_tokens override to the
     inner model (the escalation lever) and omits it when not provided."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
 
     seen = {}
 
@@ -738,7 +736,7 @@ class _CollapsingReader:
 
 
 def _install_collapsing(sdk, monkeypatch, sequence, finish_reasons):
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     fake = _CollapsingReader(sequence, finish_reasons)
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
                         lambda: fake)
@@ -759,7 +757,7 @@ def test_collapse_escalates_and_answers(monkeypatch):
     fake = _install_collapsing(sdk, monkeypatch,
                                sequence=[None, "$65"],
                                finish_reasons=["length", "length"])
-    result = sdk.ask("How much did I spend on bike stuff?",
+    result = run_ask_lane(sdk, "How much did I spend on bike stuff?",
                      question_date="2026-02-01")
     assert fake.calls == 2
     assert fake.max_tokens_seen == [None, 2000]
@@ -780,7 +778,7 @@ def test_collapse_persists_fails_loud_not_abstention(monkeypatch):
                                sequence=[None, None],
                                finish_reasons=["length", "length"])
     with pytest.raises(AskReaderUnavailable):
-        sdk.ask("what is the gym schedule?")
+        run_ask_lane(sdk, "what is the gym schedule?")
     assert fake.calls == 2
     assert fake.max_tokens_seen == [None, 2000]
 
@@ -793,7 +791,7 @@ def test_empty_stop_finish_recovers_on_same_budget_retry(monkeypatch):
     fake = _install_collapsing(sdk, monkeypatch,
                                sequence=[None, "I do not know."],
                                finish_reasons=["stop", "stop"])
-    result = sdk.ask("something not in memory")
+    result = run_ask_lane(sdk, "something not in memory")
     assert fake.calls == 2
     assert fake.max_tokens_seen == [None, None]
     assert result["answer"] == "I do not know."
@@ -809,7 +807,7 @@ def test_empty_stop_finish_persists_fails_loud(monkeypatch):
                                sequence=[None, None],
                                finish_reasons=["stop", "stop"])
     with pytest.raises(AskReaderUnavailable):
-        sdk.ask("q")
+        run_ask_lane(sdk, "q")
     assert fake.calls == 2
     assert fake.max_tokens_seen == [None, None]
 
@@ -819,8 +817,8 @@ def test_collapse_metering_counts_both_billed_calls(monkeypatch):
     cost estimate account for BOTH billed calls (the collapsed first call's
     tokens were dropped pre-fix — the per-call last_completion_tokens
     capture only reflects the LAST call)."""
+    import tortoise.ask_lane as sdk_mod
     import tortoise.metering as metering_mod
-    import tortoise.sdk as sdk_mod
 
     captured = {}
 
@@ -836,7 +834,7 @@ def test_collapse_metering_counts_both_billed_calls(monkeypatch):
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
                         lambda: fake)
     monkeypatch.setenv("TORTOISE_ASK_ESCALATION_TOKENS", "2000")
-    sdk.ask("q", org_id="team-x")
+    run_ask_lane(sdk, "q", org_id="team-x")
     assert captured, "the record path must have run (explicit org_id)"
     assert captured["tokens_out"] == 520  # 500 (collapsed) + 20 (escalated)
 
@@ -853,187 +851,3 @@ def test_both_not_either_control(monkeypatch):
     sdk.recall_state(query="gym")
     sdk.recall_gaps(query="gym")
     assert fake.calls == 0
-
-
-# ── Task 5: hosted-mode _post_ask (fake HTTP server) ───────────────────────
-
-class _FakeAskServer:
-    """Records the POST body + auth header; serves scripted responses."""
-
-    def __init__(self):
-        self.requests: list[tuple[dict, str]] = []
-        self.responses: list = [{"answer": "ok", "abstained": False,
-                                 "question_type": None,
-                                 "question_date": "2026-08-29",
-                                 "evidence": "", "context_tokens": 0,
-                                 "model": "m", "provider": "p", "route": "p",
-                                 "cost_estimate_usd": 0.0, "duration_ms": 1,
-                                 "retrieval_degraded": False}]
-        self.status = 200
-        self.headers: dict[str, str] = {}
-        self.handler = None
-
-    def _handle(self, body: dict, auth: str) -> tuple[int, dict, dict]:
-        self.requests.append((body, auth))
-        if self.status == 200 and self.responses:
-            return 200, self.responses[0], self.headers
-        if self.status and self.responses:
-            return self.status, self.responses[0], self.headers
-        return 200, self.responses[0], self.headers
-
-    def start(self, monkeypatch) -> str:
-        class _H(BaseHTTPRequestHandler):
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(length) or b"{}")
-                auth = self.headers.get("Authorization", "")
-                status, payload, headers = server._handle(body, auth)
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                for k, v in headers.items():
-                    self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(json.dumps(payload).encode())
-
-            def log_message(self, *a):
-                pass
-
-        server = self
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _H)
-        thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        thread.start()
-        monkeypatch.setenv("TORTOISE_API_URL", f"http://127.0.0.1:{self.httpd.server_address[1]}")
-        monkeypatch.setenv("TORTOISE_API_KEY", "tt_test_key")
-        return self.httpd.server_address[1]
-
-    def stop(self):
-        if self.httpd:
-            self.httpd.shutdown()
-
-
-def test_post_ask_body_and_auth_header(monkeypatch):
-    server = _FakeAskServer()
-    server.start(monkeypatch)
-    try:
-        sdk = _new_sdk()
-        result = sdk.ask("what is the schedule?", question_type="temporal-reasoning")
-        body, auth = server.requests[0]
-        assert body["question"] == "what is the schedule?"
-        assert body["question_type"] == "temporal-reasoning"
-        assert auth == "Bearer tt_test_key"
-        assert result["answer"] == "ok"
-    finally:
-        server.stop()
-
-
-def test_post_ask_status_mapping(monkeypatch):
-    """429 quota_exceeded → AskQuotaExceeded with Retry-After; 429
-    in_flight_limit → AskInFlightLimit; code-less 429 → AskQuotaExceeded
-    (retry_after=None); 400 + invalid_question → AskValidationError; 504 →
-    AskTimeout; 502 → typed; unreachable → typed."""
-    cases = [
-        # the REAL server shape: Retry-After in the HTTP HEADER (the
-        # hosted server ALSO ships the seconds in the 429 body — P1)
-        (429, {"error": {"code": "quota_exceeded"}},
-         AskQuotaExceeded, None, {"Retry-After": "42"}),
-        # body-only fallback (still honored when the header is absent)
-        (429, {"error": {"code": "quota_exceeded", "retry_after": 42}},
-         AskQuotaExceeded, None, None),
-        (429, {"error": {"code": "in_flight_limit"}},
-         AskInFlightLimit, None, None),
-        (429, {}, AskQuotaExceeded, None, None),  # code-less 429 → quota (P2-15)
-        (400, {"error": {"code": "invalid_question"}},
-         AskValidationError, "invalid_question", None),
-        (400, {}, AskValidationError, "invalid_question", None),  # code-less 400
-        (401, {}, AskValidationError, "unauthorized", None),      # code-less 401
-        (403, {}, AskValidationError, "unauthorized", None),      # code-less 403
-        (422, {}, AskValidationError, "invalid_question", None),  # code-less 422
-        (402, {}, AskReaderUnavailable, None, None),   # code-less 402 (P2-3)
-        (502, {"error": {"code": "retrieval_unavailable"}},
-         AskRetrievalUnavailable, None, None),
-        (502, {"error": {"code": "reader_unavailable"}},
-         AskReaderUnavailable, None, None),
-        (500, {}, AskReaderUnavailable, None, None),   # residual 5xx → typed (P2)
-        (500, {"error": {"code": "retrieval_unavailable"}},
-         AskRetrievalUnavailable, None, None),         # body code still honored
-        (503, {}, AskReaderUnavailable, None, None),   # LB/deploy drain → typed
-        (504, {}, AskTimeout, None, None),
-    ]
-    for status, body, exc_type, code, headers in cases:
-        server = _FakeAskServer()
-        server.status = status
-        server.responses = [body]
-        if headers:
-            server.headers = headers
-        server.start(monkeypatch)
-        try:
-            sdk = _new_sdk()
-            with pytest.raises(exc_type) as ei:
-                sdk.ask("q")
-            if code:
-                assert ei.value.code == code, (status, ei.value.code)
-            if exc_type is AskQuotaExceeded and status == 429:
-                ra = ei.value.retry_after
-                if (headers and headers.get("Retry-After")) or body.get("error", {}).get("retry_after"):
-                    assert ra == 42
-                else:
-                    assert ra is None
-        finally:
-            server.stop()
-
-
-def test_post_ask_404_is_reader_unavailable(monkeypatch):
-    """#2013: a code-less 404 on /v1/ask is the EXPECTED gated state
-    (the route is NOT registered when the hosted ask exposure is gated
-    off) — it maps to AskReaderUnavailable, never AskValidationError
-    (the default code-less 4xx map would mislabel it invalid_question)."""
-    server = _FakeAskServer()
-    server.status = 404
-    server.responses = [{}]
-    server.start(monkeypatch)
-    try:
-        sdk = _new_sdk()
-        with pytest.raises(AskReaderUnavailable) as ei:
-            sdk.ask("q")
-        assert ei.value.status_code == 404
-        assert "not enabled" in str(ei.value)
-    finally:
-        server.stop()
-
-
-def test_post_ask_429_unparseable_header_falls_back_to_body(monkeypatch):
-    """A 429 with a non-numeric (HTTP-date) Retry-After header and a numeric
-    body ``retry_after`` → AskQuotaExceeded.retry_after == 42.0 (the header
-    fails float() and the body survives — RFC 7231 allows an HTTP-date)."""
-    server = _FakeAskServer()
-    server.status = 429
-    server.responses = [{"error": {"code": "quota_exceeded", "retry_after": 42}}]
-    server.headers = {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}
-    server.start(monkeypatch)
-    try:
-        sdk = _new_sdk()
-        with pytest.raises(AskQuotaExceeded) as ei:
-            sdk.ask("q")
-        assert ei.value.retry_after == 42.0
-    finally:
-        server.stop()
-
-
-def test_post_ask_timeout_mapping(monkeypatch):
-    """504 → AskTimeout with source='server'; a client-fired timeout maps to
-    AskTimeout with source='client' (monkeypatched SHORT client timeout)."""
-    server = _FakeAskServer()
-    server.status = 504
-    server.responses = [{}]
-    server.start(monkeypatch)
-    try:
-        sdk = _new_sdk()
-        with pytest.raises(AskTimeout) as ei:
-            sdk.ask("q")
-        assert ei.value.source == "server"
-    finally:
-        server.stop()
-    # constant-check: the SDK client timeout is pinned > the server's
-    from tortoise.quota import _ASK_TIMEOUT_S
-    assert ASK_SDK_TIMEOUT_S == 75
-    assert ASK_SDK_TIMEOUT_S > _ASK_TIMEOUT_S
