@@ -83,6 +83,45 @@ DEFAULT_CONTEXT_ITEM_CAP = 40
 #: LightMem: compact evidence wins under tight budgets).
 DEFAULT_CONTEXT_TOKEN_CAP = 8000
 
+#: #4105: the ask lane's reader-context BYTE ceiling (32 KiB). Historically a
+#: hard literal at the ``assemble_context`` call site; it is a RESOLVED cap
+#: here for the same reason every other cap is — a byte ceiling that cannot be
+#: moved makes every item/token cap raised above it a SILENT NO-OP (the
+#: caller believes it widened the window; the reader still gets 32 KiB). It
+#: stays a separate bound from the token cap on purpose: it is the UTF-8
+#: invariant that keeps one pathological huge hit from blowing the prompt,
+#: and the token estimator is a whitespace heuristic, not a byte count. It is
+#: the FLOOR of the DERIVED ask-lane byte ceiling (``DEFAULT_ASK_CONTEXT_*``
+#: below), not the ask lane's effective default.
+DEFAULT_CONTEXT_BYTE_CAP = 32768
+
+#: #4105: minimum bytes-per-token the DERIVED byte ceiling assumes. When only
+#: the TOKEN cap is raised, the byte ceiling scales as
+#: ``max(DEFAULT_CONTEXT_BYTE_CAP, token_cap * this)`` so a raised token
+#: budget is never silently neutralised by a fixed byte ceiling. 8 is
+#: deliberately generous (the ask-lane corpus measures ~5.8 bytes/token), so
+#: the byte bound normally does NOT bind before the token bound — it is the
+#: cheap guard against a single pathological huge hit, not a second budget.
+BYTES_PER_TOKEN_FLOOR = 8
+
+#: #4105: the ask lane's MEASURED window defaults. These are ASK-LANE
+#: specific — the eval lane and the extraction lane keep the shared
+#: ``DEFAULT_CONTEXT_ITEM_CAP``/``DEFAULT_CONTEXT_TOKEN_CAP`` — because the
+#: ask lane is the surface the D3 instrument measured. On the frozen
+#: 21-question fixture at the historical 40/120/40/8000/32KiB defaults the
+#: byte ceiling bound at a mean 4,730 context tokens and all five
+#: answer-bearing turns the retriever had RANKED (fused ranks 67/84/89/93/147)
+#: failed to reach the reader; at 200/200/200/32000/256KiB (byte derived —
+#: 32,000 x 8) every answerable question's gold turns ARE admitted, at a mean
+#: ~29k context tokens. The raise is a deliberate, measured departure from the
+#: historical "caps stay at 40 until measured" position (see #4105). Metered
+#: cost stays under the documented $0.01/query structural target: 32k prompt
+#: tokens x $0.21/M (ASK_METER_RATES) = $0.0067 + output.
+DEFAULT_ASK_RETRIEVAL_LIMIT = 200
+DEFAULT_ASK_CONTEXT_ITEM_CAP = 200
+DEFAULT_ASK_CONTEXT_TOKEN_CAP = 32000
+DEFAULT_ASK_POOL_SIZE = 200
+
 #: C2 (#1745) / #1945: evidence-mark boost rank-offset multipliers. The
 #: answer-string mark (d, #1763 — the point's content carries the GOLD
 #: ANSWER, the strongest/answer-precise signal) gets the highest
@@ -105,12 +144,18 @@ _POOL_CLAMP = (1, 10000)
 #: assembly caps are threaded IN TANDEM — raising only the assemble cap
 #: changes NOTHING (the gold is cut at ``result_ids[:limit]`` INSIDE
 #: ``tortoise_fts_query`` before dedup/assemble); raising only the window
-#: floods the reader budget. Measurement-gated: default OFF = the historical
-#: 40/40/8000 (byte-identical until the Step-0/6 measurements justify a
-#: raise).
+#: floods the reader budget. The pre-#4105 defaults were the historical
+#: 40/40/8000/32KiB; #4105 measured the frozen D3 fixture and raised them to
+#: 200/200/32000 (byte ceiling derived) so the ranked-but-unread gold turns
+#: reach the reader. #4105 also adds the POOL depth and the BYTE ceiling to
+#: that same resolution: a window raise past the pool is cut by the pool, and
+#: a window raise past 32 KiB was cut by an un-resolvable literal — both were
+#: silently accepted and dropped.
 ASK_RETRIEVAL_LIMIT_ENV = "TORTOISE_ASK_RETRIEVAL_LIMIT"
 ASK_CONTEXT_ITEM_CAP_ENV = "TORTOISE_ASK_CONTEXT_ITEM_CAP"
 ASK_CONTEXT_TOKEN_CAP_ENV = "TORTOISE_ASK_CONTEXT_TOKEN_CAP"
+ASK_CONTEXT_BYTE_CAP_ENV = "TORTOISE_ASK_CONTEXT_BYTE_CAP"
+ASK_POOL_SIZE_ENV = "TORTOISE_ASK_POOL_SIZE"
 
 #: A1/A4/A5 (#2070): ask-lane lever env names (all default ON for the ask
 #: lane — each is a quality fix, not a gated experiment; "0"/"false"/
@@ -199,18 +244,64 @@ def ask_env_boost_float(name: str, default: float) -> float:
 
 
 def resolve_ask_retrieval_caps() -> dict:
-    """A6 (#2070): resolve the ask lane's retrieval-window limit + assembly
-    caps IN TANDEM (env-gated, default OFF = 40/40/8000). Returns
-    ``{"limit", "context_item_cap", "context_token_cap"}`` — the single
-    resolution ``run_ask_lane()`` threads into BOTH ``tortoise_fts_query(limit=…)``
-    (the ``result_ids[:limit]`` cut INSIDE the retrieval call) and
-    ``assemble_context``, so a cap raise can never be half-applied."""
+    """A6 (#2070) / #4105: resolve the ask lane's retrieval-window limit,
+    pool depth and assembly caps IN TANDEM (env-gated; #4105 defaults
+    200/200/200/32000/256KiB, measured on the frozen D3 fixture). Returns
+    ``{"limit", "pool_size", "context_item_cap", "context_token_cap",
+    "context_byte_cap"}`` — the single resolution ``run_ask_lane()`` threads
+    into ``tortoise_fts_query(limit=…, pool_size=…)``, ``assemble_context``
+    and the A7 rerank budget guard, so a cap raise can never be
+    half-applied.
+
+    Three honesty invariants (#4105), each of which was a silent no-op
+    before:
+
+    * ``limit >= context_item_cap`` — the retrieval call cuts at
+      ``result_ids[:limit]`` BEFORE assembly, so an item cap above the
+      window could never be honoured; the window is raised to admit it.
+    * ``pool_size >= limit`` — the candidate window is the pool, and a turn
+      at rank R is admitted iff ``R <= min(limit, pool_size)``; a pool
+      above the window is wasted, a pool below it truncates silently.
+    * ``context_byte_cap`` is resolved (env), not a literal, and when NOT
+      set explicitly it is DERIVED from the token cap
+      (``max(DEFAULT_CONTEXT_BYTE_CAP, token_cap * BYTES_PER_TOKEN_FLOOR)``)
+      so raising the token budget is never neutralised by a fixed byte
+      ceiling. ``assemble_context`` reports the hits the byte cap dropped,
+      and the ask lane warns — the budget is never silently accepted and
+      dropped.
+    """
+    limit = ask_env_int(ASK_RETRIEVAL_LIMIT_ENV, DEFAULT_ASK_RETRIEVAL_LIMIT)
+    item_cap = ask_env_int(
+        ASK_CONTEXT_ITEM_CAP_ENV, DEFAULT_ASK_CONTEXT_ITEM_CAP)
+    token_cap = ask_env_int(
+        ASK_CONTEXT_TOKEN_CAP_ENV, DEFAULT_ASK_CONTEXT_TOKEN_CAP)
+    # Invariant 1: the window can never be narrower than the assembly cap.
+    limit = max(limit, item_cap)
+    # Invariant 2: the pool can never be narrower than the window.
+    pool_size = max(
+        ask_env_int(ASK_POOL_SIZE_ENV, DEFAULT_ASK_POOL_SIZE, hi=10000), limit)
+    # Invariant 3: byte ceiling resolved; derived from the token cap when
+    # not set (or set to GARBAGE — a typo must not pin the ceiling to the
+    # 32 KiB floor and silently re-introduce the no-op) so a token raise is
+    # honoured in bytes too.
+    explicit_bytes = os.environ.get(ASK_CONTEXT_BYTE_CAP_ENV, "").strip()
+    byte_cap = None
+    if explicit_bytes:
+        try:
+            candidate = int(explicit_bytes)
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate is not None and candidate >= 1:
+            byte_cap = min(candidate, 1 << 40)
+    if byte_cap is None:
+        byte_cap = max(DEFAULT_CONTEXT_BYTE_CAP,
+                       token_cap * BYTES_PER_TOKEN_FLOOR)
     return {
-        "limit": ask_env_int(ASK_RETRIEVAL_LIMIT_ENV, DEFAULT_CONTEXT_ITEM_CAP),
-        "context_item_cap": ask_env_int(
-            ASK_CONTEXT_ITEM_CAP_ENV, DEFAULT_CONTEXT_ITEM_CAP),
-        "context_token_cap": ask_env_int(
-            ASK_CONTEXT_TOKEN_CAP_ENV, DEFAULT_CONTEXT_TOKEN_CAP),
+        "limit": limit,
+        "pool_size": pool_size,
+        "context_item_cap": item_cap,
+        "context_token_cap": token_cap,
+        "context_byte_cap": byte_cap,
     }
 
 
@@ -603,6 +694,7 @@ def assemble_context(
     question_date: str | None = None,
     context_item_cap: int | None = None,
     byte_cap: int | None = None,
+    stats: dict | None = None,
 ) -> list[dict]:
     """Budget-capped, rank-interleaved reader context (C1 #1745).
 
@@ -620,13 +712,23 @@ def assemble_context(
     ``byte_cap`` (#1987 Task 5, P1-2): keyword-only, default None = unchanged
     behavior (the extraction/search AND eval lanes are unaffected — the eval
     re-export ``assemble_context as _assemble_context`` never passes it). The
-    ASK lane passes ``byte_cap=32768``: the assembled evidence is enforced to
+    ASK lane passes the resolved ``byte_cap`` (#4105 — it was a 32 KiB
+    literal): the assembled evidence is enforced to
     BOTH the 8000-token estimate cap AND a 32 KiB UTF-8 byte cap
     independently, by the SAME mechanism as the token cap — WHOLE-HIT DROP
     (lowest-ranked hits dropped until under budget, never mid-hit character
     truncation), so decoding the evidence never splits a character
-    (P2-18) and ``len(evidence.encode("utf-8")) <= 32768`` is a hard output
+    (P2-18) and ``len(evidence.encode("utf-8")) <= byte_cap`` is a hard output
     invariant by construction.
+
+    ``stats`` (#4105): optional out-dict. When supplied it is updated with the
+    admission census (``items_selected``, ``claim_bearing``, ``bytes_used``,
+    ``words_used``, ``dropped_by_token_cap``, ``dropped_by_byte_cap``,
+    ``byte_cap``, ``stopped_by``). It exists so a caller can tell WHICH bound
+    is binding — in particular, ``dropped_by_byte_cap > 0`` means the byte
+    ceiling alone kept admitted-by-token hits out, so a byte ceiling that
+    cannot be raised silently caps the window. The return value is unchanged
+    (a list of hits), so pure-function callers are unaffected.
 
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
@@ -665,6 +767,13 @@ def assemble_context(
                     if question_date else 0)
     selected: list[dict] = []
     words = header_words
+    # #4105: per-constraint drop census. ``dropped_by_byte_cap`` counts hits
+    # the TOKEN cap admitted but the BYTE cap refused — i.e. hits the byte
+    # ceiling alone kept out. That is the honest signal that the caller's
+    # byte budget, not its item/token budget, is the binding constraint.
+    dropped_by_token_cap = 0
+    dropped_by_byte_cap = 0
+    claim_bearing = 0
     # The separator framing bytes (P1): render_context joins blocks with
     # "\n\n" AND appends a trailing "\n\n" after the header — account those
     # so ``len(evidence) <= byte_cap`` is a HARD invariant (not just the
@@ -685,19 +794,36 @@ def assemble_context(
         # semantics as the oversized-hit path below.
         if not _has_claim_text(h):
             continue
+        claim_bearing += 1
         block = _render_block(h)
         cost = len(block.split())
         if int((words + cost) * 1.1) > max_context_tokens:
+            dropped_by_token_cap += 1
             continue  # skip this hit; keep later ones (no starvation)
         if byte_cap is not None:
             # whole-hit drop under the byte cap — a hit is fully in or fully
             # out; the skip keeps later (lower-ranked) hits' chance like the
             # token cap (no starvation), mirroring the token-budget behavior.
             if bytes_used + len(block.encode("utf-8")) + 2 > byte_cap:
+                dropped_by_byte_cap += 1
                 continue
             bytes_used += len(block.encode("utf-8")) + 2
         selected.append(h)
         words += cost
+    if stats is not None:
+        stats.update({
+            "items_selected": len(selected),
+            "claim_bearing": claim_bearing,
+            "bytes_used": bytes_used,
+            "words_used": words,
+            "dropped_by_token_cap": dropped_by_token_cap,
+            "dropped_by_byte_cap": dropped_by_byte_cap,
+            "byte_cap": byte_cap,
+            "stopped_by": (
+                "item_cap" if len(selected) >= item_bound else
+                "byte_cap" if dropped_by_byte_cap else
+                "token_cap" if dropped_by_token_cap else None),
+        })
     return selected
 
 

@@ -1165,7 +1165,7 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         max_context_tokens=caps.get("context_token_cap", 8000),
         question_date=question_date,
         context_item_cap=caps.get("context_item_cap", 40),
-        byte_cap=32768)
+        byte_cap=caps.get("context_byte_cap", 32768))
     if not selected:
         # P1-1: both halves resolved but the assembly has NOTHING to say
         # (content-less subjects) — firing would replace legacy evidence
