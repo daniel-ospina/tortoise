@@ -3145,12 +3145,12 @@ async def get_current_org(request: Request) -> dict:
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                # #4010: sessions are UNLIMITED for every tier — the flat v1
-                # 1000 cap was REOPENED and SUPERSEDED (see the module comment
-                # in tortoise/quota.py). `_ms` (the stored t.max_sessions) is
-                # read so the deliberate departure is visible at the exact
-                # site, and then NOT honoured — a stored 1000 must never
-                # re-cap an org after the constant is gone.
+                # #4010: sessions are UNLIMITED for every tier — the flat
+                # 1000 was an inherited code fallback, never a ratified cap
+                # (see the module comment in tortoise/quota.py). `_ms` (the
+                # stored t.max_sessions) is read so the removal is visible at
+                # the exact site, and then NOT honoured — a stored 1000 must
+                # never re-cap an org after the constant is gone.
                 "max_sessions": None,
                 # #1748: key creator's user UUID rides the org dict (Supabase
                 # resolve_api_key parity) so session-user-owned endpoints can
@@ -3451,12 +3451,24 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     _mp = row.get("max_points")
     if _mp is None:
         _mp = row.get("graph_size_cap")
+    # #3874: the key allowance is resolved through the MINT GATE's own
+    # resolver (_org_node_sync_limits → _org_limits_from_node) rather than a
+    # precedence copied here. The gate is the authority on the cap, so the
+    # pre-cap surface cannot advertise a value the gate would not enforce:
+    # there is ONE resolver, so the two cannot drift. A None/missing result
+    # (the resolver could not read the org) falls back to the pricing tier
+    # default — it must never pass a bare None, because a PRESENT-and-None
+    # limit means UNLIMITED to the quota gate (enforce_org_limit) and would
+    # fail OPEN.
+    _gate_limits = _org_node_sync_limits(org_id)
     org = {
         "org_id": org_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
         "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
         "max_points": int(_mp) if _mp is not None else lim["max_graph_nodes"],
-        "max_api_keys": lim["max_api_keys"],
+        "max_api_keys": (_gate_limits["max_api_keys"]
+                         if _gate_limits.get("max_api_keys") is not None
+                         else lim["max_api_keys"]),
         # #4010: sessions are unlimited for every tier — no cap of any kind,
         # so the resolved value is always the explicit None (the pre-#4010
         # `DEFAULT_MAX_SESSIONS` fallback is deleted, not relocated).
@@ -4036,6 +4048,14 @@ class OrgInfoResponse(BaseModel):
     tier: str
     max_users: int
     max_graphs: int | None
+    # #3874: the org's API-key allowance — exposed so the keys surface can
+    # state "you get N keys" BEFORE the create call refuses at the cap.
+    # Resolved by the auth lane from the SAME limits source the mint gate
+    # (_mint_key → _org_node_sync_limits) enforces: the stored org limit
+    # with a pricing.json tier fallback. None only when a legacy/override
+    # dict predates the field — the client must then stay silent rather
+    # than fabricate a number.
+    max_api_keys: int | None = None
     max_orgs: int | None
     # #308 (R7): "active" | "flagged" over HTTP — a suspended org never
     # reaches this handler (403 SUSPENDED fires in get_current_org first);
@@ -5244,6 +5264,12 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         tier=org["tier"],
         max_users=org["max_users"],
         max_graphs=org["max_graphs"],
+        # #3874: the key allowance rides the overview read — the value is
+        # already resolved by get_current_org / _session_user_org from the
+        # org's stored limit (pricing tier fallback), the identical source
+        # _mint_key's cap gate counts against, so the pre-cap surface and
+        # the at-cap 402 detail cannot silently desync.
+        max_api_keys=org.get("max_api_keys"),
         # #308 (R7): flagged status rides /v1/team (suspended never reaches
         # here — the auth dependency 403s first; scoping delta 12).
         status="flagged" if org.get("flagged_at") is not None else "active",

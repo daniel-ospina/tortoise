@@ -37,6 +37,10 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 // step's gate from the keys-table rows (Never-keys-only embed policy, #2426
 // decision 2).
 import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from './sessionKey.js'
+// #3874: the org's API-key allowance as the SERVER states it — the pre-cap
+// line + the at-cap notices derive from one server field so they cannot
+// desync, and no client-side number is ever fabricated.
+import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom } from './keyAllowance.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -1682,25 +1686,13 @@ function claimIntentInFlight() {
   const mountedRef = React.useRef(true)  // review: flash-timer guard — flipped false on unmount so late setState is skipped
   React.useEffect(() => () => { mountedRef.current = false; stopGithubPoll && stopGithubPoll(); stopBoundedPoll(indexPollRef); stopBoundedPoll(docsPollRef) }, [])  // unmount cleanup
 
-  // #1147: build the tier-cap notice. The server's 402 detail carries the
-  // real limit ('Team api_keys limit reached (N). Upgrade your plan to
-  // increase it.') — /v1/team does NOT return max_api_keys, so parse it
-  // instead of trusting a client-side hardcode.
-  function upgradeNoticeFrom(message, team_) {
-    const m = String(message || '').match(/limit reached \((\d+)\)/)
-    const limit = m ? m[1] : (team_?.max_api_keys ?? '2')
-    return `You've reached your plan's limit of ${limit} API keys. Upgrade to add more — or regenerate an existing key instead.`
-  }
-  // #2229: rotate-path cap notice. Rotate mints the REPLACEMENT before
-  // revoking the old key, so a team AT max_api_keys 402s on the mint leg —
-  // the generic notice's "regenerate instead" tail would loop here
-  // (regenerating needs the same free slot). Truthful escape: revoke an
-  // unused key first (non-held rows have trash) or upgrade.
-  function rotateCapNoticeFrom(message, team_) {
-    const m = String(message || '').match(/limit reached \((\d+)\)/)
-    const limit = m ? m[1] : (team_?.max_api_keys ?? '2')
-    return `You're at your plan's limit of ${limit} API keys. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more.`
-  }
+  // #1147/#3874: the tier-cap notices now live in keyAllowance.js — the
+  // number comes from the server's 402 detail, else from /v1/team's
+  // max_api_keys (exposed by #3874). The old local implementations fell back
+  // to a hardcoded '2', which could declare a limit the server never
+  // enforced. The pre-cap allowance line (allowanceLine) renders the same
+  // server field BEFORE the cap is reached, so the allowance is visible
+  // ahead of the refusal instead of only at it.
 
   // #1147: shared mint — POST /v1/team/keys and return the plaintext key.
   // `name` (optional) is the key label — sent only when non-empty.
@@ -8012,6 +8004,9 @@ function claimIntentInFlight() {
             {keyModalStage === 'form' && (
               <>
                 <h2>Create new API key</h2>
+                {keysLoaded && allowanceLine(team, keys) && (
+                  <p className="dim small" data-key-allowance>{allowanceLine(team, keys)}</p>
+                )}
                 <div className="inline-form" style={{ marginTop: 8 }}>
                   <input
                     placeholder="Name (e.g. CI, staging)"
@@ -8652,6 +8647,19 @@ function claimIntentInFlight() {
                 <button className="ghost" onClick={() => { setKeyModalOpen(true); setKeyModalStage('form'); setError(''); setNewKeyName(''); setNewKeyExpiryPreset('30'); setNewKeyExpiryDate('') }}>+ New key</button>
               )}
             </div>
+            {/* #3874: the allowance stated BEFORE the cap — the same
+                server field the create/rotate 402s derive their number from
+                (keyAllowance.js), rendered from the RAW keys payload so the
+                count matches the mint gate's predicate. Gated on keysLoaded:
+                the `keys` state starts [] and fills asynchronously, so
+                without the gate the line would read "0 in use" before the
+                read lands (a fabricated count). Nothing renders when the
+                server has not supplied a limit (never fabricate one). */}
+            {keysLoaded && allowanceLine(team, keys) && (
+              <p className="dim small" style={{ margin: '0 0 1rem' }} data-key-allowance>
+                {allowanceLine(team, keys)}
+              </p>
+            )}
             {!isOwnerAdmin && (
               <p className="dim small" style={{ margin: '0 0 1rem' }}>
                 Only owners and admins can create or rotate keys in this dashboard. Paste an existing key into the setup step to connect an agent.
