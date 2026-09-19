@@ -8771,8 +8771,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #3359: one capture_cost row per capture ATTEMPT that ran an
         # extraction (successful or errored — a failed extraction that made
         # provider calls has real spend, and the deadline/deadline_aborts
-        # disclosure depends on that row existing). A ZERO-CALL capture — a
-        # replay, or the empty-transcript / keyless path — carries no
+        # disclosure depends on that row existing). A ZERO-CALL capture —
+        # the empty-transcript / keyless path — carries no
         # extractor telemetry and emits nothing; an M2 capture DOES make
         # provider calls, so since #3824 it emits a row carrying its call
         # count as ``unattributed`` rather than vanishing into the same
@@ -20274,9 +20274,9 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     #3824 — TWO FACTS, NEVER ONE. A ``stats`` with no ``llm`` used to
     collapse two distinct captures into the same ``None``:
 
-    * **F1 — zero provider calls.** A replay (#1727) or the
-      empty-transcript gate: nothing was sent, so no row is written and
-      the window stays clean. ``return None`` is correct here.
+    * **F1 — zero provider calls.** The empty-transcript gate: nothing
+      was sent, so no row is written and the window stays clean.
+      ``return None`` is correct here.
     * **F2 — calls were made and the roll-up did not survive.** The M2
       session lane (#3747) issues real provider calls and discards their
       usage; any future lane that builds its own ``meta`` does the same.

@@ -9,11 +9,11 @@ extraction that made provider calls has real spend), into
 
     ``_capture_cost_props`` -> ``_track_analytics_event``).
 
-Replay captures carry no extractor telemetry and emit nothing. M2 captures
-(#3824) DO make real provider calls — they simply discard the usage block —
-so they emit a row carrying ``unattributed`` with every measured field
-zeroed; the report counts those calls into ``unmetered_attempts`` instead of
-reading the session as an unmeasured or $0 one.
+M2 captures (#3824) DO make real provider calls — they simply discard the
+usage block — so they emit a row carrying ``unattributed`` with every
+measured field zeroed; the report counts those calls into
+``unmetered_attempts`` instead of reading the session as an unmeasured or
+$0 one.
 
     row.properties = {
         session_id, calls, retries, prompt_tokens, completion_tokens,

@@ -323,7 +323,7 @@ def test_capture_cost_props_none_only_for_a_genuinely_call_free_capture():
     """
     from tortoise import hosted_api as ha
 
-    # F1 — no calls at all (a replay / the empty-transcript gate): no row.
+    # F1 — no calls at all (the empty-transcript gate): no row.
     assert ha._capture_cost_props("sess-1", {"stats": {}}) is None
     assert ha._capture_cost_props("sess-1", {}) is None
 
@@ -631,7 +631,7 @@ def test_no_extraction_never_counts_as_a_zero_cost_success():
     exactly the reason the launch gate exists.
 
     Three shapes, all distinct and all disclosed:
-      1. no row at all (a zero-call replay / the empty gate) — the emitter
+      1. no row at all (the empty gate) — the emitter
          returns ``None``;
       2. a row with no attempted call (empty capture);
       3. a row whose calls were attempted but never metered (e.g. every
@@ -1526,7 +1526,7 @@ def test_hosted_replay_emits_no_cost_row_even_though_m2_does(
     The scope's stated T2 mutation — "drop the ``if not llm`` gate ...
     fabricating a measured $0 for a replay" — does NOT hold on its own: the
     replay never reaches the emitter, because the emit call site sits behind
-    the replay guard (``hosted_api.py`` ~8912). The two-guard conjunction is
+    the replay guard. The two-guard conjunction is
     what actually REDs this.
 
     #3745 authored the absence pin this replaces, and its own docstring
@@ -1562,7 +1562,7 @@ def test_hosted_replay_emits_no_cost_row_even_though_m2_does(
     second = _capture()
     assert second.status_code == 200, second.text
     assert second.json()["extraction_mode"] == "replayed"
-    # The replay's OWN telemetry is empty (F1) and it added no row.
+    # The replay's OWN telemetry is empty and it added no row.
     assert second.json()["stats"] == {}
     assert len(_cost_rows()) == 1, _cost_rows()
 
