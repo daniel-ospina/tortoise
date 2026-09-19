@@ -98,6 +98,24 @@ REPLY_PROMISE_VERBS = (
     + r"|\byou(?:'ll| will)\b[^.!?]{0,25}?" + REPLY_WORD
 )
 
+def _brace_end(text: str, start: int) -> int:
+    """Index just past the `}` that closes the block whose `{` follows `start`.
+
+    Used to bound a function to its REAL body: a slice that ends at the first
+    `return false;` inside it makes a "exactly one `return false`" assertion
+    vacuous by construction (cycle-14 review).
+    """
+    depth, opened = 0, False
+    for i in range(text.index("{", start), len(text)):
+        if text[i] == "{":
+            depth, opened = depth + 1, True
+        elif text[i] == "}":
+            depth -= 1
+            if opened and depth == 0:
+                return i + 1
+    raise AssertionError(f"unbalanced braces after offset {start}: cannot bound the function")
+
+
 #: A quoted string in CSS/JS source, one group per quote style, escapes included.
 _QUOTED = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|\'([^\'\\]*(?:\\.[^\'\\]*)*)\'')
 
@@ -723,13 +741,24 @@ def test_rate_limit_map_is_bounded() -> None:
         "the cap guard must not be the braceless body of another branch: "
         f"{stmt.strip()[:80]!r}"
     )
-    # …and an early `return false` would make the cap unreachable with the loop
-    # below still intact, so the cap must sit on the function's ONLY un-limited
-    # exit.
-    fn_exit = code.index("return false;", fn_start) + len("return false;")
-    assert code[fn_start:fn_exit].count("return false") == 1, (
-        "the cap must be on the function's only un-limited exit — an earlier `return false` "
-        "would make this pin vacuous"
+    # …and the limiter's own TRIP must still be a trip, and the function must have
+    # exactly ONE un-limited exit — measured against its real body. The earlier
+    # version sliced to the FIRST `return false;` in it, which makes
+    # `count("return false") == 1` true by construction: rewriting the trip
+    # (`if (recent.length >= RATE_LIMIT) { … return true; }`) to `return false;`
+    # then slipped the slice's end up to that line, so every other assertion here
+    # still held while no submission could ever be 429'd (cycle-14 review).
+    fn_end = _brace_end(code, fn_start)
+    body = code[fn_start:fn_end]
+    assert body.count("return false;") == 1, (
+        "the limiter must have exactly one un-limited exit — a second `return false;` "
+        "(for instance on its own trip) makes throttling a no-op"
+    )
+    trip = re.search(r"if\s*\(\s*recent\.length\s*>=\s*RATE_LIMIT\s*\)[^}]*", body)
+    assert trip is not None, "the limiter's trip comparison must be present"
+    assert re.search(r"\breturn true;", trip.group(0)), (
+        "the limiter's trip must RETURN TRUE: `return false;` there never throttles "
+        "anyone while every other pin stays green"
     )
     # The GUARD is part of the cap: inverting it (`<` instead of `>`) disables
     # eviction entirely while the loop below still reads correctly, and the guard
@@ -749,7 +778,7 @@ def test_rate_limit_map_is_bounded() -> None:
     assert not re.search(r"\b(?:if|while|for)\b", loop_stmt), (
         f"the eviction loop must not be the braceless body of another branch: {loop_stmt.strip()[:80]!r}"
     )
-    cap = code[guard_at : code.index("return false;", guard_at)]
+    cap = code[guard_at:fn_end]
     # Bind the initializer to the cap AND make it the only assignment: `excess = 0;`
     # after a correct `let excess = …` breaks out immediately, leaving the map
     # unbounded under live keys, while every token still appears (cycle-3 review).
