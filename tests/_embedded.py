@@ -183,8 +183,7 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
     # opener — which is only possible BECAUSE this stem is exempt. Without the
     # exemption the redirect (the ``FalkorProjection.__init__`` block) would
-    # rename every path-built graph to
-    # ``test_{db-file-basename}_{sha1(session+path+name)[:12]}``, so under a
+    # rename every path-built graph to a per-path ``test_*`` name, so under a
     # server URI no production name would exist: the probe's ``own=True`` and
     # the listing filter would assert FAIL, and the opener would return None.
     # A hard RED, never a false pass. Same carve-out rationale as

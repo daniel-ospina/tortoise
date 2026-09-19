@@ -56,14 +56,14 @@ and the ``hosted_api`` dependency-override auth seam (shared with
 
 Lane note: this module is a redirect carve-out (``tests/_embedded.py``
 ``TEST_NO_REDIRECT_STEMS``). It asserts PRODUCTION graph names (``org_{org_id}``),
-which the class-level test redirect would destroy: the redirect (the
-``FalkorProjection.__init__`` block) renames every path-built graph to
-``test_{db-file-basename}_{hash}``, so in a URI-configured session without the
-exemption no production name would exist and the scoping assertions would
-FAIL: the probe's ``own=True``, the own graph in the listing, and
-``_open_org_graph_sdk`` returning ``None`` for the opener. A hard RED, never a
-false pass. The exemption keeps the construction embedded, so ``org_{org_id}``
-really exists and the module's own exit-evidence command stays runnable.
+which the class-level test redirect would destroy: the redirect (see the
+``FalkorProjection.__init__`` block) renames every path-built graph to a
+per-path ``test_*`` name, so in a URI-configured session without the exemption
+no production name would exist and the scoping assertions would FAIL: the
+probe's ``own=True``, the own graph in the listing, and ``_open_org_graph_sdk``
+returning ``None`` for the opener. A hard RED, never a false pass. The exemption
+keeps the construction embedded, so ``org_{org_id}`` really exists and the
+module's own exit-evidence command stays runnable.
 """
 from __future__ import annotations
 
