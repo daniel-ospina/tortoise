@@ -119,9 +119,23 @@ MAX_OPERATORS = 500
 # max_points/max_api_keys have NO constant here — they resolve from
 # tortoise.pricing.tier_limits (product/pricing.json) so a legacy org without
 # stored limits gets pricing-correct caps, never the stale 1000/20 consts that
-# contradicted pricing.json (#310 GAP-B, review fix 2). max_sessions has no
-# pricing.json field — flat 1000 across tiers (matches REST today).
-DEFAULT_MAX_SESSIONS = 1000
+# contradicted pricing.json (#310 GAP-B, review fix 2).
+#
+# max_sessions has NO constant here and NO pricing.json field either. The
+# flat 1000 max_sessions WAS a recorded decision for v1 — see
+# docs/epics/2026-08-07-tortoise-user-journeys/05-plan.md (P2-7, "keep
+# points/sessions flat in v1", human gate #2 approved 2026-08-07) and
+# docs/plans/scoping-329-problem.md ("Preserve the sessions resource
+# (max_sessions default 1000)"). #4010 REOPENS and SUPERSEDES that v1
+# decision under the owner's later rulings — the product direction of
+# 2026-08-09 ("NO capture caps. Tiers are feature baselines; usage is metered
+# separately") and the #4010 directive itself ("let's remove that unapproved
+# cap"). Sessions are UNLIMITED for every tier, and unlike every other limit
+# a STORED max_sessions value is deliberately NOT honoured as a cap (see
+# resolve_org_limits): a stored 1000 would otherwise keep the org capped
+# after the constant was deleted. Recorded as a REOPEN, never as an
+# accident — a reversal that claims no decision existed is the quiet-
+# reversal failure the contradiction-test discipline forbids.
 
 # ── Documents cap: DERIVED-CONSTANT (T2-P2a, #1726 Slice 1) ────────────────
 # max_documents is DERIVED from max_points with a documented conversion
@@ -136,6 +150,9 @@ _DOCUMENTS_FROM_POINTS_FACTOR = 10
 _RESOURCE_LIMIT_KEYS = {
     "points": "max_points",
     "api_keys": "max_api_keys",
+    # #4010: the key is still carried so the resolved dict holds an EXPLICIT
+    # None for sessions ("present but unlimited") rather than a missing key
+    # (which is fail-closed). No constant ever supplies a value for it.
     "sessions": "max_sessions",
     "users": "max_users",
     "graphs": "max_graphs",
@@ -203,8 +220,16 @@ def resolve_org_limits(org_id: str) -> dict:
     Org node, as before.
 
     Missing Org → QuotaCheckError (fail-closed; the auth layer should
-    guarantee key→org mapping). Missing attributes → defaults
-    (aligned with product/pricing.json free tier).
+    guarantee key→org mapping).
+
+    CONTRACT (the return shape every caller must honour, #310 GAP-B / #4010):
+    the returned dict carries EVERY value of ``_RESOURCE_LIMIT_KEYS``. A key
+    that is PRESENT with value ``None`` means UNLIMITED (sessions is always
+    this, for every tier — #4010); a MISSING key is fail-closed in
+    ``enforce_org_limit`` (``QuotaCheckError`` → HTTP 500) for every resource.
+    A missing ATTRIBUTE on the row/column is resolved to a value here — it
+    never leaves the key absent. (The pre-#4010 rule of the same shape was
+    "missing attributes → defaults"; sessions has no default any more.)
     """
     if not org_id:
         raise QuotaCheckError("resolve_org_limits requires a org_id")
@@ -259,8 +284,11 @@ def resolve_org_limits(org_id: str) -> dict:
         # explicit None limit as unlimited; substituting finite caps would
         # hard-cap legacy/migrated rows). max_points override (GAP-B,
         # 20260817000001) takes precedence over graph_size_cap (the
-        # fallback), then pricing; max_api_keys/max_sessions fall back to
-        # pricing/defaults.
+        # fallback), then pricing; max_api_keys falls back to pricing.
+        # #4010: max_sessions is UNLIMITED for every tier — no pricing field,
+        # no constant, and (deliberately) no stored value honoured as a cap.
+        # The Supabase orgs row has no max_sessions column at all, so there is
+        # nothing to read even if we wanted to.
         mu = row.get("max_users")
         mg = row.get("max_graphs")
         # #1859 P3-2: max_points column (points-cap override, migration
@@ -278,7 +306,7 @@ def resolve_org_limits(org_id: str) -> dict:
             "max_points": (int(lim["max_graph_nodes"]) if anon_override
                             else (int(mp) if mp is not None else lim["max_graph_nodes"])),
             "max_api_keys": lim["max_api_keys"],
-            "max_sessions": DEFAULT_MAX_SESSIONS,
+            "max_sessions": None,
         }
     reg = _make_sdk(namespace="registry")
     rows = reg._get_registry().query(
@@ -289,7 +317,7 @@ def resolve_org_limits(org_id: str) -> dict:
     ).result_set
     if not rows:
         raise QuotaCheckError(f"Team {org_id!r} not found in registry")
-    tier, mu, mg, mp, mak, ms = rows[0]
+    tier, mu, mg, mp, mak, _ms = rows[0]
     tier = tier or "free"
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
@@ -301,7 +329,13 @@ def resolve_org_limits(org_id: str) -> dict:
         "max_graphs": int(mg) if mg is not None else None,
         "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
         "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-        "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier. `_ms` (the stored
+        # t.max_sessions) is read so the deliberate departure is VISIBLE at
+        # the exact site that could re-introduce the cap — and then NOT
+        # honoured, because a stored 1000 must never re-cap an org (the trap
+        # this issue names). Clearing the stored rows is the defence-in-depth
+        # half; ignoring them here is the half that actually decides.
+        "max_sessions": None,
     }
 
 
@@ -498,6 +532,9 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
     Args:
         limits: resolved org limits dict (from resolve_org_limits or the
             authenticated caller). None → skip (stdio/operator, no org).
+            A key that is PRESENT and None means UNLIMITED (skip); a MISSING
+            key is fail-closed (QuotaCheckError) for every resource — build
+            the dict from _RESOURCE_LIMIT_KEYS (#310 GAP-B / #4010).
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
@@ -547,12 +584,15 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         # stored null) — skip enforcement (#683). Distinguish from a MISSING
         # key, which is fail-closed (#310 GAP-B): never silently fall back to
         # lenient caps.
+        # #4010: sessions is no longer the exception to that rule. Its flat
+        # v1 1000 cap was REOPENED and SUPERSEDED by #4010 (see the module
+        # comment above), so it has no constant to fall back to and its
+        # resolved value is always the explicit None — the lenient
+        # `if resource == "sessions": limit = DEFAULT_MAX_SESSIONS` branch is
+        # deleted, not relocated.
         if limit_key in limits:
             return
-        if resource == "sessions":
-            limit = DEFAULT_MAX_SESSIONS
-        else:
-            raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
+        raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
     count = _count_resource(org_id, resource, sdk=sdk)
     if count >= limit:
         raise QuotaExceededError(

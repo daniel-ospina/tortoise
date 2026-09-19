@@ -281,7 +281,10 @@ Bounds are enforced IN ORDER by `capture_session` (tortoise/hosted_api.py):
    `est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
    (the ×2 covers the M2 relations stage's IMPL/NAND operator nodes; sentence
    count is capped per turn — the #329 flood gate).
-4. **Sessions quota** — `DEFAULT_MAX_SESSIONS = 1000` (`_check_team_limit`).
+
+No sessions quota: the flat `max_sessions = 1000` was removed in **#4010** —
+sessions are unlimited for every tier, and a stored `Team.max_sessions` is
+deliberately not honoured as a cap.
 
 Free-tier interplay (product/pricing.json): `max_graph_nodes: 10000` is the
 points-quota numerator for NON-episodic Points only (turn Points / Session /
