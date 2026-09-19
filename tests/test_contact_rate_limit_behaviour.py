@@ -421,9 +421,10 @@ observations.negativeExcessExpected = liveSeed + 1;
 // forgiving a bounded amount of skew drops the whole history on that call and lets the
 // submission through. Because a bound can always be raised, the seeds are placed
 // SKEW_AHEAD_MS (~7 days) ahead, which defeats every skew tolerance up to a week; a
-// predicate forgiving more than that is not a tolerance but a blanket `t <= now`, which
-// is its own battery entry. Three bounded-skew entries (1, 2 and 1000 windows) are in
-// the battery: with seeds this far out, each is observed rather than agreed with.
+// predicate forgiving more than that — `t <= now + 1001 * RATE_WINDOW_MS` is a bounded
+// tolerance too — is refused BY CONSTRUCTION by `_predicate_failures`, which reads the
+// filter expression and requires it to decide on `cutoff` alone. No finite seed can
+// defeat every finite bound, so the class is closed structurally rather than numerically.
 hits.clear();
 const SKEW_AHEAD_MS = 1000 * RATE_WINDOW_MS;
 for (let i = 0; i < limit; i++) {
@@ -657,9 +658,10 @@ def _check_guarded_sweep(observed: dict) -> None:
         "cap walks the whole map on nearly every request"
     )
     assert observed["staleSweptOverCap"] is False, (
-        "one key over the cap the expired key must go — and it is the NEWEST by "
-        "insertion order here, so eviction cannot reach it first: only the sweep can, "
-        "which is what this asserts"
+        "one key over the cap the expired key must go — and eviction cannot reach it "
+        "first here: the expired key is third-newest, so with a single key of excess the "
+        "oldest-first loop takes an older LIVE key and leaves it in place. Only the "
+        "sweep can reach it, which is what this asserts"
     )
 
 
@@ -697,6 +699,45 @@ INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
     ("guarded-sweep", _check_guarded_sweep),
     ("eviction-bound", _check_eviction_bound),
 )
+
+
+def test_the_read_path_predicate_does_not_consult_now() -> None:
+    """The expiry decision must come from `cutoff` ALONE — never from `now`.
+
+    This is the by-construction half of the clock-step guard. A behavioural scenario can
+    only place its seeds a finite distance ahead, and a predicate forgiving a larger
+    bound than that distance agrees with the real limiter on every observation; raising
+    the seed just moves the escape one step out. Reading the predicate closes the whole
+    class at once: ANY `now`-based clause — `t <= now`, `t <= now + RATE_WINDOW_MS`,
+    `t <= now + 1001 * RATE_WINDOW_MS` — discards a history that still counts, so a step
+    back past the tolerance lets the submission through.
+    """
+    assert _predicate_failures(CONTACT_TS.read_text(encoding="utf-8")) == []
+
+
+def _predicate_failures(code: str) -> list[str]:
+    """Verdicts on the read-path filter expression itself. Empty list means clean.
+
+    Kept alongside the invariants so the battery can treat it as a catch: a mutation
+    that adds a `now`-based clause must be detected by SOMETHING, and beyond the seeded
+    distance this is the only thing that can detect it.
+    """
+    match = re.search(r"\.filter\(\s*\(t\)\s*=>\s*(.+?)\)\s*;", _limiter_source(code))
+    if match is None:
+        return [
+            "the read-path filter is not the shape this check anchors on — update the "
+            "check rather than leaving it unable to look"
+        ]
+    predicate = match.group(1)
+    failures = []
+    if "cutoff" not in predicate:
+        failures.append(f"read-path predicate no longer decides on `cutoff`: {predicate!r}")
+    if re.search(r"\bnow\b", predicate):
+        failures.append(
+            f"read-path predicate consults `now` ({predicate!r}) — any now-based clause "
+            "forgives a bounded clock skew and discards live history on a step back"
+        )
+    return failures
 
 
 def _failures(observed: dict) -> list[str]:
@@ -810,6 +851,11 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "predicate forgives a thousand-window clock skew",
         r"\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
         ".filter((t) => t > cutoff && t <= now + 1000 * RATE_WINDOW_MS)",
+    ),
+    (
+        "predicate forgives a thousand-and-one-window clock skew",
+        r"\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
+        ".filter((t) => t > cutoff && t <= now + 1001 * RATE_WINDOW_MS)",
     ),
     (
         "predicate drops future-dated entries",
@@ -979,12 +1025,13 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
     ("label", "pattern", "replacement"), MUTATIONS, ids=[m[0] for m in MUTATIONS]
 )
 def test_the_harness_catches_a_behavioural_break(label: str, pattern: str, replacement: str) -> None:
-    """Each mutation of the limiter must be caught — by an invariant, or by the run.
+    """Each mutation of the limiter must be caught — by an invariant, by the read-path
+    predicate check, or (for one declared entry) by failing to run.
 
     This is the harness's own discriminating power, asserted. A mutation that leaves
-    the invariants green is a hole in the guard, and this test is where it shows up
-    rather than in a message claiming a detection count. `\\g<0>` in a replacement
-    means "the matched text", so a mutation that inserts around an anchor keeps it.
+    everything green is a hole in the guard, and this test is where it shows up rather
+    than in a message claiming a detection count. `\\g<0>` in a replacement means "the
+    matched text", so a mutation that inserts around an anchor keeps it.
     """
     source = CONTACT_TS.read_text(encoding="utf-8")
     assert re.search(pattern, source), (
@@ -1005,4 +1052,6 @@ def test_the_harness_catches_a_behavioural_break(label: str, pattern: str, repla
             "it to MAY_FAIL_TO_RUN; otherwise the mutation is broken, not caught"
         )
         return
-    assert _failures(observed), f"{label!r} escaped the harness: {observed!r}"
+    assert _failures(observed) or _predicate_failures(mutated), (
+        f"{label!r} escaped the harness: {observed!r}"
+    )
