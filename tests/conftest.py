@@ -939,17 +939,19 @@ def _codex_home_isolation(monkeypatch):
 
 # ── #3819 (P1-2): ambient CURSOR_HOME isolation ───────────────────────────
 # Cursor has NO config-dir env var (verified: `CURSOR_HOME` appears nowhere in
-# Cursor 3.20.21's bundle; it reads `~/.cursor/hooks.json`), so the resolver no
-# longer consults one. The scrub is DEFENSIVE: a future code path that
+# Cursor 3.20.21's bundle; it reads `~/.cursor/hooks.json`), so the resolver
+# never consults one.  The scrub is DEFENSE-IN-DEPTH: a future code path that
 # reintroduced an env-scoped Cursor root cannot silently redirect an install
-# away from the real `~/.cursor` during a test. Every cursor test also passes
-# an explicit `home=`, so nothing here touches the real `~/.cursor`. The
-# sentinel is what the guard test in test_cursor_capture_hook.py reads to
-# prove the fixture ran.
+# away from the real `~/.cursor` during an unrelated test.  It is NOT itself
+# the guard — no test can observe a property the code does not consult.  The
+# guard that CAN go red is
+# `test_no_cursor_test_can_reach_the_real_cursor_store` in
+# test_cursor_capture_hook.py, which re-introduces an ambient `CURSOR_HOME`
+# (aimed at the live store) and asserts the resolved root is still under the
+# tmp tree.
 @pytest.fixture(autouse=True)
 def _cursor_home_isolation(monkeypatch):
     monkeypatch.delenv("CURSOR_HOME", raising=False)
-    monkeypatch.setenv("TORTOISE_TEST_CURSOR_HOME_SCRUBBED", "1")
     yield
 
 

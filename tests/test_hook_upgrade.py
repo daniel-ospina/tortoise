@@ -1357,6 +1357,37 @@ class TestUpgrade:
         assert "Refusing" in r.stderr
         assert (root / ".claude" / "settings.json").read_text() == before
 
+    def test_hooks_status_and_upgrade_never_traceback_on_a_deep_settings_file(
+            self, tmp_path):
+        """``tortoise hooks status|upgrade`` reads and parses the settings
+        file, and the parser's raise-set is open-ended: ``json.loads`` on a
+        deeply nested document raises ``RecursionError`` — a ``RuntimeError``,
+        NOT an ``OSError`` — which the old enumerated ``except OSError``
+        boundary let escape as a raw traceback (#4024 P2-2; the same shape that
+        let ``TypeError`` #3987 and ``UnicodeDecodeError`` #3988 escape
+        ``capture_install``).  The CLI must surface a populated message and a
+        non-zero exit, never a traceback, because the fail-closed install path
+        tells the user to run exactly this command to repair.
+
+        MUTATION: enumerate the boundary (``except OSError as e:``) — the
+        traceback escapes, no populated ``Cannot inspect`` / ``Upgrade failed``
+        line is printed, and this REDs."""
+        root = tmp_path / "cursor-root"
+        root.mkdir()
+        deep = "[" * 200000 + "]" * 200000
+        (root / "hooks.json").write_text('{"hooks": ' + deep + "}")
+
+        for argv, prefix in (
+            (("hooks", "status", "--harness", "cursor"), "Cannot inspect"),
+            (("hooks", "upgrade", "--harness", "cursor"), "Upgrade failed"),
+        ):
+            r = _run(list(argv), root, tmp_path)
+            assert r.returncode == 1, r
+            assert prefix in r.stderr, r.stderr
+            assert "RecursionError" in r.stderr, r.stderr
+            assert "Traceback (most recent call last)" not in r.stderr, r.stderr
+            assert "RecursionError" not in r.stdout, r.stdout
+
     def test_installed_ahead_of_source_is_not_downgraded(self, tmp_path):
         """An install whose marker is NEWER than this CLI's is reported but
         not overwritten.

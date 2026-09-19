@@ -17,17 +17,25 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import stat
 import subprocess
 import time
 from pathlib import Path
 
+from tortoise import hook_install
 from tortoise.capture_install import install_capture
 from tortoise.hook_install import count_canonical_markers, read_hook_version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "tortoise" / "cursor-hooks" / "session-end.sh"
 VERSION_MARKER = "# tortoise-hook-version: 1"
+
+#: The machine's REAL home, resolved from the password database — NOT from
+#: ``$HOME``, which tests monkeypatch.  ``~/.cursor`` under this path is the
+#: live Cursor store; no test may read or write it.
+_REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+_REAL_CURSOR = _REAL_HOME / ".cursor"
 
 #: A REAL Cursor 3.20.21 agent transcript captured on this machine
 #: (2026-09-18, `~/.cursor/projects/empty-window/agent-transcripts/
@@ -118,21 +126,40 @@ def test_hook_artifact_carries_the_version_marker():
         "exactly one column-0 marker (an in-body mention is not a declaration)")
 
 
-def test_cursor_home_is_scrubbed_so_no_cursor_test_can_touch_the_real_home():
-    """Every test here runs under the autouse CURSOR_HOME scrub.  Cursor has
-    NO config-dir env var (verified: ``CURSOR_HOME`` appears nowhere in Cursor
-    3.20.21's bundle), so the scrub is DEFENSIVE — a future code path that
-    reintroduced an env-scoped Cursor root cannot silently redirect an install
-    away from the real ``~/.cursor`` during a test.  Every test also passes an
-    explicit ``home=``.
+def test_no_cursor_test_can_reach_the_real_cursor_store(tmp_path, monkeypatch):
+    """The hermeticity guard must observe the PROPERTY, not a fixture-set
+    sentinel.  An earlier version asserted ``TORTOISE_TEST_CURSOR_HOME_SCRUBBED``
+    — a value the autouse fixture itself sets — which proves the fixture ran
+    and says nothing about scope; nothing about it could go red for a real
+    hermeticity defect.
 
-    Mutation: delete the autouse `_cursor_home_isolation` fixture from
-    tests/conftest.py — the sentinel is absent and this REDs."""
-    assert os.environ.get("TORTOISE_TEST_CURSOR_HOME_SCRUBBED") == "1", (
-        "the autouse CURSOR_HOME scrub did not run")
-    assert not os.environ.get("CURSOR_HOME"), (
-        f"an ambient CURSOR_HOME leaked into a cursor test: "
-        f"{os.environ.get('CURSOR_HOME')!r}")
+    This asserts the property instead: with ``HOME`` under the tmp tree and an
+    ambient ``CURSOR_HOME`` deliberately pointed at the LIVE ``~/.cursor``
+    (resolved from the password database, not from the monkeypatched ``$HOME``),
+    the resolved root and the real install stay under the tmp tree, and the
+    live store is never the resolution target.
+
+    Mutation: give the cursor layout a ``root_env`` (or make
+    ``cursor_home``/``default_root`` consult ``CURSOR_HOME``) — the ambient
+    value below becomes the resolved root, it escapes the tmp tree, and this
+    REDs.  (Un-scrubbing the fixture alone cannot RED it, which is exactly why
+    the sentinel form was vacuous.)"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CURSOR_HOME", str(_REAL_CURSOR))
+
+    layout = hook_install.get_layout("cursor")
+    resolved = hook_install.default_root(layout, Path.home())
+    assert resolved == home / ".cursor", (
+        f"an ambient CURSOR_HOME moved the cursor root to {resolved}")
+    assert resolved != _REAL_CURSOR and _REAL_HOME not in resolved.parents, (
+        f"the cursor root escaped the tmp tree: {resolved}")
+    assert layout.root_env is None, "Cursor has no config-dir env var"
+
+    assert install_capture("cursor", home=Path.home()).ok
+    assert (home / ".cursor" / "hooks.json").is_file()
+    assert not (tmp_path / "elsewhere").exists()
 
 
 def test_hook_detaches_so_cursor_shutdown_cannot_kill_the_capture(tmp_path):
@@ -311,6 +338,137 @@ def test_hook_resolves_the_agent_transcripts_fallback_when_path_is_null(tmp_path
     argv = [t for t in log.read_text(encoding="utf-8").split() if t != "DONE"]
     assert argv == ["sessions", "import", "--file", str(transcript),
                     "--harness", "cursor", "--session-id", game_id], argv
+
+
+def _write_cursor_pair(tmp_path, sid: str):
+    """A `.txt` and a `.jsonl` for the SAME conversation, both on disk.
+
+    Cursor writes both for a conversation (bundle: ``joinPath(n, v, `${v}.txt`)``
+    next to ``joinPath(n, v, `${v}.jsonl`)``), so "which one does the hook
+    read?" is a real, reachable question — not a hypothetical.
+    """
+    txt = tmp_path / f"{sid}.txt"
+    jsonl = tmp_path / f"{sid}.jsonl"
+    txt.write_text(
+        "USER: hi\nASSISTANT: hello\n", encoding="utf-8")  # not JSONL
+    jsonl.write_text(
+        '{"role":"user","message":{"content":[{"type":"text",'
+        '"text":"hi"}]}}\n', encoding="utf-8")
+    return txt, jsonl
+
+
+def _capture_argv(log: Path) -> list[str]:
+    """The capture argv the fake `tortoise` recorded ("DONE" stripped)."""
+    return [t for t in log.read_text(encoding="utf-8").split() if t != "DONE"]
+
+
+def test_hook_prefers_cursor_transcript_path_over_the_payloads_txt(tmp_path):
+    """Cursor resolves the SAME transcript twice and the two disagree for
+    `sessionEnd`.  `executeHookForStep` computes the payload's
+    ``transcript_path`` with ``preferJsonl = (stop || subagentStop)`` — FALSE
+    for sessionEnd — so `getTranscriptPath` walks ``['txt','jsonl']`` and hands
+    the hook the `.txt` whenever one exists.  `_buildHookEnvironment` computes
+    ``CURSOR_TRANSCRIPT_PATH`` with ``preferJsonl=true`` → ``['jsonl','txt']``:
+    the env var is the BETTER source, and it is the JSONL when both exist.
+
+    A `.txt` fed to the JSONL parser (`parse_cursor`) yields 0 turns, so the
+    capture files nothing while the hook still exits 0 — the silent
+    no-capture this seam exists to prevent.  The hook must take the env var.
+
+    Mutation: drop the ``$CURSOR_TRANSCRIPT_PATH`` preference (read the
+    payload's ``transcript_path`` only, as the pre-fix hook did) — the argv
+    names the `.txt` and this REDs."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log)
+
+    sid = "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1"
+    txt, jsonl = _write_cursor_pair(tmp_path, sid)
+
+    proc, _ = _run_hook(
+        json.dumps({"conversation_id": sid, "session_id": sid,
+                    "transcript_path": str(txt), "reason": "window_close",
+                    "hook_event_name": "sessionEnd"}),
+        home=home, bindir=bindir,
+        extra_env={"CURSOR_TRANSCRIPT_PATH": str(jsonl)})
+    assert proc.returncode == 0, proc.stderr
+
+    _wait_for_done(log)
+    argv = _capture_argv(log)
+    assert argv == ["sessions", "import", "--file", str(jsonl),
+                    "--harness", "cursor", "--session-id", sid], argv
+
+
+def test_hook_resolves_a_txt_payload_to_its_jsonl_sibling(tmp_path):
+    """A Cursor build that exports NO ``CURSOR_TRANSCRIPT_PATH`` still hands
+    the sessionEnd payload a `.txt`-preferred path.  With no env var to
+    correct it, the hook must resolve the `.jsonl` SIBLING itself — Cursor
+    writes both next to each other — rather than feed the `.txt` to the JSONL
+    parser.
+
+    Mutation: drop the extension-normalising sibling resolution — the argv
+    names the `.txt` and this REDs."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log)
+
+    sid = "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1"
+    txt, jsonl = _write_cursor_pair(tmp_path, sid)
+    assert txt.is_file() and jsonl.is_file()
+
+    proc, _ = _run_hook(
+        json.dumps({"conversation_id": sid, "session_id": sid,
+                    "transcript_path": str(txt), "reason": "window_close",
+                    "hook_event_name": "sessionEnd"}),
+        home=home, bindir=bindir)
+    assert proc.returncode == 0, proc.stderr
+
+    _wait_for_done(log)
+    argv = _capture_argv(log)
+    assert argv == ["sessions", "import", "--file", str(jsonl),
+                    "--harness", "cursor", "--session-id", sid], argv
+
+
+def test_hook_never_feeds_a_txt_transcript_to_the_jsonl_parser(tmp_path):
+    """A `.txt` with NO `.jsonl` sibling anywhere is a clean no-op, never a
+    capture call.  ``parse_cursor`` over a `.txt` returns 0 turns, which the
+    hook's mandatory `exit 0` would present as a successful capture while
+    nothing was filed — the exact silent no-capture this seam exists to
+    prevent.  Refusing to hand a non-JSONL file to the JSONL parser is what
+    makes the failure impossible rather than merely unlikely.
+
+    Mutation: let the payload's `.txt` through to `sessions import` (drop the
+    extension guard) — the fake `tortoise` is invoked with ``--file <…>.txt``
+    and this REDs."""
+    home = tmp_path / "home"
+    bindir = tmp_path / "bin"
+    log = tmp_path / "argv.log"
+    home.mkdir()
+    bindir.mkdir()
+    _fake_tortoise(bindir, log)
+
+    sid = "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1"
+    txt = tmp_path / f"{sid}.txt"
+    txt.write_text("USER: hi\nASSISTANT: hello\n", encoding="utf-8")
+    assert not (tmp_path / f"{sid}.jsonl").exists()
+
+    proc, _ = _run_hook(
+        json.dumps({"conversation_id": sid, "session_id": sid,
+                    "transcript_path": str(txt), "reason": "window_close",
+                    "hook_event_name": "sessionEnd"}),
+        home=home, bindir=bindir)
+    assert proc.returncode == 0, proc.stderr
+    time.sleep(1.0)
+    assert not log.exists(), (
+        "a `.txt` transcript was handed to the JSONL parser — parse_cursor "
+        "returns 0 turns and the capture files nothing while reporting "
+        "success")
 
 
 def test_hook_is_fail_open_when_transcript_path_is_null(tmp_path):

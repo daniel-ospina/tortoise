@@ -18,10 +18,20 @@
 #    "cursor_version": "3.20.21", "workspace_roots": ["..."],
 #    "user_email": "...", "transcript_path": "<...>" | null}
 #
-# `transcript_path` is `null` when the user disabled transcripts. Cursor also
-# puts it in the environment as `CURSOR_TRANSCRIPT_PATH`; when it is absent we
-# fall back to Cursor's machine-local store, `~/.cursor/projects/<mangled-
-# workspace>/agent-transcripts/<mangled-conversation-id>{,/<id>}.jsonl`
+# `transcript_path` is `null` when the user disabled transcripts. Cursor ALSO
+# puts the transcript in the environment as `CURSOR_TRANSCRIPT_PATH`, and the
+# two are NOT the same resolution: `executeHookForStep` computes the payload's
+# `transcript_path` with `preferJsonl = (stop || subagentStop)` — FALSE for
+# `sessionEnd` — so `getTranscriptPath` walks `['txt','jsonl']` and hands us a
+# `.txt` whenever one exists, while `_buildHookEnvironment` computes
+# `CURSOR_TRANSCRIPT_PATH` with `preferJsonl=true` → `['jsonl','txt']`, i.e.
+# the JSONL. `parse_cursor` is a JSONL parser, so a `.txt` yields 0 turns and
+# files nothing while this hook still exits 0 — the silent no-capture this
+# seam exists to prevent. The env var therefore WINS, and every candidate is
+# normalised to a `.jsonl` (the same-stem sibling) before it reaches the
+# parser. When neither is present we fall back to Cursor's machine-local
+# store, `~/.cursor/projects/<mangled-workspace>/agent-transcripts/
+# <mangled-conversation-id>{,/<id>}.jsonl`
 # (`transcriptsDir = joinPath(projectDir, "agent-transcripts")`,
 # `pathForConversation = agent-transcripts/<encodeURIComponent(id).replace(
 # /%/g,"_")>.jsonl` — verified in the bundle). The fallback is machine-local
@@ -58,6 +68,25 @@
 
 set -uo pipefail
 
+# Echo `$1` when it is a readable `.jsonl` transcript, or the same-stem
+# `.jsonl` sibling when `$1` names a `.txt` (or other extension) Cursor also
+# writes. Print NOTHING when no JSONL form exists: the caller then tries the
+# next candidate, so a `.txt` is never handed to the JSONL parser.
+_jsonl_of() {
+  [ -n "${1:-}" ] || return 0
+  case "$1" in
+    *.jsonl)
+      [ -f "$1" ] && printf '%s\n' "$1"
+      ;;
+    *)
+      local alt="${1%.*}.jsonl"
+      if [ "$alt" != "$1" ] && [ -f "$alt" ]; then
+        printf '%s\n' "$alt"
+      fi
+      ;;
+  esac
+}
+
 # ── The detached worker half ─────────────────────────────────────────────
 # Invoked as `$0 --worker` by the parent below. All slow work lives here; the
 # parent has already returned by the time this runs.
@@ -79,14 +108,17 @@ print(root0)
 ' < "$PAYLOAD" 2>/dev/null || true)"
   rm -f "$PAYLOAD" 2>/dev/null || true
 
-  TRANSCRIPT_PATH="$(printf '%s\n' "$META" | sed -n '1p')"
+  TRANSCRIPT_PATH_RAW="$(printf '%s\n' "$META" | sed -n '1p')"
   SESSION_ID="$(printf '%s\n' "$META" | sed -n '2p')"
   WORKSPACE_ROOT="$(printf '%s\n' "$META" | sed -n '3p')"
 
-  # Nullable per the Cursor schema — fall back to the machine-local
-  # agent-transcripts store before giving up.
-  if [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then
-    TRANSCRIPT_PATH="$(TORTOISE_CURSOR_SID="$SESSION_ID" \
+  # Candidate order: the env var (Cursor's jsonl-preferred resolution) first,
+  # then the payload's `transcript_path` (txt-preferred for sessionEnd), then
+  # the machine-local store. Each is normalised to a `.jsonl`; the first that
+  # yields one wins, and a candidate with no JSONL form is skipped.
+  STORE_TRANSCRIPT_PATH=""
+  if [ -n "$SESSION_ID" ]; then
+    STORE_TRANSCRIPT_PATH="$(TORTOISE_CURSOR_SID="$SESSION_ID" \
       TORTOISE_CURSOR_PROJECT="${CURSOR_PROJECT_DIR:-$WORKSPACE_ROOT}" \
       python3 -c '
 import glob, os, re, urllib.parse
@@ -116,6 +148,13 @@ for pattern in cands:
         break
 ' 2>/dev/null || true)"
   fi
+
+  TRANSCRIPT_PATH=""
+  for CANDIDATE in "${CURSOR_TRANSCRIPT_PATH:-}" "$TRANSCRIPT_PATH_RAW" \
+                   "$STORE_TRANSCRIPT_PATH"; do
+    TRANSCRIPT_PATH="$(_jsonl_of "$CANDIDATE")"
+    [ -n "$TRANSCRIPT_PATH" ] && break
+  done
 
   [ -n "$TRANSCRIPT_PATH" ] || exit 0
   [ -f "$TRANSCRIPT_PATH" ] || exit 0

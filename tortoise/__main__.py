@@ -3125,7 +3125,18 @@ def _cmd_hooks(args) -> int:
     if args.hooks_cmd == "status":
         try:
             findings = detect_install(root, args.harness)
-        except OSError as e:
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            # A CATCH-ALL, not an enumeration: `detect_install` reads and
+            # parses `<root>/settings.json` (or `hooks.json`), and the raise-set
+            # is open-ended.  An `except OSError` (the previous form) let
+            # `json.loads`' `RecursionError` — a `RuntimeError` — escape on a
+            # deeply nested document, so `hooks status` died with a raw
+            # traceback (#4024 P2-2).  The next unenumerated member refutes any
+            # tuple, which is how `TypeError` (#3987) and `UnicodeDecodeError`
+            # (#3988) escaped `capture_install`'s old boundary.  Same shape as
+            # the root resolution above and `install_capture`'s catch-all.
             print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
                   file=_sys.stderr)
             return 1
@@ -3189,7 +3200,12 @@ def _cmd_hooks(args) -> int:
     try:
         result = upgrade_install(root, args.harness,
                                  dry_run=getattr(args, "dry_run", False))
-    except OSError as e:
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        # The install path is fail-closed and its refusal TEXT tells the user
+        # to run this very command, so the command must never crash: same
+        # catch-all boundary as `status` above (#4024 P2-2).
         print(f"Upgrade failed: {e.__class__.__name__}: {e}",
               file=_sys.stderr)
         return 1
