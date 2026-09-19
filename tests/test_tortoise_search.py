@@ -8,6 +8,7 @@ Uses TF-IDF fallback (sklearn) — no sentence_transformers dependency.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -23,7 +24,12 @@ from tortoise.sdk import TortoiseSDK
 
 @pytest.fixture
 def sdk():
-    return _new_sdk()
+    sdk = _new_sdk()
+    yield sdk
+    sdk.close()
+    # #4096: reclaim this fixture's temp tree on teardown (the _new_sdk helper
+    # is shared with test bodies, so ownership stays with the fixture).
+    shutil.rmtree(os.path.dirname(sdk._db_path), ignore_errors=True)
 
 
 def _new_sdk():

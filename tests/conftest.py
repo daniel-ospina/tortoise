@@ -7,6 +7,7 @@ directly (no user-facing tier path in v1). Used by E2E-1/3/4/5/10/11/12/13.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 
 import pytest
@@ -192,12 +193,40 @@ def _serialize_embedded_construction():
     mp.undo()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _reclaim_session_tmpdirs():
+    """#4096: reclaim SESSION-scoped test temp trees at the very end of the run.
+
+    `tests/conftest.py:shared_embedded_db` and `tests/_embedded.py:shared_proj`
+    each `mkdtemp` one shared tree for the whole session and (before this) never
+    removed it. They cannot reclaim locally: their consumers never close their
+    servers, and the pass-2 sweeps in `_redislite_hygiene` / `_server_graph_hygiene`
+    read the socket/pid markers *inside* those trees — removing the tree in the
+    shared fixture's own teardown (which reverse setup order places BEFORE the
+    sweeps) would destroy that evidence and could orphan a live redislite server
+    (#4068/#1005).
+
+    Declared before the hygiene fixtures, `autouse`, and with no dependency on the
+    shared fixtures: pytest tears session fixtures down in reverse setup order, so
+    this is set up early (regardless of which tests request the shared trees) and
+    torn down LAST — after both sweeps. It reads the registry the shared fixtures
+    populate (`tests._embedded.SESSION_TMPDIRS`).
+    """
+    yield
+    from tests import _embedded as _embedded_mod
+    dirs, _embedded_mod.SESSION_TMPDIRS[:] = list(_embedded_mod.SESSION_TMPDIRS), []
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 @pytest.fixture
 def provision_test_user():
     created = []
+    tmpdirs = []
 
     def factory(tier: str = "free", demo_seed: bool = True):
         tmpdir = tempfile.mkdtemp()
+        tmpdirs.append(tmpdir)
         # Epic #1647 (plan-review P1-5): under a supported URI, sweep the
         # shared non-test "e2e-tests" namespace to a guard-passing per-test
         # test_e2e_<uuid> (the SDK maps it to test_e2e_<uuid>_tortoise,
@@ -243,6 +272,10 @@ def provision_test_user():
             sdk.close()
         except Exception:
             pass
+    # #4096: close first (above), then reclaim — removing the tree under a live
+    # redislite server would orphan it.
+    for d in tmpdirs:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture
@@ -325,7 +358,12 @@ def shared_embedded_db():
     # embedded shared server, unchanged.
     """
     import tempfile as _tf
-    db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+
+    from tests._embedded import register_session_tmpdir
+
+    tmpdir = _tf.mkdtemp(prefix="tortoise_shared_embedded_")
+    register_session_tmpdir(tmpdir)
+    db_path = os.path.join(tmpdir, "shared.db")
     yield db_path
 
 

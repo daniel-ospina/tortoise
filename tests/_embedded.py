@@ -28,6 +28,21 @@ import pytest
 from tortoise.config import is_db_uri
 from tortoise.projection import FalkorProjection
 
+# #4096: session-scoped test trees created by fixtures in this module and in
+# tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
+# which is declared BEFORE the hygiene fixtures so pytest's reverse-order teardown
+# runs it LAST — after `_redislite_hygiene` / `_server_graph_hygiene` have used the
+# socket/pid evidence inside these trees. A local `rmtree` in the shared fixture's
+# own finalizer would run first, destroy that evidence, and could orphan a live
+# redislite server (the #4068/#1005 class).
+SESSION_TMPDIRS: list[str] = []
+
+
+def register_session_tmpdir(path: str) -> None:
+    """Register a session-scoped test tree for end-of-session reclamation."""
+    SESSION_TMPDIRS.append(path)
+
+
 # ── #3546: ONE process-wide embedded construction lock ────────────────────
 # Consolidated here from the two per-file copies that #3511 installed
 # (`tests/test_import_endpoint.py`, `tests/test_export_delete.py`). The
@@ -1090,8 +1105,9 @@ def shared_proj():
     if not has_falkor():
         yield None
         return
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_shared_embedded_")
+    register_session_tmpdir(tmpdir)
+    db_path = os.path.join(tmpdir, "shared.db")
     proj = FalkorProjection(db_path, graph_name="test")
     yield proj
     proj.close()
