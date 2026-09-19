@@ -83,6 +83,17 @@ def test_mandatory_reproducer_is_the_first_family_reproducer():
     assert ee.MANDATORY_REPRODUCER in ee.FAMILY_REPRODUCERS
 
 
+def test_family_reproducers_is_a_set():
+    # The module-level guard that REPLACED the old
+    # `assert MANDATORY_REPRODUCER in FAMILY_REPRODUCERS`, which was a TAUTOLOGY:
+    # MANDATORY_REPRODUCER IS FAMILY_REPRODUCERS[0], so membership held for any
+    # value of the tuple and the assert could never fire. This is the invariant that
+    # CAN fail, and that carries weight: a duplicate is executed twice while
+    # `_manifest_receipt` counts it once, so the count receipt stops describing the
+    # run it was taken for.
+    assert len(set(ee.FAMILY_REPRODUCERS)) == len(ee.FAMILY_REPRODUCERS)
+
+
 # ── a fork cause requires the fork refusal (P2-F) ──────────────────────────
 
 class TestForkRefusalIsRequired:
@@ -266,6 +277,52 @@ class TestForkClassesRequireEexist:
         assert ee.label_cause(lines)[0] == "module-fork-hang"
 
 
+class TestModuleForkHangIsReachableOnRealEvidence:
+    """The class must fire on the line the daemon ACTUALLY emits.
+
+    Measured over 1347 captured `redis.log`s: `Module fork started pid:` occurs in
+    **0** of them, so `module-fork-hang` keyed only on the started/exited counter was
+    UNREACHABLE on real evidence. The line the daemon does emit for this class is
+    `There is a module fork child. Killing it!` — the plan doc's declared second
+    `requires_lines` entry — and the corpus log that carries it (together with 10
+    EEXIST refusals) was labelled `module-fork-eexist`, the label reserved for a PRIOR
+    instance's child: a proxy silent in exactly the case it exists to cover.
+    """
+
+    KILLING = "1:M 01 Jan 2026 00:00:01.000 # There is a module fork child. Killing it!"
+    EEXIST = "1:M 01 Jan 2026 00:00:00.200 # Can't fork for module: File exists"
+
+    def test_hang_is_reachable_without_any_started_line(self):
+        lines = [self.EEXIST, self.KILLING]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "module-fork-hang"
+        assert ev["module_fork_child_killed"] is True
+        assert ev["module_forks_started"] == []
+
+    def test_the_killing_line_alone_is_not_an_attributable_cause(self):
+        # The witness proves an unexited child existed; it is not itself a fork
+        # refusal, so a log that only reports the child states no cause this tool can
+        # attribute. This is the other half of the corpus: 2 logs carry the killing
+        # line, and only ONE of them also carries a refusal.
+        cause, ev = ee.label_cause([self.KILLING])
+        assert cause == "unattributed"
+        assert ev["module_fork_child_killed"] is True
+        assert ev["fork_refusal"] is False
+
+    def test_a_started_line_without_an_exit_still_labels_a_hang(self):
+        # The ordered counter witness is NOT dropped: a log that DOES carry the
+        # lifecycle lines must still label the hang, or making the class reachable on
+        # real evidence would have traded one blind spot for another.
+        lines = [
+            "1:M 01 Jan 2026 00:00:00.000 * Module fork started pid: 7",
+            self.EEXIST,
+        ]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "module-fork-hang"
+        assert ev["module_fork_child_killed"] is False
+        assert ev["module_forks_unexited"] == ["7"]
+
+
 # ── same_file_list compares the red run's OWN observed files ──────────────
 
 class TestSameFileListIsDerived:
@@ -273,14 +330,16 @@ class TestSameFileListIsDerived:
 
     `_run_once` records `files` as a copy of the selection, so a comparison against
     that field is a value compared with itself — `True` in every reachable state.
-    The independent side is each run's junit-observed file set.
+    The independent side is each run's junit-observed file set, carried as a
+    `_JunitObservation` so the selection cannot be substituted for it.
     """
 
+    @staticmethod
+    def _obs(observed, failing, source="junit-1.xml"):
+        return ee._JunitObservation(tuple(observed), tuple(failing), source)
+
     def test_a_red_that_observed_the_selection_is_certified(self):
-        runs = [{
-            "observed_files": ["tests/a.py", "tests/b.py"],
-            "failing_files": ["tests/a.py"],
-        }]
+        runs = [{"observed_files": self._obs(["tests/a.py", "tests/b.py"], ["tests/a.py"])}]
         assert ee._red_file_list_matches(runs, ["tests/a.py", "tests/b.py"]) is True
 
     def test_a_red_that_observed_a_different_file_list_is_not_certified(self):
@@ -289,8 +348,7 @@ class TestSameFileListIsDerived:
         # OWN junit shows it only ever ran one of the two files.
         runs = [{
             "files": ["tests/a.py", "tests/b.py"],
-            "observed_files": ["tests/a.py"],
-            "failing_files": ["tests/a.py"],
+            "observed_files": self._obs(["tests/a.py"], ["tests/a.py"]),
         }]
         assert ee._red_file_list_matches(runs, ["tests/a.py", "tests/b.py"]) is False
 
@@ -300,8 +358,40 @@ class TestSameFileListIsDerived:
     def test_a_run_without_observed_files_is_not_certified(self):
         assert ee._red_file_list_matches([{}], ["tests/a.py"]) is False
 
+    def test_a_selection_copy_is_not_an_observation(self):
+        # The INDEPENDENCE PROPERTY, at the consumer seam. A record whose observed
+        # side is the selection — which is exactly what `list(files)` is, a plain
+        # `list[str]` — carries no independent evidence, so it cannot certify, even
+        # though the value equals the selection. The type is what makes the
+        # substitution structurally unreachable rather than merely unobserved.
+        #
+        # `failing_files` is present so this also bites a fallback that re-wraps the
+        # selection in the observation type: without it the forged observation would
+        # carry no failing file and the last check would reject it for the wrong
+        # reason, leaving the forging mutation free to pass.
+        runs = [{
+            "files": ["tests/a.py"],
+            "failing_files": ["tests/a.py"],
+            "observed_files": ["tests/a.py"],
+        }]
+        assert ee._red_file_list_matches(runs, ["tests/a.py"]) is False
+
+    def test_an_empty_observation_cannot_be_filled_from_the_selection(self):
+        # The ONLY record state in which a consumer-side fallback
+        # (`if not observed: observed = {... r["files"] ...}`) can change the answer:
+        # an observation that observed no file yet recorded a failing one. The junit
+        # reader cannot produce it (failing is always a subset of observed), so the
+        # state is unreachable from the producer — but the fallback is precisely the
+        # re-coupling this function exists to refuse, so the hole is closed here
+        # rather than left to the reader's consistency.
+        runs = [{
+            "files": ["tests/a.py", "tests/b.py"],
+            "observed_files": self._obs([], ["tests/a.py"]),
+        }]
+        assert ee._red_file_list_matches(runs, ["tests/a.py", "tests/b.py"]) is False
+
     def test_a_red_that_failed_in_no_file_is_not_certified(self):
-        runs = [{"observed_files": ["tests/a.py"], "failing_files": []}]
+        runs = [{"observed_files": self._obs(["tests/a.py"], [])}]
         assert ee._red_file_list_matches(runs, ["tests/a.py"]) is False
 
 
@@ -320,15 +410,20 @@ class TestJunitFileExtraction:
     def test_observed_and_failing_files_come_from_the_run_own_junit(self, tmp_path: Path):
         p = tmp_path / "junit.xml"
         p.write_text(self.XUNIT1)
-        assert ee._junit_test_files(p) == (
-            ["tests/test_a.py", "tests/test_b.py"],
-            ["tests/test_b.py"],
-        )
+        obs = ee._junit_test_files(p)
+        assert obs.observed == ("tests/test_a.py", "tests/test_b.py")
+        assert obs.failing == ("tests/test_b.py",)
+        assert obs.source == str(p)
 
-    def test_a_missing_junit_yields_nothing(self, tmp_path: Path):
-        assert ee._junit_test_files(tmp_path / "absent.xml") == ([], [])
+    def test_a_missing_junit_yields_an_empty_observation(self, tmp_path: Path):
+        missing = tmp_path / "absent.xml"
+        obs = ee._junit_test_files(missing)
+        assert obs.observed == () and obs.failing == ()
+        assert obs.source == str(missing)
 
-    def test_a_junit_without_file_attributes_yields_nothing(self, tmp_path: Path):
+    def test_a_junit_without_file_attributes_yields_an_empty_observation(
+        self, tmp_path: Path
+    ):
         # This is exactly what pytest's default xunit2 emits — and it is why the
         # run command must pass `-o junit_family=xunit1`.
         p = tmp_path / "xunit2.xml"
@@ -337,7 +432,8 @@ class TestJunitFileExtraction:
             '<testcase classname="tests.test_a" name="test_ok" time="0.1" />'
             '</testsuite></testsuites>'
         )
-        assert ee._junit_test_files(p) == ([], [])
+        obs = ee._junit_test_files(p)
+        assert obs.observed == () and obs.failing == ()
 
     def test_the_run_command_requests_xunit1(self):
         cmd = ee._pytest_cmd(
@@ -362,7 +458,8 @@ class TestBothJunitReadersTolerateATruncatedFile:
     def test_truncated_junit_does_not_raise_and_is_reported(self, tmp_path: Path):
         p = tmp_path / "truncated.xml"
         p.write_text(self.TRUNCATED)
-        assert ee._junit_test_files(p) == ([], [])
+        obs = ee._junit_test_files(p)
+        assert obs.observed == () and obs.failing == ()
         counts = ee._read_junit_counts(p)
         assert counts["observed"] == 0
         assert counts["junit_parse_error"], "the failure must be recorded, not swallowed"
@@ -402,29 +499,22 @@ class TestRunOnceWiresTheIndependentFileList:
 
     The helper-level tests feed hand-built dicts, so they stay green if
     `_run_once` re-couples `observed_files` to the `files` selection variable — the
-    exact vacuity `same_file_list` exists to prevent. This drives `_run_once` itself
-    with a `_junit_test_files` that returns DISTINCT values, so the re-coupling
-    mutation fails here.
+    exact vacuity `same_file_list` exists to prevent. These drive `_run_once` itself:
+    one with a REAL junit on disk (the guard must be able to PASS — over-tight is a
+    defect too), one with none (the production state the guard exists for: a red run
+    whose junit was never written), where the field must be an EMPTY observation and
+    never the selection.
     """
 
-    def test_observed_files_come_from_the_junit_not_the_selection(
-        self, tmp_path: Path, monkeypatch
-    ):
+    @staticmethod
+    def _drive(tmp_path: Path, monkeypatch, returncode: int) -> dict:
         monkeypatch.setattr(ee, "_child_env", lambda rr: {})
         monkeypatch.setattr(ee, "_snapshot_redis_logs", lambda rr: [])
         monkeypatch.setattr(ee, "load1", lambda: 1.0)
-        monkeypatch.setattr(
-            ee, "_read_junit_counts",
-            lambda p: {"executed": 1, "skipped": 0, "failed": 1, "observed": 1,
-                       "junit_parse_error": None},
-        )
-        monkeypatch.setattr(
-            ee, "_junit_test_files",
-            lambda p: (["tests/observed_only.py"], ["tests/observed_fail.py"]),
-        )
 
-        class GreenProc:
-            returncode = 0
+        class Proc:
+            def __init__(self):
+                self.returncode = returncode
 
             def communicate(self, timeout=None):
                 return ("", None)
@@ -432,14 +522,49 @@ class TestRunOnceWiresTheIndependentFileList:
             def kill(self):
                 pass
 
-        monkeypatch.setattr(ee.subprocess, "Popen", lambda *a, **k: GreenProc())
-        rec = ee._run_once(["tests/selection_x.py"], tmp_path, tmp_path, 1, "m", 60)
-        assert rec["observed_files"] == ["tests/observed_only.py"]
-        assert rec["failing_files"] == ["tests/observed_fail.py"]
-        # The selection copy is still recorded separately — the independence check
-        # must read the junit side, which is NOT this field.
-        assert rec["files"] == ["tests/selection_x.py"]
-        assert rec["observed_files"] != rec["files"]
+        monkeypatch.setattr(ee.subprocess, "Popen", lambda *a, **k: Proc())
+        return ee._run_once(
+            ["tests/selection_x.py", "tests/selection_y.py"],
+            tmp_path, tmp_path, 1, "m", 60,
+        )
+
+    def test_a_red_that_ran_the_selection_is_certified_from_its_own_junit(
+        self, tmp_path: Path, monkeypatch
+    ):
+        (tmp_path / "junit-1.xml").write_text(
+            '<?xml version="1.0"?><testsuites><testsuite name="pytest">'
+            '<testcase classname="t" name="ok" file="tests/selection_x.py" time="0.1" />'
+            '<testcase classname="t" name="bad" file="tests/selection_y.py" time="0.1">'
+            '<failure message="boom">x</failure></testcase>'
+            '</testsuite></testsuites>'
+        )
+        rec = self._drive(tmp_path, monkeypatch, returncode=1)
+        assert rec["bucket"] == "unexpected-divergence"
+        assert rec["observed_files"].observed == ("tests/selection_x.py", "tests/selection_y.py")
+        assert rec["observed_files"].failing == ("tests/selection_y.py",)
+        assert rec["observed_files"].source.endswith("junit-1.xml")
+        assert ee._red_file_list_matches(
+            [rec], ["tests/selection_x.py", "tests/selection_y.py"]
+        ) is True
+
+    def test_a_red_with_no_junit_observes_nothing_and_cannot_certify(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # NO `junit-1.xml` is written: the real reader runs and returns an EMPTY
+        # observation. This is the state a fallback at the producer seam exists to
+        # hide — under `if not observed: observed_files = list(files)` the field is the
+        # SELECTION, so the isinstance assertion below fails and the vacuous
+        # `same_file_list = True` cannot be restored.
+        rec = self._drive(tmp_path, monkeypatch, returncode=1)
+        assert rec["bucket"] == "selection-red"  # a red whose junit was never written
+        assert isinstance(rec["observed_files"], ee._JunitObservation)
+        assert rec["observed_files"].observed == ()
+        assert rec["observed_files"].failing == ()
+        assert rec["observed_files"].source.endswith("junit-1.xml")
+        assert rec["files"] == ["tests/selection_x.py", "tests/selection_y.py"]
+        assert ee._red_file_list_matches(
+            [rec], ["tests/selection_x.py", "tests/selection_y.py"]
+        ) is False
 
 
 # ── the CONSUMER site (record construction) reads the canonical constants ──
@@ -477,6 +602,10 @@ class TestRecordConstructionReadsTheCanonicalConstants:
     @staticmethod
     def _run(files, run_id, bucket, observed=None, failing=None):
         red = bucket != "green"
+        obs = list(files) if observed is None else list(observed)
+        fail = [] if not red else (
+            list(failing) if failing is not None else [files[0]]
+        )
         return {
             "run_id": run_id,
             "bucket": bucket,
@@ -491,9 +620,10 @@ class TestRecordConstructionReadsTheCanonicalConstants:
             "redis_log_cause": "module-fork-eexist" if red else None,
             "cause_evidence": {},
             "timed_out": bucket == "timeout-red",
-            "observed_files": list(files) if observed is None else list(observed),
-            "failing_files": (
-                [] if not red else (list(failing) if failing is not None else [files[0]])
+            # The observed side the matcher reads is a junit OBSERVATION — the only
+            # type `_red_file_list_matches` accepts — never the selection.
+            "observed_files": ee._JunitObservation(
+                tuple(obs), tuple(fail), f"junit-{run_id}.xml"
             ),
         }
 

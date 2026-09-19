@@ -51,6 +51,7 @@ import time
 import uuid
 from collections import Counter
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -76,8 +77,16 @@ FAMILY_REPRODUCERS = (
 # DERIVED from FAMILY_REPRODUCERS — never a second literal of its first entry.
 # Re-typing the path is how the two could drift (one list edited, the other not).
 MANDATORY_REPRODUCER = FAMILY_REPRODUCERS[0]
-assert MANDATORY_REPRODUCER in FAMILY_REPRODUCERS, (
-    f"mandatory reproducer {MANDATORY_REPRODUCER!r} is not in FAMILY_REPRODUCERS"
+# The assert that stood here (`MANDATORY_REPRODUCER in FAMILY_REPRODUCERS`) was a
+# TAUTOLOGY: `MANDATORY_REPRODUCER` IS `FAMILY_REPRODUCERS[0]`, so membership holds
+# for ANY value of the tuple and the assert could never fire. It read as protection
+# and supplied none. The invariant that CAN fail — and that actually carries weight —
+# is that the selection is a SET: a duplicated entry is executed twice while
+# `_manifest_receipt` reports `unique_count` once, so the manifest's own count
+# receipt stops describing the run it was taken for.
+assert len(set(FAMILY_REPRODUCERS)) == len(FAMILY_REPRODUCERS), (
+    "FAMILY_REPRODUCERS contains a duplicate entry, so the manifest count receipt "
+    f"cannot describe the run: {FAMILY_REPRODUCERS}"
 )
 DEFAULT_MARKER = "not track_b and not live"
 
@@ -175,6 +184,13 @@ FORK_REFUSAL_RE = re.compile(_FORK_REFUSAL)
 FORK_REFUSAL_EEXIST_RE = re.compile(_FORK_REFUSAL_EEXIST)
 MODULE_FORK_STARTED_RE = re.compile(r"Module fork started pid:\s*(\d+)")
 MODULE_FORK_EXITED_RE = re.compile(r"Module fork exited pid:\s*(\d+)")
+# The daemon's OWN shutdown assertion that a module fork child is STILL ALIVE
+# (`moduleForkChildPid != -1` at shutdown) — the plan doc's declared second
+# `requires_lines` entry for `module-fork-hang` (line 1139). It is the ONLY witness
+# of an unexited module fork child that appears in captured `redis.log`: measured
+# over 1347 captured logs, `Module fork started pid:` occurs in **0** of them, so a
+# class keyed solely on the started/exited counter is unreachable on real evidence.
+MODULE_FORK_CHILD_KILLED_RE = re.compile(r"There is a module fork child\. Killing it!")
 BGSAVE_ANY_RE = re.compile(r"Background saving")
 BGSAVE_RE = re.compile(r"Background saving (started|terminated)")
 AOF_START_RE = re.compile(_AOF_START)
@@ -183,13 +199,31 @@ AOF_REWRITE_RE = re.compile(rf"({_AOF_START}|Background AOF rewrite (started|fin
 CAUSE_PRECEDENCE = ("module-fork-hang", "module-fork-eexist", "aof-rewrite-fork", "save-child-slot")
 
 CAUSE_CLASSES: dict[str, dict] = {
-    # #3845: a previous RM_Fork child never exited, so the next refusal is
-    # EEXIST. Discriminator: a `Module fork started pid:` with NO matching
-    # `Module fork exited pid:` (the ABSENCE is the proof).
+    # #3845: a previous RM_Fork child never exited, so the next refusal is EEXIST.
+    # The unexited-child property has TWO INDEPENDENT witnesses, and the class is
+    # reachable iff either holds:
+    #   (a) the ordered started/exited counter in `_module_fork_lifecycle` — sound,
+    #       pid-reuse aware, and the only witness a fixture WITHOUT the daemon's
+    #       shutdown line can exercise;
+    #   (b) the daemon's own `There is a module fork child. Killing it!` — the plan
+    #       doc's declared `requires_lines` entry (line 1139), and the ONLY witness
+    #       that occurs in real output. Keying on (a) alone made this class
+    #       UNREACHABLE on real evidence while a genuine hang red was labelled
+    #       `module-fork-eexist`, the label reserved for a PRIOR instance's child —
+    #       a proxy silent in exactly the case it exists to cover.
+    #
+    # The plan doc's `requires_absent: [r"Module fork exited pid:"]` is NOT copied:
+    # it is the same property in a cruder form ("no fork ever exited"), and the
+    # blunt form contradicts witness (a) — the pid-reuse case `started 123 / exited
+    # 123 / started 123` DOES contain an exited line and IS a hang. The counter is a
+    # strict refinement, so it governs. Measured: no captured log holds both the
+    # killing line and an exited line, so the blunt rule would have changed nothing
+    # on this corpus either way — the counter is chosen for soundness, not for today's
+    # count.
     "module-fork-hang": {
         "requires_lines": [FORK_REFUSAL_RE],
         "requires_absent": [],
-        "requires_unexited_fork": True,
+        "unexited_fork_witnesses": [MODULE_FORK_CHILD_KILLED_RE],
         "requires_fork_refusal": True,
         # The class requires a refusal AND an unexited child, so its payload is
         # that the unexited child CAUSED the refusal — and RM_Fork's child-slot
@@ -220,7 +254,6 @@ CAUSE_CLASSES: dict[str, dict] = {
     "module-fork-eexist": {
         "requires_lines": [FORK_REFUSAL_RE],
         "requires_absent": [BGSAVE_ANY_RE, AOF_START_RE],
-        "requires_unexited_fork": False,
         "requires_fork_refusal": True,
         # The NAME asserts EEXIST, so the refusal must state EEXIST — the shared
         # `Can't fork for module:` prefix also fronts EAGAIN, which is a different
@@ -231,7 +264,6 @@ CAUSE_CLASSES: dict[str, dict] = {
     "aof-rewrite-fork": {
         "requires_lines": [AOF_REWRITE_RE],
         "requires_absent": [],
-        "requires_unexited_fork": False,
         "requires_fork_refusal": True,
         # "a child occupies the slot" means RM_Fork failed on the slot check with
         # EEXIST. An EAGAIN refusal is a resource-limit failure, a different
@@ -245,7 +277,6 @@ CAUSE_CLASSES: dict[str, dict] = {
     "save-child-slot": {
         "requires_lines": [BGSAVE_RE],
         "requires_absent": [AOF_START_RE],
-        "requires_unexited_fork": False,
         "requires_fork_refusal": True,
         # Same mechanism as aof-rewrite-fork: the save child "occupies the slot",
         # which is precisely the EEXIST child-slot check. An EAGAIN refusal does
@@ -254,7 +285,6 @@ CAUSE_CLASSES: dict[str, dict] = {
     },
     "unattributed": {
         "requires_lines": [], "requires_absent": [],
-        "requires_unexited_fork": False,
         "requires_fork_refusal": False,
     },
 }
@@ -318,6 +348,7 @@ def _cause_evidence(
         "matched_lines": hits[:20],
         "fork_refusal": bool(FORK_REFUSAL_RE.search(text)),
         "eexist_refusal": bool(FORK_REFUSAL_EEXIST_RE.search(text)),
+        "module_fork_child_killed": bool(MODULE_FORK_CHILD_KILLED_RE.search(text)),
         "module_forks_started": sorted(started),
         "module_forks_exited": sorted(exited),
         "module_forks_unexited": unexited,
@@ -358,8 +389,14 @@ def label_cause(lines: list[str]) -> tuple[str, dict]:
             # `File exists` must not be applied to an EAGAIN refusal — the two
             # share the `Can't fork for module:` prefix and nothing else.
             continue
-        if spec.get("requires_unexited_fork") and not unexited:
-            # The refusal came from a save/AOF child, not a stale module child.
+        witnesses = spec.get("unexited_fork_witnesses")
+        if witnesses is not None and not (
+            # Two independent witnesses of ONE property: the ordered counter, and the
+            # daemon's own shutdown assertion. Either establishes that a module fork
+            # child outlived its fork, which is what makes the refusal a hang.
+            unexited or any(re.search(p, text) for p in witnesses)
+        ):
+            # The refusal came from a save/AOF child, or from no stale module child.
             continue
         if any(re.search(p, text) for p in spec["requires_absent"]):
             continue
@@ -604,13 +641,45 @@ def _norm_test_file(raw: str) -> str:
     return s
 
 
-def _junit_test_files(path: Path) -> tuple[list[str], list[str]]:
+class _JunitObservation(NamedTuple):
+    """The test FILES a run's OWN junit recorded — the independent side of
+    `same_file_list`.
+
+    The type IS the guard. `_red_file_list_matches` accepts an observation only if
+    it is an instance of this class, and the only producer is `_junit_test_files`
+    (the junit reader). `_run_once`'s `files` — a `list[str]` copy of the selection —
+    is therefore not an observation and cannot be substituted for one, which is the
+    hole this closes: `same_file_list` was `True` in every reachable state because
+    both sides were the selection, and a one-line fallback (`observed = list(files)`)
+    restored the vacuity without failing a single test.
+
+    `source` is the junit path the observation was read from: the property the check
+    asserts is that the observed files came from the run's OWN evidence, so the
+    evidence is NAMED, not merely shaped like a list.
+
+    An EMPTY observation (`_junit_test_files` on a missing or truncated junit) is
+    valid and expected — it is the fail-closed state: no evidence, so
+    `same_file_list` is False and `red-file-list-differs` is reported, loudly.
+    """
+
+    observed: tuple[str, ...]
+    failing: tuple[str, ...]
+    source: str
+
+
+def _junit_test_files(path: Path) -> _JunitObservation:
     """The run's OWN observed / failing test FILES, read from its junit XML.
 
     This is the independent record of what the child actually ran — as opposed to
     `_run_once`'s `files` argument, which is a copy of the selection, so comparing
     it to the selection compares a value to itself in every reachable state (the
     vacuity this replaces).
+
+    Returns a `_JunitObservation`, NOT a bare `(list, list)` pair: the TYPE is the
+    independence guard. An earlier revision returned bare lists and left the consumer
+    to notice they were empty; a one-line fallback at either seam then restored the
+    vacuous `same_file_list = True` — including in the production state the check
+    exists for (a red run whose junit was never written).
 
     Requires `-o junit_family=xunit1` on the run command (see `_pytest_cmd`):
     xunit2 — pytest's default, and what the run used before — emits NO `file`
@@ -619,11 +688,11 @@ def _junit_test_files(path: Path) -> tuple[list[str], list[str]]:
     import xml.etree.ElementTree as ET
 
     if not path.exists():
-        return [], []
+        return _JunitObservation((), (), str(path))
     try:
         root = ET.parse(path).getroot()
     except ET.ParseError:
-        return [], []
+        return _JunitObservation((), (), str(path))
     observed: list[str] = []
     failing: list[str] = []
     for case in root.iter("testcase"):
@@ -637,7 +706,7 @@ def _junit_test_files(path: Path) -> tuple[list[str], list[str]]:
             case.find("failure") is not None or case.find("error") is not None
         ) and f not in failing:
             failing.append(f)
-    return sorted(observed), sorted(failing)
+    return _JunitObservation(tuple(sorted(observed)), tuple(sorted(failing)), str(path))
 
 
 def _git(*args: str, cwd: Path | None = None) -> str:
@@ -748,7 +817,9 @@ def _run_once(
     wall = time.time() - started
     after = load1()
     counts = _read_junit_counts(junit)
-    observed_files, failing_files = _junit_test_files(junit)
+    # NO fallback. A missing / truncated / xunit2 junit yields an EMPTY observation,
+    # which fails `_red_file_list_matches` closed — it never yields the selection.
+    observed = _junit_test_files(junit)
     bucket = "green" if rc == 0 and counts["failed"] == 0 else "unexpected-divergence"
     if timed_out:
         bucket = "timeout-red"
@@ -786,8 +857,7 @@ def _run_once(
         "cause_evidence": evidence,
         "timed_out": timed_out,
         "junit_parse_error": counts["junit_parse_error"],
-        "observed_files": observed_files,
-        "failing_files": failing_files,
+        "observed_files": observed,
     }
 
 
@@ -817,8 +887,18 @@ def _red_file_list_matches(red_runs: list[dict], files: list[str]) -> bool:
     if not red_runs:
         return False
     for r in red_runs:
-        observed = {_norm_test_file(f) for f in r.get("observed_files", [])}
-        failing = {_norm_test_file(f) for f in r.get("failing_files", [])}
+        obs = r.get("observed_files")
+        # The observed side must be an OBSERVATION — junit-derived evidence — never
+        # the selection. `list(files)` is a `list`; it is not this type, so a fallback
+        # that substitutes the selection for the run's own evidence is structurally
+        # unable to reach the comparison below. This guards the PROPERTY, not one
+        # mutation: an observation carries the junit it was read from (`source`), the
+        # files it observed, and the files it failed in, so both sides of both checks
+        # below come from the SAME run's own evidence or the check fails closed.
+        if not isinstance(obs, _JunitObservation):
+            return False
+        observed = {_norm_test_file(f) for f in obs.observed}
+        failing = {_norm_test_file(f) for f in obs.failing}
         if not observed or observed != selection:
             return False
         if not failing:
