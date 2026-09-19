@@ -82,6 +82,7 @@ from tortoise.projection import (
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
 from tortoise.sdk import (
+    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
@@ -8298,8 +8299,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #3892: a keyless capture mints ZERO non-episodic points (only the
     # episodic turn Points, which the points quota excludes), so the
     # extraction estimate must not 402-block it — same rationale as the
-    # replay skip above. The sessions-limit gate below still applies (a
-    # stored Session consumes a session slot).
+    # replay skip above. `_check_org_limit(org, "sessions")` still runs, but
+    # sessions are unlimited since #4010, so it is vacuous in practice.
     if (not session_existed or retry_failed_capture) and not no_provider:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
@@ -8538,7 +8539,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             state["proj"] = proj
             state["lane"] = "none"
         meta = {
-            "provider": None, "route": None, "errors": [],
+            "provider": None, "route": None, "failover_used": False,
+            "errors": [],
             "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
             "mode": _CAPTURE_NO_PROVIDER_MODE,
             # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
@@ -8550,10 +8552,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # (capture_ok True) or the session predates capture_ok (legacy None —
         # presumed captured). A prior FAILED capture falls through to
         # extraction — retry is TRUE.
-        meta = {"errors": [],
-                "warnings": [
-                    "session already captured (same session_id) — no new "
-                    "extraction"],
+        _replay_warnings = [
+            "session already captured (same session_id) — no new extraction"]
+        if prior_capture_ok is False and prior_capture_extractor == "none":
+            # #3892 / #4007: the prior was a KEYLESS store — extraction has
+            # NEVER run for it. When this deployment is on the non-convergent
+            # M2 lane the re-attempt is refused, so a bare "already captured"
+            # would be a FALSE statement of this state and would hide the
+            # remedy. Disclose it, in the SAME words as sdk.capture_session.
+            _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        meta = {"errors": [], "warnings": _replay_warnings,
                 "mode": "replayed",
                 "route": None, "provider": None,
                 # #2335 WI-1a: hosted replayed carries no extractor_v2
@@ -8861,9 +8869,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Metering (#681): best-effort write-op count for overage billing. A
     # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
     # not inflate metering/abuse with phantom writes (review PR #1827).
-    if not session_existed or retry_failed_capture:
+    if not session_existed or (retry_failed_capture and not no_provider):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt.
+        # #3892: a KEYLESS retry writes zero new nodes (idempotent turn
+        # MERGEs, no extraction), so it must not inflate the write-op meter or
+        # the abuse counter with phantom writes — the same guard the estimate
+        # and mint gates carry. A keyless FRESH capture still meters (it
+        # creates the Session + turn Points).
         _record_write_op(org)
         # #3359: one capture_cost row per capture ATTEMPT that ran an
         # extraction (successful or errored — a failed extraction that made
@@ -9139,13 +9152,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     mode = meta.get("mode")
     if extraction_errors:
         effective_mode = "error" if mode != "empty" else "empty"
-    elif meta.get("route"):
-        effective_mode = f"llm:{meta['route']}"
     elif mode == _CAPTURE_NO_PROVIDER_MODE:
         # #3892: the keyless capture — turns stored, extraction skipped.
         # Reported under its OWN name, never folded into "llm" (which would
-        # claim an extraction that did not happen) nor "replayed".
+        # claim an extraction that did not happen) nor "replayed". Checked
+        # before `route` for parity with sdk.capture_session.
         effective_mode = _CAPTURE_NO_PROVIDER_MODE
+    elif meta.get("route"):
+        effective_mode = f"llm:{meta['route']}"
     elif mode == "replayed":
         effective_mode = "replayed"
     else:

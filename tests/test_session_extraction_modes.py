@@ -294,6 +294,37 @@ def test_keyless_session_is_extraction_upgradable_with_a_key(monkeypatch, client
         r2.json()
 
 
+def test_hosted_m2_lane_discloses_the_refused_keyless_retry(monkeypatch, client):
+    """#4188 / #4007 parity with the SDK's
+    `test_m2_lane_refuses_the_keyless_retry_and_says_so`: a keyless session
+    re-captured WITH a key while the deployment is on the non-convergent M2
+    lane REPLAYS (the retry stays refused), and the receipt says WHY — never
+    the false "already captured" of a fully-extracted session."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    conv = [{"role": "user", "content": "we decided to ship the upgrade path"}]
+    r1 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-hosted-m2-keyless"})
+    assert r1.json()["extraction_mode"] == "no-provider", r1.json()
+
+    # A key appears, but this deployment selects the M2 lane: the re-attempt
+    # is refused (M2 is non-convergent) — and DISCLOSED.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    r2 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-hosted-m2-keyless"})
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["extraction_mode"] == "replayed", body
+    warnings = " ".join(body["warnings"])
+    assert "stored WITHOUT a provider key" in warnings, warnings
+    assert "no extraction has ever run" in warnings, warnings
+    assert "TORTOISE_SESSION_EXTRACTOR=m2" in warnings, warnings
+
+
 def test_default_llm_with_provider_key_422_on_empty(monkeypatch, client):
     """P1 #1529: an EMPTY conversation is now rejected with 422 before any
     write (the old "graceful" 200 + extracted:0 is the E2E-8 owned negative

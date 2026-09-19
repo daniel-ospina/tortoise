@@ -3391,6 +3391,16 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             file=_sys.stderr,
         )
         return 1
+    # #4188: never report an unqualified success for a DEFERRED capture — a
+    # keyless store is a 2xx with extraction skipped. Surface the receipt's
+    # non-llm mode + additive warnings (stderr), mirroring _cmd_session_import.
+    _capture_mode = result.get("extraction_mode")
+    if _capture_mode and not str(_capture_mode).startswith("llm"):
+        print(f"  Extraction: {_capture_mode} — memory points were not "
+              "extracted", file=_sys.stderr)
+    if result.get("warnings"):
+        print("capture warnings: " + "; ".join(
+            str(w) for w in result["warnings"]), file=_sys.stderr)
     print(f"Captured session: {session_id}")
     print(f"  Turns: {len(turns)}")
     print(f"  Source: {transcript_path.stem}")
@@ -3620,7 +3630,21 @@ def _cmd_sessions_import(args) -> int:
     # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
     # state key; this LOCAL marker makes re-import a cheap no-op) and the
     # local failure breadcrumb is cleared.
+    # #4188: a keyless capture STORES the turns and SKIPS extraction. Writing
+    # the local "imported" receipt would make every later explicit re-import
+    # skip the POST, so the session could never gain memory points once a key
+    # appears — and the owner ruling requires an EXPLICIT re-capture to
+    # extract (nothing here spends automatically). Deferred ⇒ NO local
+    # receipt: the server keeps the graph state truthful (capture_ok=False,
+    # lane "none") and re-running this import after the key is set re-attempts
+    # extraction on the #2335 TRUE-retry lane.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
     _clear_capture_error(harness)
+    if result.get("extraction_mode") == _CAPTURE_NO_PROVIDER_MODE:
+        print("import deferred: no LLM provider key — turns stored, "
+              "extraction skipped; re-run this import once a key is "
+              "configured.", file=_sys.stderr)
+        return 0
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),
