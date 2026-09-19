@@ -3502,8 +3502,11 @@ def _cmd_sessions_import(args) -> int:
 
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
-    or a content-hash-derived one), and a LOCAL receipt is written ONLY on a
-    2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
+    or a content-hash-derived one), and a LOCAL receipt is written on a 2xx
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) — EXCEPT a deferred keyless
+    2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
+    receipt so an explicit re-import can re-attempt extraction once a key is
+    configured. Re-import of the
     same content is a no-op (receipt exists ⇒ already imported) — and even a
     re-POST without a local receipt converges server-side (same session_id ⇒
     zero new nodes). pi parses its own record shape (#3667 — it no longer
@@ -3627,9 +3630,9 @@ def _cmd_sessions_import(args) -> int:
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
 
-    # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
-    # state key; this LOCAL marker makes re-import a cheap no-op) and the
-    # local failure breadcrumb is cleared.
+    # A keyed 2xx ⇒ the receipt lands (the server also wrote the per-harness
+    # receipt state key; this LOCAL marker makes re-import a cheap no-op) and
+    # the local failure breadcrumb is cleared.
     # #4188: a keyless capture STORES the turns and SKIPS extraction. Writing
     # the local "imported" receipt would make every later explicit re-import
     # skip the POST, so the session could never gain memory points once a key

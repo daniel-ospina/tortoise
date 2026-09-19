@@ -8255,9 +8255,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to the v2 lane (the ONLY
-    # convergent lane — content-addressed pt_<sha> ids + graph content_hash
-    # resolution fold a re-attempt's partial claims onto the same nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
+    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
+    # content_hash resolution fold a re-attempt's partial claims onto the same
+    # nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
@@ -8869,14 +8870,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Metering (#681): best-effort write-op count for overage billing. A
     # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
     # not inflate metering/abuse with phantom writes (review PR #1827).
-    if not session_existed or (retry_failed_capture and not no_provider):
+    # #3892: a keyless re-capture takes the TRUE-retry lane, and its turn loop
+    # may write NEW turn Points when the transcript has grown (the harness
+    # re-captures a resumed session), so a keyless retry IS metered like any
+    # other retry. The conservative over-count on an identical-payload retry is
+    # accepted (the abuse counter below already documents that posture);
+    # skipping the meter instead would be a billing/abuse blind spot.
+    if not session_existed or retry_failed_capture:
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
-        # replay) — metering + abuse records fire for the re-attempt.
-        # #3892: a KEYLESS retry writes zero new nodes (idempotent turn
-        # MERGEs, no extraction), so it must not inflate the write-op meter or
-        # the abuse counter with phantom writes — the same guard the estimate
-        # and mint gates carry. A keyless FRESH capture still meters (it
-        # creates the Session + turn Points).
+        # replay) — metering + abuse records fire for the re-attempt. A keyless
+        # retry is metered too: its turn loop may write new turn Points on a
+        # grown transcript (see the #3892 lead-in above).
         _record_write_op(org)
         # #3359: one capture_cost row per capture ATTEMPT that ran an
         # extraction (successful or errored — a failed extraction that made
@@ -9302,7 +9306,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
         # retry) — a replay performs NO Session write (zero-write no-op).
         # Review (PR #2473): the SET records the extractor lane that RAN so
-        # the retry gate can require a v2 prior (M2 partials never retried).
+        # the retry gate can require a convergent prior (M2 partials never
+        # retried).
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
