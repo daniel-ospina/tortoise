@@ -72,8 +72,10 @@ to the others:
 3. **Replacing an approved tool's implementation** — `mcp.add_tool(fn)` where `fn` reuses an approved
    name silently REPLACES it while leaving the name set and the entry count identical. Caught by the
    per-row **`served_from`** fingerprint, which records the **code object** behind each tool
-   (`co_filename:co_firstlineno:sha256(co_code)`) — deliberately not `__module__`/`__qualname__`,
-   which are writable strings a shadow implementation can simply copy from the tool it replaces.
+   (`co_filename:sha256` over the code object's bytecode, names and constants) — deliberately not
+   `__module__`/`__qualname__`, which are writable strings a shadow implementation can simply copy
+   from the tool it replaces. `co_firstlineno` is deliberately **not** part of the identity: a pure
+   code move is not a change to the served implementation.
 
 **Scope, stated plainly.** The gate constrains the *registration routes* — what `TOOL_REGISTRY`
 declares, what the server registers, and what the transforms do. It is **not** a security boundary
