@@ -519,35 +519,6 @@ def _capture_turn_embeddings(turn_texts: list[str]) -> list[list[float] | None]:
         return [None] * len(turn_texts)
 
 
-def _existing_turn_hashes(proj, turn_ids: list[str]) -> tuple[dict, bool]:
-    """(id -> stored content_hash, probe_ok) for the deterministic turn ids.
-
-    #4194: read BEFORE the turn MERGE so the write can tell a re-capture of
-    UNCHANGED content (safe to preserve a stored vector) from a re-capture of
-    CHANGED content (a preserved vector would rank the turn by text no longer
-    on the node — the dense-leg lie).
-
-    ``probe_ok`` distinguishes "the graph answered" from "the probe failed":
-    on a failed read every prior is UNKNOWN, and the write must then PRESERVE
-    (an unknown prior is not a changed prior) rather than clear a valid vector
-    on a transient read error. It also says nothing about whether a vector is
-    stored, so the caller still re-encodes every turn — a re-capture always
-    restores the current model's vector, which is what keeps a model rotation
-    self-healing.
-    """
-    if not turn_ids:
-        return {}, True
-    try:
-        rows = proj.g.query(
-            "MATCH (t:Point) WHERE t.id IN $ids "
-            "RETURN t.id, t.content_hash",
-            params={"ids": turn_ids}).result_set
-        return {r[0]: r[1] for r in rows}, True
-    except Exception:  # noqa: BLE001, RUF100 — a probe failure must not drop
-        # the capture; it makes every prior UNKNOWN, which preserves.
-        return {}, False
-
-
 # #1352: minimal stopword set for the cheap session-Source topic derivation —
 # content-word frequency over the transcript (the metadata extractor's LLM
 # path is not available on the capture path; this is the deterministic
@@ -3449,13 +3420,11 @@ class TortoiseSDK:
         # turn is re-encoded on every capture, so a model rotation self-heals
         # on re-capture (no model fingerprint is stored on the node, so a
         # "skip unchanged" optimisation would silently keep old-space vectors).
-        # The pre-read supplies only the prior content_hash the write's
-        # preserve/clear decision needs. Fail-soft: `None` per turn when no
-        # embedder is available — the turn is still stored and the read path
-        # declares its vector leg impaired.
+        # The write's own MERGE reads the node's pre-write content_hash to
+        # decide preserve-vs-clear, so no external probe can fail. Fail-soft:
+        # `None` per turn when no embedder is available — the turn is still
+        # stored and the read path declares its vector leg impaired.
         _turn_texts = _capture_turn_texts(windowed)
-        _turn_ids = [f"{session_id}_t{i}" for i in range(len(_turn_texts))]
-        _turn_prior, _turn_prior_ok = _existing_turn_hashes(proj, _turn_ids)
         _turn_embs = _capture_turn_embeddings(_turn_texts)
         for i, turn in enumerate(windowed):
             # #721: _normalize_turn_role is the isinstance-first pattern — an
@@ -3474,7 +3443,6 @@ class TortoiseSDK:
             # live in that one helper.
             turn_text = _turn_texts[i]
             turn_embedding = _turn_embs[i]
-            turn_prior_hash = _turn_prior.get(_turn_ids[i])
 
             # Episodic turn point — deterministic id, structured speaker tag
             # (delta 5), content hash, session-scoped (never conflated across
@@ -3482,6 +3450,13 @@ class TortoiseSDK:
             turn_id = f"{session_id}_t{i}"
             _turn_rows = proj.g.query(
                 "MERGE (t:Point {id:$id}) "
+                # #4194: capture the node's PRE-write content_hash before the
+                # SET reassigns it. Reading it here (not from the SET) is what
+                # makes the stale-vector decision sound on BOTH a matched node
+                # and a just-created one (prior_ch NULL => a new turn, nothing
+                # to preserve) — and there is no external probe that can fail
+                # and leave the prior unknown.
+                "WITH t, t.content_hash AS prior_ch "
                 "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
                 "    t.speaker=$speaker, "
                 "    t.is_episodic=true, "
@@ -3489,24 +3464,17 @@ class TortoiseSDK:
                 "    t.createdAt=coalesce(t.createdAt, $now), "
                 "    t.updatedAt=$now, t.content_hash=$ch, "
                 # #4194: three-way guard. New vector if we encoded one; else
-                # PRESERVE the stored vector when the prior is UNKNOWN (probe
-                # failed — an unknown prior is not a changed prior, and a
-                # transient read error must never destroy a valid vector) or
-                # when the content is UNCHANGED (`$prior_ch = $ch`, read
-                # pre-write — never `t.content_hash`, which this SET
-                # reassigns); else CLEAR it, because a preserved vector for
+                # PRESERVE the stored vector only when the content is
+                # UNCHANGED; else CLEAR it, because a preserved vector for
                 # changed text would rank the turn by text no longer on the
                 # node (the dense-leg lie).
                 "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
-                "        WHEN $prior_ok = false THEN t.embedding "
-                "        WHEN $prior_ch = $ch THEN t.embedding ELSE NULL END "
+                "        WHEN prior_ch = $ch THEN t.embedding ELSE NULL END "
                 "RETURN t.createdAt AS createdAt, t.status AS status",
                 params={"id": turn_id, "c": turn_text, "k": "event",
                         "speaker": role, "s": "draft", "now": now,
                         "ch": _content_hash(turn_text),
-                        "emb": turn_embedding,
-                        "prior_ch": turn_prior_hash,
-                        "prior_ok": _turn_prior_ok},
+                        "emb": turn_embedding},
             ).result_set
             # #3947 review (F4 + parity): the write's COALESCE decides what the
             # graph holds — a RE-capture keeps the ORIGINAL createdAt AND the
