@@ -238,15 +238,24 @@ def test_drop_state_is_bounded_for_distinct_client_keys():
     assert len(per_site) <= ha._TELEMETRY_DROP_MAX_PER_SITE
 
 
-def test_drop_state_is_bounded_across_distinct_sites():
+def test_drop_state_is_bounded_across_distinct_sites(caplog):
     """The reported dict is bounded in its SITE dimension too — a future emit
-    site misusing a caller-derived `subject` cannot grow it without bound."""
+    site misusing a caller-derived `subject` cannot grow it without bound — and
+    the bound must not be bought by silencing a folded site."""
     for i in range(ha._TELEMETRY_DROP_MAX_SITES + 10):
         ha._report_unregistered(f"site{i}", "subject", {f"k{i}"})
     assert len(ha._TELEMETRY_DROP_REPORTED) <= ha._TELEMETRY_DROP_MAX_SITES + 1
     total = sum(len(v) for v in ha._TELEMETRY_DROP_REPORTED.values())
     assert total <= ((ha._TELEMETRY_DROP_MAX_SITES + 1)
                      * ha._TELEMETRY_DROP_MAX_PER_SITE)
+    # The core #3821 guarantee still holds past the cap: a post-cap site that
+    # folds into the overflow sentinel is still COUNTED and still WARNS.
+    assert ha._TELEMETRY_DROP_SITE_OVERFLOW in ha._TELEMETRY_DROP_REPORTED
+    with caplog.at_level(logging.WARNING):
+        ha._report_unregistered("post_cap_site", "subject", {"fresh_key"})
+    assert ha._TELEMETRY_DROP_COUNTS[
+        ("post_cap_site", "subject", ("fresh_key",))] == 1
+    assert any("fresh_key" in rec.getMessage() for rec in _warnings(caplog))
 
 
 def test_one_site_cannot_silence_another_sites_warning(caplog):

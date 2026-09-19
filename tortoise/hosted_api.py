@@ -19849,7 +19849,8 @@ def _report_unregistered(where: str, subject: str,
     ``_TELEMETRY_DROP_MAX_MARKERS`` plus one shared overflow entry,
     ``_TELEMETRY_DROP_REPORTED`` by ``_TELEMETRY_DROP_MAX_SITES`` sites (plus a
     shared overflow site) each capped at ``_TELEMETRY_DROP_MAX_PER_SITE``
-    fingerprints, and the fingerprint itself by ``_TELEMETRY_DROP_MAX_KEYS``.
+    fingerprints, and the fingerprint's key names by ``_TELEMETRY_DROP_MAX_KEYS``
+    (plus one ``...(+N more)`` marker).
     The PATCH front door feeds this from a request body, so an authenticated
     caller must not be able to grow process-global state or a log line without
     bound by sending unique unknown field names.
