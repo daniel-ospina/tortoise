@@ -49,6 +49,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -103,13 +104,18 @@ BUCKETS_PASSING: frozenset[str] = frozenset(
     b for b, passing in BUCKET_IS_PASSING.items() if passing
 )
 BUCKETS_RED: frozenset[str] = frozenset(BUCKET_NAMES) - BUCKETS_PASSING
-assert set(BUCKET_NAMES) == BUCKETS_PASSING | BUCKETS_RED, (
-    "BUCKETS_PASSING / BUCKETS_RED do not partition the declared buckets: "
-    f"{sorted(set(BUCKET_NAMES) - (BUCKETS_PASSING | BUCKETS_RED))}"
-)
-assert not (BUCKETS_PASSING & BUCKETS_RED), (
-    "a bucket is declared both passing and red: "
-    f"{sorted(BUCKETS_PASSING & BUCKETS_RED)}"
+# The two asserts that stood here ("BUCKETS_PASSING and BUCKETS_RED partition
+# BUCKET_NAMES" and "they are disjoint") were TAUTOLOGIES: BUCKETS_RED is
+# `BUCKET_NAMES - BUCKETS_PASSING` by construction, so both conditions hold for
+# ANY input and neither could ever fire. Something that cannot fail is not
+# protection — it reads as protection. Replaced with the invariant that CAN fail
+# and that actually carries weight: both sides must be non-empty, because
+# `closes_issue` (all runs passing) and `exit_code` (any run red) each branch on
+# one of these sets, so an all-passing or all-red vocabulary silently changes what
+# a record means.
+assert BUCKETS_PASSING and BUCKETS_RED, (
+    "the bucket vocabulary must declare at least one passing and at least one red "
+    f"bucket: passing={sorted(BUCKETS_PASSING)} red={sorted(BUCKETS_RED)}"
 )
 
 # ---------------------------------------------------------------------------
@@ -158,8 +164,15 @@ def load1() -> float:
 # `AOF_REWRITE_RE` were declared here and then re-typed as strings in the specs,
 # so neither compiled object was ever matched against anything).
 _FORK_REFUSAL = r"Can't fork for module:"
+# RM_Fork's refusal is `Can't fork for module: <strerror(errno)>`. The bare prefix is
+# shared by EVERY errno, so it cannot support a class whose NAME asserts a specific
+# one: an EAGAIN refusal ("Resource temporarily unavailable") was labelled
+# `module-fork-eexist` — asserting `File exists` about a log that never says it.
+# This matcher requires the EEXIST text, and only the EEXIST-named class uses it.
+_FORK_REFUSAL_EEXIST = r"Can't fork for module:\s*File exists"
 _AOF_START = r"Starting BGREWRITEAOF"
 FORK_REFUSAL_RE = re.compile(_FORK_REFUSAL)
+FORK_REFUSAL_EEXIST_RE = re.compile(_FORK_REFUSAL_EEXIST)
 MODULE_FORK_STARTED_RE = re.compile(r"Module fork started pid:\s*(\d+)")
 MODULE_FORK_EXITED_RE = re.compile(r"Module fork exited pid:\s*(\d+)")
 BGSAVE_ANY_RE = re.compile(r"Background saving")
@@ -200,6 +213,10 @@ CAUSE_CLASSES: dict[str, dict] = {
         "requires_absent": [BGSAVE_ANY_RE, AOF_START_RE],
         "requires_unexited_fork": False,
         "requires_fork_refusal": True,
+        # The NAME asserts EEXIST, so the refusal must state EEXIST — the shared
+        # `Can't fork for module:` prefix also fronts EAGAIN, which is a different
+        # failure and a different label (`unattributed`).
+        "requires_eexist_refusal": True,
     },
     # appendonly yes -> a background AOF rewrite child occupies the slot.
     "aof-rewrite-fork": {
@@ -245,20 +262,65 @@ assert set(CAUSE_PRECEDENCE) | {"unattributed"} == set(CAUSE_CLASSES), (
     f"{sorted(set(CAUSE_CLASSES) - set(CAUSE_PRECEDENCE) - {'unattributed'})}"
 )
 
+def _module_fork_lifecycle(lines: list[str]) -> tuple[set[str], set[str], list[str]]:
+    """Ordered, pid-reuse-aware view of the module-fork lifecycle.
+
+    `started - exited` over the WHOLE log is a SET difference, and a set cannot see
+    sequence: `Module fork started pid: 123` -> `Module fork exited pid: 123` ->
+    `Module fork started pid: 123` (the second one hanging) leaves BOTH sets holding
+    123, so the set-diff is EMPTY and a genuine `module-fork-hang` is reported as
+    `module-fork-eexist`. A `redis.log` is append-ordered, so the sound view is the
+    count of instances still outstanding at end-of-log: add on every `started`,
+    subtract on every `exited` (never below zero). Leftovers are the unexited
+    instances — pid reuse, and the same pid started twice, both included.
+    """
+    outstanding: Counter[str] = Counter()
+    started: set[str] = set()
+    exited: set[str] = set()
+    for ln in lines:
+        m = MODULE_FORK_STARTED_RE.search(ln)
+        if m is not None:
+            outstanding[m.group(1)] += 1
+            started.add(m.group(1))
+            continue
+        m = MODULE_FORK_EXITED_RE.search(ln)
+        if m is not None:
+            pid = m.group(1)
+            exited.add(pid)
+            if outstanding[pid] > 0:
+                outstanding[pid] -= 1
+    unexited = sorted(pid for pid, n in outstanding.items() if n > 0)
+    return started, exited, unexited
+
+
+def _cause_evidence(
+    text: str, hits: list[str], started: set[str], exited: set[str], unexited: list[str]
+) -> dict:
+    """The evidence payload every label_cause() return shares (one spelling)."""
+    return {
+        "matched_lines": hits[:20],
+        "fork_refusal": bool(FORK_REFUSAL_RE.search(text)),
+        "eexist_refusal": bool(FORK_REFUSAL_EEXIST_RE.search(text)),
+        "module_forks_started": sorted(started),
+        "module_forks_exited": sorted(exited),
+        "module_forks_unexited": unexited,
+        "module_fork_exited_absent": bool(started) and not exited,
+    }
+
+
 def label_cause(lines: list[str]) -> tuple[str, dict]:
     """Label the red's cause from server-side `redis.log` lines (D10).
 
     Returns `(cause, evidence)`. `evidence` carries the matched lines, whether a
-    fork refusal appeared, and whether every `Module fork started pid:` has a
-    matching `Module fork exited pid:` (the module-fork-hang discriminator).
+    fork refusal appeared, whether that refusal states EEXIST, and which module-fork
+    instances were still outstanding at end-of-log — the module-fork-hang
+    discriminator, computed as a running count so pid reuse cannot hide a hang.
 
     NOTE (GAP-5): the regexes are pinned against a captured real redis.log; a log
     matching none of the declared patterns is `unattributed` and can never close.
     """
     text = "\n".join(lines)
-    started = set(MODULE_FORK_STARTED_RE.findall(text))
-    exited = set(MODULE_FORK_EXITED_RE.findall(text))
-    unexited = started - exited
+    started, exited, unexited = _module_fork_lifecycle(lines)
 
     for cause in CAUSE_PRECEDENCE:
         spec = CAUSE_CLASSES[cause]
@@ -275,28 +337,19 @@ def label_cause(lines: list[str]) -> tuple[str, dict]:
             # `save-child-slot`, attributing a fork cause to evidence that never
             # mentions a fork.
             continue
+        if spec.get("requires_eexist_refusal") and not FORK_REFUSAL_EEXIST_RE.search(text):
+            # The refusal does not state EEXIST. A class whose NAME asserts
+            # `File exists` must not be applied to an EAGAIN refusal — the two
+            # share the `Can't fork for module:` prefix and nothing else.
+            continue
         if spec.get("requires_unexited_fork") and not unexited:
             # The refusal came from a save/AOF child, not a stale module child.
             continue
         if any(re.search(p, text) for p in spec["requires_absent"]):
             continue
-        return cause, {
-            "matched_lines": hits[:20],
-            "fork_refusal": bool(FORK_REFUSAL_RE.search(text)),
-            "module_forks_started": sorted(started),
-            "module_forks_exited": sorted(exited),
-            "module_forks_unexited": sorted(unexited),
-            "module_fork_exited_absent": bool(started) and not exited,
-        }
+        return cause, _cause_evidence(text, hits, started, exited, unexited)
 
-    return "unattributed", {
-        "matched_lines": [],
-        "fork_refusal": bool(FORK_REFUSAL_RE.search(text)),
-        "module_forks_started": sorted(started),
-        "module_forks_exited": sorted(exited),
-        "module_forks_unexited": sorted(unexited),
-        "module_fork_exited_absent": bool(started) and not exited,
-    }
+    return "unattributed", _cause_evidence(text, [], started, exited, unexited)
 
 
 def attributable(cause: str | None) -> bool:
@@ -505,6 +558,57 @@ def _read_junit_counts(path: Path) -> dict:
     return {"executed": executed, "skipped": skipped, "failed": failed, "observed": observed}
 
 
+def _norm_test_file(raw: str) -> str:
+    """Normalise a junit `file` attribute to the repo-relative, POSIX form used by
+    the selection (e.g. `tests/test_dr_endpoints.py`)."""
+    p = Path(raw)
+    if p.is_absolute():
+        try:
+            return p.relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            return p.name
+    s = str(raw).replace(os.sep, "/")
+    while s.startswith("./"):
+        s = s[2:]
+    return s
+
+
+def _junit_test_files(path: Path) -> tuple[list[str], list[str]]:
+    """The run's OWN observed / failing test FILES, read from its junit XML.
+
+    This is the independent record of what the child actually ran — as opposed to
+    `_run_once`'s `files` argument, which is a copy of the selection, so comparing
+    it to the selection compares a value to itself in every reachable state (the
+    vacuity this replaces).
+
+    Requires `-o junit_family=xunit1` on the run command (see `_pytest_cmd`):
+    xunit2 — pytest's default, and what the run used before — emits NO `file`
+    attribute, so the observed set would be silently empty in every state.
+    """
+    import xml.etree.ElementTree as ET
+
+    if not path.exists():
+        return [], []
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return [], []
+    observed: list[str] = []
+    failing: list[str] = []
+    for case in root.iter("testcase"):
+        raw = case.get("file")
+        if raw is None:
+            continue
+        f = _norm_test_file(raw)
+        if f not in observed:
+            observed.append(f)
+        if (
+            case.find("failure") is not None or case.find("error") is not None
+        ) and f not in failing:
+            failing.append(f)
+    return sorted(observed), sorted(failing)
+
+
 def _git(*args: str, cwd: Path | None = None) -> str:
     proc = subprocess.run(
         ["git", *args], capture_output=True, text=True, cwd=str(cwd or REPO_ROOT)
@@ -553,6 +657,26 @@ def _snapshot_redis_logs(run_root: Path) -> list[Path]:
     return found
 
 
+def _pytest_cmd(files: list[str], junit: Path, marker: str, timeout: int) -> list[str]:
+    """The child's pytest argv — spelled ONCE, and carrying the load-bearing flag.
+
+    `-o junit_family=xunit1` is not decoration: pytest's default xunit2 emits NO
+    `file` attribute on `<testcase>`, so the per-run observed/failing FILE data the
+    red-file-list conjunct compares would be absent in every state. A test asserts
+    the flag is present, so dropping it fails a test rather than silently making
+    the tool unclosable.
+    """
+    return [
+        _python(), "-m", "pytest", *files,
+        "-q", "-p", "no:cacheprovider",
+        f"--timeout={max(30, timeout // 3)}",
+        f"--junitxml={junit}",
+        "-m", marker,
+        "-p", "pi3827_capture",
+        "-o", "junit_family=xunit1",
+    ]
+
+
 def _run_once(
     files: list[str],
     measured_root: Path,
@@ -562,14 +686,7 @@ def _run_once(
     timeout: int,
 ) -> dict:
     junit = run_root / f"junit-{run_id}.xml"
-    cmd = [
-        _python(), "-m", "pytest", *files,
-        "-q", "-p", "no:cacheprovider",
-        f"--timeout={max(30, timeout // 3)}",
-        f"--junitxml={junit}",
-        "-m", marker,
-        "-p", "pi3827_capture",
-    ]
+    cmd = _pytest_cmd(files, junit, marker, timeout)
     env = _child_env(run_root)
     (run_root / "pi3827_capture.py").write_text(_CAPTURE_PLUGIN)
     before = load1()
@@ -600,6 +717,7 @@ def _run_once(
     wall = time.time() - started
     after = load1()
     counts = _read_junit_counts(junit)
+    observed_files, failing_files = _junit_test_files(junit)
     bucket = "green" if rc == 0 and counts["failed"] == 0 else "unexpected-divergence"
     if timed_out:
         bucket = "timeout-red"
@@ -636,20 +754,44 @@ def _run_once(
         "redis_log_cause": cause,
         "cause_evidence": evidence,
         "timed_out": timed_out,
+        "observed_files": observed_files,
+        "failing_files": failing_files,
     }
 
 
 def _red_file_list_matches(red_runs: list[dict], files: list[str]) -> bool:
-    """Whether EVERY red run ran the SAME selection file list (F4a).
+    """Whether every red run ACTUALLY RAN the selection's file list (F4a).
 
-    Derived from each run's own recorded `files` — never a literal `True`. There
-    is no red whose list can be certified when there is no red at all, and a red
-    run whose recorded list differs from the selection is a real
-    `red-file-list-differs` violation.
+    Each side is independent data: the selection, and the red run's OWN
+    junit-observed test-file set (what the child actually executed). It is NOT a
+    comparison against `_run_once`'s `files` field — that field is a copy of the
+    selection, so comparing it to the selection is a comparison of a value with
+    itself and is `True` in every reachable state. That was the vacuous check this
+    replaces.
+
+    A red whose junit observed a different file set — a vanished or renamed
+    selection file, a collection error that aborted the rest of the selection, a
+    narrowed invocation — did not run this selection, so its cause cannot certify
+    it. A red that observed the selection but recorded no failing FILE is likewise
+    not a demonstrated red on it.
+
+    What this is deliberately NOT: a red-failing-set vs green-failing-set
+    comparison. A green run's failing set is EMPTY by definition, so that
+    comparison would be false in exactly the state the paired red must reach. The
+    file-level claim a paired red can honestly carry is that the red executed — and
+    failed inside — the selection the record names.
     """
-    return bool(red_runs) and all(
-        list(r.get("files", [])) == list(files) for r in red_runs
-    )
+    selection = {_norm_test_file(f) for f in files}
+    if not red_runs:
+        return False
+    for r in red_runs:
+        observed = {_norm_test_file(f) for f in r.get("observed_files", [])}
+        failing = {_norm_test_file(f) for f in r.get("failing_files", [])}
+        if not observed or observed != selection:
+            return False
+        if not failing:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
