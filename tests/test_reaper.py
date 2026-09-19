@@ -2313,6 +2313,160 @@ def test_stale_marker_write_never_follows_symlink(monkeypatch):
         shutil.rmtree(base, ignore_errors=True)
 
 
+def test_marker_write_non_regular_occupant_fails_closed(monkeypatch):
+    """#4098 adversarial class 2/3: an occupant that cannot be removed makes
+    `_open_marker_no_follow` fail CLOSED — it must never return a non-regular
+    fd, and the caller must abort the record rather than rename/rmtree.
+
+    `os.unlink` is neutered so the planted symlink survives every attempt and
+    the retry is exhausted; a DIRECTORY occupant is the other unremovable
+    case. (The retry-exhaustion *outcome* is pinned end-to-end by
+    `test_stale_marker_write_never_follows_symlink`; this test pins that the
+    helper never follows and never hands back a non-regular fd.)
+    """
+    from tortoise.embedded_reaper import (
+        REAPER_OWNED_MARKER,
+        _open_marker_no_follow,
+    )
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        victim = base / "victim.txt"
+        victim.write_text("ORIGINAL\n")
+        decoy = base / "tmpDECOY"
+        decoy.mkdir()
+        marker = decoy / REAPER_OWNED_MARKER
+        dir_fd = os.open(str(decoy), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            # case 1: symlink that is re-planted through the neutered unlink
+            marker.symlink_to(victim)
+            monkeypatch.setattr(os, "unlink", lambda *a, **k: None)
+            assert _open_marker_no_follow(dir_fd) is None
+            assert victim.read_text() == "ORIGINAL\n"
+            monkeypatch.undo()
+            # case 2: a DIRECTORY occupant cannot be unlinked at all
+            marker.unlink()
+            marker.mkdir()
+            assert _open_marker_no_follow(dir_fd) is None
+            assert marker.is_dir()
+        finally:
+            os.close(dir_fd)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_marker_write_error_skips_one_record_not_the_sweep(monkeypatch):
+    """#4098 review-cycle-1 P1 regression pin: a transient marker-write
+    failure (ENOSPC) must skip THIS record and let the sweep continue — it
+    must never propagate out of `reap()` (the remaining records include live
+    orphans), and a later record in the same call must still be acted on.
+    The pre-#4098 `with open(...)` had this isolation; the first cut of the
+    dir_fd rewrite lost it.
+    """
+    from tortoise.embedded_reaper import reap
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        d1, s1 = _make_dead_pid_dir(base, name="tmpONE")
+        d2, s2 = _make_dead_pid_dir(base, name="tmpTWO")
+        _backdate_dir(d1)
+        _backdate_dir(d2)
+        real_write = os.write
+        state = {"n": 0}
+
+        def _poisoned_write(fd, data):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise OSError(28, "ENOSPC")
+            return real_write(fd, data)
+
+        monkeypatch.setattr(os, "write", _poisoned_write)
+        monkeypatch.setattr("tortoise.embedded_reaper._real_gettempdir",
+                            lambda: os.path.realpath(str(base)))
+        acted = reap([_stale_record(d1, s1), _stale_record(d2, s2)],
+                     dry_run=False)
+        assert os.path.exists(str(d1)), \
+            "the failed record must be left intact (retried next sweep)"
+        assert not os.path.exists(str(d2)), \
+            "a later record must still be reaped — the failure is per-record"
+        assert [a.get("dbdir") for a in acted] == [str(d2)], acted
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_reaper_lock_never_follows_symlink(tmp_path):
+    """#4098 / CWE-377: the singleton lock lives in the SHARED tempdir
+    (`<tempdir>/.tortoise/.reaper.lock`), so a symlink planted at the lock
+    path must be REFUSED (ELOOP from O_NOFOLLOW) — the pre-#4098
+    `open(path, "a")` truncated the symlink target."""
+    from tortoise.embedded_reaper import _ReaperLock
+    lock_dir = tmp_path / ".tortoise"
+    lock_dir.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("IMPORTANT\n")
+    lock_path = lock_dir / ".reaper.lock"
+    os.symlink(str(victim), str(lock_path))
+    lock = _ReaperLock(str(lock_path))
+    assert lock.acquire() is False, "a planted symlink must never be followed"
+    assert victim.read_text() == "IMPORTANT\n", \
+        "the lock open truncated the symlink target (CWE-377)"
+
+
+def test_reaper_lock_holder_pid_never_blocks_on_fifo(tmp_path, monkeypatch):
+    """#4098 cycle-2 P1: `_lock_holder_pid()` is evaluated in `main()` BEFORE
+    `signal.alarm(timeout)` is armed, so a FIFO planted at the lock path must
+    not block it — `open(FIFO, O_RDONLY)` without `O_NONBLOCK` hung reaper
+    startup forever with the watchdog disabled. A non-regular path is not the
+    lock this module wrote -> "unknown"."""
+    import tortoise.embedded_reaper as er
+    fifo = tmp_path / ".reaper.lock"
+    os.mkfifo(str(fifo))
+    monkeypatch.setattr(er, "_LOCK_PATH", str(fifo))
+    assert er._lock_holder_pid() == "unknown"
+
+
+@pytest.mark.timeout(30)
+def test_reaper_lock_symlinked_dir_is_not_chmodded(tmp_path):
+    """#4098 cycle-2 P2: `os.chmod` FOLLOWS a symlink (Linux has no lchmod),
+    so tightening a pre-existing `<tempdir>/.tortoise` must not run on the
+    path — a planted symlink reached the mode change before the O_NOFOLLOW
+    gate. The dir is opened O_NOFOLLOW first and tightened through the fd."""
+    from tortoise.embedded_reaper import _ReaperLock
+    victim = tmp_path / "victimdir"
+    victim.mkdir()
+    os.chmod(str(victim), 0o755)
+    lock_dir = tmp_path / ".tortoise"
+    os.symlink(str(victim), str(lock_dir))
+    lock = _ReaperLock(str(lock_dir / ".reaper.lock"))
+    assert lock.acquire() is False, "a symlinked lock dir must be refused"
+    assert (os.stat(str(victim)).st_mode & 0o777) == 0o755, \
+        "the planted symlink redirected a chmod onto an unrelated dir"
+
+
+def test_open_marker_no_follow_replaces_fifo_without_blocking(tmp_path):
+    """#4098 in-scope class 3: a FIFO at the marker path must not block the
+    write (`O_NONBLOCK`) — it is removed and replaced by a regular file."""
+    import stat as _stat
+
+    from tortoise.embedded_reaper import (
+        REAPER_OWNED_MARKER,
+        _open_marker_no_follow,
+    )
+    decoy = tmp_path / "tmpFIFO"
+    decoy.mkdir()
+    marker = decoy / REAPER_OWNED_MARKER
+    os.mkfifo(str(marker))
+    dir_fd = os.open(str(decoy), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = _open_marker_no_follow(dir_fd)
+        assert fd is not None, "a FIFO occupant must be replaced, not block"
+        assert _stat.S_ISREG(os.fstat(fd).st_mode)
+        os.write(fd, b"reaper-owned\n")
+        os.close(fd)
+    finally:
+        os.close(dir_fd)
+    assert not os.path.islink(str(marker))
+    assert marker.read_text() == "reaper-owned\n"
+
+
 # ── #1383: pipeline integration — quarantine sweep (plan Task 4) ─────
 
 def test_discover_skips_quarantine_dirs():

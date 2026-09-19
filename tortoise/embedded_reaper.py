@@ -1886,7 +1886,10 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # "truncate any file the reaper's uid can write". O_NOFOLLOW alone
     # protects only the basename, so the dir is opened O_NOFOLLOW and the
     # marker is addressed RELATIVE to that fd (the openat pattern;
-    # CVE-2018-6954 is the precedent for skipping it).
+    # CVE-2018-6954 is the precedent for skipping it). The dir open needs
+    # READ permission, so a candidate dir that is write+execute but
+    # non-readable (0300) is abandoned rather than reaped — fail-closed, and
+    # unreachable for redislite/mkdtemp dirs (0700).
     try:
         dir_fd = os.open(dbdir_real,
                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -1955,40 +1958,46 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
 
 
 def _open_marker_no_follow(dir_fd: int) -> int | None:
-    """Create/truncate REAPER_OWNED_MARKER inside ``dir_fd``, never
-    following a symlink (#4098, CWE-377).
+    """Open REAPER_OWNED_MARKER inside ``dir_fd`` for writing, never
+    following a symlink and never returning a non-regular file (#4098).
 
-    Returns a writable fd for a REGULAR file, or None (fail closed). The
-    dir fd pins the parent, `O_NOFOLLOW` + `O_EXCL` refuse a planted
-    symlink/FIFO at the basename, and the `fstat` check refuses anything
-    that is not a regular file. An entry already occupying the name (a
-    planted symlink, a leftover from an aborted rename) is removed first —
-    `unlink` never follows a trailing symlink, and a directory (or an
-    unwritable dir) survives to abort us. A symlink re-planted between the
-    unlink and the create is still refused — `O_EXCL` reports `EEXIST` (and
-    `O_NOFOLLOW` would refuse it independently), and the exhausted retry
-    below fails closed.
+    Returns a writable fd for a REGULAR file, or None (fail closed). One
+    `O_CREAT|O_TRUNC|O_NOFOLLOW|O_NONBLOCK` open covers every common case: an
+    absent marker is created; a stale REGULAR marker is overwritten IN PLACE
+    (no write permission on the candidate dir is required, so the pre-#4098
+    overwrite semantics are preserved); a planted symlink is REFUSED (`ELOOP`
+    — `O_NOFOLLOW` protects the basename); and a FIFO cannot block
+    (`O_NONBLOCK`). Anything the open lands on that is not a regular file (a
+    symlink, a FIFO with a reader, a directory) is removed with a
+    `dir_fd`-anchored `unlink` — which never follows a trailing symlink — and
+    retried once; a re-plant in that window, or an entry that cannot be
+    unlinked (a directory occupant, an unwritable dir), fails closed.
+
+    The `dir_fd` pins the parent, so the write cannot be redirected by a
+    swapped parent directory either — `O_NOFOLLOW` alone protects only the
+    basename (CVE-2018-6954 is the precedent for skipping `openat`).
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+             | os.O_NONBLOCK)
     for _attempt in (0, 1):
         try:
             fd = os.open(REAPER_OWNED_MARKER, flags, 0o600, dir_fd=dir_fd)
-        except FileExistsError:
+        except OSError:
+            fd = None
+        if fd is not None:
             try:
-                os.unlink(REAPER_OWNED_MARKER, dir_fd=dir_fd)
+                is_regular = stat.S_ISREG(os.fstat(fd).st_mode)
             except OSError:
-                return None
-            continue
-        except OSError:
-            return None
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                os.close(fd)
-                return None
-        except OSError:
+                is_regular = False
+            if is_regular:
+                return fd
             os.close(fd)
+        # Occupied by something this must neither follow nor keep: a symlink
+        # (ELOOP), a FIFO (opened non-blocking above), a directory (EISDIR).
+        try:
+            os.unlink(REAPER_OWNED_MARKER, dir_fd=dir_fd)
+        except OSError:
             return None
-        return fd
     return None
 
 
@@ -2040,8 +2049,64 @@ class _ReaperLock:
 
     def acquire(self) -> bool:
         import fcntl
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        self._fh = open(self.path, "a")  # noqa: SIM115
+        # #4098 (CWE-377): the lock lives in the SHARED tempdir
+        # (`<tempdir>/.tortoise`, 1777 on Linux), so its open is the same
+        # symlink sink as the marker write — a plain `open(path, "a")`
+        # TRUNCATED an attacker-chosen file the reaper's uid can write when
+        # the lock name was planted as a symlink (and a FIFO blocked startup
+        # before the SIGALRM watchdog was armed). Never follow a link and
+        # never open a non-regular file; the sibling `index_lock.py` #280
+        # fix is the pattern (dir 0700, O_NOFOLLOW, truncate through the fd).
+        lock_dir = os.path.dirname(self.path)
+        try:
+            os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+            dir_fd = os.open(lock_dir,
+                             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            self._fh = None
+            return False
+        try:
+            # Best-effort tighten of a PRE-EXISTING dir. Done through the fd:
+            # chmod(2) FOLLOWS a symlink and Linux has no lchmod, so a path
+            # chmod would run before the O_NOFOLLOW gate and let a planted
+            # `.tortoise` symlink redirect the mode change (#4098 review).
+            try:  # noqa: SIM105
+                os.fchmod(dir_fd, 0o700)
+            except OSError:
+                pass
+            try:
+                fd = os.open(os.path.basename(self.path),
+                             os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
+                             dir_fd=dir_fd)
+            except OSError:
+                self._fh = None
+                return False
+            try:
+                self._fh = os.fdopen(fd, "r+")
+            except OSError:
+                # os.fdopen does not take ownership on failure — close the
+                # raw fd itself, or it leaks.
+                try:  # noqa: SIM105
+                    os.close(fd)
+                except OSError:
+                    pass
+                self._fh = None
+                return False
+        finally:
+            try:  # noqa: SIM105
+                os.close(dir_fd)
+            except OSError:
+                pass
+        try:
+            is_regular = stat.S_ISREG(os.fstat(self._fh.fileno()).st_mode)
+        except OSError:
+            is_regular = False
+        if not is_regular:
+            # A FIFO opens fine O_RDWR without blocking — never treat it as
+            # the lock. Closed exactly once, here.
+            self._fh.close()
+            self._fh = None
+            return False
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._fh.seek(0)
@@ -2719,11 +2784,37 @@ def _env_truthy(raw: str | None) -> bool:
 
 
 def _lock_holder_pid() -> str:
+    # #4098: never read through a planted symlink at the lock path, and never
+    # BLOCK on one — this runs in main() BEFORE `signal.alarm(timeout)` is
+    # armed, so `open(FIFO, O_RDONLY)` without O_NONBLOCK would hang reaper
+    # startup forever with the watchdog disabled. A non-regular path is
+    # "unknown": it can never be the lock this module wrote.
     try:
-        with open(_LOCK_PATH) as fh:
-            return fh.read().strip() or "unknown"
+        fd = os.open(_LOCK_PATH,
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return "unknown"
+    try:
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return "unknown"
+        except OSError:
+            return "unknown"
+        chunks = []
+        while True:
+            try:
+                chunk = os.read(fd, 256)
+            except OSError:
+                return "unknown"
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", "replace").strip() or "unknown"
+    finally:
+        try:  # noqa: SIM105
+            os.close(fd)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

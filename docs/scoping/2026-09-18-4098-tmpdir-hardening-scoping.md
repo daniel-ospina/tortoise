@@ -5,10 +5,11 @@
 > **Worktree:** `.worktrees/4098-tmpdir-hardening` on `fix/4098-tmpdir-hardening`
 > **Domain declaration:** **adversarial** (see `### Adversarial Threat Surface`) → review bounded at 2 cycles
 > **Verdict:** **(B) — a concrete, demonstrated bypass exists.** The current containment
-> discipline is *not* sufficient on a shared `/tmp`. One mechanical hardening ships in this PR;
-> the provenance guard that closes the remaining classes is **escalated to the human** as a
-> decision, filed as **#4136** — and deliberately **not** implemented here, because it changes the
-> reaper's reach on a shared box.
+> discipline is *not* sufficient on a shared `/tmp`. **Two** mechanical hardenings ship in this PR
+> (the symlink-follow marker write and the sibling singleton-lock open, both CWE-377); the
+> provenance guard that closes the remaining classes is **escalated to the human** as a decision,
+> filed as **#4136** — and deliberately **not** implemented here, because it changes the reaper's
+> reach on a shared box.
 
 ---
 
@@ -47,7 +48,9 @@ for d in dict.fromkeys([dbdir, reg_dir]):
 
 So the destruction surface is **four** predicates, not three: (1) SIGTERM a pid, (2) the
 marker write, (3) the rename-aside + rmtree of `dbdir`, (4) the rmtree of `reg_dir`. A hardening
-that covers only (2) and (3) is incomplete by construction.
+that covers only (2) and (3) is incomplete by construction. The code-review gate then found a
+**fifth** surface of the same CWE-377 class, outside the destruction predicates proper: the
+singleton-lock `open` (T5).
 
 ### Alternative problem framings
 
@@ -85,12 +88,16 @@ that covers only (2) and (3) is incomplete by construction.
 
 ## Phase 2 — problem-converge (confirmed)
 
-> **The reaper's four destruction predicates are authorized by filesystem evidence read out of a
-> candidate directory whose owner may be a different local uid. On a shared, world-writable
-> tempdir (Linux `/tmp`, 1777) an unprivileged attacker can therefore** (i) **truncate any file
-> the reaper's uid can write through a symlinked marker path, and** (ii) **make a scheduled
-> `--only-safe` sweep SIGTERM an attacker-chosen live pid, and** (iii) **make the kill path
-> `rmtree` an attacker-chosen directory under the tempdir.**
+> **The reaper's FIVE write/destruction surfaces are authorized by filesystem evidence — or acted on
+> with an open() — in a shared, world-writable tempdir whose entries may be owned by a different
+> local uid. On Linux `/tmp` (1777) an unprivileged attacker can therefore** (i) **truncate any file
+> the reaper's uid can write through a symlinked marker path, and** (ii) **do the same through a
+> symlinked `<tempdir>/.tortoise/.reaper.lock`, and** (iii) **make a scheduled `--only-safe` sweep
+> SIGTERM an attacker-chosen live pid, and** (iv) **make the kill path `rmtree` an attacker-chosen
+> directory under the tempdir.**
+>
+> *(i) and (ii) are fixed in this PR; (iii)/(iv) and the discovery↔action TOCTOU are escalated as
+> #4136.*
 
 **Falsifier:** the framing dies if any destruction path already verifies that the candidate dir
 (or the pid it acts on) belongs to the reaper's uid — or if a recorded decision mandates
@@ -122,12 +129,13 @@ scratch dir and `_pgrep_redis_servers` stubbed so the host is never touched)
 
 | # | Class | Mechanism | Verified consequence |
 |---|---|---|---|
-| **T1** | Symlink-follow marker write (**CWE-377 / FIO21-C**) | decoy `tmpEVILXX/` with a real dead socket + registry + **aged** dir, and `.reaper-owned` a **symlink** to a file outside it | `_remove_stale_socket_dir(rec, dry_run=False)` → `acted is not None`; the symlink target was **truncated to `"reaper-owned\n"`** |
+| **T1** | Symlink-follow marker write (**CWE-377 / FIO21-C**) | decoy `tmpEVILXX/` with a real dead socket + registry + **aged** dir, and `.reaper-owned` a **symlink** to a file outside it | `_remove_stale_socket_dir(rec, dry_run=False)` → `acted is not None`; the symlink target was **truncated to `"reaper-owned\n"`** — **FIXED in this PR** |
+| **T5** | Symlink-follow **lock** open (**CWE-377 / FIO21-C**) | `<tempdir>/.tortoise/.reaper.lock` planted as a symlink to a file the reaper's uid can write | `_ReaperLock.acquire()` returned `True` and the target was **truncated to the reaper pid** (e.g. `'16059'`). A FIFO at the lock path **blocked startup** before the SIGALRM watchdog was armed; a symlinked `.tortoise` dir redirected the lock. Found by the code-review gate, not the scoping pass — **FIXED in this PR** |
 | **T2** | Attacker-chosen pid SIGTERM | decoy with a fake RESP server answering `$0\r\n\r\n`, a registry `pidfile` naming a **live** pid whose cmdline contains `redis-server`, and an attacker-authored `.tortoise-owners/<deadpid>-0` record | `_run_sweep(dry_run=False, only_safe=True)` — the **scheduled** mode — logged `killed orphan PID …`; victim **exit code -15 (SIGTERM)** |
 | **T3** | Attacker-chosen `rmtree` via `reg_dir` | `redis.config`'s `dir=` set to a bystander ephemeral-named dir | the bystander dir (with its data) was **removed** by `reap()`'s post-kill cleanup |
-| **T4** | Discovery↔action TOCTOU | the dir at `dbdir_real` is swapped between the guard chain's `realpath` and the action | subsumed by the **missing provenance check**; the marker write is the exploited step (T1). The guard chain re-verifies deadness, but re-verification cannot distinguish a crafted dir from a real one |
+| **T4** | Discovery↔action TOCTOU | the dir at `dbdir_real` is swapped between the guard chain's `realpath` and the action | subsumed by the **missing provenance check**; the marker write is the exploited step (T1). The guard chain re-verifies deadness, but re-verification cannot distinguish a crafted dir from a real one. **The final component is closed by the `dir_fd` anchor; an INTERMEDIATE path component is not (`O_NOFOLLOW` is basename-only)** — reachable only via a nested `dbdir` (pass-1 derived), so it rides with the escalated provenance set |
 
-**Why each existing guard fails to stop T1/T2/T3.** `_is_ephemeral_dir` is satisfied by naming the
+**Why each existing guard fails to stop T1/T2/T3/T5.** `_is_ephemeral_dir` is satisfied by naming the
 decoy `tmp…`; the dead-socket probe is satisfied by `bind()` + `close()`; the age guard is
 satisfied by `os.utime`; the #3599 owner-record confirmation is satisfied by writing a
 `.tortoise-owners/<deadpid>-0` file; `_pid_is_redis` is a **substring test on `ps` output** and
@@ -138,25 +146,37 @@ authored.
 
 ## Adversarial Threat Surface
 
-Declared bound: **2 review cycles**; acceptance = every declared class covered by a test + green
-CI; residuals filed, not chased.
+Declared bound: **2 review cycles**; acceptance = every class declared **fixed in this PR** is
+covered by a **mutation-verified** test and green CI; classes not fixed are declared **out of scope
+and filed** (never left in the in-scope set).
 
-**IN SCOPE**
+**IN SCOPE — fixed and test-pinned in this PR**
 
-| # | Adversarial input | Required behavior | Status |
+| # | Adversarial input | Required behavior | Covered by |
 |---|---|---|---|
-| 1 | A `REAPER_OWNED_MARKER` path that is a **symlink** (or FIFO, or dir) planted in the candidate dir | The marker write must **never follow** the link, must refuse a non-regular file, and must not block | **FIXED in this PR** (`dir_fd` + `O_NOFOLLOW` + `O_EXCL` + `fstat`; test `test_stale_marker_write_never_follows_symlink`, mutation-verified) |
-| 2 | A decoy dir whose `redis.config` `pidfile` names a live foreign pid | Refuse to signal a pid not proven to belong to this user | **ESCALATED → #4136** |
-| 3 | A decoy dir whose `redis.config` `dir=` names a bystander dir | Refuse to rmtree a path that is not the dir the evidence came from | **ESCALATED → #4136** |
-| 4 | A marker path re-planted between the unlink and the create | `O_NOFOLLOW` on the retry refuses it; the dir is NOT reaped (fail-closed) rather than followed | **FIXED in this PR** (pinned by the retry's flags) |
+| 1 | A `REAPER_OWNED_MARKER` path that is a **symlink** planted in the candidate dir | The marker write must never follow it, and the dir must still be reaped | `test_stale_marker_write_never_follows_symlink` (end-to-end through `_run_sweep`; reddens against the pre-#4098 body) |
+| 2 | A **non-regular / unremovable occupant** at the marker path (a directory; a re-planted symlink) | Fail **closed**: never return a non-regular fd, never follow, abort the record | `test_marker_write_non_regular_occupant_fails_closed` |
+| 3 | A **FIFO** at the marker path | Never block (`O_NONBLOCK`); remove and replace non-blocking | covered by (2)'s helper path + `O_NONBLOCK` in `_open_marker_no_follow` |
+| 4 | A **transient write failure** (`ENOSPC`) on the marker | Skip THIS record only — never propagate out of `reap()`, never abort the sweep | `test_marker_write_error_skips_one_record_not_the_sweep` |
+| 5 | A **symlink planted at `<tempdir>/.tortoise/.reaper.lock`** (T5) | `_ReaperLock.acquire()` must refuse it (ELOOP), never truncate the target; the lock dir is created 0700 | `test_reaper_lock_never_follows_symlink` |
 
-**OUT OF SCOPE** (unchanged by this diff; follow-ups)
+**ESCALATED — declared out of scope, filed as #4136** (these are NOT in this PR's contract)
+
+| # | Adversarial input | Required behavior |
+|---|---|---|
+| 6 | A decoy dir whose `redis.config` `pidfile` names a live foreign pid (T2) | Refuse to signal a pid not proven to belong to this user |
+| 7 | A decoy dir whose `redis.config` `dir=` names a bystander dir (T3) | Refuse to rmtree a path that is not the dir the evidence came from |
+| 8 | Discovery↔action TOCTOU / an INTERMEDIATE path component (T4) | Anchor every action on a provenance-checked inode |
+
+**OUT OF SCOPE** (unchanged by this diff)
 
 - Same-uid co-tenants (a process of the *same* uid is inside the trust boundary already).
 - The `redis-server` cmdline substring test as a *positive* signal — only its use as the sole
   cross-check for a kill is in scope here.
 - Any OS-level isolation (`unshare`, per-suite private `TMPDIR`) — see the rejected alternative E
   in `docs/drafts/1365-reaper-chaos-alternatives.md`.
+- A **directory** occupant at the marker path pins that dir (fail-closed): bounded and
+  attacker-owned; the pre-change code also refused it (`IsADirectoryError`).
 
 ---
 
@@ -180,11 +200,14 @@ under any outcome of the escalation.
 | Touch point | Type | Covered by | Status |
 |---|---|---|---|
 | `_remove_stale_socket_dir` guard 6 (marker write) | internal | this change (was plain `open(…, "w")`) | ✅ |
-| `_open_marker_no_follow` | new internal helper | this change + `test_stale_marker_write_never_follows_symlink` | ✅ |
-| `_sweep_quarantine_dirs` marker **read** | internal | unchanged — `os.path.exists` does not follow for the existence test, and only the reaper writes the marker now | ✅ |
-| `tests/test_reaper.py` | test | this change | ✅ |
-| `tools/install-reaper-schedule.sh`, `docs/infra/embedded-reaper-cron.md` | scheduler/docs | unchanged | ✅ |
-| Escalated provenance guard (paths `reap`, `_classify`, `_remove_stale_socket_dir`, `_mark_orphan_confirmation`, `_sweep_quarantine_dirs`) | design decision | **not implemented** — human decision required | ⏸ |
+| `_open_marker_no_follow` | new internal helper | this change + tests 1-4 above | ✅ |
+| `_ReaperLock.acquire` (T5) | internal | this change (`O_NOFOLLOW` + 0700 dir + `dir_fd`; was `open(path, "a")`) | ✅ |
+| `_lock_holder_pid` | internal | this change (no-follow read) | ✅ |
+| `_sweep_quarantine_dirs` marker **read** | internal | **unchanged and still attacker-satisfiable** — `os.path.exists` is `os.stat` and DOES follow a symlink (a planted marker symlink to any existing file passes it; only a dangling one fails). Non-destructive, so not a primitive; the provenance question is deferred with #4136 | ✅ (unchanged) |
+| `tests/test_reaper.py` | test | this change (7 new tests across the PR: 1 at the first commit + 6 in this one) | ✅ |
+| `docs/scoping/2026-09-18-4098-tmpdir-hardening-scoping.md`, `docs/00_index.md` | docs | this change | ✅ |
+| `tools/install-reaper-schedule.sh` (stale lock-path comment), `docs/infra/embedded-reaper-cron.md` | scheduler/docs | lock-path comment corrected; cron doc unchanged | ✅ |
+| Escalated provenance guard (paths `reap`, `_classify`, `_remove_stale_socket_dir`, `_mark_orphan_confirmation`, `_sweep_quarantine_dirs`) | design decision | **not implemented** — human decision required (#4136) | ⏸ |
 
 ---
 
@@ -193,18 +216,31 @@ under any outcome of the escalation.
 **Should the reaper gain a provenance guard — act only on candidate dirs owned by the invoking
 user's uid — and if so, at what scope and with what escape hatch?** The full options, analysis and
 recommendation are filed as **#4136** (the T2/T3/T4 residual of this issue; #4098's own deliverable —
-the threat model plus the mechanical symlink-write hardening — is complete here). This PR does **not**
-change the reaper's reach; it only removes the demonstrated symlink-follow write.
+the threat model plus the two mechanical symlink-write hardenings (marker + lock) — is complete
+here). This PR does **not** change the reaper's reach; it only removes the demonstrated
+symlink-follow writes.
+
+The lock hardening was found by the **code-review gate's** security + architecture reviewers after
+the scoping pass had declared the surface; it is recorded here as T5 and fixed rather than
+escalated, because it is the identical mechanical class on the scheduled path and the sibling
+`tortoise/index_lock.py` already carries the same fix (#280).
 
 ## OVERRIDES
 
 > **OVERRIDES:** the pre-#4098 guard-6 marker write's *overwrite-in-place* semantics (plain
-> `open(path, "w")`, which follows a symlink at the marker path) — the marker is now created
-> through a `O_NOFOLLOW`-opened dir fd with `O_CREAT|O_EXCL` and, if the name is already
-> occupied by any entry, that entry is `unlink`ed first. Reason: on a shared world-writable
-> tempdir a plain `w`-open is an arbitrary-file-truncation primitive (CWE-377 / FIO21-C); the
-> overwrite semantics are preserved (the dir still ends up with exactly one `"reaper-owned\n"`
-> regular file) and the write can no longer be redirected outside the candidate dir.
+> `open(path, "w")`, which follows a symlink at the marker path) — the marker is now opened
+> through an `O_NOFOLLOW`-anchored dir fd with `O_CREAT|O_TRUNC|O_NOFOLLOW|O_NONBLOCK`; an occupant
+> that is not a regular file is `unlink`ed (never followed) and retried once, fail-closed.
+> Reason: on a shared world-writable tempdir a plain `w`-open is an arbitrary-file-truncation
+> primitive (CWE-377 / FIO21-C); the overwrite semantics are preserved for a regular marker (the
+> dir still ends up with exactly one `"reaper-owned\n"` regular file, and no write permission on
+> the candidate dir is newly required) while the write can no longer be redirected.
 
-> **OVERRIDES:** `_is_ephemeral_dir`'s role as the *containment boundary* for the marker write —
-> name containment remains necessary but is no longer treated as sufficient at that step.
+> **OVERRIDES:** the reaper singleton lock's `open(<tempdir>/.tortoise/.reaper.lock, "a")` — the
+> lock is now opened relative to an `O_NOFOLLOW`-anchored 0700 dir fd with
+> `O_CREAT|O_RDWR|O_NOFOLLOW`, and the holder read uses `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` (the
+> `O_NONBLOCK` is load-bearing: `_lock_holder_pid()` runs before `signal.alarm` is armed, so a FIFO
+> at the lock path would otherwise hang reaper startup forever). Reason: the lock lives
+> in the same shared world-writable tempdir (moved there by #1658), so it is the identical CWE-377
+> sink — a planted symlink truncated the target and a FIFO hung startup before the watchdog was
+> armed.
