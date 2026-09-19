@@ -146,27 +146,76 @@ def _brace_end(text: str, start: int) -> int:
     raise AssertionError(f"unbalanced braces after offset {start}")
 
 
+def _mask_strings(source: str) -> str:
+    """`source` with the CONTENTS of string literals blanked, same length.
+
+    Anchors are searched on this copy and then applied to the real text at the same
+    offsets. Without it a decoy such as
+    `const TRAP = "const hits = new Map<string, number[]>();";` matches first and the
+    harness certifies a store the limiter never uses. None of the anchors below contains
+    a string literal, so masking cannot hide a real match — and every anchor is required
+    to be UNIQUE, so a second copy anywhere (in code or in a literal) fails the harness
+    rather than letting it pick one.
+    """
+    out = list(source)
+    index, length = 0, len(source)
+    while index < length:
+        if source[index] in "\"'`":
+            quote, end = source[index], index + 1
+            while end < length:
+                if source[end] == "\\":
+                    end += 2
+                    continue
+                if source[end] == quote:
+                    break
+                out[end] = " "
+                end += 1
+            index = end + 1
+        else:
+            index += 1
+    return "".join(out)
+
+
 def _limiter_source(code: str) -> str:
     """The limiter as runnable JavaScript: its constants, its store, its function.
 
     Asserted loudly rather than skipped: if the module's shape changes so this
     extraction stops finding the limiter, the harness must fail — a silent skip
-    would be a behaviour test that tests nothing.
+    would be a behaviour test that tests nothing. Every anchor must match exactly ONCE
+    (in string-masked text) and the store must sit at module top level, so the harness
+    cannot be pointed at a decoy copy of what it is supposed to be testing.
     """
     source = _strip_comments(code)
+    masked = _mask_strings(source)
     constants = re.findall(
-        r"^const (?:RATE_LIMIT|RATE_WINDOW_MS|MAX_RATE_KEYS)\s*=\s*[^;]+;", source, re.M
+        r"^const (?:RATE_LIMIT|RATE_WINDOW_MS|MAX_RATE_KEYS)\s*=\s*[^;]+;", masked, re.M
     )
     assert len(constants) == 3, f"expected the three limiter constants, found {constants!r}"
-    declaration = re.search(r"const hits\s*=\s*[^;]+;", source)
-    assert declaration is not None, "the limiter's state map was not found"
+    for name in ("RATE_LIMIT", "RATE_WINDOW_MS", "MAX_RATE_KEYS"):
+        found = re.findall(rf"^const {name}\s*=", masked, re.M)
+        assert len(found) == 1, f"expected exactly one `const {name}` declaration, found {len(found)}"
+    declarations = list(re.finditer(r"(?:^|\n)const hits\s*=\s*[^;]+;", masked))
+    assert len(re.findall(r"\bconst hits\s*=", masked)) == 1, (
+        "expected exactly ONE `const hits` declaration in the whole module, found "
+        f"{len(re.findall(r'\bconst hits\s*=', masked))} — a second copy (a factory-local "
+        "store, or a decoy the search should have masked) would let the harness test a map "
+        "the limiter does not use"
+    )
+    assert len(declarations) == 1, (
+        f"expected exactly ONE module-level store declaration, found {len(declarations)}"
+    )
+    declaration = declarations[0]
     # The declaration is used VERBATIM (only its TypeScript type arguments removed),
     # not replaced by a `new Map()` of the harness's own: otherwise a store whose
     # `size` is `undefined` — so the cap silently never runs — would be invisible to a
     # behaviour test that builds its own store.
-    store = re.sub(r"<[^>]*>", "", declaration.group(0))
-    start = source.index("function rateLimited")
-    body = source[start : _brace_end(source, start)]
+    store = re.sub(r"<[^>]*>", "", source[declaration.start() : declaration.end()]).lstrip()
+    assert masked.count("function rateLimited") == 1, (
+        "expected exactly one `function rateLimited` definition — a second copy would "
+        "let the harness execute a limiter the module does not export"
+    )
+    start = masked.index("function rateLimited")
+    body = source[start : _brace_end(masked, start)]
     # The signature carries TypeScript annotations only; the body is plain JS. The
     # parameters are bound POSITIONALLY by the harness, which passes (address, time),
     # so the source's parameter order is part of the contract this file depends on:
@@ -414,6 +463,20 @@ observations.negativeExcessLiveCount = keptLeft;
 observations.negativeExcessExpiredLeft = goneLeft;
 observations.negativeExcessExpected = liveSeed + 1;
 
+// 13. A SNAPSHOT TAKEN BEFORE THE SWEEP. The expired keys are inserted FIRST here — the
+// opposite of §5 and §10 — so the oldest-first order reaches ALREADY-SWEPT keys: an
+// eviction that iterates a key list captured before the sweep spends its budget deleting
+// keys that are gone and leaves the map OVER its bound. The bound is the whole point of
+// the cap, so the resulting size is observed, not just the expired count.
+hits.clear();
+for (let i = 0; i < 2; i++) hits.set("early" + i, [expiredAt]);
+for (let i = 0; i < cap + 1; i++) hits.set("late" + i, [T0]);
+rateLimited("crosses2", T0);
+observations.snapshotMapSize = hits.size === undefined ? -1 : hits.size;
+let snapshotExpired = 0;
+for (const k of hits.keys()) if (k.startsWith("early")) snapshotExpired++;
+observations.snapshotExpiredLeft = snapshotExpired;
+
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
 // this call — `Date.now()` stepping backwards is reachable under NTP, a VM restore or a
 // manual clock set — must still be counted and refused. The property under test is that
@@ -535,15 +598,13 @@ def _check_window(observed: dict) -> None:
 
 
 def _check_isolation(observed: dict) -> None:
-    """The limit is per address, not global — both halves are required.
+    """The limit is per address, not global.
 
-    `otherAddressOk` alone would pass for a limiter that refuses nobody, so the
-    over-limit address tripping is asserted too.
+    Only `otherAddressOk` is asserted here. A "the over-limit address still trips"
+    assertion would add nothing: §1 and §3 run the SAME call sequence on two address
+    literals, so the outcome is implied by `_check_threshold`'s `firstTripIndex`, and an
+    implication is not a second guard.
     """
-    assert observed["oneAddressTrips"] is True, (
-        "the over-limit address must still be refused — a limiter that refuses "
-        "nobody would otherwise satisfy the isolation check"
-    )
     assert observed["otherAddressOk"] is True, (
         "a different address must not be refused by another address's history"
     )
@@ -568,6 +629,16 @@ def _check_cap(observed: dict) -> None:
     assert observed["oldestEvicted"] is True, (
         "eviction must take the OLDEST key — the first address of the flood must be "
         "gone, or the cap is buying its bound by discarding recent history instead"
+    )
+    assert observed["snapshotMapSize"] == observed["maxRateKeys"], (
+        "the map must still converge to the cap when the EXPIRED keys are the oldest "
+        "ones: an eviction that walks a key list captured before the sweep spends its "
+        "budget on keys that are already gone and leaves the map over its bound, got "
+        f"{observed['snapshotMapSize']}"
+    )
+    assert observed["snapshotExpiredLeft"] == 0, (
+        "no expired key may survive that call, got "
+        f"{observed['snapshotExpiredLeft']}"
     )
 
 
@@ -701,6 +772,23 @@ INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
 )
 
 
+def test_a_store_hidden_in_a_string_literal_is_not_mistaken_for_the_store() -> None:
+    """A decoy `const hits = new Map();` inside a STRING must not be extracted.
+
+    Anchors are searched in string-masked text for exactly this reason: a first-match
+    extraction would bind the store to a literal — text that is not code — and the
+    harness would then certify a limiter built from it. The decoy sits at the TOP of the
+    file, ahead of the real declaration, so an unmasked search picks it first.
+    """
+    real = CONTACT_TS.read_text(encoding="utf-8")
+    decoy_line = 'const TRAP = "const hits = new Map<string, number[]>();";\n'
+    decoy = decoy_line + real
+    assert decoy.index("const hits") < decoy.index("const hits = new Map", len(decoy_line))
+    assert _limiter_source(decoy) == _limiter_source(real), (
+        "the decoy literal was mistaken for the store — extraction must search masked text"
+    )
+
+
 def test_the_read_path_predicate_does_not_consult_now() -> None:
     """The expiry decision must come from `cutoff` ALONE — never from `now`.
 
@@ -732,10 +820,16 @@ def _predicate_failures(code: str) -> list[str]:
     failures = []
     if "cutoff" not in predicate:
         failures.append(f"read-path predicate no longer decides on `cutoff`: {predicate!r}")
-    if re.search(r"\bnow\b", predicate):
+    # A WHITELIST, not a ban on the spelling `now`: rejecting only `\bnow\b` was beaten
+    # by an alias (`const tolerance = now + 1001 * RATE_WINDOW_MS`) and by reading the
+    # clock directly (`new Date().getTime()`). Requiring every identifier to be `t` or
+    # `cutoff` refuses the whole class, whatever it is called.
+    unexpected = sorted(set(re.findall(r"[A-Za-z_$][\w$]*", predicate)) - {"t", "cutoff"})
+    if unexpected:
         failures.append(
-            f"read-path predicate consults `now` ({predicate!r}) — any now-based clause "
-            "forgives a bounded clock skew and discards live history on a step back"
+            f"read-path predicate refers to {unexpected!r} ({predicate!r}) — the expiry "
+            "decision must be `t` against `cutoff` ALONE, so that no bound, alias or "
+            "clock read can grant a skew tolerance"
         )
     return failures
 
@@ -819,7 +913,14 @@ def test_eviction_stops_when_the_sweep_has_done_the_work(behaviour: dict) -> Non
 # loudly with the instruction to update it instead of proving nothing.
 # An entry that cannot RUN at all is an acceptable catch only if it is declared here, so
 # that a mutated limiter the harness cannot execute is never silently counted as caught.
-MAY_FAIL_TO_RUN: frozenset[str] = frozenset({"store that cannot hold string keys"})
+# The two extraction-integrity entries belong here: they cannot execute precisely BECAUSE
+# the harness refuses to pick a store when the file offers it more than one.
+MAY_FAIL_TO_RUN: frozenset[str] = frozenset(
+    {
+        "store that cannot hold string keys",
+        "a factory-local store beside the real one",
+    }
+)
 
 MUTATIONS: tuple[tuple[str, str, str], ...] = (
     (
@@ -858,6 +959,35 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         ".filter((t) => t > cutoff && t <= now + 1001 * RATE_WINDOW_MS)",
     ),
     (
+        "predicate consults the clock without naming now",
+        r"\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
+        ".filter((t) => t > cutoff && t <= new Date().getTime() + 1001 * RATE_WINDOW_MS)",
+    ),
+    (
+        "predicate consults a now-derived alias",
+        r"const cutoff = now - RATE_WINDOW_MS;\s*\n\s*const recent = \(hits\.get\(ip\) \|\| \[\]\)"
+        r"\.filter\(\(t\) => t > cutoff\);",
+        "const cutoff = now - RATE_WINDOW_MS;\n"
+        "  const tolerance = now + 1001 * RATE_WINDOW_MS;\n"
+        "  const recent = (hits.get(ip) || []).filter((t) => t > cutoff && t <= tolerance);",
+    ),
+    (
+        "predicate no longer decides on cutoff",
+        r"\.filter\(\s*\(t\)\s*=>\s*t\s*>\s*cutoff\s*\)",
+        ".filter((t) => t > 0)",
+    ),
+    (
+        "eviction iterates a stale key snapshot",
+        r"for \(const \[k, v\] of hits\) \{\s*\n\s*if \(v\.every\(\(t\) => t <= cutoff\)\) hits\.delete\(k\);"
+        r"\s*\n\s*\}\s*\n\s*let excess = hits\.size - MAX_RATE_KEYS;\s*\n\s*for \(const k of hits\.keys\(\)\) \{",
+        "const cachedKeys = [...hits.keys()];\n"
+        "    for (const [k, v] of hits) {\n"
+        "      if (v.every((t) => t <= cutoff)) hits.delete(k);\n"
+        "    }\n"
+        "    let excess = hits.size - MAX_RATE_KEYS;\n"
+        "    for (const k of cachedKeys) {",
+    ),
+    (
         "predicate drops future-dated entries",
         r"\(\s*t\s*\)\s*=>\s*t\s*>\s*cutoff",
         "(t) => t > cutoff && t <= now",
@@ -879,6 +1009,20 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "store that cannot hold string keys",
         r"new\s+Map\s*<\s*string\s*,\s*number\[\]\s*>\s*\(\s*\)",
         "new WeakMap()",
+    ),
+    (
+        # Extraction integrity: a store created inside a factory, beside the real one.
+        # The deployed store loses its `size`, so the cap silently never runs — and a
+        # harness that binds the first `const hits` it finds would test the factory's
+        # local map instead of the one the limiter closes over.
+        "a factory-local store beside the real one",
+        r"(?m)^const hits\s*=\s*[^;]+;",
+        "const hits = new Proxy(new Map(), { get: (t, p) => (p === \"size\" ? undefined : "
+        "Reflect.get(t, p)) });\n"
+        "function makeStore() {\n"
+        "  const hits = new Map<string, number[]>();\n"
+        "  return hits;\n"
+        "}",
     ),
     ("threshold raised out of range", r"const\s+RATE_LIMIT\s*=\s*5\s*;", "const RATE_LIMIT = 1_000_000_000;"),
     ("window cut to nothing", r"const\s+cutoff\s*=\s*now\s*-\s*RATE_WINDOW_MS\s*;", "const cutoff = now;"),
