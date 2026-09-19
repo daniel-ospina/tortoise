@@ -78,6 +78,7 @@ for quota-gated tools (the ``_QUOTA_GATED`` set). Stdio/selfhost mode
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -92,6 +93,12 @@ _logger = logging.getLogger(__name__)
 #: documented best-effort, mirroring the per-process budget bucket).
 import threading as _threading  # noqa: E402
 from weakref import WeakValueDictionary as _WeakValueDictionary  # noqa: E402
+
+# #3665: the cohort spend reader drives a spend CEILING, so its failures must
+# carry the quota classification (#686) rather than surfacing as an
+# unclassified 500. ``tortoise.quota`` is stdlib-only at module level (safe to
+# import eagerly — same reason the REST adapter imports it at the top).
+from tortoise.quota import QuotaCheckError  # noqa: E402
 
 #: Per-org increment-serialization lock registry — BOUNDED by construction:
 #: a WeakValueDictionary keeps each lock alive only while some thread holds
@@ -487,6 +494,141 @@ def get_ask_usage(org_id: str) -> dict:
             "period=%s error=%s", org_id, period, e,
         )
         return {**zeros, "period": period}
+
+
+# ── Capture lane: measured per-session extraction cost (#3665 / #3359) ──────
+#
+# #3359 made the hosted capture path MEASURE per-session LLM cost (provider-
+# authoritative ``last_cost_usd`` rolled up by ``extractor_v2._rollup_llm``)
+# and emit it as an ``analytics_events`` row. That is a measurement, not a
+# ledger — nothing keyed by org+period, so a spend CEILING cannot read it
+# without scanning every capture row in the period. These two functions put
+# the SAME measurement on the durable per-period ``:MeteringRecord`` (columns
+# from migration 20260917000001) so that a pre-spend gate can answer "what has
+# this cohort spent this period?" in one row-per-org read. No parallel system:
+# it is exactly the ``record_ask_usage`` shape.
+
+
+def record_capture_usage(org_id: str | None, *, calls: int = 1,
+                         cost_usd: float = 0.0,
+                         _selfhost_transport: bool = False) -> dict | None:
+    """Record the MEASURED cost of one capture extraction attempt.
+
+    Best-effort, non-fatal (metering never blocks a committed capture).
+    Exemptions mirror ``record_ask_usage``: ``not org_id`` (stdio/None) or
+    the selfhost-transport ContextVar (``_selfhost_transport``).
+
+    Records a row even when ``cost_usd == 0.0`` — ``capture_calls`` is the
+    denominator that keeps a genuinely-free capture distinguishable from a
+    capture whose cost was never measured (#3359's silent-zero lesson).
+
+    A NON-FINITE ``cost_usd`` is dropped to 0.0 (with a warning) before it can
+    reach the ledger. This is the spend ceiling's own substrate: a ``nan`` on
+    the row would poison the cohort ``SUM`` and make ``spent >= cap``
+    permanently False — a silently disarmed ceiling (#3665 review, the
+    ``math.isfinite`` trap ``cohort_cost.resolve_cohort_cost_cap`` guards too).
+    """
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    if not math.isfinite(cost_usd):
+        _logger.warning(
+            "capture metering dropped a non-finite cost (team=%s cost=%r) — "
+            "recording 0.0 for the call rather than poisoning the cohort SUM",
+            org_id, cost_usd,
+        )
+        cost_usd = 0.0
+    period = _current_period()
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    with _ask_meter_lock(org_id):
+        return _record_capture_usage_locked(org_id, period, now_iso,
+                                            calls=calls, cost_usd=cost_usd)
+
+
+def _record_capture_usage_locked(org_id: str, period: str, now_iso: str, *,
+                                 calls: int, cost_usd: float) -> dict | None:
+    """The serialized capture increment body."""
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_increment_capture_cost,
+            )
+            metering_increment_capture_cost(get_control_plane(), org_id,
+                                            period, calls=calls,
+                                            cost_usd=cost_usd)
+            return {"period": period, "capture_calls": calls,
+                    "capture_cost_usd": cost_usd}
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {org_id: $tid, period: $period}) "
+            "SET m.capture_calls = coalesce(m.capture_calls, 0) + $calls, "
+            "    m.capture_cost_usd = coalesce(m.capture_cost_usd, 0) + $cost, "
+            "    m.updated_at = $now",
+            params={"tid": org_id, "period": period, "calls": calls,
+                    "cost": cost_usd, "now": now_iso},
+        )
+        return {"period": period, "capture_calls": calls,
+                "capture_cost_usd": cost_usd}
+    except Exception as e:
+        _logger.warning(
+            "capture metering increment failed (non-fatal): team=%s "
+            "period=%s error=%s", org_id, period, e,
+        )
+        return None
+
+
+def get_cohort_spend_usd(org_ids: list[str],
+                         period: str | None = None) -> float:
+    """Measured LLM spend for a COHORT in one billing period (#3665).
+
+    The cohort is a set of org ids (``cohort_cost.cohort_org_ids`` — there is
+    no cohort column; the only FK-enforced key to spend is
+    ``organizations.id``). Spend is the durable ledger's cost columns for
+    those orgs, for the period: ``SUM(ask_cost_usd + capture_cost_usd)``.
+
+    Both cost columns are MEASURED metres, never billing estimates: the ask
+    lane's serving-lane rates and the capture lane's provider-authoritative
+    charge. A cohort with no ledger row reads as ``0.0`` (the MERGE only
+    creates the row on the first write).
+
+    FAIL-CLOSED, deliberately unlike ``get_ask_usage``: this READER drives a
+    spend ceiling, so a query failure RAISES rather than degrading to a zero
+    view. Degrading here would read as "the cohort has spent nothing" — a
+    fail-open the cap could never recover from (#686's discipline; the
+    caller maps the raise to a 500, never a silent pass).
+    """
+    ids = [str(i) for i in (org_ids or []) if i]
+    if not ids:
+        return 0.0
+    period = period or _current_period()
+    if _supabase_mode():
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, metering_cohort_spend,
+        )
+        try:
+            return metering_cohort_spend(get_control_plane(), ids, period)
+        except QuotaCheckError:
+            raise
+        except Exception as e:
+            # #686's fail-closed quota contract: a counting failure is a
+            # QuotaCheckError (→ 500 carrying the quota classification),
+            # never an unclassified 500 and never a silent pass. The
+            # control-plane read raises RuntimeError; classifying it here is
+            # what makes the gate's own ``except QuotaCheckError`` clause (and
+            # MCP's ERR_QUOTA_SERVER) actually fire. code-review cycle 1, P2.
+            raise QuotaCheckError(
+                f"cohort spend read failed for {len(ids)} org(s), period "
+                f"{period}: {e}"
+            ) from e
+    sdk = _reg_sdk()
+    rows = sdk._get_registry().query(
+        "MATCH (m:MeteringRecord) "
+        "WHERE m.org_id IN $ids AND m.period = $period "
+        "RETURN sum(coalesce(m.ask_cost_usd, 0.0) "
+        "         + coalesce(m.capture_cost_usd, 0.0))",
+        params={"ids": ids, "period": period},
+    ).result_set
+    return float(rows[0][0] or 0.0) if rows else 0.0
 
 
 # ── Usage query ─────────────────────────────────────────────────────────────
