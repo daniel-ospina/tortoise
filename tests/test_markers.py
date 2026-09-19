@@ -494,7 +494,7 @@ def test_no_redirect_stems_registry_exact():
         # namespace probe and its opener. The exemption is load-bearing:
         # without it the class-level test redirect would rename path-built
         # graphs to test_<hash>, so under a server URI no production name
-        # would exist and those assertions FAIL — a hard RED, not a false
+        # would exist and those assertions would FAIL — a hard RED, not a false
         # pass. Runs embedded in every lane (same rationale as
         # test_hosted_backup).
         "test_cross_tenant_read_isolation",
