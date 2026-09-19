@@ -276,6 +276,20 @@ def test_sweep_refuses_a_non_finite_age_gate(tmp_path):
     assert (tmp_path / "ask_nan_33333333").exists()
 
 
+def test_sweep_refuses_an_empty_prefix_at_the_library_boundary(tmp_path):
+    # `startswith("")` matches every name: the guard must hold for `sweep()`
+    # callers, not only for the CLI (declared threat class 5).
+    alien = _make(tmp_path, "someone_elses_scratch", age_hours=_OLD_H)
+    for bad in ([""], ["  "]):
+        with pytest.raises(ValueError):
+            sweep(str(tmp_path), prefixes=bad, apply=True,
+                  older_than_hours=24.0)
+    with pytest.raises(ValueError):
+        sweep(str(tmp_path), exact_names=[""], apply=True,
+              older_than_hours=24.0)
+    assert alien.exists()
+
+
 # ── CLI surface ───────────────────────────────────────────────────────────
 
 def test_main_dry_run_exit_0_and_json(tmp_path, capsys):

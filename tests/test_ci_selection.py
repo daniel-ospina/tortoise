@@ -328,7 +328,7 @@ def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     # marks the path found — so a tool-only change selects `core` instead of
     # tier-1 smoke or the unknown-path full matrix. Mutation check: removing
     # the CORE_ALSO entry filters the path out (docs-only early return → empty
-    # surfaces, tier-1 smoke), which fails asserts 2–4 below.
+    # surfaces, tier-1 smoke), which fails asserts 2–5 below.
     r = _sel(["tools/tmpdir_sweep.py"])
     assert r["full"] is False, r
     assert "core" in r["surfaces"], r

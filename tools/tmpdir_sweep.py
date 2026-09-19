@@ -264,6 +264,11 @@ def plan(
 ) -> list[Decision]:
     """Classify every depth-1 entry of `root`; never mutates anything."""
     root = os.path.realpath(root)
+    # Validate the allowlist at the LIBRARY boundary too, not only in main:
+    # `str.startswith("")` matches every name, so `sweep(prefixes=[""])`
+    # would delete foreign-owner litter (declared threat class 5).
+    prefixes = _validated_tokens(prefixes, "prefix")
+    exact_names = _validated_tokens(exact_names, "exact-name")
     if not math.isfinite(older_than_hours) or older_than_hours < 0:
         # `age_h < nan` is always False, so a nan gate makes EVERY entry a
         # candidate — a silent bypass of the age guard (declared threat
