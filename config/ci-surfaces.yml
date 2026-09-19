@@ -94,6 +94,7 @@ surfaces:
   - test_email_notify.py
   - test_email_signup.py
   - test_enforcement.py
+  - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the ledger pins hosted_api.py / mcp_auth.py / __main__.py reads)
   - test_epic903_hosted.py
   - test_epic903_mcp.py
   - test_export_delete.py
@@ -465,6 +466,20 @@ surfaces:
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
   - test_entity_stage.py
   - test_enumeration_surfaces.py
+  # #4097: the env-truthiness contract + the non-divergence guard. The guard scans
+  # all of `tortoise/**` + `tests/_embedded.py` for a new ad-hoc vocabulary literal or a
+  # new narrow `== "1"` read, so it is registered in EVERY surface that owns a scanned
+  # path — `core` (the fallback arm for the scanned modules with no SOURCE_PATTERN:
+  # why, monitoring, extractor_v2, model_adapters, frontmatter_validator, cimd,
+  # pack_state, abuse, rerank, embedded_lifecycle, embedded_reaper, backup_config),
+  # `sdk` (retrieval.py), `api` (hosted_api.py / mcp_auth.py / __main__.py), `eval`
+  # (embeddings.py / cross_lens.py), `ep` (dream/analyze/ranking.py) and `onboarding`
+  # (tortoise/onboarding/**), whose ledger rows this file pins.
+  # (`mcp_server.py`, `projection/`, `sdk.py` and `env_truthy.py` need no registration
+  # here: they are in `tools/ci_selection.SHARED_MODULES`, which forces the full matrix.)
+  # `test_env_truthy.py` derives this requirement from SOURCE_PATTERNS, so a new or
+  # split surface cannot silently drop the guard.
+  - test_env_truthy.py
   - test_epic903_fixtures.py
   - test_epic903_freshness.py
   - test_epic903_lifecycle.py
@@ -684,6 +699,13 @@ surfaces:
   # #2498 rationale as test_lifecycle_guards.py above).
   - test_terminal_status_vocabulary.py
   ep:
+  # #4097: the env-truthiness non-divergence guard scans ALL of `tortoise/**` —
+  # including this surface's mapped modules (`dream.py`, `analyze.py`, `ranking.py`).
+  # A `SOURCE_PATTERNS` match REPLACES the `core` fallback, so without this
+  # registration a change to one of them runs no part of the guard (the
+  # #1349/#3332/#3616 silent-drop class). `tests/test_env_truthy.py` derives this
+  # requirement from SOURCE_PATTERNS, so a new/split surface cannot silently drop it.
+  - test_env_truthy.py
   - test_a9_direct_edge_traversal.py
   # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
   # They were registered under `core`, which a `tortoise/analyze.py`-only
@@ -751,6 +773,10 @@ surfaces:
   - test_w4_why_enrichment.py
   - test_weights.py
   onboarding:
+  # #4097: the env-truthiness non-divergence guard scans all of `tortoise/**`,
+  # including `tortoise/onboarding/**`, and an `onboarding` surface match replaces
+  # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
+  - test_env_truthy.py
   - test_admin_return_to.py
   - test_dashboard_unknown_address.py
   - test_github_connect.py
@@ -868,6 +894,7 @@ surfaces:
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
+  - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the migration oracle pins `retrieval.ask_env_bool` as a migrated site)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
@@ -896,6 +923,10 @@ surfaces:
   - test_kind_classifier.py
   - test_kind_eval_set.py
   eval:
+  # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
+  # scans all of `tortoise/**`, and this surface owns `tortoise/embeddings.py`
+  # (a module #4097 migrated) and `tortoise/cross_lens.py`.
+  - test_env_truthy.py
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py
   - bench/test_roundrobin.py
@@ -1037,6 +1068,14 @@ carve_out:
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py
 - test_flip_gate.py
+# #4047: both #3845 fork-guard files are module-level `embedded_only` (their
+# subject is the embedded daemon's module-fork wedge), were absent from
+# carve_out, and so were collected-and-SKIPPED by every full selection — a
+# permanently green, permanently unexecuted gate on main (#3845's own evidence
+# never ran on a full selection). Registered here so the URI-unset carve-out
+# job runs them.
+- test_fork_safety_3845.py
+- test_fork_slot_wedge_3845.py
 - test_guard.py
 - test_hard_reject.py
 - test_hosted_backup.py

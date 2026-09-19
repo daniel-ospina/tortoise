@@ -20,6 +20,17 @@ import time
 
 import numpy as np
 
+from .env_truthy import env_flag  # #4097: the declared truthy contract
+
+
+def _embedder_warmup_enabled() -> bool:
+    """`TORTOISE_EMBEDDER_WARMUP` — the engine-init warm-up opt-in (default ON).
+
+    #4097: the single resolution point (``EmbeddingModel.start_warm_up`` calls it),
+    through the declared truthy contract; ``0``/``false``/``no``/``off`` opt out.
+    """
+    return env_flag("TORTOISE_EMBEDDER_WARMUP", True)
+
 logger = logging.getLogger(__name__)
 
 # The active embedder — single source of truth for the production model id.
@@ -226,9 +237,7 @@ class EmbeddingModel:
         background load would race explicit embedder stubs). Returns None
         when disabled or already started.
         """
-        import os
-        if os.environ.get("TORTOISE_EMBEDDER_WARMUP", "1").strip().lower() \
-                in ("0", "false", "no", "off"):
+        if not _embedder_warmup_enabled():
             return None
         with cls._WARM_UP_LOCK:
             if cls._warm_up_started:

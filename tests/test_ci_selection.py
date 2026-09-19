@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
-    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,
+    SOURCE_PATTERNS, SHARED_MODULES, load_manifest, select, integrity, slow_file_issues,
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
 )
@@ -135,6 +135,21 @@ def test_shared_module_goes_full():
     assert r["test_files"] == "ALL"
     r2 = _sel(["tests/conftest.py"])
     assert r2["full"] is True
+
+
+def test_every_shared_module_entry_selects_the_full_matrix():
+    """#4097: `SHARED_MODULES` is a hand-maintained list, so derive its invariant here.
+
+    `test_shared_module_goes_full` pins two literal examples; a future entry that is
+    added (or a cross-cutting leaf like `tortoise/env_truthy.py` that is REMOVED) would
+    otherwise silently downgrade to `core`-only and stop running the consumer suites.
+    """
+    py_modules = [m for m in SHARED_MODULES if m.endswith(".py")]
+    assert py_modules, "SHARED_MODULES should list python modules"
+    for module in py_modules:
+        result = _sel([module])
+        assert result["full"] is True, f"{module} is in SHARED_MODULES but selects {result}"
+        assert result["test_files"] == "ALL", module
 
 
 def test_unknown_path_goes_full():
@@ -827,7 +842,7 @@ def test_real_workflow_halves_are_consistent():
 
 def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg. Epic
-    #1647 Task 9: the 17-file carve-out set is its OWN leg (E2E-4) — it is
+    #1647 Task 9: the carve-out set is its OWN leg (E2E-4) — it is
     excluded from fast AND slow docker legs."""
     from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
     m = load_manifest()
@@ -850,6 +865,44 @@ def test_push_legs_partitions_every_classified_file():
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
     # bench push_extra lands in half b
     assert any(f.startswith("bench/") for f in legs["half_b"])
+
+
+def test_carve_out_mirrors_test_no_redirect_stems():
+    """#4047: `carve_out:` and `TEST_NO_REDIRECT_STEMS` are one set in two homes.
+
+    `config/ci-surfaces.yml`'s `carve_out:` routes a file to the URI-unset
+    carve-out job and bars it from every docker leg; `tests/_embedded.py`'s
+    `TEST_NO_REDIRECT_STEMS` is the redirect exemption that keeps a module
+    embedded if it is executed with a URI set. A stem in only ONE of them is a
+    silent hole, in opposite directions (see the failure message).
+
+    Scope, stated honestly: this pin catches ONE-LIST-ONLY drift. It does NOT
+    catch #4047's own shape — the fork guards were missing from BOTH lists, so
+    the two sets were EQUAL then and this assertion passed on the pre-fix tree.
+    That shape is caught by the source scan in
+    `tests/test_markers.py::test_module_level_embedded_only_modules_are_carve_out`;
+    the two guards cover different holes and neither subsumes the other.
+    """
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    m = load_manifest()
+    # The one documented asymmetry: the bench smoke file is path-qualified in
+    # the manifest (`bench/...`) and bare-stem keyed in the registry. The
+    # registry/redirect mechanism is itself stem-keyed, so a collapse can only
+    # happen where the stem genuinely collides.
+    carve = {f.removesuffix(".py").removeprefix("bench/") for f in m["carve_out"]}
+    registry = set(TEST_NO_REDIRECT_STEMS)
+    assert carve == registry, (
+        "carve_out and TEST_NO_REDIRECT_STEMS have drifted — a stem in only "
+        "one of the two registries is a silent hole: "
+        f"registry-only={sorted(registry - carve)} — in the redirect registry "
+        "but NOT routed to the carve-out job, so a full (URI-set) selection "
+        "collects it on a docker leg and skips its embedded_only-marked tests "
+        "there; with a module-level mark that is the whole file, reported "
+        "green. "
+        f"carve-out-only={sorted(carve - registry)} — routed to the carve-out "
+        "job but not redirect-exempt, so an out-of-band URI run would flip its "
+        "embedded constructions to the server lane instead of the embedded "
+        "daemon")
 
 
 def test_integrity_no_matrix_drift():
@@ -1293,8 +1346,8 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
 
 
 def test_carve_out_job_uri_unset_with_carve_out_flag():
-    """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the 17-file
-    embedded set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
+    """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the embedded
+    set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
     carve-out to the server lane) with TORTOISE_TEST_CARVE_OUT=1 (the P4
     enforcement-prep escape), and consumes the changes job's carve_out
     output as its file list."""
