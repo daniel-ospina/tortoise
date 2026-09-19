@@ -161,7 +161,9 @@ def _decode_escapes(text: str) -> str:
 
     return _ESCAPE.sub(repl, text)
 #: The limiter's body, VERBATIM (comments stripped, whitespace collapsed) — see the
-#: pin in `test_rate_limit_map_is_bounded` for why this exists.
+#: pin in `test_rate_limit_map_is_bounded` for why this exists. Note the tripwire's
+#: intended noise: a predicate rename, a type annotation, or any added statement is
+#: a CHANGE here — re-read the limiter, then update this constant.
 RATE_LIMITED_BODY = (
     "function rateLimited(ip: string, now: number): boolean { const cutoff = now - "
     "RATE_WINDOW_MS; const recent = (hits.get(ip) || []).filter((t) => t > cutoff); if "
@@ -930,11 +932,39 @@ def test_rate_limit_map_is_bounded() -> None:
     called = code.index("rateLimited(", fn_end)
     site_start = code.rindex("const ip", 0, called)
     site_end = _brace_end(code, code.index("if (rateLimited(", site_start))
+    decl_start = code.index("const hits")
+    decl_end = code.index(";", decl_start) + 1
+    # …and the map must BE a `Map`: a `WeakMap` (or any type without `size`) makes
+    # `hits.size > MAX_RATE_KEYS` always false, so the cap silently never runs and
+    # the key count is unbounded (cycle-26 review, follow-on).
+    assert re.fullmatch(
+        r"\s*const hits\s*=\s*new Map<string, number\[\]>\(\);\s*", code[decl_start:decl_end]
+    ), (
+        "the limiter's state must be a `Map<string, number[]>` — a store without `size` "
+        f"silently disables the cap: {code[decl_start:decl_end].strip()!r}"
+    )
     site = re.sub(r"\s+", " ", code[site_start:site_end]).strip()
     assert site == RATE_LIMIT_CALL_SITE, (
         "the rate limiter's call site changed — re-read it, then update "
         f"RATE_LIMIT_CALL_SITE: {site!r}"
     )
+    # …and `hits` may be referenced NOWHERE else in the file. Anchoring the call
+    # site at `const ip` left everything earlier in the handler unguarded:
+    # `hits.clear();` as the handler's first statement wipes the map before every
+    # request and the limiter never throttles, with neither verbatim pin touched
+    # (cycle-26 review). Every `hits` reference must live inside the limiter's body
+    # or the pinned call site — a total-coverage assertion, so a NEW location cannot
+    # slip through, and an alias/rename would break a verbatim pin.
+    for hit in re.finditer(r"\bhits\b", code):
+        inside_body = fn_start <= hit.start() < fn_end
+        inside_call = site_start <= hit.start() < site_end
+        # The declaration is the one legitimate reference outside those spans.
+        declared = decl_start <= hit.start() < decl_end
+        assert inside_body or inside_call or declared, (
+            "`hits` is the limiter's state and may only be touched inside the limiter "
+            f"or its call site; found at offset {hit.start()}: "
+            f"{code[max(0, hit.start() - 60) : hit.start() + 60]!r}"
+        )
     # `cutoff` is what the window is filtered BY: `const cutoff = now` (or
     # `Infinity`) makes every stored entry stale, so the window is always empty and
     # the trip can never fire — while `RATE_WINDOW_MS` stays "used" by the
