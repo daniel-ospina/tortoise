@@ -77,25 +77,6 @@ jobs:
           else
             echo "CNAME already correct"
           fi
-      - name: Build blog admin SPA (vite) → stage into website/admin/ (#1800)
-        # The admin gate Function serves /admin/index.html from ASSETS; the
-        # built app must land at website/admin/ before the Pages deploy. Env
-        # comes from repo secrets (VITE_* are public-safe — anon key). The
-        # app's env guard throws at RUNTIME (browser), so missing secrets
-        # would silently ship a white-screen SPA — fail fast instead.
-        run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
-            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
-            exit 1
-          fi
-          cd website/apps/blog-admin
-          npm ci
-          VITE_SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-          VITE_SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
-            npm run build
-          mkdir -p ../../admin
-          cp -r dist/* ../../admin/
-          test -s ../../admin/index.html
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -174,8 +155,13 @@ jobs:
       #     `functions/` — the tree wrangler will actually compile now.
       #   * _redirects / _headers — consumed from the upload root; dropping them
       #     silently discards the redirect + security-header contracts.
-      #   * admin/ — generated into the upload root by the blog-admin build step
-      #     above; dropping it breaks the admin gate's ASSETS read.
+      # #4171: `admin/` is no longer staged here. The blog admin console moved
+      # to the app origin (the `tortoise-dashboard` project) so it is
+      # same-origin with its `__Host-session` cookie; it is now built and staged
+      # into `website/apps/dashboard/dist/admin/` by the `deploy-dashboard` job.
+      # This project keeps only the single-hop `/admin` → app origin 301 in
+      # `functions/_middleware.ts`. An `admin/` tree reappearing here would be
+      # dead weight (the middleware redirects before any asset is read).
       # A denylist fails LOUD: an over-eager exclusion 404s a page that the
       # verify-legal job already covers. An allowlist fails SILENT: dead auth.
       # The five survival guards below are what keep the denylist honest.
@@ -212,13 +198,11 @@ jobs:
           test -d "$STAGE/functions" \
             || { echo '::error::functions/ did not survive staging — Pages compiles Functions from the cwd (`cd "$STAGE"` below), so every /auth/*, /api/*, /blog/* and /admin/* route would 404 (#3620)'; exit 1; }
           test -f "$STAGE/functions/_middleware.ts" \
-            || { echo '::error::functions/_middleware.ts is missing — host routing and the admin gate would be gone (#3620)'; exit 1; }
+            || { echo '::error::functions/_middleware.ts is missing — host routing and the /admin → app-origin redirect would be gone (#3620/#4171)'; exit 1; }
           test -f "$STAGE/_redirects" \
             || { echo '::error::_redirects did not survive staging — the redirect contract is gone (#3620)'; exit 1; }
           test -f "$STAGE/_headers" \
             || { echo '::error::_headers did not survive staging — the security-header contract is gone (#3620)'; exit 1; }
-          test -d "$STAGE/admin" \
-            || { echo '::error::admin/ did not survive staging — the blog-admin build step above did not stage it (#3620)'; exit 1; }
           # wrangler resolves `functions/` against the PROCESS CWD, not against
           # the directory argument, so the cwd must be the upload root. Without
           # this `cd`, wrangler looks for `<repo root>/functions` (absent), omits
@@ -452,6 +436,27 @@ jobs:
           cd website/apps/dashboard
           npm ci
           npm run build
+      - name: Build blog admin SPA (vite) → stage into dist/admin/ (#4171)
+        # The blog admin console moved to the session origin (#4171). Its shell
+        # and assets must land at `dist/admin/` so the gate Function
+        # (functions/admin/[[path]].ts) can serve them from ASSETS — and so the
+        # whole console ships with THIS project, same-origin with the
+        # `__Host-session` cookie. VITE_* are public-safe (anon key). The app's
+        # env guard throws at RUNTIME (browser), so missing secrets would
+        # silently ship a white-screen SPA — fail fast instead.
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
+            exit 1
+          fi
+          cd website/apps/blog-admin
+          npm ci
+          VITE_SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+          VITE_SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+            npm run build
+          mkdir -p ../dashboard/dist/admin
+          cp -r dist/* ../dashboard/dist/admin/
+          test -s ../dashboard/dist/admin/index.html
       - name: Pre-flight — token can see tortoise-dashboard project (P2-1)
         # The CLOUDFLARE_API_TOKEN may be scoped per-project; assert the
         # dashboard project is visible BEFORE deploying so a 403-scoped

@@ -71,8 +71,9 @@ PROXY_PREFIX = "/api/v1"
 #
 # #4054: the BFF moved from the marketing project (`website/functions/`) to the app
 # project (`website/apps/dashboard/functions/`). Both roots are listed because
-# `blog/**` and `admin/**` deliberately remain in the former — dropping it would
-# start scanning those server functions as browser code.
+# `blog/**` deliberately remains in the former (and #4171 moved `admin/**` to the
+# latter with the console) — dropping either root would start scanning those
+# server functions as browser code.
 SERVER_FUNCTION_ROOTS = (
     "website/functions/",
     "website/apps/dashboard/functions/",

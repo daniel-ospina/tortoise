@@ -1,10 +1,11 @@
 """#3080 — the /admin return-to guard.
 
-The blog admin gate (`website/functions/admin/[[path]].ts`) bounces an
-unauthenticated request to `/auth?next=<path>&stale=1` so the post-login
+The blog admin gate (`website/apps/dashboard/functions/admin/[[path]].ts`)
+bounces an unauthenticated request to `/auth?next=<path>&stale=1` so the post-login
 redirect comes back to the console. Before #3080 the bounce was a bare `/auth`,
 so every login landed on the app root and `/admin` was unreachable by
-navigation.
+navigation. #4171 moved the gate to the app origin (same-origin with the
+`__Host-session` cookie); the return-to contract is unchanged.
 
 `website/signup.html` turns that `next` into the post-login destination, which
 is an open-redirect sink unless the value is constrained, so the allowlist is
@@ -48,7 +49,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # #4054: the /auth page moved to the APP Pages project with the rest of the BFF.
 SIGNUP = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "signup.html"
-GATE = REPO_ROOT / "website" / "functions" / "admin" / "[[path]].ts"
+# #4171: the gate moved to the app origin with the console itself.
+GATE = REPO_ROOT / "website" / "apps" / "dashboard" / "functions" / "admin" / "[[path]].ts"
 
 ORIGIN = "https://tortoise.premiselabs.co"
 APP_ORIGIN = "https://app.premiselabs.co"
@@ -134,7 +136,7 @@ def _blocks() -> dict[str, str]:
         "consumer": _brace_block(html, "Session probe consumer"),
         "gate": _function(gate_src, "gateDecision")
         + "\n"
-        + _function(gate_src, "sessionKindForStatus")
+        + _function(gate_src, "tokenReasonKind")
         + "\n"
         + _function(gate_src, "adminKindForResponse"),
         "server": server,
@@ -256,12 +258,11 @@ for (const c of cases.claim) out.claim.push(runTargets(c[0], c[1]));
 for (const c of cases.consumer) out.consumer.push(runConsumer(c[0], c[1], c[2], c[3]));
 
 // #3080: execute the gate's real decision table (not a substring check).
-const decide = new Function(gateSrc + '\\nreturn { gateDecision: gateDecision, sessionKindForStatus: sessionKindForStatus, adminKindForResponse: adminKindForResponse };')();
+const decide = new Function(gateSrc + '\\nreturn { gateDecision: gateDecision, tokenReasonKind: tokenReasonKind, adminKindForResponse: adminKindForResponse };')();
 for (const c of cases.gate) {
   out.gate.push(decide.gateDecision({ configured: c[0], token: c[1], session: c[2], admin: c[3] }));
 }
-out.sessionKind = {};
-out.sessionKind = cases.sessionStatus.map(function (c) { return decide.sessionKindForStatus(c[0], c[1]); });
+out.tokenReason = cases.tokenReason.map(function (c) { return decide.tokenReasonKind(c[0]); });
 out.adminKind = cases.adminResponse.map(function (c) { return decide.adminKindForResponse(c[0], c[1]); });
 
 // #3080: cross-allowlist agreement. Whatever the SERVER gate emits for a path
@@ -286,7 +287,7 @@ def _run(cases: dict) -> dict:
         pytest.skip("node not available")
     for key in ("early", "headGate", "claim", "consumer", "gate"):
         cases.setdefault(key, [])
-    cases.setdefault("sessionStatus", [])
+    cases.setdefault("tokenReason", [])
     cases.setdefault("adminResponse", [])
     cases.setdefault("corpus", [])
     blocks = _blocks()
@@ -462,6 +463,8 @@ def test_gate_bounces_with_an_allowlisted_return_to() -> None:
         (True, "t", "unauthenticated", "skipped", "auth"),
         # allowlist query failed → 503 (our config problem, not a verdict)
         (True, "t", "ok", "unavailable", "unavailable"),
+        # the is_admin() RPC rejected the minted token → re-authenticate
+        (True, "t", "ok", "unauthenticated", "auth"),
         # authenticated but not an admin → explicit 403
         (True, "t", "ok", "not-admin", "not-admin"),
         # the happy path
@@ -478,23 +481,22 @@ def test_gate_decision_matrix(configured: bool, token, session: str, admin: str,
     assert got == want, f"configured={configured} token={token} session={session} admin={admin} → {got!r}, want {want!r}"
 
 
-def test_session_status_mapping_matches_supabase() -> None:
-    """Only a bad USER token means "re-authenticate".
+def test_token_reason_mapping_separates_dead_from_fault() -> None:
+    """Only a genuinely DEAD session means "re-authenticate".
 
-    Supabase answers 401 "Invalid API key" when OUR apikey is rotated and 403
-    bad_jwt when the user's token is bad. Reading the 401 as a bad session would
-    emit stale=1 for every visitor on a key rotation — an outage-class failure
-    that must never look like a logout.
+    `getAccessTokenForSession` distinguishes `no_session` (the row is gone or the
+    refresh token is dead — re-auth) from `unavailable` (the store or the provider
+    is down — 503). Collapsing them is the #3485 class: a transient fault would
+    emit stale=1 for every visitor and log them out of the shared cookie, while a
+    dead session would 503 forever instead of bouncing to sign-in.
     """
     cases = [
-        (403, '{"error_code":"bad_jwt"}', "unauthenticated"),
-        (401, '{"error_code":"bad_jwt"}', "unauthenticated"),
-        (401, '{"message":"Invalid API key"}', "unavailable"),
-        (429, "", "unavailable"),
+        ("no_session", "unauthenticated"),
+        ("unavailable", "unavailable"),
     ]
-    got = _run({"sessionStatus": [[c[0], c[1]] for c in cases]})["sessionKind"]
-    for (status, body, want), actual in zip(cases, got, strict=True):
-        assert actual == want, f"HTTP {status} {body!r} → {actual!r}, want {want!r}"
+    got = _run({"tokenReason": [[c[0]] for c in cases]})["tokenReason"]
+    for (reason, want), actual in zip(cases, got, strict=True):
+        assert actual == want, f"{reason!r} → {actual!r}, want {want!r}"
 
 
 @pytest.mark.parametrize(
@@ -508,23 +510,24 @@ def test_admin_response_mapping(ok: bool, count: int, want: str) -> None:
 
 
 def test_verify_session_wires_the_classifier() -> None:
-    """The classifier leaf is tested behaviourally — pin its CALL SITE too.
+    """The classifier leaves are tested behaviourally — pin their CALL SITES too.
 
-    Without this, replacing `sessionKindForStatus(res.status, body)` with a
-    hardcoded `{kind: "unauthenticated"}` restores the #3080 bug (a rotated
-    apikey read as a per-user auth verdict) while the suite stays green.
+    Without this, replacing `tokenReasonKind(token.reason)` with a hardcoded
+    `{kind: "unavailable"}` (or "unauthenticated") restores half the #3485 class
+    while the behavioural suite stays green: a dead session would 503 forever, or
+    a store fault would sign the user out. Same for `adminKind`.
     """
     src = GATE.read_text(encoding="utf-8")
     i = src.find("async function verifySession")
     assert i != -1, "verifySession was removed"
     body = src[i : src.find("\nasync function", i + 10)]
-    assert "sessionKindForStatus(res.status, body)" in body, (
-        "verifySession no longer delegates to the status/body classifier (#3080)"
+    assert "tokenReasonKind(token.reason)" in body, (
+        "verifySession no longer delegates to the token-reason classifier (#3485)"
     )
     j = src.find("async function isAdmin")
     assert j != -1, "isAdmin was removed"
     abody = src[j : src.find("\nasync function", j + 10)]
-    assert "adminKindForResponse(false, 0)" in abody and "adminKindForResponse(true, rows.length)" in abody, (
+    assert "adminKind(true, isAdminUser ? 1 : 0)" in abody, (
         "isAdmin no longer delegates to the response classifier (#3080)"
     )
 
@@ -727,8 +730,9 @@ def test_console_bundle_resolves_under_admin_from_every_entry_path(doc_url: str)
     `/admin/blog` the base prefix is `/admin/`, so `./assets/...` resolved to the
     real bundle. At the extensionless `/admin` — the canonical console URL, and the
     very form the gate emits in its own `next=` — the prefix is `/`, so the shell
-    requested `/assets/index-...js`, which is never deployed (CI stages the SPA into
-    website/admin/, so the bundle exists only at /admin/assets/). Odd-depth forms
+    requested `/assets/index-...js`, which is never deployed (CI stages the SPA
+    into the app project's dist/admin/, so the bundle exists only at
+    /admin/assets/). Odd-depth forms
     like `/admin/blog/edit` failed the same way. Result: `<div id="root"></div>`
     with no script = blank page.
 

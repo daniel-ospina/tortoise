@@ -51,9 +51,9 @@ WEBSITE = REPO_ROOT / "website"
 FUNCTIONS = WEBSITE / "functions"
 # #4054: the repo now ships TWO Pages Functions trees. The BFF (auth, session,
 # api/v1) moved to the app project, so `/welcome` and `/auth/*` are served from
-# `website/apps/dashboard/functions/` while `/blog` and `/admin` stay here. A
-# resolver that only knew `website/functions/` would read a correct `/welcome`
-# link as dangling.
+# `website/apps/dashboard/functions/`. #4171 moved the blog admin gate there too
+# (`/admin`), so only `/blog` stays in `website/functions/`. A resolver that only
+# knew one tree would read a correct link as dangling.
 FUNCTION_ROOTS = (
     FUNCTIONS,
     WEBSITE / "apps" / "dashboard" / "functions",

@@ -103,12 +103,13 @@ projects:
         type: env_vars
         envs: [production]
         note: >-
-          server-side blog/admin writes. The explicit ``503 not_configured`` sites
-          are website/functions/blog/api/posts/[[path]].ts (2),
+          server-side blog writes. The explicit ``503 not_configured`` sites are
+          website/functions/blog/api/posts/[[path]].ts (2),
           website/functions/blog/api/purge.ts, .../generate-cover.ts and
-          .../generate-seo.ts; website/functions/admin/[[path]].ts reports
-          `unavailable`. website/functions/blog/_shared/admin-auth.ts reads it too
-          (`?? ""`).
+          .../generate-seo.ts. website/functions/blog/_shared/admin-auth.ts reads
+          it too (`?? ""`). The blog admin gate (now on the app origin, #4171)
+          deliberately does NOT read it — it checks `is_admin()` with the user's
+          minted token + the anon key, so the service-role secret stays here.
 
       # Cover and SEO generation. Absent -> ``503 not_configured``.
       - name: OPENROUTER_API_KEY
@@ -217,8 +218,9 @@ projects:
       # it in the BFF: /auth/signup proxies POST {API_ORIGIN}/v1/signup/email, so
       # the service-role key stays on the API. Declaring it here would assert that a
       # privileged secret belongs on the public app origin — the opposite of the
-      # point. The repo's only readers are the premise-labs blog/admin Functions
-      # (website/functions/blog/**, website/functions/admin/**), declared above.
+      # point. The repo's only readers are the premise-labs blog Functions
+      # (website/functions/blog/**), declared above. The admin gate moved to the
+      # app origin (#4171) and uses the anon key + the `is_admin()` RPC instead.
 
       # Correct in-code default (`https://app.premiselabs.co` in welcome.ts),
       # so absence is a warning, not an outage — same classification as the
@@ -241,6 +243,19 @@ projects:
         note: >-
           Supabase redirect_to. Defaults to <origin>/auth/callback
           (colocated topology, ADR-001).
+
+      # #4171: the /blog/api/* Token Handler proxy forwards to the marketing
+      # origin. Defaulted in code to https://tortoise.premiselabs.co, so absence
+      # is a warning, not an outage — set it explicitly to decouple the upstream
+      # from the code default.
+      - name: BLOG_ORIGIN
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          Upstream origin for the /blog/api/* proxy
+          (website/apps/dashboard/functions/blog/api/[[path]].ts). Defaults to
+          https://tortoise.premiselabs.co; only set it to move the blog API.
 
       # Required: api/v1/[[path]].ts answers `503 proxy_not_configured`
       # without it (line 61) and builds its upstream from it (lines 118, 96).

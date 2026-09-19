@@ -19,9 +19,11 @@
 # plus the excluded directories' contents — remain in the deploy step; this table
 # decides the top level, which is where the denylist's residual risk lives.)
 #
-# `admin/` is deliberately ABSENT: it is generated into `website/` by the
-# blog-admin build step immediately before the deploy and is not tracked, so it
-# never appears in `git ls-files website`.
+# `admin/` is deliberately ABSENT: it used to be generated into `website/` by the
+# blog-admin build step immediately before the deploy. #4171 moved the console to
+# the app origin (`tortoise-dashboard`), which stages it into
+# `website/apps/dashboard/dist/admin/` instead — so no `admin/` tree is produced
+# under `website/` at all now.
 #
 # Format: <public|excluded> <name>
 public _headers

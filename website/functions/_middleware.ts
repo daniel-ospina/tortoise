@@ -13,6 +13,9 @@
 // their canonical (host consolidation, 2026-08-17; see the TORTOISE_ONLY
 // block below). The AUTH surface (auth, signup, welcome, invite-accept) moved
 // to the app origin — issue #4054 — and 301s to app.premiselabs.co instead.
+// The blog admin console moved to the app origin too — issue #4171 — because
+// its session (`__Host-session`) is host-only on app.premiselabs.co; a single
+// unconditional /admin 301 lives below.
 //
 // The product page lives ONLY on the tortoise host (served at its root via
 // the rewrite below). The raw /product and /product.html paths are static
@@ -149,6 +152,30 @@ export const onRequest: PagesFunction = async (context) => {
     return new Response(null, {
       status: 301,
       headers: { Location: APP_ORIGIN + "/auth" + url.search, ...HSTS },
+    });
+  }
+
+  // ── The blog admin console lives on the APP origin (#4171) ────────────
+  // #4054 moved the BFF (and the `__Host-session` cookie) to
+  // app.premiselabs.co, but the console stayed on this project — so its
+  // relative `/api/session` check fell through to the SPA shell (a 200 HTML
+  // page), the operator was bounced to sign-in, and the app-origin host-only
+  // cookie could never authenticate the `/blog/api/*` calls it makes against
+  // tortoise.*. The console's decided home is the session origin (`SCOPE.md`
+  // §1.5, §3), so it is served there now and this is a SINGLE-HOP 301 to
+  // app.premiselabs.co/admin — never a chained permanent redirect
+  // (`SCOPE.md` §4 W2 / F12). `/blog/api/*` is deliberately untouched: it does
+  // not match `/admin` and must keep reaching this project (see the blog rule
+  // above — a redirect would drop a POST body). Hash routes (`#/edit/:id`) are
+  // carried by the user agent across the 301, so deep links survive.
+  if (
+    url.pathname === "/admin" ||
+    url.pathname === "/admin/" ||
+    url.pathname.startsWith("/admin/")
+  ) {
+    return new Response(null, {
+      status: 301,
+      headers: { Location: APP_ORIGIN + "/admin" + url.search, ...HSTS },
     });
   }
 

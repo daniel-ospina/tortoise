@@ -878,6 +878,9 @@ EXPECTED_CLASSIFICATION = {
         # recommended: correct in-source default, same as premise-labs
         "APP_ORIGIN": ("recommended", ["production"]),
         "AUTH_CALLBACK_URL": ("recommended", ["production"]),
+        # #4171: the /blog/api/* Token Handler proxy. ``recommended`` because the
+        # proxy falls back to https://tortoise.premiselabs.co in code.
+        "BLOG_ORIGIN": ("recommended", ["production"]),
         # required: api/v1/[[path]].ts answers `503 proxy_not_configured` without it
         "API_ORIGIN": ("required", ["production"]),
     },
@@ -1226,9 +1229,12 @@ def test_the_manifest_is_not_inside_the_pages_upload_root() -> None:
 # ---------------------------------------------------------------------------
 
 #: The entries under `website/` at the time of #3620 — the public surface, the
-#: internal paths that were leaking, the generated `admin/` (produced into the
-#: upload root by the blog-admin build step above the deploy), and a committed
-#: `node_modules` tree (as `website/apps/dashboard/node_modules` really is).
+#: internal paths that were leaking, and a committed `node_modules` tree (as
+#: `website/apps/dashboard/node_modules` really is).
+#:
+#: #4171: the generated `admin/` tree is GONE from this project — the console
+#: moved to the app origin and is staged by the `deploy-dashboard` job into
+#: `website/apps/dashboard/dist/admin/`.
 _WEBSITE_FIXTURE = (
     "_redirects",
     "_headers",
@@ -1251,8 +1257,6 @@ _WEBSITE_FIXTURE = (
     "functions/_middleware.ts",
     "functions/auth/start.ts",
     "functions/api/session.ts",
-    "admin/index.html",
-    "admin/assets/index-abc.js",
     "apps/dashboard/src/main.jsx",
     "apps/dashboard/deploy.sh",
     "apps/dashboard/package.json",
@@ -1297,16 +1301,11 @@ def _expected_public(rels) -> set[str]:
 def _assert_stage_matches(actual: set[str], expected: set[str], out: str) -> None:
     """Assert the stage is EXACTLY the classified public set, both directions.
 
-    `admin/` is generated into the upload root by the blog-admin build step and is
-    not tracked, so it is absent from the classified tree; its PRESENCE is
-    required and it is never counted as an extra.
+    #4171: the generated `admin/` tree (once a special case here) is gone — it
+    is staged into the app-origin project's `dist/` now, not into this upload.
     """
-    assert any(a == "admin" or a.startswith("admin/") for a in actual), (
-        "the generated admin/ tree is missing from the stage"
-    )
-    actual_tracked = {a for a in actual if not a.startswith("admin/")}
-    missing = sorted(expected - actual_tracked)
-    added = sorted(actual_tracked - expected)
+    missing = sorted(expected - actual)
+    added = sorted(actual - expected)
     assert not missing, (
         "PUBLIC files were dropped by the denylist staging — the leak probe "
         f"asserts 404s only, so it can never notice this (#3620): {missing}\n{out}"
@@ -1492,8 +1491,11 @@ def _tracked_website_files() -> list[str]:
 def _copy_tracked_website(root: Path) -> None:
     """Reproduce the CI checkout for the staging step: every TRACKED file under
     `website/` (copying the `git ls-files` list, so untracked local artifacts stay
-    out of the comparison) plus the generated `admin/` tree the blog-admin build
-    step creates just before the deploy."""
+    out of the comparison).
+
+    #4171: no generated `admin/` tree is added — the console is built and staged
+    by the `deploy-dashboard` job into the app-origin project's `dist/`.
+    """
     for rel in _tracked_website_files():
         src = REPO / "website" / rel
         # A tracked path can be absent from the WORKING TREE mid-change (the
@@ -1505,10 +1507,6 @@ def _copy_tracked_website(root: Path) -> None:
         dst = root / "website" / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-    admin = root / "website" / "admin"
-    (admin / "assets").mkdir(parents=True, exist_ok=True)
-    (admin / "index.html").write_text("x\n", encoding="utf-8")
-    (admin / "assets" / "index-abc.js").write_text("x\n", encoding="utf-8")
 
 
 def test_the_staged_upload_root_equals_the_classified_public_tree(tmp_path) -> None:
@@ -1595,10 +1593,9 @@ def test_the_deploy_uploads_the_staged_directory_not_website(tmp_path) -> None:
         # also match the `_middleware.ts` guard's message, so deleting the
         # directory guard would still look "caught".
         ("functions", "compiles Functions from the cwd"),
-        ("functions/_middleware.ts", "host routing and the admin gate"),
+        ("functions/_middleware.ts", "host routing and the /admin"),
         ("_redirects", "the redirect contract is gone"),
         ("_headers", "the security-header contract is gone"),
-        ("admin", "did not stage it"),
     ],
 )
 def test_the_deploy_refuses_to_upload_when_a_load_bearing_entry_is_missing(
@@ -1607,9 +1604,10 @@ def test_the_deploy_refuses_to_upload_when_a_load_bearing_entry_is_missing(
     """The denylist is only safe because these guards fail LOUD, and BEFORE the
     upload.
 
-    A denylist was chosen over an allowlist precisely because these five are easy
-    to forget. If a guard is removed — or moved after the `npx` call — the
-    failure returns to its silent form: a green deploy with dead auth.
+    A denylist was chosen over an allowlist precisely because these are easy to
+    forget. If a guard is removed — or moved after the `npx` call — the failure
+    returns to its silent form: a green deploy with dead auth. #4171 removed the
+    `admin/` guard along with the console: the tree is no longer staged here.
     """
     rc, out, _stage, _site = _run_deploy(tmp_path, omit=omitted)
     assert rc != 0, f"staging {omitted} away did not fail the step:\n{out}"
@@ -1808,10 +1806,10 @@ def test_the_leak_probe_harness_exercises_the_retry_bound() -> None:
 #: the deploy job's pre-upload preflight reads (`tools/check_pages_upload_root.py`)
 #: — so the test's expectations and the deploy gate cannot drift.
 #:
-#: `admin/` is deliberately absent: it is generated into `website/` by the
-#: blog-admin build step and is not tracked, so it never appears in
-#: `git ls-files website`; its presence in the stage is asserted by
-#: `_assert_stage_matches`.
+#: `admin/` is deliberately absent: it used to be generated into `website/` by
+#: the blog-admin build step and was never tracked. #4171 moved the console to
+#: the app-origin project, which stages it into `website/apps/dashboard/dist/admin/`
+#: — so this upload never sees an `admin/` tree at all now.
 _WEBSITE_TOP_LEVEL_STAGED = cpur.load_classification(UPLOAD_CLASSIFICATION_PATH)
 
 
@@ -2177,6 +2175,41 @@ def test_the_marketing_preflight_is_scoped_to_premise_labs() -> None:
     not block the marketing deploy (#4054)."""
     code = _step_code(PREFLIGHT)
     assert "--project premise-labs" in code
+
+
+def test_the_blog_admin_console_is_built_and_staged_by_the_dashboard_job() -> None:
+    """#4171: the console ships with the app-origin project, staged into dist/admin/.
+
+    The gate Function reads `/admin/index.html` from ASSETS, and ASSETS for the
+    `tortoise-dashboard` project is `website/apps/dashboard/dist/` — so the build
+    output must land there, and it must land BEFORE the deploy step.
+    """
+    steps = _dashboard_steps()
+    names = [s.get("name", "") for s in steps]
+    build = "Build blog admin SPA (vite) → stage into dist/admin/ (#4171)"
+    assert build in names, "the dashboard job no longer builds the blog admin SPA"
+    assert names.index(build) < names.index(DASHBOARD_DEPLOY), (
+        "the console must be staged BEFORE the dashboard deploy"
+    )
+    code = _strip_bash_comments(next(s for s in steps if s.get("name") == build)["run"])
+    assert "website/apps/blog-admin" in code
+    assert "../dashboard/dist/admin" in code, (
+        "the console is not staged into the app project's dist/ — the gate's ASSETS read would 404"
+    )
+    assert "npm run build" in code
+
+
+def test_the_marketing_job_no_longer_builds_the_blog_admin_console() -> None:
+    """#4171: the console left the marketing origin — its build must not linger.
+
+    Two producers staging the same SPA into different projects is how the old
+    tortoise.*/admin copy silently came back, and the staging denylist test above
+    would still pass (the file simply would not be in this upload).
+    """
+    names = [s.get("name", "") for s in _deploy_steps()]
+    assert not any("blog admin SPA" in n for n in names), (
+        "the marketing deploy job still builds the blog admin SPA"
+    )
 
 
 def _dashboard_preflight_script(tmp_path: Path) -> Path:
