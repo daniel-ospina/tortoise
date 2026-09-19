@@ -48,10 +48,24 @@ jobs:
           echo "changed files vs $BASE:"
           echo "$CHANGED"
           cat > /tmp/ci-gates.py <<'PY'
+          import subprocess
           import sys
 
           out = sys.argv[1]
           files = [ln.strip() for ln in sys.stdin if ln.strip()]
+
+          # The client wheel's shared-module set is DERIVED from the build
+          # script via client/shared_modules.sh (#3805). A literal
+          # enumeration here is what silently gated client-build OFF when
+          # tortoise/status_vocabulary.py was staged into the wheel. Fail
+          # closed: an underivable set must never silently skip the leg.
+          _probe = subprocess.run(["bash", "client/shared_modules.sh"],
+                                  capture_output=True, text=True)
+          SHARED = _probe.stdout.split()
+          if _probe.returncode != 0 or not SHARED:
+              print("::error::cannot derive the client wheel's shared modules "
+                    "from client/build_client.sh (client/shared_modules.sh)")
+              sys.exit(1)
 
           def startswith(p):
               return lambda f: f.startswith(p)
@@ -83,6 +97,13 @@ jobs:
               "dashboard": any_file(
                   startswith("website/apps/dashboard/"),
                   isfile("product/pricing.json"),
+                  # #3485: the dashboard's node suite loads the shared
+                  # website/assets/supabase-session.js bridge directly
+                  # (supabaseSessionBridge.test.js). Without this entry a PR
+                  # touching ONLY the bridge selects the `website` surface and
+                  # skips dashboard-js-tests, so the behavioural tests for the
+                  # very file under review would never run.
+                  isfile("website/assets/supabase-session.js"),
               ),
               # uv-lock-check
               "uv_lock": any_file(
@@ -92,12 +113,15 @@ jobs:
               "entrypoints": any_file(
                   isfile("entrypoint.sh", ".ci-checks/check-entrypoint-guards.sh"),
               ),
-              # client-build (wheel staged from client/ + the 3 canonical
-              # shared modules build_client.sh copies into the wheel)
+              # client-build (wheel staged from client/ + the canonical
+              # shared modules build_client.sh copies into the wheel). The
+              # module set is DERIVED from the build script (SHARED, above)
+              # so a newly staged module cannot miss this gate again — the
+              # PR #4044 review regression, where status_vocabulary.py
+              # shipped in the wheel while this predicate named three.
               "client": any_file(
                   startswith("client/"),
-                  isfile("tortoise/mcp_client.py", "tortoise/config.py",
-                         "tortoise/exceptions.py"),
+                  isfile(*["tortoise/" + m for m in SHARED]),
               ),
               # packaging-smoke (wheel/sdist pack catalog + doc-consistency).
               # Pack SOURCE is the root packs/ tree (pyproject maps
@@ -570,7 +594,7 @@ jobs:
 
   client-build:
     needs: changes
-    if: needs.changes.outputs.client == 'true'  # #2149: client/ + the 3 shared modules in the wheel
+    if: needs.changes.outputs.client == 'true'  # #2149: client/ + the shared modules the build script stages into the wheel (derived — client/shared_modules.sh)
     # #526: the thin-client boundary must hold on EVERY PR — build the
     # tortoise-client wheel, run the acceptance gate in a clean venv (driver
     # imports, engine modules raise ImportError, no engine deps installed),
@@ -590,10 +614,17 @@ jobs:
         run: |
           # Whitelist (PR #1313 conf 88): ANY tortoise/ entry outside the
           # client module set is rejected — including package dirs (e.g.
-          # tortoise/projection/__init__.py) and new engine modules. Must
-          # stay in sync with verify_client.sh Gate 0.
+          # tortoise/projection/__init__.py) and new engine modules. The
+          # module set is DERIVED from the build script via
+          # client/shared_modules.sh (#3805) — the same source
+          # verify_client.sh Gate 0 reads, so the three cannot drift.
+          SHARED_RE="$(bash client/shared_modules.sh | grep -oE '^[A-Za-z0-9_]+' | paste -sd'|' -)"
+          if [ -z "$SHARED_RE" ]; then
+            echo "::error::cannot derive the client wheel's shared modules"
+            exit 1
+          fi
           BAD="$(unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/' | \
-            grep -vE '^tortoise/(__init__|mcp_client|config|exceptions)\.py$' | \
+            grep -vE "^tortoise/(__init__|${SHARED_RE})\\.py$" | \
             grep -vE '^tortoise_client/(__init__|__main__|cli)\.py$' || true)"
           if [ -n "$BAD" ]; then
             echo "::error::non-client entries leaked into the tortoise-client wheel:"

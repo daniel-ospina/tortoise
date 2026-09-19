@@ -304,6 +304,22 @@ def test_ask_recall_bench_change_selects_sdk_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_gen_ask_transcripts_change_selects_sdk_not_tier1():
+    # #3914: tools/gen_ask_transcripts.py owns the capture-shaped seeder the
+    # committed transcript goldens are generated from, and its shape is pinned
+    # by tests/test_ask_seed_shape.py. Before its SOURCE_PATTERNS entry the
+    # flat "tools/" prefix swallowed the path, so a seeder-only change came
+    # back with surfaces=[] and select() took the docs-only return — tier-1
+    # smoke only — leaving BOTH guards unrun on the PR that changed the
+    # seeder (the #1349/#3332/#3910 class the ratchet exists for).
+    r = _sel(["tools/gen_ask_transcripts.py"])
+    assert r["full"] is False, r
+    assert "sdk" in r["surfaces"], r
+    assert "test_ask_seed_shape.py" in r["test_files"], r
+    assert "test_ask_regression_llm.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_collision_preflight_tool_change_fails_closed_to_full():
     # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
     # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the

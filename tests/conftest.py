@@ -947,11 +947,11 @@ def _disable_embedder_autowarmup(monkeypatch):
 # prod R2, searches and can CREATE a real `[DR] ANALYTICS_SINK_DEGRADED` GitHub
 # issue, and pushes Telegram. The per-file guard this replaces covered only
 # `tests/test_analytics_write_path_resolution.py`; this one covers EVERY test.
-# `_ANALYTICS_INCIDENT_OPEN` / `_ANALYTICS_DEGRADED_STREAK` /
-# `_ANALYTICS_RESOLVE_PROBED` are process
-# globals with no other reset, the outcome counter is a process-global
+# `_ANALYTICS_DEGRADED_STREAK` / `_ANALYTICS_RESOLVE_PENDING` /
+# `_ANALYTICS_RESOLVE_NOT_BEFORE` are
+# process globals with no other reset, the outcome counter is a process-global
 # Prometheus `Counter`, and `_ANALYTICS_COUNTS` is the in-process dict the
-# incident detail reads — all four are reset per test.
+# incident detail reads — all are reset per test.
 #
 # The LOCAL JSONL SINK is the fifth write path and is isolated here too: with
 # `_ANALYTICS_FALLBACK_PATH` left as the module default (`None`) the writer
@@ -961,6 +961,11 @@ def _disable_embedder_autowarmup(monkeypatch):
 # test-fixture ids to the real file. Redirecting it to `tmp_path` closes that
 # suite-wide.
 _REAL_ANALYTICS_ALERT_STORE = None
+# The production module-level ``_ANALYTICS_COUNTS`` object, captured before the
+# isolation replaces the attribute. The replacement is a fresh derivation each
+# test, which is right for isolation but HIDES whether the real dict is itself
+# derived — a test pinning that derivation must read this captured object.
+_REAL_ANALYTICS_COUNTS = None
 
 
 @pytest.fixture(autouse=True)
@@ -977,16 +982,25 @@ def _analytics_alert_isolation(monkeypatch, tmp_path):
     construction leg opt back in with the ``real_analytics_alert_store``
     fixture.
     """
-    global _REAL_ANALYTICS_ALERT_STORE
+    global _REAL_ANALYTICS_ALERT_STORE, _REAL_ANALYTICS_COUNTS
     import tortoise.hosted_api as ha
     import tortoise.monitoring as mon
 
     if _REAL_ANALYTICS_ALERT_STORE is None:
         _REAL_ANALYTICS_ALERT_STORE = ha._analytics_alert_store
     monkeypatch.setattr(ha, "_analytics_alert_store", lambda: None)
-    monkeypatch.setattr(ha, "_ANALYTICS_INCIDENT_OPEN", False)
     monkeypatch.setattr(ha, "_ANALYTICS_DEGRADED_STREAK", 0)
-    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_PROBED", False)
+    # `PENDING=True, NOT_BEFORE=None` is the process-start state: an incident
+    # may have been left open by a dead process, so the first delivered write
+    # probes (the CLEAN state omits the probe).
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_PENDING", True)
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_NOT_BEFORE", None)
+    # #3820 cycle-9 P2-2: the resolve's in-flight claim. A leaked ``True`` from
+    # one test would make every later test's resolve SKIP, so the suite-wide
+    # isolation resets it with the rest of the resolve state.
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_INFLIGHT", False)
+    if _REAL_ANALYTICS_COUNTS is None:
+        _REAL_ANALYTICS_COUNTS = ha._ANALYTICS_COUNTS
     monkeypatch.setattr(ha, "_ANALYTICS_COUNTS",
                         {o: 0 for o in ha._ANALYTICS_OUTCOMES})
     monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH",
@@ -1014,6 +1028,20 @@ def real_analytics_alert_store(monkeypatch, _analytics_alert_isolation):
     assert real is not None, "real builder not captured — check fixture order"
     monkeypatch.setattr(ha, "_analytics_alert_store", real)
     return real
+
+
+@pytest.fixture
+def real_analytics_counts(_analytics_alert_isolation):
+    """The production module-level ``_ANALYTICS_COUNTS`` object.
+
+    ``_analytics_alert_isolation`` REPLACES the module attribute with a fresh
+    derivation each test. That is right for isolation, but it masks whether the
+    REAL module-level dict is itself derived: a test pinning the derivation
+    must read this captured object instead of the replacement.
+    """
+    assert _REAL_ANALYTICS_COUNTS is not None, (
+        "real counts not captured — check fixture order")
+    return _REAL_ANALYTICS_COUNTS
 
 
 @pytest.fixture
