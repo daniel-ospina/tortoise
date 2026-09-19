@@ -36,6 +36,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise.sdk import TortoiseSDK
 
 _REPO = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _clean_ask_cap_env(monkeypatch):
+    """The mirror's byte ceiling is DERIVED from its own token cap, so an
+    ambient ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` would silently redirect it to
+    the env value and break the mirror contract (same guard as
+    ``tests/test_ask_retrieval_budget.py``)."""
+    from tortoise.retrieval import ASK_CONTEXT_BYTE_CAP_ENV
+    monkeypatch.delenv(ASK_CONTEXT_BYTE_CAP_ENV, raising=False)
+    yield
+
+
 _CACHED_DATASET = Path(
     os.environ.get(
         "TORTOISE_LME_DATASET",
@@ -86,10 +99,12 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
         resolve_ask_boost_multipliers,
         resolve_byte_cap_from_caps,
     )
-    # The byte ceiling FOLLOWS this helper's own 8000-token cap (not the
-    # product's 16000-token default) so the mirror stays a mirror: a byte
-    # ceiling derived from a token cap the helper does not apply would
-    # admit a different set than the pipeline it mirrors.
+    # The byte ceiling is DERIVED from this helper's own 8000-token cap (not
+    # the product's 16000-token default) so the mirror stays a mirror: a byte
+    # ceiling derived from a token cap the helper does not apply would admit a
+    # different set than the pipeline it mirrors. ``_clean_ask_cap_env``
+    # pins the byte env OFF for the same reason — with it set, the derivation
+    # follows the ENV rather than this helper's token cap.
     byte_cap = resolve_byte_cap_from_caps(
         {"context_token_cap": 8000})
     hits = sdk.tortoise_fts_query(

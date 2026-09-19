@@ -484,19 +484,31 @@ def _drop_docker_graph(base: str, name: str) -> None:
 
 
 def _drop_scratch_graph() -> None:
-    """Drop the CURRENT scratch docker graph, if any (run teardown).
+    """Drop the CURRENT scratch docker graph and restore ``TORTOISE_DB_URI``.
 
     ``_fresh_db`` deletes the PREVIOUS graph on the next call, which leaves
     the LAST graph of every process behind — one leaked graph per instrument
     run, on a shared server, which is the accumulation the docker lane
-exists to prevent. Registered via ``atexit`` and called at the end of
-    ``run_full`` so the final graph goes away too.
+    exists to prevent. Registered with ``atexit`` and called explicitly at
+    the end of ``run_full`` so the final graph goes away without waiting for
+    process exit.
+
+    It also restores ``TORTOISE_DB_URI`` to the value in force before the
+    first docker call, so a caller that constructs another SDK after the run
+    cannot silently attach to a scratch graph that this function just
+    deleted.
     """
-    global _LAST_DOCKER_GRAPH
+    global _LAST_DOCKER_GRAPH, _PRIOR_DB_URI
     base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
     if base and _LAST_DOCKER_GRAPH:
         _drop_docker_graph(base, _LAST_DOCKER_GRAPH)
     _LAST_DOCKER_GRAPH = None
+    if _PRIOR_DB_URI is not None:
+        if _PRIOR_DB_URI:
+            os.environ["TORTOISE_DB_URI"] = _PRIOR_DB_URI
+        else:
+            os.environ.pop("TORTOISE_DB_URI", None)
+        _PRIOR_DB_URI = None
 
 
 # The last scratch graph of a process is otherwise never deleted; drop it on
@@ -526,10 +538,10 @@ def _fresh_db(tag: str) -> str | None:
     memory ceiling``). The LAST graph of a run is dropped at process exit
     (``_drop_scratch_graph``, registered with ``atexit``).
 
-    ``TORTOISE_DB_URI`` is written for the duration of the per-call graph and
-    RESTORED to its prior value on the next call, so a caller that
-    constructs another SDK after the run cannot silently attach to a scratch
-    graph.
+    ``TORTOISE_DB_URI`` is written for the duration of each per-call docker
+    graph and RESTORED by ``_drop_scratch_graph`` (run teardown), so a caller
+    that constructs another SDK after the run cannot silently attach to a
+    scratch graph.
     """
     global _LAST_DOCKER_GRAPH
     global _PRIOR_DB_URI
@@ -1583,7 +1595,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(st, indent=2))
         return EXIT_ADOPT
 
-    return run_full(args, questions, fixture_shape)
+    try:
+        return run_full(args, questions, fixture_shape)
+    finally:
+        # Drop the last scratch docker graph and restore TORTOISE_DB_URI on
+        # EVERY exit path (VOID, not-adopt, raise) — the atexit registration
+        # is the backstop, not the primary teardown.
+        _drop_scratch_graph()
 
 
 if __name__ == "__main__":

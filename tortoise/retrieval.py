@@ -115,11 +115,14 @@ DEFAULT_CONTEXT_BYTE_CAP = 32768
 BYTES_PER_TOKEN_FLOOR = 8
 
 #: #4105: hard upper bounds on the resolved budget, so a typo'd env value
-#: falls back to the default instead of resolving an unbounded window. The
-#: token bound is well above any model context window in use; the byte bound
-#: is shared by the explicit env path and the DERIVED path so the two can
-#: never disagree.
-MAX_ASK_CONTEXT_TOKEN_CAP = 200_000
+#: falls back to the default instead of resolving an unbounded window. Both
+#: are TYPO GUARDS, deliberately generous rather than product limits: the
+#: 4M token bound sits above every model context window in use (the reader
+#: family's documented window is 1M), so a legitimate operator raise is not
+#: silently reset to the default; the byte bound is shared by the explicit
+#: env path, the dict path and the DERIVED path so no two of them can
+#: resolve the same nominal input to different ceilings.
+MAX_ASK_CONTEXT_TOKEN_CAP = 4_000_000
 MAX_ASK_CONTEXT_BYTE_CAP = 1 << 40
 
 #: #4105: the ask lane's MEASURED window defaults. These are ASK-LANE
@@ -356,28 +359,37 @@ def _resolve_explicit_byte_cap(raw: str) -> int | None:
 def resolve_byte_cap_from_caps(caps: dict) -> int:
     """The ask-lane byte ceiling for a caps dict (#4105).
 
-    Precedence matches :func:`resolve_ask_retrieval_caps` exactly: an
-    explicit ``context_byte_cap`` in the dict, else the explicit
-    ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` env, else a ceiling DERIVED from the
-    dict's own token cap. The env leg matters — without it a caller handing
-    a LEGACY caps dict (one that predates #4105) would silently assemble at
-    a different ceiling than the env-pinned ask lane, and an A/B comparison
-    across the two seams would be comparing budgets.
+    Precedence: an explicit ``context_byte_cap`` in the dict, else the
+    explicit ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` env, else a ceiling DERIVED
+    from the dict's own token cap (falling back to the ask lane's default
+    token cap when the dict carries none). Each of the three legs is
+    VALIDATED and clamped exactly as ``resolve_ask_retrieval_caps`` validates
+    the env one, so a nominal value can never resolve to two different
+    ceilings depending on which seam a caller came through — an A/B
+    comparison across the two seams must compare behaviour, not budgets.
 
-    Falling back to the bare 32 KiB literal would also re-introduce exactly
-    the silent no-op #4105 removes on that seam, so the last resort is
-    always the DERIVED ceiling, never the literal.
+    The env leg matters: without it a caller handing a LEGACY caps dict (one
+    that predates #4105) would silently assemble at a different ceiling than
+    the env-pinned ask lane. Falling back to the bare 32 KiB literal would
+    also re-introduce exactly the silent no-op #4105 removes on that seam,
+    so the last resort is always a DERIVED ceiling, never the literal.
     """
     explicit = caps.get("context_byte_cap")
     if explicit is not None:
-        return explicit
+        # A non-positive or absurd value must not be honoured (0/negative
+        # would drop every hit) — route it through the same parser the env
+        # path uses so the two agree on what is usable.
+        parsed = _resolve_explicit_byte_cap(str(explicit))
+        if parsed is not None:
+            return parsed
     from_env = _resolve_explicit_byte_cap(
         os.environ.get(ASK_CONTEXT_BYTE_CAP_ENV, ""))
     if from_env is not None:
         return from_env
     return min(MAX_ASK_CONTEXT_BYTE_CAP,
                max(DEFAULT_CONTEXT_BYTE_CAP,
-                   caps.get("context_token_cap", DEFAULT_CONTEXT_TOKEN_CAP)
+                   caps.get("context_token_cap",
+                            DEFAULT_ASK_CONTEXT_TOKEN_CAP)
                    * BYTES_PER_TOKEN_FLOOR))
 
 

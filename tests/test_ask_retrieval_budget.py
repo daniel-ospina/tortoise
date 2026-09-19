@@ -39,7 +39,6 @@ from tortoise.retrieval import (
     DEFAULT_ASK_POOL_SIZE,
     DEFAULT_ASK_RETRIEVAL_LIMIT,
     DEFAULT_CONTEXT_BYTE_CAP,
-    DEFAULT_CONTEXT_TOKEN_CAP,
     MAX_ASK_CONTEXT_BYTE_CAP,
     assemble_context,
     estimate_tokens_ask,
@@ -172,11 +171,24 @@ def test_legacy_caps_dict_derives_the_byte_ceiling(monkeypatch):
     would re-open the silent no-op on that seam."""
     assert resolve_byte_cap_from_caps({"context_token_cap": 32000}) == (
         32000 * BYTES_PER_TOKEN_FLOOR)
+    # No token cap in the dict → the ASK-LANE default token cap, so the
+    # unset-env case agrees with ``resolve_ask_retrieval_caps`` too (the
+    # shared 8000-token default would have resolved a third value).
     assert resolve_byte_cap_from_caps({}) == max(
         DEFAULT_CONTEXT_BYTE_CAP,
-        DEFAULT_CONTEXT_TOKEN_CAP * BYTES_PER_TOKEN_FLOOR)
+        DEFAULT_ASK_CONTEXT_TOKEN_CAP * BYTES_PER_TOKEN_FLOOR)
+    assert resolve_byte_cap_from_caps({}) == \
+        resolve_ask_retrieval_caps()["context_byte_cap"]
     assert resolve_byte_cap_from_caps({
         "context_token_cap": 32000, "context_byte_cap": 4096}) == 4096
+    # A non-positive or absurd dict value is validated + clamped on the SAME
+    # parser the env path uses, so the two resolutions cannot disagree.
+    derived = max(DEFAULT_CONTEXT_BYTE_CAP,
+                  DEFAULT_ASK_CONTEXT_TOKEN_CAP * BYTES_PER_TOKEN_FLOOR)
+    for bad in (0, -1):
+        assert resolve_byte_cap_from_caps({"context_byte_cap": bad}) == derived
+    assert resolve_byte_cap_from_caps(
+        {"context_byte_cap": 1 << 50}) == MAX_ASK_CONTEXT_BYTE_CAP
     # The env leg must be honoured too, or a legacy-dict caller assembles at a
     # different ceiling than the env-pinned ask lane and an A/B across the two
     # seams compares budgets instead of behaviour.
