@@ -55,6 +55,7 @@ link is only ever ``PROVEN`` when the path actually ran.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import enum
 import json as _json
 import os
@@ -321,10 +322,12 @@ class LaunchOutcome(enum.Enum):
     on an unclassified member rather than inheriting a sibling's semantics.
     """
 
-    #: The OS refused to execute the command (``OSError`` out of
-    #: ``subprocess.run``).  No process ever ran, so no capture was made and
-    #: none can follow: the ONE case where "nothing was left behind" is
-    #: provable rather than merely hoped for.
+    #: The OS refused to CREATE the process (``OSError`` out of the spawn,
+    #: ``Popen``).  No process ever ran, so no capture was made and none can
+    #: follow: the ONE case where "nothing was left behind" is provable rather
+    #: than merely hoped for.  The catch that produces this outcome is scoped
+    #: to the SPAWN — an OS error from the wait proves nothing about whether
+    #: the process ran (#3809 rr4).
     NOT_LAUNCHED = "not-launched"
 
     #: Launched, then killed at the timeout.  ``subprocess`` SIGKILLs only the
@@ -455,35 +458,60 @@ def _fire(root: Path, command: str, payload: dict[str, Any],
     Returns a :class:`FireResult` whose ``outcome`` is the LAUNCH fact — what
     every caller must key on.  The three outcomes are produced here and
     nowhere else, so there is exactly one place that tells them apart.
+
+    The ``OSError`` -> ``NOT_LAUNCHED`` arm is scoped to the SPAWN
+    (``Popen``), never to the wait that follows it: an OS error raised after
+    the process EXISTS (out of ``communicate``) does not prove the seam never
+    ran — it may already have filed a capture — so it is left to propagate.
+    ``verify_session_capture`` then reaches its ``finally`` with ``launch``
+    still ``None``, which cleanup reads as "may have written" and never as
+    "nothing was left behind" (#3809 rr4).
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["/bin/bash", "-c", command],
-            input=_json.dumps(payload),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=str(root),
             env=env,
-            capture_output=True,
             text=True,
-            timeout=timeout,
         )
+    except OSError as e:
+        return FireResult(
+            LaunchOutcome.NOT_LAUNCHED, f"cannot execute the seam: {e}")
+    try:
+        stdout, stderr = proc.communicate(
+            _json.dumps(payload), timeout=timeout)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
         return FireResult(
             LaunchOutcome.TIMED_OUT,
             f"the registered command did not return within {timeout:g}s "
             "(it was launched and killed at the timeout)",
             timeout=timeout)
-    except OSError as e:
-        return FireResult(
-            LaunchOutcome.NOT_LAUNCHED, f"cannot execute the seam: {e}")
+    except BaseException:
+        # The process was CREATED: kill and reap the direct child exactly as
+        # ``subprocess.run`` would, then let the error propagate — the launch
+        # fact is unknown, never NOT_LAUNCHED (see the docstring).
+        proc.kill()
+        with contextlib.suppress(OSError):
+            proc.wait()
+        raise
+    finally:
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
     detail = f"executed {command!r} (rc={proc.returncode})"
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = (stderr or stdout or "").strip().splitlines()
         return FireResult(
             LaunchOutcome.EXITED,
             f"{detail}; stderr: {tail[-1] if tail else '<empty>'}",
             returncode=proc.returncode)
     return FireResult(LaunchOutcome.EXITED, detail,
-                      returncode=proc.returncode, stdout=proc.stdout)
+                      returncode=proc.returncode, stdout=stdout)
 
 
 # ── hosted API reads (receipt / session / delete) ─────────────────────────

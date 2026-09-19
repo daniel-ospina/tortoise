@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -213,6 +214,14 @@ the killed/short-lived hook survive?" a real process question: the delay lives
 in the child, never in the server, so a late POST proves the child outlived
 ``_fire`` (a server-side gate would prove only that this server was still
 working).
+
+`TORTOISE_TEST_FORK_MARKER` / `TORTOISE_TEST_FORK_PROBE` / `TORTOISE_TEST_RELEASE_FILE`
+make a guard's outcome depend on the hook FORKING its capture step, never on
+a wall clock: the marker records the instant the fork happened (so a
+calibration run can measure the hook prologue at the CURRENT load), probe mode
+then exits without capturing, and a release file makes the forked child BLOCK
+until the test lets it capture — so a late POST is guaranteed by the test, not
+raced against the fire timeout.
 """
 import os
 import sys
@@ -222,6 +231,24 @@ argv = sys.argv[1:]
 if argv and (argv[0] == "index" or argv[0] == "context"
              or argv[0] == "session" and len(argv) > 1 and argv[1] == "probe"):
     sys.exit(0)
+
+# The hook has FORKED this capture step: record it, and let a calibration run
+# (probe mode) exit without capturing, or a real run block until released.
+_FORK_MARKER = os.environ.get("TORTOISE_TEST_FORK_MARKER")
+_RELEASE = os.environ.get("TORTOISE_TEST_RELEASE_FILE")
+if argv and argv[0] in ("session", "sessions") and (_FORK_MARKER or _RELEASE):
+    if _FORK_MARKER:
+        try:
+            with open(_FORK_MARKER, "w") as _fh:
+                _fh.write(str(time.monotonic()))
+        except OSError:
+            pass
+    if os.environ.get("TORTOISE_TEST_FORK_PROBE") == "1":
+        sys.exit(0)
+    if _RELEASE:
+        _until = time.monotonic() + 300
+        while not os.path.exists(_RELEASE) and time.monotonic() < _until:
+            time.sleep(0.05)
 
 delay = float(os.environ.get("TORTOISE_TEST_CAPTURE_DELAY") or 0)
 if delay > 0 and argv and argv[0] in ("session", "sessions"):
@@ -280,6 +307,37 @@ def _verify(hosted, home, harness, root, *, timeout=20.0, extra_env=None,
         install_dir=root, timeout=timeout,
         env=env,
         **kw)
+
+
+def _hook_fork_seconds(home, root, harness, tmp_path):
+    """How long the installed hook takes to reach its capture fork — NOW.
+
+    Fires the registered command once with the fake CLI told to record its
+    arrival (``TORTOISE_TEST_FORK_MARKER``) and exit WITHOUT capturing
+    (``TORTOISE_TEST_FORK_PROBE``), so no probe session is created.  A guard
+    that must kill the hook AFTER its fork derives its fire timeout from this
+    measurement, so the kill lands on the right side of the fork no matter
+    how slow the box is — the guard tests the mechanism, never a wall-clock
+    constant (a hardcoded 1s false-REDed at load avg 38, #3809 rr4).
+    """
+    import tortoise.session_verify as sv
+
+    command = sv._registered_capture_command(harness, root)
+    assert command, "the installed seam must register a capture command"
+    transcript = sv._write_probe_transcript(harness, tmp_path / "calibration")
+    payload = sv._probe_payload(
+        harness, "verify-calibration", transcript, root)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TORTOISE_TEST_FORK_MARKER": str(tmp_path / "calibration-fork-marker"),
+        "TORTOISE_TEST_FORK_PROBE": "1",
+    }
+    started = time.monotonic()
+    subprocess.run(
+        ["/bin/bash", "-c", command], input=json.dumps(payload),
+        cwd=str(root), env=env, capture_output=True, text=True, timeout=600)
+    return time.monotonic() - started
 
 
 # ── the happy path ────────────────────────────────────────────────────────
@@ -353,7 +411,7 @@ def test_guard_tampered_artifact_reds_installed(hosted, setup):
 
 def test_guard_unexecutable_seam_reds_installed(hosted, setup, monkeypatch):
     """Mutation: the registered command cannot be executed at all
-    (``subprocess.run`` raises ``OSError``) — the four on-disk checks pass,
+    (the ``Popen`` spawn raises ``OSError``) — the four on-disk checks pass,
     but the FIRING leg fails, so ``installed`` FAILs and nothing is captured.
 
     The launch outcome is ``NOT_LAUNCHED``, so the SAME report must not claim
@@ -371,7 +429,7 @@ def test_guard_unexecutable_seam_reds_installed(hosted, setup, monkeypatch):
     def _boom(*_a, **_k):
         raise OSError("cannot exec (test)")
 
-    monkeypatch.setattr(sv.subprocess, "run", _boom)
+    monkeypatch.setattr(sv.subprocess, "Popen", _boom)
     graph, _url = hosted
     report = _verify(hosted, home, "claude", root)
     assert report["exit_code"] == EXIT_BROKEN, report
@@ -406,7 +464,7 @@ def test_guard_never_launched_is_not_in_flight_for_the_detaching_shape(
     import tortoise.session_verify as sv
 
     monkeypatch.setattr(
-        sv.subprocess, "run",
+        sv.subprocess, "Popen",
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("cannot exec (test)")))
     graph, _url = hosted
     report = _verify(hosted, home, "codex", root)
@@ -418,6 +476,56 @@ def test_guard_never_launched_is_not_in_flight_for_the_detaching_shape(
     assert cleanup.get("in_flight") is None, cleanup
     assert "nothing was left behind" in cleanup["detail"], cleanup
     assert graph.posts == []
+
+
+def test_guard_oserror_after_spawn_is_not_reported_as_never_launched(
+        hosted, setup, monkeypatch):
+    """An ``OSError`` from the WAIT is not proof the seam never ran.
+
+    Only a SPAWN failure proves no process ever existed.  ``subprocess.run``
+    wrapped the spawn AND the wait in one ``except OSError``, so an error
+    raised after the seam had already run was reported as "the seam could not
+    be launched ... the session definitely does not exist" while its capture
+    sat on the server — the contradiction this guard pins down.  The catch is
+    now scoped to ``Popen``, so the post-spawn error propagates and cleanup
+    still deletes what the fire wrote.
+
+    Mutation: wrap the whole spawn+wait in ``except OSError`` again (the
+    ``subprocess.run`` shape) — this monkeypatched post-spawn error is mapped
+    to ``NOT_LAUNCHED`` and the guard REDs (``_verify`` returns instead of
+    raising).
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    import tortoise.session_verify as sv
+
+    real_popen = subprocess.Popen
+
+    class _SpawnedThenWaitFails:
+        """A real child that runs, then the WAIT reports an OS error."""
+
+        def __init__(self, *a, **k):
+            self._proc = real_popen(*a, **k)
+
+        def communicate(self, *a, **k):
+            self._proc.communicate(*a, **k)  # the seam really ran + captured
+            raise BrokenPipeError("the wait failed after the seam ran")
+
+        def kill(self):
+            self._proc.kill()
+
+        def wait(self, *a, **k):
+            return self._proc.wait(*a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self._proc, name)
+
+    monkeypatch.setattr(sv.subprocess, "Popen", _SpawnedThenWaitFails)
+    with pytest.raises(OSError):
+        _verify(hosted, home, "claude", root)
+    assert len(graph.posts) == 1, "the seam really ran and captured"
+    assert graph.sessions == {}, "cleanup still deleted what the fire wrote"
 
 
 def test_guard_capture_refused_reds_captured(hosted, setup):
@@ -640,18 +748,22 @@ def test_guard_read_failure_after_capture_still_deletes_the_probe(
 
 
 def test_guard_never_claims_nothing_to_delete_after_a_capture(
-        hosted, setup):
+        hosted, setup, tmp_path):
     """A persistent GET 404 must not stop the probe from being deleted.
 
-    Deletion is keyed on the fired seam, not the observation.  Mutation: key
-    cleanup on ``detail is not None`` — the probe is never deleted (POSTS=1)
-    and this REDs.
+    Deletion is keyed on the fired seam, not the observation.  The fire
+    timeout is derived from the hook's measured prologue so the capture has
+    landed before ``_fire`` returns at any load (a fixed 6s false-REDed on a
+    loaded box).  Mutation: key cleanup on ``detail is not None`` — the probe
+    is never deleted (POSTS=1) and this REDs.
     """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
     graph.hide_session_on_get = True
-    report = _verify(hosted, home, "claude", root, timeout=6.0)
+    prologue = _hook_fork_seconds(home, root, "claude", tmp_path)
+    report = _verify(hosted, home, "claude", root,
+                     timeout=2.0 * prologue + 15.0)
     assert len(graph.posts) == 1
     assert report["links"]["captured"]["status"] == "FAIL"
     assert report["cleanup"]["attempted"] is True, report["cleanup"]
@@ -684,12 +796,14 @@ def test_guard_cleanup_failure_beats_an_unverifiable_link(hosted, setup):
 
 
 def test_guard_fire_timeout_after_a_capture_still_deletes_the_probe(
-        hosted, setup):
+        hosted, setup, tmp_path):
     """A fire that is LAUNCHED but reports failure must still delete the probe.
 
     The seam stores the session and advances the receipt, THEN blocks past the
     fire timeout — so ``_fire`` reports failure after a capture that really
-    happened.
+    happened.  The timeout is derived from the hook's measured prologue (so
+    the capture has landed long before the kill at any load) while the
+    server holds the response far past it, so the fire still TIMES OUT.
 
     Mutation: restore the old ``fired["ok"]`` keying by returning early
     ("no capture was attempted — nothing to delete") from ``_cleanup``
@@ -701,8 +815,9 @@ def test_guard_fire_timeout_after_a_capture_still_deletes_the_probe(
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
-    graph.post_delay = 15.0
-    report = _verify(hosted, home, "claude", root, timeout=5.0)
+    graph.post_delay = 90.0
+    prologue = _hook_fork_seconds(home, root, "claude", tmp_path)
+    report = _verify(hosted, home, "claude", root, timeout=prologue + 20.0)
     assert len(graph.posts) == 1, "the seam really captured before the timeout"
     assert report["links"]["installed"]["status"] == "FAIL", report
     assert "did not return within" in report["links"]["installed"]["detail"]
@@ -720,41 +835,60 @@ def test_guard_fire_timeout_after_a_capture_still_deletes_the_probe(
 
 
 def test_guard_timed_out_fire_never_claims_nothing_was_left_behind(
-        hosted, setup):
+        hosted, setup, tmp_path):
     """A FORKED capture child outlives the SIGKILL — a DELETE 404 is not proof.
 
     The SHIPPED Claude hook forks its capture step (the line ends ``|| exit
-    0``, so bash cannot ``exec`` it).  The delay is CLIENT-side in the shim,
-    so with ``timeout=1.0`` the kill reaches only ``/bin/bash``: the forked
-    child survives, the probe has not landed at cleanup time, and then the
-    orphan POSTs.  A server-side gate could not show this — it would prove
-    only that this server was still working.
+    0``, so bash cannot ``exec`` it).  The fire timeout is DERIVED from the
+    hook's own measured prologue (``_hook_fork_seconds``) so the kill lands
+    AFTER the fork at any load — then the kill reaches only ``/bin/bash``,
+    the forked child survives, and it captures only when the test releases it
+    (``TORTOISE_TEST_RELEASE_FILE``), never in a race with a wall clock.  A
+    server-side gate could not show this — it would prove only that this
+    server was still working.
 
     Mutation: key the cleanup disclosure on a harness property (e.g. "is this
     a detaching harness?") or on the success flag instead of the launch
     outcome — Claude is not detaching and the fire reported failure, so the
     report claims "nothing was left behind" while the orphan is still alive
-    and this REDs.
+    and this REDs.  (Verified RED: ``_OUTCOME_PROVES_NOTHING_CAN_LAND``
+    ``TIMED_OUT`` flipped to ``True``.)
     """
     home, _bindir, _fake = setup
     root = _install(home, "claude")
     graph, _url = hosted
-    report = _verify(hosted, home, "claude", root, timeout=1.0,
-                     extra_env={"TORTOISE_TEST_CAPTURE_DELAY": "4"})
-    assert report["fire"]["outcome"] == "timed-out", report.get("fire")
-    assert report["links"]["installed"]["status"] == "FAIL"
-    assert "did not return within" in report["links"]["installed"]["detail"]
-    captured = report["links"]["captured"]["detail"]
-    assert "was launched" in captured and "did not run" not in captured
-    cleanup = report["cleanup"]
-    assert cleanup["launch"] == "timed-out", cleanup
-    assert cleanup.get("in_flight") is True, cleanup
-    assert "nothing was left behind" not in cleanup["detail"], cleanup
-    assert "in flight" in cleanup["detail"], cleanup
-    assert report["exit_code"] == EXIT_BROKEN, report
-    assert graph.posts == [], "the capture had not landed at cleanup time"
-    # The forked capture child is STILL ALIVE: it POSTs after verify returned.
-    deadline = time.monotonic() + 20.0
+    # The hook's time-to-fork at the CURRENT load, so the timeout below
+    # cannot false-RED on a loaded box (the old hardcoded 1.0s did: 5/5).
+    prologue = _hook_fork_seconds(home, root, "claude", tmp_path)
+    timeout = 2.0 * prologue + 10.0
+    fork_marker = tmp_path / "forked-at"
+    release = tmp_path / "release-the-capture"
+    try:
+        report = _verify(
+            hosted, home, "claude", root, timeout=timeout,
+            extra_env={"TORTOISE_TEST_FORK_MARKER": str(fork_marker),
+                       "TORTOISE_TEST_RELEASE_FILE": str(release)})
+        assert report["fire"]["outcome"] == "timed-out", report.get("fire")
+        assert report["links"]["installed"]["status"] == "FAIL"
+        assert "did not return within" in report["links"]["installed"]["detail"]
+        captured = report["links"]["captured"]["detail"]
+        assert "was launched" in captured and "did not run" not in captured
+        cleanup = report["cleanup"]
+        assert cleanup["launch"] == "timed-out", cleanup
+        assert cleanup.get("in_flight") is True, cleanup
+        assert "nothing was left behind" not in cleanup["detail"], cleanup
+        assert "in flight" in cleanup["detail"], cleanup
+        assert report["exit_code"] == EXIT_BROKEN, report
+        # The hook really FORKED the capture step (the kill was late enough),
+        # and that child is blocked on our release: nothing has landed.
+        assert fork_marker.exists(), (
+            "the hook never reached its capture fork before the fire timeout")
+        assert graph.posts == [], "the capture had not landed at cleanup time"
+    finally:
+        # Let the forked child — which survived the SIGKILL of /bin/bash —
+        # capture; it can only land after verify returned.
+        release.write_text("go")
+    deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline and not graph.posts:
         time.sleep(0.1)
     assert len(graph.posts) == 1, "the forked child POSTed after verify"
@@ -762,13 +896,15 @@ def test_guard_timed_out_fire_never_claims_nothing_was_left_behind(
 
 
 def test_guard_detaching_seam_reports_in_flight_not_nothing_left_behind(
-        hosted, setup):
+        hosted, setup, tmp_path):
     """Codex's disowned worker outlives a CLEAN exit — say so, do not claim.
 
-    The delay is CLIENT-side in the shim's ``sessions import``, so the Codex
+    The worker BLOCKS inside the shim on the test's release file, so the Codex
     hook exits 0 immediately after ``nohup … & disown`` while its worker is
-    still sleeping: the late POST proves the worker really survived ``_fire``
-    (a server-side gate would not).
+    still alive: the late POST proves the worker really survived ``_fire`` (a
+    server-side gate would not).  The timeout is derived from the hook's
+    measured prologue so the hook still exits cleanly at any load (a fixed 2s
+    false-REDed on a loaded box).
 
     Mutation: treat ``EXITED`` as proof (drop the launch-outcome branch in
     ``_cleanup``) — the report claims "nothing was left behind", the
@@ -777,20 +913,27 @@ def test_guard_detaching_seam_reports_in_flight_not_nothing_left_behind(
     home, _bindir, _fake = setup
     root = _install(home, "codex")
     graph, _url = hosted
-    report = _verify(hosted, home, "codex", root, timeout=2.0,
-                     extra_env={"TORTOISE_TEST_CAPTURE_DELAY": "4"})
-    assert report["fire"]["outcome"] == "exited", report.get("fire")
-    assert report["fire"]["returncode"] == 0, report.get("fire")
-    assert graph.posts == [], "the worker had not landed at cleanup time"
-    assert report["links"]["captured"]["status"] == "FAIL", report
-    cleanup = report["cleanup"]
-    assert cleanup["launch"] == "exited", cleanup
-    assert cleanup.get("in_flight") is True, cleanup
-    assert "nothing was left behind" not in cleanup["detail"]
-    assert "in flight" in cleanup["detail"]
-    assert report["exit_code"] == EXIT_BROKEN, report
-    # Release the disowned worker: the late capture really does land.
-    deadline = time.monotonic() + 20.0
+    prologue = _hook_fork_seconds(home, root, "codex", tmp_path)
+    release = tmp_path / "release-the-disowned-worker"
+    try:
+        report = _verify(
+            hosted, home, "codex", root, timeout=2.0 * prologue + 10.0,
+            extra_env={"TORTOISE_TEST_RELEASE_FILE": str(release)})
+        assert report["fire"]["outcome"] == "exited", report.get("fire")
+        assert report["fire"]["returncode"] == 0, report.get("fire")
+        assert report["links"]["captured"]["status"] == "FAIL", report
+        cleanup = report["cleanup"]
+        assert cleanup["launch"] == "exited", cleanup
+        assert cleanup.get("in_flight") is True, cleanup
+        assert "nothing was left behind" not in cleanup["detail"]
+        assert "in flight" in cleanup["detail"]
+        assert report["exit_code"] == EXIT_BROKEN, report
+        # The disowned worker is blocked on our release: nothing has landed,
+        # so this assertion cannot race a fixed client-side delay.
+        assert graph.posts == [], "the worker had not landed at cleanup time"
+    finally:
+        release.write_text("go")
+    deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline and not graph.posts:
         time.sleep(0.1)
     assert len(graph.posts) == 1, "the disowned worker POSTed after verify"
