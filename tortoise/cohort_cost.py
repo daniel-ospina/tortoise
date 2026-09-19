@@ -97,6 +97,7 @@ something that bounds nothing.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -328,6 +329,36 @@ def file_cohort_cost_incident(org_id: str, detail: dict | None = None) -> bool:
         return False
 
 
+def report_unenforceable_cap(org_id: str, error: BaseException) -> None:
+    """Operator alert: the cohort cap CANNOT be enforced for this org (#3981).
+
+    Mirrors ``metering.report_unmetered_increment``: the failure is absorbed by
+    US and announced to the OPERATOR — never silently, and never to the user.
+    The pre-spend cap's window is the REQUESTING org's metering window, and an
+    org whose subscription anchor is unusable (half-known, unparseable, naive,
+    inverted, or an unreadable anchor) has no measurable window — so the cap is
+    not evaluated for it and the request is SERVED. That is the accepted trade
+    under the owner's #3981 ruling: **a late cap beats refusing a paying org.**
+
+    A calendar-month substitute is NOT used here: it would read a cohort whose
+    windows are subscription-anchored as FREE — the false PASS this lane exists
+    to prevent (see ``metering._current_period``, D10/D13). Every org whose
+    window DOES resolve is still gated exactly as before.
+
+    Never raises: the alert itself must not become a new failure path (a signal
+    that can raise is a refusal by another name).
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        _logger.error(
+            "UNENFORCEABLE COHORT COST CAP (#3981): team=%s error=%s: %s — "
+            "the org's metering window is unresolvable, so the pre-spend cap "
+            "was NOT evaluated and the request is served; the cohort's spend "
+            "for this window cannot be measured (no calendar-month fallback). "
+            "A late cap beats refusing a paying org; this alert is the trade.",
+            org_id, type(error).__name__, error, exc_info=error,
+        )
+
+
 def enforce_cohort_cost_cap(org: dict | None, *,
                             cap: CohortCostCap | None = None,
                             env: dict | None = None) -> None:
@@ -342,8 +373,11 @@ def enforce_cohort_cost_cap(org: dict | None, *,
     Raises:
         CohortCostCapExceeded: the cohort's measured spend >= the cap (a
             ``QuotaExceededError`` subclass — the existing 402 contract).
-        QuotaCheckError: the cap or the cohort could not be evaluated
-            (fail-closed → 500; never a silent pass).
+        QuotaCheckError: the COHORT could not be resolved (fail-closed → 500;
+            never a silent pass). This is NOT window resolution: an
+            unresolvable metering window is ABSORBED here and reported to the
+            operator (``report_unenforceable_cap``), so the request is served
+            (#3981, owner ruling — see the note at the call site).
 
     No-ops when: no ``org_id`` (stdio/operator), the cap is unset, the org was
     created before the cohort start (the cap is cohort-SCOPED — a pre-beta org
@@ -367,9 +401,26 @@ def enforce_cohort_cost_cap(org: dict | None, *,
     # The window is the REQUESTING org's metering window (D10: the
     # subscription's own billing period; D13: the calendar month in UTC when it
     # has no subscription). ``_current_period`` RAISES QuotaCheckError for a
-    # subscription org whose anchor is unusable — fail-closed, never a silent
-    # calendar month (a month-keyed row is a row the window read never sees).
-    period = _current_period(org_id)
+    # subscription org whose anchor is unusable.
+    #
+    # ABSORBED, NOT REFUSED (#3981, owner ruling 2026-09-18). Before #3825 this
+    # gate's window was PURE CALENDAR ARITHMETIC (a deleted ``current_period()``)
+    # and could not raise; #3825 made it call the resolver, which CAN. Letting it
+    # escape as a 500 would be a NEW unconditional user-facing refusal on the
+    # capture path, BEFORE any spend — exactly what the ruling forbids. So an
+    # unresolvable window is absorbed here and REPORTED TO THE OPERATOR: the
+    # request proceeds, and the cap is simply NOT EVALUATED for this org, whose
+    # cohort spend cannot be measured for a window nobody can resolve. Do NOT
+    # substitute a calendar month — for a subscription-anchored cohort that
+    # reads the cohort as FREE, the false PASS this lane exists to prevent.
+    # ACCEPTED TRADE (the ruling's own words): a LATE cap beats refusing a
+    # PAYING org — and the alert is what keeps that from being silent. The money
+    # guard is UNCHANGED for every org whose window DOES resolve.
+    try:
+        period = _current_period(org_id)
+    except QuotaCheckError as e:
+        report_unenforceable_cap(str(org_id), e)
+        return
     spent = get_cohort_spend_usd(ids, period)
     if spent >= resolved.cap_usd:
         # The client-visible message carries NO cohort-wide figure

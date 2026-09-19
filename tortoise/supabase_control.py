@@ -3069,13 +3069,17 @@ def org_metering_anchor(cp, org_id: str) -> dict:
     subscription, so metering falls back to the D13 calendar month in UTC.
     A row that EXISTS but has not been populated by the webhook returns
     ``None`` values; ``metering._current_period`` distinguishes the two and
-    refuses (raises) for a subscription org whose period is unusable, because
-    the alternative is silently metering a paying org on a month bucket.
+    RAISES for a subscription org whose period is unusable, because the
+    alternative is silently metering a paying org on a month bucket. That
+    raise is a SIGNAL, not enforcement (#3981): the write paths absorb it and
+    alert the operator, and the pre-spend admission gate absorbs it too
+    (``cohort_cost.report_unenforceable_cap``).
 
     ``current_period_start`` ships in migration 20260918000001. On a lane
-    where the migration has NOT been applied this read 400s and metering fails
-    closed — loudly, and with the cap's own arming already documented as
-    migration-before-config.
+    where the migration has NOT been applied this read 400s and NO window
+    resolves for any org — a hard deploy-order dependency, not a silent
+    degradation: the metering drop and the unenforceable cap are both alerted
+    (``metering.report_unmetered_increment`` / #3981).
     """
     rows = cp.query(
         "organizations",

@@ -274,13 +274,18 @@ def _current_period(org_id: str) -> MeteringPeriod:
     :class:`~tortoise.quota.QuotaCheckError` rather than falling back to the
     calendar month. A read failure raises too.
 
-    WHAT THAT RAISE IS DEPENDS ON WHO CALLS IT (#3981). On the **read** path
-    (``cohort_cost.enforce_cohort_cost_cap``, via ``metering_cohort_spend``)
-    it IS an enforcement: the spend ceiling refuses to answer, so it can never
-    silently over-read. On the **write** path (the three ``record_*`` writers,
-    via ``_require_period``) it is a **SIGNAL, not enforcement** — every
+    WHAT THAT RAISE IS (#3981). It is a **SIGNAL, not enforcement**: every
     production caller absorbs it, alerts the operator and serves the request.
-    The user-facing refusal, where one exists, is the pre-spend admission gate.
+    On the **write** path (the three ``record_*`` writers, via
+    ``_require_period``) the increment is dropped and reported
+    (``report_unmetered_increment``). On the **read** path
+    (``cohort_cost.enforce_cohort_cost_cap``) the pre-spend cap CANNOT be
+    enforced for that org, so it serves too and reports via
+    ``cohort_cost.report_unenforceable_cap`` — refusing a paying org over our
+    own bookkeeping fault is exactly what the #3981 ruling forbids. A raise
+    nobody re-raises refuses nothing; the ONLY user-facing refusal on this
+    lane is the gate's 402 for a window that RESOLVES and a cohort at/over
+    the cap.
 
     ``org_id`` is REQUIRED — the previous zero-argument form was structurally
     incapable of resolving a per-subscription anchor, which is how the whole
@@ -328,8 +333,10 @@ def _require_period(org_id: str, what: str) -> MeteringPeriod:
     exactly as before #3825. A raise nobody re-raises refuses nothing. The
     user-facing refusal, where one exists, lives at the **pre-spend admission
     gate** (``cohort_cost.enforce_cohort_cost_cap``, reached from the hosted
-    capture path BEFORE any spend), which resolves the window itself and does
-    refuse. Nothing here adds or removes that refusal.
+    capture path BEFORE any spend). That gate refuses (402) only when the
+    window RESOLVES and the cohort is at/over the cap; an unresolvable window
+    it absorbs and reports (``cohort_cost.report_unenforceable_cap``), per the
+    #3981 ruling. Nothing here adds or removes either behaviour.
 
     So the callers report the drop to the OPERATOR — never silently, and never
     to the user: a bookkeeping fault of ours must never hand a user a 500

@@ -16,6 +16,7 @@ the resolved 402 body, **zero extraction calls**, and **zero Session writes**.
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from types import SimpleNamespace
@@ -331,6 +332,54 @@ def test_replay_of_a_captured_session_is_never_capped(capture_env):
     assert capture_env.extraction_calls == ["_extract_session_v2"], (
         "a replay must not re-extract")
     assert _session_count(COHORT_ORG) == 1
+
+
+def test_unresolvable_window_is_served_and_alerted_never_500(
+        capture_env, incidents, caplog):
+    """#3981 P0: a PAYING org whose metering window is UNRESOLVABLE gets a
+    NORMAL response — 200, extraction runs — plus an OPERATOR alert. Never a
+    500.
+
+    This is the exact shape ``checkout.session.completed`` leaves behind: a
+    ``subscription_id`` with no period, so ``metering._current_period`` raises
+    ``QuotaCheckError``. Pre-fix the admission gate let that escape and
+    ``hosted_api`` turned it into a 500 — a NEW unconditional user-facing
+    refusal on the capture path, BEFORE any spend, which the owner's #3981
+    ruling forbids (the gate was pure calendar arithmetic before #3825 and
+    could not raise). RED on the pre-fix tree (500 instead of 200).
+
+    Mutations caught: removing the ``except QuotaCheckError`` absorb in
+    ``enforce_cohort_cost_cap`` (the 500 returns); absorbing WITHOUT alerting
+    (no ``UNENFORCEABLE COHORT COST CAP`` record — the silent, unenforceable
+    cap); and substituting a calendar month (the cohort sum would read as 0,
+    so a capture that SHOULD be under an armed cap at seed-0 spend would still
+    200 — see ``test_over_cap_cohort_capture_refused_402_no_extraction_no_write``
+    for the paired enforcement path, which stays red if the guard is simply
+    deleted).
+
+    GREEN legitimate form: a subscription org with NULL period columns in an
+    armed cohort with no spend — the unenforceable case, served and alerted.
+    """
+    reg = _ha._make_sdk(namespace="registry")._get_registry()
+    reg.query(
+        "MATCH (t:Team {id: $tid}) SET t.subscription_id = 'sub-3981', "
+        "t.current_period_start = null, t.current_period_end = null",
+        params={"tid": COHORT_ORG},
+    )
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.cohort_cost"):
+        r = capture_env.client.post(
+            "/v1/sessions", json={"conversation": _CONV, "harness": "claude"})
+
+    assert r.status_code == 200, r.text
+    assert capture_env.extraction_calls == ["_extract_session_v2"], (
+        "an unenforceable cap must not block the spend it cannot measure")
+    assert any("UNENFORCEABLE COHORT COST CAP" in rec.getMessage()
+               for rec in caplog.records), [
+        rec.getMessage() for rec in caplog.records]
+    assert not incidents.issues, (
+        "an unenforceable cap is NOT a cap firing — it must not raise a "
+        "cap incident (that would conflate 'over budget' with 'cannot say')")
 
 
 # ── 3. the MCP surface reports the same class ───────────────────────────────

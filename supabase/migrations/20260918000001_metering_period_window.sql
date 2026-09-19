@@ -86,7 +86,8 @@ COMMENT ON COLUMN public.organizations.current_period_start IS
 -- renewal. A stable approximation that the next webhook corrects is strictly
 -- better than a silent metering outage.
 UPDATE public.organizations
-   SET current_period_start = current_period_end - interval '1 month'
+   SET current_period_start = (current_period_end AT TIME ZONE 'UTC'
+                               - interval '1 month') AT TIME ZONE 'UTC'
  WHERE subscription_id IS NOT NULL
    AND current_period_end IS NOT NULL
    AND current_period_start IS NULL;
@@ -118,8 +119,14 @@ COMMENT ON COLUMN public.metering_records.period IS
 -- construction, and this migration makes that explicit rather than implied.)
 UPDATE public.metering_records
    SET period_start = (period || '-01T00:00:00+00:00')::timestamptz,
-       period_end   = (period || '-01T00:00:00+00:00')::timestamptz
-                      + interval '1 month'
+       -- Month arithmetic on a ``timestamptz`` runs in the SESSION TimeZone,
+       -- so a non-UTC default would land the historical window off the UTC
+       -- month boundary (and make the same migration produce different rows
+       -- per connection). Normalise through UTC so the boundary is
+       -- deterministic.
+       period_end   = (((period || '-01T00:00:00+00:00')::timestamptz
+                        AT TIME ZONE 'UTC') + interval '1 month')
+                       AT TIME ZONE 'UTC'
  WHERE period_start IS NULL;
 
 ALTER TABLE public.metering_records

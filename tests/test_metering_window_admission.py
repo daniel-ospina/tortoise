@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,7 +118,6 @@ def _clean_ask_state(monkeypatch):
     SDK's LOCAL ask lane (a dev shell may export ``TORTOISE_API_URL``, which
     would route ``sdk.ask`` at the hosted ``/v1/ask`` instead)."""
     from tortoise.quota import _reset_ask_budget_for_tests
-    from tortoise.ask_lane import _reset_ask_reader_cache_for_tests
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     _reset_ask_reader_cache_for_tests()
     _reset_ask_budget_for_tests()
@@ -399,14 +399,25 @@ def test_ask_ledger_drop_is_signalled(caplog, monkeypatch, tmp_path):
 
 def test_the_six_swallow_sites_are_the_six_lanes():
     """The correctness proof for #3981 IS coverage completeness, so pin the
-    inventory against the source: a renamed or deleted lane token is RED here,
-    and the six behavioural tests above are RED if a *handler* is neutered.
+    inventory against the SOURCE — not against this module's own dict (a bare
+    ``len(SITE_LANES) == 6`` is tautological: it counts a literal three lines
+    above it and cannot fail). Every operator alert is a
+    ``_alert_unmetered("<lane>", ...)`` / ``report_unmetered_increment(
+    lane="<lane>", ...)`` call; the (file, lane) pairs actually emitted must be
+    exactly the declared six. A seventh site, a renamed token, or a deleted
+    alert turns this RED.
 
-    (A seventh silent swallow is not detectable by this fence; it is caught by
-    review, and the six lanes above are the declared surface.)
+    (A seventh silent swallow reusing an EXISTING lane token is not detectable
+    by this fence; it is caught by review, and the six lanes above are the
+    declared surface.)
     """
-    assert len(SITE_LANES) == 6
     root = Path(__file__).resolve().parents[1]
-    for lane, rel in SITE_LANES.items():
-        src = (root / rel).read_text(encoding="utf-8")
-        assert f'"{lane}"' in src, f"{lane} is not emitted in {rel}"
+    emitted: set[tuple[str, str]] = set()
+    for path in sorted((root / "tortoise").glob("*.py")):
+        src = path.read_text(encoding="utf-8")
+        rel = f"tortoise/{path.name}"
+        lanes = set(re.findall(r'_alert_unmetered\(\s*"([a-z_]+)"', src))
+        lanes |= set(re.findall(
+            r'report_unmetered_increment\(\s*lane="([a-z_]+)"', src))
+        emitted |= {(lane, rel) for lane in lanes}
+    assert emitted == set(SITE_LANES.items()), emitted

@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 from datetime import UTC, datetime
 
@@ -440,22 +441,26 @@ def test_cohort_spend_reads_a_boundary_range(supabase_mode, monkeypatch):
 # ── T10 ──────────────────────────────────────────────────────────────────────
 
 
-def test_unresolvable_anchor_fails_closed(reg_org, monkeypatch):
+def test_unresolvable_anchor_raises_a_signal_and_the_gate_absorbs_it(
+        reg_org, monkeypatch, caplog):
     """T10 → mutations: (i) CATCH the anchor-read exception and return the
     calendar-month key (the silent-fallback shape UF3 warns about); (ii) return
     None and DROP the increment — the write-path fail-open (#3825). Assert a
     RAISE (`QuotaCheckError`) on BOTH the reader and the writer, never a month
     key and never a silent drop.
 
-    Three ways the anchor is unusable, all of which must refuse rather than
-    silently meter on a calendar month:
+    Three ways the anchor is unusable:
       (a) a subscription whose period columns are NULL (a half-known anchor);
       (b) the anchor READ fails (a control-plane/registry blip);
-      (c) the CAP level must propagate it — a ceiling that substitutes a bucket
-          reads a cohort as free, the false PASS this lane exists to prevent.
+      (c) the ADMISSION GATE must NOT propagate the window raise — that would
+          be a NEW unconditional user-facing 500 on the capture path, before
+          any spend, which the owner's #3981 ruling forbids. The gate ABSORBS
+          it, alerts the operator, and SERVES (the cap is simply not evaluated
+          for the window-unresolvable org — a calendar-month substitute would
+          read the cohort as free, the false PASS this lane exists to prevent).
 
     (a) and (b) each assert BOTH ends: `_current_period` (the cap's read) and
-    `record_write_ops` (the ledger's write). They must fail together — for an
+    `record_write_ops` (the ledger's write). They must raise together — for an
     org whose window is unresolvable, a reader that refuses while a writer
     drops is exactly the undercount that makes the cap fire late.
     """
@@ -491,14 +496,22 @@ def test_unresolvable_anchor_fails_closed(reg_org, monkeypatch):
     with pytest.raises(QuotaCheckError):
         m.record_write_ops(tid)
 
-    # (c) the cap propagates the refusal (it does NOT degrade to a month)
+    # (c) the ADMISSION GATE absorbs the window raise (#3981 ruling) — it must
+    # NOT propagate to the user. This assertion used to be
+    # `pytest.raises(QuotaCheckError)`: that IS the new pre-spend 500 on a
+    # paying org's capture, and the ruling forbids a new unconditional
+    # user-facing refusal. The gate reports the operator and SERVES.
+    # Mutations caught: reverting to a bare `period = _current_period(org_id)`
+    # (the 500), or dropping the alert (an unenforceable cap, silently).
     monkeypatch.setattr(m, "_reg_sdk", original)
     monkeypatch.setattr(cc, "cohort_org_ids", lambda since: [tid])
-    with pytest.raises(QuotaCheckError):
-        cc.enforce_cohort_cost_cap(
+    with caplog.at_level(logging.ERROR, logger="tortoise.cohort_cost"):
+        assert cc.enforce_cohort_cost_cap(
             {"org_id": tid},
             cap=cc.CohortCostCap(cap_usd=0.01,
-                                 since="2026-01-01T00:00:00+00:00"))
+                                 since="2026-01-01T00:00:00+00:00")) is None
+    assert any("UNENFORCEABLE COHORT COST CAP" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
 
 
 # ── T11 ──────────────────────────────────────────────────────────────────────
@@ -664,4 +677,11 @@ def test_migration_rekeys_the_ledger_and_the_cohort_read_to_a_window():
 
     # (e) the anchor column the window resolves from, and its one-time backfill
     assert "ADD COLUMN IF NOT EXISTS current_period_start timestamptz" in mig
-    assert "current_period_start = current_period_end" in mig
+    # Month arithmetic on a ``timestamptz`` runs in the SESSION TimeZone (a
+    # non-UTC default would land a historical window off the UTC boundary, per
+    # connection), so both backfills normalise through UTC. The assertion pins
+    # the UTC-normalised form, not the old session-dependent one.
+    assert ("current_period_start = (current_period_end AT TIME ZONE 'UTC' "
+            "- interval '1 month') AT TIME ZONE 'UTC'") in flat
+    assert ("(((period || '-01T00:00:00+00:00')::timestamptz "
+            "AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC'") in flat
