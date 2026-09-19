@@ -38,7 +38,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from bff_test_helpers import require_toolchain
+from bff_test_helpers import d1_sqlite_files, require_toolchain
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 # The BFF moved to the DASHBOARD Pages project (issue #4054). A Pages project's
@@ -230,6 +230,24 @@ class Jar:
         return None
 
 
+def _jar_call(j: Jar, req) -> tuple[int, str, str]:
+    """Send `req` through `j`'s cookie jar WITHOUT following the redirect.
+
+    Asserting a 302 needs the response itself; `j.opener` follows and would
+    report the landing page's 200. Returns (status, Location, Set-Cookie).
+    """
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(j.jar), _NoRedirect)
+    try:
+        with op.open(req, timeout=30) as r:
+            return r.status, _headers(r).get("Location", ""), _headers(r).get("Set-Cookie", "")
+    except urllib.error.HTTPError as e:
+        return e.code, _headers(e).get("Location", ""), _headers(e).get("Set-Cookie", "")
+
+
 def _headers(r) -> dict:
     """Headers as a plain dict, PRESERVING duplicate values.
 
@@ -373,57 +391,90 @@ def test_confirm_without_flow_is_interstitial(stack):
     assert "interstitial=1" in headers.get("Location", ""), headers
 
 
-def test_recovery_confirm_without_a_flow_cookie_mints_a_session(stack):
-    """#4104: recovery must complete CROSS-DEVICE, with no flow cookie.
+def test_recovery_confirm_completes_through_the_interstitial(stack):
+    """#4104 review (cycle 2): recovery completes CROSS-DEVICE, WITHOUT minting
+    a session from the link alone.
 
-    A recovery link is emailed and is routinely opened on a DIFFERENT device or
-    browser than the one that requested it, so it cannot depend on the
-    `__Host-authflow` cookie `/auth/reset` cannot set on the clicking browser.
-    Possession of the single-use `token_hash` (delivered only to the account's
-    inbox) is the credential. The class-8 binding still applies to every OTHER
-    flow — see `test_confirm_without_flow_is_interstitial` above.
+    The earlier shape exempted `type=recovery` from the class-8 `__Host-authflow`
+    binding and minted a session straight from the `token_hash`. That re-opened
+    the session-fixation vector: an attacker requests a reset for THEIR OWN
+    address, gets a genuine link, and a victim who clicks it has the ATTACKER's
+    session minted into their browser. The `token_hash` alone cannot stop that —
+    the attacker can always obtain one for their own account.
+
+    So the GET verifies the token, mints NOTHING, and renders an interstitial
+    naming the account; the POST (CSRF-guarded, bound to the pending record by
+    the `__Host-authflow` cookie the GET just set in THIS browser) is what mints
+    the session. Both hops happen in one browser, so cross-device still works:
+    the cookie is created by the GET, not required to pre-exist.
     """
     j = Jar()
-    status, body, headers = j.get(
+    status, body, _ = j.get(
         f"{APP}/auth/confirm?token_hash=recovery-token&type=recovery", follow=False
     )
-    assert status == 302, f"a recovery confirm must redirect, got {status} {body}"
+    assert status == 200, (
+        f"the recovery GET must render the consent interstitial, got {status} {body[:200]}"
+    )
+    assert "Confirm it's you" in body, f"not the interstitial: {body[:200]!r}"
+    assert j.cookie("__Host-session") is None, (
+        "the recovery GET minted a session from the link alone — the fixation vector"
+    )
+    assert j.cookie("__Host-authflow"), (
+        "the interstitial must bind the pending recovery to this browser"
+    )
+
+    # The interstitial's own Continue action: a JSON POST carrying the cookie.
+    req = urllib.request.Request(f"{APP}/auth/confirm", method="POST", data=b"{}")
+    req.add_header("Content-Type", "application/json")
+    # No-redirect opener that still carries the jar: the response to ASSERT is
+    # the 302 itself (a redirect-following opener swallows it and returns 200).
+    status, location, _ = _jar_call(j, req)
+    assert status == 302, f"the confirm POST must redirect, got {status}"
+    assert "/welcome?reset=1" in location, (
+        f"a completed recovery must land on the reset panel, got {location!r}"
+    )
     assert j.cookie("__Host-session"), (
         "recovery did not mint a session — the reset panel is then unreachable"
     )
-    assert "/welcome?reset=1" in headers.get("Location", ""), (
-        f"a completed recovery must land on the reset panel, got {headers.get('Location')!r}"
-    )
 
 
-def test_recovery_confirm_ignores_a_stale_flow_cookie(stack):
+def test_recovery_confirm_replaces_a_stale_flow_cookie(stack):
     """A leftover flow cookie from an aborted sign-in must not block recovery.
 
-    A stale `__Host-authflow` in the recovering browser is common; treating it as
-    a binding that failed would turn a valid reset link into an interstitial.
+    A stale `__Host-authflow` in the recovering browser is common; it must be
+    REPLACED by the pending recovery the GET creates, and the POST must then
+    complete — not be refused as an unbound flow.
     """
-    req = urllib.request.Request(
-        f"{APP}/auth/confirm?token_hash=recovery-token&type=recovery"
+    j = Jar()
+    # Pre-seed the stale cookie in the jar, so the GET sees it and the POST
+    # would carry it if the GET had not replaced it.
+    j.jar.set_cookie(http.cookiejar.Cookie(
+        version=0, name="__Host-authflow", value="deadbeefdeadbeef",
+        port=None, port_specified=False, domain="127.0.0.1",
+        domain_specified=True, domain_initial_dot=False, path="/",
+        path_specified=True, secure=True, expires=None, discard=False,
+        comment=None, comment_url=None, rest={}, rfc2109=False,
+    ))
+
+    status, body, _ = j.get(
+        f"{APP}/auth/confirm?token_hash=recovery-token&type=recovery", follow=False
     )
-    req.add_header("Cookie", "__Host-authflow=deadbeefdeadbeef")
+    assert status == 200, f"a stale flow cookie must not block recovery, got {status}"
+    assert "Confirm it's you" in body, f"not the interstitial: {body[:200]!r}"
+    assert j.cookie("__Host-authflow") not in (None, "deadbeefdeadbeef"), (
+        "the stale __Host-authflow was not replaced by the pending recovery"
+    )
 
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *a, **k):
-            return None
-
-    opener = urllib.request.build_opener(_NoRedirect)
-    try:
-        with opener.open(req, timeout=30) as r:
-            status, headers = r.status, dict(r.headers)
-    except urllib.error.HTTPError as e:
-        status, headers = e.code, dict(e.headers)
-
-    assert status == 302, f"a stale flow cookie must not block recovery, got {status}"
-    loc = headers.get("Location", "")
-    assert "interstitial" not in loc, f"recovery was treated as an unbound flow: {loc!r}"
-    assert "/welcome?reset=1" in loc, f"expected the reset panel, got {loc!r}"
-    assert "__Host-session=" in headers.get("Set-Cookie", ""), (
-        f"recovery with a stale flow cookie minted no session: {headers.get('Set-Cookie')!r}"
+    req = urllib.request.Request(f"{APP}/auth/confirm", method="POST", data=b"{}")
+    req.add_header("Content-Type", "application/json")
+    status, location, _ = _jar_call(j, req)
+    assert status == 302, f"the confirm POST must redirect, got {status}"
+    assert "interstitial" not in location, (
+        f"recovery was treated as an unbound flow: {location!r}"
+    )
+    assert "/welcome?reset=1" in location, f"expected the reset panel, got {location!r}"
+    assert j.cookie("__Host-session"), (
+        "recovery with a stale flow cookie minted no session"
     )
 
 
@@ -495,7 +546,10 @@ def test_signout_revokes_the_row_not_just_the_cookie(stack):
     handle = j.cookie("__Host-session")
     assert handle, f"sign-in produced no session; hops={j.hops}"
 
-    req = urllib.request.Request(f"{APP}/api/session", method="POST")
+    req = urllib.request.Request(f"{APP}/api/session", method="POST", data=b"{}")
+    # The CSRF guard's first layer requires a JSON media type (415 otherwise) —
+    # the browser client sends it, so the replay must too.
+    req.add_header("Content-Type", "application/json")
     with j.opener.open(req, timeout=30) as r:
         assert r.status == 200
 
@@ -665,10 +719,9 @@ def test_dead_refresh_token_401s_consistently(stack):
         s1, _b1, _ = j.get(f"{APP}/api/session")
         # Clear the cached access token so the next call must refresh into the
         # dead-token path rather than serving from the D1 cache.
-        import glob
         import sqlite3
 
-        for db in glob.glob(str(DASHBOARD_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
+        for db in d1_sqlite_files(DASHBOARD_DIR):
             try:
                 con = sqlite3.connect(db)
                 con.execute(
@@ -701,7 +754,6 @@ def test_expired_session_is_401_on_both_endpoints(stack):
     Every other consumer enforces `expires_at`; this pins that the data path does
     too.
     """
-    import glob
     import sqlite3
 
     j = Jar()
@@ -711,7 +763,7 @@ def test_expired_session_is_401_on_both_endpoints(stack):
 
     # Force the row's TTL into the past.
     patched = 0
-    for db in glob.glob(str(DASHBOARD_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
+    for db in d1_sqlite_files(DASHBOARD_DIR):
         try:
             con = sqlite3.connect(db)
             cur = con.execute(

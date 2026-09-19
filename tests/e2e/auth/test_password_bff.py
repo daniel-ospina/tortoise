@@ -37,7 +37,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
-from bff_test_helpers import pick_free_port, require_toolchain
+from bff_test_helpers import d1_sqlite_files, pick_free_port, require_toolchain
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 # The BFF moved to the DASHBOARD Pages project (issue #4054): `functions/` sits
@@ -218,7 +218,7 @@ def _d1_sqlite() -> Path:
     deadline = time.time() + 30
     while time.time() < deadline:
         files = sorted(
-            DASHBOARD_DIR.glob(".wrangler/state/v3/d1/**/*.sqlite"),
+            d1_sqlite_files(DASHBOARD_DIR),
             key=lambda p: p.stat().st_mtime, reverse=True,
         )
         if files:

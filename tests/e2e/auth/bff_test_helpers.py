@@ -94,6 +94,25 @@ def ensure_dashboard_dist() -> None:
         )
 
 
+def d1_sqlite_files(persist_dir: Path) -> list[Path]:
+    """Bound D1 database files under ``<persist_dir>/.wrangler/state/v3/d1/``.
+
+    Excludes ``metadata.sqlite``: Miniflare's own bookkeeping database (D1's
+    index plus the cache/observability stores) lives in the SAME tree, is
+    touched constantly — so it is usually the NEWEST ``*.sqlite`` — and holds
+    none of the bound schema. "Pick the newest ``*.sqlite``" therefore selected
+    it and produced ``no such table: sessions`` / ``no such table: auth_flows``
+    and a dozen downstream 401s across the auth suites: the seed landed on the
+    wrong database and the route read the real (empty) one.
+
+    Use this instead of a bare glob anywhere a spec resolves the local D1.
+    """
+    return [
+        p for p in persist_dir.glob(".wrangler/state/v3/d1/**/*.sqlite")
+        if p.name != "metadata.sqlite"
+    ]
+
+
 def require_toolchain() -> None:
     """Fail (do not skip) when a required binary is absent.
 

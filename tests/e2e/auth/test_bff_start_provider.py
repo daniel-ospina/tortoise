@@ -36,7 +36,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
-from bff_test_helpers import pick_free_port, require_toolchain, stop, wait_for_port
+from bff_test_helpers import d1_sqlite_files, pick_free_port, require_toolchain, stop, wait_for_port
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
@@ -66,9 +66,8 @@ def _d1_sqlite() -> Path:
     deadline = time.time() + 30
     while time.time() < deadline:
         files = sorted(
-            DASHBOARD_DIR.glob(".wrangler/state/v3/d1/**/*.sqlite"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+            d1_sqlite_files(DASHBOARD_DIR),
+            key=lambda p: p.stat().st_mtime, reverse=True,
         )
         if files:
             return files[0]
