@@ -203,12 +203,21 @@ def refresh_vocab() -> Vocab:
 
 
 class ProvenanceRef(BaseModel):
-    """Local file provenance — path is BASENAME only (privacy, W-7)."""
+    """Local file provenance — path is BASENAME only (privacy, W-7).
+
+    ``contentHash`` (#4005) is the client-computed sha256 of the RAW's
+    normalized text (``file_indexer.derive_source_content_hash``) — the
+    index entry's integrity anchor. Privacy-safe under W-7: a hash is not the
+    raw and never leaves the machine as content. Optional for back-compat
+    (old clients send none); the server NEVER substitutes ``hash(url)`` —
+    absent stays absent (see the hosted Source bridge).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1)
     spans: list[str] = Field(default_factory=list)
+    contentHash: str | None = None
 
 
 class Source(BaseModel):

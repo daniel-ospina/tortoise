@@ -43,6 +43,7 @@ from tortoise.commit_schema import (
     compute_client_commit_id,
     point_content_id,
 )
+from tortoise.file_indexer import hash_text
 from tortoise.hosted_api import app, get_current_org
 from tortoise.ids import content_hash
 from tortoise.sdk import TortoiseSDK
@@ -149,6 +150,21 @@ def _session_counter(session_id: str, field: str):
     return int(rows[0][0]) if rows else 0
 
 
+def _session_source_rows():
+    """Every agentSession Source in the tenant graph as (url, contentHash).
+
+    Queried by ``sourceKind`` rather than by a hard-coded url so a test can
+    observe the identity the write path actually minted (#4005) — the
+    pre-fix basename url and the post-fix canonical permalink are both
+    visible here.
+    """
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (s:Source {sourceKind:'agentSession'}) "
+        "RETURN s.url, s.contentHash",
+    ).result_set
+    return [(r[0], r[1]) for r in rows]
+
+
 # ── Payload factory (mirrors the slice-5a client serializer, W-3) ───────────
 
 _TELEMETRY = {
@@ -196,7 +212,8 @@ def _raw_payload(n_points: int = 1, *, session_id: str = "s1",
                       "calibration_version": "v3"},
         "summary": "summary text",
         "story_arc": "arc text",
-        "provenance_refs": [{"path": "session.md", "spans": ["0-10"]}],
+        "provenance_refs": [{"path": "session.md", "spans": ["0-10"],
+                             "contentHash": hash_text("raw session transcript")}],
         "sources": [],
         "entities": [{"name": "Alpha", "kind": "Project",
                       "passes_frequency_gate": True}],
@@ -379,7 +396,7 @@ class TestFourNodeChain:
 
         # Source bridge (sourceKind agentSession, contentHash, provenance_spans)
         rows = g.query(
-            "MATCH (s:Source {url:'session.md'}) RETURN s.sourceKind, "
+            "MATCH (s:Source {url:'corpus://s1/session.md'}) RETURN s.sourceKind, "
             "s.contentHash, s.provenance_spans, s.is_episodic",
         ).result_set
         assert rows and rows[0][0] == "agentSession"
@@ -387,7 +404,7 @@ class TestFourNodeChain:
 
         # (Document)<-[:references]-(Source)
         n = g.query(
-            "MATCH (s:Source {url:'session.md'})-[:references]->(d:Document) "
+            "MATCH (s:Source {url:'corpus://s1/session.md'})-[:references]->(d:Document) "
             "WHERE d.sessionId='s1' RETURN count(d)",
         ).result_set[0][0]
         assert n >= 1
@@ -402,7 +419,7 @@ class TestFourNodeChain:
         assert rows[0][2] == "session.md"
         n = g.query(
             "MATCH (p:Point {id:'pt_0000000000000000000000000000000000000000000000000000000000000000'})"
-            "-[:extractedFrom]->(s:Source {url:'session.md'}) RETURN count(s)",
+            "-[:extractedFrom]->(s:Source {url:'corpus://s1/session.md'}) RETURN count(s)",
         ).result_set[0][0]
         assert n >= 1
 
@@ -649,7 +666,7 @@ class TestExternalSources:
         assert rows[0][1] == "T1" and rows[0][2] == "sha123"
         # session Source references the external Source (DE2E-5 chain)
         n = g.query(
-            "MATCH (a:Source {url:'session.md'})-[:references]->"
+            "MATCH (a:Source {url:'corpus://s1/session.md'})-[:references]->"
             "(b:Source {url:'https://example.com/pricing'}) RETURN count(b)",
         ).result_set[0][0]
         assert n >= 1
@@ -660,6 +677,110 @@ class TestExternalSources:
             "RETURN count(s)",
         ).result_set[0][0]
         assert n >= 1
+
+
+# ── #4005 — the hosted session Source is a real index entry ───────────────
+
+class TestSessionSourceIndexIdentity:
+    """#4005 — identity + integrity of the hosted session ``:Source``.
+
+    Pre-fix the commit path minted it with ``url = os.path.basename(ref.path)``
+    and ``contentHash = content_hash(url)``: two raw files sharing a basename
+    on two machines COLLIDED on the single ``MERGE (s:Source {url:$url})``
+    key, and the stored hash could not detect that the raw had changed,
+    existed, or was absent. Each behaviour below was RED before the fix.
+    """
+
+    def test_same_basename_different_machines_distinct_source_urls(self, client):
+        """(i) two raw files sharing a basename on two machines get DISTINCT
+        Source urls (pre-fix both collapsed onto ``session.md``)."""
+        for sid in ("machine-a", "machine-b"):
+            raw = _raw_payload(1, session_id=sid)
+            raw["provenance_refs"] = [{"path": "session.md", "spans": []}]
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+        urls = sorted(u for u, _ in _session_source_rows())
+        assert urls == ["corpus://machine-a/session.md",
+                        "corpus://machine-b/session.md"], urls
+
+    def test_content_hash_is_of_raw_not_of_url(self, client):
+        """(ii) ``contentHash`` is the RAW's anchor, never ``hash(url)``.
+
+        (a) with no client anchor the server stores NO anchor — it must not
+        fabricate ``content_hash(url)``; (b) a supplied non-empty raw anchor
+        is stored verbatim and differs from ``content_hash(url)``.
+        """
+        raw = _raw_payload(1)
+        # legacy/back-compat client: basename-only ref, no raw anchor
+        raw["provenance_refs"] = [{"path": "session.md", "spans": ["0-10"]}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        rows = _session_source_rows()
+        assert len(rows) == 1, rows
+        url, stored = rows[0]
+        assert not stored, stored
+        assert stored != content_hash(url), (
+            "contentHash is a hash of the Source url, not of the raw"
+        )
+
+        raw_text = "the raw session transcript: non-empty bytes"
+        raw = _raw_payload(1, summary="second capture")
+        raw["provenance_refs"] = [{"path": "session.md", "spans": [],
+                                   "contentHash": hash_text(raw_text)}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        rows = _session_source_rows()
+        assert len(rows) == 1, rows
+        url, stored = rows[0]
+        assert stored == hash_text(raw_text)
+        assert stored != content_hash(url)
+
+    def test_content_hash_stable_for_same_raw_changes_for_new_raw(self, client):
+        """(iii) the anchor is stable for identical raw and changes when the
+        raw changes, on the SAME Source url."""
+
+        def _commit_raw(summary: str, raw_text: str):
+            raw = _raw_payload(1, summary=summary)
+            raw["provenance_refs"] = [{"path": "session.md", "spans": [],
+                                       "contentHash": hash_text(raw_text)}]
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+            rows = _session_source_rows()
+            assert len(rows) == 1, rows
+            return rows[0]
+
+        url_a, stored_a = _commit_raw("summary A", "raw A: first capture")
+        assert stored_a == hash_text("raw A: first capture")
+        # a duplicate re-commit of the same raw leaves the anchor STABLE
+        url_a2, stored_a2 = _commit_raw("summary A", "raw A: first capture")
+        assert url_a2 == url_a and stored_a2 == stored_a
+        # the raw changed → SAME url, DIFFERENT anchor (the version-bump
+        # contract create_source relies on)
+        url_b, stored_b = _commit_raw("summary B", "raw B: the raw changed")
+        assert url_b == url_a, (url_a, url_b)
+        assert stored_b == hash_text("raw B: the raw changed")
+        assert stored_b != stored_a
+
+    def test_derivation_is_the_shared_canonical_permalink(self):
+        """Derivation parity: one encoding primitive with
+        ``file_indexer.derive_source_url`` (no second url format), basename
+        only (W-7), and a hash that is empty iff the raw is absent."""
+        from tortoise.file_indexer import (
+            derive_session_source_url,
+            derive_source_content_hash,
+        )
+
+        assert derive_session_source_url("my session", "a b#c.md") == \
+            "corpus://my%20session/a%20b%23c.md"
+        # the session id is the collision domain...
+        assert derive_session_source_url("m1", "session.md") != \
+            derive_session_source_url("m2", "session.md")
+        # ...and a directory component never leaks into the identity (W-7)
+        assert derive_session_source_url(
+            "m1", "/Users/alice/notes/session.md") == "corpus://m1/session.md"
+        assert derive_source_content_hash("") == ""
+        assert derive_source_content_hash(None) == ""
+        assert derive_source_content_hash("raw") == hash_text("raw")
 
 
 # ── DE2E-6 — NAND direction policy ─────────────────────────────────────────
@@ -824,7 +945,7 @@ class TestReplayIdempotency:
         assert n >= 1
         # edge transfer: extractedFrom moved to the new point
         n = g.query(
-            "MATCH (new:Point {id:$new})-[:extractedFrom]->(s:Source {url:'session.md'}) "
+            "MATCH (new:Point {id:$new})-[:extractedFrom]->(s:Source {url:'corpus://s1/session.md'}) "
             "RETURN count(s)",
             params={"new": new_id},
         ).result_set[0][0]
@@ -1412,13 +1533,15 @@ class TestPrivacy:
             "OR n.url CONTAINS '/Users/' RETURN n.content, n.sourcePath, n.url",
         ).result_set
         assert not rows, f"privacy leak: {rows}"
-        # basename-only: the Document.sourcePath + Source url are basenames
+        # basename-only: the Document.sourcePath is the basename, and the
+        # Source identity is the canonical session-scoped permalink (no
+        # absolute path).
         rows = g.query(
             "MATCH (d:Document) WHERE d.sessionId='s1' RETURN d.sourcePath",
         ).result_set
         assert rows and rows[0][0] == "session.md"
         rows = g.query(
-            "MATCH (s:Source {url:'session.md'}) RETURN count(s)",
+            "MATCH (s:Source {url:'corpus://s1/session.md'}) RETURN count(s)",
         ).result_set
         assert rows[0][0] >= 1
 

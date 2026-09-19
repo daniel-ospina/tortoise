@@ -9535,6 +9535,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     a redacted 500 and the client retries with the same client_commit_id
     (safe by L1; the record stays partial until the write completes).
     """
+    from tortoise.file_indexer import derive_session_source_url
     from tortoise.ids import content_hash
 
     proj = sdk._get_proj()
@@ -9632,17 +9633,26 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 params={"eid": ev.id, "name": name},
             )
 
-    # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
-    # + external artifacts from sources[]; the session Source references the
-    # Document AND the external artifacts (DE2E-5 chain). ──
+    # ── 4. Source bridge: the session Source (#4005 — canonical session-scoped
+    # identity, NOT a bare basename) + external artifacts from sources[]; the
+    # session Source references the Document AND the external artifacts
+    # (DE2E-5 chain). The url derives from the shared file_indexer permalink
+    # primitive; the contentHash is the client-supplied raw anchor and NEVER
+    # hash(url) (an absent raw stays an absent anchor — see #3998). ──
     session_urls: list[str] = []
+    # The payload's point/event source_refs use the W-7 basename; the graph
+    # Source identity is the canonical session-scoped url. This maps one to
+    # the other so extractedFrom still resolves.
+    session_ref_urls: dict[str, str] = {}
     for ref in payload.provenance_refs:
-        url = os.path.basename(ref.path.rstrip("/"))
+        url = derive_session_source_url(session_id, ref.path)
         if url not in session_urls:
             session_urls.append(url)
+        base = os.path.basename(ref.path.rstrip("/"))
+        session_ref_urls.setdefault(base, url)
         sdk.create_source(
             url, "agentSession",
-            contentHash=content_hash(url) if url else "",
+            contentHash=ref.contentHash or "",
             provenance_spans=list(ref.spans), is_episodic=True,
             sourceDate=payload.captured_at,
         )
@@ -9695,7 +9705,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): the commit-receiver points were
                 # written WITHOUT session_id — the source-session attribution
                 # evidence mark needs the point's session on both capture
@@ -9717,7 +9729,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): see above — session_id on the
                 # committed points so both capture paths (SDK + hosted) carry
                 # the same source-session attribution surface.

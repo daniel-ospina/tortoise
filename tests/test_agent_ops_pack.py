@@ -289,10 +289,13 @@ class TestRulesWithWhyExtraction:
             "RETURN e.eventKind, e.content", {}).result_set
         assert rows, "ruleRevised Event missing"
         # session linkage: extractedFrom → session Source + Session CONTAINS
+        # (#4005: the session Source identity is the canonical session-scoped
+        # permalink, not a bare basename)
         n = g.query(
             "MATCH (p:Point {content:$c})-[:extractedFrom]->"
-            "(s:Source {url:'session.md'}) RETURN count(s)",
-            params={"c": RATIONALE_TEXT}).result_set[0][0]
+            "(s:Source {url:$u}) RETURN count(s)",
+            params={"c": RATIONALE_TEXT, "u": f"corpus://{sid}/session.md"},
+        ).result_set[0][0]
         assert n >= 1
         n = g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point {content:$c}) "

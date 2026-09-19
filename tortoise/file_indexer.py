@@ -22,6 +22,14 @@ pipeline consumes (plan §5.1 component boundary; the #280/#330 ``_FM_RE`` /
     percent-encoding, corpus_name single-encode, realpath dedup and escape
     rejection (§4.1/§4.2). SHARED with #909 (the shared identity contract,
     §4.6 point 1).
+  - ``derive_session_source_url`` — the SESSION-scoped permalink for the
+    hosted commit path (#4005): the session id is the collision domain, so
+    two raw files sharing a basename on two machines derive DISTINCT urls.
+    Uses the SAME segment encoding as ``derive_source_url`` (one encoding
+    primitive, never a second url format).
+  - ``derive_source_content_hash`` — the raw-integrity anchor (#4005): sha256
+    (``hash_text``) of the raw's normalized text, ``""`` when the raw is
+    absent. NEVER a hash of the identity url.
   - ``derive_session_id`` / ``derive_meeting_event_id`` / ``derive_document_id``
     — event/document identity rules (§4.2), incl. the derived-id collision
     rule for meetings.
@@ -217,9 +225,73 @@ def derive_source_url(
     rel = _resolve_rel_path(file_path, corpus_root)
     if corpus_name is None:
         corpus_name = Path(os.path.realpath(str(corpus_root))).name
+    return _corpus_permalink(corpus_name, rel)
+
+
+def _corpus_permalink(corpus_name: str, rel: Path) -> str:
+    """The single encoding primitive shared by every ``corpus://`` url.
+
+    Per-segment ``quote(seg, safe="")``, segments joined with ``/``;
+    ``corpus_name`` encoded EXACTLY ONCE (single-encode pin, see
+    ``derive_source_url``). Pinned here so a second permalink flavour can
+    never drift into a second format (the #300/#330 drift class).
+    """
     name_enc = quote(str(corpus_name), safe="")
     seg_enc = "/".join(quote(seg, safe="") for seg in rel.parts)
     return f"corpus://{name_enc}/{seg_enc}"
+
+
+def derive_session_source_url(session_id: str, provenance_path: str) -> str:
+    """Session-scoped Source identity for the hosted commit path (#4005).
+
+    ``corpus://<session-id>/<basename>`` — the session id is the collision
+    domain. Two raw files that share a basename on two different machines
+    (two different sessions) derive DISTINCT urls, where the previous
+    ``os.path.basename`` identity collapsed them onto ONE ``:Source`` MERGE
+    key. The basename is preserved (not the full local path) per W-7 — the
+    full path never leaves the machine; only the session id and the basename
+    are graph-visible. Uses ``_corpus_permalink`` so the encoding is the ONE
+    shared with ``derive_source_url`` (no second derivation).
+
+    Raises ``ValueError`` on an empty session id or provenance path — a
+    Source url is an identity and may never be empty.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise ValueError(
+            "derive_session_source_url: session_id is required (the collision "
+            "domain for the Source identity)"
+        )
+    raw = str(provenance_path or "").rstrip("/")
+    if not raw:
+        raise ValueError(
+            "derive_session_source_url: provenance_path is required "
+            "(the raw's basename is the Source's rel-path)"
+        )
+    # basename-only (W-7): a path that arrives with directories must not leak
+    # them into the graph identity.
+    base = os.path.basename(raw)
+    if not base:
+        raise ValueError(
+            f"derive_session_source_url: provenance_path {provenance_path!r} "
+            "has no basename component"
+        )
+    return _corpus_permalink(sid, Path(base))
+
+
+def derive_source_content_hash(raw_text: str | None) -> str:
+    """Integrity anchor of the RAW (not of the identity url) (#4005).
+
+    ``hash_text`` of the raw's normalized text — the same single-read
+    primitive the local index path hashes (``compute_file_hash`` /
+    ``hash_text``) — so a hosted session Source carries the SAME kind of
+    anchor as a corpus-indexed one. Returns ``""`` when the raw is absent or
+    empty: an absent anchor is honest, where ``content_hash(url)`` (the
+    pre-fix value) could not detect that the raw changed, exists, or is gone.
+    """
+    if not raw_text:
+        return ""
+    return hash_text(raw_text)
 
 
 # ── Event / Document identity (§4.2) ──────────────────────────────────────
