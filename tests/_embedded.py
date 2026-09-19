@@ -217,6 +217,19 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_graph_integrity_gate",
     "test_guard",
     "test_hard_reject",
+    # #4047: the two #3845 fork-guard files carry a module-level
+    # ``pytestmark = pytest.mark.embedded_only`` — their SUBJECT is the embedded
+    # daemon (the module-fork wedge lives inside the bundled redis-server, and
+    # both the producer and the mitigation are embedded-daemon internals), so
+    # embedded-only is the honest classification and they must not be
+    # reclassified onto the server lane. They were registered on the docker
+    # api/core surfaces but ABSENT from this list and from
+    # ``config/ci-surfaces.yml`` ``carve_out``: a full selection COLLECTED them
+    # and every test SKIPPED via the embedded_only hook — a permanently green,
+    # permanently unexecuted gate on main. Registered here and in ``carve_out``
+    # so the URI-unset carve-out job runs them on every full selection.
+    "test_fork_safety_3845",
+    "test_fork_slot_wedge_3845",
     # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
     # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
     # opener — which is only possible BECAUSE this stem is exempt. Without the

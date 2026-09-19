@@ -41,6 +41,13 @@ surfaces:
   - test_agent_signup_idempotency.py
   - test_api.py
   - test_action_endpoints_dual_auth.py
+  # #B7: the activation scorecard (GET /v1/activation/scorecard). Registered under
+  # `api` AND `core` deliberately, same rationale as the boot guards above: the
+  # endpoint lives in tortoise/hosted_api.py (selects `api`) while
+  # tortoise/activation_scorecard.py matches no named pattern and falls to the
+  # `core` fallback — a one-surface registration would skip the suite whenever
+  # the other half of the diff changed.
+  - test_activation_scorecard.py
   - test_audit.py
   # #2938: the eight battery members previously dual-registered here (arms,
   # cli, config, determinism, enums, run, runner, setup) were verified per
@@ -232,6 +239,11 @@ surfaces:
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
   - test_codex_capture_hook.py
+  # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, the agent-transcript parser, and the CLI install
+  # into the HOME-scoped ~/.cursor. Same dual registration as
+  # test_capture_install.py.
+  - test_cursor_capture_hook.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -343,6 +355,7 @@ surfaces:
   - test_about_edges.py
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
+  - test_activation_scorecard.py   # #B7: activation scorecard (with the `api` half — see there)
   - test_agent_ops_pack.py
   - test_agent_ops_supersede.py
   - test_alert_store.py
@@ -395,6 +408,11 @@ surfaces:
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
   - test_codex_capture_hook.py
+  # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, the agent-transcript parser, and the CLI install
+  # into the HOME-scoped ~/.cursor. Same dual registration as
+  # test_capture_install.py.
+  - test_cursor_capture_hook.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -752,6 +770,7 @@ surfaces:
   # the `core` fallback (tools/ci_selection.py) — so the guard needs this arm too.
   - test_env_truthy.py
   - test_admin_return_to.py
+  - test_dashboard_unknown_address.py
   - test_github_connect.py
   - test_github_connector.py
   - test_github_indexer.py
@@ -1041,6 +1060,14 @@ carve_out:
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py
 - test_flip_gate.py
+# #4047: both #3845 fork-guard files are module-level `embedded_only` (their
+# subject is the embedded daemon's module-fork wedge), were absent from
+# carve_out, and so were collected-and-SKIPPED by every full selection — a
+# permanently green, permanently unexecuted gate on main (#3845's own evidence
+# never ran on a full selection). Registered here so the URI-unset carve-out
+# job runs them.
+- test_fork_safety_3845.py
+- test_fork_slot_wedge_3845.py
 - test_guard.py
 - test_hard_reject.py
 - test_hosted_backup.py

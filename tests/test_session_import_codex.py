@@ -163,8 +163,9 @@ def test_parse_transcript_dispatch(codex_jsonl, pi_jsonl):
     silent no-op)."""
     assert parse_transcript(str(codex_jsonl), "codex") == _EXPECTED_TURNS
     assert parse_transcript(str(pi_jsonl), "pi") == _PI_EXPECTED
+    # ``cursor`` is a real harness now (#3819) — this uses one with no parser.
     with pytest.raises(ValueError, match="no parser"):
-        parse_transcript(str(codex_jsonl), "cursor")
+        parse_transcript(str(codex_jsonl), "vim")
 
 
 def test_codex_parser_broken_lines_skipped(tmp_path):
