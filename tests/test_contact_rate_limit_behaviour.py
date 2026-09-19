@@ -905,9 +905,26 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "v.every((t) => t <= cutoff + 1)",
     ),
     (
-        "the limit is shared, not per address",
+        "read bucket hard-coded to a key that is never written",
         r"hits\.get\(ip\)",
         'hits.get("shared")',
+    ),
+    (
+        # The genuine shared-bucket defect named by the entry above: every address reads
+        # and writes ONE history, so the limiter stops being per-address at all. All four
+        # key sites are rewritten in a single substitution, which is what makes it a
+        # shared bucket rather than a bucket that is simply never written.
+        "one bucket for every address",
+        r"const recent = \(hits\.get\(ip\) \|\| \[\]\)\.filter\(\(t\) => t > cutoff\);"
+        r"[\s\S]*?hits\.delete\(ip\);[\s\S]*?hits\.set\(ip, recent\);",
+        'const recent = (hits.get("shared") || []).filter((t) => t > cutoff);\n'
+        "  if (recent.length >= RATE_LIMIT) {\n"
+        '    hits.set("shared", recent);\n'
+        "    return true;\n"
+        "  }\n"
+        "  recent.push(now);\n"
+        '  hits.delete("shared");\n'
+        '  hits.set("shared", recent);',
     ),
     (
         "expired sweep hoisted out of the cap guard",
