@@ -210,7 +210,8 @@ class TestE2E17Dispatch:
         try:
             tok_id = _current_org_id.set("e2e17-quota-team")
             tok_lim = _current_org_limits.set(
-                {"org_id": "e2e17-quota-team", "max_points": 0})
+                {"org_id": "e2e17-quota-team", "max_points": 0,
+                 "max_sessions": None})
             try:
                 r = ms.tortoise_index_files(str(corpus), extract_metadata=False)
             finally:

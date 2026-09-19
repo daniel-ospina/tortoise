@@ -33,6 +33,7 @@ from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
+from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
@@ -6143,10 +6144,19 @@ class TortoiseSDK:
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
         # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
+        # #3689: the positional payload is the :GraphEvent contract
+        # (docs/event-catalog.md — id/bias/precision/consistency/directness),
+        # so it is kept verbatim. `id=` + the annotator_* extras are REQUIRED
+        # for the JSONL branch: without them `_emit_event`'s
+        # `point is None and id is None` early-return dropped the record from
+        # the rebuild journal entirely, so rebuild_all erased the annotation
+        # silently (the #3299 class). Same payload+id shape as PointRetracted.
         self._emit_event("OperatorAnnotated", {
             "id": id, "bias": bias, "precision": precision,
             "consistency": consistency, "directness": directness,
-        })
+        }, id=id,
+            annotator_bias=bias, annotator_precision=precision,
+            annotator_consistency=consistency, annotator_directness=directness)
         return self.update_point(id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
@@ -15059,6 +15069,13 @@ class TortoiseSDK:
             # #329 relief path: quota limits settable via the control plane so
             # an org at cap can be upgraded (no REST surface exists yet — the
             # fields are SDK/registry-level; get_current_org honors them).
+            # #4010: max_sessions is the EXCEPTION — no decision has asked to
+            # remove this writer, so the field stays in the allowed set. It is
+            # no longer a relief mechanism: every resolver returns an unlimited
+            # None and DELIBERATELY ignores a stored value, so a write here is
+            # accepted and has no quota effect. Even removing the method would
+            # not remove the graph property — the sweep stays the way a stored
+            # value is cleared.
             "max_points", "max_api_keys", "max_sessions",
         }
         invalid = set(fields.keys()) - allowed
@@ -16354,12 +16371,45 @@ class TortoiseSDK:
         # matched them via id/eventId but no caller relies on it.
         # Per-label indexed writes (id OR eventId — original predicate; no url).
         # UNION cannot carry SET, so run each branch sequentially (#327).
+        #
+        # #3689 P1 (#4094): the generic Point branch applied caller props with
+        # a live ``SET n += $p`` but emitted NO journal record — so
+        # ``update_entity(op, annotator_bias=0.77)`` wrote a live dim that
+        # ``rebuild_all`` silently erased (the operator came back from its
+        # ``OperatorAdded`` creation snapshot, dim-free). Journal the ANNOTATOR
+        # dims on the Point branch as a ``PointRevised`` record: the same shape
+        # ``update_point``/``annotate_operator`` emit and the same one
+        # ``_revise_point``/``_apply_one`` fold, so presence-conditional replay
+        # restores exactly what the live write set.
+        #
+        # SCOPE: only the annotator dims. Every other prop this generic surface
+        # writes live is still unfolded on replay — the pre-existing
+        # PointRevised-extras class tracked by #2946/#2795/#4094, deliberately
+        # NOT widened here: folding ``content`` would need the live
+        # content_hash/embedding recompute (#1904) or it would introduce a NEW
+        # live/replay divergence in the same breath.
+        annotator_updates = {
+            k: v for k, v in props.items() if k in _ANNOTATOR_PROP_NAMES}
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
                             ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
-            proj.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p",
-                params={"id": id_val, "p": props},
-            )
+            if label == "Point":
+                res = proj.g.query(
+                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p "
+                    "RETURN count(n)",
+                    params={"id": id_val, "p": props},
+                )
+                # Post-apply, per matched label — the `_delete_entity`
+                # emitter's ordering contract (a failed/no-op write never
+                # leaves a phantom record).
+                if (annotator_updates and res.result_set
+                        and res.result_set[0][0]):
+                    self._emit_event("PointRevised", id=id_val,
+                                     **annotator_updates)
+            else:
+                proj.g.query(
+                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p",
+                    params={"id": id_val, "p": props},
+                )
         return self._get_entity(id_val)
 
     def _delete_entity(self, id_val: str) -> bool:
