@@ -9,6 +9,7 @@ Covers:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -37,6 +38,7 @@ def sdk():
     s.test_guard = lambda: None
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 class TestActionDissolution:

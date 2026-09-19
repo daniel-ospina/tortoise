@@ -11,6 +11,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_domain_validators.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -461,6 +462,8 @@ def graph_sdk():
     sdk = _make_sdk()
     yield sdk
     sdk.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(os.path.dirname(sdk._db_path), ignore_errors=True)
 
 
 class TestGraphValidators:

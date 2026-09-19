@@ -371,6 +371,7 @@ surfaces:
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
+  - test_tmpdir_hygiene_4096.py  # #4096: AST guard — no pytest fixture may mkdtemp a tree without reclaiming it (meta test; reads tests/**, no DB)
   # #3755: session-start.sh must fire the install-probe beacon even when
   # `tortoise context` fails (the digest was `|| exit 0`, which skipped the
   # probe). Registered under `core` because `tortoise/claude-hooks/` is an
