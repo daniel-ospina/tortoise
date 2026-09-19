@@ -18,6 +18,7 @@ aboutObjects: tortoise
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
 | **Ship-test instrument** — the per-deploy clean-browser onboarding walk (signup → wizard → connected only when the server observed it) + the observation artifact (#3806) | `docs/runbook/3806-ship-test-instrument.md` |
 | Hosted platform **infra runbook** — provisioning, secrets rotation, rollback, health checks, machine topology + autostop policy (§6), and the out-of-band availability watchdog with self-healing + alert dedupe (§7) (#2850) | `docs/infra-runbook.md` |
+| **Temp-dir hygiene + sweep** — the per-test `mkdtemp` teardown that stops the leak and the operator-invoked, age-gated, prefix-matched backlog sweep (#4069) | `docs/infra/tmpdir-sweep.md` |
 | Temporal measurement runbook + gate output (2×2 attribution + widening ablation, #2578) | `docs/runbook/2578-temporal-measurement.md` |
 | Temporal retrieval diagnosis + oracle ceiling (42/52 = 81%, #2976/#2978) — evidence | `docs/runbook/2578-oracle-ceiling.jsonl` · `docs/research/2026-09-11-subgraph-retrieval-research.md` |
 | **A/B/C context-assembly pre-registration** — verbatim vs epistemic subgraph vs union (#2976/#2978/#2683) | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` |

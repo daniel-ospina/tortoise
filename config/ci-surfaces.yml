@@ -585,6 +585,10 @@ surfaces:
   - test_surface_manifest.py
   - test_suspension_parity.py
   - test_taxonomy.py
+  # #4069: temp-dir hygiene + the operator-invoked backlog sweep. Core-owned —
+  # the reaper/embedded tests they sit beside are core-registered.
+  - test_tmpdir_hygiene.py
+  - test_tmpdir_sweep.py
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
