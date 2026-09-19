@@ -75,14 +75,18 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
                   evidence_boost: bool = False,
                   limit: int = 40, item_cap: int = 40) -> list[dict]:
     """The ask lane's retrieval→annotate→dedup→boost→assemble sequence
-    (mirrors tools/ask_recall_bench.py::_retrieve_pipeline; no reader)."""
+    (mirrors tools/ask_recall_bench.py::_retrieve_pipeline; no reader).
+    The BYTE ceiling is the lane's resolved cap (#4105 — it was a 32 KiB
+    literal, which silently capped every item/token raise above it)."""
     from tortoise.retrieval import (
         DEFAULT_MAX_CHUNKS_PER_SESSION,
         apply_evidence_boost,
         assemble_context,
         dedup_pool,
         resolve_ask_boost_multipliers,
+        resolve_ask_retrieval_caps,
     )
+    byte_cap = resolve_ask_retrieval_caps()["context_byte_cap"]
     hits = sdk.tortoise_fts_query(
         question, limit=limit, pool_size=120, include_terminal=True,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf)
@@ -102,7 +106,7 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
             boost_verbatim=mult["verbatim"], boost_source=mult["source"])
     return assemble_context(
         deduped, top_k=item_cap, max_context_tokens=8000,
-        context_item_cap=item_cap, byte_cap=32768)
+        context_item_cap=item_cap, byte_cap=byte_cap)
 
 
 def _recorded_questions() -> dict[str, dict]:
@@ -294,11 +298,14 @@ def test_retrieval_degraded_honest_when_embedder_absent():
         assert EmbeddingModel.get() is None  # the honest precondition
         # the degraded flag is resolved by the ask lane from leg_trace;
         # the existing test_ask_sdk retrieval_degraded tests pin that path.
-        # Here we pin the lever knobs' default-off posture:
+        # Here we pin the #4105-resolved cap posture (the ask lane's window
+        # is now env-resolvable AND honest — the historical 40/40/8000
+        # truncated at a 32 KiB literal, so a raise above it was a no-op).
         from tortoise.retrieval import resolve_ask_retrieval_caps
         caps = resolve_ask_retrieval_caps()
-        assert caps == {"limit": 40, "context_item_cap": 40,
-                        "context_token_cap": 8000}
+        assert caps["limit"] >= caps["context_item_cap"]
+        assert caps["pool_size"] >= caps["limit"]
+        assert caps["context_byte_cap"] >= caps["context_token_cap"]
     finally:
         sdk.close()
 
