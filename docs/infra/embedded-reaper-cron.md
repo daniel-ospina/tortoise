@@ -23,6 +23,17 @@ so orphans are cleaned within 2-3 spawn cycles).
 > stale_socket leftovers, so a running test suite's servers are never
 > disturbed. The singleton lock (~/.tortoise/.reaper.lock) makes concurrent
 > runs safe.
+>
+> **Discovery is scoped (#4068).** Pass 2 enumerates depth-1 tempdir entries
+> in the ephemeral namespace with an in-process `os.scandir` — no `find`
+> subprocess, no depth-2 lstat storm — and logs a WARNING with a partial set
+> if its budget expires (the sweep summary then reads `SCAN TRUNCATED`). The
+> scoped set is exactly the set every **removal** path already requires, and
+> live servers are enumerated name-independently by pass 1, so nothing
+> removable or killable is skipped. `--full-scan` (env
+> `TORTOISE_REAPER_FULL_SCAN=1`) restores the pre-#4068 **un-scoped**
+> enumeration for operator forensics; it can reach nothing an earlier release
+> could not, and the scheduled sweep stays scoped.
 
 ## Cron (Linux / macOS with cron)
 
