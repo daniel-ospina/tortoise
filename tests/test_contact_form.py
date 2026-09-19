@@ -101,6 +101,24 @@ REPLY_PROMISE_VERBS = (
 #: A quoted string in CSS/JS source, one group per quote style, escapes included.
 _QUOTED = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|\'([^\'\\]*(?:\\.[^\'\\]*)*)\'')
 
+#: Source-level escape spellings that RENDER as other characters: CSS hex escapes
+#: (`"\57 e'll…"` is `"We'll…"`) and JS unicode/hex escapes (`"\u0057e'll…"`). A
+#: scan over raw source sees the escape, not the text the visitor reads, so the
+#: escapes are decoded before matching (cycle-13 review).
+_ESCAPE = re.compile(
+    r"\\(?:([0-9a-fA-F]{1,6})[ \t]?|u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2}))"
+)
+
+
+def _decode_escapes(text: str) -> str:
+    """Decode the escape spellings a browser renders as other characters."""
+
+    def repl(m: "re.Match[str]") -> str:
+        digits = next(g for g in m.groups() if g is not None)
+        codepoint = int(digits, 16)
+        return chr(codepoint) if 0 < codepoint <= 0x10FFFF else ""
+
+    return _ESCAPE.sub(repl, text)
 #: The confirmation the visitor sees on success, pinned as a VALUE. It states
 #: receipt and nothing more: a reply is the exception (outbound email belongs to
 #: answering a user who wrote first), and while the reader gap is open
@@ -407,14 +425,15 @@ def test_the_confirmation_promises_no_reply() -> None:
         "the receipt-only confirmation must appear as a string literal"
     )
     for text in literals:
-        assert not re.search(REPLY_PROMISE_VERBS, text, re.I), (
+        assert not re.search(REPLY_PROMISE_VERBS, _decode_escapes(text), re.I), (
             f"contact.ts carries a reply promise the visitor could be shown: {text}"
         )
     # …and the WHOLE comment-stripped source too, so a promise SPLIT at a literal
     # boundary is still seen: `"Thanks…" + " " + "We'll " + "reply soon."` passes a
     # per-literal scan (cycle-8 review) while the assembled message the server
-    # returns is a promise.
-    assembled = re.search(REPLY_PROMISE_VERBS, code, re.I)
+    # returns is a promise. Escapes are decoded first, since `\u0057e'll` is the
+    # same promise written so a raw scan cannot see it (cycle-13 review).
+    assembled = re.search(REPLY_PROMISE_VERBS, _decode_escapes(code), re.I)
     assert assembled is None, (
         f"contact.ts assembles a reply promise: {assembled and assembled.group(0)!r}"
     )
@@ -464,7 +483,7 @@ def test_the_confirmation_promises_no_reply() -> None:
     # first: they cannot render, and a rule documented in one must not fail the
     # suite (cycle-10 review).
     css_text = " ".join(
-        text
+        _decode_escapes(text)
         for block in re.findall(r"<style\b[^>]*>(.*?)</style>", html_src, flags=re.S | re.I)
         for stripped in [re.sub(r"/\*.*?\*/", "", block, flags=re.S)]
         for strings in [
@@ -501,9 +520,18 @@ def test_the_confirmation_promises_no_reply() -> None:
         r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`)', script_code
     )
     for text in client_strings:
-        assert not re.search(REPLY_PROMISE_VERBS, text, re.I), (
+        assert not re.search(REPLY_PROMISE_VERBS, _decode_escapes(text), re.I), (
             f"the contact page's script promises a reply: {text}"
         )
+    # …and the assembled script, which the comment above has claimed since cycle 8
+    # while only the per-literal loop existed: `show(msg, data.message ||
+    # ("Thanks…" + " We'll " + "reply soon."))` kept the whole suite green, because
+    # no single literal carries both a subject and a reply word (cycle-13 review).
+    assembled_client = re.search(REPLY_PROMISE_VERBS, _decode_escapes(script_code), re.I)
+    assert assembled_client is None, (
+        f"the contact page's script assembles a reply promise: "
+        f"{assembled_client and assembled_client.group(0)!r}"
+    )
     # The email field's hint states a restriction on USE. Pinned as the WHOLE
     # sentence — a verb list cannot hold "no promise" (cycle-2) — compared as
     # RENDERED text, so a cosmetic reflow or an entity form is not a failure
