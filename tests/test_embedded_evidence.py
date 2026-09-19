@@ -386,13 +386,14 @@ class TestForkClassesRequireEexist:
 class TestModuleForkHangIsReachableOnRealEvidence:
     """The class must fire on the line the daemon ACTUALLY emits.
 
-    Measured over 1347 captured `redis.log`s: `Module fork started pid:` occurs in
-    **0** of them, so `module-fork-hang` keyed only on the started/exited counter was
-    UNREACHABLE on real evidence. The line the daemon does emit for this class is
-    `There is a module fork child. Killing it!` — the plan doc's declared second
-    `requires_lines` entry — and the corpus log that carries it (together with 10
-    EEXIST refusals) was labelled `module-fork-eexist`, the label reserved for a PRIOR
-    instance's child: a proxy silent in exactly the case it exists to cover.
+    Measured over the 1120 real `redis.log`s collected under `/tmp/pi3827-*`:
+    `Module fork started pid:` occurs in **0** of them, so `module-fork-hang` keyed
+    only on the started/exited counter was UNREACHABLE on real evidence. The line the
+    daemon does emit for this class is `There is a module fork child. Killing it!` —
+    the plan doc's declared second `requires_lines` entry — and the corpus log that
+    carries it (together with 10 EEXIST refusals) was labelled `module-fork-eexist`,
+    the label reserved for a PRIOR instance's child: a proxy silent in exactly the
+    case it exists to cover.
     """
 
     KILLING = "1:M 01 Jan 2026 00:00:01.000 # There is a module fork child. Killing it!"
@@ -492,6 +493,63 @@ class TestKillingLineWitnessRequiresCausation:
         cause, ev = ee.label_cause(lines)
         assert cause == "module-fork-hang"
         assert ev["module_forks_unexited"] == ["7"]
+
+
+# ── the counter witness is read AT the refusal, not at end-of-log ──────────
+
+class TestModuleForkHangWitnessIsTemporal:
+    """`module-fork-hang` says a fork held the slot when RM_Fork CHECKED it.
+
+    An ordered counter evaluated at END-OF-LOG answers a different question — "was a
+    fork outstanding at shutdown" — and both logs below end with an unexited pid. At
+    end-of-log they were labelled `module-fork-hang`; at the refusal line no fork was
+    outstanding in either, so neither log contains the causation the label asserts.
+    """
+
+    EEXIST = "1:M 01 Jan 2026 00:00:00.200 # Can't fork for module: File exists"
+
+    def test_a_fork_starting_after_the_refusal_is_not_a_hang(self):
+        # The refusal is the save child's; the module fork begins afterwards, so it
+        # cannot be the reason RM_Fork failed.
+        lines = [
+            "1:M 01 Jan 2026 00:00:00.000 * Background saving started by pid 1",
+            self.EEXIST,
+            "1:M 01 Jan 2026 00:00:01.000 * Background saving terminated with success",
+            "1:M 01 Jan 2026 00:00:02.000 * Module fork started pid: 7",
+        ]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "save-child-slot"
+        # The end-of-log leftover is still REPORTED — it is evidence, just not evidence
+        # of this refusal — so the assertions cover both the label and the temporal
+        # field, and the leftover is what the pre-fix read mistook for a witness.
+        assert ev["module_forks_unexited"] == ["7"]
+        assert ev["module_forks_outstanding_at_refusal"] == []
+
+    def test_a_fork_exiting_before_the_refusal_and_restarting_after_is_not_a_hang(self):
+        lines = [
+            "1:M 01 Jan 2026 00:00:00.000 * Module fork started pid: 7",
+            "1:M 01 Jan 2026 00:00:00.100 * Module fork exited pid: 7",
+            self.EEXIST,
+            "1:M 01 Jan 2026 00:00:01.000 * Module fork started pid: 7",
+        ]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "module-fork-eexist"
+        assert ev["module_forks_unexited"] == ["7"]
+        assert ev["module_forks_outstanding_at_refusal"] == []
+
+    def test_a_fork_outstanding_at_the_refusal_still_labels_the_hang(self):
+        # The temporal read must not make the class unreachable: a fork outstanding
+        # AT the refusal is direct evidence the slot was held. A second fork started
+        # afterwards is a later, unrelated leftover.
+        lines = [
+            "1:M 01 Jan 2026 00:00:00.000 * Module fork started pid: 7",
+            self.EEXIST,
+            "1:M 01 Jan 2026 00:00:01.000 * Module fork started pid: 8",
+        ]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "module-fork-hang"
+        assert ev["module_forks_outstanding_at_refusal"] == ["7"]
+        assert ev["module_forks_unexited"] == ["7", "8"]
 
 
 # ── same_file_list compares the red run's OWN observed files ──────────────
@@ -658,6 +716,44 @@ class TestPersistedObservationRoundTrips:
     def test_a_malformed_labelled_object_is_not_accepted(self):
         assert ee._red_file_list_matches(
             [{"observed_files": {"observed": ["tests/a.py"]}}], ["tests/a.py"]
+        ) is False
+
+    # Key NAMES alone were validated, so the value-typed shapes below were accepted
+    # (measured on the pre-fix code: `source: null`, `source: 123`, and a `failing`
+    # STRING with `source` present each rehydrated and made `_red_file_list_matches`
+    # return True). A string is iterable, so `tuple("tests/a.py")` iterated to its
+    # CHARACTERS and a one-character value could certify a red.
+    HOSTILE_SHAPES = (
+        {"observed": ["tests/a.py"], "failing": ["tests/a.py"], "source": None},
+        {"observed": ["tests/a.py"], "failing": ["tests/a.py"], "source": 123},
+        {"observed": ["tests/a.py"], "failing": "tests/a.py", "source": "junit-1.xml"},
+        {"observed": "tests/a.py", "failing": ["tests/a.py"], "source": "junit-1.xml"},
+        {"observed": ["tests/a.py"], "failing": [7], "source": "junit-1.xml"},
+        {"observed": ["tests/a.py"], "failing": ["tests/a.py"]},
+        {  # an extra key is not the persisted shape either
+            "observed": ["tests/a.py"], "failing": ["tests/a.py"],
+            "source": "junit-1.xml", "extra": 1,
+        },
+    )
+
+    def test_hostile_observation_shapes_are_rejected_without_raising(self):
+        for shape in self.HOSTILE_SHAPES:
+            assert ee._observation_from_json(shape) is None, shape
+            assert ee._red_file_list_matches(
+                [{"observed_files": shape}], ["tests/a.py"]
+            ) is False, shape
+
+    def test_a_string_failing_file_is_rejected_not_iterated(self):
+        # The headline shape: `source` IS a `str`, so the key-name guard saw the
+        # labelled object it accepts, while `tuple("tests/a.py")` silently produced
+        # the characters `t`,`e`,`s`,...
+        shape = {
+            "observed": ["tests/a.py"], "failing": "tests/a.py",
+            "source": "junit-1.xml",
+        }
+        assert ee._observation_from_json(shape) is None
+        assert ee._red_file_list_matches(
+            [{"observed_files": shape}], ["tests/a.py"]
         ) is False
 
 

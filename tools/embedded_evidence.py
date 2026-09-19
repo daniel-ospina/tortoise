@@ -82,13 +82,13 @@ MANDATORY_REPRODUCER = FAMILY_REPRODUCERS[0]
 # TAUTOLOGY: `MANDATORY_REPRODUCER` IS `FAMILY_REPRODUCERS[0]`, so membership held
 # for ANY value of the tuple and the assert could never fire. It read as protection
 # and supplied none. The invariant that CAN fail is that the selection declares each
-# reproducer once. A duplicate cannot be caught downstream: measured, pytest
-# de-duplicates a repeated path — `pytest tests/test_embedded_evidence.py
-# tests/test_embedded_evidence.py --junitxml=...` collects 48 testcases, not 96, and
-# `_manifest_receipt` on a duplicated file list reports count=52 == unique_count=52.
-# This assert is therefore the only place a duplicate declaration is caught, and the
-# defect it prevents is a recorded `selection.files` that names one reproducer twice
-# while claiming to name a set of them.
+# reproducer once. A duplicate cannot be caught downstream: pytest de-duplicates a
+# repeated path, and `_manifest_receipt` counts the nodeids of whatever pytest
+# collected — so a duplicated file list yields the SAME count as the unduplicated
+# one and neither guard can see the duplicate. This assert is therefore the only
+# place a duplicate declaration is caught, and the defect it prevents is a recorded
+# `selection.files` that names one reproducer twice while claiming to name a set of
+# them.
 assert len(set(FAMILY_REPRODUCERS)) == len(FAMILY_REPRODUCERS), (
     "FAMILY_REPRODUCERS contains a duplicate entry, so the recorded selection "
     f"names one file twice: {FAMILY_REPRODUCERS}"
@@ -209,8 +209,9 @@ MODULE_FORK_EXITED_RE = re.compile(r"Module fork exited pid:\s*(\d+)")
 # (`moduleForkChildPid != -1` at shutdown) — the plan doc's declared second
 # `requires_lines` entry for `module-fork-hang` (line 1139). It is the ONLY witness
 # of an unexited module fork child that appears in captured `redis.log`: measured
-# over 1347 captured logs, `Module fork started pid:` occurs in **0** of them, so a
-# class keyed solely on the started/exited counter is unreachable on real evidence.
+# over the 1120 real `redis.log`s collected under `/tmp/pi3827-*`,
+# `Module fork started pid:` occurs in **0** of them, so a class keyed solely on the
+# started/exited counter is unreachable on real evidence.
 MODULE_FORK_CHILD_KILLED_RE = re.compile(r"There is a module fork child\. Killing it!")
 BGSAVE_ANY_RE = re.compile(r"Background saving")
 BGSAVE_RE = re.compile(r"Background saving (started|terminated)")
@@ -223,9 +224,17 @@ CAUSE_CLASSES: dict[str, dict] = {
     # #3845: a previous RM_Fork child never exited, so the next refusal is EEXIST.
     # The unexited-child property has TWO INDEPENDENT witnesses, and the class is
     # reachable iff either holds:
-    #   (a) the ordered started/exited counter in `_module_fork_lifecycle` — sound,
-    #       pid-reuse aware, and the only witness a fixture WITHOUT the daemon's
-    #       shutdown line can exercise;
+    #   (a) the ordered started/exited counter in `_module_fork_lifecycle`, read AT
+    #       the EEXIST refusal line — sound, pid-reuse aware, and the only witness a
+    #       fixture WITHOUT the daemon's shutdown line can exercise;
+    #
+    # Witness (a) is TEMPORAL for exactly the reason (b) is weak. A fork that starts
+    # AFTER the refusal cannot have held the slot the refusal is about, so the
+    # counter is read at the refusal's own line, not at end-of-log: the reviewer's
+    # `save-started / refusal / save-terminated / fork-started` and
+    # `fork-started / fork-exited / refusal / fork-restarted` logs each end with an
+    # unexited pid, and only the temporal read distinguishes ``outstanding when
+    # RM_Fork checked`` from ``outstanding later``.
     #   (b) the daemon's own `There is a module fork child. Killing it!` — the plan
     #       doc's declared `requires_lines` entry (line 1139), and the ONLY witness
     #       that occurs in real output. Keying on (a) alone made this class
@@ -252,8 +261,8 @@ CAUSE_CLASSES: dict[str, dict] = {
     # EEXIST came from a save child was relabelled a hang because some unrelated
     # module child lingered to shutdown (measured: /tmp/revsyn/06_bgsave_kill.log
     # -> module-fork-hang under the unconstrained rule, save-child-slot under this
-    # one). The counter witness carries no such constraints — an outstanding module
-    # fork at end-of-log is direct evidence the slot was held.
+    # one). The counter witness carries no absence constraints — a fork outstanding
+    # at the refusal line IS direct evidence the slot was held at that moment.
     "module-fork-hang": {
         "requires_lines": [FORK_REFUSAL_RE],
         "requires_absent": [],
@@ -346,22 +355,37 @@ assert set(CAUSE_PRECEDENCE) | {"unattributed"} == set(CAUSE_CLASSES), (
     f"{sorted(set(CAUSE_CLASSES) - set(CAUSE_PRECEDENCE) - {'unattributed'})}"
 )
 
-def _module_fork_lifecycle(lines: list[str]) -> tuple[set[str], set[str], list[str]]:
+def _module_fork_lifecycle(
+    lines: list[str],
+) -> tuple[set[str], set[str], list[str], list[str]]:
     """Ordered, pid-reuse-aware view of the module-fork lifecycle.
 
     `started - exited` over the WHOLE log is a SET difference, and a set cannot see
     sequence: `Module fork started pid: 123` -> `Module fork exited pid: 123` ->
     `Module fork started pid: 123` (the second one hanging) leaves BOTH sets holding
     123, so the set-diff is EMPTY and a genuine `module-fork-hang` is reported as
-    `module-fork-eexist`. A `redis.log` is append-ordered, so the sound view is the
-    count of instances still outstanding at end-of-log: add on every `started`,
-    subtract on every `exited` (never below zero). Leftovers are the unexited
-    instances — pid reuse, and the same pid started twice, both included.
+    `module-fork-eexist`. A `redis.log` is append-ordered, so the sound view is a
+    running count: add on every `started`, subtract on every `exited` (never below
+    zero). Leftovers at end-of-log are the unexited instances — pid reuse, and the
+    same pid started twice, both included.
+
+    The FOURTH return value is the same counter sampled at every EEXIST refusal
+    line: the pids outstanding at the moment RM_Fork refused. This is the witness
+    `module-fork-hang` needs, and end-of-log is not a substitute — a fork that
+    starts after the refusal (or a pid that exits before it and restarts after)
+    leaves an end-of-log leftover while being no cause of the refusal at all.
     """
     outstanding: Counter[str] = Counter()
     started: set[str] = set()
     exited: set[str] = set()
+    outstanding_at_refusal: set[str] = set()
     for ln in lines:
+        # Sample BEFORE processing the line: a refusal holds the counter's value at
+        # its own moment, and no refusal line carries a started/exited marker.
+        if FORK_REFUSAL_EEXIST_RE.search(ln):
+            outstanding_at_refusal.update(
+                pid for pid, n in outstanding.items() if n > 0
+            )
         m = MODULE_FORK_STARTED_RE.search(ln)
         if m is not None:
             outstanding[m.group(1)] += 1
@@ -374,11 +398,16 @@ def _module_fork_lifecycle(lines: list[str]) -> tuple[set[str], set[str], list[s
             if outstanding[pid] > 0:
                 outstanding[pid] -= 1
     unexited = sorted(pid for pid, n in outstanding.items() if n > 0)
-    return started, exited, unexited
+    return started, exited, unexited, sorted(outstanding_at_refusal)
 
 
 def _cause_evidence(
-    text: str, hits: list[str], started: set[str], exited: set[str], unexited: list[str]
+    text: str,
+    hits: list[str],
+    started: set[str],
+    exited: set[str],
+    unexited: list[str],
+    outstanding_at_refusal: list[str],
 ) -> dict:
     """The evidence payload every label_cause() return shares (one spelling)."""
     return {
@@ -389,6 +418,7 @@ def _cause_evidence(
         "module_forks_started": sorted(started),
         "module_forks_exited": sorted(exited),
         "module_forks_unexited": unexited,
+        "module_forks_outstanding_at_refusal": outstanding_at_refusal,
     }
 
 
@@ -396,15 +426,16 @@ def label_cause(lines: list[str]) -> tuple[str, dict]:
     """Label the red's cause from server-side `redis.log` lines (D10).
 
     Returns `(cause, evidence)`. `evidence` carries the matched lines, whether a
-    fork refusal appeared, whether that refusal states EEXIST, and which module-fork
-    instances were still outstanding at end-of-log — the module-fork-hang
-    discriminator, computed as a running count so pid reuse cannot hide a hang.
+    fork refusal appeared, whether that refusal states EEXIST, which module-fork
+    instances were outstanding AT the EEXIST refusal (the `module-fork-hang`
+    discriminator, computed as a running count so pid reuse cannot hide a hang), and
+    which were still outstanding at end-of-log.
 
     NOTE (GAP-5): the regexes are pinned against a captured real redis.log; a log
     matching none of the declared patterns is `unattributed` and can never close.
     """
     text = "\n".join(lines)
-    started, exited, unexited = _module_fork_lifecycle(lines)
+    started, exited, unexited, outstanding_at_refusal = _module_fork_lifecycle(lines)
 
     for cause in CAUSE_PRECEDENCE:
         spec = CAUSE_CLASSES[cause]
@@ -428,24 +459,32 @@ def label_cause(lines: list[str]) -> tuple[str, dict]:
             continue
         witnesses = spec.get("unexited_fork_witnesses")
         if witnesses is not None:
-            # Two independent witnesses of ONE property. The ordered counter
-            # (`unexited`) is direct: a module fork is outstanding at end-of-log, so
-            # the RM_Fork slot check would have failed. The daemon's shutdown
-            # assertion (`weak`) only says a child was outstanding LATER, so it
-            # supports the class only when no save/AOF child and no exited instance
+            # Two independent witnesses of ONE property. The ordered counter,
+            # sampled at the refusal (`outstanding_at_refusal`), is direct: a module
+            # fork was outstanding when RM_Fork checked the slot, so the EEXIST check
+            # would have failed. An end-of-log leftover (`unexited`) is NOT that
+            # proof — the fork could have started after the refusal — so it is
+            # reported in evidence but does not witness the class. The daemon's
+            # shutdown assertion (`weak`) only says a child was outstanding LATER, so
+            # it supports the class only when no save/AOF child and no exited instance
             # give the refusal a different explanation (see the class comment).
             weak = any(re.search(p, text) for p in witnesses) and not any(
                 re.search(p, text)
                 for p in spec.get("weak_witness_requires_absent", [])
             )
-            if not (unexited or weak):
-                # The refusal came from a save/AOF child, or from no stale module child.
+            if not (outstanding_at_refusal or weak):
+                # The refusal came from a save/AOF child, from no stale module child,
+                # or from a module fork that was not yet outstanding at the refusal.
                 continue
         if any(re.search(p, text) for p in spec["requires_absent"]):
             continue
-        return cause, _cause_evidence(text, hits, started, exited, unexited)
+        return cause, _cause_evidence(
+            text, hits, started, exited, unexited, outstanding_at_refusal
+        )
 
-    return "unattributed", _cause_evidence(text, [], started, exited, unexited)
+    return "unattributed", _cause_evidence(
+        text, [], started, exited, unexited, outstanding_at_refusal
+    )
 
 
 def attributable(cause: str | None) -> bool:
@@ -725,21 +764,40 @@ def _observation_to_json(obs: _JunitObservation) -> dict:
     }
 
 
+def _is_str_list(value) -> bool:
+    """Whether `value` is a `list` whose every element is a `str`.
+
+    A bare `isinstance(value, list)` is not enough: `str` IS iterable, so on the
+    pre-fix code a `failing` value of `"tests/a.py"` rehydrated to
+    `('t','e','s','t','s','/','a','.','p','y')`, and a record whose `observed` matched
+    the selection with `failing` of `"X"` measured `True` from
+    `_red_file_list_matches` — a one-character value certifying a red.
+    """
+    return isinstance(value, list) and all(isinstance(x, str) for x in value)
+
+
 def _observation_from_json(value) -> _JunitObservation | None:
-    """Rehydrate the labelled persisted shape. Returns `None` for anything else —
-    including a plain `list` (the selection copy the type exists to refuse) and the
-    anonymous triple a pre-fix record holds, which stays rejected.
+    """Rehydrate the labelled persisted shape, or `None` for anything else.
+
+    Strict on VALUES, not just key NAMES. `_observation_to_json` is the only
+    producer, so the accepted shape is exactly its output: a dict with those three
+    keys and no others, `observed`/`failing` as `list[str]`, `source` as `str`. A
+    `source` of `None` or `123`, a `failing` string, or any other near-miss is
+    rejected — this function is the fail-CLOSED gate `_red_file_list_matches` reads,
+    and a permissive rehydrator is the guard failing open. Plain `list`s (the
+    selection copy the type exists to refuse), the anonymous triple a pre-fix record
+    holds, and records with extra keys all stay rejected.
     """
     if isinstance(value, _JunitObservation):
         return value
-    if isinstance(value, dict) and {"observed", "failing", "source"} <= set(value):
-        try:
-            return _JunitObservation(
-                tuple(value["observed"]), tuple(value["failing"]), value["source"]
-            )
-        except TypeError:
-            return None
-    return None
+    if not isinstance(value, dict) or set(value) != {"observed", "failing", "source"}:
+        return None
+    observed, failing, source = value["observed"], value["failing"], value["source"]
+    if not isinstance(source, str):
+        return None
+    if not _is_str_list(observed) or not _is_str_list(failing):
+        return None
+    return _JunitObservation(tuple(observed), tuple(failing), source)
 
 
 def _jsonable(value):
