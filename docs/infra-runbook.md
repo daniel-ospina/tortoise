@@ -12,6 +12,8 @@ updated: 2026-09-19
 
 # Tortoise Hosted Platform — Infrastructure Runbook
 
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
+
 **Epic:** #7711 (legacy provisioning epic — provenance) · availability watchdog: #2850
 **Last updated:** 2026-09-19
 

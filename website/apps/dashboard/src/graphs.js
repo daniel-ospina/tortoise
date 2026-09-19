@@ -226,7 +226,8 @@ export function graphMintBody(graphId, name) {
 // - GET /v1/graphs/trash/{id}/points?org_id= → {archive_count,
 //   latest_backup: {backup_id, created_at, node_count, edge_count}|null}.
 
-// The server-side recovery window (#2304 default). Client displays it only;
+// The server-side recovery window (#2304 default) — authority:
+// docs/retention-and-deletion.md. Client displays it only;
 // the purge enforces it.
 export const TRASH_GRACE_DAYS = 7
 
