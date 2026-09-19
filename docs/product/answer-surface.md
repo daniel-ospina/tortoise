@@ -82,7 +82,7 @@ answer path for search.
 | `question_type` | The detected or caller-override type; None possible |
 | `question_date` | The resolved value (see above) |
 | `evidence` | The assembled context the reader saw (trust property as a response field) — bounded by BOTH the resolved token cap (default 16 000 estimated tokens, #4105) AND the resolved `TORTOISE_ASK_CONTEXT_BYTE_CAP` byte bound (default derived as `max(32768, token_cap × 8)` = 128 KiB), ENFORCED AT ASSEMBLY (whole-hit drop; never splits a character) |
-| `context_tokens` | `estimate_tokens_ask(rendered_context)` — a conservative ESTIMATE, not a raw count; ≤ 8000 |
+| `context_tokens` | `estimate_tokens_ask(rendered_context)` — a conservative ESTIMATE, not a raw count; bounded by the resolved `TORTOISE_ASK_CONTEXT_TOKEN_CAP` (default 16 000, #4105) |
 | `model` | The RESOLVED spec (the serving lane's wire id — bare `deepseek-v4-flash` on the direct lane, the full spec on OpenRouter) |
 | `provider` / `route` | The lane that actually served — a FAILOVER answer reports the SURVIVING lane; recovery reports the primary lane again |
 | `cost_estimate_usd` | An ESTIMATE at the ×1.5 over-cover rate (see Cost) — never an exact bill |
@@ -184,11 +184,11 @@ measurement justifies a change.
 
 ## Cost & budget
 
-- **Per-query cost ≤ $0.01 target is structural:** 8000-token context cap +
-  40-item cap + 500-token output cap (the 60/min/team LLM budget was
+- **Per-query cost ≤ $0.01 target is structural:** 16 000-token context cap +
+  200-item cap + 500-token output cap (the 60/min/team LLM budget was
   retired with the product surface in #3849 — see *Budget* below).
-  Worst case ~$0.0014–0.0023/query at the over-covered rate (5–7× under
-  target).
+  Worst case ~$0.0034/query at the over-covered rate (≈3× under target;
+  the pre-#4105 8000-token cap ran ~$0.0014–0.0023, 5–7× under).
 - **Rates:** `ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m":
   0.42}` — verified deepseek-direct $0.14/$0.28 × a documented ×1.5 safety
   factor (covers the OpenRouter fallback markup). The meter over-covers.

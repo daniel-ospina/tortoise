@@ -484,8 +484,9 @@ def estimate_tokens_ask(text: str) -> int:
     multiplier for non-whitespace-delimited runs — pinned at ~0.6-0.7
     token/char (OVER-estimated versus the DeepSeek rate, so the meter can
     never under-count). Because the multiplier is conservative, on
-    CJK-heavy pools the 32 KiB BYTE cap binds FIRST (32 KiB ≈ 10.9K chars ≈
-    ~6.5-7.6K estimated tokens < 8000).
+    CJK-heavy pools the resolved BYTE ceiling binds FIRST (the ask-lane
+    default is 128 KiB, DERIVED from the 16 000-token cap by #4105; the old
+    32 KiB literal bound at ~10.9K chars ≈ ~6.5-7.6K estimated tokens).
 
     This is a conservative ESTIMATE, never an exact bill; it is the source
     of the response field ``context_tokens`` (the RENDERED-CONTEXT tokens

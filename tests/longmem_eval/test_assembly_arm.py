@@ -94,9 +94,17 @@ def _no_embedder(monkeypatch):
 @pytest.fixture(autouse=True)
 def _env_clean(monkeypatch):
     monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
-    for k in ("TORTOISE_ASK_RETRIEVAL_LIMIT", "TORTOISE_ASK_CONTEXT_ITEM_CAP",
-              "TORTOISE_ASK_CONTEXT_TOKEN_CAP"):
-        monkeypatch.delenv(k, raising=False)
+    # #4105: pin the HISTORICAL ask-lane caps. This module's "DEFAULT" arm is
+    # the pool-40 shape (its whole R9 contract is a statement about that
+    # shape); the product defaults were raised to 200/200/16000/128KiB and
+    # would otherwise admit both deep golds and make the discriminator
+    # vacuous. The byte ceiling is pinned too — otherwise it would DERIVE
+    # from whatever token cap a widened arm sets.
+    monkeypatch.setenv("TORTOISE_ASK_RETRIEVAL_LIMIT", "40")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", "40")
+    monkeypatch.setenv("TORTOISE_ASK_POOL_SIZE", "120")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_TOKEN_CAP", "8000")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_BYTE_CAP", "32768")
     yield
 
 
@@ -135,6 +143,9 @@ def _legacy(sdk, monkeypatch, question, *, widen=False):
         monkeypatch.setenv("TORTOISE_ASK_RETRIEVAL_LIMIT", "120")
         monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", "120")
         monkeypatch.setenv("TORTOISE_ASK_CONTEXT_TOKEN_CAP", "32000")
+        # the widened byte ceiling must follow the widened token cap, or the
+        # pinned 32 KiB default would silently neutralise the raise
+        monkeypatch.setenv("TORTOISE_ASK_CONTEXT_BYTE_CAP", "256000")
     return run_ask_lane(sdk, question, question_date=Q_DATE)
 
 

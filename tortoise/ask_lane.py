@@ -360,8 +360,8 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` /
         ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` /
         ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` /
-        ``TORTOISE_ASK_POOL_SIZE`` (default OFF = 40/40/8000/32 KiB/120;
-        the retrieval-window limit is threaded IN TANDEM with the
+        ``TORTOISE_ASK_POOL_SIZE`` (defaults 200/200/16000/derived(128 KiB)/200
+        since #4105; the retrieval-window limit is threaded IN TANDEM with the
         assembly caps and the pool floor, and the byte ceiling is resolved
         rather than hard-coded — raising only the assemble cap changes
         nothing, and a byte ceiling that cannot be raised is now impossible:
@@ -375,7 +375,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF, fail-safe):
         collapses a distilled point's own source raw chunks/turns into
         ONE reader entry + dedups cross-item near-duplicate facts, so
-        the 40-item reader window admits distinct facts instead of
+        the resolved-item reader window admits distinct facts instead of
         flooding on duplicates. PURE function (package_evidence_pool)
         — recall surface unchanged, hermetic no-dupe tests prove the
         ON path is byte-identical on duplicate-free pools.

@@ -134,6 +134,17 @@ def _legacy_ask(sdk, monkeypatch, question: str, *, flag_off: bool = True):
     if flag_off:
         monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY",
                            raising=False)
+    # #4105: pin the HISTORICAL ask-lane caps. This helper is the "legacy /
+    # DEFAULT" arm of the R9 geometry calibrations, whose contract ("the
+    # pool-40 binds below the deep golds") is a statement about THAT shape;
+    # the product defaults were raised to 200/200/16000/128KiB and would
+    # otherwise silently admit both deep golds and make the calibration
+    # vacuous.
+    monkeypatch.setenv("TORTOISE_ASK_RETRIEVAL_LIMIT", "40")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", "40")
+    monkeypatch.setenv("TORTOISE_ASK_POOL_SIZE", "120")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_TOKEN_CAP", "8000")
+    monkeypatch.setenv("TORTOISE_ASK_CONTEXT_BYTE_CAP", "32768")
     _install_fake(sdk, monkeypatch)
     return run_ask_lane(sdk, question)
 

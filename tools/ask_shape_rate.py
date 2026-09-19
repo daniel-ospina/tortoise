@@ -421,6 +421,23 @@ _DB_SEQ = itertools.count()
 _LAST_DOCKER_GRAPH: str | None = None
 
 
+def _substrate_label() -> str:
+    """A receipt-safe label for the store the run measured against.
+
+    Never the raw ``TORTOISE_ASK_SHAPE_DB_URI`` — its documented form
+    embeds a password, and a receipt is a tracked file that gets committed.
+    """
+    base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
+    if not base:
+        return "embedded"
+    from urllib.parse import urlparse
+    u = urlparse(base)
+    user = u.username or ""
+    auth = f"{user}:***@" if (user or u.password) else ""
+    port = f":{u.port}" if u.port else ""
+    return f"{u.scheme}://{auth}{u.hostname or ''}{port}/{u.path.lstrip('/')}"
+
+
 def _drop_docker_graph(base: str, name: str) -> None:
     """Best-effort delete of a scratch docker graph (keep the server's
     memory bounded — graphs accumulate across a run otherwise)."""
@@ -1069,9 +1086,9 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         "fixture": fixture_shape,
         # Which store the rate was measured against. The docker selector
         # (TORTOISE_ASK_SHAPE_DB_URI) is a substrate change the SDK branches
-        # on, so it is recorded rather than implied by the command line.
-        "substrate": (os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
-                      or "embedded"),
+        # on, so it is recorded rather than implied by the command line —
+        # REDACTED (the URI carries a password; the receipt is committed).
+        "substrate": _substrate_label(),
         "decision_rule": {
             "shape_rate_min": SHAPE_RATE_ADOPT,
             "provenance_min": f"{FIXTURE_N}/{FIXTURE_N}",
