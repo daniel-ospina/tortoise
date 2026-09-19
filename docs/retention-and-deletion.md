@@ -1,0 +1,169 @@
+---
+title: "Retention and Deletion — the one promise"
+type: operations
+domain: platform
+doc_status: live
+created: 2026-09-18
+ownedBy: epistemic-team
+subjects.team: epistemic-team
+aboutSubjects: tortoise
+aboutObjects: tortoise-cloud
+related:
+  - issue: 4179
+    note: "Canonical source of truth for the retention/deletion promise (owner ruling 2026-09-18)."
+  - issue: 2304
+    note: "Graph delete = trash: quarantine → 7-day grace → erasure."
+  - issue: 302
+    note: "Team-account soft delete → grace → hard purge."
+---
+
+# Retention and Deletion — the one promise
+
+> **This is the canonical document.** If you need to state a retention,
+> deletion, or restore window anywhere — code, copy, a runbook, a legal page —
+> **link here and do not restate the number.** The only exceptions are the
+> implementation constants named below. Three copies of "7" is how the windows
+> drifted apart; this document exists so they cannot drift again.
+
+## The promise
+
+Deleting a **user account**, a **graph**, or a **team account** is reversible
+for a **7-day restore window**. After that, the deleted thing is purged.
+
+> **Delete = gone from your view immediately · restorable for 7 days · no copy
+> remains after about four weeks.** *(Owner, 2026-09-18.)*
+
+The horizon is **path-dependent**, and the difference matters:
+
+| Path / copy | Deletion horizon | Where it lives in code |
+|-------------|------------------|------------------------|
+| **Graph** deletion — the undo window | **7 days** | `tortoise/backup_sweep.py` `_GRAPH_PURGE_GRACE_DAYS` → `retention.RESTORE_WINDOW_DAYS` |
+| **Graph** deletion — the graph's own backup pool | erased **wholesale at the 7-day purge** | `tortoise/backup_sweep.py` `_purge_graph_storage` |
+| **Live**-data snapshots (a backup horizon, **not** an undo) | ≈ **28 days** (24 hourly + 7 daily + 4 weekly) | `tortoise/backup_config.py` `retention_hourly/daily/weekly` |
+| **Team-account** deletion — backup artifacts | **not yet erased** — see *Open gaps* below | `tortoise/hosted_api.py` `_purge_deleted_orgs` |
+| **Second-region mirror** (shipped; `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only) | `docs/ops/registry-backup-dr.md` |
+
+> **Restore window ≠ retention window.** R1 forbids retaining user **content**
+> for any length. The 7 days are an **undo** offer, never a claim that we keep
+> content. Do not conflate the two in copy or in code.
+
+## The authoritative implementation constants
+
+These are the only places a window may be stated numerically without linking
+this document:
+
+| Constant | Role |
+|----------|------|
+| `tortoise/retention.py` `RESTORE_WINDOW_DAYS` / `RESTORE_WINDOW_HOURS` | **Sole authority for the restore window** |
+| `tortoise/backup_config.py` `retention_hourly` / `retention_daily` / `retention_weekly` | **Sole authority for the backup-hold counts** (a different concept from the restore window) |
+| `tortoise/backup_config.py` `LOCK_DAYS_MAX` | the bucket-lock bound; must stay strictly below the restore window (`RESTORE_WINDOW_DAYS - 1`) |
+
+Everything else is a **derived alias**, never independently set:
+
+- `tortoise/backup_sweep.py` `_GRAPH_PURGE_GRACE_DAYS`
+- `tortoise/hosted_api.py` `_TRASH_GRACE_DAYS` (imports `_GRAPH_PURGE_GRACE_DAYS`)
+- `tortoise/hosted_api.py` `TEAM_DELETE_GRACE_HOURS`
+- `tortoise/hosted_api.py` `USER_ACCOUNT_DELETE_GRACE_HOURS`
+- the frontend `website/apps/dashboard/src/graphs.js` `TRASH_GRACE_DAYS`
+  (bound to the authority by `tests/test_retention_promise.py`)
+
+## The three deletion paths
+
+| Path | Access ends | Restorable for | Restore mechanism |
+|------|-------------|----------------|-------------------|
+| **Graph** | immediately (API keys revoked) | 7 days | self-service Trash in the dashboard |
+| **Team account** | immediately (keys + memberships revoked) | 7 days | support / operational (no self-service surface yet) |
+| **User account** | immediately (on deletion request) | 7 days | support (email request — privacy §16) |
+
+The **user-account** path has no in-product self-service deletion today:
+privacy §16 says so, and the blocker for a surface is the missing Supabase
+auth-admin deletion wiring — not the deferred permissions model (D31).
+`USER_ACCOUNT_DELETE_GRACE_HOURS` records the promised window for that support
+path.
+
+## A different axis: the operational event store
+
+`TORTOISE_EVENT_RETENTION_DAYS` (default 30) in `tortoise/sdk.py` is the
+`:GraphEvent` **operational log** retention (see `docs/event-catalog.md`). It is
+**not** user content and **not** a deletion promise, so it is exempt from the
+"link or be a named constant" rule.
+
+## Open gaps and open decisions
+
+- **Team-account cascade (D5 — follow-up).** Deleting a team account today
+  revokes access and drops the **default** graph's namespace, but it does **not**
+  erase custom-graph namespaces, and `prune_backups` explicitly never touches
+  nested per-graph pools — so the nested backups of **every** graph in the org
+  (**default included**) survive indefinitely. The owner ruled the team account
+  "should delete everything inside"; that widening is a separate, destructive
+  change filed as **#4190**.
+- **Backups on a delete request (D6 — owner decision).** On a support/account
+  delete request, does live deletion actively purge backup snapshots, or do they
+  age out on the 24/7/4 cycle? And does the deletion propagate to the
+  second-region mirror (today it never does)? **Not decided.** The public wording
+  below is written to be true under the current default (mirror off).
+
+## Where this promise is stated
+
+The anti-scatter scan (`tests/test_retention_promise.py::test_no_unlinked_retention_claims`)
+fails on any new retention/deletion claim that neither links here nor is a named
+constant; `test_surveyed_files_link_to_canonical_doc` guards the link set itself.
+The coverage is:
+
+**Linked here and checked by the scan** — `website/privacy.html` · `website/dpa.html` ·
+`website/apps/dashboard/src/{main.jsx,graphs.js}` · `docs/ops/registry-backup-dr.md` ·
+`docs/ops/multi-graph-migration-runbook.md` · `docs/infra-runbook.md` ·
+`docs/data-safety.md` · `docs/registry-graph-schema.md` ·
+`docs/scoping-2304-delete-semantics.md`.
+
+**Named implementation constants** (exempt by design — the scan never counts them):
+`tortoise/{retention,backup_sweep,backup_config,hosted_api,sdk,supabase_control,hosted_backup}.py`.
+`website/apps/dashboard/src/graphs.test.js` is derived: it imports
+`TRASH_GRACE_DAYS` from `graphs.js` rather than restating the number.
+
+**Point-in-time records — exempt, not gated** (they state the window as it was;
+this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md` ·
+`docs/prototypes/2304-trash-ui.md` ·
+`docs/research/2026-09-06-backup-dr-best-practices.md` ·
+`docs/scoping-432-subscriptions-claim-lifecycle.md`.
+
+**Different axis — exempt, not gated:** `docs/event-catalog.md` (the 30-day
+`TORTOISE_EVENT_RETENTION_DAYS` operational event log, not a deletion promise).
+
+## Proposed public wording — PENDING OWNER APPROVAL
+
+> ⛔ **Do not publish until the owner approves.** This is the draft for
+> `website/privacy.html` §6 / §"Deletion scope" and `website/dpa.html` §11.
+> The PR that applies it is opened as a draft for exactly this reason.
+
+**Privacy §6 — replace the two list items:**
+
+> **Knowledge graphs.** Deleting a knowledge graph removes it from your view
+> immediately and revokes its API keys. It stays restorable from the
+> organization's "Trash" for **7 days** (the single source of truth is the
+> [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)).
+> After the 7-day window the graph is permanently erased, together with its
+> backup copies.
+
+> **Backups.** Snapshots of live data are kept on a rolling schedule of 24
+> hourly, 7 daily, and 4 weekly copies, so a snapshot of data that was *live*
+> at the time may persist for up to about **four weeks**. This is a backup
+> horizon, not a retention claim about content you delete. At the end of a
+> deleted graph's 7-day window we erase its own backup copies from our primary
+> storage; that erasure is best-effort and is not retried if an individual copy
+> cannot be removed, and copies held in our secondary disaster-recovery store
+> (disabled by default) are not deleted.
+
+**Privacy §"Deletion scope" — replace the closing sentence:**
+
+> A knowledge graph deleted in the product follows its **7-day recovery
+> window** before permanent erasure, as described in §6. Deleting a team
+> account removes access immediately and is restorable for 7 days.
+
+**DPA §11 — replace the "limited additional period" phrase:**
+
+> … data in backups is retained for a limited period on a rolling 24-hour /
+> 7-day / 4-weekly schedule (about four weeks at most for snapshots of data
+> that was live; backups of a deleted team account are not yet erased on this
+> schedule, as recorded in the retention and deletion policy) to maintain
+> integrity, and is not used for any other purpose.

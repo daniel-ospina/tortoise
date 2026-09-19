@@ -2363,7 +2363,7 @@ def prune_backups(
     UTC DAY-bucket for ages between ``keep_hourly`` and ``keep_daily`` days
     (bounded by the daily horizon), then the ``keep_weekly`` weekly anchors.
     This bounds an org at hourly cadence to ~24 hourly + ~7 daily-anchors + 4
-    weekly (≈35 objects/pool) — #2373: the anchor granularity was hour-
+    weekly (≈35 objects/pool; windows: `docs/retention-and-deletion.md`) — #2373: the anchor granularity was hour-
     buckets (retaining ~172/pool over 7 days), contradicting this docstring,
     the DR runbook, and #2319's lock-window premise; day anchors restore the
     documented intent. Newest-first iteration keeps the newest backup of each

@@ -73,6 +73,10 @@ surfaces:
   - test_eval_ingest_retry.py
   - test_eval_extraction_health.py
   - test_resume_gate_parity.py
+  # #4179: constants agree (7-day restore) — docs/retention-and-deletion.md;
+  # user account, graph, team account; frontend window bound; anti-scatter scan.
+  # Dual-registered in `core` (docs scan) and `onboarding` (website/privacy.html).
+  - test_retention_promise.py
   - test_per_session_census.py
   - test_graph_integrity_gate.py
   - test_cli_claim.py
@@ -382,6 +386,7 @@ surfaces:
   - test_capture_session_supersession_e2e.py
   - test_rebuild_turn_points_3947.py
   - test_restore_container_recovery.py
+  - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
   - test_tmpdir_hygiene_4096.py  # #4096: AST guard — no pytest fixture may mkdtemp a tree without reclaiming it (meta test; reads tests/**, no DB)
@@ -775,6 +780,7 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
+  - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py
   # #3485: dual-registered with `api` (cross-surface registration is deliberate,
   # #2913). This is the website-guard home for the shared session-bridge asset:

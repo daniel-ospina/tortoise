@@ -66,6 +66,8 @@ from datetime import UTC, datetime, timezone
 
 import httpx
 
+from .retention import RESTORE_WINDOW_HOURS  # #4179 single window authority
+
 _logger = logging.getLogger(__name__)
 
 # Env-var names: SUPABASE_SERVICE_ROLE_KEY is the canonical name (edge
@@ -1821,12 +1823,12 @@ def _now_iso() -> str:
 
 
 def soft_delete_org(cp, org_id: str, now: str | None = None,
-                     grace_hours: float = 24.0) -> None:
+                     grace_hours: float = float(RESTORE_WINDOW_HOURS)) -> None:
     """Stamp ``teams.deleted_at`` + persist the grace window (#302).
 
     ``grace_hours`` is stored so the purge sweep and the idempotent replay
     honor the hard_delete_after the API promised at schedule time, even if
-    TORTOISE_ORG_DELETE_GRACE_HOURS changes before the sweep runs.
+    TORTOISE_TEAM_DELETE_GRACE_HOURS changes before the sweep runs.
     Idempotent: re-stamping an already-deleted org is a no-op PATCH.
     """
     cp.query(
@@ -2627,7 +2629,7 @@ def soft_delete_graph(cp, org_id: str, graph_id: str) -> bool:
     distinguish by a prior kind lookup for the 403 default-guard).
 
     #2304: stamps ``deleted_at`` (the trash grace window's start — the
-    purge enforces the 7-day recovery period off it; legacy tombstones
+    purge enforces the _GRAPH_PURGE_GRACE_DAYS recovery period off it; legacy tombstones
     (deleted_at NULL) predate the column and are treated as past-grace).
     """
     rows = cp.query(

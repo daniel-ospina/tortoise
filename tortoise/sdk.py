@@ -2226,6 +2226,8 @@ class TortoiseSDK:
         try:
             from .event_store import purge_expired, purge_overflow
 
+            # Operational :GraphEvent log retention — NOT user content and NOT
+            # the deletion promise. See docs/retention-and-deletion.md.
             days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
             cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
             purge_expired(proj, retention_days=days)
@@ -15190,7 +15192,7 @@ class TortoiseSDK:
         404/403). Pre-C1 nodes without status gain it on delete.
 
         #2304: stamps ``deleted_at`` (the trash grace window's start — the
-        purge enforces the 7-day recovery period off it; legacy tombstones
+        purge enforces the _GRAPH_PURGE_GRACE_DAYS recovery period off it; legacy tombstones
         (deleted_at absent) predate the prop and are treated as past-grace).
         """
         reg = self._get_registry()
