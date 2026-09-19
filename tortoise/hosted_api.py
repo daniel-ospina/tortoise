@@ -24533,32 +24533,40 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         if sub_id:
             try:
                 sub = StripeClient().get_subscription(sub_id)
+            except Exception as e:
+                sub = None
+                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
+            if sub is not None:
                 # #4216: checkout is an AUTHORING path for the subscription —
-                # it must persist the METER WINDOW ANCHOR alongside the id, not
-                # only ``subscription_id``. ``metering._current_period`` needs
-                # a COMPLETE half-open interval
-                # ``[current_period_start, current_period_end)``. Without it a
+                # it must persist the METER WINDOW ANCHOR, not only
+                # ``subscription_id``. ``metering._current_period`` needs a
+                # COMPLETE half-open interval
+                # ``[current_period_start, current_period_end)``; without it a
                 # just-checked-out PAYING org is permanently
-                # window-unresolvable: its increments are dropped and the cohort
+                # window-unresolvable — its increments are dropped and the cohort
                 # cost cap cannot be enforced for it (absorbed + alerted per
-                # #3981 — but unenforceable, which is the defect this issue
+                # #3981, but unenforceable, which is the defect this issue
                 # removes). Both bounds come from the SAME authoritative Stripe
-                # subscription object the tier is resolved from, and only the
-                # bounds the payload CARRIES are written (a partial object must
-                # never half-fill or NULL the anchor).
+                # subscription object the tier is resolved from. Only the bounds
+                # the payload CARRIES are written; a bound it omits is left
+                # alone (never NULLed). The write is ISOLATED from the tier path
+                # so a window-write failure cannot suppress the upgrade.
                 window = {k: sub[k] for k in
                           ("current_period_start", "current_period_end")
                           if sub.get(k)}
                 if window:
-                    _set(window)
+                    try:
+                        _set(window)
+                    except Exception as e:
+                        _logger.warning(
+                            "webhook: period window write failed: %s",
+                            redact_error(e))
                 tier = _resolve_tier_from_price(_price_id_from(sub))
                 if tier:
                     apply_limits(sdk, org_id, tier)
                     _set({"tier": tier})
                     notify_kind = "billing_upgrade"
                     resolved_tier = tier
-            except Exception as e:
-                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
         if is_new_org and resolved_tier is None:
             # The metadata tier was server-resolved from the price at checkout
             # time and provision_org already wrote the matching quotas, so a

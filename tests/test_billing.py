@@ -922,48 +922,71 @@ class TestBootReconcile:
             "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}).result_set
         assert row[0][0] == "solo", "mirror must converge to Stripe truth"
 
-    def test_boot_reconcile_writes_both_period_bounds(self, monkeypatch, billing_client):
-        """#4216 → mutation: drop the ``current_period_end`` bind from
-        ``mirror_subscription`` (the half-known anchor the issue describes).
+    def test_mirror_writes_both_period_bounds_and_never_nulls_a_stored_one(
+            self, monkeypatch, billing_client):
+        """#4216 → mutation: bind ``current_period_end`` UNCONDITIONALLY
+        (``params["period_end"] = sub.get(...)``) — the pre-fix mirror's shape.
 
         ``mirror_subscription`` is an AUTHORING path for the subscription: the
-        authoritative push must persist the meter window as a PAIR, because
-        ``metering._current_period`` RAISES for a subscription org whose
-        half-open interval is incomplete — its increments are dropped and the
-        cohort cap cannot be enforced for it. Driven through the REAL
-        ``reconcile_org`` (whose only writer is the mirror).
+        authoritative push must persist the meter window as a PAIR and must
+        never NULL a stored bound just because a payload omits it — a NULL end
+        makes ``metering._current_period`` RAISE, dropping the org's increments
+        and leaving its cohort cap unenforceable. Driven through the REAL
+        ``reconcile_org`` (whose only writer is the mirror) and read through the
+        REAL meter.
 
-        RED: ``current_period_end`` stays NULL after a mirror that carried it.
+        RED pre-fix: the stored ``current_period_end`` is cleared (the
+        unconditional bind writes ``None``) and ``_current_period`` raises.
         """
         from datetime import datetime
 
         from tortoise import billing as bl
+        from tortoise import metering as m
 
+        monkeypatch.setattr(m, "_supabase_mode", lambda: False)  # registry lane
         org_id = billing_client["org_id"]
         sdk = billing_client["sdk"]
         start = int(datetime.fromisoformat(
             "2026-09-03T00:00:00+00:00").timestamp())
         end = int(datetime.fromisoformat(
             "2026-10-03T00:00:00+00:00").timestamp())
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_4216_mirror', "
+            "t.current_period_start=$ps, t.current_period_end=$pe",
+            params={"id": org_id, "ps": start, "pe": end})
+
+        # Stripe truth: this payload OMITS both bounds — it must not clear them.
         monkeypatch.setattr(bl.StripeClient, "get_subscription",
                             lambda self, sid: {
                                 "id": "sub_4216_mirror", "status": "active",
-                                "current_period_start": start,
-                                "current_period_end": end,
                                 "items": {"data": [
                                     {"price": {"id": "price_200proMM"}}]}})
-        sdk._get_registry().query(
-            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_4216_mirror'",
-            params={"id": org_id})
-
         summary = bl.reconcile_org(sdk, org_id)
         assert summary["action"] == "mirror_subscription"
 
         row = sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
             "t.current_period_end", params={"id": org_id}).result_set[0]
-        assert row[0] == start, row
-        assert row[1] == end, row
+        assert row[0] == start and row[1] == end, row
+        assert m._current_period(org_id).end_iso == "2026-10-03T00:00:00+00:00"
+
+        # ...and when the payload DOES carry the bounds, the mirror writes them.
+        new_start = int(datetime.fromisoformat(
+            "2026-10-03T00:00:00+00:00").timestamp())
+        new_end = int(datetime.fromisoformat(
+            "2026-11-03T00:00:00+00:00").timestamp())
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_4216_mirror", "status": "active",
+                                "current_period_start": new_start,
+                                "current_period_end": new_end,
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        bl.reconcile_org(sdk, org_id)
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
+            "t.current_period_end", params={"id": org_id}).result_set[0]
+        assert row[0] == new_start and row[1] == new_end, row
 
     def test_boot_reconcile_repairs_customer_only_team(self, monkeypatch, billing_client):
         """Missed checkout.session.completed: only stripe_customer_id exists."""

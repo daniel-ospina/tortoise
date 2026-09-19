@@ -556,8 +556,11 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     # absorbs it, alerts the operator and serves — #3981), so a mirror that
     # writes only one leaves the org permanently window-unresolvable and its
     # cohort cap unenforceable. Each bound is written ONLY when the payload
-    # carries it, so a partial subscription object can neither NULL out nor
-    # half-fill an anchor the meter depends on.
+    # carries it, so a partial subscription object can never NULL OUT a bound
+    # already stored. (A payload that carries ONE bound and not the other still
+    # leaves a half-known anchor — the meter refuses it loudly and
+    # ``20260919000001`` repairs it; that is the documented, reported state, not
+    # a silent one.)
     if sub.get("current_period_start"):
         set_fields += ", t.current_period_start=$period_start"
         params["period_start"] = sub["current_period_start"]

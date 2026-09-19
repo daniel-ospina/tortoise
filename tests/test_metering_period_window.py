@@ -600,10 +600,12 @@ def test_billing_webhook_persists_period_start(supabase_mode, monkeypatch):
 
     row = fake.tables["organizations"][0]
     assert row.get("subscription_id") == "sub_t12"
-    assert row.get("current_period_start") == start, (
+    # The control plane binds an ISO-8601 instant (`update_org_billing`
+    # normalises Stripe's epoch int — #4216), so the stored value is SUB_START.
+    assert row.get("current_period_start") == SUB_START, (
         "the meter window anchor was silently dropped by update_org_billing's "
         "allowed-set filter")
-    assert row.get("current_period_end") == end
+    assert row.get("current_period_end") == SUB_END
 
 
 # ── T13 — not applicable (documented, not implemented) ───────────────────────
@@ -749,8 +751,16 @@ def test_checkout_webhook_writes_both_period_bounds(supabase_mode, monkeypatch):
 
     row = fake.tables["organizations"][0]
     assert row.get("subscription_id") == "sub_4216"
-    assert row.get("current_period_start") == start
-    assert row.get("current_period_end") == end
+    # #4216: the CONTROL PLANE can only bind an ISO-8601 instant — Stripe sends
+    # epoch ints, and `update_org_billing` normalises them at the one seam every
+    # Supabase-lane billing write passes through (PostgREST rejects a bare JSON
+    # number for a `timestamptz`). Mutation caught: dropping that normalisation
+    # (the int is stored / the real PATCH would 400).
+    from datetime import UTC as _UTC
+    assert row.get("current_period_start") == datetime.fromtimestamp(
+        start, tz=_UTC).isoformat()
+    assert row.get("current_period_end") == datetime.fromtimestamp(
+        end, tz=_UTC).isoformat()
 
     # The whole point: the org's window now RESOLVES (no raise), so its ledger
     # rows are addressable and the cap can measure it.
