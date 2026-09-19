@@ -244,10 +244,10 @@ observations.newestKept = hits.has("ip0"); // inserted last
 // and expiry order disagree: an eviction that ignores expiry removes the live keys
 // and leaves the dead ones behind, which the counts below show. One seeded key has a
 // MIXED window, because `every` and `some` agree on single-entry windows — `some`
-// would drop a live history that still counts.
-// of expiry too: the filter keeps only `t > cutoff`, so a timestamp EXACTLY at the
-// cutoff is expired and must be swept — `dead-edge` seeds that boundary, which
-// `<= cutoff` and `< cutoff` disagree on.
+// would drop a live history that still counts. And the boundary is seeded at expiry
+// too: the filter keeps only `t > cutoff`, so a timestamp EXACTLY at the cutoff is
+// expired and must be swept — `dead-edge` is that boundary, which `<= cutoff` and
+// `< cutoff` disagree on.
 hits.clear();
 const expiredAt = T0 - RATE_WINDOW_MS - 1;
 const cap = Math.min(MAX_RATE_KEYS, CAP_CEILING);
@@ -279,6 +279,16 @@ rateLimited("v", T0 + 1);
 rateLimited("newcomer", T0);
 observations.reusedKeySurvived = hits.has("v");
 observations.reusedKeyHistory = (hits.get("v") || []).length;
+
+// 7. The REFUSAL path prunes too: when the limit is reached the function writes the
+// filtered window back before returning true, so the refused address's store holds
+// live entries only. Skipping that write-back keeps the expired timestamps in the
+// store — invisible to a check that only counts how many entries an ALLOWED call
+// stored, which is why the seed here is oversized with one expired entry.
+hits.clear();
+hits.set("r", [expiredAt, ...new Array(limit).fill(T0)]);
+observations.refusalRefuses = rateLimited("r", T0);
+observations.storedAfterRefusal = (hits.get("r") || []).length;
 
 console.log(JSON.stringify(observations));
 """
@@ -331,6 +341,14 @@ def _check_accumulation(observed: dict) -> None:
     assert observed["storedAfterTrip"] == limit, (
         f"after the refusal the stored window must hold {limit} entries, got "
         f"{observed['storedAfterTrip']}"
+    )
+    assert observed["refusalRefuses"] is True, (
+        "a store holding `limit` live entries must refuse the next submission"
+    )
+    assert observed["storedAfterRefusal"] == limit, (
+        "the REFUSAL path must write the pruned window back: the store must hold the "
+        f"{limit} live entries, not the expired timestamp as well — got "
+        f"{observed['storedAfterRefusal']}"
     )
 
 
@@ -507,7 +525,9 @@ def test_a_resubmitting_address_is_not_evicted_by_its_own_call(behaviour: dict) 
 
 
 # These are the escapes from the #2409 pin history plus the ones review found here, as
-# an executable battery: each must be caught by the invariants above. Patterns are
+# an executable battery. Every case is caught by one of the invariants, except where
+# the mutation cannot run at all — noted in its own entry — since a limiter the
+# harness cannot execute is not one it can certify. Patterns are
 # REGEXES with flexible whitespace (`\s*` / `\s+`), so re-indenting or re-wrapping an
 # expression does not break the battery — the harness asserts behaviour, not layout —
 # and each pattern is asserted present, so a mutation that stops applying fails
@@ -569,6 +589,11 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "expired sweep removed",
         r"for \(const \[k, v\] of hits\) \{\s*if \(v\.every\(\(t\) => t <= cutoff\)\) hits\.delete\(k\);\s*\}",
         "",
+    ),
+    (
+        "refusal path skips the pruning write-back",
+        r"if\s*\(recent\.length\s*>=\s*RATE_LIMIT\)\s*\{\s*hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;\s*return\s+true;\s*\}",
+        "if (recent.length >= RATE_LIMIT) { return true; }",
     ),
     (
         "sweep predicate widened to `some`",
