@@ -27,9 +27,34 @@ import argparse
 import ast
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import yaml
+
+
+def _code_digest(code) -> str:
+    """Move-invariant, implementation-complete digest of a code object.
+
+    `co_code` alone is NOT enough: a constant is loaded as `LOAD_CONST <index>`,
+    so two handlers with the same opcode shape but different constants or names
+    hash identically (verified: 98 tools collapsed to 62 digests, and a read
+    tool shared one with a destructive write tool).  `co_firstlineno` is
+    excluded on purpose — a pure code move is not a served change.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(code.co_code)
+    for attr in ("co_names", "co_varnames", "co_freevars", "co_cellvars"):
+        h.update(repr(getattr(code, attr)).encode())
+    for const in code.co_consts:
+        # a nested code object must be recursed, never repr'd (its repr carries
+        # a memory address and is not stable)
+        h.update(_code_digest(const).encode() if isinstance(const, types.CodeType)
+                 else repr(const).encode())
+    return h.hexdigest()[:16]
+
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -326,8 +351,6 @@ def _component_fingerprint(fn) -> str | None:
     the accident and the casual substitution, which is what the gate is for; see the
     threat-surface note in tools/surface-guard.py.
     """
-    import hashlib
-
     code = getattr(fn, "__code__", None)
     if code is None:
         return None
@@ -338,10 +361,7 @@ def _component_fingerprint(fn) -> str | None:
         rel = Path(code.co_filename).resolve().relative_to(ROOT.resolve())
     except Exception:
         rel = Path(code.co_filename).name
-    return (
-        f"{rel}:"
-        f"{hashlib.sha256(code.co_code).hexdigest()[:16]}"
-    )
+    return f"{rel}:{_code_digest(code)}"
 
 
 def cmd_cut(args: argparse.Namespace) -> int:

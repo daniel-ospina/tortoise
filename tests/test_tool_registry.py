@@ -901,11 +901,17 @@ class TestToolIdentity:
 
     def test_ids_are_non_empty_and_unique(self):
         """Every entry carries an immutable, unique id (the rename-free key)."""
+        import dataclasses
+
         from tortoise.tool_registry import TOOL_REGISTRY
         ids = [t.id for t in TOOL_REGISTRY]
         assert all(ids), f"entry with empty id: {[t.name for t in TOOL_REGISTRY if not t.id]}"
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         assert not dupes, f"duplicate ids: {dupes}"
+        # the permission and the id are FIELDS on the entry: a rename keeps both
+        writer = next(t for t in TOOL_REGISTRY if t.writes)
+        renamed = dataclasses.replace(writer, name="tortoise_renamed_probe")
+        assert renamed.writes is True and renamed.id == writer.id
 
     def test_write_names_are_derived_from_the_entries(self):
         """WRITE_TOOL_NAMES is the derivation, not a parallel list."""
@@ -922,12 +928,32 @@ class TestToolIdentity:
         from tool_surface_capabilities import (  # noqa: I001
             quota_gated_wrap_sites, registry_entries_by_method,
         )
+        sites = quota_gated_wrap_sites()
+        assert sites.sites, "wrap-site scan is vacuous"
         by_method = registry_entries_by_method()
-        for method, lineno, _weight in quota_gated_wrap_sites().sites:
+        for method, lineno, _weight in sites.sites:
             for entry in by_method.get(method, []):
                 assert entry.writes, (
                     f"{entry.name} bound to _quota_gated({method})@{lineno} "
                     f"but declared writes=False")
+
+    def test_gate_reads_the_entry_writes_flag(self):
+        """The gate's decision IS the entry's `writes` flag: a writer needs
+        graphs:write, a read tool is satisfied by graphs:read."""
+        from fastmcp.exceptions import AuthorizationError
+
+        from tortoise.mcp_auth import _current_legacy_full_access, _current_scopes
+        from tortoise.mcp_server import _enforce_mcp_tool_scope
+
+        scopes_tok = _current_scopes.set(["graphs:read"])
+        legacy_tok = _current_legacy_full_access.set(False)
+        try:
+            with pytest.raises(AuthorizationError):
+                _enforce_mcp_tool_scope("tortoise_create_point")  # writes=True
+            _enforce_mcp_tool_scope("tortoise_query")             # writes=False
+        finally:
+            _current_scopes.reset(scopes_tok)
+            _current_legacy_full_access.reset(legacy_tok)
 
     def test_unknown_tool_is_denied_not_served_as_read(self):
         """An unresolvable name is fail-closed — never served as a read."""

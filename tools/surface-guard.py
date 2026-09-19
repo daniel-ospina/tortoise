@@ -37,7 +37,32 @@ from __future__ import annotations
 import argparse
 import ast as _ast
 import sys
+import types
 from pathlib import Path
+
+
+def _code_digest(code) -> str:
+    """Move-invariant, implementation-complete digest of a code object.
+
+    `co_code` alone is NOT enough: a constant is loaded as `LOAD_CONST <index>`,
+    so two handlers with the same opcode shape but different constants or names
+    hash identically (verified: 98 tools collapsed to 62 digests, and a read
+    tool shared one with a destructive write tool).  `co_firstlineno` is
+    excluded on purpose — a pure code move is not a served change.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(code.co_code)
+    for attr in ("co_names", "co_varnames", "co_freevars", "co_cellvars"):
+        h.update(repr(getattr(code, attr)).encode())
+    for const in code.co_consts:
+        # a nested code object must be recursed, never repr'd (its repr carries
+        # a memory address and is not stable)
+        h.update(_code_digest(const).encode() if isinstance(const, types.CodeType)
+                 else repr(const).encode())
+    return h.hexdigest()[:16]
+
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -254,8 +279,6 @@ def main(argv: list[str]) -> int:
     # leaving the name set and the entry count identical, so it passed every check above
     # (verified: a live client then invoked the shadow function). Comparing the identity of
     # the component behind each name catches a count-preserving substitution.
-    import hashlib as _hashlib
-
     def _fingerprint(fn) -> str | None:
         """Code-object identity — see the note in tools/surface_manifest.py.
 
@@ -276,10 +299,7 @@ def main(argv: list[str]) -> int:
             rel = Path(code.co_filename).resolve().relative_to(ROOT.resolve())
         except Exception:
             rel = Path(code.co_filename).name
-        return (
-            f"{rel}:"
-            f"{_hashlib.sha256(code.co_code).hexdigest()[:16]}"
-        )
+        return f"{rel}:{_code_digest(code)}"
 
     live_components: dict[str, str] = {}
     for _key, _tool in mcp_server.mcp._local_provider._components.items():

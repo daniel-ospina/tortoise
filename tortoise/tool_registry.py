@@ -26,6 +26,8 @@ class ToolDefinition:
     """One entry per SDK-exposed operation."""
     name: str                    # e.g. "tortoise_create_point"
     id: str                      # immutable stable identity — never reused; `name` may change
+                                 # (no consumer yet: #3883 retired names / the
+                                 # manifest column will key on it)
     description: str             # Docstring for MCP + OpenAPI
     annotations: ToolAnnotations  # readOnlyHint, destructiveHint, idempotentHint
     http_policy: bool            # True = exposed on HTTP surfaces
