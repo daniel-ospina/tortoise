@@ -46,7 +46,7 @@ FALSY: frozenset[str] = frozenset({"0", "false", "no", "off"})
 
 
 def _normalized(raw: object | None) -> str:
-    """`None`/non-str -> the empty string; else strip + casefold."""
+    """`None` -> the empty string; anything else -> `str(raw)` stripped + casefolded."""
     return "" if raw is None else str(raw).strip().lower()
 
 

@@ -92,10 +92,10 @@ _STRING_FIELDS = frozenset(
 def validation_enabled() -> bool:
     """True when ``TORTOISE_VALIDATE_FRONTMATTER`` is set to a truthy spelling.
 
-    Default OFF. #4097: resolved through the declared truthy contract, so
-    ``1``/``true``/``yes``/``on`` (any case) all enable it — previously only the
-    exact string ``"1"`` did, silently ignoring the spellings 
-    ``TORTOISE_SESSION_LLM_MOCK``'s sibling gates accept.
+    Default OFF. #4097: resolved through the declared truthy contract, so ``1``,
+    ``true``/``yes``/``on`` in any case (and with surrounding whitespace) all
+    enable it — previously only the exact string ``"1"`` did, so every other
+    spelling silently did nothing.
     """
     return is_truthy(os.environ.get(TORTOISE_VALIDATE_FRONTMATTER))
 

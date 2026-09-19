@@ -15,17 +15,23 @@ Three things are pinned here:
      #4128, *within its declared scan surface*.
 
 **Declared scan boundary.** The scan covers `tortoise/**/*.py` + `tests/_embedded.py`.
-It does NOT police: V5 presence reads; split comparisons (`raw == "1" or raw ==
-"true"`); a partial vocabulary without `"1"`/`"0"`; `getattr(os.environ, ...)` reads;
-or `tests/` beyond `_embedded.py`, `tools/`, `graph-scripts/`, `apps/` — which already
-carry their own literals (`tests/test_product_rerank.py`, `tests/test_monitoring.py`,
-`tests/test_reaper.py`, `tests/test_eval_ingest_cache.py`, `tests/test_extractor_v2.py`,
+It does NOT police: V5 presence reads; split comparisons (`raw == "1" or raw == "true"`);
+a partial vocabulary with no `"1"`/`"0"` anchor (e.g. `{"true","yes","on"}`);
+`getattr(os.environ, ...)` reads; or `tests/` beyond `_embedded.py`, `tools/`,
+`graph-scripts/`, `apps/` — which already carry their own literals
+(`tests/test_product_rerank.py`, `tests/test_monitoring.py`, `tests/test_reaper.py`,
+`tests/test_eval_ingest_cache.py`, `tests/test_extractor_v2.py`,
 `tests/longmem_eval/test_assembly_arm.py`, `tests/eval/why_suite/test_why_suite_ab.py`,
 `tests/test_email_signup.py`, `apps/graph-viz/server/connection.py`). The claim this
 file supports is "no new divergence **inside the declared surface**", not "anywhere in
 the repo". A JS/TS scan of `website/functions/`, `supabase/functions/`, `client/` and
 `menu-bar/` found no boolean env-truthiness parsing, so there is no cross-language
 duplication to guard.
+
+The scan resolves: module-level string constants as env names, `.strip().lower()`
+chains, one level of `_alias = os.environ.get(NAME)` indirection, a constant on either
+side of the comparison, `environ.get(...)` after `from os import environ`, and both
+`Set`/`Tuple`/`List` and `Dict`-key vocabulary literals.
 
 The migrated-module imports are deliberately resolved **inside** the tests that need
 them, so the pure-AST guard tests below never load the heavy hosted stack.
@@ -135,6 +141,14 @@ def _old_tristate(name: str, default: bool) -> bool:
     return default
 
 
+def _old_env_bool(name: str, default: bool = False) -> bool:
+    """`backup_config._env_bool` exactly as it was before #4097."""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 #: Static label list — parametrizing over LABELS (not over resolver objects) keeps the
 #: heavy module imports out of collection; `_site_spec` resolves one lazily.
 _SITE_LABELS = (
@@ -149,6 +163,8 @@ _SITE_LABELS = (
     "frontmatter_validator.validation_enabled",
     "model_adapters._should_send_json_mode",
     "extractor_v2._classify_later_enabled",
+    "embeddings._embedder_warmup_enabled",
+    "backup_config.env_flag_false_shape",
     "retrieval.ask_env_bool",
     "rerank.rerank_enabled",
     "projection._embedded_aof_enabled",
@@ -220,6 +236,16 @@ def _site_spec(label: str):
     if label == "extractor_v2._classify_later_enabled":
         return ("TORTOISE_CLASSIFY_LATER", extractor_v2._classify_later_enabled,
                 lambda: _old_truthy("TORTOISE_CLASSIFY_LATER"), frozenset())
+    if label == "embeddings._embedder_warmup_enabled":
+        from tortoise.embeddings import _embedder_warmup_enabled
+        return ("TORTOISE_EMBEDDER_WARMUP", _embedder_warmup_enabled,
+                lambda: os.environ.get("TORTOISE_EMBEDDER_WARMUP", "1")
+                .strip().lower() not in ("0", "false", "no", "off"), frozenset())
+    if label == "backup_config.env_flag_false_shape":
+        # `backup_config._env_bool` was deleted in favour of `env_flag(name, False)`;
+        # this pins that the SHAPE reproduces the deleted helper cell-for-cell.
+        return ("TORTOISE_T_BACKUP_BOOL", lambda: env_flag("TORTOISE_T_BACKUP_BOOL", False),
+                lambda: _old_env_bool("TORTOISE_T_BACKUP_BOOL", False), frozenset())
     if label == "retrieval.ask_env_bool":
         return ("TORTOISE_T_ASK_BOOL", lambda: retrieval.ask_env_bool("TORTOISE_T_ASK_BOOL", False),
                 lambda: _old_tristate("TORTOISE_T_ASK_BOOL", False), frozenset())
@@ -267,22 +293,19 @@ def test_migration_only_widens_at_the_declared_cells(monkeypatch, label):
             )
 
 
-def test_embeddings_warmup_migration_is_cell_exact(monkeypatch):
-    """`start_warm_up`'s skip predicate keeps its exact truth table.
+def test_embeddings_warmup_oracle_agrees_with_the_old_skip_predicate(monkeypatch):
+    """`_embedder_warmup_enabled` keeps `start_warm_up`'s exact skip truth table.
 
-    Its shape is inverted (a skip), so the oracle is inverted too: the new resolver must
-    AGREE with the old predicate on every input (no declared widening at all).
+    The skip predicate is the NEGATION of this resolver, so the oracle is inverted: the
+    two must agree on every input (no declared widening at all).
     """
-    from tortoise.embeddings import EmbeddingModel  # noqa: F401  (import-time contract)
-    from tortoise.env_truthy import env_flag
-
-    def _old_skips() -> bool:
-        return os.environ.get("TORTOISE_EMBEDDER_WARMUP", "1").strip().lower() \
-            in ("0", "false", "no", "off")
+    from tortoise.embeddings import _embedder_warmup_enabled
 
     for raw in _MATRIX:
         _set(monkeypatch, "TORTOISE_EMBEDDER_WARMUP", raw)
-        assert (not env_flag("TORTOISE_EMBEDDER_WARMUP", True)) == _old_skips(), raw
+        old_skips = os.environ.get("TORTOISE_EMBEDDER_WARMUP", "1").strip().lower() \
+            in ("0", "false", "no", "off")
+        assert (not _embedder_warmup_enabled()) == old_skips, raw
 
 
 # ── 3. The reaper: a pinned mirror + the purity it exists to protect ────────
@@ -302,11 +325,18 @@ def test_reaper_standalone_import_stays_dependency_free():
     `tortoise/embedded_reaper.py` has no intra-package module-level imports by design, so
     a module-level `from tortoise.env_truthy import ...` would make it import
     `tortoise/__init__.py` -> redislite. That is why the reaper mirrors the vocabulary
-    instead of delegating — and this probe is the measurement, not a delta assertion
-    (a delta vs the `import tortoise` baseline cannot fail: the reaper is already reachable
-    from that baseline).
+    instead of delegating.
+
+    `"tortoise"` is in the blocklist (review catch): this test module imports
+    `tortoise.env_truthy` at the top, so `tortoise.env_truthy` is already in
+    `sys.modules` — without blocking the whole package, a module-level delegate in the
+    reaper would never trigger a fresh import and the probe would pass vacuously. The
+    probe also CALLS the resolver with the guard still active, so a lazy in-function
+    delegate (which loads fine and only fails at call time) reds too — verified against
+    both shapes.
     """
-    blocked = {"redislite", "falkordb", "redis", "httpx", "anyio", "torch", "numpy"}
+    blocked = {"tortoise", "redislite", "falkordb", "redis", "httpx", "anyio",
+               "torch", "numpy"}
     real = builtins.__import__
 
     def _guard(name, *args, **kwargs):
@@ -314,10 +344,14 @@ def test_reaper_standalone_import_stays_dependency_free():
             raise ImportError(f"blocked for the reaper purity probe: {name}")
         return real(name, *args, **kwargs)
 
+    sys.modules.pop("tortoise.env_truthy", None)
+    globals_ = None
     builtins.__import__ = _guard
     try:
-        runpy.run_path(str(REPO_ROOT / "tortoise" / "embedded_reaper.py"),
-                       run_name="reaper_purity_probe")
+        globals_ = runpy.run_path(str(REPO_ROOT / "tortoise" / "embedded_reaper.py"),
+                                 run_name="reaper_purity_probe")
+        assert globals_["_env_truthy"]("1") is True      # module-load AND call-time purity
+        assert globals_["_env_truthy"]("0") is False
     finally:
         builtins.__import__ = real
 
@@ -430,40 +464,69 @@ def _unwrap_chain(node: ast.expr) -> ast.expr:
     return node
 
 
-def _env_var_name(node: ast.expr, constants: dict[str, str]) -> str | None:
+def _env_var_name(node: ast.expr, constants: dict[str, str],
+                  aliases: dict[str, str]) -> str | None:
+    """The env var this expression reads, or None.
+
+    Resolves: `os.environ.get(...)` / `os.getenv(...)` (including a bare `environ`
+    after `from os import environ`), `os.environ[...]`, a module-level STRING
+    constant used as the name, and one level of local indirection
+    (`_r = os.environ.get("X")` -> the compare on `_r`).
+    """
     node = _unwrap_chain(node)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
             and node.func.attr in ("get", "getenv"):
         base = node.func.value
-        is_os = (isinstance(base, ast.Name) and base.id in ("os", "_os")) \
+        is_os = (isinstance(base, ast.Name) and base.id in ("os", "_os", "environ")) \
             or (isinstance(base, ast.Attribute) and base.attr == "environ")
         if is_os and node.args:
             arg = node.args[0]
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 return arg.value
             if isinstance(arg, ast.Name):
-                return constants.get(arg.id, "<dynamic>")
+                return constants.get(arg.id) or aliases.get(arg.id, "<dynamic>")
             return "<dynamic>"
     if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) \
             and node.value.attr == "environ" \
             and isinstance(node.slice, ast.Constant) \
             and isinstance(node.slice.value, str):
         return node.slice.value
+    if isinstance(node, ast.Name) and node.id in aliases:
+        return aliases[node.id]
     return None
 
 
+def _env_aliases(tree: ast.Module, constants: dict[str, str]) -> dict[str, str]:
+    """Local names bound to an env read: `_r = os.environ.get("X")` -> `{"_r": "X"}`.
+
+    One level is enough for the shape a refactor produces (`raw = os.environ.get(...)`
+    then `raw == "1"`); the alias map is built before the compare walk, so a two-step
+    chain is still missed and that residual is declared in the module docstring.
+    """
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            name = _env_var_name(node.value, constants, {})
+            if name and name != "<dynamic>":
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        out.setdefault(target.id, name)
+    return out
+
+
 def _is_vocabulary(values: set[str]) -> bool:
-    """A DECLARED vocabulary literal: >= 2 members, all truthy/falsy spellings, anchored
-    on "1" or "0".
+    """A DECLARED vocabulary literal: anchored on "1" or "0" and carrying >= 2
+    truthy/falsy spellings.
 
     The anchor and the >= 2 rule keep single-element collections such as
-    `dict.get("page", ["1"])[0]` (`tortoise/indexer/github_indexer.py`) and stopword sets
-    ({"on","yes"}) out of the scan.
+    `dict.get("page", ["1"])[0]` (`tortoise/indexer/github_indexer.py`) and stopword
+    sets ({"on","yes"}) out of the scan. A near-vocabulary with a stray extra member
+    (`{"1","true","yes","t"}`) IS flagged — that is a new divergence, not a
+    different thing.
     """
-    if len(values) < 2 or not values <= (TRUTHY | FALSY):
+    if "1" not in values and "0" not in values:
         return False
-    return ("1" in values and bool(values & {"true", "yes", "on"})) \
-        or ("0" in values and bool(values & {"false", "no", "off"}))
+    return len(values & (TRUTHY | FALSY)) >= 2
 
 
 def _scan() -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]]:
@@ -476,23 +539,32 @@ def _scan() -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]]:
             rel = path.relative_to(REPO_ROOT).as_posix()
             tree = ast.parse(path.read_text())
             constants = _module_string_constants(tree)
+            aliases = _env_aliases(tree, constants)
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Set, ast.Tuple, ast.List)):
                     values = {e.value for e in node.elts
                               if isinstance(e, ast.Constant) and isinstance(e.value, str)}
                     if _is_vocabulary(values):
                         literals.append((rel, node.lineno))
+                if isinstance(node, ast.Dict):
+                    keys = {k.value for k in node.keys
+                            if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+                    if _is_vocabulary(keys):
+                        literals.append((rel, node.lineno))
                 if isinstance(node, ast.Compare):
-                    names = {n for n in (_env_var_name(s, constants)
-                                         for s in (node.left, *node.comparators)) if n}
+                    sides = (node.left, *node.comparators)
+                    names = {n for n in (_env_var_name(s, constants, aliases)
+                                         for s in sides) if n}
                     if not names:
                         continue
                     hit = False
                     for op, comparator in zip(node.ops, node.comparators, strict=True):
-                        if isinstance(op, (ast.Eq, ast.NotEq)) \
-                                and isinstance(comparator, ast.Constant) \
-                                and comparator.value in ("1", "0"):
-                            hit = True
+                        if isinstance(op, (ast.Eq, ast.NotEq)):
+                            # a "1"/"0" literal on EITHER side (reversed operands count)
+                            for side in (node.left, comparator):
+                                if isinstance(side, ast.Constant) \
+                                        and side.value in ("1", "0"):
+                                    hit = True
                         if isinstance(op, (ast.In, ast.NotIn)) \
                                 and isinstance(comparator, (ast.Tuple, ast.Set, ast.List)):
                             values = {e.value for e in comparator.elts

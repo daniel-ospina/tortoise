@@ -46,7 +46,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from .env_truthy import FALSY, TRUTHY, env_flag  # #4097: the declared truthy contract
+from .env_truthy import env_flag  # #4097: the declared truthy contract
 
 #: token-count estimator (matches the reader-context alignment invariant):
 #: rough LLM token ≈ whitespace tokens, plus a 10% markup allowance for
@@ -124,24 +124,15 @@ ASK_EVIDENCE_BOOST_ENV = "TORTOISE_ASK_EVIDENCE_BOOST"
 ASK_FUSION_WEIGHTS_ENV = "TORTOISE_ASK_FUSION_WEIGHTS"
 ASK_FUSION_K_ENV = "TORTOISE_ASK_FUSION_K"
 
-#: A1/A3/A5/A6 knob env values: explicit 1/true/yes/on flips True, explicit
-#: 0/false/no/off flips False, anything else (unset OR garbage) falls back
-#: to ``default`` — a typo can never silently flip a knob.
-#:
-#: #4097: these two names are now aliases of the single declared vocabulary in
-#: ``tortoise/env_truthy.py`` (plain assignments, not import-aliases, so ruff's
-#: F401 cannot red them even though only ``env_flag`` uses them now).
-_ASK_TRUTHY = TRUTHY
-_ASK_FALSY = FALSY
-
-
 def ask_env_bool(name: str, default: bool) -> bool:
     """Ask-lane env bool with a caller default (A1/A4/A5/A7 knob parsing).
     Unset/blank/garbage → ``default`` (a typo never flips a knob); explicit
     truthy (1/true/yes/on) → True; explicit falsy (0/false/no/off) → False.
 
-    #4097: delegates to the declared contract (`tortoise.env_truthy.env_flag`);
-    `_ASK_TRUTHY` / `_ASK_FALSY` are kept as aliases of the shared vocabularies.
+    #4097: delegates to the declared contract (`tortoise.env_truthy.env_flag`).
+    The pre-#4097 `_ASK_TRUTHY`/`_ASK_FALSY` locals had no referent anywhere in
+    the tree, so they were deleted rather than kept as dead aliases; the shared
+    vocabularies live in `tortoise/env_truthy.py`.
     """
     return env_flag(name, default)
 
