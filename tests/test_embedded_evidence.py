@@ -296,9 +296,13 @@ class TestCauseClassifierPrecision:
         # `module_fork_exited_absent` was `bool(started) and not exited` over the
         # GLOBAL pid sets, so a stale `exited pid: 42` plus a `started pid: 7` that
         # never exited reported False — wrong per-pid, and the record is read by a
-        # human. It was consumed by nothing (verified), so it is DELETED;
-        # `module_forks_unexited` (the ordered counter) is the canonical hang
-        # signal. This guards against reintroducing a misleading evidence field.
+        # human. It was consumed by nothing (verified), so it is DELETED.
+        # NOTE: `module_forks_unexited` is NOT the hang signal — it samples
+        # end-of-log, so a fork started AFTER the refusal appears in it. The
+        # witness is `module_forks_outstanding_at_refusal` (the same ordered
+        # counter sampled AT each EEXIST refusal line). `unexited` is retained
+        # as evidence only. This guards against reintroducing a misleading
+        # evidence field.
         lines = [
             "1:M 01 Jan 2026 00:00:00.000 * Module fork exited pid: 42",
             "1:M 01 Jan 2026 00:00:00.100 * Module fork started pid: 7",
