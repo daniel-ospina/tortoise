@@ -243,23 +243,31 @@ def _limiter_source(code: str) -> str:
 
 
 DRIVER = r"""
-// The limiter is compiled with `new Function`, i.e. in a scope whose only reachable names
-// are GLOBALS. Nothing below this line — `observations`, `T0`, the address literals, the
-// nonce, the captured emit path — is in its scope chain, so it cannot rewrite the payload
-// it is judged on or read the tag it is judged by. The emit path is captured BEFORE any
-// limiter call for the same reason: rebinding `JSON.stringify` or `console.log` afterwards
-// cannot redirect the report.
+// The limiter is compiled inside a `node:vm` context whose globals are a short list of
+// pure primitives — no `process`, no `require`, no `console`. A lexical trick (capturing
+// `encode`/`emit` first, or `new Function` to drop the scope chain) was not enough: code in
+// the same realm can still patch the SINK the reporter writes through
+// (`process.stdout.write`) or poison `Object.prototype.toJSON`, and then rewrite the payload
+// with the nonce intact. A separate context is the boundary that actually holds — the
+// limiter cannot reach this realm's objects, so the report is built from values it cannot
+// influence. The emit path is still captured BEFORE the first limiter call, for the
+// in-realm rebinding case, and the payload must still be the single nonce-tagged line.
+const vm = require("node:vm");
 const encode = JSON.stringify;
 const emit = console.log.bind(console);
+// The sandbox is EMPTY on purpose. A `vm` context already has its own complete set of
+// ECMAScript intrinsics, and passing this realm's `Object`/`JSON`/`Map` in would hand the
+// limiter this realm's prototypes — enough to poison `Object.prototype.toJSON` and rewrite
+// the report. An empty context also has no `process`, no `require` and no `console`.
+const sandbox = {};
+vm.createContext(sandbox);
 // The constants and the store come OUT of the built limiter rather than being declared
 // twice: the harness reads them from the source under test, so a mutation to any of them
 // is observed instead of being masked by a copy the harness chose itself.
-const buildLimiter = new Function(
-  "src",
-  "return new Function(src + ';\\nreturn { rateLimited, hits, RATE_LIMIT, RATE_WINDOW_MS, " +
-    "MAX_RATE_KEYS };')();",
+const limiter = vm.runInContext(
+  __LIMITER__ + "\n;({ rateLimited, hits, RATE_LIMIT, RATE_WINDOW_MS, MAX_RATE_KEYS });",
+  sandbox,
 );
-const limiter = buildLimiter(__LIMITER__);
 const rateLimited = limiter.rateLimited;
 const hits = limiter.hits;
 const RATE_LIMIT = limiter.RATE_LIMIT;
@@ -635,7 +643,12 @@ def _observe(code: str) -> dict:
         f"limiter that writes its own stdout must not be believed. Nonce {nonce!r}, "
         f"stdout: {result.stdout[-800:]!r}"
     )
-    return json.loads(lines[0][len(nonce) :])
+    observed = json.loads(lines[0][len(nonce) :])
+    assert isinstance(observed, dict), (
+        f"the harness payload must be an object, got {type(observed).__name__}: "
+        f"{observed!r:.200}"
+    )
+    return observed
 
 
 def _check_threshold(observed: dict) -> None:
@@ -1072,8 +1085,10 @@ def _predicate_failures(code: str) -> list[str]:
 
     Both are read rather than sampled, because sampling cannot close either class:
 
-    * the READ PREDICATE must be exactly `t > cutoff` — a whitelist was beaten three times
-      (`t <= now + ...`, a `now`-derived alias, `t <= cutoff + 700000000`);
+    * the READ LINE must be exactly `(hits.get(ip) || []).filter((t) => t > cutoff)` — a
+      whitelist of identifiers was beaten three times (`t <= now + ...`, a `now`-derived
+      alias, `t <= cutoff + 700000000`), and reading only a callback named `t` was beaten
+      by renaming it (`(entry) => entry > cutoff && ...`);
     * the CUTOFF must be exactly `now - RATE_WINDOW_MS` — a scenario cannot close lossy
       coercions, because every one of them is exact on the harness's small clock and moves
       the boundary in a direction that depends on the value (`Math.fround` quantises the
@@ -1095,27 +1110,29 @@ def _predicate_failures(code: str) -> list[str]:
             "negative and locks visitors out permanently; float32 quantises it to ~131 s "
             "at real timestamps)"
         )
-    matches = re.findall(r"\.filter\(\s*\(t\)\s*=>\s*(.+?)\)\s*;", body)
-    if len(matches) != 1:
+    # The read line is matched as a WHOLE, not probed for a `.filter((t) => ...)`. Reading
+    # the callback's text was beaten by renaming its parameter (`(entry) => entry > cutoff
+    # && entry <= now + ...`): the pattern only ever looked at a callback named `t`, so the
+    # live read path was never read at all. One canonical expression, matched end to end,
+    # refuses every other spelling of that line, whatever it renames or adds.
+    reads = re.findall(r"const recent\s*=\s*([^;]+);", body)
+    read_count = len(re.findall(r"\.filter\(", body))
+    if len(reads) != 1 or read_count != 1:
         failures.append(
-            f"expected exactly ONE read-path filter expression, found {len(matches)} — a "
-            "second one (a decoy, or a second read path) would let this check grade the "
-            "wrong expression while the real one decides expiry"
+            "expected exactly ONE read path — one `const recent = ...;` and one "
+            f"`.filter(` — found {len(reads)} and {read_count}: a second one (a decoy, "
+            "or a second read path) would leave the real read unread"
         )
         return failures
-    predicate = matches[0].strip()
-    # EXACTLY `t > cutoff` — not "an expression mentioning cutoff and no extra
-    # identifier", which was beaten three times: `t <= now + ...` (the token `now`), then
-    # `t <= tolerance` (a `now`-derived alias), then `t <= cutoff + 700000000` (a bound
-    # spelled with a literal, so every identifier was still in the whitelist). Requiring
-    # the predicate to BE the comparison refuses every additional clause at once, whatever
-    # it is written with: any second bound is a skew tolerance, and a skew tolerance
-    # discards history that still counts.
-    if not re.fullmatch(r"t\s*>\s*cutoff", predicate):
+    if not re.fullmatch(
+        r"\(hits\.get\(ip\)\s*\|\|\s*\[\]\)\.filter\(\(t\)\s*=>\s*t\s*>\s*cutoff\)",
+        reads[0].strip(),
+    ):
         return [
-            f"read-path predicate is {predicate!r}, not `t > cutoff` — the expiry decision "
-            "must be that comparison alone, so that no additional bound, alias or clock "
-            "read can grant a skew tolerance"
+            f"the read path is {reads[0].strip()!r}, not "
+            "`(hits.get(ip) || []).filter((t) => t > cutoff)` — the expiry decision must "
+            "be exactly that expression, so that no extra clause, alias, renamed parameter "
+            "or coercion can grant a skew tolerance"
         ]
     return failures
 
@@ -1201,12 +1218,12 @@ def test_eviction_stops_when_the_sweep_has_done_the_work(behaviour: dict) -> Non
 # proves nothing about the guard it was added to exercise. Three members, for three
 # reasons: a store that cannot hold the keys fails at runtime; a second store is refused by
 # extraction, which will not pick one when the module offers more than one; and a limiter
-# that forges stdout is refused the run, because the harness will not credit output it did
-# not ask for and cannot attribute.
+# that reaches for `process` does not run at all, because it is compiled in a `vm` context
+# whose globals do not include it — the boundary the payload's integrity rests on.
 MAY_FAIL_TO_RUN: dict[str, str] = {
     "store that cannot hold string keys": "failed to run in node",
     "a factory-local store beside the real one": "expected exactly ONE `const hits`",
-    "the limiter forges its own stdout": "not the single nonce-tagged payload it asked for",
+    "the limiter forges its own stdout": "process is not defined",
 }
 
 MUTATIONS: tuple[tuple[str, str, str], ...] = (
@@ -1329,6 +1346,13 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "the cutoff is coerced into int32",
         r"const cutoff = now - RATE_WINDOW_MS;",
         "const cutoff = (now - RATE_WINDOW_MS) | 0;",
+    ),
+    (
+        "the limiter poisons the payload prototype",
+        r"function rateLimited\(ip: string, now: number\): boolean \{",
+        "function rateLimited(ip: string, now: number): boolean {\n"
+        "  Object.prototype.toJSON = () => '{}';\n"
+        "  return false;",
     ),
     (
         "the cutoff is quantised to float32",
