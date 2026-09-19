@@ -26,12 +26,26 @@ so regex anchoring to declaration patterns is reliable.
 
 #3485 is deliberately NOT pinned by text here. Its read/migrate/store invariants
 (the localStorage-only loop, expired-legacy displacement, corrupt-legacy
-containment, fragment-strip ordering) WERE executed against the real script in
-`website/apps/dashboard/src/supabaseSessionBridge.test.js`; that behavioural
-suite was DELETED with the dashboard adapter in #4054. The script-level
-fragment/store invariants that survive now live in
-tests/test_session_bridge_fragment_retention.py, which executes the retained
-shared bridge under a cookie-cap harness; the dashboard stores no session at all.
+containment, fragment-strip ordering) are EXECUTED against the real script by
+`website/apps/dashboard/src/supabaseSessionBridge.test.js` (behavioural, node:vm).
+The fragment/store invariants are additionally executed by
+tests/test_session_bridge_fragment_retention.py under a cookie-cap harness. The
+dashboard stores no session at all.
+#
+# #4054 CORRECTION: an earlier revision of this note claimed the behavioural suite
+tested the deleted dashboard ADAPTER and was deleted with it. That was FALSE —
+the suite never referenced `main.jsx`; its only fixture was the RETAINED shared
+bridge (`website/assets/supabase-session.js`), which #4054 keeps and still serves
+from premiselabs.co. A retained artifact with no executing test is how it rots,
+so the suite is RESTORED (the file was deleted with the dashboard's COPY of the
+bridge, not with an artifact that went away).
+#
+# Nor is the bridge kept because blog-admin loads it: blog-admin ships its OWN
+# adapter and does not load or import the shared script. It is kept because
+# `tortoise/oauth.py`'s live consent-page client is a faithful inline PORT of its
+# adapter (pinned here), the dashboard's live `tt_claim_pending` marker helpers
+# mirror its host-conditional helpers (pinned here), and it is the subject of the
+# #3503 fragment-retention gate.
 
 ⚠️ THIS MODULE PINS A DESIGN THAT IS BEING RETIRED (#3501). The parent-domain
 cookie is a REVERSAL, not a fallback: it is JavaScript-readable by construction,

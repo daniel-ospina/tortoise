@@ -90,10 +90,14 @@ def _is_server_source(p: Path) -> bool:
 # is the user's agent key (`TORTOISE_API_KEY`), not the dashboard session, and none of
 # these files performs network I/O, so none can be a credential path.
 #
-# This is NOT a blanket escape from the assertion. The exemption is self-guarding: the
-# test asserts every file listed here performs no network I/O, so the moment one gains a
-# `fetch` the gate fails and the exemption must be removed. A new offender anywhere else
-# still fails normally.
+# This is NOT a blanket escape from the assertion. The exemption is guarded by
+# `test_copy_only_exemptions_perform_no_network_io`, which is deliberately UNMARKED (no
+# xfail): it asserts every file listed here performs no network I/O, so the moment one
+# gains a `fetch` the suite turns red and the exemption must be removed. It USED to be a
+# loop inside `test_no_client_holds_a_bearer_token`, which is `xfail(strict=False)` — a
+# non-strict xfail reports the guard's assertion failure as XFAIL, so the run stayed green
+# (appending `fetch("/x")` to harnesses.js yielded `1 xfailed`, exit 0). A guard that
+# cannot fail is not a guard. A new offender anywhere else still fails normally.
 COPY_ONLY_SOURCES = (
     "website/apps/dashboard/src/harnesses.js",
     "website/apps/dashboard/src/harnesses.test.js",
@@ -185,6 +189,22 @@ def test_no_legacy_js_readable_token_anywhere(sources):
     )
 
 
+def test_migrated_surfaces_exist():
+    """Every surface the BFF owns must still exist, so the migration gate cannot pass vacuously.
+
+    `test_migrated_surfaces_do_not_use_supabase_auth_client` records a missing surface as an
+    offender, but it is `xfail(strict=False)`: a deleted or renamed surface makes it fail
+    *as expected*, so the run stays green and the migration gate silently scans nothing.
+    This UNMARKED test makes a vanished surface a hard failure instead.
+    """
+    missing = [rel for rel in MIGRATED_SURFACES if not (REPO / rel).exists()]
+    assert not missing, (
+        "the BFF-owned surfaces below are missing, so the migration gate would pass "
+        "vacuously (a surface that no longer exists cannot be checked for a legacy client):\n"
+        + "\n".join(f"  {rel}" for rel in missing)
+    )
+
+
 @pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_migrated_surfaces_do_not_use_supabase_auth_client():
     """(A) No `supabase.auth` client session in a migrated surface.
@@ -213,6 +233,35 @@ def test_migrated_surfaces_do_not_use_supabase_auth_client():
     )
 
 
+def test_copy_only_exemptions_perform_no_network_io(sources):
+    """The COPY_ONLY_SOURCES exemption must be able to FAIL.
+
+    This test is deliberately UNMARKED. The same assertion used to live inside
+    `test_no_client_holds_a_bearer_token`, which is `xfail(strict=False)` — so a copy-only
+    file gaining a network call made that test fail *as expected* and the suite stayed
+    green. A non-strict xfail turns the guard's failure into XFAIL, and a guard that cannot
+    fail is not a guard (the exact class this PR exists to close).
+
+    Taking `sources` here also pins the module-level non-vacuity assertion (the
+    browser-source scan found >40 files) to a test that cannot be xfailed, so a broken glob
+    can no longer hide behind the xfail markers either.
+    """
+    scanned = {str(p.relative_to(REPO)) for p in sources}
+    for rel in COPY_ONLY_SOURCES:
+        p = REPO / rel
+        assert p.exists(), f"copy-only exemption lists a missing file: {rel}"
+        assert rel in scanned, (
+            f"{rel} is exempt from the Bearer check, but the browser-source scan never "
+            "sees it — a dead exemption leaves the file silently unguarded"
+        )
+        hit = _NETWORK_IO.search(_code(p))
+        assert not hit, (
+            f"{rel} is exempt from the Bearer check as a copy-only module, but it now "
+            f"performs network I/O (`{hit.group(0)}`) — the exemption is no longer safe. "
+            "Migrate the call to the BFF and remove it from COPY_ONLY_SOURCES."
+        )
+
+
 @pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_no_client_holds_a_bearer_token(sources):
     """(A) No browser surface may construct an Authorization header from client state.
@@ -221,18 +270,10 @@ def test_no_client_holds_a_bearer_token(sources):
     holding a token it should not have, or sending a header that will be discarded — both
     indicate the surface was not migrated.
     """
+    # Non-vacuity for the COPY_ONLY exemption lives in the UNMARKED
+    # `test_copy_only_exemptions_perform_no_network_io` — it must not sit inside this
+    # xfail test, where its failure would be swallowed as XFAIL.
     pat = re.compile(r"Bearer\s*\$\{")
-
-    # Non-vacuity: a copy-only exemption is only valid while the file cannot send it.
-    for rel in COPY_ONLY_SOURCES:
-        p = REPO / rel
-        assert p.exists(), f"copy-only exemption lists a missing file: {rel}"
-        hit = _NETWORK_IO.search(_code(p))
-        assert not hit, (
-            f"{rel} is exempt from the Bearer check as a copy-only module, but it now "
-            f"performs network I/O (`{hit.group(0)}`) — the exemption is no longer safe. "
-            "Migrate the call to the BFF and remove it from COPY_ONLY_SOURCES."
-        )
 
     offenders = []
     for p in sources:
