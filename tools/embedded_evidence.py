@@ -72,8 +72,45 @@ FAMILY_REPRODUCERS = (
     "tests/test_hosted_backup.py",
     "tests/test_backup_e2e.py",
 )
-MANDATORY_REPRODUCER = "tests/test_dr_endpoints.py"
+# DERIVED from FAMILY_REPRODUCERS — never a second literal of its first entry.
+# Re-typing the path is how the two could drift (one list edited, the other not).
+MANDATORY_REPRODUCER = FAMILY_REPRODUCERS[0]
+assert MANDATORY_REPRODUCER in FAMILY_REPRODUCERS, (
+    f"mandatory reproducer {MANDATORY_REPRODUCER!r} is not in FAMILY_REPRODUCERS"
+)
 DEFAULT_MARKER = "not track_b and not live"
+
+# ---------------------------------------------------------------------------
+# Run buckets (#3827, P1-B) — the CLOSED vocabulary the runner can emit and every
+# consumer classifies with. ONE canonical definition; the passing set and the red
+# set are DERIVED from it, never re-spelled at each call site.
+#
+# The defect this replaces: `slow-run` appeared in four consumer sites but NO
+# producer could emit it — a bucket treated as a valid pass yet never produced is
+# a silent hole. It was REMOVED rather than wired to a producer: the RED half
+# records no run-duration baseline, so "a passing run that ran long" is not a
+# condition this harness can distinguish from `green`, and inventing a producer
+# would assert a distinction that does not exist here.
+# ---------------------------------------------------------------------------
+BUCKET_IS_PASSING: dict[str, bool] = {
+    "green": True,
+    "unexpected-divergence": False,
+    "timeout-red": False,
+    "selection-red": False,
+}
+BUCKET_NAMES: tuple[str, ...] = tuple(BUCKET_IS_PASSING)
+BUCKETS_PASSING: frozenset[str] = frozenset(
+    b for b, passing in BUCKET_IS_PASSING.items() if passing
+)
+BUCKETS_RED: frozenset[str] = frozenset(BUCKET_NAMES) - BUCKETS_PASSING
+assert set(BUCKET_NAMES) == BUCKETS_PASSING | BUCKETS_RED, (
+    "BUCKETS_PASSING / BUCKETS_RED do not partition the declared buckets: "
+    f"{sorted(set(BUCKET_NAMES) - (BUCKETS_PASSING | BUCKETS_RED))}"
+)
+assert not (BUCKETS_PASSING & BUCKETS_RED), (
+    "a bucket is declared both passing and red: "
+    f"{sorted(BUCKETS_PASSING & BUCKETS_RED)}"
+)
 
 # ---------------------------------------------------------------------------
 # Load bands (D14) — half-open, deterministic at the boundaries.
@@ -115,6 +152,21 @@ def load1() -> float:
 # a matching `Module fork exited pid:` for every `Module fork started pid:`
 # (for the module-fork-hang class).
 # ---------------------------------------------------------------------------
+# The patterns every cause classifier matches. Each literal is declared ONCE and
+# referenced by CAUSE_CLASSES below — a second, string-form copy of the same
+# regex is how a classifier and its own evidence drift (`BGSAVE_RE` /
+# `AOF_REWRITE_RE` were declared here and then re-typed as strings in the specs,
+# so neither compiled object was ever matched against anything).
+_FORK_REFUSAL = r"Can't fork for module:"
+_AOF_START = r"Starting BGREWRITEAOF"
+FORK_REFUSAL_RE = re.compile(_FORK_REFUSAL)
+MODULE_FORK_STARTED_RE = re.compile(r"Module fork started pid:\s*(\d+)")
+MODULE_FORK_EXITED_RE = re.compile(r"Module fork exited pid:\s*(\d+)")
+BGSAVE_ANY_RE = re.compile(r"Background saving")
+BGSAVE_RE = re.compile(r"Background saving (started|terminated)")
+AOF_START_RE = re.compile(_AOF_START)
+AOF_REWRITE_RE = re.compile(rf"({_AOF_START}|Background AOF rewrite (started|finished))")
+
 CAUSE_PRECEDENCE = ("module-fork-hang", "module-fork-eexist", "aof-rewrite-fork", "save-child-slot")
 
 CAUSE_CLASSES: dict[str, dict] = {
@@ -122,9 +174,10 @@ CAUSE_CLASSES: dict[str, dict] = {
     # EEXIST. Discriminator: a `Module fork started pid:` with NO matching
     # `Module fork exited pid:` (the ABSENCE is the proof).
     "module-fork-hang": {
-        "requires_lines": [r"Can't fork for module:"],
+        "requires_lines": [FORK_REFUSAL_RE],
         "requires_absent": [],
         "requires_unexited_fork": True,
+        "requires_fork_refusal": True,
     },
     # EEXIST refusal with NO save/AOF discriminator present.
     #
@@ -143,30 +196,32 @@ CAUSE_CLASSES: dict[str, dict] = {
     # That is a distinct, honestly-labellable fact, so it gets its own name rather
     # than being forced into a neighbour or lost.
     "module-fork-eexist": {
-        "requires_lines": [r"Can't fork for module:"],
-        "requires_absent": [r"Background saving", r"Starting BGREWRITEAOF"],
+        "requires_lines": [FORK_REFUSAL_RE],
+        "requires_absent": [BGSAVE_ANY_RE, AOF_START_RE],
         "requires_unexited_fork": False,
+        "requires_fork_refusal": True,
     },
     # appendonly yes -> a background AOF rewrite child occupies the slot.
     "aof-rewrite-fork": {
-        "requires_lines": [
-            r"(Starting BGREWRITEAOF|Background AOF rewrite (started|finished))",
-        ],
+        "requires_lines": [AOF_REWRITE_RE],
         "requires_absent": [],
         "requires_unexited_fork": False,
+        "requires_fork_refusal": True,
     },
     # The RDB save child (`--save ''` asymmetry) occupies the slot; the refusal
     # line is BYTE-IDENTICAL to module-fork-hang, so the save lines are the
     # discriminator. No stale module fork is required (and none may be present
     # with an unexited pid, else precedence labels it module-fork-hang).
     "save-child-slot": {
-        "requires_lines": [r"Background saving (started|terminated)"],
-        "requires_absent": [r"Starting BGREWRITEAOF"],
+        "requires_lines": [BGSAVE_RE],
+        "requires_absent": [AOF_START_RE],
         "requires_unexited_fork": False,
+        "requires_fork_refusal": True,
     },
     "unattributed": {
         "requires_lines": [], "requires_absent": [],
         "requires_unexited_fork": False,
+        "requires_fork_refusal": False,
     },
 }
 
@@ -190,14 +245,6 @@ assert set(CAUSE_PRECEDENCE) | {"unattributed"} == set(CAUSE_CLASSES), (
     f"{sorted(set(CAUSE_CLASSES) - set(CAUSE_PRECEDENCE) - {'unattributed'})}"
 )
 
-# The refusal line that both save-child-slot and module-fork-hang emit.
-FORK_REFUSAL_RE = re.compile(r"Can't fork for module:")
-MODULE_FORK_STARTED_RE = re.compile(r"Module fork started pid:\s*(\d+)")
-MODULE_FORK_EXITED_RE = re.compile(r"Module fork exited pid:\s*(\d+)")
-BGSAVE_RE = re.compile(r"Background saving (started|terminated)")
-AOF_REWRITE_RE = re.compile(r"(Starting BGREWRITEAOF|Background AOF rewrite (started|finished))")
-
-
 def label_cause(lines: list[str]) -> tuple[str, dict]:
     """Label the red's cause from server-side `redis.log` lines (D10).
 
@@ -220,6 +267,13 @@ def label_cause(lines: list[str]) -> tuple[str, dict]:
             if any(re.search(p, ln) for p in spec["requires_lines"])
         ]
         if not hits:
+            continue
+        if spec.get("requires_fork_refusal") and not FORK_REFUSAL_RE.search(text):
+            # The distinguishing refusal is absent. A save/AOF line on its own is
+            # not evidence that the module fork was refused (P2-F): without this
+            # guard a log containing only `Background saving started` was labelled
+            # `save-child-slot`, attributing a fork cause to evidence that never
+            # mentions a fork.
             continue
         if spec.get("requires_unexited_fork") and not unexited:
             # The refusal came from a save/AOF child, not a stale module child.
@@ -551,6 +605,10 @@ def _run_once(
         bucket = "timeout-red"
     elif not junit.exists():
         bucket = "selection-red"
+    # The producer names buckets by literal; fail closed if one is not declared in
+    # BUCKET_IS_PASSING above, so a consumer's set cannot silently omit it (the
+    # `slow-run` hole, inverted).
+    assert bucket in BUCKET_NAMES, f"undeclared run bucket: {bucket!r}"
     # Cause label from any captured redis.log (best-effort per run).
     cause = None
     evidence: dict = {}
@@ -567,6 +625,7 @@ def _run_once(
     return {
         "run_id": run_id,
         "bucket": bucket,
+        "files": list(files),
         "returncode": rc,
         "step_wall_s": round(wall, 2),
         "observed": counts["observed"],
@@ -578,6 +637,19 @@ def _run_once(
         "cause_evidence": evidence,
         "timed_out": timed_out,
     }
+
+
+def _red_file_list_matches(red_runs: list[dict], files: list[str]) -> bool:
+    """Whether EVERY red run ran the SAME selection file list (F4a).
+
+    Derived from each run's own recorded `files` — never a literal `True`. There
+    is no red whose list can be certified when there is no red at all, and a red
+    run whose recorded list differs from the selection is a real
+    `red-file-list-differs` violation.
+    """
+    return bool(red_runs) and all(
+        list(r.get("files", [])) == list(files) for r in red_runs
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +666,7 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     ok = True
     ok &= conj("runs-empty", bool(rec["runs"]))
     ok &= conj("non-green-bucket",
-               all(r["bucket"] in ("green", "slow-run") for r in rec["runs"]))
+               all(r["bucket"] in BUCKETS_PASSING for r in rec["runs"]))
     ok &= conj("no-test-executed", all(r["executed"] >= 1 for r in rec["runs"]))
     ok &= conj("selection-not-family", rec["selection"]["name"] == "family")
     ok &= conj("reproducer-absent",
@@ -633,7 +705,7 @@ def exit_code(rec: dict) -> int:
     ok, _ = closes_issue(rec)
     if ok:
         return 0
-    if any(r["bucket"] not in ("green", "slow-run") for r in rec["runs"]):
+    if any(r["bucket"] in BUCKETS_RED for r in rec["runs"]):
         return 1
     if rec["verdict"].get("environment_error"):
         return 2
@@ -710,10 +782,12 @@ def _build_record(args: argparse.Namespace) -> dict:
                 capture_output=True, text=True, cwd=str(REPO_ROOT),
             )
 
-    red_run = next((r for r in runs if r["bucket"] not in ("green", "slow-run")), None)
+    red_run = next((r for r in runs if r["bucket"] in BUCKETS_RED), None)
     bands = {r["load"]["band"] for r in runs}
-    green_runs = [r for r in runs if r["bucket"] in ("green", "slow-run")]
-    red_runs = [r for r in runs if r["bucket"] not in ("green", "slow-run")]
+    green_runs = [r for r in runs if r["bucket"] in BUCKETS_PASSING]
+    red_runs = [r for r in runs if r["bucket"] in BUCKETS_RED]
+    # F4a: derived from the red runs' own recorded file lists, never a literal.
+    same_file_list = _red_file_list_matches(red_runs, files)
     red_band = (red_run or runs[-1])["load"]["band"]
     green_band = (green_runs[0]["load"]["band"] if green_runs else red_band)
     cause = red_run["redis_log_cause"] if red_run else None
@@ -793,7 +867,7 @@ def _build_record(args: argparse.Namespace) -> dict:
                 "surface": None,
                 "surface_assertion": None,
             },
-            "same_file_list": True,
+            "same_file_list": same_file_list,
         },
         "verdict": {
             "status": "RED-AT-PINNED-REF" if red_runs else "ALL-GREEN",
