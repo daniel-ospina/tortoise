@@ -1566,12 +1566,68 @@ def test_cursor_entry_is_flat_not_nested(home):
     ``flat_entry`` from the cursor layout) — this REDs."""
     assert install_capture("cursor", home=home).ok
 
+    doc = _cursor_json(home)
+    # Cursor's validator REQUIRES a positive-integer `version` on the
+    # document.  Without it Cursor logs `Invalid user config: Config version
+    # must be a number`, rejects the WHOLE file and loads NO hooks — the
+    # install prints success and captures nothing (verified live, #3819).
+    assert doc.get("version") == 1, doc
     entry = _cursor_entries(home)[0]
     assert isinstance(entry.get("command"), str), entry
     assert "hooks" not in entry, (
         f"a nested matcher group would be rejected by Cursor: {entry}")
     assert "matcher" not in entry, entry
     assert entry.get("type") in (None, "command"), entry
+
+
+def test_cursor_install_writes_the_version_key_cursor_requires(home):
+    """Cursor's `hooks.json` needs a positive-integer `version`; without it the
+    WHOLE file is rejected and no hook fires.  `install` must emit it and
+    `hooks status` must report a MISSING one as blocking drift.
+
+    Mutation: drop the `version` set in `_merge_capture_hooks` — the fresh
+    install has no version and this REDs; drop the version finding in
+    `_settings_findings` — the stale-install half REDs."""
+    assert install_capture("cursor", home=home).ok
+    root = capture_install.cursor_home(home)
+    assert _cursor_json(home)["version"] == 1
+    assert hook_install.detect_install(root, "cursor") == []
+
+    # A file missing `version` (e.g. one an earlier buggy install wrote) is
+    # flagged blocking and repaired by `upgrade`.
+    doc = _cursor_json(home)
+    del doc["version"]
+    (home / ".cursor" / "hooks.json").write_text(json.dumps(doc))
+    findings = hook_install.detect_install(root, "cursor")
+    assert any(f.kind == "settings-invalid-version" and f.blocking
+               for f in findings), findings
+
+    result = hook_install.upgrade_install(root, "cursor")
+    assert result.ok, result.refused
+    assert _cursor_json(home)["version"] == 1
+    assert hook_install.detect_install(root, "cursor") == []
+
+
+def test_cursor_install_refuses_a_nested_session_end_entry(home):
+    """A nested matcher group under a flat event makes Cursor reject the WHOLE
+    file, so the merge must REFUSE rather than append a flat duplicate beside
+    it (the mixed list is the invalid shape).
+
+    Mutation: drop the `_flat_entry_is_harness_valid` guard in
+    `_merge_capture_hooks` — the installer appends beside the nested entry,
+    prints success, and this REDs."""
+    script = home / ".cursor" / "hooks" / capture_install.CURSOR_SCRIPT_NAME
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor" / "hooks.json").write_text(json.dumps({
+        "version": 1,
+        "hooks": {capture_install.CURSOR_EVENT: [{"hooks": [{
+            "type": "command", "command": str(script)}]}]},
+    }))
+
+    res = install_capture("cursor", home=home)
+
+    assert not res.ok, res.actions
+    assert "Cursor" in res.error and "manual" in res.error, res.error
 
 
 def test_cursor_install_honors_cursor_home(tmp_path, monkeypatch):
@@ -2042,6 +2098,37 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
     assert "IDE-ONLY" in r.stdout, r.stdout
     assert "CLOUD" in r.stdout.upper(), r.stdout
     assert "no editor-lifetime session boundary" in r.stdout, r.stdout
+
+
+def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
+    """`tortoise install cursor --uninstall` must NOT route to the read-hook
+    surface (which exits 1 with "has no shell-hook read seam") while the
+    capture hook stays live — Cursor has no read seam, so the honest answer is
+    a note naming what to delete (#3819).
+
+    Mutation: drop the cursor uninstall branch — the command exits 1 with the
+    read-hook refusal and this REDs."""
+    root = tmp_path / "proj"
+    home = tmp_path / "home"
+    root.mkdir()
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CURSOR_HOME": str(home / ".cursor"),
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+    assert _run(("install", "cursor", "--dir", str(root)), env, root).returncode == 0
+
+    r = _run(("install", "cursor", "--uninstall", "--dir", str(root)),
+             env, root)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "capture seam is left in place" in r.stdout, r.stdout
+    assert "tortoise-session-end.sh" in r.stdout, r.stdout
+    # it never inspected/rewrote a cline registration as if it were cursor's
+    assert not (root / ".cline").exists(), r.stdout
 
 
 def test_cli_install_codex_second_run_is_a_no_op(cli):

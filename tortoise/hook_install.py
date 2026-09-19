@@ -1301,11 +1301,47 @@ def _expected_entry(layout: HarnessLayout, spec: HookScriptSpec,
     return f"{command} with timeout {spec.timeout}"
 
 
+def _flat_entry_is_harness_valid(entry: object) -> bool:
+    """True when ``entry`` is a script object Cursor's ``hooks.json``
+    validator ACCEPTS.
+
+    Cursor 3.20.21's validator requires every entry to be a command hook (a
+    string ``command``, ``type`` omitted or ``"command"``) or a prompt hook
+    (``type: "prompt"`` with a non-empty ``prompt``).  ANY other entry makes
+    the validator reject the WHOLE document, so Cursor loads NO hooks at all —
+    which is why a flat merge that appends alongside a nested/malformed entry
+    is a silent no-capture, and why this predicate gates the merge (#3819).
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("type") == "prompt":
+        prompt = entry.get("prompt")
+        return isinstance(prompt, str) and bool(prompt.strip())
+    if entry.get("type") not in (None, "command"):
+        return False
+    return isinstance(entry.get("command"), str)
+
+
 def _settings_findings(layout: HarnessLayout, data: dict,
                        root: str | os.PathLike[str] | None = None,
                        ) -> list[Finding]:
     hooks = data.get("hooks") or {}
     findings: list[Finding] = []
+    if layout.flat_entry:
+        # Cursor's validator REQUIRES a positive-integer `version` on the
+        # document.  Without it Cursor logs `Invalid user config: Config
+        # version must be a number`, rejects the WHOLE file and loads NO hooks
+        # — the install prints success and captures nothing (verified live
+        # against Cursor 3.20.21, #3819).  `upgrade` repairs it.
+        version = data.get("version")
+        if not (isinstance(version, int) and not isinstance(version, bool)
+                and version >= 1):
+            findings.append(Finding(
+                "settings-invalid-version",
+                f'{layout.harness} hooks.json needs a positive integer '
+                f'"version" (found {version!r}) — Cursor rejects the WHOLE '
+                "file without it, so NO hook fires",
+            ))
     for spec in layout.scripts:
         entries = hooks.get(spec.event)
         expected_entry = _expected_entry(layout, spec, root)
@@ -1324,6 +1360,21 @@ def _settings_findings(layout: HarnessLayout, data: dict,
                 script=spec.name, event=spec.event,
             ))
             continue
+        if layout.flat_entry:
+            # A nested matcher group (or any non-command shape) under a flat
+            # event makes Cursor reject the whole file; flag it blocking and
+            # let `upgrade` REFUSE rather than append a flat duplicate beside
+            # it (the mixed list is exactly the invalid shape) (#3819).
+            for entry in entries:
+                if not _flat_entry_is_harness_valid(entry):
+                    findings.append(Finding(
+                        "settings-unreadable-entry",
+                        f"{spec.event} has an entry Cursor cannot parse "
+                        f"({entry!r}) — Cursor rejects the WHOLE file, so no "
+                        "hook fires; fix or remove it manually",
+                        script=spec.name, event=spec.event,
+                    ))
+                    break
         ours = [e for e in entries
                 if _entry_is_ours(e, spec.name, layout.hooks_dir, root,
                                   flat=layout.flat_entry)]
@@ -1635,6 +1686,19 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
     changed.
     """
     changed = False
+    if layout.flat_entry:
+        # Cursor's `hooks.json` REQUIRES a positive-integer `version`; without
+        # it Cursor rejects the WHOLE file and loads no hooks.  Set it when
+        # absent/invalid, never overwrite a user's valid value.
+        version = data.get("version")
+        if not (isinstance(version, int) and not isinstance(version, bool)
+                and version >= 1):
+            data["version"] = 1
+            actions.append(
+                f"settings: set \"version\" to 1 in {layout.harness} "
+                f"hooks.json (was {version!r}; Cursor rejects the whole file "
+                "without a positive integer version)")
+            changed = True
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
@@ -1749,9 +1813,13 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
         result.refused = f"Refusing: {error}"
         return result
     # A malformed event value (e.g. SessionEnd holding an object instead of a
-    # list) must be refused, never silently replaced by an empty list — that
-    # would destroy a user's hooks.
-    if any(f.kind == "unreadable-settings" for f in result.findings_before):
+    # list), or — for a flat (Cursor) layout — an entry the harness's own
+    # validator would reject, must be refused, never silently replaced by an
+    # empty list or merged alongside.  Appending a valid flat entry next to a
+    # nested one still leaves a file Cursor rejects, so the repair path must
+    # refuse it (the manual fix is to remove the bad entry) (#3819).
+    if any(f.kind in ("unreadable-settings", "settings-unreadable-entry")
+           for f in result.findings_before):
         result.refused = (
             "Refusing: the settings file has a malformed hooks entry — fix "
             "it manually, then re-run"

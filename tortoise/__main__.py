@@ -2496,6 +2496,17 @@ def _cmd_install_hooks(args) -> int:
               "tortoise-capture.ts) is left in place; delete that file to "
               "uninstall it.")
         return 0
+    # `cursor` has no shell-hook read seam either: routing `--uninstall` to
+    # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
+    # HOME-scoped capture hook stayed live — the opposite of what a user
+    # asking to uninstall capture concluded (#3819).
+    if uninstall and harness == "cursor":
+        print("cursor has no shell-hook read seam — nothing for --uninstall to "
+              "remove. The capture seam is left in place: delete "
+              "${CURSOR_HOME:-~/.cursor}/hooks/tortoise-session-end.sh and its "
+              "sessionEnd entry in ${CURSOR_HOME:-~/.cursor}/hooks.json to "
+              "uninstall capture.")
+        return 0
     # `--list` / no harness prints the catalogue.
     if listing or uninstall:
         rc = _install_read_hook(args)

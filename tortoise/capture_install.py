@@ -640,6 +640,15 @@ def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
     Raises :class:`ValueError` for a shape that cannot be merged safely.
     """
     root_path = Path(root)
+    if flat:
+        # Cursor's `hooks.json` REQUIRES a positive-integer `version`; without
+        # it Cursor rejects the WHOLE file and loads NO hooks (verified live:
+        # Cursor 3.20.21 logs `Invalid user config: Config version must be a
+        # number`).  Set it when absent/invalid; never overwrite a valid value.
+        version = data.get("version")
+        if not (isinstance(version, int) and not isinstance(version, bool)
+                and version >= 1):
+            data["version"] = 1
     hooks = data.get("hooks")
     if hooks is None:
         hooks = {}
@@ -652,6 +661,18 @@ def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
         hooks[event] = entries
     if not isinstance(entries, list):
         raise ValueError(f'"{event}" entries are not a list')
+    if flat:
+        # Cursor's validator rejects the WHOLE document on any entry that is
+        # not a command/prompt hook.  Appending our flat entry beside a nested
+        # matcher group (or any other malformed entry) would leave a file
+        # Cursor refuses to load — so refuse loudly instead, and never claim a
+        # successful install over a broken file (#3819).
+        for entry in entries:
+            if not hook_install._flat_entry_is_harness_valid(entry):
+                raise ValueError(
+                    f'a "{event}" entry is not a Cursor script object '
+                    f"({entry!r}) — Cursor rejects the whole file and loads no "
+                    "hooks; fix or remove that entry manually")
     registered: list[dict] = []
     for entry in entries:
         registered.extend(hook_install._entry_command_dicts(
