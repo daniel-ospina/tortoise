@@ -324,6 +324,95 @@ def test_long_turn_and_coerced_content_still_store_the_encoded_text(
     assert np.allclose(emb1, embedder.encode([stored1])[0], atol=1e-6)
 
 
+def test_recapture_with_changed_content_and_no_embedder_clears_the_stale_vector(
+        sdk, embedder, monkeypatch):
+    """A stale vector must NEVER survive a changed re-capture.
+
+    The P1 this pins: capture with a healthy embedder, then re-capture the same
+    deterministic id with DIFFERENT content and no embedder. A guard that
+    simply preserved ``t.embedding`` on ``$emb = NULL`` would leave the node
+    carrying the OLD text's vector — the dense leg would then rank the turn by
+    text no longer on it, the "mismatched vector runs and returns garbage"
+    trap. The write clears it instead.
+    """
+    _keyless(monkeypatch)
+    sdk.capture_session(
+        [{"role": "user", "content": "ORIGINAL alpha text"}],
+        session_id="sess-4194-stale")
+    before = _turn_rows(sdk, "sess-4194-stale")
+    assert before and before[0][2] is not None, before
+
+    monkeypatch.setattr(
+        EmbeddingModel, "get",
+        classmethod(lambda cls, load_timeout=None: None))
+    EmbeddingModel._reset()
+    sdk.capture_session(
+        [{"role": "user", "content": "COMPLETELY DIFFERENT beta text"}],
+        session_id="sess-4194-stale")
+
+    after = _turn_rows(sdk, "sess-4194-stale")
+    assert after[0][1] == "[user] COMPLETELY DIFFERENT beta text"
+    assert after[0][2] is None, (
+        "a stale vector survived a changed re-capture — the dense leg would "
+        "rank this turn by text no longer on the node")
+
+
+def test_rebuild_recomputes_the_turn_embedding(tmp_path, embedder, monkeypatch):
+    """live == rebuild for the new field.
+
+    The journal deliberately omits ``embedding`` and
+    ``projection/entities._upsert_point_props`` recomputes it from ``content``
+    on replay — so a rebuilt turn Point must still carry the (same) vector.
+    Without this, a rebuild could silently drop the field the whole fix is
+    about, exactly the #3947 class.
+    """
+    _keyless(monkeypatch)
+    from tortoise.log import EventLog
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
+    try:
+        s.capture_session(CONV, session_id="sess-4194-rebuild")
+        before = _turn_rows(s, "sess-4194-rebuild")
+        assert before and all(r[2] is not None for r in before), before
+
+        s._get_proj().rebuild(EventLog(log_path))
+
+        after = _turn_rows(s, "sess-4194-rebuild")
+        assert [r[0] for r in after] == [r[0] for r in before]
+        for (bid, _bc, bvec), (aid, _ac, avec) in zip(before, after,
+                                                      strict=True):
+            assert aid == bid
+            assert avec is not None, (
+                f"{aid}: the rebuilt turn lost its embedding")
+            assert np.allclose(bvec, avec, atol=1e-6), aid
+    finally:
+        s.close()
+
+
+def test_wrong_length_model_output_degrades_to_no_vector(monkeypatch, embedder):
+    """The dimension guard is ENFORCED, not assumed (#4194).
+
+    A model returning a vector whose width is not :data:`EMBEDDING_DIM` must
+    degrade to ``None`` (turn stored, leg impaired) rather than hand a
+    wrong-space vector to ``vecf32`` — the exact "runs and returns garbage"
+    failure.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM, compute_embeddings
+
+    assert len(embedder.encode(["x"])[0]) == EMBEDDING_DIM
+
+    class _WrongDim:
+        def encode(self, texts, batch_size=32, show_progress_bar=False):
+            return np.zeros((len(texts), EMBEDDING_DIM - 1))
+
+    monkeypatch.setattr(
+        EmbeddingModel, "get",
+        classmethod(lambda cls, load_timeout=None: _WrongDim()))
+    EmbeddingModel._reset()
+    assert compute_embeddings(["a", "b"]) == [None, None]
+    assert compute_embedding("a") is None
+
+
 # ── 4. The hosted write path is the same write ────────────────────────────
 
 def test_hosted_capture_embeds_turn_points(client, monkeypatch, embedder):

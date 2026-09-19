@@ -412,9 +412,13 @@ surfaces:
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
   # #4194: captured turn Points must carry the embedding the dense leg
-  # searches. Registered here because a tortoise/sdk.py-only change falls to
-  # `core` (no SOURCE_PATTERNS match); dual-registered with `api` (the hosted
-  # copy of the loop) and `eval` (tortoise/embeddings.py).
+  # searches. Registered here because this file pins the unpatterned engine
+  # module `tortoise/search_engine.py` (run_vector_query /
+  # declared_degraded_read), which matches no SOURCE_PATTERNS entry and so
+  # falls to the `core` fallback. Dual-registered with `api` (the hosted copy of
+  # the loop in `tortoise/hosted_api.py`) and `eval`
+  # (`tortoise/embeddings.py`). Note `tortoise/sdk.py` is a SHARED_MODULE, so an
+  # sdk.py-only change already runs the full matrix.
   - test_turn_embedding_write_path_4194.py
   - test_capture_session_supersession_e2e.py
   - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api

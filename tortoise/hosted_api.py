@@ -103,7 +103,7 @@ from tortoise.sdk import (
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
-    _capture_turn_embeddings,  # #4194: local-embedder batch for stored turn Points
+    _capture_turn_embedding_plan,  # #4194: per-turn prior-hash + local-embedder batch
     _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
@@ -8606,23 +8606,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 exc_info=True)
             prior_turn_count = 0
 
-    # #4194: embed the whole window in ONE local-model call BEFORE the loop —
-    # the stored text of each turn, exactly as the loop writes it. Batched so
-    # the added work on this already-hot synchronous path (#3086 measures
-    # ~4.75 s for a 500-turn capture) is one model call rather than one per
-    # turn. Same local embedder (and same vector) `create_point` stores, and
-    # the same one the read path encodes a query with. Fail-soft: `None` per
-    # turn when no embedder is available — the turn is still stored and the
-    # read path declares its vector leg impaired.
     #
-    # #4194/#3086: the encode runs OFF the event loop on the capture pool. The
-    # turn loop itself is a tracked on-loop residual (#3086); a local-model
-    # encode over a whole capture window must not add to it. SDK
+    # #4194: embed the turns that need it BEFORE the loop (new / content-
+    # changed / no stored vector), in ONE local-model call, using the same
+    # embedder `create_point` stores from and the read path encodes queries
+    # with. Fail-soft: `None` per turn when no embedder is available — the
+    # turn is still stored and the read path declares its vector leg impaired.
+    #
+    # #4194/#3086: the pre-read + encode run OFF the event loop on the capture
+    # pool. The turn loop itself is a tracked on-loop residual (#3086); the
+    # local-model encode over a capture window must not add to it. SDK
     # `capture_session` is synchronous (there is no loop to free) and calls the
     # same helper inline — the two share the helper, not the scheduling.
     _turn_texts = _capture_turn_texts(windowed)
-    _turn_embs = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts)
+    _turn_prior_hashes, _turn_embs = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _capture_turn_embedding_plan,
+        proj, session_id, _turn_texts)
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         # P1 #1529 (D10, #721 parity): the stored text (and its isinstance-first
@@ -8643,6 +8642,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         turn_id = f"{session_id}_t{i}"
         turn_text = _turn_texts[i]
         turn_embedding = _turn_embs[i]
+        turn_prior_hash = _turn_prior_hashes[i]
         _turn_rows = proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
@@ -8651,17 +8651,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
             "    t.updatedAt=$now, t.content_hash=$ch, "
-            # #4194: CASE-guarded so a RE-capture without an embedder
-            # preserves an already-stored vector instead of nulling it
-            # (`vecf32(null)` would REMOVE the property). The same guard
-            # `_upsert_point_props` uses, so live == rebuild.
-            "    t.embedding=CASE WHEN $emb IS NOT NULL "
-            "        THEN vecf32($emb) ELSE t.embedding END "
+            # #4194: three-way guard. New vector if we encoded one; else
+            # PRESERVE the stored vector only when the content is UNCHANGED
+            # (`$prior_ch = $ch`, read pre-write — never `t.content_hash`,
+            # which this same SET reassigns); else CLEAR it, because a
+            # preserved vector for changed text would rank the turn by text no
+            # longer on the node (the dense-leg lie).
+            "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
+            "        WHEN $prior_ch = $ch THEN t.embedding ELSE NULL END "
             "RETURN t.createdAt AS createdAt, t.status AS status",
             params={"id": turn_id, "c": turn_text, "k": "event",
                     "speaker": role, "s": "draft", "now": now,
                     "ch": _content_hash(turn_text),
-                    "emb": turn_embedding},
+                    "emb": turn_embedding,
+                    "prior_ch": turn_prior_hash},
         ).result_set
         # #3947 review (F4 + parity): the write's COALESCE owns the stored
         # timestamp and status — a RE-capture keeps the original createdAt and
@@ -9140,15 +9143,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # after the capture). Tracked on the Session node.
     try:
         from .session_link import link_session_entities
-        # The same stored-window text the turn loop wrote (byte-identical
-        # content) drives the link trigger — link what is actually stored.
-        link_texts = []
-        for _, turn in enumerate(windowed):
-            role = _normalize_turn_role(turn.get("role"))
-            raw_content = turn.get("content", "")
-            content = raw_content if isinstance(raw_content, str) else (
-                "" if raw_content is None else str(raw_content))
-            link_texts.append(f"[{role}] {content[:5000]}")
+        # #4194: the shared `_capture_turn_texts` is the ONE stored-text
+        # definition — the link trigger, the stored turn, and the embedded text
+        # cannot drift (#1532 D1/D2).
+        link_texts = _capture_turn_texts(windowed)
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"
