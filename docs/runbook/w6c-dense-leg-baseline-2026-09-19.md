@@ -68,8 +68,8 @@ I therefore report both, and they must not be confused:
 
 ### Census — does a turn stored through the REAL capture path now carry an embedding?
 
-Read-only, on a **copy** of the real store (`~/.tortoise/tortoise.db` → `/tmp/w6c/copy/tortoise.db`;
-the original was never written — mtime still `19 Sep 10:02`). A capture was then run through
+Read-only, on a **copy** of the real store (`~/.tortoise/tortoise.db` → `/tmp/w6c/copy/tortoise.db`).
+A capture was then run through
 `TortoiseSDK.capture_session` with the branch's code (3 turns, extraction mocked locally —
 `TORTOISE_SESSION_LLM_MOCK=1` — so **no LLM spend**).
 
@@ -225,7 +225,11 @@ will be misread as "the leg is broken".
   (extraction mocked locally).
 * **No product behaviour changed.** Read-only on copies for the census; the instrument's legs,
   thresholds, fixture, reader pin and pre-registered rule were **not** touched.
-* **Real store copied, never written.**
+* **Real store copied, never written.** Verified by CONTENT, not by mtime: the real store still
+  reports **55 `Point` / 1538 `Session`** (identical to the recorded M1 census) and **0** W6C points,
+  after the whole job. ⚠️ Its file **mtime does move** (opening the embedded store rewrites the file
+  on open/close — reproduced with a pure read), so an mtime change is **not** evidence of a write;
+  graph content is.
 
 ## What I could NOT verify
 
