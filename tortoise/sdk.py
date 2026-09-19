@@ -6169,10 +6169,19 @@ class TortoiseSDK:
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
         # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
+        # #3689: the positional payload is the :GraphEvent contract
+        # (docs/event-catalog.md — id/bias/precision/consistency/directness),
+        # so it is kept verbatim. `id=` + the annotator_* extras are REQUIRED
+        # for the JSONL branch: without them `_emit_event`'s
+        # `point is None and id is None` early-return dropped the record from
+        # the rebuild journal entirely, so rebuild_all erased the annotation
+        # silently (the #3299 class). Same payload+id shape as PointRetracted.
         self._emit_event("OperatorAnnotated", {
             "id": id, "bias": bias, "precision": precision,
             "consistency": consistency, "directness": directness,
-        })
+        }, id=id,
+            annotator_bias=bias, annotator_precision=precision,
+            annotator_consistency=consistency, annotator_directness=directness)
         return self.update_point(id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)

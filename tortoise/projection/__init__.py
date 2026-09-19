@@ -1036,7 +1036,10 @@ def _journal_append_product(graph_name: str) -> None:
 
 
 # ── Mixins ────────────────────────────────────────────────────────────────
-from tortoise.projection.entities import _EntityHandlers  # noqa: E402, I001
+from tortoise.projection.entities import (  # noqa: E402, I001
+    _EntityHandlers,
+    _is_persistable_prop_value,
+)
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
 from tortoise.projection.propagation import _PropagationMixin  # noqa: E402
@@ -1097,6 +1100,114 @@ def _norm(ev: dict) -> dict:
     if isinstance(ev.get("point"), dict):
         return {**ev, **ev["point"]}
     return ev
+
+
+# #3689: the four epistemic dims ``annotate_operator`` writes onto an Operator
+# Point. The SDK journals them under their NODE-property names
+# (``annotator_*``) as ``OperatorAnnotated`` / ``PointRevised`` extras; the
+# ``OperatorAnnotated`` :GraphEvent payload (docs/event-catalog.md) uses the
+# SHORT names (``bias``/``precision``/…), so a raw producer journaling the
+# documented payload shape is accepted too. The projection folded NEITHER
+# before #3689 — so a wipe+replay erased the annotation with NO warning
+# (the #3299 class: a live mutation with no effective journal fold).
+#
+# SCOPE (#2946): this is deliberately the ANNOTATOR subset, not the general
+# "PointRevised extras dropped on replay" class (#2946/#2795 own that design:
+# the handled-key semantics of `confidence`/`status`, the tags/TAGGED edge
+# ordering across pass 2, and a shared skip-set for this module-level fold).
+_ANNOTATOR_PROPS: tuple[str, ...] = (
+    "annotator_bias",
+    "annotator_precision",
+    "annotator_consistency",
+    "annotator_directness",
+)
+_ANNOTATOR_SHORT_ALIASES: dict[str, str] = {
+    "bias": "annotator_bias",
+    "precision": "annotator_precision",
+    "consistency": "annotator_consistency",
+    "directness": "annotator_directness",
+}
+
+
+def _annotator_value_ok(val) -> bool:
+    """True when a journaled annotator dim can be written to FalkorDB.
+
+    Shape rule first, so this stays in lockstep with the shared #2894/#2795
+    writer (``_is_persistable_prop_value``): maps/bytes/sets and over-deep
+    arrays are rejected there. On top of that, two classes are rejected at
+    PARAMETER PARSE even though they round-trip through JSONL — a non-finite
+    float (NaN/±Inf; ``1e400`` → ``inf``) and a string carrying NUL or a
+    lone surrogates (review P1). A rejection here lands in rebuild pass-1b
+    AFTER the wipe, so a malformed record must degrade to a DROPPED dim,
+    never an aborted recovery.
+
+    ``None`` is KEPT: a live ``update_point(x=None)`` clears the property,
+    and replay must match by clearing it too — dropping the key would leave
+    the prior value in place (a live/replay parity break).
+    """
+    if val is None:
+        return True
+    if not _is_persistable_prop_value(val):
+        return False
+    if isinstance(val, float):
+        return math.isfinite(val)
+    if isinstance(val, str):
+        if "\x00" in val:
+            return False
+        try:
+            val.encode("utf-8")
+        except UnicodeEncodeError:
+            return False  # lone surrogate (driver rejects at encode)
+        return True
+    if isinstance(val, (list, tuple)):
+        return all(_annotator_value_ok(x) for x in val)
+    return True
+
+
+def _writable_id(val) -> bool:
+    """True when ``val`` is a str FalkorDB can take as a query parameter.
+
+    The ``id`` rides as a Cypher parameter exactly like a dim value, so it
+    needs the SAME NUL/lone-surrogate gate — otherwise a corrupt journal line
+    with such an id aborts ``rebuild_all`` after the wipe (review P1; the
+    pre-existing PointRevised fold had the same latent hole).
+    """
+    return isinstance(val, str) and _annotator_value_ok(val)
+
+
+def _annotator_dims(ev: dict, *, aliases: bool = False) -> dict:
+    """Annotator dims PRESENT on a journal record, under their node-prop names.
+
+    Presence-conditional (#3689): only keys the record actually carries are
+    returned, so a partial ``update_point(annotator_bias=…)`` never clobbers
+    the sibling dims it did not write. Canonical (long) names always win.
+
+    ``aliases`` (default False) admits the :GraphEvent SHORT payload names
+    (``bias``/``precision``/…) as aliases — and MUST be True only for an
+    ``OperatorAnnotated`` record, whose documented payload uses them.
+    ``update_point`` journals a ``PointRevised`` with the caller's props
+    VERBATIM (``SET n += $props``), so a node prop literally named
+    ``precision`` is exactly the ``precision`` property — treating it as
+    ``annotator_precision`` would rename it on replay and silently clobber a
+    real annotator dim (and the retrieval ordering that reads it; review P1).
+    """
+    # #2894/#2795 + review P1: a journal record can carry a value FalkorDB
+    # cannot take (map/bytes/set, an array containing one, or a non-finite
+    # float). The rejection lands in rebuild pass-1b — AFTER the wipe, on the
+    # recovery path — so drop the dim here instead of aborting the rebuild
+    # (the shared PointAdded writer drops the whole prop the same way).
+    def _ok(val) -> bool:
+        return _annotator_value_ok(val)
+
+    dims: dict = {}
+    for key in _ANNOTATOR_PROPS:
+        if key in ev and _ok(ev[key]):
+            dims[key] = ev[key]
+    if aliases:
+        for short, key in _ANNOTATOR_SHORT_ALIASES.items():
+            if short in ev and key not in dims and _ok(ev[short]):
+                dims[key] = ev[short]
+    return dims
 
 
 # Recognized journal record types the projection folds NOWHERE — audit-only
@@ -1171,13 +1282,26 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
     elif t == "PointRevised":
         # #331 (review r4): str-only lookup — dict.get(unhashable) raises.
         rid = ev.get("id")
-        p = points.get(rid) if isinstance(rid, str) else None
+        p = points.get(rid) if _writable_id(rid) else None
         if p:
             if ev.get("new_content") is not None:
                 p["content"] = ev["new_content"]
             # Phase 1: discard new_context for v2+ events (#49)
             if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
+            # #3689: fold the annotator dims carried as PointRevised extras
+            # (update_point's emit), canonical names only. Presence-
+            # conditional — never clobber a sibling dim the revision did not
+            # carry.
+            p.update(_annotator_dims(ev))
+    elif t == "OperatorAnnotated":
+        # #3689: the explicit annotation record — parity with apply() /
+        # rebuild_all pass-1b. A plain property write on the operator's
+        # ``{id: point}`` entry. Short payload aliases ARE admitted here.
+        rid = ev.get("id")
+        p = points.get(rid) if _writable_id(rid) else None
+        if p:
+            p.update(_annotator_dims(ev, aliases=True))
     elif t == "PointRetracted":
         # #689: tombstone instead of hard delete — retracted content stays
         # recoverable via raw graph queries. Historical data loss prior to
@@ -1921,6 +2045,14 @@ class FalkorProjection(
             if ev.get("projection_version", 0) >= 2:
                 ev.pop("new_context", None)
             self._revise_point(ev, set_updated_at=True)
+        elif t == "OperatorAnnotated":
+            # #3689: fold the explicit annotation record. Inline (a
+            # non-terminalizing property SET — parity with the PointRevised
+            # branch directly above); the dims have no edge/graph-shape
+            # effect, so no deferred sweep is needed. No return: keep
+            # ``apply()``'s declared ``-> None`` contract (the fold-miss
+            # signal is consumed by rebuild_all pass-1b).
+            self._apply_annotator(ev)
         elif t == "PointRetracted":
             rid = ev.get("id")
             if isinstance(rid, str):
@@ -2498,10 +2630,50 @@ class FalkorProjection(
                 # #2488: revise stamps updatedAt inline (the fold below) — a
                 # same-id revise later than an invalidate is the newer writer
                 # (the sweep skip_updated_at gate source).
+                rid = ev.get("id")
+                if isinstance(rid, str):
+                    max_inline_seq[rid] = seq
+                # #3689 review P1: a PRE-recreation revise's annotator dims
+                # died with the deleted incarnation live — fold them only when
+                # the revision postdates the id's last hoisted creation (the
+                # #2488 survivor anchor). Without this gate the pass-1a hoist
+                # leaks the dead incarnation's dims onto the re-created node,
+                # diverging from the chronological apply()/fold() (#330).
+                anchor = (
+                    last_recreate_seq.get(rid)
+                    if isinstance(rid, str) else None)
+                self._revise_point(
+                    ev, set_updated_at=True,
+                    skip_annotator_dims=(anchor is not None and seq <= anchor))
+            elif t == "OperatorAnnotated":
+                # #3689 pass-1b rebuild parity: apply() folds the explicit
+                # annotation record, and the rebuild chain needs the SAME
+                # branch — without it a journaled OperatorAnnotated falls to
+                # the unrecognized-type warning AND its dims are lost whenever
+                # it is the only carrier (a raw producer, or a PointRevised
+                # pruned from the journal).
+                #
+                # #3689 review P1: pass-1a hoists EVERY creation before this
+                # loop, so an annotation that predates the id's last creation
+                # would otherwise fold onto the re-created incarnation — its
+                # subject died with the deleted node live. Gate on the SAME
+                # #2488 survivor anchor the EntityMutated delete one branch
+                # above uses (isinstance-guarded id, matching shape).
                 if isinstance(ev.get("id"), str):
-                    max_inline_seq[ev["id"]] = seq
-                # set_updated_at parity with apply() (#330)
-                self._revise_point(ev, set_updated_at=True)
+                    anchor = last_recreate_seq.get(ev["id"])
+                    if anchor is not None and seq <= anchor:
+                        continue
+                if self._apply_annotator(ev) == 0:
+                    # #3689: the defect was SILENT loss — an annotation that
+                    # cannot be folded must be audible, mirroring the
+                    # EntityMutated / PointSuperseded / PointInvalidated
+                    # fold-miss warnings.
+                    logger.warning(
+                        "rebuild: OperatorAnnotated fold matched no Point "
+                        "(event_id=%s id=%r) — operator not re-created by "
+                        "any journaled event, or the record carried no "
+                        "annotator dim",
+                        ev.get("event_id"), ev.get("id"))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
             elif t == "SubjectAdded":
@@ -3798,17 +3970,62 @@ class FalkorProjection(
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def _revise_point(self, ev: dict, set_updated_at: bool = False) -> None:
-        """Apply PointRevised event — update content, context, and re-compute embedding."""
+    def _apply_annotator(self, ev: dict) -> int:
+        """Replay an ``OperatorAnnotated`` record (#3689) — SET the dims it
+        carries onto the operator Point.
+
+        The durable counterpart of ``annotate_operator``'s live
+        ``update_point`` write. A non-terminalizing property write, so it
+        folds INLINE (parity with the ``PointRevised`` branch; the
+        ``last_recreate_seq`` survivor rule governs terminalizing folds
+        only). The dims have no edge/graph-shape effect, so pass 2 cannot
+        clobber them. Returns the matched node count (1 when the operator
+        exists; 0 = unwritable/absent id, no dim present, or the Point is
+        absent) — the fold-miss signal, mirroring ``_fold_entity_mutation``.
+        """
+        pid = ev.get("id")
+        if not _writable_id(pid):
+            return 0
+        dims = _annotator_dims(ev, aliases=True)
+        if not dims:
+            return 0
+        set_clauses = [f"n.{key} = ${key}" for key in dims]
+        res = self.g.query(
+            f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)} "
+            f"RETURN n.id",
+            params={"id": pid, **dims},
+        )
+        return len(res.result_set or [])
+
+    def _revise_point(self, ev: dict, set_updated_at: bool = False,
+                      skip_annotator_dims: bool = False) -> None:
+        """Apply PointRevised event — update content, context, and re-compute embedding.
+
+        ``skip_annotator_dims`` (#3689): suppress ONLY the annotator-dim
+        fold. ``rebuild_all`` sets it for a revision that predates the id's
+        last hoisted creation (the dead incarnation's dims must not leak onto
+        the re-created node); chronological callers (``apply()``) leave it
+        False. Content/embedding replay is unaffected.
+        """
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")  # noqa: F841
         # #331 (review r3): NO event_id fallback — parity with _apply_one
         # (fold is the single source of truth, module contract).
         # #331 (review r4): str-only ids.
         pid = ev.get("id")
-        if not isinstance(pid, str):
-            # Malformed PointRevised — skip rather than crash (issue #325)
+        if not _writable_id(pid):
+            # Malformed PointRevised (non-str, or a NUL/lone-surrogate str the
+            # engine/driver reject as a param) — skip rather than crash a
+            # rebuild after the wipe (issue #325; #3689 review P1).
             return
+        if new_content is not None and not _annotator_value_ok(new_content):
+            # A content value FalkorDB cannot take as a parameter (NUL/lone-
+            # surrogate str, map, non-finite float, ...). Drop the content
+            # EDIT — `coalesce($c, n.content)` then keeps the stored content —
+            # but STILL fold the annotator dims below. Aborting here would
+            # strand the rebuilt graph after the wipe and block every retry
+            # (#3689 review P1; same parameter-writability class as the dims).
+            new_content = None
         params: dict = {"id": pid, "c": new_content}
 
         # Re-compute embedding when content changes (even to empty — wipe stale).
@@ -3845,6 +4062,16 @@ class FalkorProjection(
         if set_updated_at:
             set_clauses.append("n.updatedAt = $now")
             params["now"] = _now_iso()
+        # #3689: fold the annotator dims carried as PointRevised extras
+        # (update_point's emit) — apply()/rebuild previously dropped them, so
+        # rebuild_all silently erased annotate_operator's write. Presence-
+        # conditional (see _annotator_dims), canonical names only: the short
+        # :GraphEvent aliases belong to OperatorAnnotated, never to a
+        # PointRevised (whose keys ARE the node props — review P1).
+        if not skip_annotator_dims:
+            for key, val in _annotator_dims(ev).items():
+                set_clauses.append(f"n.{key} = ${key}")
+                params[key] = val
 
         self.g.query(
             f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)}",
