@@ -855,17 +855,29 @@ def test_rate_limit_map_is_bounded() -> None:
     assert re.search(r"recent\.push\(\s*now\s*\)", body), (
         "the window must be extended with the CURRENT timestamp, or the limiter never trips"
     )
-    # …and the pushed window must be STORED BACK: `hits.get(ip)` is the limiter's
-    # only state source, so a re-insert that stores a literal `[]` — or is dropped —
-    # leaves the map permanently empty and the trip a dead branch while every other
-    # assertion here stays green (cycle-22 review).
-    assert re.search(
-        r"recent\.push\(\s*now\s*\);\s*[\s\S]*?\bhits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
-        body,
-    ), (
+    # …and from the push onwards the ONLY thing that may touch the window is the
+    # write-back itself: `hits.get(ip)` is the limiter's only state source and the
+    # map holds the array BY REFERENCE, so a `recent.length = 0;` on either side of
+    # the write-back empties the stored history and the trip can never fire, while
+    # the write-back's own value pin stays satisfied. Both gaps are checked
+    # (cycle-22 and cycle-23 reviews).
+    push_at = body.index("recent.push(now)")
+    push_end = body.index(";", push_at) + 1
+    written = re.search(r"\bhits\.set\(\s*ip\s*,\s*recent\s*\)\s*;", body[push_end:])
+    assert written is not None, (
         "the pushed window must be written back into the map as `recent`, or the "
         "limiter can never trip"
     )
+    written_end = push_end + written.end()
+    for gap, span in (
+        ("the push and the write-back", body[push_end : push_end + written.start()]),
+        ("the write-back and the end of the limiter", body[written_end:]),
+    ):
+        assert not re.search(r"\brecent\b", span), (
+            f"nothing may touch the window between {gap}: the map holds the array by "
+            f"reference, so mutating it there empties the stored history and the "
+            f"limiter never throttles — {span.strip()[:60]!r}"
+        )
     # `cutoff` is what the window is filtered BY: `const cutoff = now` (or
     # `Infinity`) makes every stored entry stale, so the window is always empty and
     # the trip can never fire — while `RATE_WINDOW_MS` stays "used" by the
