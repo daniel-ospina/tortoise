@@ -62,6 +62,7 @@ await db.exec(`
     user_id uuid NOT NULL,
     provider text NOT NULL,
     provider_id text NOT NULL,
+    identity_data jsonb,
     email text,
     created_at timestamptz NOT NULL DEFAULT now(),
     last_sign_in_at timestamptz,

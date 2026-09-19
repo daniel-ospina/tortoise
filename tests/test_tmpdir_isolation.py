@@ -242,16 +242,26 @@ def test_guard_can_be_removed_and_reinstalled():
 
 # ── discovery itself is scoped ───────────────────────────────────────────
 
-def test_find_socket_dirs_is_called_with_the_private_root(monkeypatch):
-    """The scoped-discovery assertion: the reaper's socket/pid walk gets the
-    PRIVATE root. This is the call that produced the 2-minute `find` over the
-    shared temp dir at 53% CPU."""
+def test_socket_census_is_scoped_to_the_private_root(monkeypatch):
+    """The scoped-discovery assertion: the reaper's socket/pid census gets the
+    PRIVATE root. This is the call that produced the multi-minute walk over
+    the shared temp dir at 53% CPU."""
     from tortoise import embedded_reaper as reaper
+
     seen: list[str] = []
-    monkeypatch.setattr(reaper, "_find_socket_dirs",
-                        lambda root: seen.append(root) or [])
+
+    def spy(tmpdir, **_kwargs):
+        seen.append(tmpdir)
+        return reaper._ScanResult([], True)
+
+    monkeypatch.setattr(reaper, "_scan_socket_dirs", spy)
+    # Pass 1 probes every live redis server on the box, so the result (and the
+    # runtime) would otherwise be a property of the HOST — on a machine with a
+    # fleet's embedded servers that is minutes, which is the load-dependence
+    # this whole issue is about. Pin it empty: this test is about pass 2.
+    monkeypatch.setattr(reaper, "_pgrep_redis_servers", lambda: [])
     reaper.discover()
-    assert seen, "_find_socket_dirs was never called — test proves nothing"
+    assert seen, "_scan_socket_dirs was never called — test proves nothing"
     assert all(os.path.realpath(r) == os.path.realpath(scan_root())
                for r in seen), f"discovery scanned {seen!r}, expected the "\
                                f"private root {scan_root()!r}"
@@ -290,8 +300,10 @@ def test_socket_walk_reaches_into_a_nested_session_scratch_root(tmp_path):
     23k-entry tempdir, depth 2 took 6.2s and depth 3 took 53.3s, over
     `SOCKET_WALK_TIMEOUT` — and a timed-out walk returns [], re-opening the
     #1449 pollution-disables-cleanup hole. The bounded nested pass this
-    asserts costs one `find` per recognised session root instead."""
-    from tortoise.embedded_reaper import _find_socket_dirs
+    asserts costs one extra depth-1 `os.scandir` per recognised session root
+    instead (`_iter_candidate_dirs_over_roots`; the `find` subprocess this
+    was originally written against no longer exists — #4068)."""
+    from tortoise.embedded_reaper import _scan_socket_dirs
 
     direct = tmp_path / "redislite_direct"
     direct.mkdir()
@@ -307,7 +319,7 @@ def test_socket_walk_reaches_into_a_nested_session_scratch_root(tmp_path):
     pid_only.mkdir()
     (pid_only / "redis.pid").write_text("1\n")
 
-    found = _find_socket_dirs(str(tmp_path))
+    found = _scan_socket_dirs(str(tmp_path)).dirs
     assert str(direct) in found, "depth-2 global pass regressed"
     assert str(nested) in found, \
         "socket dir nested inside a tt_ session root was not reached"
@@ -322,7 +334,7 @@ def test_socket_walk_ignores_legacy_tt_prefixed_scratch_dirs(tmp_path):
     host this was measured on, 207 of which were skipped once the shared walk
     budget ran out — starving the real session root the nested pass exists
     for. Only a root carrying SESSION_ROOT_MARKER is a session root."""
-    from tortoise.embedded_reaper import _find_socket_dirs, _socket_walk_roots
+    from tortoise.embedded_reaper import _scan_socket_dirs, _socket_walk_roots
 
     legacy = tmp_path / "tt_211_deadbeef"
     (legacy / "redislite_legacy").mkdir(parents=True)
@@ -333,7 +345,7 @@ def test_socket_walk_ignores_legacy_tt_prefixed_scratch_dirs(tmp_path):
         "a bare tt_* test-scratch dir was treated as a session root"
     assert roots[-1] == str(tmp_path), "the tempdir root must still be walked"
     assert str(legacy / "redislite_legacy") not in \
-        _find_socket_dirs(str(tmp_path)), \
+        _scan_socket_dirs(str(tmp_path)).dirs, \
         "a legacy tt_* scratch dir's socket must not be reached as a session root"
 
 
@@ -349,17 +361,17 @@ def test_socket_walk_orders_nested_roots_before_the_tempdir(tmp_path):
         f"nested root must precede the tempdir, got {roots!r}"
 
 
-def test_socket_walk_reserves_budget_for_the_global_pass(tmp_path, monkeypatch):
-    """#3752 review cycle 2/3: nested session roots are walked FIRST, so N of
-    them could consume the single shared deadline and silently skip the GLOBAL
+def test_nested_roots_cannot_starve_the_global_pass(tmp_path, monkeypatch):
+    """#3752 review cycle 2/3: nested session roots are scanned FIRST, so N of
+    them could consume the single shared budget and silently skip the GLOBAL
     (tempdir) pass — the only pass that reaches non-session dirs.
 
-    Behavioural, not arithmetic: the nested roots' `find` is made to spend its
-    WHOLE timeout, and the test asserts the global root is still invoked with
-    a POSITIVE timeout. With the reserve disabled the first nested root spends
-    the entire budget and the global root is never invoked — which this test
-    proves by running that case too (so it does not merely mirror the
-    constant), and it is independent of GLOBAL_WALK_RESERVE_S' value.
+    Behavioural, not arithmetic: the deadline each root actually receives is
+    recorded, and the test asserts the global root's is the FULL budget while
+    the nested roots' are clamped. With the reserve disabled the nested roots
+    get the whole budget, which the test proves by running that case too — so
+    it does not merely mirror the constant, and it is independent of
+    GLOBAL_WALK_RESERVE_S' value.
     """
     from tortoise import embedded_reaper as reaper
 
@@ -369,51 +381,45 @@ def test_socket_walk_reserves_budget_for_the_global_pass(tmp_path, monkeypatch):
     global_root = str(tmp_path)
     monkeypatch.setattr(reaper, "_socket_walk_roots",
                         lambda _tmpdir: [*nested, global_root])
-    monkeypatch.setattr(reaper, "SOCKET_WALK_TIMEOUT", 0.5)
-    monkeypatch.setattr(reaper, "GLOBAL_WALK_RESERVE_S", 0.25)
-    called: list[tuple[str, float]] = []
 
-    def slow_nested_run(cmd, *a, **kw):
-        root, timeout = str(cmd[1]), float(kw.get("timeout", -1))
-        called.append((root, timeout))
-        if root != global_root:
-            time.sleep(max(timeout, 0.0) + 0.05)  # spend the whole cap
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+    seen: list[tuple[str, float | None]] = []
+    real_iter = reaper._iter_candidate_dirs
 
-    monkeypatch.setattr(reaper.subprocess, "run", slow_nested_run)
-    reaper._find_socket_dirs(str(tmp_path))
-    assert called and called[-1][0] == global_root, \
-        f"the reserved global root was never walked: {called!r}"
-    assert called[-1][1] > 0, f"the global pass got no budget: {called!r}"
+    def recording_iter(root, *, predicate, deadline=None):
+        seen.append((root, deadline))
+        return real_iter(root, predicate=predicate, deadline=deadline)
 
-    # And the counter-case: with the reserve disabled the nested root eats the
-    # budget and the global pass IS starved — so the assertion above is
-    # load-bearing rather than an artefact of the cap.
+    monkeypatch.setattr(reaper, "_iter_candidate_dirs", recording_iter)
+
+    reaper._iter_candidate_dirs_over_roots(global_root, predicate=lambda n: True)
+    assert seen, "no root was scanned — test proves nothing"
+    assert seen[-1][0] == global_root, \
+        f"the tempdir root must be scanned LAST, got {[r for r, _ in seen]!r}"
+    glob_dl = seen[-1][1]
+    nested_dls = [dl for _r, dl in seen[:-1]]
+    assert glob_dl is not None and all(dl is not None for dl in nested_dls)
+    assert all(glob_dl - dl >= reaper.GLOBAL_WALK_RESERVE_S - 0.5
+               for dl in nested_dls), \
+        f"nested roots were not clamped by the reserve: {seen!r}"
+
+    # Counter-case: with the reserve disabled the clamp is a no-op, so the
+    # assertion above is load-bearing rather than an artefact of a low cap.
     monkeypatch.setattr(reaper, "GLOBAL_WALK_RESERVE_S", 0.0)
-    starved: list[str] = []
-
-    def starving_run(cmd, *a, **kw):
-        root, timeout = str(cmd[1]), float(kw.get("timeout", -1))
-        starved.append(root)
-        if root != global_root:
-            time.sleep(max(timeout, 0.0) + 0.05)
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(reaper.subprocess, "run", starving_run)
-    reaper._find_socket_dirs(str(tmp_path))
-    assert global_root not in starved, (
-        "without the reserve the global pass should have been starved — the "
-        "behavioural test no longer pins anything"
-    )
+    seen.clear()
+    reaper._iter_candidate_dirs_over_roots(global_root, predicate=lambda n: True)
+    assert all(abs(glob_dl - dl) < 0.5 for _r, dl in seen), \
+        "with the reserve disabled the global pass should have lost its " \
+        "advantage — the test no longer pins anything"
 
 
 def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
     """#3752 review cycle 3/4: `_socket_walk_roots` does real I/O (a scandir
     plus a stat per `tt_*` child). Charging it to the walk budget let a slow
-    discovery issue ZERO `find` calls — the pollution-disables-cleanup failure
-    the nested pass exists to prevent. Covered for BOTH walk call sites.
+    discovery leave the walk with ZERO budget — the pollution-disables-cleanup
+    failure the nested pass exists to prevent. Covered for BOTH walk call
+    sites.
 
-    The 20 s constant is monkeypatched: the ordering being asserted is
+    The budget constant is monkeypatched: the ordering being asserted is
     scale-invariant, so sleeping the real budget would burn 20 s of wall clock
     for nothing.
     """
@@ -425,22 +431,26 @@ def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
         time.sleep(0.5 + 0.2)  # longer than the (patched) budget
         return [str(tmpdir)]
 
-    seen: list[str] = []
+    seen: list[tuple[str, float | None]] = []
+    real_iter = reaper._iter_candidate_dirs
 
-    def recording_run(cmd, *a, **kw):
-        seen.append(str(cmd[1]))
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+    def recording_iter(root, *, predicate, deadline=None):
+        seen.append((root, deadline))
+        return real_iter(root, predicate=predicate, deadline=deadline)
 
     monkeypatch.setattr(reaper, "_socket_walk_roots", slow_roots)
     monkeypatch.setattr(reaper, "_real_gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(reaper.subprocess, "run", recording_run)
-    reaper._find_socket_dirs(str(tmp_path))
-    assert str(tmp_path) in seen, \
-        f"_find_socket_dirs: discovery time was charged to the walk {seen!r}"
+    monkeypatch.setattr(reaper, "_iter_candidate_dirs", recording_iter)
+
+    reaper._scan_socket_dirs(str(tmp_path))
+    assert seen, "_scan_socket_dirs: no root was scanned after slow discovery"
+    assert seen[0][1] is not None and seen[0][1] > time.monotonic(), \
+        f"_scan_socket_dirs: discovery time was charged to the walk {seen!r}"
 
     seen.clear()
     reaper._sweep_quarantine_dirs(dry_run=True)
-    assert str(tmp_path) in seen, \
+    assert seen, "_sweep_quarantine_dirs: no root was scanned after slow discovery"
+    assert seen[0][1] is not None and seen[0][1] > time.monotonic(), \
         f"_sweep_quarantine_dirs: discovery charged to the walk {seen!r}"
 
 
@@ -607,37 +617,48 @@ def test_probe_socket_falls_back_to_tmp_for_a_link_that_cannot_fit(
 
 def test_quarantine_walk_reaches_nested_session_roots(tmp_path, monkeypatch):
     """#3752 review finding: the rename-aside is IN PLACE, so a quarantined
-    dir under a nested session root is invisible to a `-maxdepth 1` walk of
-    the tempdir root alone and would never converge."""
+    dir under a nested session root is invisible to a depth-1 scan of the
+    tempdir root alone and would never converge.
+
+    Asserts the scan reaches the nested root AND that the quarantine dir
+    found there is actually SEEN (not merely that a root was visited), so the
+    test cannot pass on a walk that scans the right root with the wrong
+    predicate.
+    """
     from tortoise import embedded_reaper as reaper
 
     session = _make_session_root(tmp_path, "tt_abc12345")
     q = session / f"redislite_live{reaper.STALE_QUARANTINE_SUFFIX}123"
     q.mkdir()
     (q / reaper.REAPER_OWNED_MARKER).write_text("")
-    (q / "redis.socket").write_text("")
-    (q / "redis.pid").write_text("1\n")
 
     monkeypatch.setattr(reaper, "_real_gettempdir", lambda: str(tmp_path))
-    argv_log: list[list[str]] = []
-    real_run = subprocess.run
+    roots: list[str] = []
+    real_iter = reaper._iter_candidate_dirs
 
-    def recording_run(cmd, *a, **kw):
-        argv_log.append([str(c) for c in cmd])
-        return real_run(cmd, *a, **kw)
+    def recording_iter(root, *, predicate, deadline=None):
+        roots.append(root)
+        return real_iter(root, predicate=predicate, deadline=deadline)
 
-    monkeypatch.setattr(reaper.subprocess, "run", recording_run)
+    monkeypatch.setattr(reaper, "_iter_candidate_dirs", recording_iter)
     reaper._sweep_quarantine_dirs(dry_run=True)
-    roots = [argv[1] for argv in argv_log if "-maxdepth" in argv]
     assert str(session) in roots, \
-        f"the nested session root was not walked for quarantines: {roots!r}"
-    assert str(tmp_path) in roots, "the tempdir root walk regressed"
+        f"the nested session root was not scanned for quarantines: {roots!r}"
+    assert str(tmp_path) in roots, "the tempdir root scan regressed"
+    # ...and the predicate actually surfaces the quarantine dir in that root.
+    scan = reaper._iter_candidate_dirs(
+        str(session),
+        predicate=lambda name: reaper.STALE_QUARANTINE_SUFFIX in name)
+    assert str(q) in scan.dirs, \
+        f"the quarantine dir was not matched inside {session}: {scan.dirs!r}"
 
 
 def test_discover_never_shells_out_to_the_shared_temp_dir(monkeypatch):
-    """The `find` walk is a subprocess, so the in-process guard cannot see
-    it. Record every argv and assert no subprocess is ever aimed at the
-    shared temp dir (or an ancestor of it)."""
+    """Discovery shells out (pgrep/ps for pass 1, redis-cli to probe a
+    server), so the IN-PROCESS guard cannot see all of it. Record every argv
+    and assert no subprocess is ever aimed at the shared temp dir (or an
+    ancestor of it) — the shell-out form is how the original #3752 defect
+    presented (`find <shared T> -maxdepth 2 …` at 53% CPU)."""
     from tests._tmpdir_isolation import _is_host_tempdir_scope
     from tortoise import embedded_reaper as reaper
     real_run = subprocess.run
@@ -648,6 +669,16 @@ def test_discover_never_shells_out_to_the_shared_temp_dir(monkeypatch):
                         else [str(cmd)])
         return real_run(cmd, *a, **kw)
 
+    # Pass 1 probes every live redis server on the HOST — minutes on a box
+    # running a fleet's embedded servers, which is the host-dependence this
+    # issue exists to remove. Pin it to THIS process rather than the host:
+    # `_batch_process_info` still runs its one batched `ps` (so the recorder
+    # is exercised and `argv_log` is non-empty on every host, lane and test
+    # order), while `_socket_dir_from_cmdline` finds no unixsocket in this
+    # process's own argv and admits no candidate. Pinning to `[]` instead
+    # would make pass 1 spawn nothing → `argv_log` empty → the assertion
+    # below fails (default docker lane: pass 2 finds no socket dir).
+    monkeypatch.setattr(reaper, "_pgrep_redis_servers", lambda: [os.getpid()])
     monkeypatch.setattr(reaper.subprocess, "run", recording_run)
     reaper.discover()
     assert argv_log, "no subprocess recorded — test proves nothing"

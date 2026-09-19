@@ -8,7 +8,7 @@
 
 | Type | Version | Emitted by | Payload fields | Producer surface |
 |---|---|---|---|---|
-| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit) | `id`, `kind`, `content_hash` | SDK (MCP, REST, local) |
+| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt`. `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
 | `PointRetracted` | 1 | `TortoiseSDK.retract_point` | `id` | SDK |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
@@ -27,6 +27,31 @@
 > The EventAPI/CLI/ingest path emits its own legacy events (`PointAdded`,
 > `PointRetracted`, `PointsMerged`, `IngestStarted`) to the EventLog JSONL —
 > unchanged. Hosted/SDK tenants read the `:GraphEvent` stream below.
+
+### JSONL rebuild-journal record shapes (durability, not the `:GraphEvent` stream)
+
+The table above documents the `:GraphEvent` **payload**. The JSONL rebuild
+journal that `rebuild_all` replays is a *second*, differently-shaped store:
+`_emit_event` writes the envelope (`event_id`/`ts`/`type`/`initiated_by`/
+`projection_version`) plus the record's own fields. Two folds carry props that
+the payload does not name:
+
+- **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
+  **canonical** `annotator_bias`/`annotator_precision`/`annotator_consistency`/
+  `annotator_directness` (the payload above keeps the SHORT names
+  `bias`/`precision`/`consistency`/`directness` for the `:GraphEvent`
+  contract). The fold accepts either spelling (`_annotator_dims(aliases=True)`),
+  but an SDK-produced record always carries the long names.
+- **`PointRevised`** — `update_point(**props)` journals the caller's props
+  VERBATIM as extras, so an `annotator_*` key here is a node property of that
+  exact name (never aliased).
+
+**No down-version guarantee for new folded record types.** An older binary
+rebuilding a journal written by a newer one warns `unrecognized event type 'X'
+— skipped` for a new type it does not know, and silently drops unknown
+`PointRevised` extras. The rebuild path has no pre-wipe allowlist analogous to
+`_assert_episodic_points_recreatable`; forward-only evolution of the JSONL
+record vocabulary is a known limitation, not a supported downgrade path.
 
 ## `:GraphEvent` node schema
 

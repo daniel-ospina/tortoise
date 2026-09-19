@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
+# tortoise-hook-version: 3
 # Tortoise memory injection for Claude Code — SessionStart hook.
+#
+# The `tortoise-hook-version` marker above is the install-contract generation
+# for this hook (see tortoise/hook_install.py). Bump it on ANY behavioural
+# edit — `tortoise hooks status` and `tortoise doctor` read it to tell an
+# already-installed copy it is stale.
 #
 # Install (once, per project):
 #   mkdir -p .claude/hooks
 #   cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
 #   chmod +x .claude/hooks/session-start.sh
 #   # then add to .claude/settings.json:
-#   #   { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }] } }
+#   # #3754: an explicit timeout is set too — Claude Code's command-hook default on
+#   # SessionStart is 600s, so a hung `tortoise context` would stall the session
+#   # for 10 minutes; 60s bounds it with ~6× headroom over the measured path.
+#   #   { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }] } }
 #
 # The hook prints a Tortoise memory digest to stdout, which Claude Code
 # injects into the session context automatically. If Tortoise isn't
@@ -25,14 +34,20 @@ if [ -z "$TORTOISE_BIN" ]; then
   fi
   PYTHON_BIN="$(command -v python3 || true)"
   [ -z "$PYTHON_BIN" ] && exit 0
+  # #3755: the digest is BEST-EFFORT — it must never short-circuit this
+  # script, because the install-probe beacon below is independent of it.
+  # `|| exit 0` here (before #3755) skipped the probe whenever the embedded
+  # store was busy, silently dropping install telemetry.
   "$PYTHON_BIN" -c "
 import sys
 sys.path.insert(0, '$TORTOISE_MODULE')
 from tortoise.__main__ import main
 raise SystemExit(main(['context']))
-" 2>/dev/null || exit 0
+" 2>/dev/null || true
 else
-  tortoise context 2>/dev/null || exit 0
+  # #3755: same as above — a failed digest (busy/unreachable store) is
+  # best-effort and must fall through to the probe, not exit the script.
+  tortoise context 2>/dev/null || true
 fi
 
 # #1727 Slice 2 (Task 14, T2-P1): install-probe beacon.

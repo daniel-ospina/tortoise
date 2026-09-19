@@ -10,8 +10,9 @@ demonstrate:
      redesign exists to obtain — the old flow put tokens where JS could read them)
   3. the redirect chain completes and the app's own session endpoint agrees
 
-Harness mirrors `tests/e2e/test_session_login_flow.py`: serve `website/` with
-`wrangler pages dev .`, mock Supabase Auth locally (real ES256 + real S256).
+Harness: serve the `tortoise-dashboard` project with
+`wrangler pages dev dist` (the BFF and the session cookie issuance live there
+since #4054), mock Supabase Auth locally (real ES256 + real S256).
 Opt-in via AUTH_CLICKTHROUGH=1.
 """
 from __future__ import annotations
@@ -27,8 +28,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.auth.bff_test_helpers import ensure_dashboard_dist
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WEBSITE_DIR = REPO_ROOT / "website"
+# #4054: the BFF moved to the `tortoise-dashboard` project. These suites
+# must boot THAT Pages project — serving website/ would answer /auth/*
+# with the SPA fallback and no session would ever be minted.
+DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
 # Ports are claimed at runtime. Both e2e modules previously defaulted to the
@@ -86,6 +92,11 @@ def running_stack():
                 "set AUTH_ALLOW_NO_TOOLCHAIN=1 to opt out explicitly."
             )
 
+    # `wrangler pages dev dist` needs the built root (vite copies public/ into
+    # dist/); building here keeps the suite self-sufficient rather than depending
+    # on `tests/e2e/auth/` having run first in the same job.
+    ensure_dashboard_dist()
+
     mock_env = os.environ.copy()
     mock_env["MOCK_PORT"] = str(MOCK_PORT)
     mock = subprocess.Popen(
@@ -96,7 +107,7 @@ def running_stack():
 
     app = subprocess.Popen(
         [
-            shutil.which("wrangler"), "pages", "dev", ".",
+            shutil.which("wrangler"), "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
             "-b", f"SUPABASE_URL={MOCK_URL}",
@@ -108,7 +119,7 @@ def running_stack():
         # config-not-literal change from SCOPE.md 6.
         "-b", f"APP_ORIGIN={APP}",
         ],
-        cwd=str(WEBSITE_DIR),
+        cwd=str(DASHBOARD_DIR),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
     ok = _wait(APP_PORT)

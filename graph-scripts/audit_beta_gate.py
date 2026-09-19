@@ -32,6 +32,14 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# #2901: the ONE canonical non-current predicate (tortoise/live.py) — status
+# in the canonical terminal vocabulary OR the legacy ``outdated=true`` flag.
+# Never inline a status subset here (the pre-fix two-status list omitted
+# ``outdated`` / ``archived`` / ``deprecated``).
+from tortoise.live import _terminal_expression
+
 
 def _q(proj, cypher: str, **params) -> list:
     return proj.g.query(cypher, params).result_set
@@ -45,6 +53,27 @@ def _redact_uri(uri: str) -> str:
     if parts.port:
         netloc += f":{parts.port}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def _nand_to_dead(proj) -> list:
+    """5e. NAND edges whose TARGET is non-current (dangling attacks).
+
+    #2901: the filter is ``live._terminal_expression`` — the ONE canonical
+    non-current PREDICATE (terminal status OR the legacy ``outdated=true``
+    flag). The pre-fix inline two-status list (retraction + supersession only)
+    omitted ``outdated`` / ``archived`` / ``deprecated`` and ignored the flag,
+    so dangling attacks on those non-current targets were invisible to the
+    gate. Extracted to module scope so the filter is directly testable.
+    """
+    return [
+        {"from": r[0], "to": r[1], "status": r[2]}
+        for r in _q(
+            proj,
+            "MATCH (n:Point {is_operator:true, op_type:'NAND'})-[:NAND]->(t:Point) "
+            f"WHERE {_terminal_expression('t.status')} "
+            "RETURN n.id, t.id, t.status LIMIT 100",
+        )
+    ]
 
 
 def run_check(sdk, proj) -> dict:
@@ -150,19 +179,10 @@ def run_check(sdk, proj) -> dict:
         )
     ]
 
-    # 5e. NAND edges targeting retracted/superseded points (dangling attacks).
+    # 5e. NAND edges targeting terminal points (dangling attacks).
     #     'deleted' is NOT a point status — delete_point tombstones to
-    #     'retracted' (POINT_STATUS_VALUES: draft/live/retracted/superseded/
-    #     outdated/archived).
-    out["nand_to_dead"] = [
-        {"from": r[0], "to": r[1], "status": r[2]}
-        for r in _q(
-            proj,
-            "MATCH (n:Point {is_operator:true, op_type:'NAND'})-[:NAND]->(t:Point) "
-            "WHERE t.status IN ['retracted', 'superseded'] "
-            "RETURN n.id, t.id, t.status LIMIT 100",
-        )
-    ]
+    #     'retracted'. #2901: canonical terminal set, see _nand_to_dead.
+    out["nand_to_dead"] = _nand_to_dead(proj)
 
     # ── gate verdict ──────────────────────────────────────────────────
     p1 = out["check_structure"]  # chain violations are P1-relevant
@@ -230,7 +250,7 @@ def print_report(out: dict, db_target: str) -> None:
     print(f"5b batch-connected mitigations:      {len(out['batch_mitigations'])}")
     print(f"5c unmitigated low-confidence ops:   {len(out['unmitigated_low_conf'])}")
     print(f"5d evidence missing sourceKind #1158: {len(out['missing_sourcekind'])}")
-    print(f"5e NAND → retracted/deleted:         {len(out['nand_to_dead'])}")
+    print(f"5e NAND → terminal points:           {len(out['nand_to_dead'])}")
 
     g = out["gate"]
     verdict = "PASS" if g["PASS"] else "FAIL"
