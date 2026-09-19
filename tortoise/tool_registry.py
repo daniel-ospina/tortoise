@@ -25,9 +25,8 @@ class RestSpec:
 class ToolDefinition:
     """One entry per SDK-exposed operation."""
     name: str                    # e.g. "tortoise_create_point"
-    id: str                      # immutable stable identity — never reused; `name` may change
-                                 # (no consumer yet: #3883 retired names / the
-                                 # manifest column will key on it)
+    id: str                      # immutable stable identity — `name` may change; a
+                                 # retired id is reserved once a ledger exists (#3883)
     description: str             # Docstring for MCP + OpenAPI
     annotations: ToolAnnotations  # readOnlyHint, destructiveHint, idempotentHint
     http_policy: bool            # True = exposed on HTTP surfaces

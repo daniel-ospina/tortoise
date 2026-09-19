@@ -282,12 +282,13 @@ def main(argv: list[str]) -> int:
     def _fingerprint(fn) -> str | None:
         """Code-object identity — see the note in tools/surface_manifest.py.
 
-        Built from `co_filename` and a digest of `co_code` rather than from
-        `__module__`/`__qualname__`, because those are writable strings a shadow can
-        simply copy from the tool it is replacing.  `co_firstlineno` is deliberately
-        NOT part of the identity: a pure code move (an edit elsewhere in the file)
-        is not a change to the served implementation, yet it shifts every handler
-        below it and reddened the gate on an unchanged surface.
+        Built from `co_filename` and a digest of the bytecode, names and constants
+        (`_code_digest`) rather than from `__module__`/`__qualname__`, because those
+        are writable strings a shadow can simply copy from the tool it is replacing.
+        `co_firstlineno` is deliberately NOT part of the identity: a pure code move
+        (an edit elsewhere in the file) is not a change to the served implementation,
+        yet it shifts every handler below it and reddened the gate on an unchanged
+        surface.
         """
         code = getattr(fn, "__code__", None)
         if code is None:
@@ -336,9 +337,21 @@ def main(argv: list[str]) -> int:
                 "cannot tell whether the implementation behind that name was replaced. "
                 "Re-cut the baseline."
             )
-        live = live_components.get(name)
-        if live is None:
+        if name not in live_components:
             continue  # absence is already reported by the missing-served check above
+        live = live_components[name]
+        # A PRESENT but unfingerprintable component (no `__code__`, e.g. a
+        # functools.partial) is malformed evidence, not absence: treating it as
+        # skippable let a same-name substitution with no code object through
+        # (verified: a partial shadow of an approved tool exited 0).
+        if live is None:
+            problems.append(
+                f"the tool served as `{name}` has no code-object identity (its callable "
+                "has no `__code__`), so the guard cannot tell whether the implementation "
+                "behind that name was replaced. Register a plain function, or re-cut "
+                "the baseline."
+            )
+            continue
         if live != stored:
             problems.append(
                 f"the implementation served as `{name}` changed: the baseline recorded "

@@ -338,8 +338,9 @@ def telemetry_tools() -> set[str]:
 def _component_fingerprint(fn) -> str | None:
     """A fingerprint of the IMPLEMENTATION behind a tool component.
 
-    Deliberately built from the CODE OBJECT (`co_filename` and a digest of `co_code`),
-    not from `__module__` / `__qualname__`. Those two attributes are plain
+    Deliberately built from the CODE OBJECT (`co_filename` and a digest of the
+    bytecode, names and constants — see `_code_digest`), not from `__module__` /
+    `__qualname__`. Those two attributes are plain
     writable strings, so a shadow function can copy an approved tool's identity exactly and
     pass a name-based comparison while serving different code (verified: a shadow that set
     `__module__ = "tortoise.mcp_server"` and `__qualname__ = "tortoise_search"` replaced an
