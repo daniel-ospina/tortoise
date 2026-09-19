@@ -455,6 +455,10 @@ def test_the_confirmation_promises_no_reply() -> None:
         for m in re.finditer(
             r'''content\s*:\s*(?:"([^"]*)"|'([^']*)')''',
             re.sub(r"/\*.*?\*/", "", block, flags=re.S),
+            # CSS property names are ASCII case-insensitive, so the scan must be
+            # too: `CONTENT: "We'll reply within two business days."` renders to
+            # the visitor and stayed green without this flag (cycle-11 review).
+            re.I,
         )
     )
     # ATTRIBUTE-carried copy is visitor-facing too (cycle-5 review): the meta
