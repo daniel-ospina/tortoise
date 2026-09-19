@@ -64,6 +64,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # resolves. Same class as test_quota/test_commit_endpoint.
     "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
+    # #3926: the registry `Team` seed (hosted_api `_make_sdk(namespace="registry")`)
+    # and the registry resolve that `mcp_server.tortoise_create_point` performs
+    # internally must be the SAME graph — a test_* rename would seed a verbatim
+    # test_* graph while the tool path still resolved `registry_tortoise`, so the
+    # create would fail closed and the observation assertion would go red. The
+    # literal IS the canonical namespace PROD code resolves (prod-coupled).
+    "test_3926_error_prop_guard.py": {"registry": "prod-coupled"},
     "test_index_docs_api.py": {"registry": "index-docs"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
