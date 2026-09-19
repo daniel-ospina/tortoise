@@ -126,12 +126,14 @@ namespace rather than flattened onto the same object as `search`.
 
 | Method | Why it is not on the target surface |
 |---|---|
-| `backfill_v25` | A one-shot migration setting `status='live'` where NULL and backfilling `pointKind` — targeting `ONTOLOGY_v2.5` while the schema is **v3.13**. Zero customers, pre-beta. The approved MCP list already archives its tool (`tortoise_backfill_v25`). A migration written against a schema several versions old is a liability, not a capability. |
+| `backfill_v25` | A one-shot migration setting `status='live'` where NULL and backfilling `pointKind` — targeting `ONTOLOGY_v2.5` while the schema is **v3.13**. Zero customers, pre-beta. The approved MCP list proposes the same archive for its tool (`tortoise_backfill_v25`); like that one, this is a **proposal** — the baseline still records the method `lifecycle: active`. A migration written against a schema several versions old is a liability, not a capability. |
 
 ## What collapses — and what the discriminator is
 
-Each row below is a genuine duplicate: the members differ by nothing, by a type, or by a
-flag — never by capability. The discriminator is a parameter that **already exists**.
+Most rows below are genuine duplicates: the members differ by nothing, by a type, or by a
+flag — rarely by capability. Where the discriminator **already exists** the row says so;
+where it does not (a parameter that must first be forwarded, or a name that has to be
+invented) the row says that instead, because those are not renames.
 
 | Members | Discriminator | Evidence |
 |---|---|---|
@@ -201,7 +203,7 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 1. **Small closed verb vocabulary — 14/14.** Nobody invents a domain verb for the happy path.
 2. **Verb-first, snake_case — 13/14.** The exception is the tool-first product, because an LLM selects from its list.
 3. **Above ~30 methods, the pattern is to namespace** — Zep (95), Letta (16 resources), Supermemory (36 across 5 resources) and Weaviate all use namespaces or resource trees. Cognee is the counterexample on this table's own evidence: ~40 exports exposed as **free functions**, flat and untenanted. This is a tendency, not a rule — and it is this document's reading of the table, not a finding of the source.
-4. **Flat classes cluster at 13–27 — 5/5.** The largest flat object surveyed is Pinecone's `Index` at 27; the largest flat *memory* client is MemOS at 26.
+4. **Flat classes cluster at 13–27 — 5/5.** The largest flat *memory* client is MemOS at 26. (Pinecone's `Index` carries 27 names but is one of **two** flat objects by plane, so whether it counts as a single flat surface is ambiguous — **UNVERIFIED**.)
 5. **One high-level call with many effects is the default; primitives stay public — 11/14. Nobody hides them.**
 6. **Read/write separation is by naming or namespace — 14/14. Never separate client classes.**
 7. **Every retirement observed involved a warning or a parallel surface — never a silent rename.**
@@ -210,9 +212,10 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 **Where this lands for us.** 150 public methods on one flat class is ~5.5× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The target list above does exactly that: **36 groups over 150
+**collapse the aliases**. The target list above does exactly that: **36 groups over 149
 names** — 29 memory-facing (R1–R9, W1–W20) and 7 control-plane namespaces (N1–N7) —
-reached by grouping and merging, with the primitives still reachable. The
+reached by grouping and merging, with the primitives still reachable and `backfill_v25`
+archived. The
 control plane is what moves behind namespaces; the memory surface
 is what mirrors the approved 23-tool list.
 
