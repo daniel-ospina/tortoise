@@ -3145,12 +3145,12 @@ async def get_current_org(request: Request) -> dict:
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                # #4010: sessions are UNLIMITED for every tier — the flat v1
-                # 1000 cap was REOPENED and SUPERSEDED (see the module comment
-                # in tortoise/quota.py). `_ms` (the stored t.max_sessions) is
-                # read so the deliberate departure is visible at the exact
-                # site, and then NOT honoured — a stored 1000 must never
-                # re-cap an org after the constant is gone.
+                # #4010: sessions are UNLIMITED for every tier — the flat
+                # 1000 was an inherited code fallback, never a ratified cap
+                # (see the module comment in tortoise/quota.py). `_ms` (the
+                # stored t.max_sessions) is read so the removal is visible at
+                # the exact site, and then NOT honoured — a stored 1000 must
+                # never re-cap an org after the constant is gone.
                 "max_sessions": None,
                 # #1748: key creator's user UUID rides the org dict (Supabase
                 # resolve_api_key parity) so session-user-owned endpoints can

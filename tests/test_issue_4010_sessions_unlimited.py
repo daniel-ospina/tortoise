@@ -2,23 +2,39 @@
 every tier.
 
 PROVENANCE (stated precisely, because the record matters). The flat 1000
-max_sessions **was** a recorded v1 decision — `docs/epics/2026-08-07-tortoise-
-user-journeys/05-plan.md` P2-7 ("keep points/sessions flat in v1", human gate
-#2 approved 2026-08-07) and `docs/plans/scoping-329-problem.md` ("Preserve the
-sessions resource (max_sessions default 1000)"). It was never *ratified as a
-product cap* — it rode into `quota.py` inside the #329 security commit
-(`f6ca5ebdb`), it was the only org limit flat across every tier, and it was the
-only resource whose enforcement fell back to a lenient constant when its key
-was missing. Because the session count is monotonic (no retention window on
-user content), the dogfood org crossed it and captured nothing for 43
-consecutive days.
+max_sessions was an INHERITED CODE FALLBACK, never a ratified product cap,
+and the reason is checkable rather than reconstructed: the plan that carried
+it also designated its OWN canonical limits source, and that source has no
+session field at all. `product/pricing.json` (canonical single source,
+decision 1d: "product/pricing.json ... is canonical; pricing.md is
+doc-generated from it") contains ZERO occurrences of "session" and no
+sessions row in its tier table. What the plan recorded was KEEPING THE
+EXISTING FALLBACK — as a fallback: `docs/epics/2026-08-07-tortoise-user-
+journeys/05-plan.md:570` — "keep flat fallbacks (1000/1000) in v1 OR fold
+into `ops_allowance` — decision: keep points/sessions flat in v1;
+`ops_allowance` (write ops) is the billing metric", restated at `:598`
+("points/sessions stay flat 1000/1000 in v1"). Keeping a fallback is not
+ratifying the value, and `:18`'s "human gate #2 approved" reads in full "all
+8 substeps, coherence CLEAN; human gate #2 approved 2026-08-07; decomposed
+into #568-#578" — it approved the plan's coherence to decompose, not a
+constant inside a tier table. The default pre-dates the #329 security commit
+(`f6ca5ebdb`), whose scoping doc only instructed preserving the existing
+resource in the shared helper (`docs/plans/scoping-329-problem.md:17` — a
+refactor-safety instruction, not a cap ratification); it was the only org
+limit flat across every tier and the only resource whose enforcement fell
+back to a lenient constant when its key was missing. Because the session
+count is monotonic (no retention window on user content), the dogfood org
+crossed it and captured nothing for 43 consecutive days.
 
-#4010 therefore **reopens and supersedes** that v1 decision under the owner's
-later rulings — the 2026-08-09 product direction ("NO capture caps. Tiers are
-feature baselines; usage is metered separately") and the #4010 directive
-itself. Recorded as a reopen, never as an accident: a reversal that claims no
-decision existed is the quiet-reversal failure the contradiction-test
-discipline forbids.
+#4010 therefore REMOVES an unratified fallback that should never have been
+enforcement (the 2026-09-19 correction on the issue withdraws the earlier
+"recorded v1 decision / REOPEN" framing). It is **not** a reopen of a v1 cap
+decision — nothing that RATIFIES a cap ever named it: no owner ruling, no
+decision record, no `product/pricing.json` field. Approved docs do carry
+1000 forward as a default (`git grep -n max_sessions -- '*.md'`); carrying a
+default forward is the inheritance this docstring describes, not a
+ratification. The P2-7 billing-metric choice (write-ops bills) is untouched.
+Stale 1000-as-cost-bound framing elsewhere: #4052.
 
 Removing it has two independent halves, and this module guards BOTH:
 
