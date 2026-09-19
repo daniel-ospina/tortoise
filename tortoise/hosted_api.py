@@ -27,7 +27,7 @@ import os
 import re
 import threading
 import time
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
@@ -18295,7 +18295,15 @@ def _write_onboarding_state(org_id: str, state: dict) -> None:
     jsonb NEVER holds FLOW state (the router branches before the allowlist
     filter; this is the belt-and-braces backstop the registration-split
     negatives pin)."""
-    if any(k in state for k in _os.FLOW_KEYS) or any(k in state for k in _os.STEP_IDS):
+    _stripped_flow = {k for k in state
+                      if k in _os.FLOW_KEYS or k in _os.STEP_IDS}
+    if _stripped_flow:
+        # #3821: this is the last chance to learn the router leaked a FLOW
+        # key. The strip itself is unchanged (jsonb NEVER holds FLOW state);
+        # the drop is now reported instead of silent — it was the
+        # "defensive" backstop with no observer.
+        _report_unregistered(
+            "onboarding_state", "flow_keys_stripped_at_write", _stripped_flow)
         state = {k: v for k, v in state.items()
                  if k not in _os.FLOW_KEYS and k not in _os.STEP_IDS}
     from tortoise.supabase_control import (
@@ -18362,7 +18370,8 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     infra); FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
     → graph writers. Branches BEFORE the allowlist filter so FLOW keys can
     never round-trip into jsonb. Unknown keys are dropped (fail-closed,
-    never default-to-FLOW). Returns the MERGED PROJECTION — the writer echo
+    never default-to-FLOW) and the drop is REPORTED (raised instead under
+    strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
 
     NOTE: step-edge writes via this router (PATCH catalog-presented) trigger
@@ -18377,10 +18386,17 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
         elif k in _os.FLOW_KEYS:
             # only step-edge keys are routable here; scalar FLOW keys are
             # rejected by the PATCH surface / checkpoint before reaching
-            # this point (defensive: silently skip — never default-to-jsonb)
-            pass
+            # this point (never default-to-jsonb). #3821: the rejection is
+            # reported with its OWN reason, so a scalar FLOW key stays
+            # distinguishable from a typo'd operational key.
+            _report_unregistered(
+                "onboarding_state", "flow_scalar_rejected_at_router", {k})
         elif k in _ALLOWED_STATE_KEYS:
             jsonb_fields[k] = v
+        else:
+            # #3821: the negative branch that used to be nothing. An
+            # unregistered key matched no arm and vanished with no observer.
+            _report_unregistered("onboarding_state", "unknown_key", {k})
     if jsonb_fields:
         state = _get_onboarding_state(org_id)
         for k, v in jsonb_fields.items():
@@ -18674,6 +18690,26 @@ class OnboardingStatePatchRequest(BaseModel):
     # a stray PATCH is REJECTED loudly (403 server-owned) like the siblings.
     fork_unsure_at: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _report_unknown_patch_fields(cls, data):
+        """#3821 (the front door): pydantic's default ``extra='ignore'``
+        drops an unknown PATCH field BEFORE `_update_onboarding_state` ever
+        runs, so the router's new negative branch could never see it.
+
+        This validator keeps the drop — it does NOT switch to
+        ``extra='forbid'``, which would make an unknown client field an
+        unconditional 422 (the owner ruled against unconditional
+        user-facing refusals) — but makes it observable: the offending
+        field name(s) are counted and reported through the same choke point.
+        Strict mode raises."""
+        if isinstance(data, dict):
+            unknown = set(data) - set(cls.model_fields)
+            if unknown:
+                _report_unregistered("onboarding_state_patch",
+                                     "unknown_field", unknown)
+        return data
+
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
 # where (per-step write-surface ownership, scope pin 7/8).
@@ -18752,13 +18788,28 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     updates.pop("org_created", None)
     # Epic #529 copy-attribution beacon: analytics-only fields — pop before
     # the state merge (email pattern) and emit artifact_copied for enum-valid
-    # pairs; invalid values are ignored (no event, no error) so a stale or
-    # malformed beacon can never break the copy UX or pollute state.
+    # pairs; invalid values still emit no event and change no state, so IN
+    # NORMAL MODE a stale or malformed beacon cannot pollute state. #3821:
+    # the rejection is now REPORTED instead of vanishing without an observer —
+    # and because this raise is in the endpoint BODY (not a pydantic
+    # validator) strict mode turns it into a 500, which is why strict is off
+    # by default and never set in production.
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
         _track_analytics_event(org["org_id"], "artifact_copied",
                                {"harness": harness, "section": section})
+    elif harness is not None or section is not None:
+        # #3821: an enum-invalid beacon used to produce NO event and NO
+        # observer — indistinguishable from a beacon that never fired. The
+        # event still does not fire (the enum check is unchanged); the
+        # rejected value(s) are now reported.
+        _report_unregistered(
+            "artifact_copied", "invalid_enum",
+            {name for name, value, allowed in (
+                ("harness", harness, _HARNESS_ANALYTICS_VALUES),
+                ("section", section, _SECTION_ANALYTICS_VALUES))
+             if value is not None and value not in allowed})
     # #1997 (W1): accept-and-drop (plan T7) — a client PATCH
     # onboarding_complete on a NODE-PRESENT org is DROPPED (accepted 200;
     # the echo is node-governed — the legacy jsonb flag is inert there).
@@ -19690,7 +19741,206 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "deadline_aborts", "by_stage",
+    # #3821: billing attribution. The Stripe webhook emits `plan` and `tier`
+    # (the notify_kind row at the billing emit), but they were never
+    # registered — so billing analytics rows have been written STRIPPED since
+    # c928b0316 (2026-08-09), despite
+    # docs/plans/2026-08-08-310-stripe-billing.md mandating those fields.
+    # Registering them here repairs that shipped, silent loss; the structural
+    # registration test is what keeps the two sets from drifting again.
+    "plan", "tier",
 }
+
+# ── #3821: the unregistered-key choke point ─────────────────────────────
+# Every allowlist filter in this module has the same shape: a membership
+# test with no `else`. Before this, a key that failed the test was simply
+# gone — no error, no counter, no log — so a dropped signal was
+# indistinguishable from an event that never fired, and the debugging
+# direction was inverted (you hunt a product bug while the product is fine
+# and the INSTRUMENT ate the event).
+#
+# The adopted standard is the OpenTelemetry attribute-limit rule: an
+# attribute that cannot be carried MUST NOT be discarded silently, and the
+# message MUST be printed at most once per record. The rule has four parts:
+#   1. never forward the key  (the PII guarantee is unchanged),
+#   2. always count it        (the drop is distinguishable from never-fired),
+#   3. report it once         (bounded — a hot emit site cannot flood),
+#   4. raise only in strict mode (an explicit dev/test opt-in, read at call
+#      time so a test can flip it and prod cannot accidentally be strict).
+_TELEMETRY_STRICT_ENV = "TORTOISE_TELEMETRY_STRICT"
+
+# (where, subject, bounded sorted unknown keys) -> drop count. Monotonic —
+# reads never reset it. The key is BOUNDED (see `_telemetry_drop_fingerprint`)
+# and the dict is capped, because one call site (the PATCH front door) derives
+# its keys from a request body: without a bound, an authenticated caller could
+# grow both structures without limit and emit an unbounded warning line.
+_TELEMETRY_DROP_COUNTS: Counter[tuple[str, str, tuple[str, ...]]] = Counter()
+
+# (where, subject, bounded key fingerprint) already warned — the OTel
+# "at most once per record" dedup, kept PER SITE. A single global set let the
+# client-controlled PATCH front door consume the whole warning budget and
+# silence EVERY other site's first warning — a per-site budget keeps one
+# noisy surface from blinding the others.
+_TELEMETRY_DROP_REPORTED: dict[tuple[str, str], set[tuple[str, ...]]] = {}
+
+# Guards the count and the warn-dedup so "always counted" and "reported at
+# most once" hold under the threaded emit sites (`asyncio.to_thread`, the
+# MCP executor). Contended only on a drop — rare by construction — never on
+# the happy path.
+_TELEMETRY_DROP_LOCK = threading.Lock()
+
+# Cardinality bounds. The counter retains at most `_TELEMETRY_DROP_MAX_MARKERS`
+# distinct key-sets PLUS one shared overflow entry; the per-site dedup dict
+# retains at most `_TELEMETRY_DROP_MAX_SITES` sites PLUS one shared overflow
+# site, each with at most `_TELEMETRY_DROP_MAX_PER_SITE` fingerprints; and at
+# most `_TELEMETRY_DROP_MAX_KEYS` keys are named in one counter key / log line,
+# each truncated to `_TELEMETRY_DROP_MAX_KEY_LEN` characters.
+# Together these mean a CALLER-SUPPLIED key name (or site label) can never make
+# the reporter retain or log without bound.
+_TELEMETRY_DROP_MAX_MARKERS = 512
+_TELEMETRY_DROP_MAX_SITES = 64
+_TELEMETRY_DROP_MAX_PER_SITE = 64
+_TELEMETRY_DROP_MAX_KEYS = 20
+_TELEMETRY_DROP_MAX_KEY_LEN = 128
+
+# The sentinels a capped structure folds into — SHARED, so each structure is
+# bounded overall rather than bounded-per-key.
+_TELEMETRY_DROP_OVERFLOW: tuple[str, str, tuple[str, ...]] = (
+    "<overflow>", "<overflow>", ())
+_TELEMETRY_DROP_SITE_OVERFLOW: tuple[str, str] = (
+    "<site-overflow>", "<site-overflow>")
+
+
+def _truncate_label(text: str) -> str:
+    """Truncate an over-long label, keeping a length suffix in the rendering."""
+    if len(text) <= _TELEMETRY_DROP_MAX_KEY_LEN:
+        return text
+    return (text[:_TELEMETRY_DROP_MAX_KEY_LEN]
+            + f"...(+{len(text) - _TELEMETRY_DROP_MAX_KEY_LEN} more)")
+
+
+def _cap_dropped_key(key: object) -> object:
+    """Truncate ONE over-long dropped key name so a fingerprint stays bounded.
+
+    A key at or under ``_TELEMETRY_DROP_MAX_KEY_LEN`` is returned UNCHANGED, so
+    a normal short key's fingerprint — and every assertion on it — is
+    byte-identical to before; only an over-long rendering is truncated, with a
+    length suffix so the log line still says how much was elided."""
+    rendered = key if isinstance(key, str) else str(key)
+    if len(rendered) <= _TELEMETRY_DROP_MAX_KEY_LEN:
+        return key
+    return _truncate_label(rendered)
+
+
+def _telemetry_drop_fingerprint(keys: frozenset[str] | set[str]) -> tuple[str, ...]:
+    """A BOUNDED, comparable rendering of a dropped key set.
+
+    ``key=str`` keeps the sort total for a non-string key (a caller-supplied
+    props dict is only membership-checked, so a mixed-type key set must not
+    make the reporter itself raise). TWO caps are needed because the PATCH
+    front door feeds this from a request body: ``_TELEMETRY_DROP_MAX_KEYS``
+    bounds the COUNT of keys named, and ``_TELEMETRY_DROP_MAX_KEY_LEN`` bounds
+    each name's LENGTH — without the second, one 1 MiB field name would become
+    one 1 MiB retained fingerprint entry and log line.
+    """
+    ordered = sorted(keys, key=str)
+    marker = None
+    if len(ordered) > _TELEMETRY_DROP_MAX_KEYS:
+        extra = len(ordered) - _TELEMETRY_DROP_MAX_KEYS
+        ordered = ordered[:_TELEMETRY_DROP_MAX_KEYS]
+        marker = f"...(+{extra} more)"
+    rendered = tuple(_cap_dropped_key(k) for k in ordered)
+    return (*rendered, marker) if marker is not None else rendered
+
+
+class UnregisteredTelemetryKey(ValueError):
+    """Raised by ``_report_unregistered`` ONLY in strict mode.
+
+    Subclasses ``ValueError`` so a raise inside
+    ``OnboardingStatePatchRequest``'s pydantic before-validator surfaces as a
+    validation error rather than an opaque 500; every other raise site
+    propagates it as-is."""
+
+    def __init__(self, where: str, subject: str, unknown: set[str]) -> None:
+        self.where = where
+        self.subject = subject
+        self.unknown = frozenset(unknown)
+        super().__init__(
+            f"unregistered telemetry key(s) at {where} (subject={subject}): "
+            f"{sorted(map(str, unknown))}")
+
+
+def _telemetry_strict() -> bool:
+    """Strictness is read AT CALL TIME.
+
+    Reading it at import time would both (a) make the flag untestable and
+    (b) let a dev flag set before boot survive into production."""
+    return os.environ.get(_TELEMETRY_STRICT_ENV) == "1"
+
+
+def _report_unregistered(where: str, subject: str,
+                         unknown: set[str] | frozenset[str] | None) -> None:
+    """Account for allowlist-dropped telemetry keys — and never forward them.
+
+    Contract (issue #3821), in order:
+
+    1. ALWAYS counts — the bounded key fingerprint is incremented before any
+       escalation, so the drop is visible even when strict mode raises.
+    2. Reports AT MOST ONCE per ``(where, subject, key-fingerprint)`` per
+       process — the OTel bound, so an emit site in a hot loop cannot flood
+       the log.
+    3. Raises ``UnregisteredTelemetryKey`` ONLY when strict mode is on at call
+       time; otherwise returns.
+    4. NEVER forwards the key: the caller's filtered props are byte-identical
+       to before, preserving the PII guarantee.
+
+    Every retained structure is bounded: ``_TELEMETRY_DROP_COUNTS`` by
+    ``_TELEMETRY_DROP_MAX_MARKERS`` plus one shared overflow entry,
+    ``_TELEMETRY_DROP_REPORTED`` by ``_TELEMETRY_DROP_MAX_SITES`` sites (plus a
+    shared overflow site) each capped at ``_TELEMETRY_DROP_MAX_PER_SITE``
+    fingerprints, and the fingerprint's key names by ``_TELEMETRY_DROP_MAX_KEYS``
+    names (plus one ``...(+N more)`` marker), each capped at
+    ``_TELEMETRY_DROP_MAX_KEY_LEN`` characters.
+    The PATCH front door feeds this from a request body, so an authenticated
+    caller must not be able to grow process-global state or a log line without
+    bound by sending unique unknown field names.
+
+    An empty/``None`` ``unknown`` is a no-op — a fully-registered event must
+    leave the counter at zero, or the counter itself is unreadable.
+    """
+    if not unknown:
+        return
+    # A site label is a code literal at every CURRENT call site, but the
+    # boundedness contract must not depend on that — cap it exactly as a key
+    # name is capped, so a future request-derived label cannot grow the
+    # counter, the per-site dict, or the log line without bound.
+    where = _truncate_label(where)
+    subject = _truncate_label(subject)
+    fingerprint = _telemetry_drop_fingerprint(frozenset(unknown))
+    with _TELEMETRY_DROP_LOCK:
+        counter_key = (where, subject, fingerprint)
+        if (counter_key not in _TELEMETRY_DROP_COUNTS
+                and len(_TELEMETRY_DROP_COUNTS) >= _TELEMETRY_DROP_MAX_MARKERS):
+            counter_key = _TELEMETRY_DROP_OVERFLOW
+        _TELEMETRY_DROP_COUNTS[counter_key] += 1
+        site = (where, subject)
+        if (site not in _TELEMETRY_DROP_REPORTED
+                and len(_TELEMETRY_DROP_REPORTED) >= _TELEMETRY_DROP_MAX_SITES):
+            site = _TELEMETRY_DROP_SITE_OVERFLOW
+        reported = _TELEMETRY_DROP_REPORTED.setdefault(site, set())
+        report = (fingerprint not in reported
+                  and len(reported) < _TELEMETRY_DROP_MAX_PER_SITE)
+        if report:
+            reported.add(fingerprint)
+    if report:
+        _logger.warning(
+            "unregistered telemetry key(s) dropped at %s (subject=%s): %s — "
+            "NOT forwarded; if the loss is unintended, register them in "
+            "_ALLOWED_ANALYTICS_PROPS (props) or _ALLOWED_STATE_KEYS (state)",
+            where, subject, list(fingerprint))
+    if _telemetry_strict():
+        raise UnregisteredTelemetryKey(where, subject, set(unknown))
+
 
 _ANALYTICS_FALLBACK_PATH = None
 
@@ -19830,8 +20080,11 @@ def _track_analytics_event(org_id: str, event_name: str,
 
     Writes to Supabase analytics_events when SUPABASE_URL + a service key are
     set (either name in ``supabase_control._SERVICE_KEY_ENV``); otherwise
-    appends to a local JSONL fallback. Never raises — the onboarding flow must
-    not break because analytics failed.
+    appends to a local JSONL fallback. Never raises **except**
+    ``UnregisteredTelemetryKey`` under ``TORTOISE_TELEMETRY_STRICT=1`` — the
+    registration guard (``_report_unregistered``) raises before any row is
+    written, so it is the one documented non-return exit and it is off by
+    default in production (see its own docstring).
 
     #3677: this site read ONLY the legacy ``SUPABASE_SERVICE_KEY`` while the
     hosted deployment sets ``SUPABASE_SERVICE_ROLE_KEY`` — so in production
@@ -19866,8 +20119,9 @@ def _track_analytics_event(org_id: str, event_name: str,
     ``fallback``/``dropped`` additionally increment
     ``monitoring.ANALYTICS_OUTCOME_COUNT`` and, at most once per degradation
     episode, file ``ANALYTICS_SINK_DEGRADED``. That alert leg is best-effort —
-    it cannot escape (the never-raise contract above is unchanged) and it is
-    NOT conditioned on the alert channel existing: counting happens either way.
+    it adds no non-return exit of its own (the contract above has exactly ONE:
+    strict mode's registration guard) and it is NOT conditioned on the alert
+    channel existing: counting happens either way.
 
     #3820 (D5a): the alert leg is also NOT conditioned on the backup sweep
     being enabled. ``_backup_config_safe()`` returns ``None`` whenever
@@ -19885,6 +20139,13 @@ def _track_analytics_event(org_id: str, event_name: str,
         # from `.items()` straight out of it. Every in-repo caller passes a
         # dict — this pins the contract for callers added later.
         properties = None
+    # #3821: observe the drop BEFORE the filter below removes it. The filter
+    # itself is unchanged — an unknown key is still never forwarded, so the
+    # PII guarantee is byte-identical. Reporting first also means strict mode
+    # raises before any row is written.
+    _report_unregistered(
+        "analytics_props", event_name,
+        set(properties or {}) - _ALLOWED_ANALYTICS_PROPS)
     props = {k: v for k, v in (properties or {}).items()
              if k in _ALLOWED_ANALYTICS_PROPS}
     event = {
@@ -20484,9 +20745,17 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
 
 
 def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
-    """Convenience: track with the current org, swallowing errors."""
-    try:  # noqa: SIM105
+    """Convenience: track with the current org, swallowing errors.
+
+    #3821: the ONE exception that must escape this swallow is
+    ``UnregisteredTelemetryKey`` — strict mode exists precisely so a
+    misregistered prop cannot be silently swallowed by this wrapper.
+    Everything else is still swallowed (analytics must never break the
+    onboarding flow)."""
+    try:
         _track_analytics_event(org["org_id"], event_name, props or None)
+    except UnregisteredTelemetryKey:
+        raise
     except Exception:
         pass
 

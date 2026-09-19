@@ -131,6 +131,11 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # the wheel — `tortoise install` resolves volunteer-turn.sh from
           # package __file__, so site-package installs need the real script.
           "claude-hooks/*.sh", "claude-hooks/*.md",
+          # #3818: the Codex capture seam ships too — `tortoise install codex`
+          # copies the hook out of the PACKAGE into $CODEX_HOME/hooks, so a
+          # wheel without it fails the install with "shipped capture hook not
+          # found".
+          "codex-hooks/*.sh",
           # #3808: the same is true of the Pi capture seam — `tortoise install
           # pi` copies this extension out of the PACKAGE (not the repo), so a
           # wheel without it fails the install with "shipped capture extension
