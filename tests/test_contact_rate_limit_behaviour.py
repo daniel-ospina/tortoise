@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -270,6 +271,7 @@ const CLIENT_V6_B = "2001:db8:85a3:0:0:8a2e:370:7433";
 const CLIENT_V6_C = "2001:db8::1";
 const CLIENT_V6_D = "::ffff:203.0.113.9";
 const CLIENT_BURST = "203.0.113.201";
+const CLIENT_EPOCH = "203.0.113.202";
 
 // The loops must not scale with a bumped constant: a huge RATE_LIMIT or
 // MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
@@ -519,6 +521,19 @@ for (let i = 0; i < limit; i++) rateLimited(CLIENT_BURST, T0);
 observations.burstStored = (hits.get(CLIENT_BURST) || []).length;
 observations.burstRefuses = rateLimited(CLIENT_BURST, T0);
 
+// 16. A REALISTIC epoch clock. `Date.now()` is ~1.79e12, far outside int32, and the
+// limiter stores timestamps and subtracts a window from them. A cutoff coerced into
+// int32 — `(now - RATE_WINDOW_MS) | 0`, `>>> 0` — wraps NEGATIVE, so every stored
+// timestamp stays `> cutoff`, the window never expires, and once an address reaches the
+// limit it is refused PERMANENTLY: a trivial lockout. Every other scenario's clock
+// starts at 1_000_000, where such a coercion is harmless, so this is the only place the
+// class can be seen.
+const REAL_T0 = 1_789_837_407_846;
+hits.clear();
+for (let i = 0; i < limit; i++) rateLimited(CLIENT_EPOCH, REAL_T0);
+observations.epochTrips = rateLimited(CLIENT_EPOCH, REAL_T0);
+observations.epochAfterWindowOk = !rateLimited(CLIENT_EPOCH, REAL_T0 + RATE_WINDOW_MS + 1);
+
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
 // this call — `Date.now()` stepping backwards is reachable under NTP, a VM restore or a
 // manual clock set — must still be counted and refused. The property under test is that
@@ -538,7 +553,7 @@ for (let i = 0; i < limit; i++) {
 observations.clockStepBackRefuses = rateLimited(CLIENT_Z, T0);
 observations.clockStepBackStored = (hits.get(CLIENT_Z) || []).length;
 
-console.log(JSON.stringify(observations));
+console.log("__NONCE__" + JSON.stringify(observations));
 """
 
 
@@ -547,9 +562,17 @@ def _observe(code: str) -> dict:
 
     A failure to run is an assertion failure, not a skip: a limiter the harness
     cannot execute is a limiter this harness cannot certify.
+
+    The payload is tagged with a per-run NONCE and must be the ONLY line on stdout. The
+    code under test shares this process with the driver, so it could otherwise report
+    observations of its own choosing and be certified on them; with the nonce it can only
+    be credited for output the harness asked for and can attribute. That raises the bar
+    rather than removing it — see THE DECLARED LIMIT — and a limiter that forges stdout
+    is refused loudly instead of quietly believed.
     """
+    nonce = "nonce-" + secrets.token_hex(8)
     result = subprocess.run(
-        [NODE, "-e", _limiter_source(code) + DRIVER],
+        [NODE, "-e", _limiter_source(code) + DRIVER.replace("__NONCE__", nonce)],
         capture_output=True,
         text=True,
         timeout=180,
@@ -559,12 +582,13 @@ def _observe(code: str) -> dict:
         f"the extracted limiter failed to run in node (exit {result.returncode}):\n"
         f"{result.stderr[-2000:]}"
     )
-    try:
-        return json.loads(result.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError) as err:
-        raise AssertionError(
-            f"could not read the harness output: {err}\nstdout: {result.stdout[-800:]!r}"
-        ) from err
+    lines = result.stdout.strip().splitlines()
+    assert len(lines) == 1 and lines[0].startswith(nonce), (
+        "the harness output is not the single nonce-tagged payload it asked for — a "
+        f"limiter that writes its own stdout must not be believed. Nonce {nonce!r}, "
+        f"stdout: {result.stdout[-800:]!r}"
+    )
+    return json.loads(lines[0][len(nonce) :])
 
 
 def _check_threshold(observed: dict) -> None:
@@ -598,6 +622,16 @@ def _check_accumulation(observed: dict) -> None:
     assert observed["burstRefuses"] is True, (
         "the submission after a same-millisecond burst must be refused: counting distinct "
         "timestamps instead of submissions is the bypass"
+    )
+    assert observed["epochTrips"] is True, (
+        "an address must be refused once it reaches the limit on a REALISTIC epoch clock "
+        "(~1.79e12 ms) — if it is not, the window arithmetic is not reaching the store"
+    )
+    assert observed["epochAfterWindowOk"] is True, (
+        "after one full window the SAME address must be accepted again on a realistic "
+        "epoch clock: a cutoff coerced into int32 (`| 0`, `>>> 0`) wraps negative, the "
+        "window never expires, and every visitor that reaches the limit is locked out "
+        "permanently"
     )
     assert observed["storedAfterTrip"] == limit, (
         f"after the refusal the stored window must hold {limit} entries, got "
@@ -857,20 +891,41 @@ def _key_failures(code: str) -> list[str]:
     `hits.set(ip, ...)` and `hits.delete(ip)`.
     """
     body = _limiter_source(code)
-    calls = re.findall(r"hits\.(get|set|delete)\(([^,)]*)", body)
-    assert len(calls) >= 4, (
-        f"expected the limiter's store call sites, found {calls!r} — the key check "
-        "cannot certify a limiter whose store it cannot find"
-    )
+    function_body = body[body.index("function rateLimited") :]
+    calls = re.findall(r"hits\.(get|set|delete)\(([^,)]*)", function_body)
+    failures = []
+    if len(calls) < 4:
+        # Returned rather than raised: this check is part of the battery's catch set, and
+        # a raised precondition would bypass the `or` chain it is evaluated in.
+        failures.append(
+            f"expected the limiter's store call sites in the dot-notation form this "
+            f"check reads, found {calls!r} — a limiter whose store it cannot find is one "
+            "it cannot certify"
+        )
+    # Every use of `hits` must be a dot-method call the scan above can see. A different
+    # spelling of the SAME operations — bracket notation, optional chaining, a
+    # destructured `get`, a helper wrapper — would leave the live store operations
+    # unexamined while the four dead dot-notation calls above kept the count satisfied.
+    allowed = (".get(", ".set(", ".delete(", ".keys(", ".size", ".clear(")
+    for match in re.finditer(r"\bhits\b", function_body):
+        tail = function_body[match.end() : match.end() + 12].lstrip()
+        iterated = function_body[: match.start()].rstrip().endswith("of")
+        if not (tail.startswith(allowed) or iterated):
+            failures.append(
+                f"the store is used as {('hits' + tail[:16])!r} — the key check reads "
+                "`hits.get(ip)`, `hits.set(ip, ...)` and `hits.delete(ip)`, so any other "
+                "spelling of those operations would go unexamined"
+            )
     # `delete` is exempt from `ip`: the sweep and the eviction delete keys they are
     # iterating (`k`), which is the whole point of those loops. The address-keyed
     # operations — the read, and both writes — are what must agree on the key.
-    return [
+    failures.extend(
         f"the store is {method}-ed with {argument.strip()!r}, not the address — a key "
         "derived from the address reads a bucket nothing writes and refuses nobody"
         for method, argument in calls
         if argument.strip() != "ip" and not (method == "delete" and argument.strip() == "k")
-    ]
+    )
+    return failures
 
 
 def _binding_failures(code: str) -> list[str]:
@@ -891,10 +946,15 @@ def _binding_failures(code: str) -> list[str]:
         )
     if masked.count("function rateLimited") != 1:
         failures.append("expected exactly one `function rateLimited` definition")
-    if masked.count("rateLimited(") < 2:
+    # Exactly the declaration and the call site — no third mention anywhere. A presence
+    # check (`>= 2`) would be satisfied by a decoy call in dead code while the handler
+    # called something else, which is the failure this check exists to prevent.
+    mentions = len(re.findall(r"\brateLimited\b", masked))
+    if mentions != 2:
         failures.append(
-            "the limiter is never called in this module — the call site is the only "
-            "evidence that the extracted function is the one in use"
+            f"`rateLimited` is mentioned {mentions} times, expected exactly 2 (the "
+            "declaration and the call site) — the extracted function must be the one the "
+            "request path calls"
         )
     return failures
 
@@ -966,7 +1026,7 @@ def _predicate_failures(code: str) -> list[str]:
         ]
     predicate = matches[0].strip()
     # EXACTLY `t > cutoff` — not "an expression mentioning cutoff and no extra
-    # identifier", which was beaten twice: `t <= now + ...` (the token `now`), then
+    # identifier", which was beaten three times: `t <= now + ...` (the token `now`), then
     # `t <= tolerance` (a `now`-derived alias), then `t <= cutoff + 700000000` (a bound
     # spelled with a literal, so every identifier was still in the whitelist). Requiring
     # the predicate to BE the comparison refuses every additional clause at once, whatever
@@ -1057,17 +1117,18 @@ def test_eviction_stops_when_the_sweep_has_done_the_work(behaviour: dict) -> Non
 # expression does not break the battery — the harness asserts behaviour, not layout —
 # and each pattern is asserted present, so a mutation that stops applying fails
 # loudly with the instruction to update it instead of proving nothing.
-# An entry that cannot RUN at all is an acceptable catch only if it is declared here, so
-# that a mutated limiter the harness cannot execute is never silently counted as caught.
-# Two members, for two different reasons: a store that cannot hold the keys fails at
-# runtime (`hits.clear()` is not a function), and a factory-local store beside the real one
-# is refused by extraction, which will not pick a store when the module offers more than one.
-MAY_FAIL_TO_RUN: frozenset[str] = frozenset(
-    {
-        "store that cannot hold string keys",
-        "a factory-local store beside the real one",
-    }
-)
+# An entry that cannot RUN at all is an acceptable catch only if it is declared here WITH
+# the reason it fails, and the reason is asserted: a mutation that dies of a syntax error
+# proves nothing about the guard it was added to exercise. Three members, for three
+# reasons: a store that cannot hold the keys fails at runtime; a second store is refused by
+# extraction, which will not pick one when the module offers more than one; and a limiter
+# that forges stdout is refused the run, because the harness will not credit output it did
+# not ask for and cannot attribute.
+MAY_FAIL_TO_RUN: dict[str, str] = {
+    "store that cannot hold string keys": "failed to run in node",
+    "a factory-local store beside the real one": "expected exactly ONE `const hits`",
+    "the limiter forges its own stdout": "not the single nonce-tagged payload it asked for",
+}
 
 MUTATIONS: tuple[tuple[str, str, str], ...] = (
     (
@@ -1184,6 +1245,34 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "burst timestamps are deduplicated",
         r"recent\.push\(now\);",
         "if (!recent.includes(now)) recent.push(now);",
+    ),
+    (
+        "the cutoff is coerced into int32",
+        r"const cutoff = now - RATE_WINDOW_MS;",
+        "const cutoff = (now - RATE_WINDOW_MS) | 0;",
+    ),
+    (
+        "the store is reached by bracket notation",
+        r"const recent = \(hits\.get\(ip\) \|\| \[\]\)\.filter\(\(t\) => t > cutoff\);"
+        r"[\s\S]*?hits\.delete\(ip\);[\s\S]*?hits\.set\(ip, recent\);",
+        'const recent = (hits["get"](ip) || []).filter((t) => t > cutoff);\n'
+        "  if (recent.length >= RATE_LIMIT) {\n"
+        '    hits["set"](ip.split(".")[0], recent);\n'
+        "    return true;\n"
+        "  }\n"
+        "  recent.push(now);\n"
+        '  hits["delete"](ip);\n'
+        '  hits["set"](ip.split(".")[0], recent);',
+    ),
+    (
+        "the limiter forges its own stdout",
+        r"return false;\n\}",
+        "console.log = () => {};\n"
+        "  process.stdout.write(JSON.stringify({\n"
+        "    limit: RATE_LIMIT, maxRateKeys: MAX_RATE_KEYS, capCeiling: 1,\n"
+        "    firstTripIndex: RATE_LIMIT, growth: Array.from({length: RATE_LIMIT}, (_, i) => i + 1),\n"
+        "  }) + '\\n');\n"
+        "  return false;\n}",
     ),
     (
         "eviction decrements by two",
@@ -1373,6 +1462,19 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _apply_mutation(pattern: str, replacement: str, source: str) -> str:
+    """Apply one battery entry, inserting `replacement` VERBATIM.
+
+    `re.sub` processes backslash escapes in a replacement string, so a mutation that
+    wants JavaScript `'\\n'` inside a string literal would be handed a real newline and
+    die of a syntax error instead of the behaviour under test — and the entry would then
+    "pass" as a declared run-failure while proving nothing. Substituting through a
+    function removes that class: the only escape with meaning here is `\\g<0>` (the
+    matched text), expanded explicitly so it cannot be lost to re-interpretation either.
+    """
+    return re.sub(pattern, lambda match: replacement.replace("\\g<0>", match.group(0)), source, count=1)
+
+
 @pytest.mark.parametrize(
     ("label", "pattern", "replacement"), MUTATIONS, ids=[m[0] for m in MUTATIONS]
 )
@@ -1390,18 +1492,23 @@ def test_the_harness_catches_a_behavioural_break(label: str, pattern: str, repla
         f"the mutation anchor for {label!r} is gone from the limiter — update MUTATIONS "
         "rather than leaving a battery that no longer applies"
     )
-    mutated = re.sub(pattern, replacement, source, count=1)
+    mutated = _apply_mutation(pattern, replacement, source)
     try:
         observed = _observe(mutated)
     except AssertionError as exc:
         # The mutated limiter could not be extracted or run at all. That is an
-        # acceptable catch only where the entry SAYS so: a limiter the harness cannot
-        # execute is one it cannot certify. For every other entry a run failure means
-        # the mutation broke the harness rather than beating it, so it must not be
-        # counted as a detection.
-        assert label in MAY_FAIL_TO_RUN, (
-            f"{label!r} could not run ({exc}) — if that is the point of the entry, add "
-            "it to MAY_FAIL_TO_RUN; otherwise the mutation is broken, not caught"
+        # acceptable catch only where the entry SAYS so — and only for the reason it
+        # says: a mutation that dies of a syntax error proves nothing about the guard it
+        # was added to exercise, so the declared reason is asserted, not just the label.
+        if label not in MAY_FAIL_TO_RUN:
+            raise AssertionError(
+                f"{label!r} could not run ({exc}) — if that is the point of the entry, "
+                "add it to MAY_FAIL_TO_RUN with the reason; otherwise the mutation is "
+                "broken, not caught"
+            ) from exc
+        assert MAY_FAIL_TO_RUN[label] in str(exc), (
+            f"{label!r} failed to run for a different reason than declared: expected "
+            f"{MAY_FAIL_TO_RUN[label]!r} in {str(exc)[:400]!r}"
         )
         return
     assert (
