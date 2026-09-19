@@ -81,7 +81,7 @@ answer path for search.
 | `abstained` | **Best-effort heuristic label** (phrase list over the answer text) — NOT the abstention guarantee; the two-phase prompt is authoritative |
 | `question_type` | The detected or caller-override type; None possible |
 | `question_date` | The resolved value (see above) |
-| `evidence` | The assembled context the reader saw (trust property as a response field) — bounded by BOTH the resolved token cap (default 16 000 estimated tokens, #4105) AND the resolved `TORTOISE_ASK_CONTEXT_BYTE_CAP` byte bound (default derived as `max(32768, token_cap × 8)` = 128 KiB), ENFORCED AT ASSEMBLY (whole-hit drop; never splits a character) |
+| `evidence` | The assembled context the reader saw (trust property as a response field) — bounded by BOTH the resolved token cap (default 16 000 estimated tokens, #4105) AND the resolved `TORTOISE_ASK_CONTEXT_BYTE_CAP` byte bound (default derived as `max(32768, token_cap × 8)` = 128 000 bytes), ENFORCED AT ASSEMBLY (whole-hit drop; never splits a character) |
 | `context_tokens` | `estimate_tokens_ask(rendered_context)` — a conservative ESTIMATE, not a raw count; bounded by the resolved `TORTOISE_ASK_CONTEXT_TOKEN_CAP` (default 16 000, #4105) |
 | `model` | The RESOLVED spec (the serving lane's wire id — bare `deepseek-v4-flash` on the direct lane, the full spec on OpenRouter) |
 | `provider` / `route` | The lane that actually served — a FAILOVER answer reports the SURVIVING lane; recovery reports the primary lane again |

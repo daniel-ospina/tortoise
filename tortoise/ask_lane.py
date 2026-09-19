@@ -360,7 +360,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` /
         ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` /
         ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` /
-        ``TORTOISE_ASK_POOL_SIZE`` (defaults 200/200/16000/derived(128 KiB)/200
+        ``TORTOISE_ASK_POOL_SIZE`` (defaults 200/200/16000/derived(128000 bytes)/200
         since #4105; the retrieval-window limit is threaded IN TANDEM with the
         assembly caps and the pool floor, and the byte ceiling is resolved
         rather than hard-coded — raising only the assemble cap changes
