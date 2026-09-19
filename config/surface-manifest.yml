@@ -14,7 +14,7 @@ approval_pr: null
 response_fields:
 - response: tortoise_search
   field: status
-  emitted_when: 'the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/read_status.py, roadmap §7 item 9)'
+  emitted_when: 'the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available|empty|degraded|unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9)'
   unchanged_when_off: 'yes — results and count stay byte-identical and the key is absent'
 counts:
   tools: 98

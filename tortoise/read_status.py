@@ -1,59 +1,46 @@
-"""The read-path status vocabulary — roadmap §7 item 9 (ADOPTED 2026-09-17).
+"""The read-path half of the recorded status vocabulary — roadmap §7 item 9.
 
-The LLM-free ``search`` / ``recall`` read path reports exactly one of four
+The LLM-free ``search`` / ``recall`` read path reports exactly ONE of the four
 recorded terms, so that **memory unavailable** can never be indistinguishable
 from **memory empty**:
 
-    available     the store was reached AND hits were returned
-    empty         the store was reached AND nothing matched
-    degraded      the store was reached, results were returned (or could be),
-                  but a leg did not run — e.g. the embedder is not installed so
-                  the dense leg was skipped (the #2573 / #2898 class), or
-                  annotation/assembly failed
-    unconfigured  the read path could not reach a store at all — no store /
-                  endpoint configured, or unreachable — NEVER reported as empty
+    available      the store was reached AND hits were returned
+    empty          the store was reached AND nothing matched
+    degraded       the memory layer is IMPAIRED — the store is configured but
+                   could not be reached (off by outage), or it answered while a
+                   retrieval leg did not run (the #2573 / #2898 embedder-absent
+                   class)
+    unconfigured   NO store / endpoint is configured — "off by policy", a
+                   set-up gap. NEVER reported as empty
 
-⛔ **THE VOCABULARY IS RECORDED — CONSUME IT, DO NOT MINT.** These four terms
-are the adopted contract (roadmap §7 item 9). Do not add a fifth, do not rename
-one, do not add a synonym. A state the four do not cover is a contract change:
-raise it instead of naming one locally — coining a term in parallel is how one
-contract becomes two.
+⛔ **THE VOCABULARY IS RECORDED — CONSUME IT, DO NOT MINT.** The four terms and
+the condition each names are declared in ONE home,
+``tortoise/status_vocabulary.py`` (the client-boundary vocabulary, #3805 / PR
+#4044). This module does not re-declare the words: ``STATUS_*`` and
+``READ_STATUSES`` are re-exported from that home, and ``classify_read_status``
+DELEGATES the configuration / reachability / content mapping to its
+``classify``. Do not add a fifth term, rename one, add a synonym, or fork the
+mapping locally — a term coined in parallel is how one contract becomes two.
 
-**The client boundary is NOT mapped here.** ``scripts/tortoise-memory.mjs``
-still exits 0 for both "unreachable" and "empty" (issue #3805); mapping the
-client side to distinct exit codes is the client-boundary lane's work, not this
-module's. The cross-lane acceptance test — the same condition must produce the
-same term on both sides — is likewise a lane-orchestrator step and does not
-exist yet. What this module guarantees is the read-path term itself.
+**The one read-path dimension the four terms do not name.** A retrieval leg
+that did not run (no embedder installed, a tripped breaker, a timeout) leaves
+the store ANSWERED but the memory layer IMPAIRED. The four terms have no name
+for "the store answered, but not every leg did", so that state is carried as
+the classified status ``degraded`` — the recorded term for an impaired memory —
+while the leg-by-leg detail stays in the existing ``leg_trace``. No fifth term
+is invented for it.
 
-**The load-bearing property:** ``unconfigured`` must never be indistinguishable
-from ``empty``, and a failure must never be returned as a successful empty
-result.
+**The load-bearing property:** ``empty`` (the store answered and had nothing)
+is never reported as ``degraded`` or ``unconfigured`` (the store did not
+answer), and neither failure is ever reported as a successful empty result.
+``unconfigured`` (never declared) and ``degraded`` (configured but impaired)
+are likewise never reported as each other.
 
-⚠️ **A KNOWN CROSS-LANE CONFLICT, RAISED NOT RESOLVED HERE.** The read-path
-contract's home issue is #3805 (*the read-path failure contract — unavailable
-must be distinguishable from empty*), which stays open: this module implements
-only its status-vocabulary sub-item. Two other status declarations exist, and
-they do not agree with this module or with each other:
-
-1. `157a3f8f3` (#3893 "D5") landed ``not_configured`` (never set up) and
-   ``tortoise_unavailable`` (configured but unreachable) in
-   ``tortoise/tortoise_client.py`` and ``client/tortoise_client/cli.py``.
-2. The unmerged ``tortoise/status_vocabulary.py`` (PR #4044) supersedes D5's
-   words with the same four terms but maps them differently: ``degraded`` = the
-   store is **configured but could not be reached** (off by outage), and
-   ``unconfigured`` = **no store / endpoint / key was declared** (off by
-   policy). Under that mapping the condition this module calls ``degraded`` — a
-   leg did not run (the #2573/#2898 class) — is a condition the four terms do
-   not name, and this module's ``unconfigured`` ("no store configured, **or**
-   unreachable") re-collapses the off-by-policy vs off-by-outage pair the four
-   terms exist to separate.
-
-**This module does not silently pick either reading and does not rename or
-split the terms** — the four terms are the recorded contract, and the mapping
-is a lane/owner call (it touches #3832/D5; #4044 raises the mirror-image of
-this note). It is handed up to the orchestrator, not settled locally. Whichever
-mapping wins, no fifth term is introduced here.
+**Cross-lane parity.** The client boundary (``client/tortoise_client/cli.py``,
+``tortoise/tortoise_client.py``) reports the same four terms from that same
+home module. ``tests/test_read_status.py`` asserts, term for term, that the
+read path and ``tortoise.status_vocabulary.classify`` agree on the same
+underlying condition, so the two surfaces cannot drift apart silently.
 
 **Additive and off by default.** The status is computed only when a caller
 passes ``read_status_out`` (the same caller-owned-mutable-sink pattern as the
@@ -67,18 +54,19 @@ from __future__ import annotations
 
 import os
 
-#: The four recorded terms — the whole vocabulary, in no implied order.
-STATUS_AVAILABLE = "available"
-STATUS_EMPTY = "empty"
-STATUS_DEGRADED = "degraded"
-STATUS_UNCONFIGURED = "unconfigured"
-
-READ_STATUSES: tuple[str, ...] = (
+#: The recorded terms and the published term set, imported from their ONE
+#: home. ``READ_STATUSES`` is the home's ``CLIENT_STATUS_TERMS``: the read path
+#: reports the boundary's vocabulary, it does not own a copy of it.
+from .status_vocabulary import (
+    CLIENT_STATUS_TERMS,
     STATUS_AVAILABLE,
-    STATUS_EMPTY,
     STATUS_DEGRADED,
+    STATUS_EMPTY,
     STATUS_UNCONFIGURED,
 )
+from .status_vocabulary import classify as classify_condition
+
+READ_STATUSES: tuple[str, ...] = CLIENT_STATUS_TERMS
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -102,38 +90,58 @@ def read_status_enabled() -> bool:
     return os.environ.get("TORTOISE_READ_STATUS", "").strip().lower() in _TRUTHY
 
 
-def classify_read_status(*, reached: bool, hit_count: int, degraded: bool) -> str:
-    """Map the three observed facts onto the four recorded terms.
+def classify_read_status(*, reached: bool, hit_count: int, degraded: bool,
+                         configured: bool = True) -> str:
+    """Map the read path's observed facts onto the recorded four terms.
 
-    ``degraded`` outranks ``empty``: when a leg did not run, "nothing matched"
-    is not established, so the honest report is a degraded read rather than an
-    empty one. Reachability outranks everything — nothing else can be claimed
-    about a store that was never reached.
+    ``configured``  a store / endpoint was DECLARED — the read path reached a
+                    projection object. ``False`` is the only route to
+                    ``unconfigured``.
+    ``reached``     the store ANSWERED.
+    ``hit_count``   rows the read returned.
+    ``degraded``    a leg did not run — the memory layer is impaired.
+
+    The configuration / reachability / content mapping is DELEGATED to
+    ``tortoise.status_vocabulary.classify`` (the recording home), so the two
+    surfaces cannot diverge on it: configuration first (never declared →
+    ``unconfigured``), then reachability (configured but no answer →
+    ``degraded``), then content (``available`` / ``empty``). The read path's
+    own ``degraded`` dimension folds in on top, and only AFTER that order — a
+    store that was never declared stays ``unconfigured`` — but it outranks a
+    successful read: when a leg did not run, a partial result is not a clean
+    one and "nothing matched" is not established.
     """
-    if not reached:
-        return STATUS_UNCONFIGURED
+    status = classify_condition(
+        configured=configured, reached=reached, hits=hit_count)
+    if status == STATUS_UNCONFIGURED:
+        return status
     if degraded:
         return STATUS_DEGRADED
-    return STATUS_AVAILABLE if hit_count > 0 else STATUS_EMPTY
+    return status
 
 
 def classify_leg_trace(entries, *, hit_count: int,
-                       reached: bool | None = None) -> str:
+                       reached: bool | None = None,
+                       configured: bool = True) -> str:
     """Classify a read from its leg trace (R3 #1542 D4) and its hit count.
+
+    ``configured`` is true by default because a leg trace only exists once the
+    read path has a projection object; pass ``False`` when no store was
+    declared at all.
 
     ``reached`` is derived BY DEFAULT (either rows came back, or at least one
     leg answered the store); it may be passed explicitly when the caller holds
-    independent reachability proof (the read path's probe). ``degraded`` is true when any leg recorded a
-    degradation (a leg skipped, an index missing, a timeout) or when the
-    TF-IDF fallback actually produced the rows. A zero-count fallback is a
-    recovery that found nothing, not a degradation — the #2952 rule, so an
-    honest no-match read on a healthy store is ``empty`` and not ``degraded``.
+    independent reachability proof (the read path's bounded probe).
+    ``degraded`` is true when any leg recorded a degradation (a leg skipped, an
+    index missing, a timeout) or when the TF-IDF fallback actually produced the
+    rows. A zero-count fallback is a recovery that found nothing, not a
+    degradation — the #2952 rule, so an honest no-match read on a healthy store
+    is ``empty`` and not ``degraded``.
 
-    ``reached`` may be passed explicitly when the caller has INDEPENDENT proof
-    the store answered — the read path proves it with a reachability probe, and
-    a caller holding that proof must not have the answer walked back by a trace
-    whose legs were skipped by a tripped circuit breaker: a breaker-open leg is
-    a leg that did not run (``degraded``), never an unreachable store.
+    A trace whose legs all failed (``query_failed`` / ``breaker_open``) derives
+    ``reached=False``, and a CONFIGURED store that did not answer is
+    ``degraded`` (off by outage), never ``unconfigured`` — that term is
+    reserved for a store that was never declared.
     """
     derived_reached = False
     degraded = False
@@ -155,6 +163,7 @@ def classify_leg_trace(entries, *, hit_count: int,
     if hit_count > 0:
         derived_reached = True
     return classify_read_status(
+        configured=configured,
         reached=(derived_reached if reached is None else reached),
         hit_count=hit_count,
         degraded=degraded,
@@ -164,25 +173,25 @@ def classify_leg_trace(entries, *, hit_count: int,
 def combine_read_statuses(*statuses: str | None) -> str | None:
     """Coalesce the statuses of the calls that make up ONE composite read.
 
-    A leg that returned hits, ran degraded, or answered-and-found-nothing
-    proves the store WAS reached — so ``unconfigured`` is not available as the
-    composite answer once any leg is one of those; a leg that could not be
-    reached then means the composite read was incomplete (``degraded``), not
-    that the store was absent. ``unconfigured`` wins only when NO leg reached
-    the store at all. This keeps the composite payload self-consistent: a read
-    that returns rows can never simultaneously report ``unconfigured``.
+    A leg that returned hits or answered-and-found-nothing proves the store WAS
+    reached — a store's configuration is one global fact, so a reached leg
+    proves it was declared. A second leg that could not answer then makes the
+    composite read INCOMPLETE (``degraded``), not absent: ``unconfigured``
+    wins only when NO leg reached the store at all. This keeps the composite
+    payload self-consistent — a read that returns rows can never simultaneously
+    report ``unconfigured``.
     """
     present = [status for status in statuses if status]
     if not present:
         return None
     reached = any(
-        status in (STATUS_AVAILABLE, STATUS_DEGRADED, STATUS_EMPTY)
-        for status in present
-    )
-    if not reached:
-        return STATUS_UNCONFIGURED
-    if STATUS_DEGRADED in present or STATUS_UNCONFIGURED in present:
+        status in (STATUS_AVAILABLE, STATUS_EMPTY) for status in present)
+    impaired = any(
+        status in (STATUS_DEGRADED, STATUS_UNCONFIGURED) for status in present)
+    if reached and impaired:
         return STATUS_DEGRADED
-    if STATUS_AVAILABLE in present:
-        return STATUS_AVAILABLE
-    return STATUS_EMPTY
+    if reached:
+        return STATUS_AVAILABLE if STATUS_AVAILABLE in present else STATUS_EMPTY
+    # No leg reached the store. ``degraded`` asserts the store WAS configured,
+    # so it outranks ``unconfigured`` (never declared) here.
+    return STATUS_DEGRADED if STATUS_DEGRADED in present else STATUS_UNCONFIGURED

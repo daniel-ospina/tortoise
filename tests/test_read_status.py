@@ -2,16 +2,24 @@
 
 One status per retrieval read, from the FOUR RECORDED terms (roadmap §7 item 9,
 ADOPTED 2026-09-17): ``available | empty | degraded | unconfigured``. The
-load-bearing property is that ``unconfigured`` is never indistinguishable from
-``empty``, and a failure is never returned as a successful empty result.
+vocabulary's ONE home is ``tortoise/status_vocabulary.py`` (the client-boundary
+contract); the read path consumes it and mints no term of its own. The
+load-bearing property is that ``unconfigured`` (never declared) and ``degraded``
+(configured but impaired) are never indistinguishable from ``empty`` (the store
+answered and had nothing), and a failure is never returned as a successful
+empty result.
 
 MUTATION PROOF — the guard is shown to MOVE (the reverts and their verbatim
 pytest output are recorded in the PR body / the lane report):
 
 * **Collapse the failed path back onto empty** — make ``classify_read_status``
-  return ``STATUS_EMPTY`` when ``reached`` is False (the #3892 defect) →
-  ``TestReadPathStates::test_state_unconfigured_*`` and
+  return ``STATUS_EMPTY`` when the store was not reached (the #3892 defect) →
+  ``TestReadPathStates::test_state_unconfigured_*``,
+  ``TestClassify::test_configured_but_unreachable_is_degraded`` and
   ``test_unconfigured_is_distinguishable_from_empty`` RED.
+* **Re-fork the mapping** — make the configured-but-unreachable condition
+  report ``unconfigured`` again (the pre-alignment read-path mapping) → the
+  ``degraded`` tests and the cross-lane parity rows RED.
 * **Drop the status write** — make ``_with_read_status`` a no-op → every
   ``TestReadPathStates`` state assertion REDs (``KeyError: 'status'``) and the
   hosted-route ON test REDs.
@@ -25,6 +33,7 @@ import asyncio
 
 import pytest
 
+from tortoise import status_vocabulary
 from tortoise.embeddings import EmbeddingModel
 from tortoise.read_status import (
     READ_STATUSES,
@@ -67,6 +76,12 @@ class TestVocabulary:
             "available", "empty", "degraded", "unconfigured"}
         assert len(READ_STATUSES) == 4
 
+    def test_read_statuses_is_the_client_boundary_term_set(self):
+        # The read path does not own a copy of the vocabulary — it re-exports
+        # the recording home's published set (#3805 / PR #4044).
+        assert READ_STATUSES is status_vocabulary.CLIENT_STATUS_TERMS
+        assert set(status_vocabulary.CONDITIONS) == set(READ_STATUSES)
+
     def test_status_field_is_off_by_default(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_READ_STATUS", raising=False)
         assert read_status_enabled() is False
@@ -80,6 +95,46 @@ class TestVocabulary:
     def test_truthy_values_turn_the_field_on(self, monkeypatch, value):
         monkeypatch.setenv("TORTOISE_READ_STATUS", value)
         assert read_status_enabled() is True
+
+
+class TestCrossLaneParity:
+    """The same condition names the same term on both surfaces (#3805).
+
+    The read path and the client boundary draw from ONE home module, so this
+    asserts the terms rather than the wording: for each condition BOTH trees
+    can express, the read path's classifier and the boundary's must agree.
+    """
+
+    @pytest.mark.parametrize(
+        "condition,read_kwargs,vocab_kwargs",
+        [
+            ("reached and returned content",
+             dict(reached=True, hit_count=3, degraded=False),
+             dict(configured=True, reached=True, hits=3)),
+            ("reached and returned nothing",
+             dict(reached=True, hit_count=0, degraded=False),
+             dict(configured=True, reached=True, hits=0)),
+            ("configured but unreachable",
+             dict(configured=True, reached=False, hit_count=0, degraded=False),
+             dict(configured=True, reached=False, hits=0)),
+            ("never declared",
+             dict(configured=False, reached=False, hit_count=0,
+                  degraded=False),
+             dict(configured=False, reached=False, hits=0)),
+        ],
+    )
+    def test_read_path_term_equals_client_boundary_term(
+            self, condition, read_kwargs, vocab_kwargs):
+        assert (classify_read_status(**read_kwargs)
+                == status_vocabulary.classify(**vocab_kwargs)), condition
+
+    def test_a_leg_that_did_not_run_is_the_boundary_degraded_term(self):
+        # The four terms name no "the store answered but not every leg did"
+        # condition. It is carried as `degraded` — the recorded term for an
+        # impaired memory — and no fifth term is coined for it.
+        assert classify_read_status(
+            reached=True, hit_count=3, degraded=True
+        ) == status_vocabulary.STATUS_DEGRADED
 
 
 class TestClassify:
@@ -102,21 +157,36 @@ class TestClassify:
         assert classify_read_status(
             reached=True, hit_count=0, degraded=True) == STATUS_DEGRADED
 
-    def test_unreachable_is_unconfigured_never_empty(self):
+    def test_configured_but_unreachable_is_degraded_not_unconfigured(self):
+        # B3's client boundary wins: `unconfigured` = never declared;
+        # `degraded` = configured but the store did not answer.
         assert classify_read_status(
-            reached=False, hit_count=0, degraded=False) == STATUS_UNCONFIGURED
+            reached=False, hit_count=0, degraded=False) == STATUS_DEGRADED
         assert classify_read_status(
-            reached=False, hit_count=0, degraded=True) == STATUS_UNCONFIGURED
+            reached=False, hit_count=0, degraded=True) == STATUS_DEGRADED
 
-    def test_explicit_reachability_overrides_a_breaker_open_trace(self):
-        # P1 review fix: the read path's reachability probe is PROOF — a trace
-        # skipped by tripped breakers must classify as degraded (a leg did not
-        # run), not as an unreachable store.
+    def test_never_declared_is_unconfigured(self):
+        assert classify_read_status(
+            configured=False, reached=False, hit_count=0,
+            degraded=False) == STATUS_UNCONFIGURED
+
+    def test_unconfigured_is_not_empty(self):
+        # THE load-bearing property of the read path.
+        assert classify_read_status(
+            configured=False, reached=False, hit_count=0,
+            degraded=False) != STATUS_EMPTY
+        assert classify_read_status(
+            reached=True, hit_count=0, degraded=False) == STATUS_EMPTY
+
+    def test_breaker_open_trace_is_degraded_not_unconfigured(self):
+        # A trace whose legs were all skipped by a tripped breaker is a store
+        # that is configured but did not answer: `degraded`. Only a store that
+        # was never declared is `unconfigured`.
         trace = [_leg("fts", False, True, "breaker_open", 0),
                  _leg("structural", False, True, "breaker_open", 0)]
-        assert classify_leg_trace(trace, hit_count=0) == STATUS_UNCONFIGURED
+        assert classify_leg_trace(trace, hit_count=0) == STATUS_DEGRADED
         assert classify_leg_trace(
-            trace, hit_count=0, reached=True) == STATUS_DEGRADED
+            trace, hit_count=0, configured=False) == STATUS_UNCONFIGURED
 
     def test_leg_trace_available(self):
         trace = [_leg("fts", True, False, "ok", 2),
@@ -134,11 +204,26 @@ class TestClassify:
                  _leg("fts", True, False, "ok", 1)]
         assert classify_leg_trace(trace, hit_count=1) == STATUS_DEGRADED
 
-    def test_leg_trace_all_legs_failed_is_unconfigured(self):
+    def test_leg_trace_all_legs_failed_is_degraded(self):
+        # The store was configured (a leg trace only exists once the read path
+        # has a projection object) and no leg answered: off by OUTAGE, which
+        # the recorded vocabulary names `degraded` — never `unconfigured`,
+        # which is reserved for a store that was never declared.
         trace = [_leg("fts", True, True, "query_failed", 0),
                  _leg("vector", False, True, "breaker_open", 0),
                  _leg("structural", True, True, "query_failed", 0)]
-        assert classify_leg_trace(trace, hit_count=0) == STATUS_UNCONFIGURED
+        assert classify_leg_trace(trace, hit_count=0) == STATUS_DEGRADED
+        assert classify_leg_trace(
+            trace, hit_count=0, configured=False) == STATUS_UNCONFIGURED
+
+    def test_probe_proof_makes_an_unanswered_read_empty_not_degraded(self):
+        # No leg answered and nothing came back, but the bounded probe proved
+        # the store ANSWERS: the honest term is `empty` (reached, nothing
+        # matched). Without that proof the same trace derives no reachability
+        # and is `degraded`.
+        assert classify_leg_trace([], hit_count=0) == STATUS_DEGRADED
+        assert classify_leg_trace(
+            [], hit_count=0, reached=True) == STATUS_EMPTY
 
     def test_results_bearing_fallback_is_degraded(self):
         trace = [_leg("fts", True, False, "ok", 1),
@@ -258,15 +343,19 @@ class TestReadPathStates:
         finally:
             sdk.close()
 
-    def test_state_unconfigured_store_configured_but_unreachable(
+    def test_state_configured_but_unreachable_is_degraded(
             self, sdk_factory, monkeypatch):
+        # The client boundary's mapping: `unconfigured` names a store that was
+        # NEVER DECLARED, and this SDK has one (the projection object was
+        # obtained) — it just did not answer. Off by outage is `degraded`.
         sdk = sdk_factory()
         try:
             monkeypatch.setattr(sdk, "_get_proj", lambda: _UnreachableProj())
             out: dict = {}
             rows = sdk.tortoise_fts_query("alpha", read_status_out=out, limit=5)
             assert rows == []
-            assert out["status"] == STATUS_UNCONFIGURED
+            assert out["status"] == STATUS_DEGRADED
+            assert out["status"] != STATUS_UNCONFIGURED
         finally:
             sdk.close()
 

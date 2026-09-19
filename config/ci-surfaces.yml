@@ -32,6 +32,14 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py, which
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
+  # #3892 (B6): the read-path status contract. Dual-registered with `core` for
+  # the same reason as the three guards above: one half of the suite pins the
+  # `status` field on the shipped GET /v1/search response, and the file that
+  # serves it is tortoise/hosted_api.py, which selects the `api` surface. A PR
+  # that dropped the field from that route alone would otherwise never run the
+  # guard written for it. The `core` half is the primary arm — it pins
+  # tortoise/read_status.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_read_status.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -595,6 +603,7 @@ surfaces:
   - test_slack_connector.py
   - test_sparse.py
   - test_status_projection.py
+  - test_read_status.py  # #3892 (B6): the read-path status contract — the recorded four terms on search/recall (tortoise/read_status.py + tortoise/sdk.py; dual-registered with `api` for the hosted /v1/search field)
   - test_stop_writes.py
   - test_structural_leg_r4.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)

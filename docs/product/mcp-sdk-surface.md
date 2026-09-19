@@ -84,7 +84,7 @@ at all is a review obligation, not a machine check — the carve-out is about wh
 
 | Response | Field | Emitted when | Unchanged when off |
 |---|---|---|---|
-| `tortoise_search` | `status` | the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available/empty/degraded/unconfigured (tortoise/read_status.py, roadmap §7 item 9) | yes — results and count stay byte-identical and the key is absent |
+| `tortoise_search` | `status` | the hosted GET /v1/search response, when TORTOISE_READ_STATUS is truthy (1/true/yes/on; unset or 0 means off) — one of the four recorded terms available/empty/degraded/unconfigured (tortoise/status_vocabulary.py is their ONE home; the read path consumes them in tortoise/read_status.py; roadmap §7 item 9) | yes — results and count stay byte-identical and the key is absent |
 
 A field belongs in that table from the moment it is added — an off-by-default field that
 is not recorded here has no approval behind it, and the carve-out does not cover it.

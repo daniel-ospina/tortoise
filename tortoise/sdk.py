@@ -12685,12 +12685,14 @@ class TortoiseSDK:
             return []). Default None = no trace, byte-identical behavior.
         read_status_out (B6 #3892): the read-path status contract — when
             provided, the dict receives ``{"status": <term>}`` with ONE of the
-            four recorded terms (``tortoise.read_status``): ``available``
-            (reached, hits), ``empty`` (reached, nothing matched), ``degraded``
-            (reached, but a leg did not run — e.g. the embedder is absent so
+            four recorded terms (``tortoise.status_vocabulary``, consumed by
+            ``tortoise.read_status``): ``available`` (reached, hits), ``empty``
+            (reached, nothing matched), ``degraded`` (the memory layer is
+            impaired — the store is configured but could not be reached, or it
+            answered while a leg did not run, e.g. the embedder is absent so
             the dense leg was skipped, the #2573/#2898 class), or
-            ``unconfigured`` (no store/endpoint could be reached — returned as
-            a status, NEVER as an empty result and never as an exception).
+            ``unconfigured`` (NO store/endpoint was declared — returned as a
+            status, NEVER as an empty result and never as an exception).
             Caller-owned opt-in sink, the same pattern as ``leg_trace``;
             default None = not computed, no probe, byte-identical behavior.
         structural_kind (R4 #1543): keyword-only, default None — the kind
@@ -12768,9 +12770,12 @@ class TortoiseSDK:
             enrich_items as w4_enrich_items,
             w4_enrichment_enabled,
         )
-        # B6 (#3892): the recorded read-path status vocabulary lives in ONE
-        # module; this method consumes it and mints no terms of its own.
+        # B6 (#3892): the recorded vocabulary's ONE home is
+        # ``tortoise/status_vocabulary.py``; ``tortoise/read_status.py`` is the
+        # read-path consumer of it and this method consumes that — it mints no
+        # terms of its own.
         from .read_status import (
+            STATUS_DEGRADED as _STATUS_DEGRADED,
             STATUS_UNCONFIGURED as _STATUS_UNCONFIGURED,
             classify_leg_trace as _classify_leg_trace,
         )
@@ -12810,8 +12815,13 @@ class TortoiseSDK:
             if read_status_out is not None:
                 read_status_out["status"] = _classify_leg_trace(
                     status_trace or (), hit_count=len(rows),
-                    # The probe is proof; a trace whose legs were skipped by a
-                    # tripped breaker must not walk it back to `unconfigured`.
+                    # A store we reached here IS configured (the projection
+                    # object was obtained above): `unconfigured` names a store
+                    # that was never declared, and is not available past this
+                    # point. The probe is proof of ANSWERING; a trace whose
+                    # legs were skipped by a tripped breaker must not walk it
+                    # back to a failure class the store does not have.
+                    configured=True,
                     reached=True if store_answered else None)
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
@@ -12835,9 +12845,14 @@ class TortoiseSDK:
                 graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or 500))
                 store_answered = True
             except Exception as e:  # noqa: BLE001, RUF100
+                # The store IS configured (the projection object was obtained
+                # just above) but did not answer: off by OUTAGE — `degraded`,
+                # never `unconfigured` (which is reserved for a store that was
+                # never declared) and never an empty result.
                 _logger.warning(
-                    "read path cannot reach the store (%s) — unconfigured", e)
-                read_status_out["status"] = _STATUS_UNCONFIGURED
+                    "read path cannot reach the configured store (%s) — "
+                    "degraded", e)
+                read_status_out["status"] = _STATUS_DEGRADED
                 return []
         label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
         # Operator: Point nodes with is_operator=true, kind=op_type
@@ -14022,13 +14037,15 @@ class TortoiseSDK:
             (fail loud) — see also :meth:`retrieval_legs`.
         read_status_out (B6 #3892): the read-path status contract — when
             provided, the dict receives ``{"status": <term>}`` with ONE of the
-            four recorded terms (``tortoise.read_status``) for the WHOLE
-            composite read: ``available`` / ``empty`` / ``degraded`` /
-            ``unconfigured``. The Point and Object legs each classify their
-            own read and the two are coalesced so that a leg that reached the
-            store makes the composite ``degraded`` (incomplete) rather than
-            ``unconfigured``; ``unconfigured`` wins only when NO leg reached
-            the store. A read that returned rows can therefore never report
+            four recorded terms (``tortoise.status_vocabulary``, consumed by
+            ``tortoise.read_status``) for the WHOLE composite read:
+            ``available`` / ``empty`` / ``degraded`` / ``unconfigured``. The
+            Point and Object legs each classify their own read and the two are
+            coalesced so that a leg that reached the store makes the composite
+            ``degraded`` (incomplete) rather than ``unconfigured`` — a store's
+            configuration is one global fact, so the reached leg proves it was
+            declared; ``unconfigured`` wins only when NO leg reached the
+            store. A read that returned rows can therefore never report
             ``unconfigured`` alongside them. Caller-owned opt-in sink; default
             None = not computed, byte-identical behavior.
         """
