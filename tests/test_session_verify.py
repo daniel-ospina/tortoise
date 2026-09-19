@@ -343,6 +343,38 @@ def _hook_fork_seconds(home, root, harness, tmp_path):
 _FORK_SECONDS: dict[tuple[str, str], float] = {}
 
 
+def _hook_byte_sources(harness: str, root: Path, command: str) -> list[Path]:
+    """Every on-disk hook file whose bytes define this seam.
+
+    The raw command path is taken literally (a guard may synthesise a bare
+    path), AND the file a REAL install's command executes is located through
+    the installer's OWN classifier — ``hook_install._invokes_script``, the
+    same predicate ``detect_install``/``registered_commands`` use — so a
+    quoted Codex/Cursor path, a ``/bin/sh <hook>`` prefix, or a ``$VAR`` form
+    resolves to the file that actually runs.  Prefix-joining the whole command
+    string onto ``root`` only ever worked for a bare relative path; for a
+    quoted or multi-token command it missed, and the bytes leg was dropped.
+    """
+    import tortoise.hook_install as hook_install
+
+    sources: list[Path] = []
+    if command:
+        raw = Path(command)
+        sources.append(raw if raw.is_absolute() else Path(root) / raw)
+    layout = hook_install.get_layout(harness)
+    for spec in layout.scripts:
+        if hook_install._invokes_script(
+                command, spec.name, layout.hooks_dir, root):
+            sources.append(Path(root) / layout.hooks_dir / spec.name)
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for source in sources:
+        if str(source) not in seen:
+            seen.add(str(source))
+            unique.append(source)
+    return unique
+
+
 def _seam_fingerprint(harness: str, root: Path) -> tuple[str, str]:
     """Identity of the seam this root fires: the command AND the hook bytes.
 
@@ -350,6 +382,14 @@ def _seam_fingerprint(harness: str, root: Path) -> tuple[str, str]:
     calibration; a locally edited hook, or a substituted command (``exit 7``),
     hashes differently and gets its own — never a landing test's throttled
     value.
+
+    The bytes leg reads the file the command ACTUALLY executes
+    (``_hook_byte_sources``), so it is not silently skipped when the registered
+    command quotes the path (Codex/Cursor) or prefixes a launcher
+    (``/bin/sh <hook>``) — the forms under which a shipped and a tampered hook
+    shared one key.  When NO hook file can be read, a MARKER keyed on the
+    canonical command is hashed instead: an unresolvable form still keys
+    differently from a resolved one, never a silent drop.
     """
     import tortoise.session_verify as sv
 
@@ -359,14 +399,20 @@ def _seam_fingerprint(harness: str, root: Path) -> tuple[str, str]:
     # calibration while a substituted command still differs.
     canonical = command.replace(str(root), "<root>")
     digest = hashlib.sha256(canonical.encode("utf-8"))
-    artifact = Path(command)
-    if command and not artifact.is_absolute():
-        artifact = Path(root) / artifact
-    try:
+    hashed = False
+    for artifact in _hook_byte_sources(harness, root, command):
+        try:
+            blob = artifact.read_bytes()
+        except OSError:
+            # A candidate that is not the invoked file (e.g. the raw quoted
+            # token); ``hashed`` decides whether EVERY candidate missed.
+            continue
         digest.update(b"\0")
-        digest.update(artifact.read_bytes())
-    except OSError:
-        pass
+        digest.update(blob)
+        hashed = True
+    if command and not hashed:
+        digest.update(b"\0unresolved\0")
+        digest.update(canonical.encode("utf-8"))
     return (harness, digest.hexdigest())
 
 
@@ -436,6 +482,67 @@ def test_guard_prologue_cache_is_keyed_on_the_seam_not_the_harness(
     landing.mkdir()
     (landing / "session-end.sh").write_text("set -euo pipefail\n")
     assert this._prologue_seconds(home, landing, "claude") == pytest.approx(5.0)
+
+
+def test_guard_hook_bytes_are_hashed_for_quoted_and_multitoken_commands(
+        monkeypatch, tmp_path):
+    """A quoted or launcher-prefixed command still keys on the hook bytes.
+
+    ``_seam_fingerprint``'s bytes leg must hash the file the command ACTUALLY
+    executes.  Codex/Cursor register the path ``shlex.quote``d (so the quoted
+    token is not ``Path(...).is_absolute()``), and the project's own
+    ``/bin/sh <hook>`` shape is multi-token (so no prefix-join resolves); under
+    the raw prefix join both missed, the bare ``except OSError`` dropped the
+    bytes, and a SHIPPED and a TAMPERED hook hashed the same key — the
+    cross-seam poisoning rr7 claimed closed.  Reads no process and fires
+    nothing: the fingerprint is a pure function of the install.
+
+    Mutation: resolve the hook with ``Path(command)`` alone (prefix-join when
+    not absolute) — the quoted Codex/Cursor and the multi-token commands miss,
+    the tampered and shipped keys become equal and this REDs.
+    """
+    this = sys.modules[__name__]
+    import tortoise.hook_install as hook_install
+    import tortoise.session_verify as sv
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+    def _tamper(path: Path) -> None:
+        path.write_bytes(path.read_bytes() + b"\n# tampered\n")
+
+    def _codex_root(home: Path) -> Path:
+        assert install_capture("codex", home=home).ok
+        return hook_install.default_root(
+            hook_install.get_layout("codex"), home)
+
+    # ── Codex: ``shlex.quote``d ABSOLUTE path, root carrying a space so the
+    # quoting is load-bearing.  Two shipped installs in different spacey roots
+    # MUST share one key (the bytes hash, not the root); tampering one MUST NOT.
+    root_a = _codex_root(tmp_path / "home with space")
+    root_b = _codex_root(tmp_path / "home with a second space")
+    quoted = sv._registered_capture_command("codex", root_a)
+    assert quoted and quoted.startswith("'") and " " in quoted, quoted
+    shipped = this._seam_fingerprint("codex", root_a)
+    assert this._seam_fingerprint("codex", root_b) == shipped
+    _tamper(root_a / "hooks" / "tortoise-session-end.sh")
+    assert this._seam_fingerprint("codex", root_a) != shipped
+
+    # ── Claude: the project's own multi-token ``/bin/sh <hook>`` shape.  Two
+    # shipped roots share a key; tampering the hook the launcher runs does not.
+    project_a = tmp_path / "proj a"
+    project_b = tmp_path / "proj b"
+    project_a.mkdir()
+    project_b.mkdir()
+    for project in (project_a, project_b):
+        assert install_capture("claude", root=project, home=tmp_path).ok
+    monkeypatch.setattr(
+        sv, "_registered_capture_command",
+        lambda _h, _root: "/bin/sh .claude/hooks/session-end.sh")
+    claude_shipped = this._seam_fingerprint("claude", project_a)
+    assert this._seam_fingerprint("claude", project_b) == claude_shipped
+    _tamper(project_a / ".claude" / "hooks" / "session-end.sh")
+    assert this._seam_fingerprint("claude", project_a) != claude_shipped
 
 
 def test_default_fire_timeout_is_derived_not_a_wall_clock(monkeypatch, tmp_path):
