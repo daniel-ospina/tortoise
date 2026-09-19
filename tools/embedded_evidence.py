@@ -191,6 +191,15 @@ CAUSE_CLASSES: dict[str, dict] = {
         "requires_absent": [],
         "requires_unexited_fork": True,
         "requires_fork_refusal": True,
+        # The class requires a refusal AND an unexited child, so its payload is
+        # that the unexited child CAUSED the refusal — and RM_Fork's child-slot
+        # check sets EEXIST (`moduleForkChildPid != -1`); the plan doc's own
+        # declaration requires `File exists`. A bare `Can't fork for module:` can
+        # also be EAGAIN (the fork() call hit a resource limit), which is a
+        # different mechanism the hang does not evidence. The unexited child is
+        # still reported in `module_forks_unexited`; only the CAUSATION claim is
+        # withheld, so the refusal falls to `unattributed` (which cannot close).
+        "requires_eexist_refusal": True,
     },
     # EEXIST refusal with NO save/AOF discriminator present.
     #
@@ -224,6 +233,10 @@ CAUSE_CLASSES: dict[str, dict] = {
         "requires_absent": [],
         "requires_unexited_fork": False,
         "requires_fork_refusal": True,
+        # "a child occupies the slot" means RM_Fork failed on the slot check with
+        # EEXIST. An EAGAIN refusal is a resource-limit failure, a different
+        # mechanism the AOF rewrite child does not evidence.
+        "requires_eexist_refusal": True,
     },
     # The RDB save child (`--save ''` asymmetry) occupies the slot; the refusal
     # line is BYTE-IDENTICAL to module-fork-hang, so the save lines are the
@@ -234,6 +247,10 @@ CAUSE_CLASSES: dict[str, dict] = {
         "requires_absent": [AOF_START_RE],
         "requires_unexited_fork": False,
         "requires_fork_refusal": True,
+        # Same mechanism as aof-rewrite-fork: the save child "occupies the slot",
+        # which is precisely the EEXIST child-slot check. An EAGAIN refusal does
+        # not evidence the save child holding it.
+        "requires_eexist_refusal": True,
     },
     "unattributed": {
         "requires_lines": [], "requires_absent": [],
@@ -304,7 +321,6 @@ def _cause_evidence(
         "module_forks_started": sorted(started),
         "module_forks_exited": sorted(exited),
         "module_forks_unexited": unexited,
-        "module_fork_exited_absent": bool(started) and not exited,
     }
 
 
@@ -542,9 +558,23 @@ def _child_env(run_root: Path) -> dict:
 
 def _read_junit_counts(path: Path) -> dict:
     import xml.etree.ElementTree as ET
+    empty = {
+        "executed": 0, "skipped": 0, "failed": 0, "observed": 0,
+        "junit_parse_error": None,
+    }
     if not path.exists():
-        return {"executed": 0, "skipped": 0, "failed": 0, "observed": 0}
-    root = ET.parse(path).getroot()
+        return empty
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        # A child killed mid-flush leaves a TRUNCATED junit. Its sibling
+        # `_junit_test_files` already tolerated that; this reader raised, so on the
+        # TIMEOUT path — the case that exists precisely when things are going wrong
+        # — `_run_once` raised out of `_build_record`, and `main` catches only
+        # RuntimeError, so the whole harness died with a traceback instead of
+        # recording `timeout-red`. Both readers now degrade the same way, and the
+        # reason is recorded (`junit_parse_error`) rather than swallowed.
+        return {**empty, "junit_parse_error": f"{type(exc).__name__}: {exc}"}
     cases = root.iter("testcase")
     executed = skipped = failed = observed = 0
     for c in cases:
@@ -555,7 +585,8 @@ def _read_junit_counts(path: Path) -> dict:
             executed += 1
         if c.find("failure") is not None or c.find("error") is not None:
             failed += 1
-    return {"executed": executed, "skipped": skipped, "failed": failed, "observed": observed}
+    return {"executed": executed, "skipped": skipped, "failed": failed,
+            "observed": observed, "junit_parse_error": None}
 
 
 def _norm_test_file(raw: str) -> str:
@@ -754,6 +785,7 @@ def _run_once(
         "redis_log_cause": cause,
         "cause_evidence": evidence,
         "timed_out": timed_out,
+        "junit_parse_error": counts["junit_parse_error"],
         "observed_files": observed_files,
         "failing_files": failing_files,
     }
