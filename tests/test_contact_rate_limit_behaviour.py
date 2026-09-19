@@ -21,11 +21,14 @@ This file asserts BEHAVIOUR instead: it extracts the limiter from
 * the map converges to exactly MAX_RATE_KEYS under a flood of distinct addresses;
 * one address tripping does not refuse another.
 
-HOW THIS RELATES TO THE STATIC PINS. The pins red on every limiter-level mutation
-below as well — `RATE_LIMITED_BODY` is the limiter verbatim, so any body edit
-breaks it. Their role is to force a re-read of the reviewed text; the value they
-add is the message telling a human to re-read the limiter and update the pin. This
-harness is the check that survives that update: it asserts the behaviour the
+HOW THIS RELATES TO THE STATIC PINS. `RATE_LIMITED_BODY` is the limiter verbatim, so
+any edit INSIDE the function body also reds the pins. Their role is to force a re-read of
+the reviewed text; the value they add is the message telling a human to re-read the
+limiter and update the pin. They are not a superset of this battery: a mutation OUTSIDE
+the body — re-binding `rateLimited` after its declaration, or changing a constant — leaves
+the pins green, and is caught here (by `_binding_failures`, or by the invariants reading
+the mutated constant). This
+harness is the check that survives the pin update: it asserts the behaviour the
 re-read is supposed to preserve.
 
 FOUR of the escapes from that pin history live outside the limiter, and they are not
@@ -240,6 +243,28 @@ def _limiter_source(code: str) -> str:
 
 
 DRIVER = r"""
+// The limiter is compiled with `new Function`, i.e. in a scope whose only reachable names
+// are GLOBALS. Nothing below this line — `observations`, `T0`, the address literals, the
+// nonce, the captured emit path — is in its scope chain, so it cannot rewrite the payload
+// it is judged on or read the tag it is judged by. The emit path is captured BEFORE any
+// limiter call for the same reason: rebinding `JSON.stringify` or `console.log` afterwards
+// cannot redirect the report.
+const encode = JSON.stringify;
+const emit = console.log.bind(console);
+// The constants and the store come OUT of the built limiter rather than being declared
+// twice: the harness reads them from the source under test, so a mutation to any of them
+// is observed instead of being masked by a copy the harness chose itself.
+const buildLimiter = new Function(
+  "src",
+  "return new Function(src + ';\\nreturn { rateLimited, hits, RATE_LIMIT, RATE_WINDOW_MS, " +
+    "MAX_RATE_KEYS };')();",
+);
+const limiter = buildLimiter(__LIMITER__);
+const rateLimited = limiter.rateLimited;
+const hits = limiter.hits;
+const RATE_LIMIT = limiter.RATE_LIMIT;
+const RATE_WINDOW_MS = limiter.RATE_WINDOW_MS;
+const MAX_RATE_KEYS = limiter.MAX_RATE_KEYS;
 const observations = {};
 const T0 = 1_000_000;
 
@@ -272,6 +297,8 @@ const CLIENT_V6_C = "2001:db8::1";
 const CLIENT_V6_D = "::ffff:203.0.113.9";
 const CLIENT_BURST = "203.0.113.201";
 const CLIENT_EPOCH = "203.0.113.202";
+const CLIENT_EPOCH_EDGE = "203.0.113.203";
+const CLIENT_EPOCH_PAST = "203.0.113.204";
 
 // The loops must not scale with a bumped constant: a huge RATE_LIMIT or
 // MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
@@ -533,6 +560,19 @@ hits.clear();
 for (let i = 0; i < limit; i++) rateLimited(CLIENT_EPOCH, REAL_T0);
 observations.epochTrips = rateLimited(CLIENT_EPOCH, REAL_T0);
 observations.epochAfterWindowOk = !rateLimited(CLIENT_EPOCH, REAL_T0 + RATE_WINDOW_MS + 1);
+// …and the BOUNDARY itself, at epoch scale, from both sides. A lossy coercion of the
+// cutoff (`Math.fround`) is exact at T0 and quantises to ~131 s here, so the window
+// silently becomes 600 s ± 65 s. Exactly one window later the entry must be EXPIRED
+// (an upward shift keeps it counting), and one millisecond past that the same must hold
+// (a downward shift keeps it counting).
+hits.clear();
+rateLimited(CLIENT_EPOCH_EDGE, REAL_T0);
+rateLimited(CLIENT_EPOCH_EDGE, REAL_T0 + RATE_WINDOW_MS);
+observations.epochBoundaryStored = (hits.get(CLIENT_EPOCH_EDGE) || []).length;
+hits.clear();
+rateLimited(CLIENT_EPOCH_PAST, REAL_T0);
+rateLimited(CLIENT_EPOCH_PAST, REAL_T0 + RATE_WINDOW_MS + 1);
+observations.epochPastBoundaryStored = (hits.get(CLIENT_EPOCH_PAST) || []).length;
 
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
 // this call — `Date.now()` stepping backwards is reachable under NTP, a VM restore or a
@@ -553,7 +593,8 @@ for (let i = 0; i < limit; i++) {
 observations.clockStepBackRefuses = rateLimited(CLIENT_Z, T0);
 observations.clockStepBackStored = (hits.get(CLIENT_Z) || []).length;
 
-console.log("__NONCE__" + JSON.stringify(observations));
+console.log = console.log; // kept so the capture above is visibly the emit path in use
+emit("__NONCE__" + encode(observations));
 """
 
 
@@ -564,15 +605,21 @@ def _observe(code: str) -> dict:
     cannot execute is a limiter this harness cannot certify.
 
     The payload is tagged with a per-run NONCE and must be the ONLY line on stdout. The
-    code under test shares this process with the driver, so it could otherwise report
-    observations of its own choosing and be certified on them; with the nonce it can only
-    be credited for output the harness asked for and can attribute. That raises the bar
-    rather than removing it — see THE DECLARED LIMIT — and a limiter that forges stdout
-    is refused loudly instead of quietly believed.
+    limiter is compiled by the driver with `new Function`, so it shares no scope with the
+    report: it cannot see the nonce, cannot reach `observations`, and cannot redirect the
+    captured emit path — a limiter that writes its own stdout line is refused rather than
+    believed. That is a boundary, not a sandbox: the limiter still runs in the same
+    process, so the guarantee is exactly this — it cannot influence the payload, and output
+    it did not have the harness ask for is rejected.
     """
     nonce = "nonce-" + secrets.token_hex(8)
+    driver = (
+        DRIVER.replace("__LIMITER__", json.dumps(_limiter_source(code))).replace(
+            "__NONCE__", nonce
+        )
+    )
     result = subprocess.run(
-        [NODE, "-e", _limiter_source(code) + DRIVER.replace("__NONCE__", nonce)],
+        [NODE, "-e", driver],
         capture_output=True,
         text=True,
         timeout=180,
@@ -632,6 +679,17 @@ def _check_accumulation(observed: dict) -> None:
         "epoch clock: a cutoff coerced into int32 (`| 0`, `>>> 0`) wraps negative, the "
         "window never expires, and every visitor that reaches the limit is locked out "
         "permanently"
+    )
+    assert observed["epochBoundaryStored"] == 1, (
+        "exactly one window after the first submission the entry must be EXPIRED at epoch "
+        "scale, so the store holds only the new one — got "
+        f"{observed['epochBoundaryStored']}. A cutoff that is only lossily representable "
+        "there (`Math.fround`) shifts the boundary by ~65 s and keeps the old entry"
+    )
+    assert observed["epochPastBoundaryStored"] == 1, (
+        "one millisecond past the window the same must hold from the other side — got "
+        f"{observed['epochPastBoundaryStored']}, so the boundary is not where the window "
+        "says it is"
     )
     assert observed["storedAfterTrip"] == limit, (
         f"after the refusal the stored window must hold {limit} entries, got "
@@ -1010,20 +1068,41 @@ def test_the_read_path_predicate_does_not_consult_now() -> None:
 
 
 def _predicate_failures(code: str) -> list[str]:
-    """Verdicts on the read-path filter expression itself. Empty list means clean.
+    """Verdicts on the read path's two decisive expressions. Empty list means clean.
 
-    Kept alongside the invariants so the battery can treat it as a catch: a mutation
-    that adds a `now`-based clause must be detected by SOMETHING, and beyond the seeded
-    distance this is the only thing that can detect it.
+    Both are read rather than sampled, because sampling cannot close either class:
+
+    * the READ PREDICATE must be exactly `t > cutoff` — a whitelist was beaten three times
+      (`t <= now + ...`, a `now`-derived alias, `t <= cutoff + 700000000`);
+    * the CUTOFF must be exactly `now - RATE_WINDOW_MS` — a scenario cannot close lossy
+      coercions, because every one of them is exact on the harness's small clock and moves
+      the boundary in a direction that depends on the value (`Math.fround` quantises the
+      epoch to ~131 s, `| 0` wraps it negative, and either can round a given timestamp the
+      harmless way).
+
+    Kept alongside the invariants so the battery can treat it as a catch: a mutation that
+    adds a `now`-based clause, or coerces the cutoff, must be detected by SOMETHING.
     """
     body = _limiter_source(code)
+    failures = []
+    cutoffs = re.findall(r"const cutoff\s*=\s*([^;]+);", body)
+    if len(cutoffs) != 1:
+        return [f"expected exactly ONE cutoff declaration, found {len(cutoffs)}"]
+    if not re.fullmatch(r"now\s*-\s*RATE_WINDOW_MS", cutoffs[0].strip()):
+        failures.append(
+            f"the cutoff is {cutoffs[0].strip()!r}, not `now - RATE_WINDOW_MS` — any "
+            "coercion or rounding of it shifts the window boundary (int32 wraps it "
+            "negative and locks visitors out permanently; float32 quantises it to ~131 s "
+            "at real timestamps)"
+        )
     matches = re.findall(r"\.filter\(\s*\(t\)\s*=>\s*(.+?)\)\s*;", body)
     if len(matches) != 1:
-        return [
+        failures.append(
             f"expected exactly ONE read-path filter expression, found {len(matches)} — a "
             "second one (a decoy, or a second read path) would let this check grade the "
             "wrong expression while the real one decides expiry"
-        ]
+        )
+        return failures
     predicate = matches[0].strip()
     # EXACTLY `t > cutoff` — not "an expression mentioning cutoff and no extra
     # identifier", which was beaten three times: `t <= now + ...` (the token `now`), then
@@ -1038,7 +1117,7 @@ def _predicate_failures(code: str) -> list[str]:
             "must be that comparison alone, so that no additional bound, alias or clock "
             "read can grant a skew tolerance"
         ]
-    return []
+    return failures
 
 
 def _failures(observed: dict) -> list[str]:
@@ -1252,7 +1331,20 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "const cutoff = (now - RATE_WINDOW_MS) | 0;",
     ),
     (
-        "the store is reached by bracket notation",
+        "the cutoff is quantised to float32",
+        r"const cutoff = now - RATE_WINDOW_MS;",
+        "const cutoff = Math.fround(now - RATE_WINDOW_MS);",
+    ),
+    (
+        "the limiter forges the payload through the serializer",
+        r"function rateLimited\(ip: string, now: number\): boolean \{",
+        "function rateLimited(ip: string, now: number): boolean {\n"
+        "  JSON.stringify = () => '{}';\n"
+        "  console.log = () => {};\n"
+        "  return false;",
+    ),
+    (
+        "the store is reached by bracket notation with a derived key",
         r"const recent = \(hits\.get\(ip\) \|\| \[\]\)\.filter\(\(t\) => t > cutoff\);"
         r"[\s\S]*?hits\.delete\(ip\);[\s\S]*?hits\.set\(ip, recent\);",
         'const recent = (hits["get"](ip) || []).filter((t) => t > cutoff);\n'
