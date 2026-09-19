@@ -21,8 +21,9 @@ the server dead and no-ops fast.
 Scope (deliberately narrow — the safety boundary):
 - ONLY at the interpreter-exit seam (each tortoise atexit handler routes
   through `_atexit_close`, which calls `atexit_fast_close` first).
-- ONLY when `TORTOISE_FAST_ATEXIT=1` (opt-in; set by tests/conftest.py and
-  the CI workflow env — never in hosted/production paths).
+- ONLY when `TORTOISE_FAST_ATEXIT` resolves truthy through the declared contract
+  (`1`/`true`/`yes`/`on`, any case — `tortoise/env_truthy.py`; opt-in, set by
+  tests/conftest.py and the CI workflow env — never in hosted/production paths).
 - ONLY for servers whose dbdir is an ephemeral test tree
   (`embedded_reaper._is_ephemeral_dir` + `EPHEMERAL_PREFIXES` — the same
   classification the reaper uses for reap-safety).
@@ -111,7 +112,7 @@ def atexit_fast_close(client) -> bool:
     close().
 
     Gating (all three must hold):
-      1. TORTOISE_FAST_ATEXIT=1 (opt-in flag).
+      1. TORTOISE_FAST_ATEXIT truthy (1/true/yes/on, opt-in flag).
       2. Ephemeral test-tree dbdir.
       3. NO live co-tenant — decided by `cotenant_holds_server()`, NOT by
          redislite's registry-based `_connection_count()` (#3653). A failed
@@ -754,8 +755,8 @@ def close_embedded_clients() -> int:
     Routes each client through the SAME idempotent seams normal teardown
     uses (redislite last-client semantics: the final close shuts the server
     down with a save; shared servers survive for their other clients):
-      1. the #1371 ephemeral fast-close (NOSAVE, only under
-         TORTOISE_FAST_ATEXIT=1 for test-tree servers) and
+      1. the #1371 ephemeral fast-close (NOSAVE, only for test-tree servers
+         whose TORTOISE_FAST_ATEXIT resolves truthy) and
       2. the guarded subclass ``_t_close`` (``FalkorDB.close`` →
          redislite ``_cleanup``) — the raw-client fallback mirrors that.
     Signal-handler-safe in practice: redis-py's pool lock is an RLock, so a

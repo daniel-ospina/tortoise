@@ -46,8 +46,9 @@ the shapes listed above" — not "anywhere in the repo, however written". A JS/T
 env-truthiness parsing, so there is no cross-language duplication to guard.
 
 The scan resolves: module-level string constants as env names, `.strip().lower()`
-chains, one level of alias indirection (assignment, annotated assignment and walrus), a
-constant on either side of the comparison, `environ.get(...)` after
+chains, one level of alias indirection (assignment, annotated assignment and walrus), the
+`"1"`/`"0"` anchor on either side of the comparison — written literally or as a
+module-level constant bound to it (scalar or Tuple/Set/List) — `environ.get(...)` after
 `from os import environ [as X]`, and both `Set`/`Tuple`/`List` and `Dict`-key vocabulary
 literals.
 
@@ -359,6 +360,20 @@ def test_reaper_mirror_matches_the_contract(raw):
     assert _env_truthy(raw) is is_truthy(raw)
 
 
+def test_reaper_mirror_is_the_contract_vocabulary():
+    """The mirror must BE the contract, not merely agree with it over `_MATRIX`.
+
+    Matrix parity alone is blind to a mirror that gains a spelling the contract rejects
+    (`_ENV_TRUTHY` + `"y"` resolves True while `is_truthy("y")` is False, and every other
+    guard test still passes), so pin the vocabulary identity directly.
+    """
+    from tortoise.embedded_reaper import _ENV_TRUTHY
+    assert _ENV_TRUTHY == TRUTHY, (
+        "the reaper's mirror drifted from the declared truthy vocabulary — it must be the "
+        f"same set ({sorted(TRUTHY)}), not {sorted(_ENV_TRUTHY)} (#4097)"
+    )
+
+
 def test_reaper_standalone_import_stays_dependency_free():
     """The reaper's own promise: runnable with the heavy chain ABSENT.
 
@@ -601,6 +616,39 @@ def _is_vocabulary(values: set[str]) -> bool:
     return bool((values & (TRUTHY | FALSY)) - {"0", "1"})
 
 
+def _is_binary_anchor(node: ast.expr, constants: dict[str, str]) -> bool:
+    """A `"1"`/`"0"` anchor: the literal itself, or a module-level constant bound to it."""
+    if isinstance(node, ast.Constant):
+        return node.value in ("1", "0")
+    return isinstance(node, ast.Name) and constants.get(node.id) in ("1", "0")
+
+
+def _collection_values(node: ast.expr) -> set[str] | None:
+    """The string members of a literal Tuple/Set/List, else None."""
+    if not isinstance(node, (ast.Tuple, ast.Set, ast.List)):
+        return None
+    return {e.value for e in node.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+
+
+def _module_collection_constants(tree: ast.Module) -> dict[str, set[str]]:
+    """Module-level names bound to a string-constant Tuple/Set/List literal.
+
+    Resolved so a narrow read written `_ONE = ("1",); ... in _ONE` is visible, not just
+    its inline-literal form (code review caught the same blind spot for the scalar form).
+    """
+    out: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            values = _collection_values(node.value)
+            if values is None:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    out.setdefault(target.id, values)
+    return out
+
+
 def _scan_source(rel: str, source: str) -> tuple[list[tuple[str, int]],
                                                 list[tuple[str, str, int]]]:
     """Scan ONE module's source. Split out from `_scan()` so the alias/env-alias
@@ -609,6 +657,7 @@ def _scan_source(rel: str, source: str) -> tuple[list[tuple[str, int]],
     narrow: list[tuple[str, str, int]] = []
     tree = ast.parse(source)
     constants = _module_string_constants(tree)
+    collections = _module_collection_constants(tree)
     environ_names = _os_environ_aliases(tree)
     aliases = _env_aliases(tree, constants, environ_names)
     for node in ast.walk(tree):
@@ -630,18 +679,20 @@ def _scan_source(rel: str, source: str) -> tuple[list[tuple[str, int]],
                 continue
             hit = False
             for op, comparator in zip(node.ops, node.comparators, strict=True):
-                if isinstance(op, (ast.Eq, ast.NotEq)):
-                    # a "1"/"0" literal on EITHER side (reversed operands count)
-                    for side in (node.left, comparator):
-                        if isinstance(side, ast.Constant) and side.value in ("1", "0"):
-                            hit = True
-                if isinstance(op, (ast.In, ast.NotIn)) \
-                        and isinstance(comparator, (ast.Tuple, ast.Set, ast.List)):
-                    values = {e.value for e in comparator.elts
-                              if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+                if isinstance(op, (ast.Eq, ast.NotEq)) and any(
+                        _is_binary_anchor(side, constants)
+                        for side in (node.left, comparator)):
+                    # a "1"/"0" anchor on EITHER side (reversed operands count), whether
+                    # written literally or as a module-level constant bound to it
+                    hit = True
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    values = _collection_values(comparator)
+                    if values is None and isinstance(comparator, ast.Name):
+                        values = collections.get(comparator.id)
                     # A NARROW membership test only: `("1",)` counts; the wide
                     # vocabulary does not (the literal clause catches that).
-                    if ("1" in values or "0" in values) and not _is_vocabulary(values):
+                    if values is not None and ("1" in values or "0" in values) \
+                            and not _is_vocabulary(values):
                         hit = True
             if hit:
                 for name in names:
@@ -745,6 +796,10 @@ _SYNTHETIC_SHAPES = [
      "module constant name"),
     ('if os.environ.get("TORTOISE_SYNTH", "").strip().lower() == "1":\n    pass\n',
      "normalised chain"),
+    ('_ONE = "1"\nif os.environ.get("TORTOISE_SYNTH") == _ONE:\n    pass\n',
+     "module constant anchor"),
+    ('_ONES = ("1",)\nif os.environ.get("TORTOISE_SYNTH") in _ONES:\n    pass\n',
+     "module constant membership anchor"),
 ]
 
 
