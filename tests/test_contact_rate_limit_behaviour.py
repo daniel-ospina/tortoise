@@ -31,9 +31,10 @@ history — a per-request key (`crypto.randomUUID()`) and a `hits.clear()` in th
 handler body — are NOT visible here; they stay the pins' job (the call site pinned
 verbatim, every `hits` reference confined), verified red on both.
 
-`MUTATIONS` below replays those escapes — plus the ones review found here — as an
-executable battery, so the detection claim is an artifact in the repo rather than a
-number in a message.
+`MUTATIONS` below replays the LIMITER-LEVEL escapes from that list — plus the ones
+review found here — as an executable battery, so the detection claim is an artifact
+in the repo rather than a number in a message. The handler-level ones cannot appear
+there, which is why they are named as the static pins' job above.
 
 SCOPE, HONESTLY. The extraction is deliberately narrow — the limiter, its
 constants and its store, not the module — so this harness says nothing about the
@@ -179,6 +180,21 @@ DRIVER = r"""
 const observations = {};
 const T0 = 1_000_000;
 
+// Realistic multi-character addresses on purpose. The handler keys on
+// `CF-Connecting-IP`, so a client address is never one character; a scenario that
+// repeats history under "a" would silently accept a read-side transform that is the
+// identity on "a" (`hits.get(ip.split(".")[0])`) — which buckets every real IPv4
+// address onto a key nothing ever writes, and the limiter stops refusing anyone.
+const CLIENT_A = "203.0.113.5";
+const CLIENT_G = "198.51.100.22";
+const CLIENT_W = "192.0.2.7";
+const CLIENT_E = "203.0.113.9";
+const CLIENT_M = "198.51.100.44";
+const CLIENT_X = "192.0.2.11";
+const CLIENT_Y = "198.51.100.77";
+const CLIENT_V = "203.0.113.77";
+const CLIENT_R = "198.51.100.9";
+
 // The loops must not scale with a bumped constant: a huge RATE_LIMIT or
 // MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
 // to a ceiling and a value beyond it is reported so the assertion can say so.
@@ -196,15 +212,15 @@ observations.limit = limit;
 // `length = 0`, a `[]` write-back, `clear()`, or an always-empty filter) is visible
 // here and nowhere else.
 const calls = [];
-for (let i = 0; i < limit + 1; i++) calls.push(rateLimited("a", T0 + i));
+for (let i = 0; i < limit + 1; i++) calls.push(rateLimited(CLIENT_A, T0 + i));
 observations.firstTripIndex = calls.indexOf(true);
-observations.storedAfterTrip = (hits.get("a") || []).length;
+observations.storedAfterTrip = (hits.get(CLIENT_A) || []).length;
 
 hits.clear();
 const growth = [];
 for (let i = 0; i < limit; i++) {
-  rateLimited("g", T0 + i);
-  growth.push((hits.get("g") || []).length);
+  rateLimited(CLIENT_G, T0 + i);
+  growth.push((hits.get(CLIENT_G) || []).length);
 }
 observations.growth = growth;
 
@@ -215,27 +231,27 @@ observations.growth = growth;
 // stops expiring altogether, or that keeps the old entries, changes the mixed
 // sequence below.
 hits.clear();
-for (let i = 0; i < limit; i++) rateLimited("w", T0 + i);
-observations.expiredRefuses = rateLimited("w", T0 + RATE_WINDOW_MS + limit);
-observations.afterExpiryStored = (hits.get("w") || []).length;
+for (let i = 0; i < limit; i++) rateLimited(CLIENT_W, T0 + i);
+observations.expiredRefuses = rateLimited(CLIENT_W, T0 + RATE_WINDOW_MS + limit);
+observations.afterExpiryStored = (hits.get(CLIENT_W) || []).length;
 
 hits.clear();
-for (let i = 0; i < limit; i++) rateLimited("e", T0 + i);
-observations.edgeInsideRefuses = rateLimited("e", T0 + RATE_WINDOW_MS - 1);
-observations.edgeExactRefuses = rateLimited("e", T0 + RATE_WINDOW_MS);
-observations.edgeAfterStored = (hits.get("e") || []).length;
+for (let i = 0; i < limit; i++) rateLimited(CLIENT_E, T0 + i);
+observations.edgeInsideRefuses = rateLimited(CLIENT_E, T0 + RATE_WINDOW_MS - 1);
+observations.edgeExactRefuses = rateLimited(CLIENT_E, T0 + RATE_WINDOW_MS);
+observations.edgeAfterStored = (hits.get(CLIENT_E) || []).length;
 
 hits.clear();
-for (let i = 0; i < 2; i++) rateLimited("m", T0 + i);
+for (let i = 0; i < 2; i++) rateLimited(CLIENT_M, T0 + i);
 const mixed = [];
-for (let i = 0; i < limit + 1; i++) mixed.push(rateLimited("m", T0 + RATE_WINDOW_MS + i));
+for (let i = 0; i < limit + 1; i++) mixed.push(rateLimited(CLIENT_M, T0 + RATE_WINDOW_MS + i));
 observations.mixed = mixed;
 
 // 3. Per-address isolation: one address tripping must not refuse another's.
 hits.clear();
-for (let i = 0; i < limit; i++) rateLimited("x", T0 + i);
-observations.oneAddressTrips = rateLimited("x", T0 + limit);
-observations.otherAddressOk = !rateLimited("y", T0 + limit);
+for (let i = 0; i < limit; i++) rateLimited(CLIENT_X, T0 + i);
+observations.oneAddressTrips = rateLimited(CLIENT_X, T0 + limit);
+observations.otherAddressOk = !rateLimited(CLIENT_Y, T0 + limit);
 
 // 4. The cap, under a REAL flood of distinct addresses through `rateLimited`. One
 // more key than the cap is attempted, so a correct eviction leaves exactly
@@ -292,17 +308,18 @@ observations.liveEdgeSurvived = hits.has("live-edge");
 
 // 6. The re-insert of the current key, which the limiter's own comment calls
 // load-bearing. An address that submits again must be the LAST key in insertion
-// order, or the eviction it triggers drops ITS OWN history and the limit becomes
-// bypassable by flooding distinct keys. `hits.delete(ip); hits.set(ip, recent);`
-// does that; a plain `hits.set(ip, recent)` leaves the key at its original position,
-// where the next eviction takes it.
+// order. Re-setting an existing key does not grow the map, so the resubmitting call
+// cannot evict anything itself — the eviction comes with the NEXT new key, and by
+// then a key left at its ORIGINAL position is the oldest and goes. `hits.delete(ip);
+// hits.set(ip, recent);` moves it to the end; a plain `hits.set(ip, recent)` does
+// not, and the address loses the history it had stored.
 hits.clear();
-rateLimited("v", T0);
+rateLimited(CLIENT_V, T0);
 for (let i = 0; i < cap - 1; i++) rateLimited("fill" + i, T0);
-rateLimited("v", T0 + 1);
+rateLimited(CLIENT_V, T0 + 1);
 rateLimited("newcomer", T0);
-observations.reusedKeySurvived = hits.has("v");
-observations.reusedKeyHistory = (hits.get("v") || []).length;
+observations.reusedKeySurvived = hits.has(CLIENT_V);
+observations.reusedKeyHistory = (hits.get(CLIENT_V) || []).length;
 
 // 7. The REFUSAL path prunes too: when the limit is reached the function writes the
 // filtered window back before returning true, so the refused address's store holds
@@ -310,9 +327,9 @@ observations.reusedKeyHistory = (hits.get("v") || []).length;
 // store — invisible to a check that only counts how many entries an ALLOWED call
 // stored, which is why the seed here is oversized with one expired entry.
 hits.clear();
-hits.set("r", [expiredAt, ...new Array(limit).fill(T0)]);
-observations.refusalRefuses = rateLimited("r", T0);
-observations.storedAfterRefusal = (hits.get("r") || []).length;
+hits.set(CLIENT_R, [expiredAt, ...new Array(limit).fill(T0)]);
+observations.refusalRefuses = rateLimited(CLIENT_R, T0);
+observations.storedAfterRefusal = (hits.get(CLIENT_R) || []).length;
 
 console.log(JSON.stringify(observations));
 """
@@ -649,6 +666,11 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "the limit is shared, not per address",
         r"hits\.get\(ip\)",
         'hits.get("shared")',
+    ),
+    (
+        "read bucket derived from the address",
+        r"hits\.get\(ip\)",
+        'hits.get(String(ip).split(".")[0])',
     ),
     (
         "eviction sorts by key name",
