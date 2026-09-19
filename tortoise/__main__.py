@@ -44,12 +44,20 @@ def _markdown_files(root: Path | str) -> list[Path]:
 def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
     try:
-        from tortoise.projection import FalkorProjection
+        from tortoise.projection import FalkorProjection, RebuildDroppedEpisodicPoints
         # skip_health_check: `rebuild` IS the recovery tool — a broken DB must
         # not block its own rebuild (ops safety #428).
         proj = FalkorProjection(args.db, skip_health_check=True)
         counts = proj.rebuild_all(args.dir)
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
+    except RebuildDroppedEpisodicPoints as e:
+        # #3947 review (cycle 2, D5): the refusal is the intended outcome for a
+        # store whose episodic roster cannot be proven recoverable, so it must
+        # reach the operator as the message it was written to be — not as a
+        # traceback on a supported ops path. Nothing was wiped; exit non-zero
+        # so a scripted caller cannot read the refusal as success.
+        print(f"Refused: {e}", file=sys.stderr)
+        return 1
     except ImportError as e:
         print(f"FalkorDB unavailable ({e}). Use InMemory rebuild:", file=sys.stderr)
         from tortoise.log import EventLog  # noqa: I001
@@ -6562,8 +6570,10 @@ def main(argv: list[str] | None = None) -> int:
     from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
     install_embedded_signal_cleanup()
     if args.cmd == "rebuild":
-        _cmd_rebuild(args)
-        return 0
+        # #3947 review (cycle 3): propagate the refusal's exit code — the
+        # handler's documented non-zero exit is worthless if the dispatcher
+        # discards it and returns 0 (the same false PASS, at the CLI edge).
+        return _cmd_rebuild(args)
     elif args.cmd == "demo":
         _cmd_demo(args)
         return 0

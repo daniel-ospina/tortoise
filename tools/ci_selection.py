@@ -116,6 +116,16 @@ SOURCE_PATTERNS = {
                    "website/self-hosted.html", "website/product.html",
                    "website/index.html", "website/signup.html",
                    "website/signin.html", "website/privacy.html",
+                   # #3485: the shared cross-subdomain session bridge is a
+                   # website asset whose guard test
+                   # (test_cross_subdomain_cookie_sync.py) reads it directly.
+                   # Without this entry a bridge-only PR matched no pattern,
+                   # fell into NON_PYTHON_PREFIXES -> changed == [] -> tier-1
+                   # smoke, and the guard for the file under review never ran
+                   # (the #1349/#3332/#3616 silent-drop class). The file is
+                   # dual-registered: this surface owns the website guards,
+                   # `api` keeps its existing membership.
+                   "website/assets/supabase-session.js",
                    # #3332: the public pages that own a guard test in this surface.
                    # docs.html + faq.html -> test_website_docs_consistency.py;
                    # product.html + welcome.html -> test_website_static.py;
@@ -207,7 +217,14 @@ SOURCE_PATTERNS = {
                    # flat NON_PYTHON_PREFIXES entry, and the docs-only return
                    # bypasses the `core` fallback) so its guard never runs on the
                    # PR that edits it — the #3261/#3616/#3910 silent-drop class.
-                   "tools/ship_test_onboarding.py"),
+                   "tools/ship_test_onboarding.py",
+                   # #3620: the Pages UPLOAD-ROOT gate is a pair too — the
+                   # preflight checker and the reviewed classification it reads.
+                   # A PR that adds a top-level entry under website/ (or edits
+                   # the checker) must select this surface, or the ratchet that
+                   # classifies the new entry never runs on the PR that owns it.
+                   "tools/check_pages_upload_root.py",
+                   "config/pages-upload-classification.txt"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
@@ -237,7 +254,15 @@ SOURCE_PATTERNS = {
             # it mirrors, so a bench-only PR must select `sdk` rather than
             # drop to tier-1 smoke with that guard test never running.
             # Refs #2089, whose criterion 1 this entry satisfies.
-            "tools/ask_recall_bench.py"),
+            "tools/ask_recall_bench.py",
+            # #3914: gen_ask_transcripts.py OWNS the seeder whose shape the
+            # committed transcript goldens and tests/test_ask_seed_shape.py
+            # pin. Before this entry the flat "tools/" prefix swallowed the
+            # path, so a seeder-only PR selected NO surface (surfaces=[],
+            # tier-1 smoke only) and both guards ran nowhere — the same
+            # #1349/#3332/#3910 silent-drop class, on the file that
+            # manufactures the graph those guards read.
+            "tools/gen_ask_transcripts.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
@@ -349,6 +374,10 @@ TOOL_CARVEOUTS = (
     "tools/ask_spotcheck.py",
     "tools/ask_spotcheck_consistency.py",
     "tools/ask_spotcheck_probe.py",
+    # #3914: the transcript-golden generator's seeder is what
+    # tests/test_ask_seed_shape.py + tests/test_ask_regression_llm.py pin —
+    # same carve-out as the spot-check harnesses above.
+    "tools/gen_ask_transcripts.py",
     # #2159 review P2-3: the diff-gate selector itself must never classify
     # as docs-only (the two gated legs would skip AND the wiring pins in
     # tests/test_ci_selection.py would never run on the PR that owns them).

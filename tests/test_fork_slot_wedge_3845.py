@@ -220,19 +220,27 @@ class TestForkSlotRecovery:
 
 
 def _refuse_first_copy(monkeypatch, *, times: int = 1) -> dict:
-    """Make the embedded GRAPH.COPY refuse ``times`` times, then work again."""
-    import redislite.falkordb_client as rfc
+    """Make the restore's GRAPH.COPY seam refuse ``times`` times, then work.
 
-    real = rfc._EmbeddedGraphMixin.copy
+    #3813: the restore no longer calls ``Graph.copy`` — it issues
+    ``GRAPH.COPY`` through ``hosted_backup._issue_graph_copy`` on its own
+    derived client (its own read bound). Injecting at that seam is what makes
+    the refusal actually reach ``_graph_copy_or_diagnose``; patching
+    ``_EmbeddedGraphMixin.copy`` is now dead code (the same re-point the
+    branch applied to ``tests/test_hosted_backup.py``).
+    """
+    import tortoise.hosted_backup as hb
+
+    real = hb._issue_graph_copy
     state = {"seen": 0}
 
-    def flaky(self, dest, *a, **kw):
+    def flaky(client, src_name, dst_name):
         if state["seen"] < times:
             state["seen"] += 1
             raise redis_mod.exceptions.ResponseError(_REFUSAL)
-        return real(self, dest, *a, **kw)
+        return real(client, src_name, dst_name)
 
-    monkeypatch.setattr(rfc._EmbeddedGraphMixin, "copy", flaky)
+    monkeypatch.setattr(hb, "_issue_graph_copy", flaky)
     return state
 
 
