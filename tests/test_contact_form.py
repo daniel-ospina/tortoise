@@ -72,9 +72,16 @@ CONTACT_TO = "hello@premiselabs.co"
 #: differently (cycles 2-3), and every literal is scanned — not just the ones
 #: anchored to `message:` — because a CONCATENATION hid its second half.
 REPLY_PROMISE_VERBS = (
-    r"\b(?:reply(?!-to)|replies|respond|reach(?:ing)? out|write back|get back|"
-    r"be in touch|be in contact|get in touch|hear from|follow(?:ing)? up|"
-    r"answer you|contact you)\b"
+    # A first-person COMMITMENT: "we'll reply", "we will respond", "we can follow
+    # up", "we aim to respond".
+    r"\b(?:we|i)(?:'ll| will| shall| can| aim to| try to)\s+"
+    r"(?:reply|respond|reaching out|reach out|write back|write to you|get back to you|"
+    r"be in touch|be in contact|get in touch|follow up|answer|contact you)\b"
+    # …or the present-tense form of the same promise: "we reply to every message".
+    r"|\bwe\s+(?:reply|respond|answer|write back|follow up|get back to you)\b"
+    # …or a promise made TO the visitor: "you'll hear from us".
+    r"|\byou(?:'ll| will)\s+(?:hear|get a reply|receive a reply|be contacted)\b"
+    r"|\bexpect a reply\b|\ba reply will\b"
 )
 
 #: The confirmation the visitor sees on success, pinned as a VALUE. It states
@@ -361,12 +368,26 @@ def test_the_confirmation_promises_no_reply() -> None:
         "the success branch must display the server's message (`data.message`) with its "
         "own fallback pinned — the client cannot substitute its own confirmation"
     )
+    # The whole PAGE is visitor-facing, not just its script: the static copy, the
+    # lede and the noscript fallback are what a JS-off reader sees, and appending
+    # a promise to the noscript paragraph kept the suite green when this scan
+    # started at `<script>` (cycle-4 review). Rendered as a browser reads it —
+    # scripts and styles dropped, tags to spaces, entities unescaped, whitespace
+    # collapsed.
+    page_markup = re.sub(r"<(script|style)\b.*?</\1>", " ", html_src, flags=re.S | re.I)
+    page_text = " ".join(unescape(re.sub(r"<[^>]+>", " ", page_markup)).split())
+    assert not re.search(REPLY_PROMISE_VERBS, page_text, re.I), (
+        "the contact page promises a reply: "
+        f"{re.search(REPLY_PROMISE_VERBS, page_text, re.I).group(0)!r}"
+    )
     # No client-side string may promise a reply either (comments excluded: the
     # script explains the 503 path in prose).
     client_code = "\n".join(
         line for line in script.splitlines() if not line.strip().startswith(("//", "*", "/*"))
     )
-    client_strings = re.findall(r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`)', client_code)
+    client_strings = re.findall(
+        r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`)', client_code
+    )
     for text in client_strings:
         assert not re.search(REPLY_PROMISE_VERBS, text, re.I), (
             f"the contact page's script promises a reply: {text}"
@@ -378,7 +399,7 @@ def test_the_confirmation_promises_no_reply() -> None:
     hint = html_src[html_src.index('id="contact-email"') : html_src.index('id="contact-message"')]
     hint_text = re.search(r"<p[^>]*>(.*?)</p>", hint, re.S)
     assert hint_text is not None, f"cannot read the email hint: {hint!r}"
-    rendered = " ".join(unescape(re.sub(r"<[^>]+>", "", hint_text.group(1))).split())
+    rendered = " ".join(unescape(re.sub(r"<[^>]+>", " ", hint_text.group(1))).split())
     assert rendered == HINT_EMAIL_EXACT, (
         "the email hint must state a use-restriction and never a reply promise, got: "
         f"{rendered!r}"
@@ -484,17 +505,51 @@ def test_rate_limit_map_is_bounded() -> None:
     traffic from many addresses — the map would grow without limit and then run
     an O(n) rebuild per request.
 
-    The slice starts at the CAP's own loop (`let excess`), not at the
-    `hits.size > MAX_RATE_KEYS` check above it: that check follows the
-    expired-keys sweep, so slicing from there picked up the sweep's
-    `hits.delete(k)` and stayed green when the cap's eviction loop was neutered
-    (cycle-1 review).
+    The slice starts at the CAP's own guard, not at the `hits.size >
+    MAX_RATE_KEYS` string anywhere in the file: that string was satisfiable from
+    inside the expired-keys sweep above it (cycle-1 review), from a `/* … */`
+    block comment (cycle-4), and from a dead `if (false)` branch (cycle-4).
+
+    ⚠️  WHAT THIS PINS, AND WHAT IT CANNOT. It gates the SHAPE of the cap — the
+    guard, a cap-derived `excess`, and an eviction loop that breaks at the cap,
+    deletes and counts down, on the function's only un-limited exit, with no
+    disabled branch in the path. It does not PROVE the cap is reachable: a
+    sufficiently contrived refactor (a dead helper holding the loop, an
+    equivalent-but-unrecognised shape) is outside a static gate's reach. The
+    behavioural answer is a TS harness that fills the map and asserts its bound;
+    the Pages Functions have none (#4108).
     """
     src = _src(FUNCTION_TS)
     assert "MAX_RATE_KEYS" in src
-    # Strip comments FIRST: a commented-out eviction loop supplied both tokens and
-    # kept an earlier version of this pin green (cycle-2 review).
-    code = re.sub(r"//[^\n]*", "", src)
+    # The cap VALUE matters too: a 1000x bump bounds nothing in practice, and the
+    # token assertions below would all still hold (cycle-4 review, honourable
+    # mention).
+    cap_value = re.search(r"MAX_RATE_KEYS\s*=\s*(\d+)", src)
+    assert cap_value is not None, "MAX_RATE_KEYS must have a numeric value"
+    assert 100 <= int(cap_value.group(1)) <= 50_000, (
+        f"MAX_RATE_KEYS must be a real bound, got {cap_value.group(1)}"
+    )
+    # Strip BOTH comment forms FIRST: a commented-out eviction loop supplied every
+    # pinned token as TEXT and kept an earlier version of this pin green (cycle-2
+    # review), and stripping only `//` left `/* … */` able to do the same
+    # (cycle-4 review).
+    code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
+    # A dead branch keeps every token readable while eviction never runs —
+    # `if (false) if (hits.size > MAX_RATE_KEYS) { … }` passed this pin
+    # (cycle-4 review).
+    assert not re.search(r"\b(?:if|while)\s*\(\s*(?:false|0)\s*\)", code), (
+        "a disabled branch cannot guard the rate-limit cap"
+    )
+    # …and an early `return false` would make the cap unreachable with the loop
+    # below still intact, so the cap must sit on the function's ONLY un-limited
+    # exit.
+    fn_start = code.index("function rateLimited")
+    fn_exit = code.index("return false;", fn_start) + len("return false;")
+    assert code[fn_start:fn_exit].count("return false") == 1, (
+        "the cap must be on the function's only un-limited exit — an earlier `return false` "
+        "would make this pin vacuous"
+    )
     # The GUARD is part of the cap: inverting it (`<` instead of `>`) disables
     # eviction entirely while the loop below still reads correctly, and the guard
     # sat outside the old slice (cycle-3 review).
