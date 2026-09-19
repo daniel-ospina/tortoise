@@ -286,7 +286,6 @@ for (let i = 0; i < planned; i++) rateLimited("ip" + (planned - 1 - i), T0);
 observations.attemptedKeys = planned;
 observations.mapSize = hits.size === undefined ? -1 : hits.size;
 observations.oldestEvicted = !hits.has("ip" + (planned - 1)); // inserted first
-observations.oldestEvicted = !hits.has("ip" + (planned - 1)); // inserted first
 
 // 5. The expired sweep, when over the cap: an EXPIRED key must be dropped before a
 // LIVE one. Seeds are written directly (the limiter cannot travel back in time to
@@ -304,6 +303,10 @@ const cap = Math.min(MAX_RATE_KEYS, CAP_CEILING);
 for (let i = 0; i < cap; i++) hits.set("live" + i, [T0]);
 for (let i = 0; i < 10; i++) hits.set("dead" + i, [expiredAt]);
 hits.set("dead-edge", [T0 - RATE_WINDOW_MS]);
+// A NON-MONOTONIC key: a live timestamp followed by an expired one, reachable under the
+// clock step §12 exercises. A predicate inspecting only the LAST entry deletes it and
+// discards live history, while `every` keeps it.
+hits.set("mixed-rev", [T0, expiredAt]);
 // The LIVE side of the same boundary: one millisecond inside the window the key must
 // SURVIVE. Over-expiring it is invisible to the counts (the oldest-first loop evicts
 // one more key and both totals land where they should), so it is observed by name.
@@ -322,6 +325,7 @@ for (const k of hits.keys()) {
 observations.deadKeysLeft = deadLeft;
 observations.liveKeysLeft = liveLeft;
 observations.mixedKeySurvived = hits.has("mixed");
+observations.mixedRevKeySurvived = hits.has("mixed-rev");
 observations.liveEdgeSurvived = hits.has("live-edge");
 
 // 6. The re-insert of the current key, which the limiter's own comment calls
@@ -376,9 +380,10 @@ observations.staleKeyLingeredUnderCap = hits.has("stale");
 // filled to just under the cap, the expired key is inserted LAST, and an EXISTING
 // address then submits again — re-setting a key adds none, so the guard is evaluated at
 // exactly the cap and the expired key must survive. One more key crosses the cap, and
-// the expired key must go: it is the NEWEST by insertion order, so ordinary eviction
-// would take an older LIVE key first — only the sweep can reach it, which is what makes
-// this assertion about the sweep rather than about eviction.
+// the expired key must go: ordinary eviction would take an older LIVE key first
+// (`pad0` is the oldest here — `stale-under` is third-newest, because `CLIENT_G` is
+// re-inserted after it and `pushes-over` follows), so only the sweep can reach it, which
+// is what makes this assertion about the sweep rather than about eviction.
 hits.clear();
 rateLimited(CLIENT_G, T0);
 for (let i = 0; i < cap - 2; i++) rateLimited("pad" + i, T0);
@@ -402,8 +407,11 @@ for (let i = 0; i < expiredSeed; i++) hits.set("gone" + i, [expiredAt]);
 rateLimited("crosses", T0);
 let keptLeft = 0;
 for (const k of hits.keys()) if (!k.startsWith("gone")) keptLeft++;
+let goneLeft = 0;
+for (const k of hits.keys()) if (k.startsWith("gone")) goneLeft++;
 observations.negativeExcessOldestKept = hits.has("kept0");
 observations.negativeExcessLiveCount = keptLeft;
+observations.negativeExcessExpiredLeft = goneLeft;
 observations.negativeExcessExpected = liveSeed + 1;
 
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
@@ -572,6 +580,11 @@ def _check_sweep(observed: dict) -> None:
         "a key holding one expired and one live timestamp must survive the sweep — "
         "dropping it discards history that still counts (an `every` swept as `some`)"
     )
+    assert observed["mixedRevKeySurvived"] is True, (
+        "a key with a LIVE timestamp followed by an EXPIRED one (reachable under the "
+        "clock step) must survive: a predicate inspecting only the last entry deletes "
+        "it and discards live history"
+    )
     assert observed["liveEdgeSurvived"] is True, (
         "a key one millisecond INSIDE the window must survive the sweep — sweeping "
         "at the wrong side of the cutoff loses a live history"
@@ -623,8 +636,7 @@ def _check_guarded_sweep(observed: dict) -> None:
     runs only once the map is OVER the cap. Both sides of that are pinned: an expired
     key lingers while the map is under the cap, still lingers at exactly the cap, and is
     taken as soon as one more key crosses it. That is what separates `>` from `>=` and
-    from any lower threshold — a threshold of 100 would otherwise run the walk on
-    nearly every request and no invariant would see it.
+    from any lower threshold.
     """
     assert observed["staleKeyLingeredUnderCap"] is True, (
         "an expired key under the cap is expected to linger (the sweep is guarded to "
@@ -656,6 +668,11 @@ def _check_eviction_bound(observed: dict) -> None:
     assert observed["negativeExcessLiveCount"] == observed["negativeExcessExpected"], (
         f"every live key plus the new one must remain: expected "
         f"{observed['negativeExcessExpected']}, got {observed['negativeExcessLiveCount']}"
+    )
+    assert observed["negativeExcessExpiredLeft"] == 0, (
+        "the sweep must reclaim EVERY expired key here, not just as many as the map is "
+        "over the cap by — a sweep bounded by `excess` leaves expired state behind, "
+        f"got {observed['negativeExcessExpiredLeft']} left"
     )
 
 
@@ -817,6 +834,20 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "sweep inspects one timestamp only",
         r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
         "v.length === 1 && v[0] <= cutoff",
+    ),
+    (
+        "sweep inspects the last timestamp only",
+        r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
+        "v[v.length - 1] <= cutoff",
+    ),
+    (
+        "sweep bounded by the excess",
+        r"for \(const \[k, v\] of hits\) \{\s*\n\s*if \(v\.every\(\(t\) => t <= cutoff\)\) hits\.delete\(k\);\s*\n\s*\}\s*\n\s*let excess = hits\.size - MAX_RATE_KEYS;",
+        "let excess = hits.size - MAX_RATE_KEYS;\n"
+        "    for (const [k, v] of hits) {\n"
+        "      if (excess <= 0) break;\n"
+        "      if (v.every((t) => t <= cutoff)) { hits.delete(k); excess--; }\n"
+        "    }",
     ),
     (
         "refusal path re-inserts the key",
