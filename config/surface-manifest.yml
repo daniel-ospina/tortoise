@@ -1,6 +1,6 @@
 manifest_version: 1
 issue: 3863
-cut_at_commit: 1de413d6510972671615829c0ff7d234a4e24b06
+cut_at_commit: 1aecface1
 allowed_transforms:
 - _HTTPToolFilter
 approval_status: pending-owner-approval
@@ -253,7 +253,7 @@ rows:
     full control.'
   dependency: declares TortoiseSDK.recall_state (resolves)
   lifecycle: active
-  used_by: agents, tooling, skill-docs, docs
+  used_by: agents, eval-harness, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -279,7 +279,7 @@ rows:
     omit query, set kind → all Points of kind.'
   dependency: declares TortoiseSDK.tortoise_fts_query (resolves)
   lifecycle: active
-  used_by: agents, tooling, skill-docs, docs
+  used_by: agents, eval-harness, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -1733,12 +1733,7 @@ rows:
   cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
     — waits for your approval
 - name: tortoise_session_capture
-  # #4010 (PR #4048): the capture bridge now carries `max_sessions` through to
-  # `_check_org_limit` instead of dropping the key (which had silently forced
-  # the 1000 default on every MCP capture). Implementation fix, no surface
-  # growth — re-cut per the gate's remedy, `approval_status` stays
-  # pending-owner-approval.
-  served_from: tortoise/mcp_server.py:03a29c8a37a39663
+  served_from: tortoise/mcp_server.py:20fc9c5db96c8fd3
   family: sessions
   family_rank: 4
   served: http
@@ -1765,7 +1760,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # Genuine served-surface change (#4009): the ERR_QUOTA 402-mapping added by
+  # fced38374 (#3665), carried by PR #3780 — 03a29c8a37a39663 -> 20fc9c5db96c8fd3.
+  # A line shift is not a fingerprint change since #4170, so no line-only row exists.
+  approval: '#3780 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_graph_set_recording
@@ -2102,8 +2100,6 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_onboarding_github_index
-  # #4010/#4170: `served_from` is the code-object digest only (bytecode, names,
-  # constants) — a pure line shift is not a fingerprint change since #4170.
   served_from: tortoise/mcp_server.py:2cf4f3e3798f46d3
   family: onboarding
   family_rank: 6
@@ -2471,10 +2467,10 @@ rows:
   job: List all Sources with point counts. Where data came FROM.
   dependency: declares TortoiseSDK.list_sources (resolves)
   lifecycle: active
-  used_by: never called, skill-docs, docs
+  used_by: agents, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by skill-docs — removing it would break that
+  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -3455,11 +3451,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_point.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
+  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
   lifecycle: active
   used_by: tooling, skill-docs, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
+  reason: 'no MCP tool binds it; callers: engine, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
@@ -4005,16 +4001,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.graph_list.
-  dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
+  dependency: 'reached by no registered MCP tool; caller categories: other-tooling, tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: tenant-rest'
+  reason: 'no MCP tool binds it; callers: other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:graph_restore
   method: graph_restore
   family: null
