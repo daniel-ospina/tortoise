@@ -212,7 +212,9 @@ def provision_test_user():
         team = sdk.org_create(f"e2e-{os.urandom(4).hex()}")
         lim = tier_limits(tier)
         # #310 (review fix 16b): mirror production CREATE semantics — write
-        # max_points (= max_graph_nodes, GAP-B mapping) + max_sessions too.
+        # max_points (= max_graph_nodes, GAP-B mapping). #4010: max_sessions is
+        # written as NULL (unlimited) — it is never a cap, and a leftover
+        # number here would re-create exactly the trap the issue names.
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.tier=$tier, t.max_graphs=$mg, "
             "t.max_users=$mu, t.max_api_keys=$mk, t.max_points=$mp, "
@@ -220,7 +222,7 @@ def provision_test_user():
             params={"id": team["id"], "tier": tier,
                     "mg": lim["max_graphs_per_team"], "mu": lim["max_users_per_team"],
                     "mk": lim["max_api_keys"], "mp": lim["max_graph_nodes"],
-                    "ms": 1000, "ops": lim["included_write_ops_per_month"],
+                    "ms": None, "ops": lim["included_write_ops_per_month"],
                     "nodes": lim["max_graph_nodes"]},
         )
         if demo_seed:

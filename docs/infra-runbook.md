@@ -7,13 +7,13 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-09-16
+updated: 2026-09-19
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
 
 **Epic:** #7711 (legacy provisioning epic — provenance) · availability watchdog: #2850
-**Last updated:** 2026-09-16
+**Last updated:** 2026-09-19
 
 ## 1. Initial Provisioning
 
@@ -58,6 +58,68 @@ wrangler r2 bucket create tortoise-backups
 |------|------|--------|
 | CNAME | api | tortoise-api.fly.dev |
 | CNAME | app | tortoise-dashboard.pages.dev |
+
+### Canonical API host — and why `tortoise.dev` is not ours (recorded 2026-09-19, #3474)
+
+**The canonical hosted API base URL is `https://api.premiselabs.co`** (MCP at
+`https://api.premiselabs.co/mcp/`). The client-facing surfaces that declare the API base
+agree on that spelling — `.mcp.json`, `README.md`, `client/README.md`,
+`docs/INGEST_CONTRACT.md`, `docs/data-safety.md`, and the availability watchdog's
+`DEFAULT_PROBE_URL` (`.github/scripts/availability-watchdog.sh`). Other hostnames are
+different surfaces, **not** competing client-facing API bases —
+`tortoise.premiselabs.co` (landing / legal / auth, Cloudflare Pages),
+`app.premiselabs.co` (dashboard), and `tortoise-y4mjjq.fly.dev` (the Fly app host, also
+used as a server-side/internal base such as `INTERNAL_API_URL`).
+
+⛔ **`tortoise.dev` is a third party's zone. Never point a client, a doc, or a DNS
+record at `api.tortoise.dev`, and do not add a record for it.** Recorded so this is not
+investigated a third time. The probes below are reproducible and were taken
+2026-09-19 03:23 UTC (timings are single samples).
+
+```bash
+dig +short api.tortoise.dev          # 172.67.211.252, 104.21.53.100 + 2 IPv6 — Cloudflare anycast
+echo | openssl s_client -connect api.tortoise.dev:443 -servername api.tortoise.dev
+                                     # handshake COMPLETES; "Verify return code: 0 (ok)";
+                                     # cert CN=tortoise.dev, SAN tortoise.dev + *.tortoise.dev
+curl -sS -i https://api.tortoise.dev/health      # HTTP 522 "error code: 522" — a LOUD status
+                                                 # code, not a hang; 16-byte body in ~20s
+curl -sS -i https://tortoise.dev/                # HTTP 200, 0 bytes, x-turbo-charged-by: LiteSpeed
+                                                 # → a third-party shared host, not Fly, not Pages
+curl -sS https://api.premiselabs.co/health       # HTTP 200 (0.24s) — the canonical host, healthy
+curl -sS https://tortoise-y4mjjq.fly.dev/health  # HTTP 200 (0.32s) — the Fly app itself
+```
+
+Ownership — reproducible evidence first, credential-gated evidence labelled as such:
+
+- *(reproducible with Fly credentials)* `fly certs list -a tortoise-y4mjjq` →
+  `api.premiselabs.co` only, and `fly certs check api.tortoise.dev` → *certificate not
+  found*. Certificate Transparency (`crt.sh`) holds **no `api.tortoise.dev` SAN** — only
+  `tortoise.dev`, `*.tortoise.dev`, `www…` names. Fly has never served this name.
+- *(reproducible)* Registrar RDAP (`rdap.dynadot.com`, 2026-09-19): **Dynadot LLC**; the
+  registrant is a privacy service (`Super Privacy Service LTD c/o Dynadot`), registered
+  2024-05-19, expires 2027-05-19. Nothing in it identifies an owner we know.
+- *(reproducible)* With this record excluded, nothing in the repo or its history has ever
+  offered the name: `git grep -I 'api\.tortoise\.dev' -- ':!docs/infra-runbook.md'` →
+  **0 hits**, and
+  `git log -S'tortoise.dev' --all -- . ':(exclude)docs/infra-runbook.md'` → **0 commits**.
+- *(operator-verified, credential-gated — not reproducible without Cloudflare access)*
+  `GET /zones` on our Cloudflare account returned exactly `dmeer.app`, `eldato.com.mx`,
+  `premiselabs.co`: **`tortoise.dev` is absent from our account.** Nameserver pairs are
+  *not* used as evidence here — this account issues more than one pair (`everton`/`sonia`
+  for `premiselabs.co`, `elisa`/`woz` for `eldato.com.mx`), so a different pair proves
+  nothing on its own.
+
+**Consequence: there is no in-repo fix and no DNS change for us to make.** #3831
+reached the same conclusion — its earlier "remove the record" decision is VOID, because
+the owner never owned the name. The issue's original "TLS black-hole" framing is also
+**stale**: the host now fails *loudly* with a 522 in ~20 s instead of hanging.
+
+*Adjacent work owned elsewhere — do not re-fix it in this section:* the
+`tortoise-api.fly.dev` target in the table above does not resolve (`dig +short
+tortoise-api.fly.dev` → empty; the Fly app is `tortoise-y4mjjq` per `fly.toml`),
+tracked by **#3046**. A host that answers slowly instead of failing fast is the
+client-contract defect tracked by **#3805** (one canonical base URL + bounded
+fail-fast).
 
 ### GitHub Actions
 Set these secrets in repo Settings → Secrets and variables → Actions:
@@ -219,7 +281,10 @@ Bounds are enforced IN ORDER by `capture_session` (tortoise/hosted_api.py):
    `est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
    (the ×2 covers the M2 relations stage's IMPL/NAND operator nodes; sentence
    count is capped per turn — the #329 flood gate).
-4. **Sessions quota** — `DEFAULT_MAX_SESSIONS = 1000` (`_check_team_limit`).
+
+No sessions quota: the flat `max_sessions = 1000` was removed in **#4010** —
+sessions are unlimited for every tier, and a stored `Team.max_sessions` is
+deliberately not honoured as a cap.
 
 Free-tier interplay (product/pricing.json): `max_graph_nodes: 10000` is the
 points-quota numerator for NON-episodic Points only (turn Points / Session /

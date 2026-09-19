@@ -28,6 +28,31 @@
 > `PointRetracted`, `PointsMerged`, `IngestStarted`) to the EventLog JSONL —
 > unchanged. Hosted/SDK tenants read the `:GraphEvent` stream below.
 
+### JSONL rebuild-journal record shapes (durability, not the `:GraphEvent` stream)
+
+The table above documents the `:GraphEvent` **payload**. The JSONL rebuild
+journal that `rebuild_all` replays is a *second*, differently-shaped store:
+`_emit_event` writes the envelope (`event_id`/`ts`/`type`/`initiated_by`/
+`projection_version`) plus the record's own fields. Two folds carry props that
+the payload does not name:
+
+- **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
+  **canonical** `annotator_bias`/`annotator_precision`/`annotator_consistency`/
+  `annotator_directness` (the payload above keeps the SHORT names
+  `bias`/`precision`/`consistency`/`directness` for the `:GraphEvent`
+  contract). The fold accepts either spelling (`_annotator_dims(aliases=True)`),
+  but an SDK-produced record always carries the long names.
+- **`PointRevised`** — `update_point(**props)` journals the caller's props
+  VERBATIM as extras, so an `annotator_*` key here is a node property of that
+  exact name (never aliased).
+
+**No down-version guarantee for new folded record types.** An older binary
+rebuilding a journal written by a newer one warns `unrecognized event type 'X'
+— skipped` for a new type it does not know, and silently drops unknown
+`PointRevised` extras. The rebuild path has no pre-wipe allowlist analogous to
+`_assert_episodic_points_recreatable`; forward-only evolution of the JSONL
+record vocabulary is a known limitation, not a supported downgrade path.
+
 ## `:GraphEvent` node schema
 
 Stored in the **team's own FalkorDB graph namespace** (the namespace IS the

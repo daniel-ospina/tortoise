@@ -313,6 +313,14 @@ class TestApplyLimitsAndReconcile:
     def test_apply_limits_writes_tier_and_limits_atomically(self, monkeypatch, billing_sdk):
         sdk = billing_sdk
         team = sdk.org_create("limits-team")
+        # #4010: seed a stored cap FIRST so the assertion below distinguishes
+        # "apply_limits DELETES the property" from "the field was never set"
+        # (FalkorDB deletes a property written as NULL).
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_sessions = 1000",
+            params={"id": team["id"]},
+        )
+        assert sdk.org_get(team["id"])["max_sessions"] == 1000
         queries: list[str] = []
         orig_query = sdk._get_registry().query
 
@@ -327,7 +335,9 @@ class TestApplyLimitsAndReconcile:
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000   # == max_graph_nodes (GAP-B mapping)
         assert t["max_api_keys"] == 10
-        assert t["max_sessions"] == 1000
+        # #4010: the stored 1000 is CLEARED by the tier write (NULL → the
+        # property is deleted), so a later reader cannot re-cap the org.
+        assert t.get("max_sessions") is None
         assert t["max_users"] == 2
         assert t.get("max_graphs") is None   # pro = unlimited (None not stored)
 

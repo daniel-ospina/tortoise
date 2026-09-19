@@ -23,15 +23,57 @@ re-includes drafts identically everywhere:
 
 from __future__ import annotations
 
-# Terminal statuses — a Point in any of these is dead for EP factor
-# extraction (ontology §5: retracted/superseded are terminal; outdated is the
-# legacy flag-status supersede/invalidate write; archived is reserved;
-# deprecated is written by legacy/assessment paths and already excluded from
-# every read surface — search_engine + recall_state — so EP must not let it
-# vote either). Mirrors the read-surface vocabulary
-# (search_engine.TERMINAL_EXCLUDED_STATUSES).
-TERMINAL_EXCLUDED_STATUSES = frozenset(
-    {"retracted", "superseded", "outdated", "archived", "deprecated"})
+# ══════════════════════════════════════════════════════════════════════════
+# #2901 — THE canonical Point-status partition. ONE declaration, imported by
+# every reader that must skip non-current Points.
+#
+# Do NOT re-declare a status set at a call site. A hand-written subset is how
+# ``outdated`` was omitted from three reader filters (#2901: github_indexer,
+# audit_beta_gate, 1714_dedup_observation) and a superseded/outdated claim was
+# then served as the CURRENT statement. Import ``TERMINAL_EXCLUDED_STATUSES``
+# from HERE instead.
+#
+# live.py is the LEAF status module: ``tortoise/sdk.py`` imports it (sdk.py:
+# ``from .live import TERMINAL_EXCLUDED_STATUSES``), so the module can be
+# imported by every consumer without a cycle. Because it is below sdk.py it
+# cannot import the full vocabulary (``POINT_STATUS_VALUES``, canonical in
+# ``tortoise/sdk.py``) at import time. The partition below is therefore held
+# to that vocabulary by ``tests/test_terminal_status_vocabulary.py``, which
+# DERIVES the expected terminal set as
+# ``POINT_STATUS_VALUES - CURRENT_POINT_STATUS_VALUES`` and asserts equality —
+# so adding a status to the vocabulary without classifying it here REDs that
+# test instead of silently defaulting to "current" on every read surface.
+# (A parity test, not import-time coercion, is the guard: the alternative —
+# declaring POINT_STATUS_VALUES here — would need sdk.py to stop declaring it,
+# and a circular import makes the reverse direction impossible.)
+# ══════════════════════════════════════════════════════════════════════════
+
+#: The non-terminal members of the Point vocabulary — a Point in one of these
+#: is CURRENT (draft is not-yet-published, not dead).
+CURRENT_POINT_STATUS_VALUES = frozenset({"draft", "live"})
+
+#: The vocabulary's terminal members (ontology §5: retracted/superseded are
+#: terminal; ``outdated`` is the legacy supersede/invalidate status;
+#: ``archived`` is reserved — no v1 write path).
+TERMINAL_STATUS_VALUES = frozenset(
+    {"retracted", "superseded", "outdated", "archived"})
+
+#: ``deprecated`` is deliberately NOT in ``POINT_STATUS_VALUES``: no SDK/API
+#: write path emits it (only direct graph writes / legacy assessment paths
+#: ever did — see tests/test_lifecycle_guards.py, which asserts its absence),
+#: so it is not a legal create-time status. It IS present in legacy graphs and
+#: must never be served as current, so it joins the EXCLUSION set below but
+#: not ``TERMINAL_STATUS_VALUES``. #2901 inverse-shape ruling: the vocabulary
+#: is right (no writer) and the recall_state test that sets ``n.status =
+#: 'deprecated'`` directly is a legitimate simulation of legacy graph data.
+LEGACY_NON_CURRENT_STATUS_VALUES = frozenset({"deprecated"})
+
+#: Every status a read surface (FTS/vector/structural, EP factor extraction,
+#: recall_state, the SDK query paths, the indexers) must treat as NOT current.
+#: ``None``/absent status is separately LIVE (legacy nodes — see
+#: ``_terminal_excluded``'s NULL handling).
+TERMINAL_EXCLUDED_STATUSES = (
+    TERMINAL_STATUS_VALUES | LEGACY_NON_CURRENT_STATUS_VALUES)
 
 
 def _terminal_excluded(clause: str) -> str:

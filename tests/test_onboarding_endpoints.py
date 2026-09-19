@@ -59,8 +59,10 @@ def client(tmp_path):
             "max_teams": 1,
             # #1922: the demo seed is now quota-gated — the team dict must
             # carry max_points (the fail-closed points cap) or the check
-            # 500s.
+            # 500s. #4010: the same contract now applies to max_sessions
+            # (unlimited → explicit None); a missing key is fail-closed.
             "max_points": 10000,
+            "max_sessions": None,
             # #1748: the onboarding sub-team is provisioned on the USER path
             # — the session user becomes the owner member
             # (get_current_org_session attaches session_user_id for session
@@ -142,6 +144,7 @@ class TestPublicDemo:
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 0,  # at cap — count(0) >= limit(0)
+            "max_sessions": None,
         }
         r = client.post("/v1/demo")
         assert r.status_code == 402, r.text
@@ -171,6 +174,7 @@ class TestPublicDemo:
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
+            "max_sessions": None,
         }
         r = client.post("/v1/demo")
         assert r.status_code == 200, r.text

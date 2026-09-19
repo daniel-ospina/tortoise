@@ -109,6 +109,7 @@ def client(tmp_path):
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
+            "max_sessions": None,
         }
         _INDEX_JOBS.clear()
         with TestClient(app) as tc:
@@ -630,6 +631,7 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
         "org_id": "some-other-team", "tier": "free", "key_id": "k2",
         "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
+        "max_sessions": None,
     }
     rb = provisioned.tc.get(f"/v1/index/docs/{job_id}")
     assert rb.status_code == 404
@@ -638,6 +640,7 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
         "org_id": provisioned.org_id, "tier": "free", "key_id": "k1",
         "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
+        "max_sessions": None,
     }
     body = _poll_until(provisioned.tc, job_id, "completed")
     assert body["status"] == "completed"
