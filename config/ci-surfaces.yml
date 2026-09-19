@@ -238,6 +238,11 @@ surfaces:
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
   - test_codex_capture_hook.py
+  # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, the agent-transcript parser, and the CLI install
+  # into the HOME-scoped ~/.cursor. Same dual registration as
+  # test_capture_install.py.
+  - test_cursor_capture_hook.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -402,6 +407,11 @@ surfaces:
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
   - test_codex_capture_hook.py
+  # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, the agent-transcript parser, and the CLI install
+  # into the HOME-scoped ~/.cursor. Same dual registration as
+  # test_capture_install.py.
+  - test_cursor_capture_hook.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
