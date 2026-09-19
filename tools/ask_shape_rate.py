@@ -1049,12 +1049,20 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             # evidence: its faults are excluded from flip detection above and
             # its flips are not credited here. A faulted arm makes the whole
             # control NOT fired (=> VOID), never quietly fired.
-            faulted_arms = [name for name, recs in
-                            (("baseline", base), ("M1", m1), ("M2", m2),
-                             ("M2_control", m2c), ("M3", m3))
-                            if _err_qids(recs)]
+            # ⚠ EXCEPTION: the M2-CONTROL arm's AskReaderUnavailable records
+            # are its DESIGNED outcome — it demonstrates that the fixed code
+            # fails loud on a blank output instead of fabricating an
+            # abstention (that is the whole comparison against M2). Counting
+            # them as faults would VOID every run.
+            faulted_arms = [
+                name for name, recs, expected_failures in
+                (("baseline", base, False), ("M1", m1, False),
+                 ("M2", m2, False), ("M2_control", m2c, True),
+                 ("M3", m3, False))
+                if _err_qids(recs) and not expected_failures]
             fired["arms_error_free"] = not faulted_arms
             fired["faulted_arms"] = faulted_arms
+            fired["M2_control_expected_failures"] = len(_err_qids(m2c))
             fired["all"] = (all(fired[k] for k in
                                 ("M1_l2_red", "M2_l1_red", "M3_l3_red",
                                  "M3_l1_red"))
