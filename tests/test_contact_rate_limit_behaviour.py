@@ -224,17 +224,19 @@ observations.otherAddressOk = !rateLimited("y", T0 + limit);
 
 // 4. The cap, under a REAL flood of distinct addresses through `rateLimited`. One
 // more key than the cap is attempted, so a correct eviction leaves exactly
-// MAX_RATE_KEYS. `size` on a store that lacks it is reported as -1 so the assertion
-// fails loudly instead of passing on `undefined`.
+// MAX_RATE_KEYS. The names DESCEND with age, so lexicographic order is the opposite
+// of insertion order: an eviction that sorts by key name instead of taking the
+// oldest key must red here. `size` on a store that lacks it is reported as -1 so the
+// assertion fails loudly instead of passing on `undefined`.
 hits.clear();
 const planned = Math.min(MAX_RATE_KEYS, CAP_CEILING) + 1;
-for (let i = 0; i < planned; i++) rateLimited("ip" + i, T0);
+for (let i = 0; i < planned; i++) rateLimited("ip" + (planned - 1 - i), T0);
 observations.attemptedKeys = planned;
 observations.mapSize = hits.size === undefined ? -1 : hits.size;
 // WHICH keys survive, not just how many: an eviction that takes the NEWEST key
 // instead of the oldest leaves the count at the cap all the same.
-observations.oldestEvicted = !hits.has("ip0");
-observations.newestKept = hits.has("ip" + (planned - 1));
+observations.oldestEvicted = !hits.has("ip" + (planned - 1)); // inserted first
+observations.newestKept = hits.has("ip0"); // inserted last
 
 // 5. The expired sweep, when over the cap: an EXPIRED key must be dropped before a
 // LIVE one. Seeds are written directly (the limiter cannot travel back in time to
@@ -243,11 +245,15 @@ observations.newestKept = hits.has("ip" + (planned - 1));
 // and leaves the dead ones behind, which the counts below show. One seeded key has a
 // MIXED window, because `every` and `some` agree on single-entry windows — `some`
 // would drop a live history that still counts.
+// of expiry too: the filter keeps only `t > cutoff`, so a timestamp EXACTLY at the
+// cutoff is expired and must be swept — `dead-edge` seeds that boundary, which
+// `<= cutoff` and `< cutoff` disagree on.
 hits.clear();
 const expiredAt = T0 - RATE_WINDOW_MS - 1;
 const cap = Math.min(MAX_RATE_KEYS, CAP_CEILING);
 for (let i = 0; i < cap; i++) hits.set("live" + i, [T0]);
 for (let i = 0; i < 10; i++) hits.set("dead" + i, [expiredAt]);
+hits.set("dead-edge", [T0 - RATE_WINDOW_MS]);
 hits.set("mixed", [expiredAt, T0]);
 rateLimited("fresh", T0);
 let deadLeft = 0;
@@ -353,8 +359,8 @@ def _check_window(observed: dict) -> None:
     )
     assert observed["mixed"] == [False] * limit + [True], (
         "in a mixed window only the expired entries may stop counting: the oldest two "
-        f"must expire, so the refusal comes on the {limit}-th live submission — got "
-        f"{observed['mixed']!r}"
+        "must expire, so the refusal comes once `limit` live entries are stored and "
+        f"the next arrives, got {observed['mixed']!r}"
     )
 
 
@@ -568,6 +574,22 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "sweep predicate widened to `some`",
         r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
         "v.some((t) => t <= cutoff)",
+    ),
+    (
+        "sweep boundary made strict",
+        r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
+        "v.every((t) => t < cutoff)",
+    ),
+    (
+        "eviction sorts by key name",
+        r"for\s*\(\s*const\s+k\s+of\s+hits\.keys\(\)\s*\)",
+        "for (const k of [...hits.keys()].sort())",
+    ),
+    (
+        "store whose writes are dropped",
+        r"new\s+Map\s*<\s*string\s*,\s*number\[\]\s*>\s*\(\s*\)",
+        "new Proxy(new Map(), { get: (t, p) => p === 'set' ? () => t : "
+        "(typeof t[p] === 'function' ? t[p].bind(t) : t[p]) })",
     ),
     (
         "re-insert of the current key removed",
