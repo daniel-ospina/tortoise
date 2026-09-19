@@ -238,6 +238,26 @@ def test_drop_state_is_bounded_for_distinct_client_keys():
     assert len(per_site) <= ha._TELEMETRY_DROP_MAX_PER_SITE
 
 
+def test_drop_fingerprint_bounds_a_single_key_name_length(caplog):
+    """The COUNT cap alone is not enough: the PATCH front door keys the drop on
+    request-body FIELD NAMES, so one field name of unbounded length would
+    otherwise become one unbounded retained fingerprint entry AND log line."""
+    huge = "A" * 200_000
+    with caplog.at_level(logging.WARNING):
+        ha._report_unregistered("bounded_len", "subject", {huge})
+    counter_key = next(k for k in ha._TELEMETRY_DROP_COUNTS
+                       if k[0] == "bounded_len")
+    (rendered,) = counter_key[2]
+    assert len(rendered) <= ha._TELEMETRY_DROP_MAX_KEY_LEN + 32
+    assert rendered.startswith("A")
+    # The warning carries that same bounded fingerprint, so the log line is
+    # bounded by the same cap.
+    assert all(len(rec.getMessage()) < 10_000 for rec in _warnings(caplog))
+    # The cap must not perturb a normal short key — existing assertions and the
+    # billing plan/tier fingerprint rely on the un-truncated form.
+    assert ha._telemetry_drop_fingerprint({"plan", "tier"}) == ("plan", "tier")
+
+
 def test_drop_state_is_bounded_across_distinct_sites(caplog):
     """The reported dict is bounded in its SITE dimension too — a future emit
     site misusing a caller-derived `subject` cannot grow it without bound — and

@@ -19773,13 +19773,15 @@ _TELEMETRY_DROP_LOCK = threading.Lock()
 # distinct key-sets PLUS one shared overflow entry; the per-site dedup dict
 # retains at most `_TELEMETRY_DROP_MAX_SITES` sites PLUS one shared overflow
 # site, each with at most `_TELEMETRY_DROP_MAX_PER_SITE` fingerprints; and at
-# most `_TELEMETRY_DROP_MAX_KEYS` keys are named in one counter key / log line.
+# most `_TELEMETRY_DROP_MAX_KEYS` keys are named in one counter key / log line,
+# each truncated to `_TELEMETRY_DROP_MAX_KEY_LEN` characters.
 # Together these mean a CALLER-SUPPLIED key name (or site label) can never make
 # the reporter retain or log without bound.
 _TELEMETRY_DROP_MAX_MARKERS = 512
 _TELEMETRY_DROP_MAX_SITES = 64
 _TELEMETRY_DROP_MAX_PER_SITE = 64
 _TELEMETRY_DROP_MAX_KEYS = 20
+_TELEMETRY_DROP_MAX_KEY_LEN = 128
 
 # The sentinels a capped structure folds into — SHARED, so each structure is
 # bounded overall rather than bounded-per-key.
@@ -19789,19 +19791,39 @@ _TELEMETRY_DROP_SITE_OVERFLOW: tuple[str, str] = (
     "<site-overflow>", "<site-overflow>")
 
 
+def _cap_dropped_key(key: object) -> object:
+    """Truncate ONE over-long dropped key name so a fingerprint stays bounded.
+
+    A key at or under ``_TELEMETRY_DROP_MAX_KEY_LEN`` is returned UNCHANGED, so
+    a normal short key's fingerprint — and every assertion on it — is
+    byte-identical to before; only an over-long rendering is truncated, with a
+    length suffix so the log line still says how much was elided."""
+    rendered = key if isinstance(key, str) else str(key)
+    if len(rendered) <= _TELEMETRY_DROP_MAX_KEY_LEN:
+        return key
+    return (rendered[:_TELEMETRY_DROP_MAX_KEY_LEN]
+            + f"...(+{len(rendered) - _TELEMETRY_DROP_MAX_KEY_LEN} more)")
+
+
 def _telemetry_drop_fingerprint(keys: frozenset[str] | set[str]) -> tuple[str, ...]:
     """A BOUNDED, comparable rendering of a dropped key set.
 
     ``key=str`` keeps the sort total for a non-string key (a caller-supplied
     props dict is only membership-checked, so a mixed-type key set must not
-    make the reporter itself raise); the length cap keeps one huge key set
-    from becoming one huge retained entry / log line.
+    make the reporter itself raise). TWO caps are needed because the PATCH
+    front door feeds this from a request body: ``_TELEMETRY_DROP_MAX_KEYS``
+    bounds the COUNT of keys named, and ``_TELEMETRY_DROP_MAX_KEY_LEN`` bounds
+    each name's LENGTH — without the second, one 1 MiB field name would become
+    one 1 MiB retained fingerprint entry and log line.
     """
     ordered = sorted(keys, key=str)
+    marker = None
     if len(ordered) > _TELEMETRY_DROP_MAX_KEYS:
         extra = len(ordered) - _TELEMETRY_DROP_MAX_KEYS
-        return (*ordered[:_TELEMETRY_DROP_MAX_KEYS], f"...(+{extra} more)")
-    return tuple(ordered)
+        ordered = ordered[:_TELEMETRY_DROP_MAX_KEYS]
+        marker = f"...(+{extra} more)"
+    rendered = tuple(_cap_dropped_key(k) for k in ordered)
+    return (*rendered, marker) if marker is not None else rendered
 
 
 class UnregisteredTelemetryKey(ValueError):
@@ -19850,7 +19872,8 @@ def _report_unregistered(where: str, subject: str,
     ``_TELEMETRY_DROP_REPORTED`` by ``_TELEMETRY_DROP_MAX_SITES`` sites (plus a
     shared overflow site) each capped at ``_TELEMETRY_DROP_MAX_PER_SITE``
     fingerprints, and the fingerprint's key names by ``_TELEMETRY_DROP_MAX_KEYS``
-    (plus one ``...(+N more)`` marker).
+    names (plus one ``...(+N more)`` marker), each capped at
+    ``_TELEMETRY_DROP_MAX_KEY_LEN`` characters.
     The PATCH front door feeds this from a request body, so an authenticated
     caller must not be able to grow process-global state or a log line without
     bound by sending unique unknown field names.

@@ -35,6 +35,7 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
+  - test_telemetry_registration.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
