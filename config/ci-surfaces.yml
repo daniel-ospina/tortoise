@@ -145,6 +145,12 @@ surfaces:
   # #3154 note in tools/ci_selection.py). A hosted_backup.py-only change now
   # selects this file (docker-lane; dump/restore round-trips).
   - test_dump_edge_asymmetry_3895.py
+  # #3902: the per-graph event-log counter (:GraphEventMeta.last_seq) must
+  # survive the backup boundary. Registered under `api` because
+  # tortoise/hosted_backup.py owns that surface (see the #3154 note in
+  # tools/ci_selection.py) — a hosted_backup.py-only change selects this file
+  # (docker-lane; dump → create_backup → restore_backup swap).
+  - test_restore_seq_3902.py
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
