@@ -49,6 +49,7 @@ Run:  python -m pytest tests/test_contact_form.py -v
 from __future__ import annotations
 
 import re
+from html import unescape
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,18 @@ README = WEBSITE_DIR / "README.md"
 #: The owner-decided outside-product destination. Changing this is a product
 #: decision, not a code change — it must be argued in the issue, not here.
 CONTACT_TO = "hello@premiselabs.co"
+
+#: Verbs that promise the visitor a follow-up. The confirmation and the client
+#: that displays it may use NONE of them, in any wording: intake is the receiving
+#: mechanism and a reply is the exception. A verb family, not a sentence list,
+#: because "pin the exact wording" was itself defeated by a promise phrased
+#: differently (cycles 2-3), and every literal is scanned — not just the ones
+#: anchored to `message:` — because a CONCATENATION hid its second half.
+REPLY_PROMISE_VERBS = (
+    r"\b(?:reply(?!-to)|replies|respond|reach(?:ing)? out|write back|get back|"
+    r"be in touch|be in contact|get in touch|hear from|follow(?:ing)? up|"
+    r"answer you|contact you)\b"
+)
 
 #: The confirmation the visitor sees on success, pinned as a VALUE. It states
 #: receipt and nothing more: a reply is the exception (outbound email belongs to
@@ -309,32 +322,66 @@ def test_the_confirmation_promises_no_reply() -> None:
     easiest thing to soften without noticing.
     """
     src = _src(FUNCTION_TS)
-    success = src[src.rindex("return json(") :]
-    # Pin the VALUE, not a substring: `"…received your message." + " We'll reach
-    # out shortly."` satisfies a substring check and SHIPS the promise (cycle-2
-    # review). Reading the literal and comparing it exactly makes every
-    # rewording — concatenated, templated or rephrased — a failure, which is what
-    # "the confirmation promises nothing further" has to mean. This replaces an
-    # earlier verb blocklist that the same reviewer walked through with "reach
-    # out"/"write back"/"hear from".
-    literal = re.search(r'\{ ok: true, message: ("(?:[^"\\]|\\.)*") \}', success)
-    assert literal is not None, (
-        f"cannot read a literal confirmation from the success return: {success.strip()[:200]!r}"
+    html_src = _src(CONTACT_HTML)
+    # Pin the success literal by VALUE, with whitespace tolerance: a substring
+    # check accepted `"…received your message." + " We'll reach out shortly."`
+    # (cycle-2 review), and a single-line-only regex rejected a purely cosmetic
+    # reflow (cycle-3 review).
+    assert re.search(r'message:\s*"' + re.escape(CONFIRMATION_EXACT) + r'"', src), (
+        "the success return must carry the receipt-only confirmation verbatim"
     )
-    assert literal.group(1) == f'"{CONFIRMATION_EXACT}"', (
-        f"the confirmation must state receipt and nothing more: {literal.group(1)}"
+    # …and then scan EVERY string literal in the file, not just the ones anchored
+    # to `message:`. Three escapes made the anchored versions insufficient: a
+    # reworded promise in the success branch (cycle-2), a decoy `return json(…)`
+    # appended after the handler (cycle-3), and a CONCATENATED promise
+    # (`"…received your message." + " We'll reach out shortly."`), whose second
+    # half an anchored scan never reads (cycle-3). Comments are stripped first, so
+    # the file's extensive prose about email is not scanned — only what the code
+    # could show a visitor.
+    code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
+    literals = re.findall(
+        r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`', code, re.S
     )
-    # The email field's hint states a restriction on USE. It is pinned as the
-    # WHOLE sentence for the same reason: a verb list cannot hold "no promise"
-    # (cycle-2 review found `we'll follow up`, `we'll write back`, `we'll reach
-    # out` and bare `we will reply` all still shipping).
-    html = _src(CONTACT_HTML)
-    hint = html[html.index('id="contact-email"') : html.index('id="contact-message"')]
+    assert literals, "no string literals found — did the file shape change?"
+    for text in literals:
+        assert not re.search(REPLY_PROMISE_VERBS, text, re.I), (
+            f"contact.ts carries a reply promise the visitor could be shown: {text}"
+        )
+    # The visitor-facing confirmation has TWO surfaces: the server literal above,
+    # and the client that displays it. Cycle-3 review shipped a promise by editing
+    # ONLY the client — `show(msg, "Thanks — we'll reply within two business
+    # days.")` kept all 86 tests green — so the success branch must consume the
+    # server's message, and the client's own fallback is pinned by value.
+    script = html_src[html_src.index("<script>") :]
+    assert re.search(
+        r'show\(\s*msg\s*,\s*data\.message\s*\|\|\s*"Thanks — your message is on its way\."\s*\)',
+        script,
+    ), (
+        "the success branch must display the server's message (`data.message`) with its "
+        "own fallback pinned — the client cannot substitute its own confirmation"
+    )
+    # No client-side string may promise a reply either (comments excluded: the
+    # script explains the 503 path in prose).
+    client_code = "\n".join(
+        line for line in script.splitlines() if not line.strip().startswith(("//", "*", "/*"))
+    )
+    client_strings = re.findall(r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`)', client_code)
+    for text in client_strings:
+        assert not re.search(REPLY_PROMISE_VERBS, text, re.I), (
+            f"the contact page's script promises a reply: {text}"
+        )
+    # The email field's hint states a restriction on USE. Pinned as the WHOLE
+    # sentence — a verb list cannot hold "no promise" (cycle-2) — compared as
+    # RENDERED text, so a cosmetic reflow or an entity form is not a failure
+    # (cycle-3).
+    hint = html_src[html_src.index('id="contact-email"') : html_src.index('id="contact-message"')]
     hint_text = re.search(r"<p[^>]*>(.*?)</p>", hint, re.S)
     assert hint_text is not None, f"cannot read the email hint: {hint!r}"
-    assert hint_text.group(1).strip() == HINT_EMAIL_EXACT, (
+    rendered = " ".join(unescape(re.sub(r"<[^>]+>", "", hint_text.group(1))).split())
+    assert rendered == HINT_EMAIL_EXACT, (
         "the email hint must state a use-restriction and never a reply promise, got: "
-        f"{hint_text.group(1).strip()!r}"
+        f"{rendered!r}"
     )
 
 
@@ -446,13 +493,20 @@ def test_rate_limit_map_is_bounded() -> None:
     src = _src(FUNCTION_TS)
     assert "MAX_RATE_KEYS" in src
     # Strip comments FIRST: a commented-out eviction loop supplied both tokens and
-    # kept the previous version of this pin green (cycle-2 review).
+    # kept an earlier version of this pin green (cycle-2 review).
     code = re.sub(r"//[^\n]*", "", src)
-    cap = code[code.index("let excess") : code.index("return false;")]
-    # Bind the initializer to the cap: `let excess = 0;` breaks out immediately,
-    # so the loop removes only expired entries and the map is unbounded under many
-    # live keys — the exact bug this test exists to prevent — while both tokens
-    # still appear (cycle-2 review).
+    # The GUARD is part of the cap: inverting it (`<` instead of `>`) disables
+    # eviction entirely while the loop below still reads correctly, and the guard
+    # sat outside the old slice (cycle-3 review).
+    guard = re.search(r"if \(hits\.size > MAX_RATE_KEYS\)", code)
+    assert guard is not None, "the cap guard must compare the map size to MAX_RATE_KEYS"
+    cap = code[guard.end() : code.index("return false;")]
+    # Bind the initializer to the cap AND make it the only assignment: `excess = 0;`
+    # after a correct `let excess = …` breaks out immediately, leaving the map
+    # unbounded under live keys, while every token still appears (cycle-3 review).
+    assert len(re.findall(r"\bexcess\s*=(?!=)", cap)) == 1, (
+        "excess must be assigned exactly once — from the cap"
+    )
     assert re.search(r"let excess\s*=\s*hits\.size\s*-\s*MAX_RATE_KEYS", cap), (
         "excess must be derived from the cap, not a constant"
     )
