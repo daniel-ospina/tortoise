@@ -26,10 +26,20 @@ below as well — `RATE_LIMITED_BODY` is the limiter verbatim, so any body edit
 breaks it. Their role is to force a re-read of the reviewed text; the value they
 add is the message telling a human to re-read the limiter and update the pin. This
 harness is the check that survives that update: it asserts the behaviour the
-re-read is supposed to preserve. The two handler-level escapes from the pin
-history — a per-request key (`crypto.randomUUID()`) and a `hits.clear()` in the
-handler body — are NOT visible here; they stay the pins' job (the call site pinned
-verbatim, every `hits` reference confined), verified red on both.
+re-read is supposed to preserve.
+
+FOUR of the escapes from that pin history live outside the limiter, and they are not
+equally guarded:
+
+* a per-request key (`crypto.randomUUID()`) and a `hits.clear()` in the handler body —
+  pinned STATICALLY (the call site pinned verbatim, every `hits` reference confined),
+  verified red on both; not visible here;
+* a `Date.now` override in the handler and an always-firing honeypot — guarded by
+  NEITHER this harness nor those pins. Verified: inserting `Date.now = () => NaN;` at
+  the top of `handlePost` leaves all 25 pins in `test_contact_form.py` green, because
+  they pin the call site's text and the `hits` references, not the source of the clock.
+  Both belong to the handler-level harness #4108 still owes; until it exists they are
+  DECLARED here, not guarded.
 
 `MUTATIONS` below replays the LIMITER-LEVEL escapes from that list — plus the ones
 review found here — as an executable battery, so the detection claim is an artifact
@@ -45,7 +55,8 @@ constant's magnitude is a product choice pinned only loosely in
 `test_contact_form.py`, so a shorter-but-sane window does not red here.
 
 THE DECLARED LIMIT. `MUTATIONS` is not a proof that the invariants catch every
-reachable change: it is the list of escapes we know, each asserted caught. Review
+reachable change: it is the list of LIMITER-LEVEL escapes we know, each asserted
+caught. Review
 cycles here have each found a class the previous battery missed — a predicate
 inspecting one entry rather than all of them, an eviction ordered by key name, a
 skipped write-back on the refusal path, an over-eager sweep one millisecond inside
@@ -226,12 +237,14 @@ for (let i = 0; i < limit; i++) {
 }
 observations.growth = growth;
 
-// 2. The WINDOW, at its edges rather than somewhere past them. `limit` submissions
-// land at T0..T0+limit-1, so at `now = T0 + RATE_WINDOW_MS` the first of them is
-// exactly ON the cutoff and must have expired: the predicate is strict (`t > cutoff`)
-// and this is the one input that separates strict from non-strict. A filter that
-// stops expiring altogether, or that keeps the old entries, changes the mixed
-// sequence below.
+// 2. The WINDOW, on both sides of its edge. `limit` submissions land at
+// T0..T0+limit-1: one millisecond INSIDE the window all of them must still count (the
+// call must be refused), and AT `T0 + RATE_WINDOW_MS` the first is exactly ON the
+// cutoff and must have expired. The predicate is strict (`t > cutoff`), and the AT-edge
+// call is the input that separates strict from non-strict. The `+ limit` call below is
+// simply FAR past the edge — it checks that a fully expired history is replaced, not
+// where the boundary is. A filter that stops expiring altogether, or that keeps the old
+// entries, changes the mixed sequence below.
 hits.clear();
 for (let i = 0; i < limit; i++) rateLimited(CLIENT_W, T0 + i);
 observations.expiredRefuses = rateLimited(CLIENT_W, T0 + RATE_WINDOW_MS + limit);
@@ -369,6 +382,24 @@ rateLimited(CLIENT_G, T0 + 1);
 observations.staleLingeredAtCap = hits.has("stale-under");
 rateLimited("pushes-over", T0);
 observations.staleSweptOverCap = hits.has("stale-under");
+
+// 11. The eviction loop's STOP CONDITION. `excess` is computed AFTER the expired sweep,
+// so when the sweep alone frees more keys than the map is over the cap, `excess` is
+// NEGATIVE and the loop must break anyway. A stop test of `excess === 0` never holds
+// there, so the loop walks the whole map and deletes every key — including live
+// histories — at once. This seeds fewer live keys than the cap plus more expired ones
+// than the overage, which is the only shape that makes `excess` negative.
+hits.clear();
+const liveSeed = cap - 10;
+const expiredSeed = 20;
+for (let i = 0; i < liveSeed; i++) hits.set("kept" + i, [T0]);
+for (let i = 0; i < expiredSeed; i++) hits.set("gone" + i, [expiredAt]);
+rateLimited("crosses", T0);
+let keptLeft = 0;
+for (const k of hits.keys()) if (!k.startsWith("gone")) keptLeft++;
+observations.negativeExcessOldestKept = hits.has("kept0");
+observations.negativeExcessLiveCount = keptLeft;
+observations.negativeExcessExpected = liveSeed + 1;
 
 console.log(JSON.stringify(observations));
 """
@@ -591,6 +622,23 @@ def _check_guarded_sweep(observed: dict) -> None:
     )
 
 
+def _check_eviction_bound(observed: dict) -> None:
+    """When the sweep alone brings the map under the cap, eviction must stop.
+
+    `excess` can be NEGATIVE, and a loop that only stops at exactly zero never stops:
+    it walks the map and deletes every key, taking live histories with it. This is the
+    difference between bounding memory and wiping the limiter's state.
+    """
+    assert observed["negativeExcessOldestKept"] is True, (
+        "the oldest live key must survive an over-cap call whose expired keys already "
+        "brought the map under the cap — the eviction loop ran past its stop condition"
+    )
+    assert observed["negativeExcessLiveCount"] == observed["negativeExcessExpected"], (
+        f"every live key plus the new one must remain: expected "
+        f"{observed['negativeExcessExpected']}, got {observed['negativeExcessLiveCount']}"
+    )
+
+
 INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
     ("threshold", _check_threshold),
     ("accumulation", _check_accumulation),
@@ -601,6 +649,7 @@ INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
     ("re-insert", _check_reinsert),
     ("refusal-position", _check_refusal_position),
     ("guarded-sweep", _check_guarded_sweep),
+    ("eviction-bound", _check_eviction_bound),
 )
 
 
@@ -664,6 +713,11 @@ def test_the_refusal_path_does_not_re_insert(behaviour: dict) -> None:
 def test_the_sweep_is_guarded_by_the_cap(behaviour: dict) -> None:
     """The sweep runs over the cap and not at or under it."""
     _check_guarded_sweep(behaviour)
+
+
+def test_eviction_stops_when_the_sweep_has_done_the_work(behaviour: dict) -> None:
+    """An over-cap call must not evict live keys the sweep just made room for."""
+    _check_eviction_bound(behaviour)
 
 
 # These are the escapes from the #2409 pin history plus the ones review found here, as
@@ -768,6 +822,11 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "expired sweep hoisted out of the cap guard",
         r"if\s*\(\s*hits\.size\s*>\s*MAX_RATE_KEYS\s*\)\s*\{",
         "{",
+    ),
+    (
+        "eviction stop relaxed to `=== 0`",
+        r"if\s*\(\s*excess\s*<=\s*0\s*\)\s*break\s*;",
+        "if (excess === 0) break;",
     ),
     (
         "sweep guard widened to `>=`",
