@@ -551,6 +551,16 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     if sub.get("id"):
         set_fields += ", t.subscription_id=$subscription_id"
         params["subscription_id"] = sub["id"]
+    # #3825 (D10): the METER WINDOW ANCHOR — the registry twin of
+    # ``organizations.current_period_start``. Written only when the payload
+    # carries it, so a subscription object that omits the field cannot NULL
+    # out an anchor the meter depends on (``metering._current_period`` RAISES
+    # on a half-known anchor rather than metering on a month bucket — a SIGNAL,
+    # not enforcement: every production caller absorbs it and alerts the
+    # operator, #3981).
+    if sub.get("current_period_start"):
+        set_fields += ", t.current_period_start=$period_start"
+        params["period_start"] = sub["current_period_start"]
     if customer_email:
         set_fields += ", t.customer_email=$customer_email"
         params["customer_email"] = customer_email

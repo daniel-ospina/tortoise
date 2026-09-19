@@ -3882,23 +3882,93 @@ def _check_org_limit(org: dict, resource: str) -> None:
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
 
 
+def _alert_unmetered(lane: str, org_id: str | None,
+                     error: BaseException) -> None:
+    """Emit the #3981 operator alert for a dropped increment, never raising.
+
+    The alert lives in ``tortoise.metering`` — but that module may be the very
+    thing that failed to import (or a partial deploy may predate
+    ``report_unmetered_increment``). Importing it unguarded inside an
+    ``except`` handler would then turn a bookkeeping fault into the
+    user-facing failure the owner's ruling forbids, so the import gets its own
+    guard and the fallback logs directly.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+    except Exception:  # noqa: BLE001, RUF100 — the alert must never raise
+        logging.getLogger("tortoise.metering").error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
+            "(metering module unavailable)", lane, org_id or "<none>",
+            type(error).__name__, error)
+        return
+    report_unmetered_increment(lane=lane, org_id=org_id, error=error)
+
+
 def _record_write_op(org: dict, nodes_written: int = 0) -> None:
     """Best-effort write-op metering for overage billing (#681).
 
-    Call AFTER a successful write. Non-fatal — metering failures are logged
-    and swallowed; they never block the caller.
+    Call AFTER a successful write. The increment never blocks the caller — a
+    bookkeeping fault of ours must not fail a committed write — but the drop is
+    never SILENT (#3981): when the increment cannot be recorded the operator is
+    alerted (lane=write_op) and the error is absorbed here.
+
+    Note what the raise from window resolution IS: a SIGNAL, not a refusal. The
+    user-facing refusal, where one exists, is the pre-spend admission gate
+    (``_check_org_limit`` / the armed cohort cap), which runs BEFORE the write;
+    this function is downstream of it and can refuse nothing.
 
     nodes_written: net-new non-episodic nodes written by this call (the
     value-first commit cost driver, epic #909 §4.4/W-4/PL4 — the commit
     endpoint passes the reconciled net-new delta; hold commits bill 0 and
     skip this entirely).
     """
+    org_id = org.get("org_id", "")
     try:
         from tortoise.metering import record_write_ops
-        record_write_ops(org.get("org_id", ""), tier=org.get("tier"),
+        record_write_ops(org_id, tier=org.get("tier"),
                          nodes_written=nodes_written)
-    except Exception:
-        pass  # best-effort — never block the write path
+    except Exception as e:  # noqa: BLE001, RUF100 — never block the write path
+        _alert_unmetered("write_op", org_id, e)
+
+
+async def _emit_capture_ledger(org_id: str, session_id: str,
+                               meta: dict) -> None:
+    """Write a capture's MEASURED cost onto the durable per-period ledger.
+
+    #3665 (lane B7): the SAME measured cost as the analytics row, beside it.
+    #3359's analytics row is a measurement, not a ledger: nothing keyed by
+    org+period, so a spend CEILING could read it only by scanning every capture
+    row in the period. This row is one per (org, period) — the read side
+    ``cohort_cost.enforce_cohort_cost_cap`` gates on.
+
+    Best-effort by contract: a committed capture is never failed by bookkeeping.
+    The drop is NOT silent (#3981) — ``record_capture_usage`` raises on an
+    unresolvable metering window (a SIGNAL, not a refusal), and the handler
+    below reports lane=capture_ledger to the operator instead of swallowing it.
+
+    Both writes run off the event loop: the Supabase RPC / embedded registry
+    write and ``_track_analytics_event``'s synchronous ``httpx.Client`` POST are
+    blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
+    class). The analytics emit keeps its OWN best-effort handler — a ledger
+    failure is not an analytics failure and must not be labelled one.
+    """
+    try:
+        _cost_props = _capture_cost_props(session_id, meta)
+        if _cost_props is None:
+            return
+        from tortoise.metering import record_capture_usage
+        await asyncio.to_thread(
+            record_capture_usage, org_id,
+            cost_usd=float(_cost_props.get("cost_usd") or 0.0))
+    except Exception as e:  # noqa: BLE001, RUF100 — never block a committed capture
+        _alert_unmetered("capture_ledger", org_id, e)
+        return
+    try:
+        await asyncio.to_thread(
+            _track_analytics_event, org_id, "capture_cost", _cost_props)
+    except Exception:  # noqa: BLE001, RUF100 — never block capture
+        logging.getLogger("tortoise.api").exception(
+            "capture_cost analytics emit failed (non-fatal)")
 
 
 def _suspended_detail() -> dict:
@@ -4804,10 +4874,14 @@ async def create_object(body: CreateObjectRequest, request: Request,
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     # #1643 (review P2-4): mirror the points handler's bookkeeping — object
     # writes must count toward metering + leave an audit trail.
-    try:  # noqa: SIM105
+    try:
         _record_write_op(org, nodes_written=1)
-    except Exception:
-        pass  # metering is best-effort — never fail the write
+    except Exception as e:  # noqa: BLE001, RUF100
+        # #3981: this outer guard exists so metering can never fail the write.
+        # ``_record_write_op`` already absorbs its own failures and alerts the
+        # operator (lane=write_op); if it ever escapes past that, the increment
+        # is dropped a second time and must not be silent either.
+        _alert_unmetered("object_write_op", org.get("org_id"), e)
     await _async_audit(request, org["org_id"], "object_create",
                        resource_id=node.get("id") or body.name,
                        detail={"name": body.name, "objectKind": body.objectKind})
@@ -4841,10 +4915,11 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
-    try:  # noqa: SIM105
+    try:
         _record_write_op(org, nodes_written=1)
-    except Exception:
-        pass  # metering is best-effort — never fail the write
+    except Exception as e:  # noqa: BLE001, RUF100
+        # #3981: same second-line guard as create_object above.
+        _alert_unmetered("subject_write_op", org.get("org_id"), e)
     await _async_audit(request, org["org_id"], "subject_create",
                        resource_id=node.get("id") or body.name,
                        detail={"name": body.name, "subjectKind": body.subjectKind})
@@ -8956,53 +9031,39 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # replay) — metering + abuse records fire for the re-attempt. A keyless
         # retry is metered too: see the #3892 lead-in above.
         _record_write_op(org)
-        # #3359: one capture_cost row per capture ATTEMPT that ran an
-        # extraction (successful or errored — a failed extraction that made
-        # provider calls has real spend, and the deadline/deadline_aborts
-        # disclosure depends on that row existing). A ZERO-CALL capture —
-        # the empty-transcript / keyless path — carries no
-        # extractor telemetry and emits nothing; an M2 capture DOES make
+        # #3359/#3665: one measured-cost ledger + analytics row per capture
+        # ATTEMPT that ran an extraction (successful or errored — a failed
+        # extraction that made provider calls has real spend, and the
+        # deadline/deadline_aborts disclosure depends on that row existing).
+        # A ZERO-CALL capture — the empty-transcript / keyless path — carries
+        # no extractor telemetry and emits nothing; an M2 capture DOES make
         # provider calls, so since #3824 it emits a row carrying its call
         # count as ``unattributed`` rather than vanishing into the same
-        # silence as a zero-call capture. Idempotent for free: this
-        # sits behind the SAME replay guard the write-op meter uses, so a
+        # silence as a zero-call capture. Idempotent for free: this sits
+        # behind the SAME replay guard the write-op meter uses, so a
         # zero-node re-POST writes no second row; a genuine retry (#2335
         # WI-2b) does write a second row, which is why the report aggregates
-        # by session_id before percentiling. Best-effort — analytics must
+        # by session_id before percentiling. Best-effort — bookkeeping must
         # never block a committed capture.
-        try:
-            _cost_props = _capture_cost_props(session_id, meta)
-            if _cost_props is not None:
-                # #3665 (lane B7): the SAME measured cost onto the durable
-                # per-period LEDGER, beside the analytics row it already
-                # writes. #3359's analytics row is a measurement, not a
-                # ledger: nothing keyed by org+period, so a spend CEILING
-                # could only read it by scanning every capture row in the
-                # period. The ledger row is one per (org, period) — the read
-                # side `cohort_cost.enforce_cohort_cost_cap` gates on.
-                # Best-effort by contract (record_capture_usage swallows its
-                # own failures): metering never blocks a committed capture.
-                # Off the event loop for the same reason as the emit below —
-                # the Supabase RPC and the embedded registry write are both
-                # blocking I/O and this API runs a single uvicorn worker.
-                from tortoise.metering import record_capture_usage
-                await asyncio.to_thread(
-                    record_capture_usage, org["org_id"],
-                    cost_usd=float(_cost_props.get("cost_usd") or 0.0))
-                # Off the event loop: `_track_analytics_event` POSTs
-                # synchronously (`httpx.Client`), and this API runs a single
-                # uvicorn worker — calling it inline stalls EVERY concurrent
-                # request for the duration of a Supabase round-trip (the
-                # #2988 / #3498 class of sync-HTTP-on-the-loop bug). This is
-                # the first call site on the highest-frequency path, so it is
-                # routed through `asyncio.to_thread` (the house style).
-                await asyncio.to_thread(
-                    _track_analytics_event,
-                    org["org_id"], "capture_cost", _cost_props)
-        except Exception:  # noqa: BLE001, RUF100 — never block capture
-            import logging
-            logging.getLogger("tortoise.api").exception(
-                "capture_cost analytics emit failed (non-fatal)")
+        #
+        # #3665 (lane B7): the SAME measured cost onto the durable per-period
+        # LEDGER, beside the analytics row. #3359's analytics row is a
+        # measurement, not a ledger: nothing keyed by org+period, so a spend
+        # CEILING could only read it by scanning every capture row in the
+        # period. The ledger row is one per (org, period) — the read side
+        # `cohort_cost.enforce_cohort_cost_cap` gates on. Both writes run off
+        # the event loop (`asyncio.to_thread`): the Supabase RPC / embedded
+        # registry write and `_track_analytics_event`'s synchronous
+        # `httpx.Client` POST are blocking I/O, and this API runs a single
+        # uvicorn worker (the #2988 / #3498 class of sync-HTTP-on-the-loop
+        # bug).
+        #
+        # #3825/#3981: the ledger half raises on an unresolvable window; that
+        # raise is a SIGNAL, and ``_emit_capture_ledger`` reports the dropped
+        # increment to the operator (lane=capture_ledger) instead of leaving
+        # a silent short ledger row behind. A ledger failure is not an
+        # analytics failure and is never labelled one.
+        await _emit_capture_ledger(org["org_id"], session_id, meta)
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -24645,6 +24706,16 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             updates["subscription_id"] = data["id"]
         if data.get("current_period_end"):
             updates["current_period_end"] = data["current_period_end"]
+        # #3825 / D10: the METER WINDOW ANCHOR. The cost meter totals usage
+        # over the subscription's OWN billing period so it reconciles with the
+        # invoice line, and only the period END was persisted — leaving the
+        # window half-known, which ``metering._current_period`` refuses to
+        # guess at (a derived start is wrong for annual plans and plan
+        # changes, and a calendar-month fallback would put a paying org's
+        # spend on a row the cap's window read never looks at). This event
+        # carries the authoritative start next to the end already written here.
+        if data.get("current_period_start"):
+            updates["current_period_start"] = data["current_period_start"]
         if status:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be
