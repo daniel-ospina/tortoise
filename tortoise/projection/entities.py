@@ -537,14 +537,18 @@ class _EntityHandlers:
     # #3664: the `EntityLinked` record's validated vocabulary. The record is
     # replayed from a journal FILE, so its label / relationship-type strings
     # must never be interpolated into Cypher unvalidated. Mirrors
-    # ``session_link.ENTITY_LINKED_*`` (kept local so the projection stays
-    # self-contained and import-free).
+    # ``session_link.ENTITY_LINKED_*`` EXACTLY (kept local so the projection
+    # stays self-contained and import-free) — pinned by
+    # tests/test_capture_entity_attachment_3664.py::test_entity_linked_vocabulary_drift,
+    # because a silent divergence (writer accepts a predicate the fold
+    # rejects, or vice versa) loses the edge with no error.
     _ENTITY_LINKED_RELS: frozenset = frozenset({
         "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
-        "aboutDocument",
+        "aboutDocument", "aboutAction", "aboutSource",
     })
     _ENTITY_LINKED_LABELS: frozenset = frozenset({
         "Session", "Point", "Document", "Event", "Object", "Subject",
+        "Source",
     })
 
     def _fold_entity_linked(self, ev: dict) -> int:
@@ -562,13 +566,21 @@ class _EntityHandlers:
         if not isinstance(ev, dict):
             return 0
         rel = ev.get("edge_type", "aboutObject")
-        if rel not in self._ENTITY_LINKED_RELS:
+        # Type-check BEFORE the membership test: ``edge_type`` /
+        # ``source_label`` / ``target_label`` come from a journal FILE and a
+        # list/dict value raises ``TypeError: unhashable type`` on the frozen
+        # -set lookup. ``rebuild_all``'s sweep has no try/except, so that
+        # raise would abort the whole rebuild AFTER the wipe — a malformed
+        # line must be a NO-OP, exactly as this fold's docstring promises.
+        if not isinstance(rel, str) or rel not in self._ENTITY_LINKED_RELS:
             return 0
         src_label = ev.get("source_label")
-        if src_label not in self._ENTITY_LINKED_LABELS:
+        if not isinstance(src_label, str) \
+                or src_label not in self._ENTITY_LINKED_LABELS:
             return 0
         tgt_label = ev.get("target_label", "Object")
-        if tgt_label not in self._ENTITY_LINKED_LABELS:
+        if not isinstance(tgt_label, str) \
+                or tgt_label not in self._ENTITY_LINKED_LABELS:
             return 0
         sid = ev.get("source_id") or ev.get("id")
         tid = ev.get("target_id")
@@ -580,6 +592,22 @@ class _EntityHandlers:
             params={"sid": sid, "tid": tid},
         )
         return int(r.result_set[0][0]) if r.result_set else 0
+
+    def fold_deferred_entity_links(self, events) -> None:
+        """Fold a trailing batch of ``EntityLinked`` records (#3664).
+
+        ``apply()`` is a ONE-record API, so it folds the type inline — correct
+        on the live path, where both endpoints already exist. The whole-journal
+        apply()-based replay engines (``rebuild()`` and ``recover_from_log``)
+        buffer the records and call this AFTER every creation event has
+        applied, so a link whose endpoint is created LATER in the journal still
+        folds — the same forward-reference treatment ``rebuild_all`` gives the
+        type. Without this the two engines disagree on a forward-reference
+        journal. The fold is an idempotent MERGE, so deferral changes nothing
+        else.
+        """
+        for ev in events:
+            self._fold_entity_linked(self._norm(ev))
 
     def _fold_session_recorded(self, ev: dict) -> int:
         """#3664: fold a ``SessionRecorded`` record into the :Session node.

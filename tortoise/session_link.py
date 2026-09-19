@@ -32,15 +32,18 @@ The linking pass runs (1) after capture in ``_capture_session_impl`` and
 so sessions captured before their entities materialize still resolve once the
 index lands.
 
-Durability (#3664): every edge minted here is LIVE-ONLY unless an ``sdk`` is
-passed. With ``sdk``, ``_link`` additionally emits a JSONL-only
-``EntityLinked`` record (the flat logical identities ``{source_label,
-source_id, target_label, target_id, edge_type}``) which
-``FalkorProjection`` folds back on replay — so the capture's entity
-attachment survives ``rebuild_all``/``recover_from_log`` (the #2296
-live-only-edge hazard is closed for this edge class). Without ``sdk`` (the
-index-completion re-link, direct callers) behaviour is byte-identical to
-pre-#3664 — the edges are wired live and never journaled.
+Durability (#3664): every edge minted here is LIVE-ONLY unless an ``sdk``
+**with a configured JSONL journal** (``event_log_path``) is passed. With
+such an ``sdk``, ``_link`` additionally emits a JSONL-only ``EntityLinked``
+record (the flat logical identities ``{source_label, source_id,
+target_label, target_id, edge_type}``) which ``FalkorProjection`` folds
+back on replay — so the capture's entity attachment survives
+``rebuild_all``/``recover_from_log`` (the #2296 live-only-edge hazard is
+closed for this edge class). ``EntityLinked`` is NOT in
+``_GRAPH_EVENT_TYPES``, so the record rides the JSONL journal alone: on an
+``sdk`` built WITHOUT an ``event_log_path`` (every hosted-lane SDK —
+``hosted_api._make_sdk`` / ``_data_sdk``) ``_emit_event`` is a no-op and
+the edges stay live-only. Passing ``sdk=None`` is likewise live-only.
 """
 from __future__ import annotations
 
@@ -223,14 +226,20 @@ def link_session_entities(proj, session_id: str,
 # #3664: validated vocabularies for the EntityLinked edge record. The journal
 # is a FILE — its labels/relationship types must never be interpolated into
 # Cypher unvalidated (a tampered line would otherwise be a Cypher-injection
-# sink). The set mirrors the ONTOLOGY about* predicate family + the entity
-# labels the capture path may use as endpoints.
+# sink). The set is the FULL ONTOLOGY about* predicate family — every member
+# is also in ``security.KNOWN_REL_TYPES`` (pinned by
+# tests/test_capture_entity_attachment_3664.py::test_entity_linked_vocabulary_drift)
+# — plus every entity label that family can use as an endpoint (so
+# ``aboutSource`` can address ``Source``). ``link_entity`` is the shared
+# about*-edge writer, not just the capture pass, so narrowing this set to the
+# single predicate the pass happens to emit would reject valid calls silently.
 ENTITY_LINKED_RELS = frozenset({
     "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
-    "aboutDocument",
+    "aboutDocument", "aboutAction", "aboutSource",
 })
 ENTITY_LINKED_LABELS = frozenset({
     "Session", "Point", "Document", "Event", "Object", "Subject",
+    "Source",
 })
 
 

@@ -3740,10 +3740,12 @@ class TortoiseSDK:
         # landed as an unattached island (no Session/turn aboutObject edge).
         # It resolves EXISTING WorkItem Objects from GitHub refs in the
         # stored window and wires (Session)-[:aboutObject]->(Object) +
-        # (turn Point)-[:aboutObject]->(Object). Every NEW edge is journaled
-        # (``sdk=self`` → the EntityLinked record) so the attachment survives
-        # rebuild_all — the pre-#3664 raw MERGE was live-only (the #2296
-        # hazard). Best-effort/non-fatal, exactly like hosted: a resolution
+        # (turn Point)-[:aboutObject]->(Object). With an ``event_log_path``
+        # configured every NEW edge is journaled (``sdk=self`` → the
+        # ``EntityLinked`` record) so the attachment survives rebuild_all —
+        # the pre-#3664 raw MERGE was live-only (the #2296 hazard). Without a
+        # journal the record is a no-op and the edges stay live-only.
+        # Best-effort/non-fatal, exactly like hosted: a resolution
         # or write hiccup must never fail a committed capture. Runs on
         # replays too (idempotent probe → 0 new edges; re-resolves entities
         # that materialized after the first capture, the T1-P15 contract).
@@ -4347,16 +4349,43 @@ class TortoiseSDK:
                         if isinstance(name, str) and name.strip():
                             # #3664: the claim -> Object attachment was a raw
                             # live-only MERGE (lost on rebuild — the #2296
-                            # hazard). Resolve the Object's canonical id by
-                            # name, then route through the shared journaled
-                            # writer so the edge replays (EntityLinked).
+                            # hazard). Route each edge through the shared
+                            # journaled writer so it replays (EntityLinked).
+                            #
+                            # Coverage is NOT narrowed: main attached the edge
+                            # to EVERY name-matching Object, and an id-less
+                            # name stub is still covered below. Two silent
+                            # drops are explicitly avoided: (a) `LIMIT 1` with
+                            # no ORDER BY collapsed all matches to one
+                            # arbitrary node; (b) a NULL/absent `id` yielded
+                            # `[None]` and no edge at all.
+                            _n = name.strip()
                             _oid_rows = proj.g.query(
                                 "MATCH (o:Object {name:$n}) "
-                                "RETURN o.id LIMIT 1",
-                                params={"n": name.strip()}).result_set
-                            if _oid_rows and _oid_rows[0][0]:
-                                link_entity(proj, "Point", pid,
-                                            _oid_rows[0][0], sdk=self)
+                                "RETURN o.id",
+                                params={"n": _n}).result_set
+                            _idless = False
+                            for _row in _oid_rows:
+                                _oid = _row[0] if _row else None
+                                if isinstance(_oid, str) and _oid:
+                                    link_entity(proj, "Point", pid,
+                                                _oid, sdk=self)
+                                else:
+                                    _idless = True
+                            if _idless:
+                                # An id-less name stub (hosted_api.py mints
+                                # these with `MERGE (o:Object {name:$name})`)
+                                # cannot be addressed by link_entity, which
+                                # MERGEs on {id:...} and would mint a
+                                # DIFFERENT node. Fall back to main's
+                                # name-based MERGE so the edge is not silently
+                                # dropped — live-only, honestly unjournaled.
+                                proj.g.query(
+                                    "MATCH (p:Point {id:$pid}), "
+                                    "(o:Object {name:$n}) "
+                                    "WHERE o.id IS NULL OR o.id = '' "
+                                    "MERGE (p)-[:aboutObject]->(o)",
+                                    params={"pid": pid, "n": _n})
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",

@@ -1342,6 +1342,15 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     "DocumentCreated",
     "SourceCreated",
     "DirectEdgeRepoint",
+    # JSONL-only siblings of the two above: both have REAL fold branches in
+    # ``apply``/``rebuild_all``, but neither has a representation in this
+    # ``{id: point}`` index (a Session node is not a Point; the about* edge
+    # is a flat descriptor) — so without them every replayed record logged
+    # the ``unrecognized event type`` warning, contradicting the set's
+    # documented contract that the warning is reserved for a type OUTSIDE
+    # the vocabulary.
+    "EntityLinked",
+    "SessionRecorded",
 })
 
 
@@ -2253,6 +2262,11 @@ class FalkorProjection(
             # #3664: the capture entity-attachment replay consumer — an
             # idempotent about* edge MERGE keyed on the flat logical ids
             # (Session/Point -> Object). JSONL-only record (no GraphEvent).
+            # Folded INLINE here because ``apply`` sees one event and the live
+            # caller's endpoints already exist; the whole-journal apply()-based
+            # engines (``rebuild``/``recover_from_log``) buffer the type and
+            # call ``fold_deferred_entity_links`` after the pass, matching
+            # ``rebuild_all``'s trailing sweep on a forward-reference journal.
             return self._fold_entity_linked(ev)
         elif t == "SessionRecorded":
             # #3664: the :Session node's journal carrier — the capture MERGE
@@ -2437,8 +2451,19 @@ class FalkorProjection(
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
         self.g.query("MATCH (n) DETACH DELETE n")
+        # #3664: this engine feeds ``apply()`` ONE record at a time, so an
+        # ``EntityLinked`` whose endpoint is created LATER in the journal would
+        # fold to nothing. Defer the type to a trailing sweep — the same
+        # forward-reference treatment ``rebuild_all`` gives it — so the replay
+        # engines agree. The fold is an idempotent MERGE, order-free by
+        # construction.
+        entity_link_events: list[dict] = []
         for ev in events:
+            if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                entity_link_events.append(ev)
+                continue
             self.apply(ev)
+        self.fold_deferred_entity_links(entity_link_events)
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.

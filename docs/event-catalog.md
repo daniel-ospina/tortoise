@@ -45,6 +45,25 @@ the payload does not name:
 - **`PointRevised`** — `update_point(**props)` journals the caller's props
   VERBATIM as extras, so an `annotator_*` key here is a node property of that
   exact name (never aliased).
+- **`EntityLinked`** (#3664) — the capture entity-attachment record, written by
+  `session_link.link_entity` **only when the SDK has an `event_log_path`**
+  (JSONL-only: it is NOT in `_GRAPH_EVENT_TYPES`). Fields: `id` (source id;
+  also carried as `source_id`), `source_label`, `source_id`, `target_label`,
+  `target_id`, `edge_type`. Folded by `FalkorProjection._fold_entity_linked`
+  as an idempotent MERGE of the flat logical endpoints; `edge_type` and both
+  labels are validated against a frozen vocabulary (an unknown/malformed value
+  is a 0-row NO-OP, never interpolated into Cypher).
+- **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
+  live capture MERGE is a raw write). Fields: `id`, `created_at`,
+  `turn_count`, `harness`, `actor_user_id`. Folded by
+  `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
+  `id` (with `is_episodic=true`), coalesce-preserving `created_at` /
+  `actor_user_id` and taking `turn_count` from the latest record.
+
+**Replay ordering.** `EntityLinked` is deferred to a trailing sweep by every
+replay engine (`rebuild_all`, and the `apply()`-based `rebuild` /
+`recover_from_log`), so a link whose endpoint is created LATER in the journal
+still folds.
 
 **No down-version guarantee for new folded record types.** An older binary
 rebuilding a journal written by a newer one warns `unrecognized event type 'X'

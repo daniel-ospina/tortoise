@@ -148,12 +148,11 @@ def test_capture_about_edges_survive_recover_from_log(journal_sdk, tmp_path):
     reproduce the attachment — a wipe + apply-based replay, not just
     rebuild_all.
 
-    Scope note: ``recover_from_log`` has no #548 pre-wipe snapshot, so an
-    UNJOURNALED turn Point cannot be recreated by it (the turn Point is a raw
-    Cypher write — pre-existing, tracked by #2296). The endpoints this test
-    asserts are the journaled ones: the :Session node (``SessionRecorded``)
-    and the extractor's claim (``PointAdded``). The turn→entity edge is
-    covered by the rebuild_all test above.
+    Scope note: ``recover_from_log`` has no #548 pre-wipe snapshot, so only
+    journaled writes replay. The turn Points ARE journaled (#3947: one
+    ``PointAdded`` per turn), so the turn→entity edge is asserted here too,
+    alongside the :Session node (``SessionRecorded``) and the extractor's
+    claim (``PointAdded``).
 
     MUTATION: remove the ``EntityLinked`` / ``SessionRecorded`` branch from
     ``FalkorProjection.apply`` → the edge/node is lost and this REDs.
@@ -176,6 +175,7 @@ def test_capture_about_edges_survive_recover_from_log(journal_sdk, tmp_path):
     assert r["recovered"] is True, r
     post = _about_edges(g)
     assert (("Session",), sid, oid) in post, post
+    assert (("Point",), f"{sid}_t0", oid) in post, post
     assert live_claim <= post, (live_claim, post)
 
 
@@ -218,3 +218,186 @@ def test_entity_linked_fold_rejects_unknown_label_and_rel(journal_sdk):
     assert g.query(
         "MATCH (:Point {id:$p})-[:window]->(:Object {id:$o}) RETURN count(*)",
         params={"p": pid, "o": oid}).result_set[0][0] == 0
+
+
+# ── SCOPE: the extractor's claim→Object coverage is NOT narrowed ──────────
+
+def _patch_extractor_payload(monkeypatch, points):
+    """Replace the v2 extractor with a fixed payload so a test controls the
+    entity names the claim references. The extractor's ``entities`` list is
+    left EMPTY on purpose: that keeps ``create_entity`` (whose MERGE-by-name
+    adopts and re-ids same-name stubs) out of the way, so the claim-link step
+    sees the objects exactly as the test minted them."""
+    import tortoise.extractor_v2 as _ex
+
+    def _fake(model, conversation, **kwargs):
+        return {"payload": {"entities": [], "points": points,
+                            "events": [], "operators": [],
+                            "supersessions": []},
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(_ex, "extract_session_v2", _fake)
+
+
+def test_claim_links_idless_name_stub_object(journal_sdk, monkeypatch):
+    """An id-less name-matched Object must STILL receive the claim's
+    aboutObject edge. main attached by NAME to every match; the id-resolution
+    rewrite must not silently drop an id-less stub (hosted_api mints
+    ``MERGE (o:Object {name:$name})`` stubs with no id).
+
+    MUTATION: restore ``LIMIT 1`` + the truthiness guard → the id-less stub
+    gets no edge and this REDs.
+    """
+    sdk, _ = journal_sdk
+    g = sdk._get_proj().g
+    g.query("MERGE (o:Object {name:'stub-entity'})")
+    _patch_extractor_payload(monkeypatch, [
+        {"id": "pt-idless", "content": "claim one",
+         "pointKind": "statement", "about_entities": ["stub-entity"]}])
+    _capture(sdk, "s-3664-idless")
+    n = g.query(
+        "MATCH (:Point {id:'pt-idless'})-[:aboutObject]->"
+        "(o:Object {name:'stub-entity'}) WHERE o.id IS NULL "
+        "RETURN count(*)").result_set[0][0]
+    assert n == 1, "id-less name-matched Object got no aboutObject edge"
+
+
+def test_claim_links_every_name_matched_object(journal_sdk, monkeypatch):
+    """TWO same-name Objects must BOTH receive the claim edge — main's
+    name-based MERGE attached to every match, and ``LIMIT 1`` with no ORDER BY
+    collapsed them to one arbitrary node.
+
+    MUTATION: restore ``LIMIT 1`` → only one of the two gets the edge and this
+    REDs.
+    """
+    sdk, _ = journal_sdk
+    g = sdk._get_proj().g
+    for oid in ("dup-a", "dup-b"):
+        g.query("MERGE (o:Object {id:$i, name:'dup-entity'})",
+                params={"i": oid})
+    _patch_extractor_payload(monkeypatch, [
+        {"id": "pt-dupes", "content": "claim two",
+         "pointKind": "statement", "about_entities": ["dup-entity"]}])
+    _capture(sdk, "s-3664-dupes")
+    got = {r[0] for r in g.query(
+        "MATCH (:Point {id:'pt-dupes'})-[:aboutObject]->"
+        "(o:Object {name:'dup-entity'}) RETURN o.id").result_set}
+    assert got == {"dup-a", "dup-b"}, got
+
+
+# ── MALFORMED journal input is a NO-OP, never a raise ─────────────────────
+
+def test_entity_linked_fold_noop_on_nonstring_fields(journal_sdk):
+    """A malformed ``EntityLinked`` record (non-string ``edge_type`` / label)
+    must fold to 0, never raise: ``rebuild_all``'s trailing sweep has no
+    try/except, so a raise aborts the rebuild AFTER the wipe.
+
+    MUTATION: drop the isinstance guards → the frozenset membership test raises
+    ``TypeError: unhashable type`` and this REDs.
+    """
+    sdk, _ = journal_sdk
+    proj = sdk._get_proj()
+    assert proj._fold_entity_linked({
+        "type": "EntityLinked", "id": "p", "source_label": "Point",
+        "target_label": "Object", "target_id": "o",
+        "edge_type": ["aboutObject"]}) == 0
+    assert proj._fold_entity_linked({
+        "type": "EntityLinked", "id": "p", "source_label": {"a": 1},
+        "target_label": "Object", "target_id": "o",
+        "edge_type": "aboutObject"}) == 0
+
+
+# ── ORDERING: every replay engine defers EntityLinked to a trailing sweep ──
+
+def test_entity_linked_forward_reference_folds_in_rebuild(tmp_path):
+    """An ``EntityLinked`` whose endpoint is created LATER in the journal must
+    still fold in the apply()-based ``rebuild()`` engine — the same trailing
+    sweep ``rebuild_all`` gives it, so the engines agree.
+
+    MUTATION: drop the trailing sweep from ``FalkorProjection.rebuild`` (fold
+    inline via ``apply``) → the edge is lost and this REDs.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "fwd.db"))
+    try:
+        proj = sdk._get_proj()
+        events = [
+            {"type": "PointAdded",
+             "point": {"id": "pt-fwd", "content": "c",
+                       "pointKind": "statement"}},
+            # The link precedes the Object it points at (forward reference).
+            {"type": "EntityLinked", "id": "pt-fwd", "source_id": "pt-fwd",
+             "source_label": "Point", "target_label": "Object",
+             "target_id": "obj-fwd", "edge_type": "aboutObject"},
+            {"type": "ObjectRegistered", "id": "obj-fwd", "name": "late"},
+        ]
+
+        class _Log:
+            def read_all(self):
+                return list(events)
+
+        proj.rebuild(_Log())
+        assert proj.g.query(
+            "MATCH (:Point {id:'pt-fwd'})-[:aboutObject]->"
+            "(:Object {id:'obj-fwd'}) RETURN count(*)").result_set[0][0] == 1
+    finally:
+        sdk.close()
+
+
+def test_entity_linked_forward_reference_folds_in_recover_from_log(tmp_path):
+    """The reclaim engine (``recover_from_log`` → ``apply()``) defers
+    ``EntityLinked`` exactly like ``rebuild``/``rebuild_all``.
+
+    MUTATION: fold ``EntityLinked`` inline in the recover loop → the forward
+    reference is lost and this REDs.
+    """
+    import json
+
+    from tortoise.consistency import recover_from_log
+
+    sdk = TortoiseSDK(str(tmp_path / "rec.db"))
+    try:
+        proj = sdk._get_proj()
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        events = [
+            {"type": "PointAdded",
+             "point": {"id": "pt-fwd2", "content": "c",
+                       "pointKind": "statement"}},
+            {"type": "EntityLinked", "id": "pt-fwd2", "source_id": "pt-fwd2",
+             "source_label": "Point", "target_label": "Object",
+             "target_id": "obj-fwd2", "edge_type": "aboutObject"},
+            {"type": "ObjectRegistered", "id": "obj-fwd2", "name": "late2"},
+        ]
+        with open(events_dir / "events.jsonl", "w", encoding="utf-8") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+        # recover_from_log only rebuilds a graph that reports 0 nodes; the
+        # projection's own schema/init writes must be wiped first.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        r = recover_from_log(str(events_dir), proj)
+        assert r["recovered"] is True, r
+        assert proj.g.query(
+            "MATCH (:Point {id:'pt-fwd2'})-[:aboutObject]->"
+            "(:Object {id:'obj-fwd2'}) RETURN count(*)").result_set[0][0] == 1
+    finally:
+        sdk.close()
+
+
+# ── VOCABULARY: writer / fold / security sets must not drift ──────────────
+
+def test_entity_linked_vocabulary_drift():
+    """The writer's validated vocabulary and the fold's MUST be the same set,
+    and every writer rel must be a known ONTOLOGY predicate. A
+    hand-maintained divergence fails SILENTLY (the writer accepts an edge the
+    fold rejects → 0, no warning).
+
+    MUTATION: add/remove a rel in either set only → an equality assert REDs.
+    """
+    from tortoise.projection.entities import _EntityHandlers
+    from tortoise.security import KNOWN_REL_TYPES
+    from tortoise.session_link import ENTITY_LINKED_LABELS, ENTITY_LINKED_RELS
+
+    assert _EntityHandlers._ENTITY_LINKED_RELS == ENTITY_LINKED_RELS
+    assert _EntityHandlers._ENTITY_LINKED_LABELS == ENTITY_LINKED_LABELS
+    assert ENTITY_LINKED_RELS <= KNOWN_REL_TYPES, (
+        ENTITY_LINKED_RELS - KNOWN_REL_TYPES)

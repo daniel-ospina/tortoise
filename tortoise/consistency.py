@@ -201,13 +201,28 @@ def recover_from_log(events_dir: str, projection) -> dict:
 
     # Faithful replay via apply() (preserves context; restore uses the same
     # path). Per-event guard: one bad event must not abort the whole recovery.
+    # #3664: EntityLinked records are buffered and folded AFTER the pass —
+    # apply() is a one-record API, so folding the type inline would lose a link
+    # whose endpoint is created later in the log. This is the same trailing
+    # sweep ``rebuild_all``/``rebuild`` give the type, so all three replay
+    # engines agree on a forward-reference journal.
     applied = 0
+    entity_link_events: list[dict] = []
     for ev in events:
+        if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+            entity_link_events.append(ev)
+            continue
         try:
             projection.apply(ev)
             applied += 1
         except Exception:
             torn += 1
+    if entity_link_events:
+        try:
+            projection.fold_deferred_entity_links(entity_link_events)
+            applied += len(entity_link_events)
+        except Exception:
+            torn += len(entity_link_events)
     after = _node_count()
     ok = applied > 0 and after is not None and after > 0
     return {"recovered": ok, "log_points": len(events),
