@@ -270,8 +270,9 @@ provider/model and fails in hosted mode when the key is missing.
 - The key must exist on BOTH GitHub Actions secrets (deploy source —
   `deploy-hosted.yml` sets Fly secrets from GH secrets) and the running app
   (`fly secrets list -a tortoise-api`). A GH-secret miss ships a deploy whose
-  captures STORE turns but never extract into memory; the deploy workflow now
-  fails the job when no provider key is present.
+  captures STORE turns but never extract into memory; the deploy workflow
+  warns (warn-only by design, #1346 — a fail-closed gate here held ALL deploys
+  for 2+ days) so the miss is visible without blocking the rest of the API.
 
 ### Cost bounds per capture
 
@@ -342,7 +343,7 @@ before relying on a capture smoke (#1197).
 
 **Deploy checklist (operator, before/after each deploy-hosted run):**
 
-- [ ] ≥1 LLM provider key in GitHub secrets (deploy gate hard-fails otherwise)
+- [ ] ≥1 LLM provider key in GitHub secrets (the deploy warns if absent — warn-only per #1346, so without one every capture STORES its turns but extracts nothing into memory)
 - [ ] `TORTOISE_SESSION_LLM_MOCK` is NOT set on Fly (`fly secrets list -a tortoise-y4mjjq | grep TORTOISE_SESSION_LLM_MOCK` → empty). MOCK=1 is a TEST-ONLY seam that counts as configured for the extraction gate — a deploy with it set passes the gate while captures write offline MockModel points. NEVER set it on Fly.
 
 ## 5. Dashboard Deploy
