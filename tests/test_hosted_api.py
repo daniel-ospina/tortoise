@@ -3085,6 +3085,29 @@ class TestSessionDetail:
         assert "content" in ep
         assert "kind" in ep
 
+    def test_detail_exposes_the_session_source_node(self, client):
+        """#3809: the detail carries the session's graph Source node
+        (``session:<id>``, sourceKind ``agentSession``) so
+        ``tortoise session verify`` can prove the "in the graph as a source"
+        link over the REST surface rather than inferring it from turn points.
+
+        Mutation: drop the ``source`` query/field from ``get_session_detail`` —
+        the key is absent and this REDs."""
+        r = client.post("/v1/sessions", json={
+            "conversation": [
+                {"role": "user", "content": "We decided to use FalkorDB."},
+                {"role": "assistant", "content": "Noted."},
+            ],
+            "session_id": "detail-source-test",
+        })
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+        body = client.get(f"/v1/sessions/{sid}").json()
+        assert "source" in body, body
+        assert body["source"] is not None, body
+        assert body["source"]["url"] == f"session:{sid}"
+        assert body["source"]["sourceKind"] == "agentSession"
+
     def test_detail_cross_team_isolation(self, client):
         """Session from a different namespace is not found (404).
 
