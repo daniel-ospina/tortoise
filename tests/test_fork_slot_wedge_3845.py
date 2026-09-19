@@ -33,6 +33,7 @@ import redis as redis_mod
 
 from tortoise.fork_slot import (
     ForkSlotRecovery,
+    _list_processes,
     find_hung_module_fork_children,
     is_fork_refusal,
     recover_fork_slot,
@@ -231,7 +232,12 @@ class TestForkSlotRecovery:
 
         proc = _spawn_titled_child("redis-module-fork", sock)
         try:
-            assert [p for p, _ in find_hung_module_fork_children(db)] == [proc.pid]
+            found = [p for p, _ in find_hung_module_fork_children(db)]
+            assert found == [proc.pid], (
+                f"the wedge scanner did not see the titled child: found={found}, "
+                f"pid={proc.pid}, COLUMNS={os.environ.get('COLUMNS')!r}, "
+                f"argv={_ps_command(proc.pid)!r}"
+            )
 
             recovery = recover_fork_slot(db, min_age_s=0.0, timeout_s=8.0)
             assert recovery.recovered, recovery.detail
@@ -472,3 +478,41 @@ class TestTitleWaitIsStillStrict:
             if proc is not None and proc.poll() is None:
                 proc.kill()
         assert time.monotonic() - started < 10.0
+
+
+class TestScannerIsWidthIndependent:
+    """A wedge scanner truncated by the reporting width misses real children (#4070)."""
+
+    def test_a_long_titled_child_is_visible_at_a_narrow_width(self, monkeypatch):
+        """`ps` truncates `command` to COLUMNS; the scan must ask for unlimited width.
+
+        The failure this guards is silent: the child is real, hung and titled, but
+        its socket path is cut off, so ``find_hung_module_fork_children`` reports
+        nothing and the recovery concludes the slot is not wedged.
+        """
+        sock = "/tmp/" + "n" * 90 + "/redis.socket"  # > any 80-column window
+        monkeypatch.setenv("COLUMNS", "80")
+        proc = _spawn_titled_child("redis-module-fork", sock)
+        try:
+            # Prove the lever bites HERE before asserting the fix: a platform whose
+            # `ps` ignores COLUMNS when piped (macOS) cannot truncate through this
+            # code path, so passing there would be vacuous, not evidence. Skip
+            # loudly instead of reporting a green that proves nothing.
+            narrow = subprocess.run(
+                ["ps", "-A", "-o", "pid=,ppid=,etime=,command="],
+                capture_output=True, text=True,
+            ).stdout
+            narrow_line = next((line for line in narrow.splitlines()
+                                if line.split(None, 3)[0] == str(proc.pid)), "")
+            if sock in narrow_line:
+                pytest.skip("ps does not truncate to COLUMNS on this platform "
+                            "— #4070 is GNU-ps-specific")
+            listed = {pid: cmd for pid, _ppid, _age, cmd in _list_processes()}
+            assert proc.pid in listed, "the child is not listed at all (did ps run?)"
+            assert sock in listed[proc.pid], (
+                f"#4070: the command is {len(listed[proc.pid])} chars and lost the "
+                f"socket path — `ps` was truncated to COLUMNS: {listed[proc.pid]!r}"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
