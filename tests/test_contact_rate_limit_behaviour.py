@@ -273,11 +273,11 @@ observations.otherAddressOk = !rateLimited(CLIENT_Y, T0 + limit);
 // more key than the cap is attempted, so a correct eviction leaves exactly
 // MAX_RATE_KEYS. The flood's FIRST-INSERTED name is `ip{planned-1}` and the LAST is
 // `ip0`, and `ip0` sorts first lexicographically: an eviction that sorts keys by name
-// rather than taking the oldest evicts the address that just submitted, which the
-// WHICH key was evicted, not just how many remain: an eviction that takes the NEWEST
-// key instead of the oldest leaves the count at the cap all the same. The oldest key is
-// the first-inserted name; the newest key's survival follows from that plus the count,
-// so it is deliberately not asserted — an implication is not a second guard.
+// rather than taking the oldest evicts the address that just submitted. WHICH key was
+// evicted is observed below, not just how many remain: an eviction that takes the NEWEST
+// key instead of the oldest leaves the count at the cap all the same. The newest key's
+// survival follows from the oldest's absence plus the count, so it is deliberately not
+// asserted — an implication is not a second guard.
 // `size` on a store that lacks it is reported as -1 so the assertion fails loudly
 // instead of passing on `undefined`.
 hits.clear();
@@ -415,11 +415,17 @@ observations.negativeExcessExpiredLeft = goneLeft;
 observations.negativeExcessExpected = liveSeed + 1;
 
 // 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
-// this call — `Date.now()` stepping backwards is reachable under NTP — must still be
-// counted and refused. A predicate that also requires `t <= now` drops the whole
-// history on that call and lets the submission through.
+// this call — `Date.now()` stepping backwards is reachable under NTP, a VM restore or a
+// manual clock set — must still be counted and refused. A predicate that also requires
+// `t <= now` drops the whole history on that call and lets the submission through.
+// The seeds deliberately straddle MORE THAN ONE WINDOW ahead: with a step back of only a
+// second or two, a predicate that merely forgives a bounded amount of clock skew (say
+// `t <= now + RATE_WINDOW_MS`) still agrees with the real limiter, so the escape would
+// not be observed.
 hits.clear();
-for (let i = 0; i < limit; i++) rateLimited(CLIENT_Z, T0 + 1000 + i);
+for (let i = 0; i < limit; i++) {
+  rateLimited(CLIENT_Z, T0 + RATE_WINDOW_MS + 1000 + i);
+}
 observations.clockStepBackRefuses = rateLimited(CLIENT_Z, T0);
 observations.clockStepBackStored = (hits.get(CLIENT_Z) || []).length;
 
@@ -759,8 +765,9 @@ def test_eviction_stops_when_the_sweep_has_done_the_work(behaviour: dict) -> Non
 
 # These are the escapes from the #2409 pin history plus the ones review found here, as
 # an executable battery. Every case is caught by one of the invariants, except where
-# the mutation cannot run at all — noted in its own entry — since a limiter the
-# harness cannot execute is not one it can certify. Patterns are
+# the mutation cannot run at all (e.g. a store that rejects string keys): that case reds
+# the driver's failure-to-run assertion, since a limiter the harness cannot execute is
+# not one it can certify. Patterns are
 # REGEXES with flexible whitespace (`\s*` / `\s+`), so re-indenting or re-wrapping an
 # expression does not break the battery — the harness asserts behaviour, not layout —
 # and each pattern is asserted present, so a mutation that stops applying fails
@@ -780,6 +787,11 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "emptied history after the write-back",
         r"hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
         "\\g<0>\n  recent.length = 0;",
+    ),
+    (
+        "predicate forgives a bounded clock skew",
+        r"\.filter\(\(t\) => t > cutoff\)",
+        ".filter((t) => t > cutoff && t <= now + RATE_WINDOW_MS)",
     ),
     (
         "predicate drops future-dated entries",
