@@ -27,6 +27,7 @@ import threading
 import pytest
 
 from tortoise.config import is_db_uri
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.projection import FalkorProjection
 
 # #4096: session-scoped test trees created by fixtures in this module and in
@@ -392,6 +393,17 @@ BACKEND_IDENTITY = BackendIdentity()
 # need no server) opt in via TORTOISE_TEST_CARVE_OUT=1. Lives HERE (not
 # conftest) for the same reason as _embedded_only_skip: an import via
 # `tests.conftest` re-executes conftest's top-level code mid-session.
+def _carve_out_opted_in() -> bool:
+    """The ``TORTOISE_TEST_CARVE_OUT`` opt-in, through the declared contract.
+
+    #4097: truthy spellings (1/true/yes/on) now opt in; unset/blank/falsy/garbage
+    do not. Previously only the exact string ``"1"`` did, so ``=true`` — what a
+    human or a CI author naturally writes — silently failed the URI gate. The
+    opt-in permits a URI-less embedded run; it deletes nothing.
+    """
+    return is_truthy(os.environ.get("TORTOISE_TEST_CARVE_OUT"))
+
+
 def _assert_p4_uri_required() -> None:
     """Epic #1647 Task 10 Step 1a (plan-review P1-9): fail the session when
     TORTOISE_DB_URI is unset UNLESS TORTOISE_TEST_CARVE_OUT=1 is set.
@@ -409,7 +421,7 @@ def _assert_p4_uri_required() -> None:
     (which would re-execute conftest's top-level code)."""
     if _uri_set_supported():
         return
-    if os.environ.get("TORTOISE_TEST_CARVE_OUT") == "1":
+    if _carve_out_opted_in():
         return
     pytest.fail(
         "default pytest requires TORTOISE_DB_URI (epic #1647 P4); run the "
@@ -1013,6 +1025,14 @@ def _team_sweep_allowed(uri: str) -> bool:
     server is NOT an ownership record; the explicit opt-in is (CI's
     dedicated docker containers are fresh per job, so nothing accumulates
     there without the pass)."""
+    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
+    # This gate requires the exact value "1": it is the SOLE authorization for an
+    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the real-tenant
+    # org_*/team_* namespace (the `uri` parameter is dead — the #1884 URI inference
+    # was retracted — so no containment check compensates), and widening a
+    # destructive opt-in surface is not a vocabulary-coherence win. The refusal is
+    # logged with the exact required spelling, so the narrowing is discoverable.
+    # Pinned by tests/test_env_truthy.py::test_team_sweep_gate_is_narrow_by_design.
     return os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1"
 
 

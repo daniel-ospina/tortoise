@@ -73,6 +73,7 @@ import socket
 import tempfile
 
 from tortoise.embedded_reaper import OWNERS_DIRNAME, _is_ephemeral_dir
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 
 
 def _is_ephemeral_test_server(client) -> bool:
@@ -88,6 +89,18 @@ def _is_ephemeral_test_server(client) -> bool:
     tmpdir_real = os.path.realpath(tempfile.gettempdir())
     dbdir_real = os.path.realpath(dbdir)
     return _is_ephemeral_dir(dbdir_real, tmpdir_real)
+
+
+def _fast_atexit_enabled() -> bool:
+    """The ``TORTOISE_FAST_ATEXIT`` opt-in (#1371), through the declared contract.
+
+    #4097: truthy spellings (1/true/yes/on) enable it; unset/blank/falsy/garbage
+    stay OFF. Previously only the exact string ``"1"`` enabled it, so
+    ``=true``/``=yes``/``=on`` silently fell through to the slow close. The fast
+    path is additionally gated by `_is_ephemeral_test_server` + an ephemeral
+    socket dir, so widening cannot reach a production data file.
+    """
+    return is_truthy(os.environ.get("TORTOISE_FAST_ATEXIT"))
 
 
 def atexit_fast_close(client) -> bool:
@@ -115,7 +128,7 @@ def atexit_fast_close(client) -> bool:
     socket dir is reclaimed here because redislite only rmtrees it from
     inside `if self.pid:` and never touches a dead server's dir (#3653 F3).
     """
-    if os.environ.get("TORTOISE_FAST_ATEXIT") != "1":
+    if not _fast_atexit_enabled():
         return False
     if not _is_ephemeral_test_server(client):
         return False

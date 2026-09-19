@@ -87,6 +87,7 @@ surfaces:
   - test_email_notify.py
   - test_email_signup.py
   - test_enforcement.py
+  - test_env_truthy.py  # #4097: env-truthiness contract + guard (dual-registered with `core`/`sdk`; the ledger pins hosted_api.py / mcp_auth.py / __main__.py reads)
   - test_epic903_hosted.py
   - test_epic903_mcp.py
   - test_export_delete.py
@@ -439,6 +440,15 @@ surfaces:
   - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
   - test_entity_stage.py
   - test_enumeration_surfaces.py
+  # #4097: the env-truthiness contract + the non-divergence guard. The guard scans
+  # `tortoise/**` for a new ad-hoc vocabulary literal or a new narrow `== "1"` read,
+  # so it needs the surface of every module it can catch — `core` is the fallback arm
+  # for the many scanned modules with no SOURCE_PATTERN (why, monitoring, extractor_v2,
+  # model_adapters, frontmatter_validator, cimd, pack_state, abuse, mcp_server,
+  # projection/, rerank, sdk, embedded_lifecycle, embedded_reaper, backup_config,
+  # env_truthy). Dual-registered in `sdk` (owns tortoise/retrieval.py) and `api`
+  # (owns hosted_api.py / mcp_auth.py / __main__.py), whose ledger rows this file pins.
+  - test_env_truthy.py
   - test_epic903_fixtures.py
   - test_epic903_freshness.py
   - test_epic903_lifecycle.py
@@ -841,6 +851,7 @@ surfaces:
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
+  - test_env_truthy.py  # #4097: env-truthiness contract + guard (dual-registered with `core`/`api`; the ledger pins retrieval.ask_env_bool)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
@@ -1398,6 +1409,7 @@ durations:
   test_bfs_audit.py: 0.2
   test_calibration_tools.py: 0.2
   test_embeddings.py: 0.2
+  test_env_truthy.py: 0.2
   test_extractor.py: 0.2
   test_extractor_doc.py: 0.2
   test_file_indexer.py: 0.2

@@ -20,6 +20,8 @@ import time
 
 import numpy as np
 
+from .env_truthy import env_flag  # #4097: the declared truthy contract
+
 logger = logging.getLogger(__name__)
 
 # The active embedder — single source of truth for the production model id.
@@ -226,9 +228,7 @@ class EmbeddingModel:
         background load would race explicit embedder stubs). Returns None
         when disabled or already started.
         """
-        import os
-        if os.environ.get("TORTOISE_EMBEDDER_WARMUP", "1").strip().lower() \
-                in ("0", "false", "no", "off"):
+        if not env_flag("TORTOISE_EMBEDDER_WARMUP", True):
             return None
         with cls._WARM_UP_LOCK:
             if cls._warm_up_started:
