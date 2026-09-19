@@ -220,3 +220,27 @@ def test_transcript_golden_pins_identity_from_the_contains_edge(sdk):
     assert mutated_msg != tx["user_message"], (
         "the committed golden renders identically with the CONTAINS edge gone "
         "— it is NOT bound to the identity read")
+
+
+# ── 4. #4106: a seed with NO session_date records NO time ────────────────
+
+def test_transcript_seed_without_a_date_records_no_time(sdk):
+    """#4106: ``_seed``'s date default must not become a session's recorded
+    time. ``seed_capture_turn_store``'s ``now=None`` default is the RUN clock,
+    which the ask-path date annotation would render as the session's date; a
+    seed with no ``session_date`` therefore erases it (session AND turns) and
+    the reader's context carries no date marker."""
+    from tools.gen_ask_transcripts import _seed
+    from tortoise.retrieval import render_context
+
+    _seed(sdk, [{"content": "I bought a smoker today"}])  # no session_date
+    proj = sdk._get_proj()
+    sessions = proj.g.query(
+        "MATCH (s:Session) RETURN s.id, s.created_at").result_set
+    assert sessions and all(r[1] is None for r in sessions), sessions
+    turns = proj.g.query("MATCH (t:Point) RETURN t.createdAt").result_set
+    assert turns and all(r[0] is None for r in turns), turns
+    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    assert ann and all(not h.get("session_date") for h in ann), ann
+    assert "(session date" not in render_context(ann)
