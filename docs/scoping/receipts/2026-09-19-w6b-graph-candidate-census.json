@@ -1,0 +1,537 @@
+{
+  "job": "W6B \u2014 graph-based candidate introduction: census",
+  "date": "2026-09-19",
+  "tree": "origin/main@4a7b7202e (branch scope/w6b-graph-candidate)",
+  "issue": 4211,
+  "read_only": "All store access read-only: ~/.tortoise/tortoise.db copied to /tmp before any read; live :16379 censused with GRAPH.RO_QUERY only. No store was written.",
+  "instrument": "tools/ask_spotcheck.py::_seed_memory (capture shape) + sdk.tortoise_fts_query(limit=120, pool_size=120, include_terminal=True, keep_numeric=True, search_keys_prf=True, fusion_k=60); fixture sha256 7f4062643323af4e5d0fec0b98bb3e3ca8499362c3f7e07a83c55f07633d15fa",
+  "stores": {
+    "instrument_capture_shape": {
+      "note": "the D3 instrument's own store, per question; the ONLY store where the 5 window-miss failures live",
+      "per_question": {
+        "0a995998": {
+          "points": 484,
+          "edges_by_type": {
+            "CONTAINS": 484
+          },
+          "embedded_points": 0,
+          "sessions": 44,
+          "avg_turns_per_session": 11.0,
+          "max_turns_per_session": 14
+        },
+        "1d4e3b97": {
+          "points": 474,
+          "edges_by_type": {
+            "CONTAINS": 474
+          },
+          "embedded_points": 0,
+          "sessions": 45,
+          "avg_turns_per_session": 10.5,
+          "max_turns_per_session": 24
+        },
+        "1de5cff2": {
+          "points": 473,
+          "edges_by_type": {
+            "CONTAINS": 473
+          },
+          "embedded_points": 0,
+          "sessions": 45,
+          "avg_turns_per_session": 10.5,
+          "max_turns_per_session": 15
+        },
+        "ceb54acb": {
+          "points": 493,
+          "edges_by_type": {
+            "CONTAINS": 493
+          },
+          "embedded_points": 0,
+          "sessions": 50,
+          "avg_turns_per_session": 9.9,
+          "max_turns_per_session": 14
+        },
+        "e9327a54": {
+          "points": 533,
+          "edges_by_type": {
+            "CONTAINS": 533
+          },
+          "embedded_points": 0,
+          "sessions": 50,
+          "avg_turns_per_session": 10.7,
+          "max_turns_per_session": 33
+        }
+      }
+    },
+    "real_store_copy": {
+      "path": "~/.tortoise/tortoise.db (copied to /tmp before reading)",
+      "nodes": {
+        "Point": 55,
+        "Session": 1538,
+        "Object": 147,
+        "Subject": 4,
+        "Action": 0,
+        "Event": 3732,
+        "Source": 2196,
+        "Document": 0,
+        "Tag": 4,
+        "TOTAL": 11228
+      },
+      "edges_total": 2640,
+      "edges_by_type": {
+        "references": 2186,
+        "aboutObject": 404,
+        "CONTAINS": 27,
+        "performs": 8,
+        "produces": 8,
+        "participatesIn": 5,
+        "CORRECTS": 1,
+        "uses": 1
+      },
+      "point_IMPL": 0,
+      "point_NAND": 0,
+      "aboutSubject": 0,
+      "extractedFrom": 0,
+      "points_total": 55,
+      "points_with_embedding": 18,
+      "episodic_turns": 27,
+      "episodic_turns_with_embedding": 0,
+      "points_with_zero_edges": 25,
+      "turn_1hop_edge_types": [
+        "CONTAINS"
+      ],
+      "claim_1hop_avg_neighbors": 0.111,
+      "claims_isolated": 24
+    },
+    "live_epistemic_graph": {
+      "path": "FalkorDB :16379 graph 'tortoise' (GRAPH.RO_QUERY only)",
+      "points": 1259,
+      "edges_by_type": {
+        "IMPL": 5229,
+        "INPUT": 260,
+        "NAND": 26,
+        "extractedFrom": 8
+      },
+      "operators": 150,
+      "points_embedded": 1000,
+      "points_isolated": 24,
+      "sessions": 0,
+      "contains": 0,
+      "turns": 0,
+      "note": "the epistemic edges PPR would walk exist HERE \u2014 but this graph has no Session/CONTAINS and no turns, and none of the measured failures live in it. The two graph shapes never coexist."
+    }
+  },
+  "the_5_window_miss_questions": [
+    {
+      "qid": "0a995998",
+      "qtype": "multi-session",
+      "gold": [
+        {
+          "id": "answer_afa9873b_2_t10",
+          "fused_rank_pool120": 19,
+          "siblings_from_session_in_returned": 5,
+          "best_sibling_rank": 5,
+          "gold_session_distinct_seed_pos": 4,
+          "reached_by_one_CONTAINS_hop_from_top40": true,
+          "reached_by_one_CONTAINS_hop_from_top120": true
+        },
+        {
+          "id": "answer_afa9873b_3_t6",
+          "fused_rank_pool120": null,
+          "siblings_from_session_in_returned": 4,
+          "best_sibling_rank": 15,
+          "gold_session_distinct_seed_pos": 14,
+          "reached_by_one_CONTAINS_hop_from_top40": true,
+          "reached_by_one_CONTAINS_hop_from_top120": true
+        },
+        {
+          "id": "answer_afa9873b_1_t4",
+          "fused_rank_pool120": null,
+          "siblings_from_session_in_returned": 2,
+          "best_sibling_rank": 39,
+          "gold_session_distinct_seed_pos": 24,
+          "reached_by_one_CONTAINS_hop_from_top40": true,
+          "reached_by_one_CONTAINS_hop_from_top120": true
+        }
+      ],
+      "distinct_sessions_in_top40": 25,
+      "distinct_sessions_in_top120": 41,
+      "leg_trace": [
+        {
+          "leg": "fts",
+          "ran": true,
+          "degraded": false,
+          "reason": "ok",
+          "count": 120
+        },
+        {
+          "leg": "vector",
+          "ran": true,
+          "degraded": true,
+          "reason": "no_embeddings",
+          "count": 0
+        },
+        {
+          "leg": "structural",
+          "ran": true,
+          "degraded": false,
+          "reason": "empty_results",
+          "count": 0
+        }
+      ]
+    },
+    {
+      "qid": "1d4e3b97",
+      "qtype": "single-session-preference",
+      "gold": [
+        {
+          "id": "answer_e6b6353d_t2",
+          "fused_rank_pool120": 55,
+          "siblings_from_session_in_returned": 9,
+          "best_sibling_rank": 0,
+          "gold_session_distinct_seed_pos": 0,
+          "reached_by_one_CONTAINS_hop_from_top40": true,
+          "reached_by_one_CONTAINS_hop_from_top120": true
+        },
+        {
+          "id": "answer_e6b6353d_t4",
+          "fused_rank_pool120": 83,
+          "siblings_from_session_in_returned": 9,
+          "best_sibling_rank": 0,
+          "gold_session_distinct_seed_pos": 0,
+          "reached_by_one_CONTAINS_hop_from_top40": true,
+          "reached_by_one_CONTAINS_hop_from_top120": true
+        }
+      ],
+      "distinct_sessions_in_top40": 23,
+      "distinct_sessions_in_top120": 37,
+      "leg_trace": [
+        {
+          "leg": "fts",
+          "ran": true,
+          "degraded": false,
+          "reason": "ok",
+          "count": 120
+        },
+        {
+          "leg": "vector",
+          "ran": true,
+          "degraded": true,
+          "reason": "no_embeddings",
+          "count": 0
+        },
+        {
+          "leg": "structural",
+          "ran": true,
+          "degraded": false,
+          "reason": "empty_results",
+          "count": 0
+        }
+      ]
+    },
+    {
+      "qid": "1de5cff2",
+      "qtype": "single-session-assistant",
+      "gold": [
+        {
+          "id": "answer_ultrachat_440262_t7",
+          "fused_rank_pool120": 66,
+          "siblings_from_session_in_returned": 10,
+          "best_sibling_rank": 0,
+          "gold_session_distinct_seed_pos": 0,
+          "reached_by_one_CONTAINS_hop_from_top40": true,
+          "reached_by_one_CONTAINS_hop_from_top120": true
+        }
+      ],
+      "distinct_sessions_in_top40": 17,
+      "distinct_sessions_in_top120": 40,
+      "leg_trace": [
+        {
+          "leg": "fts",
+          "ran": true,
+          "degraded": false,
+          "reason": "ok",
+          "count": 120
+        },
+        {
+          "leg": "vector",
+          "ran": true,
+          "degraded": true,
+          "reason": "no_embeddings",
+          "count": 0
+        },
+        {
+          "leg": "structural",
+          "ran": true,
+          "degraded": false,
+          "reason": "empty_results",
+          "count": 0
+        }
+      ]
+    },
+    {
+      "qid": "ceb54acb",
+      "qtype": "single-session-assistant",
+      "gold": [
+        {
+          "id": "answer_sharegpt_cGdjmYo_0_t3",
+          "fused_rank_pool120": 92,
+          "siblings_from_session_in_returned": 2,
+          "best_sibling_rank": 6,
+          "gold_session_distinct_seed_pos": 3,
+          "reached_by_one_CONTAINS_hop_from_top40": true,
+          "reached_by_one_CONTAINS_hop_from_top120": true
+        }
+      ],
+      "distinct_sessions_in_top40": 24,
+      "distinct_sessions_in_top120": 42,
+      "leg_trace": [
+        {
+          "leg": "fts",
+          "ran": true,
+          "degraded": false,
+          "reason": "ok",
+          "count": 120
+        },
+        {
+          "leg": "vector",
+          "ran": true,
+          "degraded": true,
+          "reason": "no_embeddings",
+          "count": 0
+        },
+        {
+          "leg": "structural",
+          "ran": true,
+          "degraded": false,
+          "reason": "empty_results",
+          "count": 0
+        }
+      ]
+    },
+    {
+      "qid": "e9327a54",
+      "qtype": "single-session-assistant",
+      "gold": [
+        {
+          "id": "answer_ultrachat_480665_t7",
+          "fused_rank_pool120": 88,
+          "siblings_from_session_in_returned": 11,
+          "best_sibling_rank": 0,
+          "gold_session_distinct_seed_pos": 0,
+          "reached_by_one_CONTAINS_hop_from_top40": true,
+          "reached_by_one_CONTAINS_hop_from_top120": true
+        }
+      ],
+      "distinct_sessions_in_top40": 20,
+      "distinct_sessions_in_top120": 38,
+      "leg_trace": [
+        {
+          "leg": "fts",
+          "ran": true,
+          "degraded": false,
+          "reason": "ok",
+          "count": 120
+        },
+        {
+          "leg": "vector",
+          "ran": true,
+          "degraded": true,
+          "reason": "no_embeddings",
+          "count": 0
+        },
+        {
+          "leg": "structural",
+          "ran": true,
+          "degraded": false,
+          "reason": "empty_results",
+          "count": 0
+        }
+      ]
+    }
+  ],
+  "within_session_fts_ranks": [
+    {
+      "qid": "0a995998",
+      "fts_query": "clothing|return|items|store|many|need|pick|up",
+      "global_fts_returned": 223,
+      "global_fts_ms": 2.6,
+      "expansion_fetch_ms": 3.48,
+      "expansion_rows": 194,
+      "gold": [
+        {
+          "id": "answer_afa9873b_2_t10",
+          "global_fts_rank": 19,
+          "session_scoped_fts_rank": 1,
+          "session_fts_matches": 10,
+          "session_turn_count": 12,
+          "lexicographic_id_order_pos": 2
+        },
+        {
+          "id": "answer_afa9873b_3_t6",
+          "global_fts_rank": 146,
+          "session_scoped_fts_rank": 4,
+          "session_fts_matches": 9,
+          "session_turn_count": 12,
+          "lexicographic_id_order_pos": 8
+        },
+        {
+          "id": "answer_afa9873b_1_t4",
+          "global_fts_rank": 152,
+          "session_scoped_fts_rank": 4,
+          "session_fts_matches": 8,
+          "session_turn_count": 10,
+          "lexicographic_id_order_pos": 4
+        }
+      ]
+    },
+    {
+      "qid": "1d4e3b97",
+      "fts_query": "performing|noticed|better|during|sunday|reason|seems|group|rides|could|there|bike",
+      "global_fts_returned": 203,
+      "global_fts_ms": 3.9,
+      "expansion_fetch_ms": 12.09,
+      "expansion_rows": 197,
+      "gold": [
+        {
+          "id": "answer_e6b6353d_t2",
+          "global_fts_rank": 55,
+          "session_scoped_fts_rank": 6,
+          "session_fts_matches": 12,
+          "session_turn_count": 12,
+          "lexicographic_id_order_pos": 4
+        },
+        {
+          "id": "answer_e6b6353d_t4",
+          "global_fts_rank": 83,
+          "session_scoped_fts_rank": 8,
+          "session_fts_matches": 12,
+          "session_turn_count": 12,
+          "lexicographic_id_order_pos": 6
+        }
+      ]
+    },
+    {
+      "qid": "1de5cff2",
+      "fts_query": "conversation|rainforest|wondering|previous|through|fashion|sourced|brands|remind|rubber|amazon|going",
+      "global_fts_returned": 153,
+      "global_fts_ms": 2.2,
+      "expansion_fetch_ms": 2.34,
+      "expansion_rows": 122,
+      "gold": [
+        {
+          "id": "answer_ultrachat_440262_t7",
+          "global_fts_rank": 66,
+          "session_scoped_fts_rank": 9,
+          "session_fts_matches": 11,
+          "session_turn_count": 12,
+          "lexicographic_id_order_pos": 9
+        }
+      ]
+    },
+    {
+      "qid": "ceb54acb",
+      "fts_query": "compulsions|alternative|suggested|behaviors|previous|options|certain|options|sexual|remind|other|terms",
+      "global_fts_returned": 210,
+      "global_fts_ms": 4.5,
+      "expansion_fetch_ms": 5.73,
+      "expansion_rows": 170,
+      "gold": [
+        {
+          "id": "answer_sharegpt_cGdjmYo_0_t3",
+          "global_fts_rank": 92,
+          "session_scoped_fts_rank": 1,
+          "session_fts_matches": 2,
+          "session_turn_count": 4,
+          "lexicographic_id_order_pos": 3
+        }
+      ]
+    },
+    {
+      "qid": "e9327a54",
+      "fts_query": "milkshakes|wondering|planning|revisit|orlando|dessert|remind|unique|talked|could|giant|that",
+      "global_fts_returned": 337,
+      "global_fts_ms": 3.9,
+      "expansion_fetch_ms": 2.18,
+      "expansion_rows": 198,
+      "gold": [
+        {
+          "id": "answer_ultrachat_480665_t7",
+          "global_fts_rank": 88,
+          "session_scoped_fts_rank": 6,
+          "session_fts_matches": 14,
+          "session_turn_count": 14,
+          "lexicographic_id_order_pos": 11
+        }
+      ]
+    }
+  ],
+  "c4_seed_check": [
+    {
+      "qid": "0a995998",
+      "seeded_sessions_first5": [
+        "sharegpt_U3S02iq_0",
+        "ultrachat_428050",
+        "fa46a10e",
+        "ultrachat_62232",
+        "answer_afa9873b_2"
+      ],
+      "injected": 10,
+      "reached_gold": []
+    },
+    {
+      "qid": "1d4e3b97",
+      "seeded_sessions_first5": [
+        "answer_e6b6353d",
+        "ultrachat_8041",
+        "sharegpt_3I3T3Xn_7",
+        "1b320137_1",
+        "5cd6ab1b"
+      ],
+      "injected": 10,
+      "reached_gold": []
+    },
+    {
+      "qid": "1de5cff2",
+      "seeded_sessions_first5": [
+        "answer_ultrachat_440262",
+        "28031c43_2",
+        "ultrachat_208537",
+        "c14dbe17",
+        "c3cf5ac0"
+      ],
+      "injected": 10,
+      "reached_gold": []
+    },
+    {
+      "qid": "ceb54acb",
+      "seeded_sessions_first5": [
+        "ultrachat_238565",
+        "ultrachat_150562",
+        "sharegpt_yePPued_0",
+        "answer_sharegpt_cGdjmYo_0",
+        "ultrachat_233333"
+      ],
+      "injected": 10,
+      "reached_gold": []
+    },
+    {
+      "qid": "e9327a54",
+      "seeded_sessions_first5": [
+        "answer_ultrachat_480665",
+        "30e58d0c_1",
+        "ultrachat_353915",
+        "ultrachat_95525",
+        "sharegpt_kXjhIjQ_256"
+      ],
+      "injected": 10,
+      "reached_gold": []
+    }
+  ],
+  "headline": {
+    "one_hop_reach": "A one-hop CONTAINS walk from the top-40 pool reaches ALL gold turns in ALL 5 window-miss questions (8/8 gold turns), including both turns that never enter the 120-pool (0a995998 at 146/152).",
+    "edge_substrate": "On the failing store the only edge type is (Session)-[:CONTAINS]->(turn); IMPL/NAND/about* are 0. PPR degenerates to a weighted session expansion.",
+    "existing_mechanisms": "expand_structural_hops traverses :IMPL|NAND (0 edges here) and the ask lane sets structural_hops=0; GraphRanker reorders only; coverage_loop C3-1 needs Objects/aboutObject (capture writes none, #3664); session_reinjection C4 (#2517/PR#3577) fetches via CONTAINS but its seed needs a session_id a product turn lacks, and its first-5-distinct-session rule misses 4 of 5 gold sessions.",
+    "within_session_k": "Gold turns' session-scoped FTS ranks: 1, 4, 4, 6, 8, 9, 2, 6 \u2014 a per-session K=10 covers all.",
+    "latency": "Expansion fetch 2.2-12.1 ms (122-198 sibling rows); deep FTS 2.2-4.5 ms; zero LLM calls."
+  },
+  "discrepancy_reported": "e9327a54 gold turn measured at fused rank 88 here; M1 (docs/research/2026-09-19-m1-read-path-latency-profile.md \u00a75) recorded 30 (in cut). Class unchanged (below/at the 40-cut differs); not reconciled, reported."
+}
