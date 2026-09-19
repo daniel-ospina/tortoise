@@ -10,15 +10,15 @@
  * an open relay. Routing the queued item to it is the intake endpoint's job;
  * this surface only guarantees the visitor is told the decided address.
  *
- * ⚠️  THE TRANSPORT IS AN OPEN DECISION (a queue vs. email; #2409). This file
+ * ⚠️  THE EMAIL LEG IS AN OPEN DECISION (a queue vs. email; #2409). This file
  * knows NOTHING about how a submission travels onward: no provider name, no
- * credential, no email sender, no endpoint, no wire format. The one network
- * call lives behind ONE seam, `enqueue()` in `../_shared/contact-transport.ts`,
- * whose item shape (name, replyTo, message, receivedAt, source) and result
- * types are transport-neutral; swapping transport is a change to that module
- * alone. This file's job is the transport-independent half: validation,
- * honeypot, rate limit, cross-site refusal — and mapping the seam's outcome to
- * HTTP.
+ * send-capable credential, no email sender, no endpoint, no wire format. The one
+ * network call lives behind ONE seam, `enqueue()` in
+ * `../_shared/contact-transport.ts`, whose envelope (`source`, `source_item_id`,
+ * `payload`) and result types belong to the seam; swapping the leg is a change
+ * to that module alone. This file's job is the transport-independent half:
+ * validation, honeypot, rate limit, cross-site refusal — and mapping the seam's
+ * outcome to HTTP.
  *
  * WHY THIS FORM ROUTES INTO INTAKE — THE OWNER'S ARCHITECTURE: WE RECEIVE.
  * Customers email `hello@premiselabs.co` and `support@premiselabs.co`, and
@@ -295,8 +295,14 @@ async function handlePost(request: Request, env: ContactEnv): Promise<Response> 
     );
   }
 
+  // NO PROMISE OF A REPLY. The intake is the receiving mechanism; a reply is
+  // the exception (outbound email belongs to replying to a user who wrote
+  // first). The confirmation states only what is true at that moment — the
+  // message was received — because "we'll reply" is a commitment this form's
+  // transport cannot keep while intake has no reader (relay condition,
+  // tortoise #2409).
   return json(
-    { ok: true, message: "Thanks — we've received your message. We'll reply to the address you gave." },
+    { ok: true, message: "Thanks — we've received your message." },
     200,
   );
 }

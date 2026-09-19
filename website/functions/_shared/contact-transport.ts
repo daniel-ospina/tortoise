@@ -18,8 +18,37 @@
  * because Supabase's auth mail would max its quota and arrives from Supabase,
  * which is confusing to a new sign-up. So this form is an INTAKE PRODUCER, not
  * an email sender: RECEIVING IS THE MECHANISM AND SENDING IS THE EXCEPTION.
- * It routes INTO intake. No send-capable credential is provisioned for it —
+ * It routes INTO intake. No SEND-capable credential is provisioned for it —
  * not because sending is forbidden, but because the queue leg needs none.
+ *
+ * ── WIRED AT THE EXISTING INTAKE (relay ruling, tortoise #2409) ─────────────
+ * The endpoint is the intake that already exists — one intake, many producers
+ * (premise-labs #426). Its contract, read from the function itself
+ * (`swarm/supabase/functions/inbound-ingest/index.ts`), is:
+ *
+ *     POST <org-data>/functions/v1/inbound-ingest
+ *     x-inbound-secret: <INBOUND_SECRET_<SOURCE>>      (uppercased source)
+ *     { source, source_item_id, payload }
+ *
+ * and it answers `403 unknown_source` when no `INBOUND_SECRET_<SOURCE>` is set
+ * for that source, `401 unauthorized` when the secret does not match, and
+ * dedupes on `(source, source_item_id)`. Three consequences are load-bearing
+ * and were NOT obvious before reading it:
+ *
+ *   1. THE QUEUE LEG DOES CARRY A SECRET — the intake's own inbound shared
+ *      secret. It is not a send-capable credential and it cannot send mail; the
+ *      earlier note here that this leg “needs none” was premised on a
+ *      credential-free intake and is corrected rather than deleted.
+ *   2. THE SOURCE NAME MUST BE ENV-NAME-SAFE. The intake derives the variable
+ *      name by uppercasing the source, so `website/contact` would ask for
+ *      `INBOUND_SECRET_WEBSITE/CONTACT` — not a name any platform can set. It
+ *      is `website_contact`.
+ *   3. THE ITEM IS AN ENVELOPE, NOT A BARE OBJECT — `payload` carries the
+ *      submission, and `source_item_id` must be unique per source.
+ *
+ * Absent configuration is still a VISIBLE failure, and it now covers both
+ * variables: a URL with no secret would be answered 401/403 by the intake, so
+ * reporting `enqueued` for a message nothing will read is not available here.
  *
  * ⛔ `premise-labs#393` IS A BUDGET TO MANAGE, NOT A REASON TO REFUSE TO
  * BUILD. #393's objective is ZERO quota-rejected sends; the sender's quota is
@@ -32,27 +61,32 @@
  * provider credential.
  *
  * WHAT THIS SEAM IS, THEN — QUEUE-SHAPED. One submission becomes ONE JSON item
- * posted to a configurable intake endpoint, and that is the whole transport:
+ * in the intake's envelope, posted to the configured intake endpoint, and that is
+ * the whole transport:
  *
- *     { name, replyTo, message, receivedAt, source }
+ *     { source, source_item_id, payload: { subject, body, name, replyTo,
+ *                                         message, receivedAt } }
  *
  * `enqueue()` is the SOLE entry point. It is the only place in the form's path
- * that performs a network call, and the intake URL is its only configuration.
- * When the transport decision lands, swapping it is a change to THIS FILE ONLY
- * — the item shape and the three-value outcome vocabulary stay as they are.
+ * that performs a network call, and its two variables (the endpoint and the
+ * intake's inbound secret) are its only configuration. When the email leg is
+ * decided, swapping it is a change to THIS FILE ONLY — the envelope and the
+ * three-value outcome vocabulary stay as they are.
  *
  * Owner decisions that ARE settled, and stay settled here:
  *   - RECIPIENT: `hello@premiselabs.co` (owner ruling, issue #2409,
  *     2026-09-18). It is a code constant in the caller, never a request field,
  *     and — deliberately — not part of the queued item: the intake endpoint is
  *     the routing point and owns the destination.
- *   - FAIL LOUDLY: a missing intake endpoint is a visible failure
+ *   - FAIL LOUDLY: a missing intake endpoint OR secret is a visible failure
  *     (`status: "not_configured"` → the caller's 503), never a silent success.
  *
- * SECRET HANDLING: there is no secret. The intake endpoint is a plain URL read
- * from `env`; this module sends no credential and no authorization header,
- * because the queue leg needs none and none may be provisioned while the
- * transport decision is open (do not read that absence as a quota verdict).
+ * SECRET HANDLING: the only secret is the intake's inbound shared secret,
+ * read from `env.CONTACT_INTAKE_SECRET` and sent as the `x-inbound-secret`
+ * header the intake requires. It is provisioned by an operator (never in this
+ * repository, never in a request body) and it grants nothing but "submit an
+ * item to this intake": it cannot send mail, read the intake, or reach any
+ * other service. No provider key and no send-capable credential is read here.
  */
 
 /**
@@ -84,10 +118,22 @@ export type IntakeOutcome =
 
 // ── Current shape: one JSON item, one configurable intake endpoint ─────────
 
-/** The intake endpoint — the seam's ONLY configuration. No credential. */
+/** The intake endpoint. */
 const INTAKE_URL_ENV = "CONTACT_INTAKE_URL";
-/** Which surface produced the item. Lets the endpoint route by producer. */
-export const INTAKE_SOURCE = "website/contact";
+/**
+ * The intake's inbound shared secret, sent as `x-inbound-secret`. Required by
+ * the endpoint, not by us: without it the intake answers 401/403 and the
+ * message is dropped, so its absence is `not_configured` — the same visible
+ * failure as an absent URL.
+ */
+const INTAKE_SECRET_ENV = "CONTACT_INTAKE_SECRET";
+/**
+ * Which surface produced the item. The intake derives its per-source secret
+ * variable by uppercasing this (`INBOUND_SECRET_${source.toUpperCase()}`), so it
+ * must survive as an environment-variable name: no slash, no space. It is
+ * deliberately `website_contact` and not `website/contact`.
+ */
+export const INTAKE_SOURCE = "website_contact";
 
 function envString(env: TransportEnv, name: string): string {
   const v = env[name];
@@ -98,37 +144,58 @@ function envString(env: TransportEnv, name: string): string {
  * Enqueue one contact submission to the configured intake endpoint.
  *
  * The configuration gate is HERE, and it precedes the network call: without an
- * intake endpoint there is nowhere to enqueue, and the outcome must be a
- * visible `not_configured` the caller turns into a 503 — never a success that
- * drops the message on the floor. (Pinning the ordering in-source is what the
- * test suite checks; the variable's name is operator-facing only — the visitor
- * message the caller builds never names it.)
+ * endpoint AND the intake's secret there is nowhere to enqueue, and the outcome
+ * must be a visible `not_configured` the caller turns into a 503 — never a
+ * success that drops the message on the floor. (Pinning the ordering in-source
+ * is what the test suite checks; the variables' names are operator-facing only —
+ * the visitor message the caller builds never names them.)
  */
 export async function enqueue(msg: ContactMessage, env: TransportEnv): Promise<IntakeOutcome> {
   const intakeUrl = envString(env, INTAKE_URL_ENV);
-  if (intakeUrl === "") {
-    // Visible to an operator: the ABSENCE of the variable is the condition, and
-    // naming it is what lets them fix it. No secret value is involved.
-    console.error(`contact: ${INTAKE_URL_ENV} is unset — contact form cannot accept submissions`);
+  const intakeSecret = envString(env, INTAKE_SECRET_ENV);
+  if (intakeUrl === "" || intakeSecret === "") {
+    // Visible to an operator: the ABSENCE of a variable is the condition, and
+    // naming it is what lets them fix it. Neither value is a secret being
+    // logged — one is a URL, the other only ever named, never printed.
+    console.error(
+      "contact: contact form cannot accept submissions — missing " +
+        [INTAKE_URL_ENV, INTAKE_SECRET_ENV].filter((n) => envString(env, n) === "").join(", "),
+    );
     return { status: "not_configured" };
   }
 
-  // The item is built here, whole: exactly the five agreed fields, with the
-  // receipt time the seam observed and the producing surface. No request field
-  // beyond the validated name/reply-to/message ever reaches the wire.
+  // The item is built here, whole: the intake's ENVELOPE (`source`,
+  // `source_item_id`, `payload`) around the five agreed fields. `payload.body`
+  // and `payload.subject` are what the intake reads as the item's text (they
+  // feed its risk scan), so they are written for a human reader and carry the
+  // reply-to address; the structured fields ride alongside for the machine. No
+  // request field beyond the validated name/reply-to/message ever reaches the
+  // wire.
+  const receivedAt = new Date().toISOString();
   const item = {
-    name: msg.name,
-    replyTo: msg.replyTo,
-    message: msg.message,
-    receivedAt: new Date().toISOString(),
     source: INTAKE_SOURCE,
+    // Unique per source — the intake's store dedupes on (source,
+    // source_item_id), so this must be minted per submission, never reused.
+    source_item_id: crypto.randomUUID(),
+    payload: {
+      subject: `Contact form — ${msg.name}`,
+      body: `${msg.message}\n\n— ${msg.name} <${msg.replyTo}>`,
+      name: msg.name,
+      replyTo: msg.replyTo,
+      message: msg.message,
+      receivedAt: receivedAt,
+      source: INTAKE_SOURCE,
+    },
   };
 
   let upstream: Response;
   try {
     upstream = await fetch(intakeUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-inbound-secret": intakeSecret,
+      },
       body: JSON.stringify(item),
     });
   } catch (err) {

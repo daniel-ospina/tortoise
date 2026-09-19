@@ -56,16 +56,46 @@ fallback below the form), not only in an error path.
 ```text
 contact.html ──POST JSON──▶ /api/contact ──▶ enqueue() ──▶ CONTACT_INTAKE_URL
    fields: name, email (Reply-To), message      honeypot (hp) + per-IP rate limit
-      └─ one JSON item: {name, replyTo, message, receivedAt, source}
+      └─ one item in the intake's envelope:
+         { source, source_item_id, payload: { subject, body, name, replyTo,
+                                              message, receivedAt } }
+         sent with the header `x-inbound-secret`
          seam: functions/_shared/contact-transport.ts
 ```
 
-**Transport — ⚠️ OPEN DECISION; NOT SETTLED (a queue vs. email).** The owner
-has not chosen how a submission travels onward, so nothing here is that
-choice. The one network call is isolated behind ONE seam —
-`functions/_shared/contact-transport.ts`, entry point `enqueue()` — whose item
-shape (name, replyTo, message, receivedAt, source) and result types are
-transport-neutral. Swapping transport is a change to that module alone.
+**Transport — the intake leg is SETTLED and wired; the outbound-email leg is
+an OPEN DECISION (a queue vs. email).** The endpoint is the intake that already
+exists — one intake, many producers (premise-labs **#426**), per the relay
+ruling recorded on **#2409** — so this form is one more producer into the same
+store, with no new infrastructure. The owner has not chosen whether a
+submission is ever *answered* by email, so nothing here is that choice: the one
+network call is isolated behind ONE seam (`enqueue()`) and swapping the leg
+later is a change to that module alone. That the seam speaks the existing
+intake's dialect is what makes `CONTACT_INTAKE_URL` mean anything — the
+contract, read from the function itself, is:
+
+```text
+POST <org-data>/functions/v1/inbound-ingest
+x-inbound-secret: <INBOUND_SECRET_<SOURCE>>      (source uppercased)
+{ source, source_item_id, payload }
+  → 403 unknown_source  when no secret is set for that source
+  → 401 unauthorized    when the secret does not match
+  → dedupes on (source, source_item_id)
+```
+
+Three consequences follow, and all three are recorded in the seam:
+
+1. **The queue leg carries a secret** — the intake's own *inbound* shared
+   secret, which submits an item and nothing else (no send, no read). The
+   earlier claim here that this leg needs *no* credential was premised on a
+   credential-free intake; it is corrected, not deleted. What remains true, and
+   is still forbidden, is a **send-capable** credential.
+2. **The source name must be env-name-safe**, because the intake builds the
+   variable name by uppercasing it: `website_contact`, never
+   `website/contact` (which would ask for `INBOUND_SECRET_WEBSITE/CONTACT` —
+   unsettable — and earn a `403`).
+3. **The item is an envelope**, with `payload.subject`/`payload.body` carrying
+   the readable text the intake's risk scan reads.
 
 **The form is an intake producer — because receiving is the mechanism, and
 sending is the exception.** The owner's architecture is *we receive*: customers
@@ -82,15 +112,22 @@ routes **into intake**; it is not an email sender.
 manage** — its objective is zero quota-rejected sends — never a reason to
 refuse to build. An earlier revision of this section recorded the missing email
 leg as quota-avoidance; that framing is **retracted**. Do **not** provision a
-send-capable credential for this form while the transport decision is open; the
-absence of a sending key is the current shape of an unresolved decision, not a
-quota verdict.
+**send-capable** credential for this form: the absence of a sending key is the
+shape of the unresolved email leg, not a quota verdict.
 
-**Configuration:** the seam reads exactly one variable, `CONTACT_INTAKE_URL`
-(Pages project env var) — the URL the JSON item is POSTed to. **It is not a
-secret**, and no authorization header is sent. **Fail-loud contract:** with it
-unset the endpoint returns `503 not_configured` and the page shows the visitor
-the direct-mailto fallback — it never returns a silent success.
+**Configuration:** the seam reads exactly two variables — `CONTACT_INTAKE_URL`
+(the endpoint) and `CONTACT_INTAKE_SECRET` (the intake's inbound shared secret
+for this producer, sent as `x-inbound-secret`). The secret is an *inbound*
+credential: it submits an item and nothing else. **Fail-loud contract:** with
+**either** unset the endpoint returns `503 not_configured` and the page shows
+the visitor the direct-mailto fallback — it never returns a silent success.
+
+**No promise of a reply.** The confirmation says the message was received and
+nothing more. A reply is the exception (outbound email belongs to answering
+the support channel, and to auth flows), and while the reader gap is open
+(swarm#18407; the #426 interim copy is unbound) "we'll reply" is a commitment
+this transport cannot keep. The email field's hint states the restriction on
+use, not a commitment to write back.
 
 **Spam:** hidden `hp` honeypot field (a filled one is answered with a generic
 success so a bot learns nothing) plus a per-isolate rate limit (5 submissions /
@@ -112,21 +149,25 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/api/conta
 1. **Supabase secrets** (set via
    `supabase secrets set --project-ref ybetwichurajbfswfeqa`):
    `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `TURNSTILE_SECRET_KEY`.
-2. **Pages env var for the contact form** — bind `CONTACT_INTAKE_URL` on the
-   `premise-labs` Cloudflare Pages project (production) to the intake endpoint
-   the owner chooses. This is the step that makes `/contact` accept
-   submissions; until it is bound the endpoint answers `503 not_configured`
-   exactly as designed. It is the `CONTACT_INTAKE_URL` entry in
-   `config/required-bindings.yml`. **Do not bind a send-capable email
-   credential** while the transport decision is open — the seam needs none, and
-   none is provisioned for it. (#393 is a budget to manage, never a reason to
-   refuse to build — see the contact-form note above.) (When the transport
-   decision lands, this binding moves with the seam — see the seam note above.)
-3. **Turnstile site key** → paste into the `TURNSTILE_SITE_KEY` constant in
+2. **Pages env vars for the contact form** — on the `premise-labs` Cloudflare
+   Pages project (production), bind **both** `CONTACT_INTAKE_URL` = the existing
+   intake endpoint (`<org-data>/functions/v1/inbound-ingest`) and
+   `CONTACT_INTAKE_SECRET` = the inbound secret a below step provisions. This is
+   the pair that makes `/contact` accept submissions; until both are bound the
+   endpoint answers `503 not_configured` exactly as designed. They are the two
+   `CONTACT_INTAKE_*` entries in `config/required-bindings.yml`. **Do not bind a
+   send-capable email credential.** (#393 is a budget to manage, never a reason
+   to refuse to build — see the contact-form note above.)
+3. **Intake secret for this producer** — provision
+   `INBOUND_SECRET_WEBSITE_CONTACT` on the org-data intake function and check
+   the `website_contact` source is accepted; the intake answers `403
+   unknown_source` without it. Same credential as the Pages var above, on the
+   receiving side. (Tracked on `swarm#18407`'s lane / the #2409 record.)
+4. **Turnstile site key** → paste into the `TURNSTILE_SITE_KEY` constant in
    `index.html`.
-4. **Deploy** — see `supabase/README.md` (CI workflow does it on merge once
+5. **Deploy** — see `supabase/README.md` (CI workflow does it on merge once
    `SUPABASE_ACCESS_TOKEN` + `SUPABASE_DB_URL` repo secrets are set).
-5. **Smoke test:** submit a test email → confirm the row appears in Supabase
+6. **Smoke test:** submit a test email → confirm the row appears in Supabase
    Studio and the confirmation email arrives within 30s.
 
 ## Tech

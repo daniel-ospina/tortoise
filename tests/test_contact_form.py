@@ -7,34 +7,42 @@ Guards the contract the form exists to honour — at the repo level, no network:
      CONSTANT in the Pages Function, never a request field — that is what keeps
      the form from being an open relay. A future edit that made the recipient
      configurable, or drifted it to another address, fails here.
-  2. FAIL LOUDLY WHEN UNCONFIGURED. With the intake endpoint absent the endpoint
-     must answer 503 `not_configured` with a human-actionable message — never a
-     200. This is the #3616 lesson applied to a second surface: a requirement
-     that can only be read cannot fail. (The live proof is the curl probe in
-     website/README.md; this pins the source that produces it.)
+  2. FAIL LOUDLY WHEN UNCONFIGURED. With the intake endpoint — or the intake's
+     own inbound secret — absent, the endpoint must answer 503 `not_configured`
+     with a human-actionable message, never a 200. This is the #3616 lesson
+     applied to a second surface: a requirement that can only be read cannot
+     fail. (The live proof is the curl probe in website/README.md; this pins the
+     source that produces it.)
   3. THE FORM IS AN INTAKE PRODUCER, WITH NO PROVIDER CALL IN ITS PATH. The
      owner's architecture is WE RECEIVE: customers email hello@/support@ and
      intake processes the message; no reply is required for the product to
      work, and outbound email has exactly two legitimate homes — replying to a
      user who emailed first, and auth flows. So the form sends NO email: no
      `RESEND_*` read, no provider endpoint, no `Authorization`/`Bearer` header,
-     and no send-capable credential. `premise-labs#393` is a BUDGET TO MANAGE
-     (objective: zero quota-rejected sends), NOT a reason to refuse to build —
-     the absence of a sending key is the shape of an OPEN transport decision,
-     not a quota verdict.
+     and no send-capable credential. The ONE secret it reads is the intake's own
+     inbound shared secret (`x-inbound-secret`), provisioned on the intake for
+     this producer's source name: it submits an item and nothing else.
+     `premise-labs#393` is a BUDGET TO MANAGE (objective: zero quota-rejected
+     sends), NOT a reason to refuse to build — sending is not forbidden, it is
+     simply not this leg's job.
   4. THE FORM IS SURFACED, AND `hello@` IS VISIBLE. `/contact` is a real page,
      linked from the company landing page, the product footer, the FAQ footer
      and the docs next-steps, and the trailing-slash / .html variants redirect
      to it. The decided address is shown plainly on the outside surface (lede
      and direct-mailto fallback), not hidden behind an error path.
-  5. THE TRANSPORT IS A SINGLE, PROVIDER-NEUTRAL SEAM — AND IT IS UNRESOLVED.
-     One submission becomes one JSON item `{name, replyTo, message, receivedAt,
-     source}` posted to a configurable intake endpoint from
-     `functions/_shared/contact-transport.ts`, behind `enqueue()`. The owner has
-     NOT settled the transport (a queue vs. email), so the open decision and the
-     owner's architecture — with #393 recorded as a budget to manage, not a
-     reason to refuse to build — must stay recorded in the code and in
-     website/README.md for the next reader.
+  5. THE TRANSPORT IS A SINGLE SEAM, WIRED AT THE EXISTING INTAKE. One
+     submission becomes one item in the intake's own envelope
+     `{source, source_item_id, payload}` — posted, with `x-inbound-secret`, to
+     the endpoint configured in `CONTACT_INTAKE_URL` — from
+     `functions/_shared/contact-transport.ts`, behind `enqueue()`. The endpoint
+     and its contract are the ones that already exist (one intake, many
+     producers; premise-labs #426, relay ruling on #2409), and the outbound
+     email leg remains the owner's open question: the owner's architecture, with
+     #393 recorded as a budget to manage rather than a reason to refuse to
+     build, must stay recorded in the code and in website/README.md for the next
+     reader. The visitor-facing confirmation promises NO reply — intake is the
+     receiving mechanism, and a promise nothing can keep is not a message to
+     send.
 
 Run:  python -m pytest tests/test_contact_form.py -v
 """
@@ -125,7 +133,16 @@ def test_missing_endpoint_returns_503_not_configured() -> None:
     # The intake endpoint comes from env, and its gate precedes the network call.
     assert 'const INTAKE_URL_ENV = "CONTACT_INTAKE_URL"' in tsrc
     assert "envString(env, INTAKE_URL_ENV)" in tsrc
-    assert re.search(r'if\s*\(\s*intakeUrl\s*===\s*""\s*\)', tsrc), "missing-endpoint gate not found"
+    # The endpoint requires the intake's inbound secret too, so BOTH absences are
+    # the same visible failure — a URL alone would be answered 401/403 and the
+    # submission dropped, which is the silent loss this contract forbids.
+    assert 'const INTAKE_SECRET_ENV = "CONTACT_INTAKE_SECRET"' in tsrc
+    assert re.search(
+        r'if\s*\(\s*intakeUrl\s*===\s*""\s*\|\|\s*intakeSecret\s*===\s*""\s*\)', tsrc
+    ), "missing-endpoint/secret gate not found"
+    assert '"x-inbound-secret": intakeSecret' in tsrc, (
+        "the seam must send the header the intake requires"
+    )
     gate_pos = tsrc.index('intakeUrl === ""')
     fetch_pos = tsrc.index("await fetch(")
     assert gate_pos < fetch_pos, "the configuration gate must precede the network call"
@@ -168,19 +185,50 @@ def test_no_email_provider_or_credential_anywhere_in_the_form_path() -> None:
         assert "RESEND_" not in text, f"{path.relative_to(REPO_ROOT)} reads a RESEND_* variable"
 
 
-def test_the_only_configuration_is_the_intake_endpoint() -> None:
-    """The seam reads exactly one variable — a plain URL, no secret — and the
-    function reads none of its own."""
+def test_the_only_configuration_is_the_intake_endpoint_and_its_inbound_secret() -> None:
+    """The seam reads exactly two variables — the endpoint and the intake's own
+    inbound secret — and the function reads none of its own.
+
+    The secret is required by the EXISTING intake, not by us: it derives the
+    variable name from the source and answers 401/403 without a match. It is an
+    inbound credential (it can submit an item and nothing else); no
+    send-capable provider key is read anywhere.
+    """
     tsrc = _src(TRANSPORT_TS)
     assert 'const INTAKE_URL_ENV = "CONTACT_INTAKE_URL"' in tsrc
-    # Exactly one env read, and it is the intake endpoint.
-    assert tsrc.count("envString(env, INTAKE_URL_ENV)") == 1
+    # Exactly two env reads, and the function performs none of its own.
+    assert tsrc.count("envString(env, ") == 3, (
+        "one read per variable in the gate, plus one in the gate's log line"
+    )
     assert _src(FUNCTION_TS).count("envString(") == 0
-    # Exactly one env-var-name constant, and it is not secret-shaped.
     env_names = re.findall(r'^\s*const\s+\w*ENV\w*\s*=\s*"([^"]+)"', tsrc, flags=re.M)
-    assert env_names == ["CONTACT_INTAKE_URL"], f"unexpected env variables: {env_names}"
+    assert env_names == ["CONTACT_INTAKE_URL", "CONTACT_INTAKE_SECRET"], (
+        f"unexpected env variables: {env_names}"
+    )
+    # The endpoint is not secret-shaped…
     for forbidden in ("API_KEY", "SECRET", "TOKEN", "PASSWORD"):
-        assert forbidden not in env_names[0]
+        assert forbidden not in env_names[0], f"the intake URL must not be secret-shaped: {env_names[0]}"
+    # …and the one secret is the INTAKE's, not a provider's: nothing in the file
+    # names a mail provider, and no send-capable name is read.
+    for forbidden in ("RESEND", "SENDGRID", "MAILGUN", "POSTMARK", "API_KEY"):
+        assert forbidden not in tsrc, f"a send-capable provider appears in the seam: {forbidden}"
+
+
+def test_the_source_name_is_env_name_safe() -> None:
+    """The source must survive being uppercased into an env-var NAME.
+
+    The intake resolves its per-source secret as
+    `INBOUND_SECRET_${source.toUpperCase()}` (swarm/supabase/functions/
+    inbound-ingest/index.ts), so a slash or a space would ask for a variable no
+    platform can set — and the endpoint would answer `403 unknown_source`. The
+    earlier `website/contact` form of this constant could never have worked.
+    """
+    tsrc = _src(TRANSPORT_TS)
+    assert 'INTAKE_SOURCE = "website_contact"' in tsrc
+    source = re.search(r'INTAKE_SOURCE = "([^"]+)"', tsrc).group(1)
+    assert re.fullmatch(r"[A-Za-z0-9_]+", source), (
+        f"the source must be env-name-safe (uppercased into INBOUND_SECRET_<SRC>): {source!r}"
+    )
 
 
 # ── 5. The transport seam is singular, provider-neutral, and unresolved ───
@@ -204,17 +252,66 @@ def test_the_enqueue_is_isolated_behind_one_seam() -> None:
 
 
 def test_queued_item_has_exactly_the_agreed_shape() -> None:
-    """One item: name, reply-to email, message, received-at, source."""
+    """One item, in the intake's OWN envelope: `source`, `source_item_id`,
+    `payload` — the submission inside the payload, plus the text fields the
+    intake reads."""
     tsrc = _src(TRANSPORT_TS)
+    assert "source: INTAKE_SOURCE" in tsrc, "the item must carry its producing surface"
+    assert "source_item_id: crypto.randomUUID()" in tsrc, (
+        "the intake dedupes on (source, source_item_id): it must be minted per submission"
+    )
+    assert re.search(r"payload:\s*\{", tsrc), "the submission travels in the payload"
     assert "name: msg.name" in tsrc
     assert "replyTo: msg.replyTo" in tsrc
     assert "message: msg.message" in tsrc
-    assert "receivedAt: new Date().toISOString()" in tsrc, "the item must carry a receipt time"
-    assert "source: INTAKE_SOURCE" in tsrc, "the item must carry its producing surface"
-    assert 'INTAKE_SOURCE = "website/contact"' in tsrc
-    # The item is POSTed as JSON to the configured endpoint.
-    assert re.search(r'headers:\s*\{\s*"Content-Type":\s*"application/json"\s*\}', tsrc)
+    assert "receivedAt = new Date().toISOString()" in tsrc, "the payload must carry a receipt time"
+    # `payload.subject`/`payload.body` are what the intake extracts as the item's
+    # text (they feed its pre-LLM risk scan), so the message must be readable
+    # there — not only as JSON — and the reply-to address must travel with it.
+    assert "subject: `Contact form" in tsrc, "the item needs a readable subject"
+    assert "body: `${msg.message}" in tsrc, "the item needs a readable body"
+    assert "<${msg.replyTo}>" in tsrc, "the intake's text must carry the reply-to address"
+    # The item is POSTed as JSON to the configured endpoint, with the header the
+    # intake requires.
+    assert '"Content-Type": "application/json"' in tsrc
+    assert '"x-inbound-secret": intakeSecret' in tsrc
     assert "body: JSON.stringify(item)" in tsrc
+
+
+def test_the_confirmation_promises_no_reply() -> None:
+    """The visitor-facing confirmation must be factual, and must not promise a
+    reply.
+
+    Intake is the receiving mechanism and a reply is the exception (outbound
+    email belongs to replying to a user who wrote first). While the reader gap
+    is open (swarm#18407; the #426 interim copy is unbound), "we'll reply" is a
+    commitment this transport cannot keep — so the confirmation says only what
+    is true at that moment: the message was received. This is the relay's
+    condition on shipping the form, and it is pinned here because copy is the
+    easiest thing to soften without noticing.
+    """
+    src = _src(FUNCTION_TS)
+    success = src[src.rindex("return json(") :]
+    assert "received your message" in success, "the confirmation must state receipt"
+    for promise in ("We'll reply", "we will reply", "We will reply", "reply to the address you gave"):
+        assert promise not in src, f"the form promises a reply it cannot guarantee: {promise!r}"
+    # The email field's hint states a PURPOSE restriction (only used to follow up
+    # if we need to), never a commitment to write back.
+    html = _src(CONTACT_HTML)
+    assert "We reply to this address" not in html, "the email hint promises a reply"
+    assert "never a mailing list" in html, "the no-mailing-list assurance must stay stated"
+
+
+def test_the_intake_contract_is_recorded_in_the_seam() -> None:
+    """The three non-obvious facts about the existing intake stay written down,
+    so a future edit cannot "simplify" the envelope back into a shape the
+    endpoint answers 403 to."""
+    tsrc = _src(TRANSPORT_TS)
+    assert "inbound-ingest" in tsrc, "the endpoint's function must be named"
+    assert "INBOUND_SECRET_" in tsrc, "the per-source secret derivation must be stated"
+    assert "unknown_source" in tsrc, "the 403 the wrong source name earns must be recorded"
+    assert "one intake, many producers" in tsrc.lower(), "the architecture must be named"
+    assert "x-inbound-secret" in tsrc, "the required header must be named"
 
 
 def test_transport_decision_is_marked_open_with_the_reason() -> None:
@@ -226,8 +323,11 @@ def test_transport_decision_is_marked_open_with_the_reason() -> None:
     assert "NOT SETTLED" in tsrc
     assert "393" in tsrc, "the #393 budget must be named"
     assert "quota" in tsrc.lower(), "#393 is a managed quota budget"
-    assert "no credential" in tsrc.lower() or "do not" in tsrc.lower(), (
-        "the seam must say a send-capable credential is not to be provisioned"
+    assert "send-capable credential" in tsrc.lower(), (
+        "the seam must state that no SEND-capable credential is provisioned"
+    )
+    assert "x-inbound-secret" in tsrc, (
+        "the inbound credential it DOES carry must be named, not implied away"
     )
 
 
