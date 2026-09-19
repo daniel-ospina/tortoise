@@ -78,9 +78,6 @@ def cli(tmp_path, home):
         # capture install into the REAL ~/.codex. Empty ⇒ ~/.codex under the
         # temp HOME.
         "CODEX_HOME": "",
-        # Hermetic: same for the Cursor seam (#3819) — empty ⇒ ~/.cursor under
-        # the temp HOME, never the developer's real ~/.cursor.
-        "CURSOR_HOME": "",
     }
     return lambda *argv: _run(argv, env, root), root, home
 
@@ -1476,7 +1473,6 @@ def test_explicit_dir_keeps_an_unresolvable_home_irrelevant(
         **os.environ,
         "HOME": home,
         "CODEX_HOME": "",
-        "CURSOR_HOME": "",
         "TORTOISE_DB_URI": "",
         "TORTOISE_SECRET_PEPPER": "test-static-pepper",
     }
@@ -1502,7 +1498,7 @@ def test_explicit_dir_keeps_an_unresolvable_home_irrelevant(
     assert "to repair" in without_dir.stderr, without_dir.stderr
 
 
-# ── cursor: the artifact + the $CURSOR_HOME registration (#3819) ─────────
+# ── cursor: the artifact + the ~/.cursor registration (#3819) ───────────
 
 
 def _cursor_json(home: Path) -> dict:
@@ -1539,8 +1535,8 @@ def _cursor_session_end_commands(*roots: Path) -> list[str]:
 
 
 def test_cursor_install_writes_the_hook_and_merges_the_absolute_command(home):
-    """The Cursor seam: the shipped hook into ``$CURSOR_HOME/hooks/`` (0755)
-    and a ``sessionEnd`` registration in ``$CURSOR_HOME/hooks.json`` whose
+    """The Cursor seam: the shipped hook into ``~/.cursor/hooks/`` (0755)
+    and a ``sessionEnd`` registration in ``~/.cursor/hooks.json`` whose
     command is the script's ABSOLUTE path.
 
     Mutation: register a relative command (Cursor runs the hook from its own
@@ -1630,76 +1626,119 @@ def test_cursor_install_refuses_a_nested_session_end_entry(home):
     assert "Cursor" in res.error and "manual" in res.error, res.error
 
 
-def test_cursor_install_honors_cursor_home(tmp_path, monkeypatch):
-    """Cursor's hook source is ``$CURSOR_HOME/hooks.json`` — an install that
-    ignored it would register the hook in a file Cursor never reads on every
-    non-default setup.
+def test_cursor_install_refuses_a_document_cursor_would_reject(home):
+    """Cursor's validator iterates EVERY event and rejects the WHOLE file on an
+    unknown step, a non-list event, or any unparseable entry — including under
+    an event we do not merge.  The refusal must be whole-document, not scoped
+    to ``sessionEnd``.
 
-    Mutation: resolve ``~/.cursor`` unconditionally — this REDs."""
-    home = tmp_path / "home"
-    cursor_home = tmp_path / "elsewhere"
-    home.mkdir()
-    monkeypatch.setenv("CURSOR_HOME", str(cursor_home))
-
+    Mutation: check only ``spec.event`` (the nested-entry-only guard) — an
+    invalid entry under another event installs "successfully" and this REDs."""
+    (home / ".cursor").mkdir(parents=True)
+    path = home / ".cursor" / "hooks.json"
+    # (a) an unparseable entry under a DIFFERENT event
+    path.write_text(json.dumps({"version": 1, "hooks": {
+        "afterFileEdit": [{"hooks": [{"type": "command", "command": "/x"}]}],
+    }}))
     res = install_capture("cursor", home=home)
+    assert not res.ok, res.actions
+    assert "afterFileEdit" in res.error, res.error
 
-    assert res.ok, res.error
-    assert (cursor_home / "hooks.json").is_file()
-    assert (cursor_home / "hooks" / capture_install.CURSOR_SCRIPT_NAME).is_file()
-    assert not (home / ".cursor").exists()
+    # (b) an unknown event key
+    path.write_text(json.dumps({"version": 1, "hooks": {
+        "notARealStep": [{"command": "/bin/other"}],
+    }}))
+    res = install_capture("cursor", home=home)
+    assert not res.ok, res.actions
+    assert "unknown hook type" in res.error, res.error
 
-
-@pytest.mark.parametrize("cursor_home", [None, "", "   ", "relcursor", "~/.cursor"])
-def test_cursor_default_root_is_absolute_and_expanded(tmp_path, monkeypatch,
-                                                      cursor_home):
-    """The ONE resolver always returns an ABSOLUTE, expanded root — the
-    layout's ``absolute_command`` invariant cannot hold otherwise. Verbatim, a
-    relative ``$CURSOR_HOME`` registers a command Cursor resolves against its
-    own cwd (a silent no-capture), and a literal ``~/.cursor`` makes a literal
-    ``~`` directory.
-
-    Mutation: return ``Path(env)`` / ``home / default`` verbatim — the
-    relative and tilde cases are non-absolute and this REDs."""
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))  # hermetic `~` expansion
-    if cursor_home is None:
-        monkeypatch.delenv("CURSOR_HOME", raising=False)
-    else:
-        monkeypatch.setenv("CURSOR_HOME", cursor_home)
-    layout = hook_install.get_layout("cursor")
-
-    root = hook_install.default_root(layout, home)
-
-    assert root == {
-        None: home / ".cursor",
-        "": home / ".cursor",
-        "   ": home / ".cursor",
-        "relcursor": home / "relcursor",
-        "~/.cursor": home / ".cursor",
-    }[cursor_home], cursor_home
-    assert root.is_absolute(), root
+    # (c) a field Cursor's validator rejects (a non-numeric timeout)
+    path.write_text(json.dumps({"version": 1, "hooks": {
+        "sessionEnd": [{"command": "/bin/other", "timeout": "30s"}],
+    }}))
+    res = install_capture("cursor", home=home)
+    assert not res.ok, res.actions
+    assert "sessionEnd" in res.error, res.error
 
 
-@pytest.mark.parametrize("cursor_home", ["relcursor", "~/.cursor"])
-def test_cursor_relative_or_tilde_cursor_home_registers_absolute_and_status_clean(
-        tmp_path, cursor_home, monkeypatch):
-    """A relative or literal-tilde ``$CURSOR_HOME`` still registers the
-    script's ABSOLUTE path, and ``status`` recognizes it in the same run.
+def test_cursor_hooks_status_calls_a_malformed_entry_a_manual_fix(home):
+    """`hooks status` must NOT recommend `upgrade` for a malformed flat entry —
+    `upgrade` refuses on it, so the hint would point at a command that refuses.
+    `settings-unreadable-entry` belongs in the manual-fix set.
 
-    Mutation: resolve ``$CURSOR_HOME`` verbatim — the command is not absolute
-    and ``status`` reports ``settings-stale-command`` → this REDs."""
+    Mutation: drop `settings-unreadable-entry` from the `_manual` frozenset —
+    status recommends `hooks upgrade` and this REDs."""
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor" / "hooks.json").write_text(json.dumps(
+        {"version": 1, "hooks": {capture_install.CURSOR_EVENT: [
+            {"hooks": [{"type": "command", "command": "/x"}]}]}}))
+
+    r = _run(("hooks", "status", "--harness", "cursor",
+              "--dir", str(capture_install.cursor_home(home))),
+             {**os.environ, "HOME": str(home), "TORTOISE_DB_URI": "",
+              "TORTOISE_SECRET_PEPPER": "test-static-pepper"}, home)
+
+    assert r.returncode != 0, r.stdout
+    assert "manual fix" in r.stdout, r.stdout
+    assert "hooks upgrade" not in r.stdout, r.stdout
+
+
+def test_cursor_root_is_home_scoped_and_ignores_an_unrelated_env(
+        tmp_path, monkeypatch):
+    """Cursor resolves ``~/.cursor/hooks.json`` and has NO config-dir env var —
+    verified: the string ``CURSOR_HOME`` appears nowhere in Cursor 3.20.21's JS
+    bundle, asar or binary (`CursorHooksService` joins
+    ``pathService.userHome() / ".cursor"``).  The install must land in
+    ``$HOME/.cursor`` regardless of any ambient ``CURSOR_HOME``, or it writes a
+    file Cursor never reads — the silent no-capture class this seam exists to
+    prevent.
+
+    Mutation: declare ``root_env="CURSOR_HOME"`` on the cursor layout —
+    setting it redirects the install and this REDs."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("CURSOR_HOME", cursor_home)
-    resolved = (home / ".cursor" if cursor_home.startswith("~")
-                else home / cursor_home)
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path / "elsewhere"))
+    layout = hook_install.get_layout("cursor")
+
+    assert layout.root_env is None, "Cursor has no config-dir env var"
+    assert hook_install.default_root(layout, home) == home / ".cursor"
+    assert install_capture("cursor", home=home).ok
+    assert (home / ".cursor" / "hooks.json").is_file()
+    assert not (tmp_path / "elsewhere").exists(), (
+        "an ambient CURSOR_HOME redirected the install away from ~/.cursor")
+
+
+def test_cursor_default_root_is_absolute_or_refuses(tmp_path, monkeypatch):
+    """The resolver always returns an ABSOLUTE root — the layout's
+    ``absolute_command`` invariant cannot hold otherwise.  A RELATIVE ``$HOME``
+    (``Path.home()`` returns it verbatim) makes the root relative, so it must
+    REFUSE loudly rather than register a command Cursor resolves somewhere
+    unknowable.
+
+    Mutation: return ``home / root_home_default`` without the absoluteness
+    guard — a relative home yields a relative root and this REDs."""
+    layout = hook_install.get_layout("cursor")
+    assert hook_install.default_root(layout, tmp_path / "home").is_absolute()
+    with pytest.raises(ValueError, match="absolute"):
+        hook_install.default_root(layout, Path("relhome"))
+
+
+def test_cursor_install_registers_an_absolute_command_and_status_clean(
+        tmp_path, monkeypatch):
+    """An install registers the script's ABSOLUTE path, and ``status``
+    recognizes that registration in the same run.
+
+    Mutation: register a relative command — the registered path is not
+    absolute and ``status`` reports ``settings-stale-command`` → this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    resolved = home / ".cursor"
 
     assert install_capture("cursor", home=home).ok
 
-    entries = json.loads((resolved / "hooks.json").read_text())["hooks"][
-        capture_install.CURSOR_EVENT]
-    registered = [e["command"] for e in entries]
+    registered = _cursor_commands(home)
     assert registered == [
         str(resolved / "hooks" / capture_install.CURSOR_SCRIPT_NAME)], registered
     assert os.path.isabs(registered[0]), registered
@@ -1707,28 +1746,19 @@ def test_cursor_relative_or_tilde_cursor_home_registers_absolute_and_status_clea
         "the installer produced state the drift detector calls drifted")
 
 
-@pytest.mark.parametrize("cursor_home", ["relcursor", "~/.cursor"])
-def test_cursor_reinstall_with_a_relative_or_tilde_cursor_home_does_not_duplicate(
-        tmp_path, cursor_home, monkeypatch):
-    """Installing twice from a relative or literal-tilde ``$CURSOR_HOME``
-    leaves ONE ``sessionEnd`` registration.
+def test_cursor_reinstall_does_not_duplicate(tmp_path, monkeypatch):
+    """Installing twice leaves ONE ``sessionEnd`` registration.
 
-    Mutation: resolve ``$CURSOR_HOME`` verbatim — the detector does not
-    recognize our own (relative) registration, so the second install appends a
-    second entry → this REDs."""
+    Mutation: the detector does not recognize our own registration, so the
+    second install appends a duplicate → this REDs."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("CURSOR_HOME", cursor_home)
-    resolved = (home / ".cursor" if cursor_home.startswith("~")
-                else home / cursor_home)
 
     for _ in range(2):
         assert install_capture("cursor", home=home).ok
 
-    entries = json.loads((resolved / "hooks.json").read_text())["hooks"][
-        capture_install.CURSOR_EVENT]
-    assert len(entries) == 1, entries
+    assert len(_cursor_entries(home)) == 1, _cursor_json(home)
 
 
 # The `--dir`-vs-unresolvable-HOME boundary is covered for cursor by
@@ -1973,8 +2003,8 @@ def test_cursor_hooks_status_reports_the_install_as_current(cli):
 
 def test_cursor_hooks_status_defaults_to_cursor_home_not_the_cwd(cli):
     """With NO ``--dir``, `tortoise hooks status --harness cursor` resolves its
-    root from ``$CURSOR_HOME`` (here ``$HOME/.cursor``) — the only path Cursor
-    reads — not the cwd.
+    root from ``~/.cursor`` (``$HOME/.cursor``) — the only path Cursor reads
+    — not the cwd.
 
     Mutation: resolve the default root from the cwd (``--dir .``) → the check
     lands on a path with no install, reports ``missing-script`` +
@@ -1994,12 +2024,12 @@ def test_cursor_hooks_status_defaults_to_cursor_home_not_the_cwd(cli):
 
 def test_cursor_hooks_upgrade_defaults_to_cursor_home_not_the_cwd(cli):
     """With NO ``--dir``, `tortoise hooks upgrade --harness cursor` writes into
-    ``$CURSOR_HOME`` — the script plus an ABSOLUTE registration — and leaves
-    the project path untouched.
+    ``~/.cursor`` — the script plus an ABSOLUTE registration — and leaves the
+    project path untouched.
 
     Mutation: resolve the default root from the cwd (``--dir .``) → the
     upgrade writes ``<cwd>/hooks.json`` and ``<cwd>/hooks/`` with a RELATIVE
-    command, prints ``upgraded.``, and the real ``$CURSOR_HOME/hooks.json`` is
+    command, prints ``upgraded.``, and the real ``~/.cursor/hooks.json`` is
     never created → this REDs (the #3819 silent no-capture)."""
     run, root, home = cli
     cursor_root = capture_install.cursor_home(home)
@@ -2072,13 +2102,12 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
     no `sessionEnd` registration lands and this REDs."""
     root = tmp_path / "proj"
     home = tmp_path / "home"
-    cursor_home = tmp_path / "cursor"
+    cursor_home = home / ".cursor"
     root.mkdir()
     home.mkdir()
     env = {
         **os.environ,
         "HOME": str(home),
-        "CURSOR_HOME": str(cursor_home),
         "TORTOISE_DB_URI": "",
         "TORTOISE_SECRET_PEPPER": "test-static-pepper",
     }
@@ -2115,7 +2144,6 @@ def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
     env = {
         **os.environ,
         "HOME": str(home),
-        "CURSOR_HOME": str(home / ".cursor"),
         "TORTOISE_DB_URI": "",
         "TORTOISE_SECRET_PEPPER": "test-static-pepper",
     }

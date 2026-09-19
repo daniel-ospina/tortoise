@@ -938,12 +938,14 @@ def _codex_home_isolation(monkeypatch):
 
 
 # ── #3819 (P1-2): ambient CURSOR_HOME isolation ───────────────────────────
-# `capture_install.cursor_home()` honors `$CURSOR_HOME` for the whole tree, so
-# a developer/CI/operator machine that exports it would send every direct
-# `install_capture("cursor", home=...)` — and every cursor test in the suite —
-# into the REAL `~/.cursor`. Cleared per test so no cursor test can mutate the
-# machine it runs on; the sentinel is what the guard test in
-# test_cursor_capture_hook.py reads to prove the scrub ran.
+# Cursor has NO config-dir env var (verified: `CURSOR_HOME` appears nowhere in
+# Cursor 3.20.21's bundle; it reads `~/.cursor/hooks.json`), so the resolver no
+# longer consults one. The scrub is DEFENSIVE: a future code path that
+# reintroduced an env-scoped Cursor root cannot silently redirect an install
+# away from the real `~/.cursor` during a test. Every cursor test also passes
+# an explicit `home=`, so nothing here touches the real `~/.cursor`. The
+# sentinel is what the guard test in test_cursor_capture_hook.py reads to
+# prove the fixture ran.
 @pytest.fixture(autouse=True)
 def _cursor_home_isolation(monkeypatch):
     monkeypatch.delenv("CURSOR_HOME", raising=False)

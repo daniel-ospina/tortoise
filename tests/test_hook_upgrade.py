@@ -1510,8 +1510,8 @@ class TestDoctorIntegration:
         assert any("hooks status --harness codex" in ln for ln in lines), lines
 
     def test_doctor_reports_a_cursor_install_at_cursor_home(self, doctor_env, capsys):
-        """Doctor checks the Cursor seam at `$CURSOR_HOME` (here `~/.cursor`),
-        the only path Cursor reads — not the cwd (#3819).
+        """Doctor checks the Cursor seam at ``~/.cursor``, the only path Cursor
+        reads — not the cwd (#3819).
 
         MUTATION: check only claude+codex layouts → no cursor row → RED.
         """

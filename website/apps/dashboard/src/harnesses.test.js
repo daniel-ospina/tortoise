@@ -352,22 +352,27 @@ test('#3818: the Codex capture install copy honours $CODEX_HOME', () => {
 
 // #3819: the Cursor capture install. Cursor's MCP copy is a JSON file (so the
 // capture step lives in HARNESS_CAPTURE_INSTALL + HARNESS_STEPS.cursor), the
-// registration is HOME-scoped through ${CURSOR_HOME:-$HOME/.cursor}, and the
-// IDE-ONLY limitation is disclosed — Cursor's own docs say cloud agents have
-// no editor-lifetime session boundary, and the disclosure must sit where the
-// user chooses Cursor, not in a footnote.
+// registration is HOME-scoped at `~/.cursor` (Cursor has no config-dir env
+// var), and the IDE-ONLY limitation is disclosed — Cursor's own docs say
+// cloud agents have no editor-lifetime session boundary, and the disclosure
+// must sit where the user chooses Cursor, not in a footnote.
 test('#3819: the Cursor capture install is home-scoped, flat, and discloses the IDE-only limit', () => {
   const cursor = HARNESS_CAPTURE_INSTALL.cursor
   assert.ok(cursor, 'HARNESS_CAPTURE_INSTALL.cursor present')
   assert.match(cursor, /tortoise\/cursor-hooks\/session-end\.sh/,
     'the capture step must name the declared seam artifact')
-  assert.match(cursor, /\$\{CURSOR_HOME:-\$HOME\/\.cursor\}/,
-    'the copy must use the ${CURSOR_HOME:-$HOME/.cursor} default the installer honours')
+  assert.match(cursor, /~\/\.cursor\/hooks\.json/,
+    'the copy must name ~/.cursor/hooks.json, the one path Cursor reads')
+  assert.doesNotMatch(cursor, /CURSOR_HOME:-/,
+    'Cursor has NO config-dir env var — do not teach a ${CURSOR_HOME:-…} default')
   assert.match(cursor, /sessionEnd/, 'the copy must name the sessionEnd event')
   // the flat entry shape is load-bearing — a nested matcher group invalidates
   // Cursor's WHOLE hooks.json (its validator rejects a non-string command)
   assert.match(cursor, /FLAT/,
     'the copy must warn that the entry is flat (a nested entry disables all Cursor hooks)')
+  // Cursor's validator also requires a document `version`
+  assert.match(cursor, /version/,
+    'the copy must warn that hooks.json needs a numeric version')
   // the IDE-only limitation is disclosed on the install surface
   assert.match(cursor, /IDE-ONLY/)
   assert.match(cursor, /[Cc]loud [Aa]gent/,

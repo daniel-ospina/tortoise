@@ -49,9 +49,9 @@
 # desktop editor IS the expected surface for this seam; the cloud-agent gap is
 # disclosed where a user chooses Cursor, not engineered around here.
 #
-# Cursor reads hook registrations ONLY from `$CURSOR_HOME/hooks.json`
-# (default `~/.cursor/hooks.json`); a project-local `<repo>/.cursor/hooks.json`
-# is gated on workspace trust and fires nothing when untrusted. Install once:
+# Cursor reads hook registrations ONLY from `~/.cursor/hooks.json` (Cursor has
+# no config-dir env var; a project-local `<repo>/.cursor/hooks.json` is gated
+# on workspace trust). Install once:
 #   tortoise install cursor           # installs this hook + the registration
 #
 # The hook ALWAYS exits 0: memory capture must never block or fail a session.

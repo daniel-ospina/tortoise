@@ -244,12 +244,15 @@ class HarnessLayout:
 
     ``root_env`` declares the env var a harness resolves its install root
     through when the caller passes NO explicit directory (``root_home_default``
-    is the ``$HOME``-relative fallback): Codex reads its hooks ONLY from
-    ``$CODEX_HOME`` and Cursor ONLY from ``$CURSOR_HOME`` (never a
-    project-local file), so a cwd default would inspect and "upgrade" a path
-    the harness never reads while the real install stays broken (#3818,
-    #3819).  ``None`` keeps the cwd default — Claude's install is
-    project-scoped.
+    is the ``$HOME``-relative fallback).  Codex reads its hooks ONLY from
+    ``$CODEX_HOME``; Cursor has NO config-dir env var (verified — the string
+    ``CURSOR_HOME`` appears nowhere in Cursor 3.20.21's JS bundle, asar or
+    binary; it resolves ``pathService.userHome() / ".cursor"``), so the Cursor
+    layout declares ``root_env=None`` with ``root_home_default=".cursor"``: a
+    HOME-scoped root with no env override.  A layout with NEITHER (Claude)
+    keeps the cwd default — Claude's install is project-scoped.  A cwd default
+    for a HOME-scoped harness would inspect and "upgrade" a path it never
+    reads while the real install stays broken (#3818, #3819).
 
     ``flat_entry`` selects the settings ENTRY shape.  Claude and Codex nest
     the handler under a matcher group (``{"hooks": [{"type": "command", …}]}``);
@@ -315,17 +318,17 @@ def _claude_layout() -> HarnessLayout:
 def _cursor_layout() -> HarnessLayout:
     """The Cursor capture seam as a layout (#3819) — NOT a fork of the logic.
 
-    Cursor reads hook registrations from ``$CURSOR_HOME/hooks.json``
-    (default ``~/.cursor/hooks.json``) — verified against the installed
-    bundle (``CursorHooksService`` resolves ``pathService.userHome() /
-    ".cursor" / "hooks.json"``); a project-local ``<repo>/.cursor/hooks.json``
-    is gated on workspace trust and fires nothing when untrusted, so the
-    HOME-scoped registration is the reliable one.  Its entry is a FLAT
-    ``{"command": …, "timeout": …}`` object (``flat_entry``), the script is
-    registered by ABSOLUTE path (the command runs from the hook cwd, not the
-    install dir), and there is no matcher key.  ``sessionEnd`` is an
-    IDE-only event: Cursor's docs state cloud agents have no editor-lifetime
-    session boundary.
+    Cursor reads hook registrations from ``~/.cursor/hooks.json`` (verified
+    against the installed bundle: ``CursorHooksService`` resolves
+    ``pathService.userHome() / ".cursor" / "hooks.json"``, and there is NO
+    config-dir env var — ``CURSOR_HOME`` appears nowhere in the app bundle);
+    a project-local ``<repo>/.cursor/hooks.json`` is gated on workspace trust
+    and fires nothing when untrusted, so the HOME-scoped registration is the
+    reliable one.  Its entry is a FLAT ``{"command": …, "timeout": …}``
+    object (``flat_entry``), the script is registered by ABSOLUTE path (the
+    command runs from the hook cwd, not the install dir), and there is no
+    matcher key.  ``sessionEnd`` is an IDE-only event: Cursor's docs state
+    cloud agents have no editor-lifetime session boundary.
     """
     return HarnessLayout(
         harness="cursor",
@@ -333,7 +336,7 @@ def _cursor_layout() -> HarnessLayout:
         settings_file="hooks.json",
         absolute_command=True,
         matcher=False,
-        root_env="CURSOR_HOME",
+        root_env=None,
         root_home_default=".cursor",
         flat_entry=True,
         scripts=(
@@ -398,12 +401,13 @@ def default_root(layout: HarnessLayout, home: Path) -> Path:
     """The install root to use when the caller passes no explicit directory.
 
     Claude's install is project-scoped, so its default is the cwd (``.``).  A
-    layout with ``root_env`` resolves through that env var — for Codex the
-    documented ``${CODEX_HOME:-$HOME/.codex}`` and for Cursor the analogous
-    ``${CURSOR_HOME:-$HOME/.cursor}`` — because each reads its hooks only from
-    the HOME-scoped ``hooks.json``: a cwd default would inspect and "upgrade"
-    the dead project-local path this seam replaces, and report success while
-    nothing is captured (#3818, #3819).
+    layout with a HOME-scoped root (``root_env`` and/or ``root_home_default``)
+    resolves through the env var when set — Codex's documented
+    ``${CODEX_HOME:-$HOME/.codex}`` — else ``$HOME/<root_home_default>``.
+    Cursor declares only ``root_home_default=".cursor"`` (no env var; Cursor
+    has none), so its root is ``~/.cursor``.  A cwd default for such a harness
+    would inspect and "upgrade" the dead project-local path this seam
+    replaces, and report success while nothing is captured (#3818, #3819).
 
     The returned root is ALWAYS absolute and ``~``-expanded.  Returning the
     env value verbatim registered a command the harness could never resolve: a
@@ -415,10 +419,11 @@ def default_root(layout: HarnessLayout, home: Path) -> Path:
     same HOME-scoped base the documented fallback uses, so the root is
     deterministic and ``install``/``status`` can never disagree (#3818).
     """
-    if layout.root_env is None:
+    if layout.root_env is None and not layout.root_home_default:
         return Path(".")
     home = Path(home).expanduser()
-    env = os.environ.get(layout.root_env, "").strip()
+    env = (os.environ.get(layout.root_env, "").strip()
+           if layout.root_env else "")
     root = (Path(env).expanduser() if env
             else home / (layout.root_home_default or ""))
     if not root.is_absolute():
@@ -426,12 +431,11 @@ def default_root(layout: HarnessLayout, home: Path) -> Path:
     if not root.is_absolute():
         # Truly unresolvable (not even the supplied home is absolute) —
         # refuse loudly rather than register a cwd-relative command that
-        # Codex will resolve somewhere unknowable.
+        # the harness will resolve somewhere unknowable.
         raise ValueError(
             f"cannot resolve an absolute install root for the {layout.harness} "
-            f"capture hook from ${layout.root_env}="
-            f"{os.environ.get(layout.root_env)!r} and home {home!r} — set "
-            f"${layout.root_env} to an absolute path")
+            f"capture hook from home {home!r} — set an absolute HOME"
+            + (f" or ${layout.root_env}" if layout.root_env else ""))
     return root
 
 
@@ -1301,25 +1305,102 @@ def _expected_entry(layout: HarnessLayout, spec: HookScriptSpec,
     return f"{command} with timeout {spec.timeout}"
 
 
+#: Cursor's known hook steps (`r6o` in Cursor 3.20.21's bundle).  Cursor's
+#: validator iterates EVERY key under `hooks` and rejects the WHOLE file on an
+#: unknown one, so a flat document is invalid if it names a step Cursor does
+#: not know.
+_FLAT_KNOWN_EVENTS = frozenset({
+    "beforeShellExecution", "beforeMCPExecution", "afterShellExecution",
+    "afterMCPExecution", "beforeReadFile", "afterFileEdit",
+    "beforeTabFileRead", "afterTabFileEdit", "stop", "beforeSubmitPrompt",
+    "afterAgentResponse", "afterAgentThought", "sessionStart", "sessionEnd",
+    "preCompact", "subagentStart", "subagentStop", "preToolUse",
+    "postToolUse", "postToolUseFailure", "workspaceOpen",
+})
+
+
 def _flat_entry_is_harness_valid(entry: object) -> bool:
     """True when ``entry`` is a script object Cursor's ``hooks.json``
-    validator ACCEPTS.
+    validator (``Uvd``/``Fvd``/``Bvd``/``Ovd`` in 3.20.21) ACCEPTS.
 
-    Cursor 3.20.21's validator requires every entry to be a command hook (a
-    string ``command``, ``type`` omitted or ``"command"``) or a prompt hook
-    (``type: "prompt"`` with a non-empty ``prompt``).  ANY other entry makes
-    the validator reject the WHOLE document, so Cursor loads NO hooks at all —
-    which is why a flat merge that appends alongside a nested/malformed entry
-    is a silent no-capture, and why this predicate gates the merge (#3819).
+    Cursor rejects the WHOLE document on a single bad entry, so a flat merge
+    that appends beside a nested/malformed entry is a silent no-capture —
+    which is why this predicate gates the merge.  It mirrors Cursor's own
+    field checks (command/prompt shape, ``matcher`` regex, numeric positive
+    ``timeout``, integer/null ``loop_limit``, boolean ``failClosed``, prompt
+    ``model``) rather than a subset: a partial validator CERTIFIES a foreign
+    entry Cursor will reject (#3819).
     """
     if not isinstance(entry, dict):
         return False
     if entry.get("type") == "prompt":
         prompt = entry.get("prompt")
-        return isinstance(prompt, str) and bool(prompt.strip())
-    if entry.get("type") not in (None, "command"):
+        if not (isinstance(prompt, str) and prompt.strip()):
+            return False
+        model = entry.get("model")
+        if model is not None and not (isinstance(model, str) and model.strip()):
+            return False
+    elif entry.get("type") in (None, "command"):
+        if not isinstance(entry.get("command"), str):
+            return False
+    else:
         return False
-    return isinstance(entry.get("command"), str)
+    matcher = entry.get("matcher")
+    if matcher is not None:
+        if not isinstance(matcher, str):
+            return False
+        if matcher not in ("", "*"):
+            try:
+                re.compile(matcher)
+            except re.error:
+                return False
+    timeout = entry.get("timeout")
+    if timeout is not None:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            return False
+        if timeout <= 0:
+            return False
+    loop_limit = entry.get("loop_limit")
+    if loop_limit is not None:
+        if isinstance(loop_limit, bool) or not isinstance(loop_limit, int):
+            return False
+        if loop_limit <= 0:
+            return False
+    fail_closed = entry.get("failClosed")
+    return fail_closed is None or isinstance(fail_closed, bool)
+
+
+def _flat_document_refusal(data: dict) -> str | None:
+    """A populated refusal when Cursor's validator would REJECT ``data`` — in
+    which case Cursor loads NO hooks at all — else ``None``.
+
+    Checks the WHOLE document: the required positive-integer ``version``,
+    that every ``hooks`` key is a known Cursor step, that every value is a
+    list, and that every entry passes :func:`_flat_entry_is_harness_valid`.
+    Scoped to the whole document, not just the event being merged: an invalid
+    entry under ANY event invalidates the file (#3819).
+    """
+    version = data.get("version")
+    if not (isinstance(version, int) and not isinstance(version, bool)
+            and version >= 1):
+        return (f'needs a positive integer "version" (found {version!r}) — '
+                "Cursor rejects the WHOLE file without it")
+    hooks = data.get("hooks")
+    if hooks is None:
+        return None
+    if not isinstance(hooks, dict):
+        return '"hooks" is not a JSON object'
+    for event, entries in hooks.items():
+        if event not in _FLAT_KNOWN_EVENTS:
+            return (f'unknown hook type {event!r} — Cursor rejects the WHOLE '
+                    "file on an unknown step")
+        if not isinstance(entries, list):
+            return f'"{event}" entries are not a list'
+        for entry in entries:
+            if not _flat_entry_is_harness_valid(entry):
+                return (f'a "{event}" entry is not a script object Cursor '
+                        f"can parse ({entry!r})")
+    return None
 
 
 def _settings_findings(layout: HarnessLayout, data: dict,
@@ -1328,20 +1409,17 @@ def _settings_findings(layout: HarnessLayout, data: dict,
     hooks = data.get("hooks") or {}
     findings: list[Finding] = []
     if layout.flat_entry:
-        # Cursor's validator REQUIRES a positive-integer `version` on the
-        # document.  Without it Cursor logs `Invalid user config: Config
-        # version must be a number`, rejects the WHOLE file and loads NO hooks
-        # — the install prints success and captures nothing (verified live
-        # against Cursor 3.20.21, #3819).  `upgrade` repairs it.
-        version = data.get("version")
-        if not (isinstance(version, int) and not isinstance(version, bool)
-                and version >= 1):
+        # Cursor's validator rejects the WHOLE document — after which NO hook
+        # fires — on a missing/non-positive `version`, an unknown event key, a
+        # non-list event value, or any entry it cannot parse (verified live
+        # against Cursor 3.20.21, #3819).  `upgrade` repairs the version; the
+        # structural cases are a manual fix (see `upgrade_install`'s refusal).
+        refusal = _flat_document_refusal(data)
+        if refusal:
             findings.append(Finding(
-                "settings-invalid-version",
-                f'{layout.harness} hooks.json needs a positive integer '
-                f'"version" (found {version!r}) — Cursor rejects the WHOLE '
-                "file without it, so NO hook fires",
-            ))
+                "settings-invalid-version" if "version" in refusal
+                else "settings-unreadable-entry",
+                f"{layout.harness} hooks.json {refusal}"))
     for spec in layout.scripts:
         entries = hooks.get(spec.event)
         expected_entry = _expected_entry(layout, spec, root)
@@ -1361,20 +1439,9 @@ def _settings_findings(layout: HarnessLayout, data: dict,
             ))
             continue
         if layout.flat_entry:
-            # A nested matcher group (or any non-command shape) under a flat
-            # event makes Cursor reject the whole file; flag it blocking and
-            # let `upgrade` REFUSE rather than append a flat duplicate beside
-            # it (the mixed list is exactly the invalid shape) (#3819).
-            for entry in entries:
-                if not _flat_entry_is_harness_valid(entry):
-                    findings.append(Finding(
-                        "settings-unreadable-entry",
-                        f"{spec.event} has an entry Cursor cannot parse "
-                        f"({entry!r}) — Cursor rejects the WHOLE file, so no "
-                        "hook fires; fix or remove it manually",
-                        script=spec.name, event=spec.event,
-                    ))
-                    break
+            # (The whole-document refusal above already covers every event, so
+            # this is only reached when the document is valid.)
+            pass
         ours = [e for e in entries
                 if _entry_is_ours(e, spec.name, layout.hooks_dir, root,
                                   flat=layout.flat_entry)]

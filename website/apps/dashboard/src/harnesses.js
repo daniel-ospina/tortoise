@@ -65,7 +65,7 @@ export const WORKFLOWS_PROMPT =
 //            ~/.pi/agent/extensions/ (extension session_start install-probe +
 //            session_shutdown capture; recording ON by default)
 //   cursor = tortoise/cursor-hooks/session-end.sh copied into
-//            ${CURSOR_HOME:-~/.cursor}/hooks + wired in hooks.json under
+//            ~/.cursor/hooks + wired in hooks.json under
 //            "sessionEnd" (Cursor 3.20.21 reads hooks.json from the HOME-scoped
 //            .cursor/ dir; the entry is a FLAT {"command": …} object).
 //            IDE-ONLY: cloud agents have no editor-lifetime session boundary.
@@ -273,7 +273,8 @@ chmod +x "\${CODEX_HOME:-$HOME/.codex}/hooks/tortoise-session-end.sh"
 // makes LOCAL Cursor desktop-editor sessions land in Tortoise Cloud. Shown in
 // the Memory-sources inline row; the connect-wizard step (HARNESS_STEPS.cursor)
 // carries the same disclosure. The registration is HOME-scoped
-// (`$CURSOR_HOME/hooks.json`, Cursor's own user-scoped hook source) — a
+// (`~/.cursor/hooks.json`, Cursor's own user-scoped hook source; Cursor
+// has NO config-dir env var — `CURSOR_HOME` does not exist) — a
 // project-local `.cursor/hooks.json` is gated on workspace trust. Cursor's
 // entry is a FLAT {"command": …} script object; its validator rejects a
 // nested matcher group and invalidates the whole hooks.json.
@@ -284,11 +285,14 @@ export const CURSOR_CAPTURE_INSTALL = `# Session capture for Cursor (#3819): rec
 # (github.com/daniel-ospina/tortoise):
 tortoise install cursor
 # ...or by hand: copy tortoise/cursor-hooks/session-end.sh into
-# "\${CURSOR_HOME:-$HOME/.cursor}/hooks/" and add it under "sessionEnd" in
-# "\${CURSOR_HOME:-$HOME/.cursor}/hooks.json" as a FLAT script object:
+# "~/.cursor/hooks/" and add it under "sessionEnd" in
+# "~/.cursor/hooks.json" as a FLAT script object:
 #   {"command": "<abs-path>/tortoise-session-end.sh"}
 # (Cursor's validator rejects a NESTED matcher-group entry and then loads
-#  NO hooks at all — the entry must be flat.)
+#  NO hooks at all — the entry must be flat.) The document ALSO needs a
+#  numeric "version" (e.g. "version": 1): without it Cursor rejects the
+#  whole hooks.json and loads no hooks. Run "tortoise hooks upgrade --harness
+#  cursor" to set the version and the flat entry for you.
 #
 # ** IDE-ONLY — Cursor CLOUD AGENT sessions are NOT captured. **
 # Cursor's docs: "Cloud agents have no editor-lifetime session boundary.

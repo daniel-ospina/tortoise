@@ -38,13 +38,13 @@ What it installs, per harness
     cwd.
 
 ``cursor``
-    ``tortoise/cursor-hooks/session-end.sh`` into ``<cursor_home>/hooks/``
+    ``tortoise/cursor-hooks/session-end.sh`` into ``~/.cursor/hooks/``
     (mode 0755), and **merges** the ``sessionEnd`` registration into
-    ``<cursor_home>/hooks.json``. ``<cursor_home>`` is ``$CURSOR_HOME`` when
-    set, else ``~/.cursor`` — the same HOME-scoped resolver shape as Codex,
-    because Cursor's ``CursorHooksService`` reads ``~/.cursor/hooks.json``
-    (verified against Cursor 3.20.21's installed bundle) while a project-local
-    ``<repo>/.cursor/hooks.json`` is gated on workspace trust. Cursor's entry
+    ``~/.cursor/hooks.json``.  The root is the HOME-scoped ``.cursor`` dir —
+    ``CursorHooksService`` resolves ``pathService.userHome() / ".cursor" /
+    "hooks.json"`` and Cursor has NO config-dir env var (verified: ``CURSOR_HOME``
+    appears nowhere in Cursor 3.20.21's bundle), while a project-local
+    ``<repo>/.cursor/hooks.json`` is gated on workspace trust.  Cursor's entry
     is a FLAT ``{"command": …, "timeout": …}`` script object — its own
     validator rejects a nested matcher group and invalidates the WHOLE config.
     ``sessionEnd`` is IDE-only: Cursor's docs state cloud agents have no
@@ -183,11 +183,11 @@ CURSOR_EVENT = "sessionEnd"
 CODEX_REGISTRATION_FILE = "hooks.json"
 CODEX_HOOKS_SUBDIR = "hooks"
 
-#: Cursor hook registrations live in ``$CURSOR_HOME/hooks.json`` — the ONE
+#: Cursor hook registrations live in ``~/.cursor/hooks.json`` — the ONE
 #: user-scoped hook source Cursor 3.20.21 reads (``CursorHooksService`` joins
 #: ``pathService.userHome() / ".cursor" / "hooks.json"``; verified against the
-#: installed bundle, #3819). ``$CURSOR_HOME`` is the environment override
-#: (default ``~/.cursor``).
+#: installed bundle, #3819).  Unlike Codex there is NO config-dir env var —
+#: ``CURSOR_HOME`` does not exist in the app bundle.
 CURSOR_REGISTRATION_FILE = "hooks.json"
 CURSOR_HOOKS_SUBDIR = "hooks"
 
@@ -598,13 +598,13 @@ def codex_home(home: Path) -> Path:
 
 
 def cursor_home(home: Path) -> Path:
-    """Resolve Cursor's config root: ``$CURSOR_HOME`` when set, else
-    ``~/.cursor``.
+    """Resolve Cursor's config root: ``~/.cursor`` (no env override).
 
     Cursor resolves its hook source as
     ``pathService.userHome() / ".cursor" / "hooks.json"`` (verified against
-    Cursor 3.20.21's bundle, #3819), so the install must be HOME-scoped and
-    honor ``CURSOR_HOME``.  ``home`` is the user home (injectable for tests).
+    Cursor 3.20.21's bundle, #3819) and has NO config-dir env var — unlike
+    Codex's ``CODEX_HOME``, ``CURSOR_HOME`` does not exist.  ``home`` is the
+    user home (injectable for tests).
 
     DELEGATES to :func:`tortoise.hook_install.default_root` — the ONE resolver
     ``tortoise hooks status|upgrade`` also uses, so the installer and the CLI
@@ -662,17 +662,14 @@ def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
     if not isinstance(entries, list):
         raise ValueError(f'"{event}" entries are not a list')
     if flat:
-        # Cursor's validator rejects the WHOLE document on any entry that is
-        # not a command/prompt hook.  Appending our flat entry beside a nested
-        # matcher group (or any other malformed entry) would leave a file
-        # Cursor refuses to load — so refuse loudly instead, and never claim a
-        # successful install over a broken file (#3819).
-        for entry in entries:
-            if not hook_install._flat_entry_is_harness_valid(entry):
-                raise ValueError(
-                    f'a "{event}" entry is not a Cursor script object '
-                    f"({entry!r}) — Cursor rejects the whole file and loads no "
-                    "hooks; fix or remove that entry manually")
+        # Cursor's validator rejects the WHOLE document — after which NO hook
+        # fires — on a bad `version`, an unknown event key, a non-list event,
+        # or any entry it cannot parse.  Refuse loudly rather than append
+        # beside a broken entry and report success (#3819).  (The version key
+        # is set above, so only structural problems remain here.)
+        refusal = hook_install._flat_document_refusal(data)
+        if refusal:
+            raise ValueError(f"hooks.json {refusal}")
     registered: list[dict] = []
     for entry in entries:
         registered.extend(hook_install._entry_command_dicts(

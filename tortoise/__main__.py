@@ -2503,8 +2503,8 @@ def _cmd_install_hooks(args) -> int:
     if uninstall and harness == "cursor":
         print("cursor has no shell-hook read seam — nothing for --uninstall to "
               "remove. The capture seam is left in place: delete "
-              "${CURSOR_HOME:-~/.cursor}/hooks/tortoise-session-end.sh and its "
-              "sessionEnd entry in ${CURSOR_HOME:-~/.cursor}/hooks.json to "
+              "~/.cursor/hooks/tortoise-session-end.sh and its "
+              "sessionEnd entry in ~/.cursor/hooks.json to "
               "uninstall capture.")
         return 0
     # `--list` / no harness prints the catalogue.
@@ -2746,7 +2746,7 @@ def _install_read_hook_impl(args) -> int:
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
               "tortoise-capture.ts (the capture extension; Pi has no "
               "shell-hook read seam)")
-        print("  tortoise install cursor  → ${CURSOR_HOME:-~/.cursor}/hooks.json "
+        print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook; Cursor has no shell-hook read "
               "seam. IDE-ONLY: Cursor cloud agent sessions are not captured)")
         print("Other seams (docs/matrix only, this wave): "
@@ -3158,6 +3158,7 @@ def _cmd_hooks(args) -> int:
                 # recommending a command that will refuse.
                 _manual = frozenset({
                     "unreadable-settings",
+                    "settings-unreadable-entry",
                     "not-a-regular-file",
                     "not-executable-symlink",
                     "not-readable",

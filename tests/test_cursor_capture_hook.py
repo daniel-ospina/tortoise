@@ -119,20 +119,20 @@ def test_hook_artifact_carries_the_version_marker():
 
 
 def test_cursor_home_is_scrubbed_so_no_cursor_test_can_touch_the_real_home():
-    """Every test here runs under the autouse CURSOR_HOME scrub: a direct
-    `install_capture("cursor", home=...)` resolves its root through
-    `$CURSOR_HOME`, so an ambient value sends the install into the REAL
-    `~/.cursor` — the suite would mutate the machine it runs on.
+    """Every test here runs under the autouse CURSOR_HOME scrub.  Cursor has
+    NO config-dir env var (verified: ``CURSOR_HOME`` appears nowhere in Cursor
+    3.20.21's bundle), so the scrub is DEFENSIVE — a future code path that
+    reintroduced an env-scoped Cursor root cannot silently redirect an install
+    away from the real ``~/.cursor`` during a test.  Every test also passes an
+    explicit ``home=``.
 
     Mutation: delete the autouse `_cursor_home_isolation` fixture from
     tests/conftest.py — the sentinel is absent and this REDs."""
     assert os.environ.get("TORTOISE_TEST_CURSOR_HOME_SCRUBBED") == "1", (
-        "the autouse CURSOR_HOME scrub did not run — an ambient CURSOR_HOME "
-        "would send install_capture('cursor', home=...) into the real home")
+        "the autouse CURSOR_HOME scrub did not run")
     assert not os.environ.get("CURSOR_HOME"), (
         f"an ambient CURSOR_HOME leaked into a cursor test: "
-        f"{os.environ.get('CURSOR_HOME')!r} — installs would land in the real "
-        "Cursor config")
+        f"{os.environ.get('CURSOR_HOME')!r}")
 
 
 def test_hook_detaches_so_cursor_shutdown_cannot_kill_the_capture(tmp_path):
