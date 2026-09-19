@@ -836,16 +836,30 @@ def known_green(*, n_questions: int | None = None) -> dict:
             continue
         with open(os.path.join(TRANSCRIPTS_DIR, name)) as f:
             tx = json.load(f)
-        sdk_mod._reset_ask_reader_cache_for_tests()
-        db = _fresh_db("kg")
-        sdk = sdk_mod.TortoiseSDK(db)
-        replay = _ReplayReader(tx["completion"])
-        saved = sdk_mod._default_ask_reader_factory
-        sdk_mod._default_ask_reader_factory = lambda replay=replay: replay
+        for attempt in _attempts():
+            sdk_mod._reset_ask_reader_cache_for_tests()
+            sdk = sdk_mod.TortoiseSDK(_fresh_db(f"kg{attempt}"))
+            replay = _ReplayReader(tx["completion"])
+            saved = sdk_mod._default_ask_reader_factory
+            sdk_mod._default_ask_reader_factory = lambda replay=replay: replay
+            try:
+                _seed(sdk, tx["seeds"])
+                res = sdk.ask(tx["question"],
+                              question_date=tx.get("question_date"))
+            except Exception:  # noqa: BLE001, RUF100 — infrastructure fault
+                sdk.close()
+                sdk_mod._default_ask_reader_factory = saved
+                sdk_mod._reset_ask_reader_cache_for_tests()
+                if attempt != _attempts()[-1]:
+                    time.sleep(1.0)
+                continue
+            break
+        else:
+            results.append({"fixture": tx["fixture"], "ok": False,
+                            "error": "known-green could not run "
+                                     "(substrate faults on every attempt)"})
+            continue
         try:
-            _seed(sdk, tx["seeds"])
-            res = sdk.ask(tx["question"],
-                          question_date=tx.get("question_date"))
             abstained = bool(res.get("abstained"))
             ok = abstained is tx["expected_abstained"]
             if ok and tx.get("expect_superseded_markers"):
@@ -895,7 +909,7 @@ def seed_timing(questions: list[dict], n: int = 1) -> dict:
 
 # ── main ────────────────────────────────────────────────────────────────────
 
-def _attempts(retry: bool = True) -> tuple[int, ...]:
+def _attempts() -> tuple[int, ...]:
     """Attempts per question. A transient substrate failure (an embedded
     FalkorDB socket vanishing mid-run — OBSERVED repeatedly on a
     load-average-100+ host) is an INFRASTRUCTURE fault, not a product
@@ -903,10 +917,11 @@ def _attempts(retry: bool = True) -> tuple[int, ...]:
     without laundering the fault. Only a question that fails EVERY attempt is
     recorded as a per-question FAIL, with its reason and the attempt count.
 
-    ``retry=False`` (the M2-control arm) runs ONCE: its ``AskReaderUnavailable``
-    records are the designed fail-loud signal, not faults to retry.
+    Callers pass ``expected_error_prefix`` for an arm whose errors are its
+    DESIGNED outcome (the M2-control arm's ``AskReaderUnavailable``): such an
+    attempt counts as complete, so a genuine fault alongside it still retries.
     """
-    return (1, 2, 3) if retry else (1,)
+    return (1, 2, 3)
 
 
 def _fault_record(question: dict, error: str, attempts: int) -> dict:
@@ -925,13 +940,13 @@ def _fault_record(question: dict, error: str, attempts: int) -> dict:
 def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
              blank: bool, retired_substitution: bool,
              mutation=None, limit: int | None = None,
-             retry_substrate: bool = True) -> list[dict]:
+             expected_error_prefix: str | None = None) -> list[dict]:
     """Seed + run one movement-control arm over the fixture (bounded by
     ``limit``). Deterministic transports; no provider calls."""
     import tortoise.sdk as sdk_mod
     records = []
     subset = questions[:limit] if limit else questions
-    attempts = _attempts(retry_substrate)
+    attempts = _attempts()
     for q in subset:
         rec: dict | None = None
         last_err = ""
@@ -961,13 +976,16 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
                 sdk_mod._default_ask_reader_factory = saved
                 sdk.close()
                 sdk_mod._reset_ask_reader_cache_for_tests()
-            if rec is not None and _substrate_error(rec) is None:
+            fault = _substrate_error(rec) if rec is not None else None
+            designed = bool(
+                fault and expected_error_prefix
+                and str(fault.get("error", "")).startswith(
+                    expected_error_prefix))
+            if rec is not None and (fault is None or designed):
                 rec["attempts"] = attempt
                 break
-            if rec is not None:
-                fault = _substrate_error(rec)
-                last_err = ((fault or {}).get("error")
-                            or str(rec.get("error") or ""))
+            if fault is not None:
+                last_err = str(fault.get("error") or "")
             rec = None
             if attempt != attempts[-1]:
                 time.sleep(1.0)   # let a thrashing host settle
@@ -1057,7 +1075,7 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             print("[movement] M2-control (blank output, fixed fail-loud)...")
             m2c = _run_arm(questions, arm="m2c", probe=None, blank=True,
                            retired_substitution=False,
-                           retry_substrate=False,
+                           expected_error_prefix="AskReaderUnavailable",
                            limit=args.movement_limit)
             print("[movement] M3 (drop gold sessions' turns)...")
             m3 = _run_arm(questions, arm="m3", probe=ProbeReader(),
