@@ -1418,6 +1418,11 @@ def test_fast_close_reclaims_the_ephemeral_socket_dir(tmp_path, monkeypatch):
     NOSAVEd server's dir leaked forever (measured: 10,711 orphaned dirs vs
     123 live). The fast path must reclaim it.
 
+    #4214: this MUST hold on the exit seam too, not just mid-run — after a
+    clean NOSAVE shutdown redislite has unlinked both ``redis.socket`` and
+    ``redis.pid``, and the #4068 reaper's discovery requires one of those
+    markers, so a deferred dir is invisible to the reaper and leaks forever.
+
     RED mutation: drop the ``_remove_ephemeral_socket_dir`` call from the
     fast path's SHUTDOWN-NOSAVE branch — the dir survives the close.
     """

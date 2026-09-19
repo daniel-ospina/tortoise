@@ -71,10 +71,99 @@ import contextlib
 import shutil
 import signal
 import socket
+import sys
 import tempfile
+import time
 
 from tortoise.embedded_reaper import OWNERS_DIRNAME, _is_ephemeral_dir
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
+
+# ── #4214: the exit seam must not stat the temp root once per client ───────
+#
+# `os.path.realpath()` `lstat`s EVERY path component. On a box whose per-user
+# temp root has accumulated tens of thousands of unterminated test dirs (the
+# #2875/#3685 leak) that single stat is not free. Measured on the filing box:
+# `lstat('/var/folders/…/T')` = 13 ms–3.4 s (median ≈0.43 s) at nlink 55 k,
+# while `lstat` of a CHILD of it — and of a synthetic 55 000-subdirectory
+# directory on the same APFS volume — is 0.00 ms. So the cost is the temp
+# root's own stat, and every `realpath` of any path under the root pays it.
+#
+# The teardown seams below called realpath ~9 times PER LEAKED CLIENT
+# (measured: 9 calls / 8.4 s for one client, all of it after the suite had
+# already printed its summary). With the hundreds of clients a suite leaks,
+# that is the multi-minute tail in `Py_FinalizeEx` — flat CPU, `STAT=U`,
+# stacks pinned in `os_lstat`. `pytest-timeout` cannot interrupt
+# interpreter finalisation, so the process simply never exits: the observed
+# "hung pytest" that wedges an agent child until an outer bound kills it.
+#
+# Two changes remove it: resolve the temp root at most ONCE per process (it
+# cannot change mid-process), and decide containment from the raw spelling
+# whenever no symlink sits below the root — so the common case needs no
+# `lstat` of the root at all.
+_TMPDIR_RESOLVED: str | None = None
+
+
+def _resolved_tempdir() -> str:
+    """``os.path.realpath(tempfile.gettempdir())``, memoized per process.
+
+    #4214: the resolve is a full per-component ``lstat`` walk and the temp
+    root's own stat is the expensive one on a leak-degraded box. The value is
+    a process constant (``tempfile.gettempdir()`` is itself cached), so pay
+    for it once rather than once per client.
+    """
+    global _TMPDIR_RESOLVED
+    if _TMPDIR_RESOLVED is None:
+        try:
+            _TMPDIR_RESOLVED = os.path.realpath(tempfile.gettempdir())
+        except Exception:  # realpath is non-raising in practice; fail open
+            _TMPDIR_RESOLVED = os.path.abspath(tempfile.gettempdir())
+    return _TMPDIR_RESOLVED
+
+
+def _containment_pair(candidate: str) -> tuple[str, str]:
+    """``(path, temp_root)`` to feed :func:`_is_ephemeral_dir` — the raw
+    spelling when no ``lstat`` of the temp root is needed (#4214).
+
+    Every ephemeral test dir is built by ``tempfile.mkdtemp()`` as
+    ``join(gettempdir(), <prefix>…)``, so ``realpath(candidate)`` and
+    ``realpath(gettempdir())`` share their whole ancestor chain and the part
+    below the temp root is unchanged — UNLESS a component below the root is a
+    symlink, which is the only way the two spellings can disagree. So: walk
+    the part below the raw root with cheap ``islink`` calls (final component
+    small → 0.00 ms) and classify raw-vs-raw; fall back to the original
+    realpath-both-sides form the moment the path is not lexically under the
+    raw root, a component below it IS a symlink, the link check itself fails,
+    or the spelling carries a ``..`` component. The classification is
+    therefore exactly the pre-#4214 one, not an approximation of it.
+
+    The ``..`` guard is load-bearing, not defensive noise: ``abspath``
+    collapses ``..`` LEXICALLY, while ``realpath`` resolves a symlink BEFORE
+    applying ``..`` — so ``<root>/link/../x`` (with ``<root>/link`` a symlink
+    out of the root) lands outside on the realpath side and inside on the
+    lexical side. That divergence is in the PERMISSIVE direction for a
+    destructive call, so it is excluded rather than documented. redislite's
+    own paths are ``mkdtemp()`` products and never contain ``..``.
+    """
+    raw = os.fspath(candidate)
+    if ".." in raw.replace("\\", os.sep).split(os.sep):
+        return os.path.realpath(candidate), _resolved_tempdir()
+    cand = os.path.abspath(candidate)
+    base = os.path.abspath(tempfile.gettempdir())
+    if cand == base or cand.startswith(base + os.sep):
+        rel = cand[len(base):].lstrip(os.sep)
+        parts = [p for p in rel.split(os.sep) if p] if rel else []
+        cur = base
+        for part in parts:
+            cur = os.path.join(cur, part)
+            try:
+                link = os.path.islink(cur)
+            except OSError:
+                link = True  # cannot tell -> take the slow path
+            if link:
+                break
+        else:
+            return cand, base
+    return os.path.realpath(candidate), _resolved_tempdir()
 
 
 def _is_ephemeral_test_server(client) -> bool:
@@ -82,14 +171,96 @@ def _is_ephemeral_test_server(client) -> bool:
 
     Mirrors the reaper's containment check on BOTH sides through realpath
     (a symlinked TMPDIR would otherwise fail the strict relative_to test and
-    silently disable the fast path — safe direction, but slow).
+    silently disable the fast path — safe direction, but slow). #4214: the
+    realpath walk is now taken only when the raw spellings cannot decide (see
+    :func:`_containment_pair`) — it used to re-stat the temp root on every
+    call, which is what made interpreter exit unbounded.
     """
     dbdir = getattr(client, "dbdir", None)
     if not dbdir:
         return False
-    tmpdir_real = os.path.realpath(tempfile.gettempdir())
-    dbdir_real = os.path.realpath(dbdir)
-    return _is_ephemeral_dir(dbdir_real, tmpdir_real)
+    return _is_ephemeral_dir(*_containment_pair(dbdir))
+
+
+# ── #4214: bound the interpreter-exit seam ────────────────────────────────
+#
+# `Py_FinalizeEx` runs atexit handlers synchronously and in-process; nothing
+# at the Python level can preempt a slow one, and `pytest-timeout` cannot
+# interrupt finalisation at all. The fixes above remove the measured slow
+# operation, and this budget is the belt: it caps the AGGREGATE work the exit
+# seam may do, so a future regression (or a slower box) degrades into "a few
+# servers are left for the reaper" instead of "the child never exits".
+#
+# Only the EXIT-path teardown is bounded: the `atexit` seams, `weakref`'s
+# exit pass, and the #2203 terminating-signal handler (the process is about
+# to die there). Explicit `close()` / `__exit__` and ordinary mid-run GC stay
+# unbounded — a caller there can still observe and fix a slow path, and
+# truncating a deliberate close would be a correctness change.
+_ATEXIT_BUDGET_DEFAULT = 30.0
+_atexit_deadline: float | None = None
+_atexit_last_seam_call: float | None = None
+
+
+def _in_weakref_exit_finalizer() -> bool:
+    """True when this call runs from ``weakref.finalize``'s exit pass.
+
+    ``weakref`` runs its remaining finalizers at interpreter exit from its own
+    atexit handler, ``weakref._exitfunc``; a GC-time finalizer never carries
+    that frame. This is the reliable "we are exiting" signal for the
+    ``_gc_close`` seam — **not** ``sys.is_finalizing()``, which CPython 3.12.13
+    still reports as ``False`` inside atexit callbacks AND inside these
+    finalizers (measured). The first cut of the #4214 fix guarded on it and
+    was therefore a silent no-op.
+    """
+    try:
+        frame = sys._getframe(1)
+    except ValueError:  # no Python caller (a C atexit dispatch)
+        return False
+    while frame is not None:
+        if (frame.f_code.co_name == "_exitfunc"
+                and frame.f_globals.get("__name__") == "weakref"):
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _atexit_budget_seconds() -> float:
+    """``TORTOISE_ATEXIT_BUDGET`` seconds, or the 30 s default.
+
+    Blank/garbage keeps the default (never "unbounded" by accident); an
+    explicit ``0`` or negative value opts the bound out.
+    """
+    try:
+        val = float(os.environ.get("TORTOISE_ATEXIT_BUDGET", ""))
+    except (TypeError, ValueError):
+        return _ATEXIT_BUDGET_DEFAULT
+    return float("inf") if val <= 0 else val
+
+
+def _atexit_budget_expired() -> bool:
+    """True once the CURRENT exit cascade has spent its wall-clock budget.
+
+    A cascade is bounded by the budget and ENDS when the seam goes quiet for
+    longer than that: consecutive exit-seam calls (sub-second apart in a real
+    cascade) share one deadline, while a call arriving after a silence longer
+    than the budget starts a fresh one. That makes the bound a bound on a
+    cascade rather than on the process lifetime, which matters because
+    ``_atexit_close`` is callable outside ``atexit`` — a test (or a future
+    "close everything" caller) must not be able to consume the budget of an
+    exit cascade that begins later in the same process.
+
+    The last-call stamp is updated on EVERY call, including a call that is
+    already over budget: a skipped call still counts as part of the cascade,
+    so exceeding the budget cannot reset it and loop forever.
+    """
+    global _atexit_deadline, _atexit_last_seam_call
+    now = time.monotonic()
+    budget = _atexit_budget_seconds()
+    if (_atexit_last_seam_call is None
+            or (now - _atexit_last_seam_call) > budget):
+        _atexit_deadline = now + budget
+    _atexit_last_seam_call = now
+    return now >= _atexit_deadline
 
 
 def _fast_atexit_enabled() -> bool:
@@ -104,12 +275,32 @@ def _fast_atexit_enabled() -> bool:
     return is_truthy(os.environ.get("TORTOISE_FAST_ATEXIT"))
 
 
-def atexit_fast_close(client) -> bool:
+def atexit_fast_close(client, *, at_exit: bool = False) -> bool:
     """Fast-close an ephemeral test-tree redislite client at interpreter exit.
+
+    ``at_exit`` marks a call made from the interpreter-exit cascade (the
+    ``_atexit_close`` seams, and ``weakref``'s exit pass for ``_gc_close``).
+    It enables the wall-clock budget, which is what makes the process able to
+    exit: `Py_FinalizeEx` runs these handlers synchronously and
+    `pytest-timeout` cannot interrupt it, so a per-client cost that is merely
+    slow (the #4214 `os.lstat` walk) is otherwise indistinguishable from a
+    hang. Mid-run calls are unbounded as before — a caller there can still
+    observe and fix a slow close.
 
     Returns True when the close was handled by the fast path (or there was
     nothing to do); False when the caller must fall through to the normal
     close().
+
+    #4214: at interpreter exit the seam is additionally bounded by
+    ``TORTOISE_ATEXIT_BUDGET`` (default 30 s, see
+    :func:`_atexit_budget_expired`). Once that budget is spent this returns
+    True without doing the close — the client's redislite atexit `_cleanup`
+    is neutralised so it cannot re-run the slow path, and the server is left
+    to the #2052 reaper. **Nothing is stranded by that skip:** a client this
+    seam never touched still has its on-disk `redis.socket`/`redis.pid` —
+    the marker the reaper's discovery requires — and the caller releases its
+    owner record, so the server reads as a provable orphan (#3599). A
+    bounded "leave it to the reaper" beats an unbounded interpreter exit.
 
     Gating (all three must hold):
       1. TORTOISE_FAST_ATEXIT truthy (1/true/yes/on, opt-in flag).
@@ -129,17 +320,31 @@ def atexit_fast_close(client) -> bool:
     socket dir is reclaimed here because redislite only rmtrees it from
     inside `if self.pid:` and never touches a dead server's dir (#3653 F3).
     """
+    # #4214: the exit budget is checked BEFORE any filesystem work, and the
+    # client is neutralised so redislite's own atexit `_cleanup` (registered
+    # independently at construction) cannot re-run the slow close we just
+    # declined. Nothing is stranded: the client's on-disk
+    # `redis.socket`/`redis.pid` are untouched, so the reaper's discovery
+    # still sees it, and the caller releases the owner record — the #3599
+    # "no live owner" signal that makes it a provable orphan. Same declared
+    # residual this module already carries for SIGKILL.
+    if at_exit and _atexit_budget_expired():
+        _neutralize_redislite_cleanup(client)
+        return True
     if not _fast_atexit_enabled():
-        return False
-    if not _is_ephemeral_test_server(client):
         return False
 
     # Already handled by an earlier seam for the same server (the projection
     # and the db wrapper both register exit handlers) — skip the liveness
     # probe entirely: on a NOSAVEd server redis-py's reconnect-retry on the
     # stale connection costs ~3.9s per server (the CI tail we are removing).
+    # #4214: this short-circuit comes FIRST — `_is_ephemeral_test_server` is
+    # a filesystem walk, and running it before this test made every repeat
+    # seam invocation pay for a client that was already handled.
     if getattr(client, "_tortoise_fast_closed", False):
         return True
+    if not _is_ephemeral_test_server(client):
+        return False
 
     # #3653 F2: a live co-tenant must never be SHUTDOWN. Use the
     # registry-independent co-tenant test instead of redislite's own
@@ -207,7 +412,11 @@ def atexit_fast_close(client) -> bool:
     # #3653 F3: we are the last client and just sent SHUTDOWN NOSAVE, so
     # redislite's dead-pid `_cleanup` will never rmtree this dir. Reclaim it
     # here — this is the CI-default path and the source of the measured
-    # 10,711 orphaned tempdirs.
+    # 10,711 orphaned tempdirs. #4214: this is not deferred. After this
+    # NOSAVE the server unlinks its socket and pidfile, and the #4068
+    # reaper's discovery needs one of those markers — so a dir left here
+    # would be invisible to the reaper and leak forever. The exit cascade's
+    # BUDGET is what bounds the aggregate cost of this call.
     _remove_ephemeral_socket_dir(rdir, sock_path)
     return True
 
@@ -271,8 +480,17 @@ def _remove_ephemeral_socket_dir(redis_dir, socket_file=None) -> bool:
     The deletion is gated on the SAME ephemeral-temp-tree classification the
     fast-close gate and the reaper use, so a user-path server is never
     touched. Never raises.
+
+    #4214 note: this is NOT made conditional on being at interpreter exit.
+    Removing a direct child of a leak-degraded temp root is expensive there
+    (measured 14 ms–4.5 s on the filing box), but it is also the ONLY path
+    that reclaims such a dir: after a clean NOSAVE shutdown the server has
+    unlinked both `redis.socket` and `redis.pid`, and the #4068 reaper's
+    discovery requires one of those markers — so a deferred dir is invisible
+    to the reaper and leaks permanently. Bounding the exit CASCADE (see
+    `_atexit_budget_expired`) is the correct lever; skipping the removal is
+    not.
     """
-    tmpdir = os.path.realpath(tempfile.gettempdir())
     candidates = []
     if redis_dir:
         candidates.append(redis_dir)
@@ -281,10 +499,17 @@ def _remove_ephemeral_socket_dir(redis_dir, socket_file=None) -> bool:
     removed = False
     for d in candidates:
         try:
-            real = os.path.realpath(d)
-            if not _is_ephemeral_dir(real, tmpdir):
+            # #4214: `_containment_pair` returns the raw spelling when no
+            # symlink sits below the temp root, so this no longer re-stats
+            # the (potentially 55 k-entry) temp root once per candidate. The
+            # rmtree target is that same pair member: rmtree is agnostic to
+            # the shared `/var` → `/private/var` ancestor spelling, and the
+            # realpath form is still used whenever a symlink below the root
+            # could make the raw form point elsewhere.
+            target, tmpdir = _containment_pair(d)
+            if not _is_ephemeral_dir(target, tmpdir):
                 continue
-            shutil.rmtree(real, ignore_errors=True)
+            shutil.rmtree(target, ignore_errors=True)
             removed = True
         except Exception:
             continue
@@ -546,6 +771,10 @@ def register_gc_close(owner, db) -> None:
     #1371 shared-server guard and ephemeral fast-close gating apply
     unchanged. Idempotent; never raises.
 
+    #4214: reaching here during the exit cascade, the per-client dir removal
+    is the only remaining filesystem work and the exit budget bounds how much
+    of it the cascade may do before it stops.
+
     NOTE: host-mode (docker/URI) clients are not pinned by redislite — the
     captured weakref derefs to None when `owner` is collected and the
     finalizer no-ops (safe by construction).
@@ -579,6 +808,16 @@ def _gc_close(db_ref) -> None:
     if db is None:
         return  # not a redislite-pinned client — nothing to do
     client = getattr(db, "client", db)
+    # #4214: `_gc_close` runs both on ordinary mid-run collection and on
+    # `weakref`'s exit pass. Only the latter may skip work: mid-run GC-time
+    # reclamation is the #1475 close-on-GC contract and must keep running.
+    at_exit = _in_weakref_exit_finalizer()
+    # #4214: a spent exit budget skips the co-tenant probe too. The probe is
+    # bounded per call (socket timeouts), but "bounded" is not "cheap":
+    # N clients x probe is the same aggregate tail the budget exists to cap.
+    if at_exit and _atexit_budget_expired():
+        _neutralize_redislite_cleanup(client)
+        return
     # Explicit close()/__exit__ are routed through db._t_close by the
     # projection, which sets _t_closed — the finalizer is a strict no-op
     # then (the socket_file guard below would not catch it: redislite's
@@ -618,7 +857,7 @@ def _gc_close(db_ref) -> None:
     sock_path = getattr(client, "socket_file", None)
     pid_before = _server_pid(client)
     try:
-        if atexit_fast_close(client):
+        if atexit_fast_close(client, at_exit=at_exit):
             _release_owner_quietly(db)
             return
     except Exception:
@@ -773,7 +1012,11 @@ def close_embedded_clients() -> int:
         # ``close()`` → ``client._cleanup()``).
         inner = getattr(client, "client", client)
         try:
-            if atexit_fast_close(inner):
+            # #4214: this is the #2203 terminating-signal teardown — the
+            # process is about to die (`os.kill(self, signum)` follows), so
+            # it takes the exit-seam semantics: a spent budget stops the
+            # close rather than delaying the death it exists to perform.
+            if atexit_fast_close(inner, at_exit=True):
                 closed += 1
                 _release_owner(client, inner)
                 continue
