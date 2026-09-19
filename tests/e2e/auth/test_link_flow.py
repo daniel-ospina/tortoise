@@ -320,7 +320,7 @@ def test_link_github_redirects_into_gotrue_with_s256_and_writes_flow(stack):
 
 def test_link_google_also_allowed(stack):
     _link_calls(reset=True)
-    status, _, headers = _get(f"{APP}/auth/link?provider=google", cookie=AUTH_COOKIE, follow=False)
+    status, _, _ = _get(f"{APP}/auth/link?provider=google", cookie=AUTH_COOKIE, follow=False)
     assert status == 302, f"google must be allowed, got {status}"
     calls = _link_calls()
     assert len(calls) == 1 and calls[0]["provider"] == "google", calls

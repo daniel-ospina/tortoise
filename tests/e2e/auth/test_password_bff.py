@@ -21,6 +21,7 @@ Status discipline under test (the #3485 class): a provider or store fault is
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -68,10 +69,8 @@ class Proc:
         )
 
     def stop(self):
-        try:
+        with contextlib.suppress(Exception):
             os.killpg(os.getpgid(self.p.pid), signal.SIGTERM)
-        except Exception:
-            pass
 
 
 def _wait(port: int, timeout: float = 90.0) -> bool:

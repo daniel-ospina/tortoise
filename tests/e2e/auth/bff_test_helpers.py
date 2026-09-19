@@ -67,8 +67,14 @@ def ensure_dashboard_dist() -> None:
             newest = max(newest, p.stat().st_mtime)
     if dist_index.is_file() and dist_index.stat().st_mtime >= newest:
         return
+    # `npm run build` (the project's own `vite build`) rather than
+    # `npx vite build`: npx silently performs an AD-HOC install when the local
+    # toolchain is absent, and that install omitted rollup's platform binary
+    # (`@rollup/rollup-linux-x64-gnu`) so the whole suite errored at fixture
+    # setup with a MODULE_NOT_FOUND far from the cause (#4054, welcome-e2e).
+    # A missing local install must fail HERE, naming the missing toolchain.
     proc = subprocess.run(
-        ["npx", "vite", "build"],
+        ["npm", "run", "build"],
         cwd=str(DASHBOARD_DIR),
         capture_output=True,
         text=True,
@@ -76,6 +82,12 @@ def ensure_dashboard_dist() -> None:
     if proc.returncode != 0 or not dist_index.is_file():
         # Fail, never skip: a suite that cannot serve the real asset root would
         # assert against the SPA shell and pass vacuously.
+        if not (DASHBOARD_DIR / "node_modules" / ".bin" / "vite").exists():
+            pytest.fail(
+                "dashboard toolchain is not installed — the auth suites build "
+                "and serve the dashboard's dist/ root. Run "
+                "`cd website/apps/dashboard && npm ci` first."
+            )
         pytest.fail(
             "dashboard build failed — the auth suites serve its dist/ root:\n"
             f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"

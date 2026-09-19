@@ -15,6 +15,7 @@ and must never be folded into the 200.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -56,10 +57,8 @@ class Proc:
         )
 
     def stop(self):
-        try:
+        with contextlib.suppress(Exception):
             os.killpg(os.getpgid(self.p.pid), signal.SIGTERM)
-        except Exception:
-            pass
 
 
 def _wait(port: int, timeout: float = 90.0) -> bool:
@@ -213,6 +212,7 @@ def test_a_provider_refusal_is_still_an_indistinguishable_200(stack):
     assert s_refused == 200, (
         f"a provider refusal must be folded into the enumeration-safe 200, got {s_refused} {b_refused}"
     )
+    assert s_normal == 200, f"the normal address must also be 200, got {s_normal} {b_normal}"
     assert b_refused == b_normal, (
         "a provider refusal produced a different body than an accepted request — "
         f"that difference is the oracle:\n{b_normal}\n{b_refused}"

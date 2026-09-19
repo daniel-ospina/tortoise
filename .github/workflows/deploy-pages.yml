@@ -617,6 +617,11 @@ jobs:
           # full crawl.
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL: '1'
           BASE_URL: https://premiselabs.co
+          # #4054: the auth surface is served by the app origin, and the
+          # marketing origin only 301s to it. The suite's app-surface tests must
+          # target the app origin — following that 301 would assert against
+          # whatever production last shipped instead of this deploy.
+          APP_BASE_URL: https://app.premiselabs.co
           TORTISE_HOST: https://tortoise.premiselabs.co
 
       # Step 4: Warn-only effective-date comparison — served

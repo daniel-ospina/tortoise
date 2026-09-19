@@ -17,6 +17,7 @@ successful request).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -58,10 +59,8 @@ class Proc:
         )
 
     def stop(self):
-        try:
+        with contextlib.suppress(Exception):
             os.killpg(os.getpgid(self.p.pid), signal.SIGTERM)
-        except Exception:
-            pass
 
 
 def _wait(port: int, timeout: float = 90.0) -> bool:
@@ -188,8 +187,8 @@ def test_valid_email_requests_recovery_with_the_confirm_redirect(stack):
 # ---------------------------------------------------------------------------
 def test_known_and_unknown_addresses_are_indistinguishable(stack):
     _calls(reset=True)
-    s_known, b_known, h_known = _post(APP, "/auth/reset", KNOWN)
-    s_unknown, b_unknown, h_unknown = _post(APP, "/auth/reset", UNKNOWN)
+    s_known, b_known, _ = _post(APP, "/auth/reset", KNOWN)
+    s_unknown, b_unknown, _ = _post(APP, "/auth/reset", UNKNOWN)
 
     assert s_known == 200 and s_unknown == 200, f"{s_known} / {s_unknown}"
     assert b_known == b_unknown, (
@@ -219,6 +218,7 @@ def test_a_provider_refusal_is_still_an_indistinguishable_200(stack):
     assert s_refused == 200, (
         f"a provider refusal must be folded into the enumeration-safe 200, got {s_refused} {b_refused}"
     )
+    assert s_normal == 200, f"the normal address must also be 200, got {s_normal} {b_normal}"
     assert b_refused == b_normal, (
         "a provider refusal produced a different body than an accepted request — "
         f"that difference is the oracle:\n{b_normal}\n{b_refused}"

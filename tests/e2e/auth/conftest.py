@@ -19,7 +19,6 @@ the dashboard's Functions are still discovered.
 from __future__ import annotations
 
 import pytest
-
 from bff_test_helpers import ensure_dashboard_dist
 
 

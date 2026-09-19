@@ -26,8 +26,6 @@ import http.cookiejar
 import json
 import os
 import shutil
-import signal
-import socket
 import sqlite3
 import subprocess
 import sys
