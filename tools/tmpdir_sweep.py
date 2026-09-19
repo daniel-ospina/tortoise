@@ -50,7 +50,8 @@ Usage:
     python3 tools/tmpdir_sweep.py --apply               # delete
     python3 tools/tmpdir_sweep.py --json                # machine-readable
 
-Exit codes: 0 = ran (dry or apply), 2 = refused / could not run.
+Exit codes: 0 = ran cleanly (dry or apply), 2 = refused, could not run,
+     or an `--apply` removal failed.
 """
 from __future__ import annotations
 
@@ -75,10 +76,19 @@ DEFAULT_PREFIXES: tuple[str, ...] = (
     "ask_",              # ask_proof_, ask_reg_, ask_sdk_, ask2070_, askshape_
     "tortoise_",         # tortoise_test_, tortoise_validity_test_, tortoise_w2_...
     "tortoise-",         # tortoise-lifecycle-, tortoise-concurrency-, capture spools
+    "d3_session_",       # tests/test_d3_session_identity.py
+    "reaper_probe_",     # tests/test_reaper.py
     "redislite_",        # redislite's own scratch trees
     "lme-",              # tools/longmem_eval per-question trees
     "battery_a4_",       # battery/arms/a4_tortoise.py
 )
+
+# This is the *observed* #4069 histogram subset, not an exhaustive census of
+# every committed `mkdtemp(prefix=...)` call site (~60 distinct prefixes exist,
+# several deliberately generic — `a2_`, `t7_`, `rp_`, `probe_` — and `tt_` is
+# the #3752 session root, excluded on purpose). The age gate plus the live-pid
+# guard make broader matching safe, so an operator can widen with `--prefix`;
+# this list is the safely-defaulted core.
 
 # Fixed-name debris whose creator is not in any committed source (verified
 # with `git log --all -S`); swept by exact name rather than prefix.
@@ -90,8 +100,14 @@ DEFAULT_EXACT_NAMES: tuple[str, ...] = ("a_ours.py",)
 # genuinely destructive case. Operators can add it with `--prefix tt_`.
 
 # Never a valid sweep root — a bounded, single-child-safe tool that
-# accepted these would be an unbounded delete.
-_FORBIDDEN_ROOTS = frozenset({"/", "//", os.path.expanduser("~")})
+# accepted these would be an unbounded delete. Both the raw and the
+# realpath spelling are recorded: a guard that matched only one of them
+# fails open whenever `$HOME` is a symlink (#3752's recorded gotcha).
+_FORBIDDEN_ROOTS = frozenset(
+    spelling
+    for raw in ("/", "//", os.path.expanduser("~"))
+    for spelling in (raw, os.path.realpath(raw))
+)
 
 _PID_FILENAMES = ("redis.pid",)
 
@@ -127,6 +143,10 @@ class SweepResult:
     def reclaimed_bytes(self) -> int:
         return sum(d.size_bytes for d in self.removed)
 
+    @property
+    def remove_failures(self) -> list[Decision]:
+        return [d for d in self.decisions if d.category == "remove-failed"]
+
 
 def resolve_root(root: str | None) -> str:
     """Resolve and validate the sweep root, refusing anything unsafe.
@@ -141,7 +161,8 @@ def resolve_root(root: str | None) -> str:
     real = os.path.realpath(expanded)
     if any(part == ".." for part in expanded.split(os.sep)):
         raise ValueError(f"refusing a root containing '..': {candidate!r}")
-    if real in _FORBIDDEN_ROOTS or real == os.path.realpath("/"):
+    if expanded in _FORBIDDEN_ROOTS or real in _FORBIDDEN_ROOTS \
+            or real == os.path.realpath("/"):
         raise ValueError(f"refusing an unbounded root: {candidate!r}")
     if not os.path.isdir(real):
         raise ValueError(f"root is not a directory: {candidate!r}")
@@ -218,6 +239,8 @@ def _live_pid_protects(entry_path: str) -> str | None:
             return None  # dead pid -> orphaned dir, safe to reclaim
         except PermissionError:
             return f"pid {pid} alive (no permission to signal)"
+        except OverflowError:
+            return f"pid {pid} out of range (treated as live)"
         except OSError:
             return f"pid {pid} probe failed (treated as live)"
         return f"live redis pid {pid}"
@@ -354,6 +377,23 @@ def sweep(
     return result
 
 
+def _validated_tokens(values: Iterable[str], label: str) -> tuple[str, ...]:
+    """Reject empty/whitespace tokens.
+
+    `str.startswith("")` is True for every name, so an empty prefix (e.g. an
+    unset `"$OWNER_"` reaching `--prefix`) would silently widen the sweep to
+    every age-qualified entry in the root — including the foreign-owner litter
+    this tool promises is out of scope. Fail loudly instead.
+    """
+    tokens = tuple(values)
+    for token in tokens:
+        if not token.strip():
+            raise ValueError(
+                f"refusing an empty/whitespace {label} — it would match every "
+                f"entry, defeating the allowlist")
+    return tokens
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tmpdir_sweep",
@@ -382,19 +422,24 @@ def main(argv: list[str] | None = None) -> int:
                         help="Machine-readable output")
     args = parser.parse_args(argv)
 
-    prefixes = tuple(args.prefix) if args.prefix else DEFAULT_PREFIXES
-    exact_names = (tuple(args.exact_name) if args.exact_name
-                   else DEFAULT_EXACT_NAMES)
-
     try:
+        prefixes = _validated_tokens(
+            args.prefix if args.prefix else DEFAULT_PREFIXES, "--prefix")
+        exact_names = _validated_tokens(
+            args.exact_name if args.exact_name else DEFAULT_EXACT_NAMES,
+            "--exact-name")
         result = sweep(args.root, prefixes=prefixes, exact_names=exact_names,
                        older_than_hours=args.older_than_hours,
                        apply=args.apply)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
+        # An empty prefix, an unreadable/absent root, etc. are a run that
+        # COULD NOT happen (or must not) — map to 2 like embedded_orphans
+        # refuses to report a census it could not run.
         print(f"tmpdir_sweep: refusing to run: {exc}", file=sys.stderr)
         return 2
 
     remove_n = len(result.removed)
+    failed_n = len(result.remove_failures)
     if args.json:
         print(json.dumps({
             "root": result.root,
@@ -404,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
             "exact_names": list(exact_names),
             "candidates": remove_n,
             "kept": len(result.kept),
+            "remove_failures": failed_n,
             "reclaimed_bytes": result.reclaimed_bytes,
             "removed": [d.name for d in result.removed],
             "keep_categories": {
@@ -426,7 +472,9 @@ def main(argv: list[str] | None = None) -> int:
         for category in sorted({d.category for d in result.kept}):
             n = sum(1 for d in result.kept if d.category == category)
             print(f"  keep   {n:5d}  {category}")
-    return 0
+    # A removal that failed is not a clean run; the documented cron
+    # invocation must be able to tell "nothing to do" from "delete failed".
+    return 2 if failed_n else 0
 
 
 if __name__ == "__main__":

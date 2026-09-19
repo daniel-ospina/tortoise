@@ -331,12 +331,14 @@ SOURCE_PATTERNS = {
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py",
              # #4069: the temp-dir sweep is test-infra whose guard tests
              # (tests/test_tmpdir_sweep.py, tests/test_tmpdir_hygiene.py) are
-             # core-registered. A tool-only change would otherwise be
-             # swallowed by the flat "tools/" NON_PYTHON_PREFIXES entry and
-             # drop to tier-1 smoke with both guards never running — the
-             # #1349/#3332/#3910/#3914 silent-drop class. Adding it here (and
-             # to TOOL_CARVEOUTS, so it survives the filter) selects `core`
-             # rather than forcing the full matrix.
+             # core-registered. `_selection_relevant()` consults CORE_ALSO, so
+             # this entry has a DUAL role: it admits a `tools/` path past the
+             # flat NON_PYTHON_PREFIXES filter AND, in the match loop below,
+             # adds `core` and marks the path found — so a tool-only change
+             # selects `core` instead of the unknown-path fail-closed full
+             # matrix, and never drops to tier-1 smoke (the #1349/#3332/#3910
+             # silent-drop class). No TOOL_CARVEOUTS entry is needed: that
+             # tuple is redundant for any path already listed here.
              "tools/tmpdir_sweep.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
@@ -408,12 +410,6 @@ TOOL_CARVEOUTS = (
     # A narrower core-only mapping is possible but not needed: a
     # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
-    # #4069: the temp-dir sweep's guard tests live in tests/test_tmpdir_sweep.py
-    # + tests/test_tmpdir_hygiene.py. Without this carve-out the flat "tools/"
-    # prefix filters the path out before SOURCE_PATTERNS, `changed` is empty,
-    # and the PR takes the docs-only path (tier-1 smoke) — the guard does not
-    # run on the PR that owns it. Paired with the CORE_ALSO entry above.
-    "tools/tmpdir_sweep.py",
 )
 
 

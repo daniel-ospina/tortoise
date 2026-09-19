@@ -45,16 +45,17 @@ python3 tools/tmpdir_sweep.py --apply --older-than-hours 12
 python3 tools/tmpdir_sweep.py --apply --json
 ```
 
-Exit codes: `0` ran (dry or apply), `2` refused / could not run.
+Exit codes: `0` ran cleanly (dry or apply), `2` refused / could not run / an
+`--apply` removal failed.
 
 ## Safety by construction
 
 | Guard | Behaviour |
 |---|---|
 | **Depth 1 only** | One `os.scandir` of the root. It never walks the tree, so it cannot become the load spike it exists to remove. |
-| **Bounded root** | `--root` is realpath-resolved and refuses `/`, `$HOME`, and any path containing `..`; every candidate is verified to resolve *inside* the root, and the check is repeated inside the removal call. |
+| **Bounded root** | `--root` is realpath-resolved and refuses `/`, `$HOME` (raw **and** realpath spelling, so a symlinked `$HOME` cannot slip through), and any path containing `..`; every candidate is verified to resolve *inside* the root, and the check is repeated inside the removal call. |
 | **Symlinks** | Never followed and never removed; a symlinked entry is reported `symlink`. Its target — inside or outside the root — is untouched. |
-| **Prefix allowlist** | Only tortoise-owned creators match (`ask_`, `tortoise_`, `tortoise-`, `redislite_`, `lme-`, `battery_a4_`) plus the fixed-name `a_ours.py`. Agent-tooling litter (`pi-commit-msg-*`, `pi-pr-body-*`, `wf-lock-*`, `admin-*`) is a **different owner** (cross-repo issue) and is deliberately not swept unless the operator passes `--prefix`. |
+| **Prefix allowlist** | Only tortoise-owned creators match (`ask_`, `tortoise_`, `tortoise-`, `d3_session_`, `reaper_probe_`, `redislite_`, `lme-`, `battery_a4_`) plus the fixed-name `a_ours.py`. This is the *observed #4069 histogram* subset, deliberately not an exhaustive census of every committed `mkdtemp` prefix; widen with `--prefix` (an empty/whitespace prefix is rejected, since `startswith("")` matches every entry). Agent-tooling litter (`pi-commit-msg-*`, `pi-pr-body-*`, `wf-lock-*`, `admin-*`) is a **different owner** (cross-repo issue) and is not swept unless the operator passes `--prefix`. |
 | **Age gate** | Default **12h** (`--older-than-hours`). A concurrent suite's per-test dirs are minutes old; its session-long dirs carry a live pid (below). |
 | **Live-server guard** | A candidate whose `redis.pid` names a live process is protected; an unreadable/unparseable pid file fails closed (protected). A *dead* pid does not protect — that orphaned dir is exactly what the sweep reclaims. |
 | **Dry run by default** | `--apply` is required to delete. |

@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.tmpdir_sweep import (
+    _FORBIDDEN_ROOTS,
     DEFAULT_PREFIXES,
     _is_within,
     _live_pid_protects,
@@ -48,7 +49,8 @@ def _make(root: Path, name: str, *, age_hours: float, is_dir: bool = True,
 # ── the allowlist the issue's evidence requires ───────────────────────────
 
 def test_default_allowlist_covers_observed_creators():
-    for prefix in ("ask_", "tortoise_", "tortoise-", "redislite_", "lme-"):
+    for prefix in ("ask_", "tortoise_", "tortoise-", "redislite_", "lme-",
+                   "d3_session_", "reaper_probe_"):
         assert prefix in DEFAULT_PREFIXES, prefix
 
 
@@ -64,6 +66,14 @@ def test_resolve_root_refuses_unbounded_roots():
     for bad in ("/", os.path.expanduser("~")):
         with pytest.raises(ValueError):
             resolve_root(bad)
+
+
+def test_forbidden_roots_include_the_realpath_spelling():
+    # A guard matching only the raw `~` spelling fails open when $HOME is a
+    # symlink; both spellings must be present.
+    for raw in ("/", os.path.expanduser("~")):
+        assert raw in _FORBIDDEN_ROOTS
+        assert os.path.realpath(raw) in _FORBIDDEN_ROOTS
 
 
 def test_resolve_root_refuses_dotdot():
@@ -259,6 +269,37 @@ def test_main_apply_json_then_idempotent(tmp_path, capsys):
     rc = main(["--root", str(tmp_path), "--apply", "--json"])
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["candidates"] == 0
+
+
+def test_main_refuses_an_empty_prefix(tmp_path, capsys):
+    # `str.startswith("")` matches everything — an unset "$OWNER_" must not
+    # silently widen the sweep to every entry.
+    _make(tmp_path, "ask_anything_44444444", age_hours=_OLD_H)
+    rc = main(["--root", str(tmp_path), "--apply", "--prefix", ""])
+    assert rc == 2
+    assert "empty/whitespace" in capsys.readouterr().err
+    assert (tmp_path / "ask_anything_44444444").exists()
+
+
+def test_main_refuses_a_missing_root(tmp_path, capsys):
+    rc = main(["--root", str(tmp_path / "does-not-exist")])
+    assert rc == 2
+    assert "refusing" in capsys.readouterr().err
+
+
+def test_main_exits_2_when_a_removal_fails(tmp_path, capsys, monkeypatch):
+    import tools.tmpdir_sweep as sweep_mod
+
+    _make(tmp_path, "ask_locked_55555555", age_hours=_OLD_H)
+
+    def _boom(path, root):
+        raise PermissionError("simulated rmtree failure")
+
+    monkeypatch.setattr(sweep_mod, "_remove", _boom)
+    rc = main(["--root", str(tmp_path), "--apply", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2, payload
+    assert payload["remove_failures"] >= 1
 
 
 def test_main_refuses_an_unbounded_root(capsys):

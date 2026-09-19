@@ -23,9 +23,10 @@ Why patch the call sites rather than edit 435 of them:
 Safety properties:
 
 * Directories only (`tempfile.mkdtemp`); `mkstemp` files are not touched.
-* A directory still holding a **live** `redis.pid` is left for the reaper
-  rather than removed out from under a running embedded server (a buggy test
-  is not made worse by this fixture). The skip is logged.
+* A directory whose `redis.pid` is live — or unreadable/unparseable — is
+  left for the reaper rather than removed out from under a running embedded
+  server (fail closed, mirroring the sweep: a pid that cannot be proven dead
+  is treated as live). The skip is logged.
 * `shutil.rmtree` never follows symlinks; removal is `ignore_errors` so an
   already-cleaned directory (or a concurrent reaper) is a no-op — the fixture
   is idempotent.
@@ -49,12 +50,15 @@ logger = logging.getLogger(__name__)
 _PID_FILENAMES = ("redis.pid",)
 
 
-def _live_pid_in(path: str) -> int | None:
-    """The live redis pid inside `path`, or None. Fail-closed -> None here.
+def _protected_reason(path: str) -> str | None:
+    """Why `path` must NOT be removed, or None when teardown is safe.
 
-    A pid file that exists but is unreadable/unparseable is treated as NOT
-    live (the process is gone as far as we can tell); the reaper's own
-    classification is the authority for the ambiguous case.
+    Fail-CLOSED, mirroring `tools/tmpdir_sweep.py::_live_pid_protects`: a
+    `redis.pid` that is live, unreadable, unparseable, non-positive, or whose
+    probe fails for any reason is treated as a running server and the
+    directory is left for the reaper. Only a provably dead pid (or no pid
+    file at all) permits removal — the reaper cannot reclassify a directory
+    this fixture has already deleted.
     """
     for name in _PID_FILENAMES:
         pid_file = os.path.join(path, name)
@@ -62,16 +66,26 @@ def _live_pid_in(path: str) -> int | None:
             continue
         try:
             with open(pid_file, encoding="utf-8", errors="replace") as fh:
-                pid = int(fh.read().strip())
-        except (OSError, ValueError):
-            return None
+                raw = fh.read().strip()
+        except OSError as exc:
+            return f"unreadable {name} ({exc}) — treated as live"
+        try:
+            pid = int(raw)
+        except ValueError:
+            return f"unparseable {name} — treated as live"
         if pid <= 0:
-            return None
+            return f"nonsensical pid {pid} in {name}"
         try:
             os.kill(pid, 0)
-        except OSError:
-            return None
-        return pid
+        except ProcessLookupError:
+            return None  # provably dead -> safe to remove
+        except PermissionError:
+            return f"pid {pid} alive (no permission to signal)"
+        except OverflowError:
+            return f"pid {pid} out of range — treated as live"
+        except OSError as exc:
+            return f"pid {pid} probe failed ({exc}) — treated as live"
+        return f"live redis pid {pid}"
     return None
 
 
@@ -85,7 +99,7 @@ class TrackedTempfileArtifacts:
 
     def __init__(self) -> None:
         self.created: list[str] = []
-        self.skipped_live: list[tuple[str, int]] = []
+        self.skipped_live: list[tuple[str, str]] = []
         self._previous = None
 
     def __enter__(self) -> TrackedTempfileArtifacts:
@@ -106,12 +120,12 @@ class TrackedTempfileArtifacts:
             tempfile.mkdtemp = self._previous
             self._previous = None
         for path in self.created:
-            pid = _live_pid_in(path)
-            if pid is not None:
-                self.skipped_live.append((path, pid))
+            reason = _protected_reason(path)
+            if reason is not None:
+                self.skipped_live.append((path, reason))
                 logger.warning(
-                    "#4069: leaving %s in place — live embedded server pid %d "
-                    "(the reaper owns it)", path, pid)
+                    "#4069: leaving %s in place — %s (the reaper owns it)",
+                    path, reason)
                 continue
             shutil.rmtree(path, ignore_errors=True)
         # `created` / `skipped_live` are deliberately left populated: the

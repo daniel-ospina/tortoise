@@ -322,11 +322,12 @@ def test_gen_ask_transcripts_change_selects_sdk_not_tier1():
 
 def test_tmpdir_sweep_tool_change_selects_core_not_tier1():
     # #4069: tools/tmpdir_sweep.py owns tests/test_tmpdir_sweep.py and
-    # tests/test_tmpdir_hygiene.py. Without its TOOL_CARVEOUTS entry the flat
-    # "tools/" prefix swallows the path, `changed` comes back empty and
-    # select() takes the docs-only return (tier-1 smoke only), so both guards
-    # miss the PR that changes the tool — the #1349/#3332/#3910 silent-drop
-    # class. The CORE_ALSO entry keeps it narrow: `core`, not the full matrix.
+    # tests/test_tmpdir_hygiene.py. The mechanism is the CORE_ALSO entry:
+    # `_selection_relevant()` consults it, so the `tools/` path survives the
+    # flat NON_PYTHON_PREFIXES filter, and the match loop then adds `core` and
+    # marks the path found — so a tool-only change selects `core` instead of
+    # tier-1 smoke or the unknown-path full matrix. Mutation check: removing
+    # the CORE_ALSO entry makes `full` True and fails the first two asserts.
     r = _sel(["tools/tmpdir_sweep.py"])
     assert r["full"] is False, r
     assert "core" in r["surfaces"], r

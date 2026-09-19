@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests._tmpdir_hygiene import (
     TrackedTempfileArtifacts,
-    _live_pid_in,
+    _protected_reason,
 )
 
 
@@ -81,7 +81,10 @@ def test_tracker_leaves_a_live_server_directory_in_place():
             fh.write(str(os.getpid()))  # a live pid (this process)
     # left for the reaper rather than removed under a running server
     assert os.path.isdir(path)
-    assert tracker.skipped_live == [(path, os.getpid())]
+    assert len(tracker.skipped_live) == 1
+    skipped_path, reason = tracker.skipped_live[0]
+    assert skipped_path == path
+    assert "live redis pid" in reason
     os.remove(os.path.join(path, "redis.pid"))
     os.rmdir(path)
 
@@ -97,13 +100,36 @@ def test_tracker_removes_a_dir_whose_pid_is_dead():
     assert not os.path.exists(path)
 
 
-def test_live_pid_in_ignores_missing_and_unparseable():
-    with TrackedTempfileArtifacts():
-        path = tempfile.mkdtemp(prefix="ask_hygiene_pid_")
-        assert _live_pid_in(path) is None
+def test_tracker_fails_closed_on_an_unparseable_pid():
+    """A corrupt/partially-written redis.pid must not expose the dir."""
+    with TrackedTempfileArtifacts() as tracker:
+        path = tempfile.mkdtemp(prefix="ask_hygiene_corrupt_")
         with open(os.path.join(path, "redis.pid"), "w") as fh:
             fh.write("not-a-pid")
-        assert _live_pid_in(path) is None
+    assert os.path.isdir(path)  # left for the reaper, never removed
+    assert [p for p, _ in tracker.skipped_live] == [path]
+    os.remove(os.path.join(path, "redis.pid"))
+    os.rmdir(path)
+
+
+def test_protected_reason_is_none_only_without_a_pid_file():
+    with TrackedTempfileArtifacts():
+        path = tempfile.mkdtemp(prefix="ask_hygiene_pid_")
+        assert _protected_reason(path) is None
+        with open(os.path.join(path, "redis.pid"), "w") as fh:
+            fh.write("not-a-pid")
+        assert _protected_reason(path) is not None  # fail closed
+
+
+def test_protected_reason_is_none_for_a_provably_dead_pid():
+    import subprocess
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    with TrackedTempfileArtifacts():
+        path = tempfile.mkdtemp(prefix="ask_hygiene_deadreason_")
+        with open(os.path.join(path, "redis.pid"), "w") as fh:
+            fh.write(str(proc.pid))
+        assert _protected_reason(path) is None
 
 
 def test_autouse_fixture_is_wired_into_the_suite(request):
