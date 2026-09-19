@@ -172,9 +172,9 @@ SOURCE_PATTERNS = {
                    "website/security.html", "website/tos.html",
                    "website/license.html", "website/dpa.html",
                    "website/aviso-privacidad.html",
-                   # #3436: the remaining two top-level pages, listed for the same
-                   # reason as the ten above — they are covered by the
-                   # site-wide element-id uniqueness guard
+                   # #3436: the two remaining top-level pages, listed for the
+                   # same reason as every other page entry in this tuple — they
+                   # are covered by the site-wide element-id uniqueness guard
                    # (tests/test_website_docs_consistency.py), whose scope is
                    # DERIVED as `website/*.html`. Their absence was verified
                    # before listing: `select(["website/invite-accept.html"])`
