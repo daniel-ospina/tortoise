@@ -81,7 +81,7 @@ answer path for search.
 | `abstained` | **Best-effort heuristic label** (phrase list over the answer text) — NOT the abstention guarantee; the two-phase prompt is authoritative |
 | `question_type` | The detected or caller-override type; None possible |
 | `question_date` | The resolved value (see above) |
-| `evidence` | The assembled context the reader saw (trust property as a response field) — **32 KiB byte bound**, `len(evidence.encode("utf-8")) ≤ 32768`, ENFORCED AT ASSEMBLY (whole-hit drop; never splits a character); ≤ 8000 estimated tokens |
+| `evidence` | The assembled context the reader saw (trust property as a response field) — bounded by BOTH the resolved token cap (default 16 000 estimated tokens, #4105) AND the resolved `TORTOISE_ASK_CONTEXT_BYTE_CAP` byte bound (default derived as `max(32768, token_cap × 8)` = 128 KiB), ENFORCED AT ASSEMBLY (whole-hit drop; never splits a character) |
 | `context_tokens` | `estimate_tokens_ask(rendered_context)` — a conservative ESTIMATE, not a raw count; ≤ 8000 |
 | `model` | The RESOLVED spec (the serving lane's wire id — bare `deepseek-v4-flash` on the direct lane, the full spec on OpenRouter) |
 | `provider` / `route` | The lane that actually served — a FAILOVER answer reports the SURVIVING lane; recovery reports the primary lane again |
@@ -153,17 +153,24 @@ measurement justifies a change.
   weights/damping overrides. Default None/60 = the shared global
   (`TORTOISE_FUSION_WEIGHTS` → `{"vector": 1.5}`) unchanged.
 - **A6 `TORTOISE_ASK_RETRIEVAL_LIMIT` / `_CONTEXT_ITEM_CAP` /
-  `_CONTEXT_TOKEN_CAP` (default 40/40/8000):** the retrieval-window limit
-  (the `result_ids[:limit]` cut inside `tortoise_fts_query`) is threaded IN
-  TANDEM with the assembly caps — raising only the assemble cap changes
-  nothing. Measurement-gated: defaults stay OFF until the runbook
-  baseline justifies a raise.
+  `_CONTEXT_TOKEN_CAP` / `_CONTEXT_BYTE_CAP` / `_POOL_SIZE` (default
+  200/200/16000/derived/200, #4105):** the retrieval-window limit (the
+  `result_ids[:limit]` cut inside `tortoise_fts_query`) is threaded IN
+  TANDEM with the assembly caps AND the pool floor — `limit >= item_cap`
+  and `pool_size >= limit` always hold, so raising one can never be
+  silently half-applied. The BYTE ceiling is resolved, not a literal: when
+  `_CONTEXT_BYTE_CAP` is unset it is DERIVED from the token cap
+  (`max(32768, token_cap × 8)`), so a token raise cannot be neutralised by
+  a fixed 32 KiB ceiling; `assemble_context` reports which bound dropped
+  hits and the lane warns when bytes are the binding constraint.
+  Defaults raised from 40/120/40/8000/32 KiB to the values measured on the
+  frozen D3 fixture (#4105).
 - **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 eval-lane
   cross-encoder rerank (eval R6 port, `tortoise/rerank.py` — the ONE
   implementation, re-exported by the eval lane). Truthy-only; needs the
   `embeddings` extra. Degrades to untouched on any scorer failure (never
   raises). Context/token budget guard (#2976): the measured lever costs
-  ~6.6× context, so a reranked set over the SAME 8000-token / 32 KiB caps
+  ~6.6× context, so a reranked set over the SAME resolved token / byte caps
   `assemble_context` enforces is refused WHOLE — the pool degrades to the
   unreranked order with a declared `reranked-set-exceeds-context-budget`
   reason (logged), never a silent truncation of the reranked set.

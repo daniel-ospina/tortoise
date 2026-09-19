@@ -80,7 +80,8 @@ Shipped as an optimisation loop (baseline → lever → measure → keep/revert)
   product graphs currently carry none — zero marks = no-op),
 - **A3** ask-lane fusion weights/k knobs (default = shared global),
 - **A6** measurement-gated cap review (retrieval-window `limit` threaded in
-  tandem with `context_item_cap`; default OFF = 40/40/8000),
+  tandem with `context_item_cap`; #4105 defaults 200/200/16000 with the
+  byte ceiling derived; raising one half alone changes nothing),
 - **A7** eval-lane cross-encoder rerank behind `TORTOISE_ASK_RERANK` (default
   OFF, gated phase 2, degrade-to-untouched contract).
 

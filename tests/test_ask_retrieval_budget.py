@@ -39,9 +39,11 @@ from tortoise.retrieval import (
     DEFAULT_ASK_POOL_SIZE,
     DEFAULT_ASK_RETRIEVAL_LIMIT,
     DEFAULT_CONTEXT_BYTE_CAP,
+    DEFAULT_CONTEXT_TOKEN_CAP,
     assemble_context,
     render_context,
     resolve_ask_retrieval_caps,
+    resolve_byte_cap_from_caps,
 )
 
 _CAP_ENVS = (ASK_RETRIEVAL_LIMIT_ENV, ASK_CONTEXT_ITEM_CAP_ENV,
@@ -115,6 +117,31 @@ def test_explicit_byte_cap_wins_and_garbage_falls_back(monkeypatch):
     assert caps["context_byte_cap"] == max(
         DEFAULT_CONTEXT_BYTE_CAP,
         caps["context_token_cap"] * BYTES_PER_TOKEN_FLOOR)
+
+
+def test_out_of_range_window_env_falls_back_to_default(monkeypatch):
+    """The resolution never hands the SDK a value it rejects: ``limit`` /
+    ``item_cap`` are clamped to the same 1..10000 bound ``tortoise_fts_query``
+    validates ``pool_size`` against, so an out-of-range env falls back to the
+    default instead of failing every ask with a retrieval error."""
+    monkeypatch.setenv(ASK_CONTEXT_ITEM_CAP_ENV, "20000")
+    caps = resolve_ask_retrieval_caps()
+    assert caps["limit"] <= 10000
+    assert caps["pool_size"] <= 10000
+    assert caps["context_item_cap"] == DEFAULT_ASK_CONTEXT_ITEM_CAP
+
+
+def test_legacy_caps_dict_derives_the_byte_ceiling():
+    """A caps dict that predates #4105 (no ``context_byte_cap``) must get a
+    DERIVED ceiling from its own token cap — never the 32 KiB literal, which
+    would re-open the silent no-op on that seam."""
+    assert resolve_byte_cap_from_caps({"context_token_cap": 32000}) == (
+        32000 * BYTES_PER_TOKEN_FLOOR)
+    assert resolve_byte_cap_from_caps({}) == max(
+        DEFAULT_CONTEXT_BYTE_CAP,
+        DEFAULT_CONTEXT_TOKEN_CAP * BYTES_PER_TOKEN_FLOOR)
+    assert resolve_byte_cap_from_caps({
+        "context_token_cap": 32000, "context_byte_cap": 4096}) == 4096
 
 
 # ── assemble_context: whole-hit byte drop + the binding-bound census ───────

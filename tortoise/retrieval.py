@@ -277,14 +277,20 @@ def resolve_ask_retrieval_caps() -> dict:
       and the ask lane warns — the budget is never silently accepted and
       dropped.
     """
-    limit = ask_env_int(ASK_RETRIEVAL_LIMIT_ENV, DEFAULT_ASK_RETRIEVAL_LIMIT)
+    limit = ask_env_int(ASK_RETRIEVAL_LIMIT_ENV, DEFAULT_ASK_RETRIEVAL_LIMIT,
+                        hi=_POOL_CLAMP[1])
     item_cap = ask_env_int(
-        ASK_CONTEXT_ITEM_CAP_ENV, DEFAULT_ASK_CONTEXT_ITEM_CAP)
+        ASK_CONTEXT_ITEM_CAP_ENV, DEFAULT_ASK_CONTEXT_ITEM_CAP,
+        hi=_POOL_CLAMP[1])
     token_cap = ask_env_int(
         ASK_CONTEXT_TOKEN_CAP_ENV, DEFAULT_ASK_CONTEXT_TOKEN_CAP)
     # Invariant 1: the window can never be narrower than the assembly cap.
     limit = max(limit, item_cap)
-    # Invariant 2: the pool can never be narrower than the window.
+    # Invariant 2: the pool can never be narrower than the window. The
+    # window is clamped to the SAME bound the SDK validates ``pool_size``
+    # against (1..10000), so an out-of-range env value falls back to the
+    # default at resolve time rather than handing the SDK a value it
+    # rejects (which would fail every ask with a retrieval error).
     pool_size = max(
         ask_env_int(ASK_POOL_SIZE_ENV, DEFAULT_ASK_POOL_SIZE, hi=10000), limit)
     # Invariant 3: byte ceiling resolved; derived from the token cap when
@@ -310,6 +316,23 @@ def resolve_ask_retrieval_caps() -> dict:
         "context_token_cap": token_cap,
         "context_byte_cap": byte_cap,
     }
+
+
+def resolve_byte_cap_from_caps(caps: dict) -> int:
+    """The ask-lane byte ceiling for a caps dict, DERIVING it from the
+    dict's token cap when the dict carries no ``context_byte_cap`` (#4105).
+
+    A caller may hand a LEGACY caps dict (one that predates #4105, e.g. an
+    eval arm built before the key existed). Falling back to the 32 KiB
+    literal there would re-introduce exactly the silent no-op #4105 removes
+    on that seam, so the fallback is derived from the dict's own token cap.
+    """
+    explicit = caps.get("context_byte_cap")
+    if explicit is not None:
+        return explicit
+    return max(DEFAULT_CONTEXT_BYTE_CAP,
+               caps.get("context_token_cap", DEFAULT_CONTEXT_TOKEN_CAP)
+               * BYTES_PER_TOKEN_FLOOR)
 
 
 def resolve_ask_boost_multipliers() -> dict:
