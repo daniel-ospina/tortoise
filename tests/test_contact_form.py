@@ -119,6 +119,29 @@ def _brace_end(text: str, start: int) -> int:
 #: A quoted string in CSS/JS source, one group per quote style, escapes included.
 _QUOTED = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|\'([^\'\\]*(?:\\.[^\'\\]*)*)\'')
 
+#: `const NAME = "literal"` — an identifier bound to a string literal.
+_CONST_LITERAL = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*[;,)]"
+)
+
+
+def _inline_constants(text: str) -> str:
+    """Substitute identifiers bound to a string literal with that literal's text.
+
+    A promise split across DISTANT literals — one half hoisted into a named
+    constant and concatenated at the call site — defeats any proximity search over
+    raw source: the assembled scan sees the IDENTIFIER, not the text the visitor
+    reads, so `"Thanks…" + SUBJECT + " reply soon."` stayed green while rendering a
+    promise (cycle-17 review). Substituting the literal back in makes the halves
+    adjacent again, so the assembled scan sees what renders.
+    """
+    for name, literal in {m.group(1): m.group(2) for m in _CONST_LITERAL.finditer(text)}.items():
+        # Not a property NAME (`NAME:`) — only a reference to the binding.
+        text = re.sub(rf"\b{re.escape(name)}\b(?!\s*:)", literal, text)
+    return text
+
+
 #: Source-level escape spellings that RENDER as other characters: CSS hex escapes
 #: (`"\57 e'll…"` is `"We'll…"`) and JS unicode/hex escapes (`"\u0057e'll…"`). A
 #: scan over raw source sees the escape, not the text the visitor reads, so the
@@ -451,7 +474,7 @@ def test_the_confirmation_promises_no_reply() -> None:
     # per-literal scan (cycle-8 review) while the assembled message the server
     # returns is a promise. Escapes are decoded first, since `\u0057e'll` is the
     # same promise written so a raw scan cannot see it (cycle-13 review).
-    assembled = re.search(REPLY_PROMISE_VERBS, _decode_escapes(code), re.I)
+    assembled = re.search(REPLY_PROMISE_VERBS, _decode_escapes(_inline_constants(code)), re.I)
     assert assembled is None, (
         f"contact.ts assembles a reply promise: {assembled and assembled.group(0)!r}"
     )
@@ -545,7 +568,9 @@ def test_the_confirmation_promises_no_reply() -> None:
     # while only the per-literal loop existed: `show(msg, data.message ||
     # ("Thanks…" + " We'll " + "reply soon."))` kept the whole suite green, because
     # no single literal carries both a subject and a reply word (cycle-13 review).
-    assembled_client = re.search(REPLY_PROMISE_VERBS, _decode_escapes(script_code), re.I)
+    assembled_client = re.search(
+        REPLY_PROMISE_VERBS, _decode_escapes(_inline_constants(script_code)), re.I
+    )
     assert assembled_client is None, (
         f"the contact page's script assembles a reply promise: "
         f"{assembled_client and assembled_client.group(0)!r}"
