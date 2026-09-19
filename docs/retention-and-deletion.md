@@ -96,12 +96,31 @@ path.
   nested per-graph pools — so the nested backups of **every** graph in the org
   (**default included**) survive indefinitely. The owner ruled the team account
   "should delete everything inside"; that widening is a separate, destructive
-  change filed as **#4190**.
+  change filed as **#4190** — which the end-destination ruling below makes
+  **promise-blocking**, not merely a gap.
 - **Backups on a delete request (D6 — owner decision).** On a support/account
   delete request, does live deletion actively purge backup snapshots, or do they
   age out on the 24/7/4 cycle? And does the deletion propagate to the
   second-region mirror (today it never does)? **Not decided.** The public wording
   below is written to be true under the current default (mirror off).
+
+## The end-destination rule — the team-account promise is a commitment
+
+The owner ruled (2026-09-18) that customer copy states the **end destination**,
+not the gaps: *"don't worry about those promises, we'll deliver soon on them or
+when someone asks we do it... focus on end-destination."* The published promise
+is therefore a **commitment about where deletion ends**, not a description of
+what the code does today.
+
+For a **team account** the published promise is: restorable for 7 days, then
+**permanent erasure including its backup copies**. **#4190 is consequently a
+promise-blocking item, not "a gap found"** — deleting a team account today
+drops only the default graph namespace, and custom namespaces plus every org
+backup pool survive indefinitely. The code must be made to perform the erasure
+the copy promises; **#4190 is not optional and must not be read as such.**
+
+The team-account carve-out was deliberately removed from the customer copy and
+must not be re-added.
 
 ## Where this promise is stated
 
@@ -161,7 +180,8 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 **Privacy §"Deletion scope" — the aligned closing sentence (pending confirmation):**
 
 > A deleted memory graph, user account, or team account remains restorable for
-> 7 days before permanent erasure, as described in §6; the
+> 7 days before permanent erasure; §6 covers how a deleted memory graph is
+> erased, and the
 > [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)
 > is the single source of truth for these windows.
 
