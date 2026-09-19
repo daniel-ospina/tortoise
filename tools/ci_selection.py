@@ -152,11 +152,56 @@ SOURCE_PATTERNS = {
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
                    "website/apps/blog-admin/dist/index.html",
-                   # The guard also reads the gate Function itself (it extracts
-                   # returnToPath/gateDecision from it, and derives the console's
-                   # mount path from its directory), so a change to the gate must
-                   # run the guard too.
-                   "website/functions/admin/[[path]].ts",
+                   # The guards read the moved Functions themselves — and not only
+                   # the gate: `test_admin_return_to.py` reads the gate by exact
+                   # path and derives the console's mount path from its directory,
+                   # `test_pages_bindings.py` rglob-scans the ENTIRE tree for env
+                   # reads (`_env_names_read_by_the_bff`), and
+                   # `test_website_docs_consistency.py` resolves routes from both
+                   # function roots. The directory is therefore the correct
+                   # granularity — not the two files that happened to break.
+                   #
+                   # #4171: this block previously named
+                   # `website/functions/admin/[[path]].ts`, which the admin-origin
+                   # move DELETED. An entry is matched by `startswith`, never
+                   # against the filesystem, so the dead path stayed "alive": a PR
+                   # touching the moved gate selected NO surface and
+                   # `test_admin_return_to.py` silently stopped guarding the file it
+                   # was written for (#1349/#3332 class, one level up — the ratchet
+                   # caught the reverse direction only). Naming single files also
+                   # left every OTHER moved Function unselectable: `auth/signup.ts`,
+                   # `_shared/auth/csrf.ts`, `api/session.ts` and the rest all
+                   # selected surfaces=[] — so a change adding an env read shipped
+                   # green with the binding guard never running. The directory
+                   # closes both holes. `test_source_patterns_all_name_something_real`
+                   # (tests/test_ci_selection.py) now fails on a dead entry.
+                   "website/apps/dashboard/functions/",
+                   # The SPA files the migrated-surface invariant reads by exact
+                   # path (`test_no_legacy_token_path.py` -> MIGRATED_SURFACES)
+                   # and that `test_admin_return_to.py` opens by name. Each of
+                   # these selected surfaces=[] before this commit, so the
+                   # legacy-token invariant could not fail on the very files it
+                   # exists to guard — including `main.jsx`, which THIS PR
+                   # rewrites (logout teardown, CSRF content-type). Same
+                   # #1349/#3332 class as the entry above; both are now covered by
+                   # `test_source_patterns_all_name_something_real`.
+                   "website/apps/blog-admin/src/lib/blog-api.ts",
+                   "website/apps/blog-admin/src/hooks/useAuth.ts",
+                   "website/apps/dashboard/src/main.jsx",
+                   # #4171: two more guarded files this branch MODIFIED while leaving
+                   # them unselectable, found by review after the directory entry
+                   # landed. `supabase.ts` is read by exact constant in
+                   # `test_cross_subdomain_cookie_sync.py` (four STORAGE_KEY/cookie
+                   # scope assertions) and by
+                   # `test_session_bridge_fragment_retention.py`;
+                   # `blog/_shared/admin-auth.ts` by
+                   # `test_no_legacy_token_path.py`'s store-fault-vs-signed-out
+                   # semantics guard. Both are non-tier-1 `onboarding` guards, so
+                   # editing these files shipped green with their guard never
+                   # running — the same #1349/#3332 class, and inconsistent with
+                   # the sibling entries directly above.
+                   "website/apps/blog-admin/src/lib/supabase.ts",
+                   "website/functions/blog/_shared/admin-auth.ts",
                    # #3950: the blog-discoverability guard
                    # (test_website_docs_consistency.py
                    # ::test_every_in_scope_page_links_to_the_blog) covers all 12
@@ -239,7 +284,7 @@ SOURCE_PATTERNS = {
     # a future core-registered test reading it would silently stop running on
     # the PR that edits it. Fail-closed is the right default for the file that
     # owns the deploy.
-    "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
+    "ep": ("tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
             "tortoise/reader.py", "tortoise/retrieval.py",
