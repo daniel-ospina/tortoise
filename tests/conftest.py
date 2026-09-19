@@ -1060,3 +1060,15 @@ def force_sparse_tfidf(monkeypatch):
     monkeypatch.setattr(EmbeddingModel, "get", classmethod(
         lambda cls, load_timeout=None: None))
     return None
+
+
+# ── #4069: per-test temp-directory teardown ────────────────────────────────
+# `$TMPDIR` churned to 362,962 entries with nothing older than three days:
+# the suite's `tempfile.mkdtemp(prefix=...)` call sites create a directory
+# per invocation and never remove it, and that tree is the one the reaper's
+# socket census walks (~41% CPU per call at 224k depth-2 entries). The fix
+# is structural — re-exported here so the autouse fixture applies suite-wide,
+# tracking every `mkdtemp` a test creates and removing it at teardown. The
+# mechanism and its safety properties live in `tests/_tmpdir_hygiene.py`;
+# the operator-invoked backlog sweep is `tools/tmpdir_sweep.py`.
+from tests._tmpdir_hygiene import track_tempfile_artifacts  # noqa: E402, F401

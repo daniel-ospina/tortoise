@@ -328,7 +328,18 @@ SOURCE_PATTERNS = {
 # would run only the selected surface's half of them. A path listed here adds
 # `core` alongside its matched surface(s) — narrower than promoting the whole
 # module to SHARED_MODULES (which forces the full matrix).
-CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py")
+CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py",
+             # #4069: the temp-dir sweep is test-infra whose guard tests
+             # (tests/test_tmpdir_sweep.py, tests/test_tmpdir_hygiene.py) are
+             # core-registered. `_selection_relevant()` consults CORE_ALSO, so
+             # this entry has a DUAL role: it admits a `tools/` path past the
+             # flat NON_PYTHON_PREFIXES filter AND, in the match loop below,
+             # adds `core` and marks the path found — so a tool-only change
+             # selects `core` instead of the unknown-path fail-closed full
+             # matrix, and never drops to tier-1 smoke (the #1349/#3332/#3910
+             # silent-drop class). No TOOL_CARVEOUTS entry is needed: that
+             # tuple is redundant for any path already listed here.
+             "tools/tmpdir_sweep.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
