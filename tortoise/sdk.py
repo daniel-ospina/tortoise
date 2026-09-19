@@ -1805,6 +1805,38 @@ def _is_digest_noise(content) -> bool:
     return bool(_DIGEST_LABEL_RE.match(t))
 
 
+def _resolve_vector_min_similarity() -> float | None:
+    """#4028 — the OPT-IN vector-leg relevance floor (cosine) for the surface.
+
+    **Default: None (no floor — the pre-#4028 behaviour).** An absolute
+    cosine floor cannot be default-on: the query->document relevant and
+    unrelated bands OVERLAP for bge-small (see
+    ``embeddings.VECTOR_RELEVANCE_FLOOR``), so any floor high enough to drop
+    the #4028 residue also drops real answers and fails
+    ``tests/test_longmem_runner.py::test_vector_strategy_verified_in_eval_path``.
+    #4028's store defect is DATA (test residue), fixed by
+    ``tools/purge_test_residue.py``.
+
+    ``TORTOISE_VECTOR_MIN_SIMILARITY`` enables it (a value in (0, 1];
+    ``embeddings.VECTOR_RELEVANCE_FLOOR`` is the calibrated starting point).
+    Unset, 0, unparseable or out of range → None (off).
+
+    The knob changes the behaviour of the existing ``tortoise_search`` read
+    surface; it adds NO surface (#3863 surface freeze).
+    """
+    raw = os.environ.get("TORTOISE_VECTOR_MIN_SIMILARITY")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        # A typo must never silently ENABLE a floor that drops real answers.
+        return None
+    if not (0.0 < value <= 1.0):
+        return None
+    return value
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -13061,6 +13093,15 @@ class TortoiseSDK:
         # points — a top-level filter would drop the raw-chunk leg). Legacy
         # callers keep kind → structural kind + post-filter exactly as today.
         struct_kind = structural_kind if structural_kind is not None else kind
+        # #4028: the read surface's OPT-IN vector-leg relevance floor. Off by
+        # default (None) — see _resolve_vector_min_similarity. The shipped
+        # default's real failure was 17 test-residue Points holding the only
+        # stored embeddings: the hybrid surface answered every query with
+        # them. That is a DATA defect (tools/purge_test_residue.py); this
+        # lever additionally lets an operator who has measured their corpus
+        # drop sub-relevance near neighbours.
+        _vector_floor = _resolve_vector_min_similarity()
+        _floored_legs: set[str] = set()
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -13074,9 +13115,23 @@ class TortoiseSDK:
             # A1 (#2070): the ask-lane numeric-token policy threads into the
             # sparse leg's OR-union (default False = search lane unchanged).
             keep_numeric=keep_numeric,
+            min_vector_similarity=_vector_floor,
+            # Only request the floored-leg report when a floor is active, so a
+            # floor-off call keeps `trace_active` False (pre-#4028 shape).
+            floored_legs=(_floored_legs if _vector_floor is not None else None),
         )
 
         if not raw_results:
+            # #4028: the vector leg RAN and the relevance floor removed every
+            # near neighbour. That is an ANSWER (nothing relevant), not a leg
+            # failure — so the in-memory TF-IDF fallback, which returns a hit
+            # for almost any query, must NOT fire here.
+            if "vector" in _floored_legs:
+                if leg_trace is not None:
+                    leg_trace.append(_trace_entry(
+                        "fallback", ran=False, degraded=False,
+                        reason="relevance_floor_empty", count=0))
+                return []
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
                 # #1375: serve from the cached lean corpus snapshot when
