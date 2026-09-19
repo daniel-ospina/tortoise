@@ -19769,19 +19769,24 @@ _TELEMETRY_DROP_REPORTED: dict[tuple[str, str], set[tuple[str, ...]]] = {}
 # the happy path.
 _TELEMETRY_DROP_LOCK = threading.Lock()
 
-# Cardinality bounds: at most this many counter entries in total (further
-# distinct key-sets fold into ONE shared overflow entry), at most this many
-# fingerprints reported per site, and at most this many keys named in one
-# counter key / log line. A CALLER-SUPPLIED key name can never make the
-# reporter retain or log without bound.
+# Cardinality bounds. The counter retains at most `_TELEMETRY_DROP_MAX_MARKERS`
+# distinct key-sets PLUS one shared overflow entry; the per-site dedup dict
+# retains at most `_TELEMETRY_DROP_MAX_SITES` sites PLUS one shared overflow
+# site, each with at most `_TELEMETRY_DROP_MAX_PER_SITE` fingerprints; and at
+# most `_TELEMETRY_DROP_MAX_KEYS` keys are named in one counter key / log line.
+# Together these mean a CALLER-SUPPLIED key name (or site label) can never make
+# the reporter retain or log without bound.
 _TELEMETRY_DROP_MAX_MARKERS = 512
+_TELEMETRY_DROP_MAX_SITES = 64
 _TELEMETRY_DROP_MAX_PER_SITE = 64
 _TELEMETRY_DROP_MAX_KEYS = 20
 
-# The sentinel a capped counter folds into — SHARED across sites, so the
-# Counter stays bounded overall rather than bounded-per-site.
+# The sentinels a capped structure folds into — SHARED, so each structure is
+# bounded overall rather than bounded-per-key.
 _TELEMETRY_DROP_OVERFLOW: tuple[str, str, tuple[str, ...]] = (
     "<overflow>", "<overflow>", ())
+_TELEMETRY_DROP_SITE_OVERFLOW: tuple[str, str] = (
+    "<site-overflow>", "<site-overflow>")
 
 
 def _telemetry_drop_fingerprint(keys: frozenset[str] | set[str]) -> tuple[str, ...]:
@@ -19832,16 +19837,20 @@ def _report_unregistered(where: str, subject: str,
 
     1. ALWAYS counts — the bounded key fingerprint is incremented before any
        escalation, so the drop is visible even when strict mode raises.
-    2. Reports ONCE per ``(where, subject, key-fingerprint)`` per process —
-       the OTel bound, so an emit site in a hot loop cannot flood the log.
+    2. Reports AT MOST ONCE per ``(where, subject, key-fingerprint)`` per
+       process — the OTel bound, so an emit site in a hot loop cannot flood
+       the log.
     3. Raises ``UnregisteredTelemetryKey`` ONLY when strict mode is on at call
        time; otherwise returns.
     4. NEVER forwards the key: the caller's filtered props are byte-identical
        to before, preserving the PII guarantee.
 
-    Both retained structures are CAPPED (``_TELEMETRY_DROP_MAX_MARKERS``) and
-    the fingerprint is LENGTH-BOUNDED (``_TELEMETRY_DROP_MAX_KEYS``), because
-    the PATCH front door feeds this from a request body — an authenticated
+    Every retained structure is bounded: ``_TELEMETRY_DROP_COUNTS`` by
+    ``_TELEMETRY_DROP_MAX_MARKERS`` plus one shared overflow entry,
+    ``_TELEMETRY_DROP_REPORTED`` by ``_TELEMETRY_DROP_MAX_SITES`` sites (plus a
+    shared overflow site) each capped at ``_TELEMETRY_DROP_MAX_PER_SITE``
+    fingerprints, and the fingerprint itself by ``_TELEMETRY_DROP_MAX_KEYS``.
+    The PATCH front door feeds this from a request body, so an authenticated
     caller must not be able to grow process-global state or a log line without
     bound by sending unique unknown field names.
 
@@ -19857,7 +19866,11 @@ def _report_unregistered(where: str, subject: str,
                 and len(_TELEMETRY_DROP_COUNTS) >= _TELEMETRY_DROP_MAX_MARKERS):
             counter_key = _TELEMETRY_DROP_OVERFLOW
         _TELEMETRY_DROP_COUNTS[counter_key] += 1
-        reported = _TELEMETRY_DROP_REPORTED.setdefault((where, subject), set())
+        site = (where, subject)
+        if (site not in _TELEMETRY_DROP_REPORTED
+                and len(_TELEMETRY_DROP_REPORTED) >= _TELEMETRY_DROP_MAX_SITES):
+            site = _TELEMETRY_DROP_SITE_OVERFLOW
+        reported = _TELEMETRY_DROP_REPORTED.setdefault(site, set())
         report = (fingerprint not in reported
                   and len(reported) < _TELEMETRY_DROP_MAX_PER_SITE)
         if report:

@@ -238,6 +238,17 @@ def test_drop_state_is_bounded_for_distinct_client_keys():
     assert len(per_site) <= ha._TELEMETRY_DROP_MAX_PER_SITE
 
 
+def test_drop_state_is_bounded_across_distinct_sites():
+    """The reported dict is bounded in its SITE dimension too — a future emit
+    site misusing a caller-derived `subject` cannot grow it without bound."""
+    for i in range(ha._TELEMETRY_DROP_MAX_SITES + 10):
+        ha._report_unregistered(f"site{i}", "subject", {f"k{i}"})
+    assert len(ha._TELEMETRY_DROP_REPORTED) <= ha._TELEMETRY_DROP_MAX_SITES + 1
+    total = sum(len(v) for v in ha._TELEMETRY_DROP_REPORTED.values())
+    assert total <= ((ha._TELEMETRY_DROP_MAX_SITES + 1)
+                     * ha._TELEMETRY_DROP_MAX_PER_SITE)
+
+
 def test_one_site_cannot_silence_another_sites_warning(caplog):
     """A client flooding the PATCH front door with distinct unknown field
     names must not exhaust the warning budget for unrelated sites. With a
