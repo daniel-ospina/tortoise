@@ -122,20 +122,44 @@ MAX_OPERATORS = 500
 # contradicted pricing.json (#310 GAP-B, review fix 2).
 #
 # max_sessions has NO constant here and NO pricing.json field either. The
-# flat 1000 max_sessions WAS a recorded decision for v1 — see
-# docs/epics/2026-08-07-tortoise-user-journeys/05-plan.md (P2-7, "keep
-# points/sessions flat in v1", human gate #2 approved 2026-08-07) and
-# docs/plans/scoping-329-problem.md ("Preserve the sessions resource
-# (max_sessions default 1000)"). #4010 REOPENS and SUPERSEDES that v1
-# decision under the owner's later rulings — the product direction of
-# 2026-08-09 ("NO capture caps. Tiers are feature baselines; usage is metered
-# separately") and the #4010 directive itself ("let's remove that unapproved
-# cap"). Sessions are UNLIMITED for every tier, and unlike every other limit
-# a STORED max_sessions value is deliberately NOT honoured as a cap (see
+# flat 1000 was an INHERITED CODE FALLBACK, never a ratified product cap —
+# and the reason is checkable, not reconstructed: the plan that carried it
+# also designated its OWN canonical limits source, and that source has no
+# session field at all. `product/pricing.json` (canonical single source,
+# decision 1d: "product/pricing.json ... is canonical; pricing.md is
+# doc-generated from it") contains ZERO occurrences of "session" and no
+# sessions row in its tier table. What the plan recorded was KEEPING THE
+# EXISTING FALLBACK — as a fallback: 05-plan.md:570, "keep flat fallbacks
+# (1000/1000) in v1 OR fold into ops_allowance — decision: keep
+# points/sessions flat in v1; ops_allowance (write ops) is the billing
+# metric", restated at :598 ("points/sessions stay flat 1000/1000 in v1").
+# Keeping a fallback is not ratifying the value, and 05-plan.md:18's "human
+# gate #2 approved" reads in full "all 8 substeps, coherence CLEAN; human
+# gate #2 approved 2026-08-07; decomposed into #568-#578" — it approved the
+# plan's coherence to decompose, not a constant inside a tier table. The
+# default pre-dates the #329 security commit (f6ca5ebdb), whose scoping doc
+# only instructed preserving the existing resource in the shared helper
+# (docs/plans/scoping-329-problem.md:17 — a refactor-safety instruction, not
+# a cap ratification). It became a production ceiling because the limits
+# resolvers substituted the constant as their fallback wherever a stored
+# value was absent, and the lenient `if resource == "sessions"` branch in
+# enforce_org_limit supplied it to callers whose limits dict lacked the key
+# entirely (the MCP capture bridge).
+#
+# #4010 REMOVES that fallback (the 2026-09-19 correction on the issue
+# withdraws the earlier "recorded v1 decision / REOPEN" framing). Sessions
+# are UNLIMITED for every tier, and unlike every other limit a STORED
+# max_sessions value is deliberately NOT honoured as a cap (see
 # resolve_org_limits): a stored 1000 would otherwise keep the org capped
-# after the constant was deleted. Recorded as a REOPEN, never as an
-# accident — a reversal that claims no decision existed is the quiet-
-# reversal failure the contradiction-test discipline forbids.
+# after the constant was deleted. This removes an unratified fallback that
+# should never have been enforcement; it is NOT a reopen of a v1 cap
+# decision, because nothing that RATIFIES a cap ever named it — no owner
+# ruling, no decision record, no `product/pricing.json` field. Approved docs
+# do carry 1000 forward as a default (`git grep -n max_sessions -- '*.md'`);
+# carrying a default forward is the inheritance this comment describes, not a
+# ratification. The owner confirms he never approved a 1k cap. Stale
+# 1000-as-cost-bound framing elsewhere: #4052. The P2-7 billing-metric
+# decision is untouched — write-ops remains the billing metric.
 
 # ── Documents cap: DERIVED-CONSTANT (T2-P2a, #1726 Slice 1) ────────────────
 # max_documents is DERIVED from max_points with a documented conversion
@@ -329,12 +353,14 @@ def resolve_org_limits(org_id: str) -> dict:
         "max_graphs": int(mg) if mg is not None else None,
         "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
         "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-        # #4010: sessions are unlimited for every tier. `_ms` (the stored
-        # t.max_sessions) is read so the deliberate departure is VISIBLE at
-        # the exact site that could re-introduce the cap — and then NOT
-        # honoured, because a stored 1000 must never re-cap an org (the trap
-        # this issue names). Clearing the stored rows is the defence-in-depth
-        # half; ignoring them here is the half that actually decides.
+        # #4010: sessions are unlimited for every tier — the flat 1000 was
+        # an inherited code fallback, never a ratified cap (see the module
+        # comment above). `_ms` (the stored t.max_sessions) is read so the
+        # removal is VISIBLE at the exact site that could re-introduce the
+        # cap — and then NOT honoured, because a stored 1000 must never
+        # re-cap an org (the trap this issue names). Clearing the stored rows
+        # is the defence-in-depth half; ignoring them here is the half that
+        # actually decides.
         "max_sessions": None,
     }
 
@@ -584,12 +610,12 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         # stored null) — skip enforcement (#683). Distinguish from a MISSING
         # key, which is fail-closed (#310 GAP-B): never silently fall back to
         # lenient caps.
-        # #4010: sessions is no longer the exception to that rule. Its flat
-        # v1 1000 cap was REOPENED and SUPERSEDED by #4010 (see the module
-        # comment above), so it has no constant to fall back to and its
-        # resolved value is always the explicit None — the lenient
-        # `if resource == "sessions": limit = DEFAULT_MAX_SESSIONS` branch is
-        # deleted, not relocated.
+        # #4010: sessions is no longer the exception to that rule. The flat
+        # 1000 it fell back to was an inherited code fallback, never a
+        # ratified cap (see the module comment above), so it has no constant
+        # to fall back to and its resolved value is always the explicit None
+        # — the lenient `if resource == "sessions": limit =
+        # DEFAULT_MAX_SESSIONS` branch is deleted, not relocated.
         if limit_key in limits:
             return
         raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
