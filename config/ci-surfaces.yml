@@ -1029,6 +1029,14 @@ carve_out:
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py
 - test_flip_gate.py
+# #4047: both #3845 fork-guard files are module-level `embedded_only` (their
+# subject is the embedded daemon's module-fork wedge), were absent from
+# carve_out, and so were collected-and-SKIPPED by every full selection — a
+# permanently green, permanently unexecuted gate on main (#3845's own evidence
+# never ran on a full selection). Registered here so the URI-unset carve-out
+# job runs them.
+- test_fork_safety_3845.py
+- test_fork_slot_wedge_3845.py
 - test_guard.py
 - test_hard_reject.py
 - test_hosted_backup.py
