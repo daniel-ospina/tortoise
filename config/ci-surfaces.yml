@@ -35,6 +35,7 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
+  - test_telemetry_registration.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -110,6 +111,11 @@ surfaces:
   - test_fork_slot_wedge_3845.py
   - test_graphcopy_boolean_index_3154.py
   - test_hosted_api.py
+  # #3849: the eval-only ask-lane surface contract. Its N4/N5 assertions pin
+  # the ABSENCE of a /v1/ask route on BOTH the hosted app (api-owned) and the
+  # self-host router, so a hosted_api.py-only PR must run it — dual-registered
+  # with `core` (where the auto-register placed it) per the #2938 convention.
+  - test_ask_eval_only.py
   # #3359: per-session provider-cost measurement — the hosted emit path
   # (_capture_cost_props + the analytics allowlist) is api-owned, so the
   # acceptance test is dual-registered (also under `core` for the extractor
@@ -118,6 +124,11 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_hosted_auth.py
   - test_hosted_backup.py
+  # #3895: the dump's node set and edge set must be the SAME set — registered
+  # under `api` because tortoise/hosted_backup.py owns that surface (see the
+  # #3154 note in tools/ci_selection.py). A hosted_backup.py-only change now
+  # selects this file (docker-lane; dump/restore round-trips).
+  - test_dump_edge_asymmetry_3895.py
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
@@ -141,8 +152,6 @@ surfaces:
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
-  - test_ask_api.py
-  - test_ask_gating.py
   - test_attribution_actor.py   # #2600: session→human actor stamp + event backstop + forged-claim strip (docker lane)
   - test_attribution_machine_model.py   # #2599: additive session machine_id + model attribution (docker lane)
   - test_commit_supersession_parity.py
@@ -217,6 +226,10 @@ surfaces:
   # CLI-wiring regression still runs the install guard. See the core entry for
   # the mechanism half.
   - test_capture_install.py
+  # #3818: the Codex SessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
+  # registration as test_capture_install.py (mechanism = core; CLI = api).
+  - test_codex_capture_hook.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -310,6 +323,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_ask_eval_only.py
   - test_capture_cost_measurement.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
@@ -321,6 +335,7 @@ surfaces:
   # this is the fallback arm, and it also covers a tortoise/monitoring.py-only change
   # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
   - test_analytics_fallback_alert.py
+  - test_client_status_vocabulary.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -372,6 +387,10 @@ surfaces:
   # surface (the #3575/#3795 precedent: without that entry a CLI-wiring-only
   # change would run no guard for the very change it guards).
   - test_capture_install.py
+  # #3818: the Codex SessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
+  # registration as test_capture_install.py (mechanism = core; CLI = api).
+  - test_codex_capture_hook.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -775,6 +794,11 @@ surfaces:
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   sdk:
+  # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
+  # `sdk`, so these two must be dual-registered here or they stop running on
+  # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
+  - test_ask_eval_only.py    # the removal contract incl. N7 (the lane's hosted-mode refusal)
+  - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm — drives ask_lane.run_ask_assembled/run_ask_lane (also under `eval`)
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
   - test_ask_sdk.py
@@ -789,7 +813,7 @@ surfaces:
   - test_eval_ingest_cache.py  # #2080 ingest-cache seam (docker-lane leg — the retriever/namespace surface, mirrors test_retrieval.py)
   - test_operator_dedup_parity.py
   - test_postmerge_dedup.py
-  - test_product_rerank.py  # #2976: product ask-lane rerank seam — tri-state gate, budget guard, one-impl de-fork guard (hermetic)
+  - test_product_rerank.py  # #2976: ask-lane (eval-only) rerank seam — tri-state gate, budget guard, one-impl de-fork guard (hermetic)
   - test_ci_timing.py
   - test_ids.py
   - test_log.py
@@ -808,7 +832,7 @@ surfaces:
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
-  - test_assembly_sdk.py  # #2165 Task 6: ask() connected-assembly branch + ask_assembled + byte goldens (docker-lane)
+  - test_assembly_sdk.py  # #2165 Task 6: ask_lane.run_ask_lane()/run_ask_assembled() connected-assembly branch + byte goldens (docker-lane)
   - test_retrieval.py
   - test_sdk.py
   - test_sdk_dedup.py
@@ -851,6 +875,7 @@ surfaces:
   - eval/retrieval/test_run.py
   - longmem_eval/test_vector_arm.py
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm A/A-widened/B admission + R9 geometry (docker-lane)
+  - test_ask_eval_only.py  # #3849: N6 pins tools/longmem_eval/reader.py's prompt re-export (an eval-owned file) — also under api/core/sdk
   - longmem_eval/test_measure_temporal.py  # #2578 Task 2: measurement scaffold — census 133->55 pin, prereg writer, refusal classifier (embedded-safe)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
   - longmem_eval/test_probe_v2.py  # #2578 Task 5: v2-lane structural probe — wave guard, saturation stop rule, substrate measurement (embedded-safe)
@@ -1011,6 +1036,13 @@ durations:
   # not a precise cost. Re-measure rather than trusting it if the import graph
   # changes.
   test_no_legacy_token_path.py: 60.0
+  # #3895: 21 docker-lane dump/restore + graph-rebuild tests (~40 graph
+  # round-trips). HIGH-VARIANCE: measured 68-106s warm across runs (the
+  # session-hygiene sweep and the shared container's load dominate the tail),
+  # 126-183s on the embedded lane. Loose middle so the LPT packer does not
+  # under-weight it against default_weight=2.0 — the file is NOT slow-listed,
+  # it stays in the derived fast halves.
+  test_dump_edge_asymmetry_3895.py: 90.0
   test_divergence_conformance.py: 57.8
   test_export_cli.py: 53.7
   test_github_indexer.py: 51.5
@@ -1047,7 +1079,6 @@ durations:
   test_ingest_v2_consolidation.py: 16.5
   test_metering.py: 16.5
   eval/harness/test_harness_benchmark.py: 16.1
-  test_ask_api.py: 15.1
   test_epic903_scheduler.py: 14.0
   test_hosted_volunteer_context.py: 14.0
   test_tripwire.py: 14.0
@@ -1119,7 +1150,6 @@ durations:
   test_write_consolidation.py: 4.7
   test_value_extractor.py: 4.6
   test_pack_state.py: 4.5
-  test_ask_gating.py: 4.4
   test_skip_guard.py: 4.4
   test_admin_return_to.py: 4.3
   test_longmem_usage_e2e.py: 4.3

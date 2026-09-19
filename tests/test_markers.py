@@ -85,8 +85,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_invite_fusion_http.py": {"registry": "prod-coupled"},    # #2003 (W7): registry lane invite-fusion HTTP tests
     "test_invite_fusion_docker.py": {"registry": "prod-coupled"}, # #2003 (W7): docker-lane fusion journeys
     "test_mcp_http.py": {"registry": "prod-coupled"},
-    "test_mcp_server_auth_modes.py": {"registry": "prod-coupled",
-                                     "selfhost": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern; #2657 TestAskConnectedAssemblyExposure auth_mode="none" resolves the canonical selfhost namespace (graph team_selfhost on the env URI)
+    "test_mcp_server_auth_modes.py": {"registry": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern (the #2657 TestAskConnectedAssemblyExposure selfhost site went with the ask surface, #3849)
     "test_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
@@ -189,11 +188,6 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # otherwise, #1970 main hygiene).
         'f"org_{org_id}"': "endpoint-constrained",
     },
-    "test_mcp_server_auth_modes.py": {
-        # #2657 TestAskConnectedAssemblyExposure finally-cleanup — deletes the
-        # team_selfhost graph seeded by the auth_mode="none" ask fixture.
-        '"org_selfhost"': "endpoint-constrained",  # fixture's own seeded graph delete
-    },
     "test_onboarding_state_split.py": {
         'f"org_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
         'f"org_{org_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
@@ -217,6 +211,12 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     },
     "test_navigation.py": {
         "name (MagicMock param)": "unit-mock",
+    },
+    "test_dump_edge_asymmetry_3895.py": {
+        # #3895: a scratch registry handle for the create_backup stamp seam
+        # (`_stamp_backup_latest` MATCHes Team.id) — the test seeds it itself
+        # and no production seam resolves the name.
+        '"registry_3895"': "test-constructed",  # scratch registry handle for create_backup's stamp seam
     },
 }
 

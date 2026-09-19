@@ -70,6 +70,9 @@ family_rank:
 # difference, so a registry or table edit that moves rows between keywords
 # cannot pass silently. To change the surface you update this file and the
 # manifest together, in a PR that carries the owner's approval.
+#
+# #3849: `find` 7 -> 6 — `tortoise_ask` was the removed row (its name token
+# `ask` derives `find`), so the removal moves this count and nothing else.
 baseline_counts:
   fetch: 22
   create: 20
@@ -77,7 +80,7 @@ baseline_counts:
   check: 9
   operate: 9
   update: 8
-  find: 7
+  find: 6
   delete: 6
   link: 4
   trace: 2

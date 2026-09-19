@@ -602,6 +602,15 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
 
 # ── Ask lane: shared budget bucket + bounded runner (#1987 Tasks 6/7/8) ────
 #
+# ⛔ RETIRED-BUT-RETAINED (#3849): every PRODUCT caller of this cluster — the
+# hosted REST /v1/ask handler, the hosted MCP ask handler and the selfhost
+# /ask handler — was removed with the ask product surface, so no product path
+# reaches it today (the eval-only lane, tortoise/ask_lane.py, is unbudgeted).
+# Its one remaining caller is a test: tests/test_quota.py pins
+# `run_ask_bounded`'s exec-floor guarantee, so the #3849 §7 D5 purge has to
+# move or drop that test with it. The comments below that name the removed
+# handlers are kept as the record of what the bounds were.
+#
 # The ONE shared per-org per-minute LLM budget for the ask lane, used by
 # BOTH the hosted REST handler and the hosted MCP handler (no duplicated
 # prune/check/append logic — mcp_server.py imports ``tortoise.quota``). The
@@ -689,12 +698,17 @@ def ask_budget_retry_after(org_id: str | None) -> float:
 
 class AskInFlightLimitError(Exception):
     """Per-org in-flight cap hit (4 concurrent) — mapped to 429
-    ``in_flight_limit`` by the ask handlers."""
+    ``in_flight_limit`` by the ask handlers (removed in #3849 — no handler
+    maps it any more, though the retained ``run_ask_bounded`` still raises
+    it; see the RETIRED note on this cluster)."""
 
 
 class AskBoundedTimeoutError(Exception):
     """The bounded ask section exceeded ``_ASK_TIMEOUT_S`` (semaphore queue
-    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers."""
+    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers
+    (removed in #3849 — no handler maps it any more, though the retained
+    ``run_ask_bounded`` still raises it and tests/test_quota.py pins that;
+    see the RETIRED note on this cluster)."""
 
 
 #: Ask-lane bounds (#1987 Task 7): global semaphore, per-org in-flight cap,
@@ -765,7 +779,10 @@ def ask_in_flight_capacity(org_id: str | None) -> bool:
 async def run_ask_bounded(fn, org_id: str | None, *args, **kwargs):
     """Shared bounded ask runner (#1987 Task 7/8/9) — the ONE wrapper the
     hosted HTTP handler, the hosted MCP handler, and the selfhost REST
-    handler all await.
+    handler all awaited (all three removed in #3849, so no product caller
+    reaches it any more; its one remaining caller is ``tests/test_quota.py``,
+    which pins the exec-floor guarantee — see the RETIRED note on this
+    cluster).
 
     Bounds: global ``asyncio.Semaphore(8)`` + ``asyncio.wait_for(_ASK_TIMEOUT_S)``
     wrapping the FULL bounded section (semaphore acquire + the to_thread
@@ -791,8 +808,9 @@ async def run_ask_bounded(fn, org_id: str | None, *args, **kwargs):
     sem = st["sem"]
     inflight = st["in_flight"]
     # ``_sdk_org_id`` is the bound SDK lane's metering org_id (hosted
-    # HTTP/MCP handlers pass the org; selfhost passes None) — stripped here
-    # so ``fn`` (sdk.ask) receives it WITHOUT colliding with this wrapper's
+    # HTTP/MCP handlers pass the org; selfhost passes None; that SDK entry
+    # point was removed in #3849) — stripped here
+    # so ``fn`` receives it WITHOUT colliding with this wrapper's
     # own ``org_id`` (the in-flight-cap key).
     fn_kwargs = dict(kwargs)
     sdk_org_id = fn_kwargs.pop("_sdk_org_id", org_id)

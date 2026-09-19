@@ -1384,6 +1384,10 @@ class TestDoctorIntegration:
         for k in _DB_ENV_VARS:
             monkeypatch.delenv(k, raising=False)
         monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+        # Hermetic HOME: doctor resolves the Codex root through `Path.home()`
+        # (`$CODEX_HOME` is scrubbed by the autouse conftest fixture), so the
+        # real HOME would let doctor read the developer's own ~/.codex.
+        monkeypatch.setenv("HOME", str(tmp_path))
         from tortoise import config as _config
         monkeypatch.setattr(
             _config, "DEFAULT_DB_PATH",
@@ -1475,8 +1479,38 @@ class TestDoctorIntegration:
         lines = self._doctor_lines(capsys)
         assert lines and "❌" in lines[0]
 
+    def test_doctor_reports_a_codex_install_at_codex_home(self, doctor_env, capsys):
+        """Doctor checks the Codex seam at `$CODEX_HOME`, the only path Codex
+        reads — not the cwd.
 
-# ── 5. harness-agnosticism (the mechanism must not be Claude-shaped) ─────
+        MUTATION: check only the `claude` layout (anchor the root at cwd) → no
+        codex row → RED.
+        """
+        from tortoise.capture_install import install_capture
+        assert install_capture("codex", home=doctor_env).ok
+
+        lines = self._doctor_lines(capsys)
+        assert any("codex" in ln and "✅" in ln for ln in lines), lines
+        # ...and nothing was read from the dead project-local path.
+        assert not (doctor_env / "hooks.json").exists()
+
+    def test_doctor_fails_on_a_stale_codex_install(self, doctor_env, capsys):
+        """A stale Codex install is a FAIL, same as Claude's — doctor's
+        freshness row must not be Claude-only (#3818).
+
+        MUTATION: add the codex row but never mark its drift → RED.
+        """
+        from tortoise.capture_install import install_capture
+        assert install_capture("codex", home=doctor_env).ok
+        stale = (doctor_env / ".codex" / "hooks" / "tortoise-session-end.sh")
+        stale.write_text("#!/usr/bin/env bash\n# tortoise session capture\nexit 0\n")
+
+        lines = self._doctor_lines(capsys)
+        assert any("codex" in ln and "❌" in ln for ln in lines), lines
+        assert any("hooks status --harness codex" in ln for ln in lines), lines
+
+
+# ── 5. harness-agnosticism (the mechanism must not be Claude-shaped) ────
 
 
 class TestHarnessAgnostic:
