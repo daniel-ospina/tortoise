@@ -196,9 +196,12 @@ async def _selfhost_ask_http_handler(request, exc):
             # breach refusal now carries one), and add the static actionable
             # ``message`` only on the timeout arm. RFC 7231 allows an
             # HTTP-date header — the body field is omitted when it cannot be
-            # parsed as seconds.
+            # parsed as seconds. OverflowError is listed explicitly: it is an
+            # ArithmeticError, not a ValueError, and ``int(float("inf"))``
+            # raises it — an escape here would turn the pinned 504 into a 500
+            # from inside the refusal formatter itself (#4020 review).
             if exc.headers and exc.headers.get("Retry-After"):
-                with suppress(TypeError, ValueError):
+                with suppress(TypeError, ValueError, OverflowError):
                     body["error"]["retry_after"] = int(
                         float(exc.headers["Retry-After"]))
             if status == 504 and detail == CODE_TIMEOUT:

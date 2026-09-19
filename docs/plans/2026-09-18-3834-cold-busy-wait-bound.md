@@ -797,6 +797,7 @@ route-level tests that existed.
 | `_FakeAskServer.sequence: list \| None = None` | `sequence: list = []` | Identical behaviour (the branch tests truthiness). `requests.append(...)` remains the first statement of `_handle`, as required. |
 | SDK deadline stop driven by patching `retry_mod._monotonic` | driven by `ASK_RETRY_DEADLINE_S = 0` | Both avoid real waiting; the knob version additionally pins the constant. |
 | AC1 margin expressed as `_ASK_TIMEOUT_S + 2.5` | literal `0.5 + 2.5` | `test_reader_timeout_504` monkeypatches the constant to 0.5; reading it back would test the monkeypatch. |
+| "One contract test asserts, for the **three** off-loop dispatchers this unit knows about (`_emit_ask_latency_off_path`, `mcp_server._emit_mcp_tool_call_telemetry`, the capture_cost `to_thread` site), that the write body runs on a thread **≠** the calling loop thread" (§ recurrence guard; repeated in the cycle-5 changelog) | the thread-identity assertion exists for `_emit_ask_latency_off_path` **only** (`test_ask_emission_is_handed_off_the_event_loop`, `…_non_blocking`, `…_daemon_thread_branch`) | **Not built — recorded as an open deviation, not a reached deliverable.** R5-1/F4's recurrence guard is therefore **partial**: a future regression that puts the MCP or capture-cost write body back on the loop would not be caught by anything this unit adds. `_emit_mcp_tool_call_telemetry` is covered only by an `inspect.getsource` proxy (`test_ask_api.py::test_ask_per_surface_keys_never_combine`), which pins identifiers rather than the property. Carried as a follow-up; the two other dispatchers are pre-existing code this unit did not modify. |
 
 ### 3. Pre-existing bugs this work surfaced (filed, not fixed here)
 
@@ -806,8 +807,11 @@ route-level tests that existed.
   fake-reader seam. **This inverted a premise of this plan:** base `tests/test_ask_api.py` is
   **29/29 green** with the var cleared, and 20/29 with it set — the "9 pre-existing environmental
   failures" this work originally carried forward were entirely the leak. `test_ask_sdk.py` 36/36 vs
-  17/36; `test_selfhost_rest.py::TestAsk` 3/3 vs 1 failing. Worked around in two files' fixtures
-  (`test_ask_api.py::_clean_ask_state`, `test_selfhost_rest.py::_client_for_env`); the suite-wide fix
+  17/36; `test_selfhost_rest.py::TestAsk` 3/3 vs 1 failing. Worked around before the ask path is
+  exercised in **four** places — `test_ask_api.py::_clean_ask_state` and
+  `test_ask_sdk.py::_clean_ask_state` (every test in each file),
+  `test_selfhost_rest.py::_client_for_env`, and
+  `test_mcp_server_auth_modes.py::TestAskBoundBreachRefusal._stub_bound`; the suite-wide fix
   is in the issue.
   - Consequence for the plan's #3759 acknowledgement: with the SDK local, `test_ask_returns_200_shape`
     **passes** — the 502 it was documented as hitting was the leak, not the reader-build failure.

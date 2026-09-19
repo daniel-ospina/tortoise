@@ -150,6 +150,18 @@ and no reopen is warranted because the requirement is satisfiable without moving
   breach causes honestly (the client cannot distinguish a queued ask from a slow one — see C.3) and
   **carrying no literal number**, so the value lives in exactly one place (`_ASK_TIMEOUT_S`):
   *"The ask exceeded the server's wait deadline (the service was cold or busy). Retry after the advertised delay; the answer was not produced."*
+- **SUPERSEDED by the shipped constant (2026-09-18, cycle 6).** The wording above is **not** the
+  string `tortoise/schemas.py::ASK_BUSY_MESSAGE` ships. Cycle 6 replaced it with *"Tortoise is busy
+  or still waking up and could not answer this question within its wait budget. Retry after the
+  advertised back-off — the `retry_after` field of this body (also the `Retry-After` header on HTTP
+  responses)."* — the pinned properties are unchanged and are the part that matters: static,
+  non-leaking, **no literal number**, transport-neutral (it names both the body field and the
+  header), and honest about both breach causes. The shipped text is pinned **by reference**, not by
+  wording: `tests/test_ask_api.py`, `test_mcp_server_auth_modes.py` and `test_selfhost_rest.py`
+  compare the response `message` against the imported `ASK_BUSY_MESSAGE` constant, so they pin that
+  the field is *present and identical across transports* — they would **not** fail if the constant's
+  wording changed. The digit-free property IS asserted directly (`not any(ch.isdigit() ...)`).
+  **Do not "restore" the wording above from this doc.**
 - **Disclosed body-shape extension:** `message` is additive. The unit's requirement is *"machine-actionable
   (status + Retry-After + a clear body)"* — that phrasing is **the unit's, not an owner quote**; the
   owner's recorded words are *"hand back the retry signal"* / *"a 'come back in N seconds' signal that the

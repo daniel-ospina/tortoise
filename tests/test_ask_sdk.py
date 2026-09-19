@@ -53,8 +53,17 @@ from tortoise.sdk import (
 
 
 @pytest.fixture(autouse=True)
-def _clean_ask_state():
-    """Reset the shared ask-reader cache + budget between tests."""
+def _clean_ask_state(monkeypatch):
+    """Reset the shared ask-reader cache + budget between tests.
+
+    Also clears the fleet shell's ambient ``TORTOISE_API_URL`` (#4017):
+    ``sdk.ask()`` takes the REMOTE branch whenever it is set, so without this
+    the whole file delegates to production instead of resolving its fake
+    server — 20 failed / 43 passed with it set, 63 passed with it cleared. The
+    test that needs it (``test_ask_retry_...``, below) sets it itself, after
+    this fixture. The suite-wide fix is #4017.
+    """
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     _reset_ask_reader_cache_for_tests()
     from tortoise.quota import _reset_ask_budget_for_tests
     _reset_ask_budget_for_tests()
@@ -1127,8 +1136,7 @@ def test_ask_retry_deadline_stops_further_attempts(monkeypatch):
     server.start(monkeypatch)
     try:
         with pytest.raises(AskTimeout):
-            sdk_mod._new_sdk().ask("q") if hasattr(sdk_mod, "_new_sdk") \
-                else _new_sdk().ask("q")
+            _new_sdk().ask("q")
         assert len(server.requests) == 1, server.requests
         assert waits == []
     finally:

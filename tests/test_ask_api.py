@@ -343,6 +343,47 @@ def test_budget_429_with_retry_after(client, monkeypatch):
     assert r2.status_code == 200
 
 
+@pytest.mark.parametrize("surface", ["hosted", "selfhost"])
+def test_unconvertible_retry_after_omits_the_field_instead_of_raising(surface):
+    """#4020 review: a ``Retry-After`` that ``int(float(...))`` cannot convert
+    must OMIT the body field — which is exactly what BOTH handlers document —
+    and must never raise.
+
+    ``OverflowError`` is an ``ArithmeticError``, NOT a ``ValueError``, so the
+    ``suppress(TypeError, ValueError)`` mirror did not cover it. The escape
+    happened INSIDE the refusal formatter, so the pinned 504 became a 500 —
+    the same class the SDK's own parse already guards with
+    ``_ASK_RETRY_AFTER_CEILING_S``. Non-vacuous: before the fix this raises
+    ``OverflowError`` and the test errors.
+    """
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from tortoise import hosted_api as ha_mod
+    from tortoise import selfhost as sh_mod
+    from tortoise.schemas import CODE_TIMEOUT
+
+    handler = {
+        "hosted": ha_mod._ask_path_scoped_http_handler,
+        "selfhost": sh_mod._selfhost_ask_http_handler,
+    }[surface]
+    request = Request({
+        "type": "http", "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": "/v1/ask", "raw_path": b"/v1/ask",
+        "query_string": b"", "root_path": "", "headers": [],
+        "server": ("testserver", 80), "client": ("testclient", 1),
+    })
+    exc = HTTPException(status_code=504, detail=CODE_TIMEOUT,
+                        headers={"Retry-After": "inf"})
+    response = asyncio.run(handler(request, exc))
+    assert response.status_code == 504, "the pinned 504 must survive"
+    body = json.loads(response.body)
+    assert body["error"]["code"] == CODE_TIMEOUT
+    assert "retry_after" not in body["error"], "documented: omitted, not 500"
+
+
 def test_in_flight_cap_429(client, monkeypatch):
     """Per-team in-flight cap 4 → the 5th concurrent ask is 429
     in_flight_limit (Retry-After omitted)."""

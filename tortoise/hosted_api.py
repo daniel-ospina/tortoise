@@ -1534,8 +1534,13 @@ async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
             # no header → its body stays exactly ``{"error": {"code": …}}``.
             if exc.headers and exc.headers.get("Retry-After"):
                 # RFC 7231 allows an HTTP-date Retry-After — the body field
-                # is omitted when it cannot be parsed as seconds.
-                with suppress(TypeError, ValueError):
+                # is omitted when it cannot be parsed as seconds. OverflowError
+                # is listed explicitly because it is an ArithmeticError, NOT a
+                # ValueError: ``int(float("inf"))`` raises it, and an escape
+                # here would turn the pinned 504 into a 500 from inside the
+                # refusal formatter itself (#4020 review, same class the SDK's
+                # ``_ASK_RETRY_AFTER_CEILING_S`` parse already guards).
+                with suppress(TypeError, ValueError, OverflowError):
                     body["error"]["retry_after"] = int(
                         float(exc.headers["Retry-After"]))
             # #3834/#3993: the bound-breach 504 ALSO carries the static,
