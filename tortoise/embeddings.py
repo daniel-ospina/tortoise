@@ -389,7 +389,6 @@ def _truncate_for_embedding(content: str, max_tokens: int) -> str:
 
 def compute_embeddings(
     texts: list[str], max_tokens: int = 512,
-    load_timeout: float | None = None,
 ) -> list[list[float] | None]:
     """Batched form of :func:`compute_embedding` — SAME embedder, per text.
 
@@ -404,14 +403,10 @@ def compute_embeddings(
     vector MUST agree with the query encoder (model, dimension, normalisation)
     or the dense leg still "runs" and returns garbage — worse than an honest
     empty leg — so the dimension is ENFORCED here, not assumed.
-
-    ``load_timeout`` forwards to :meth:`EmbeddingModel.get` for callers that
-    must not block a request on a cold model load (the capture write path,
-    #4194); the default keeps the embedder's own bound.
     """
     if not texts:
         return []
-    model = EmbeddingModel.get(load_timeout=load_timeout)
+    model = EmbeddingModel.get()
     if model is None:
         return [None] * len(texts)
     try:

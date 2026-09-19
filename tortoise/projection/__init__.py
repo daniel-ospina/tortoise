@@ -4450,9 +4450,16 @@ class FalkorProjection(
             # but NOT `db.idx.vector.createNodeIndex`). Record which API
             # succeeded on self._vector_index_api for the query path.
             if not getattr(self, '_is_embedded', False):
+                # #4194: the width comes from the ONE constant
+                # `compute_embeddings` validates stored vectors against, so the
+                # index and the write path can never disagree — a bare 384 here
+                # plus a rotated `EMBEDDING_DIM` would bless vectors the index
+                # cannot hold (the mismatched-vector trap).
+                from ..embeddings import EMBEDDING_DIM
                 try:
                     self.g.query(
-                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
+                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                        f"{EMBEDDING_DIM}, 'HNSW')"
                     )
                     self._vector_index_api = 'procedure'
                 except Exception as e:
@@ -4469,7 +4476,8 @@ class FalkorProjection(
                         try:
                             self.g.query(
                                 "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
-                                "OPTIONS {dimension: 384, similarityFunction: 'cosine'}"
+                                f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                                "similarityFunction: 'cosine'}"
                             )
                             self._vector_index_api = 'cypher'
                         except Exception as e2:
