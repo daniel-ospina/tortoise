@@ -1001,7 +1001,7 @@ carve_out:
 - test_longmem_runner.py  # #2573/P3-lane-flip: embedded eval harness (D2-D4 vector-leg asserts are FalkorDBLite-only)
 - test_backup_e2e.py
 - test_config.py
-- test_cross_tenant_read_isolation.py  # #3663: asserts production org_{org_id} graph-name scoping; under the test redirect no production name exists, so the strict scoping checks FAIL (hard RED, not a false pass)
+- test_cross_tenant_read_isolation.py  # #3663: asserts production org_{org_id} graph-name scoping; the carve-out exemption is load-bearing (without it the test redirect would rename every path-built graph, so under a server URI the scoping checks FAIL — hard RED, not a false pass)
 - test_embedded_concurrency.py
 - test_embedded_durability_claim.py  # #2879: embedded AOF durability drift pin (on-disk appendonlydir measurement)
 - test_embedded_lifecycle.py

@@ -490,11 +490,13 @@ def test_no_redirect_stems_registry_exact():
         # registered in ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS.
         "test_precision_leak_4028",
         # #3663: the cross-tenant read-isolation proof asserts PRODUCTION
-        # graph names (org_{org_id}) on the MCP list_graphs filter + the
-        # namespace probe; the class-level test redirect renames path-built
-        # graphs to test_<hash>, so no production name exists and those
-        # assertions FAIL — a hard RED, not a false pass. Runs embedded in
-        # every lane (same rationale as test_hosted_backup).
+        # graph names (org_{org_id}) on the MCP list_graphs filter, the
+        # namespace probe and its opener. The exemption is load-bearing:
+        # without it the class-level test redirect would rename path-built
+        # graphs to test_<hash>, so under a server URI no production name
+        # would exist and those assertions FAIL — a hard RED, not a false
+        # pass. Runs embedded in every lane (same rationale as
+        # test_hosted_backup).
         "test_cross_tenant_read_isolation",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (

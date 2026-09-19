@@ -55,13 +55,16 @@ and the ``hosted_api`` dependency-override auth seam (shared with
 ``tests/test_hosted_api.py``).
 
 Lane note: this module is a redirect carve-out (``tests/_embedded.py``
-``TEST_NO_REDIRECT_STEMS``). It asserts PRODUCTION graph names (``org_{org_id}``);
-the class-level test redirect renames every path-built graph to
-``test_{db-file-basename}_{hash}``, so under a server URI **no production name
-exists** and the scoping assertions FAIL — the probe's ``own=True``, the own
-graph in the listing, and ``_open_org_graph_sdk`` returning ``None`` for the
-opener — a hard RED, never a false pass. The carve-out is what keeps the
-module's own exit-evidence command runnable.
+``TEST_NO_REDIRECT_STEMS``). It asserts PRODUCTION graph names (``org_{org_id}``),
+so the exemption is load-bearing: the class-level test redirect (the redirect
+block in ``FalkorProjection.__init__``) renames every path-built graph to
+``test_{db-file-basename}_{hash}``, so WITHOUT the exemption — under a server
+URI, the shape the carve-out/api CI lanes run this module in — no production
+name would exist and the scoping assertions would FAIL: the probe's ``own=True``,
+the own graph in the listing, and ``_open_org_graph_sdk`` returning ``None`` for
+the opener. A hard RED, never a false pass. With the exemption in place the
+module stays on the embedded backend, so ``org_{org_id}`` really exists and the
+module's own exit-evidence command stays runnable.
 """
 from __future__ import annotations
 
