@@ -723,19 +723,56 @@ def _compact(records: list[dict]) -> list[dict]:
             for r in records]
 
 
+def _err_qids(records: list[dict]) -> set:
+    """Question ids whose record is a per-question EXCEPTION (top-level
+    ``error``) — a run/arm fault, never usable as movement evidence: an
+    all-red fault record would otherwise count as a 'flip' and let a
+    substrate failure satisfy the movement gate."""
+    return {r.get("question_id") for r in records if r.get("error")}
+
+
+def _substrate_error(rec: dict) -> dict | None:
+    """A per-question substrate fault, from EITHER source, with a
+    discriminator — a top-level exception (``run``) or a shipping handler
+    that returned an ERROR envelope (``handler_search``/``handler_recall``).
+    Both lower a leg while leaving the aggregate looking like a quality
+    result, so both must reach the receipt's summary."""
+    qid = rec.get("question_id")
+    if rec.get("error"):
+        return {"question_id": qid, "source": "run",
+                "error": str(rec["error"])[:300]}
+    for side in ("handler_search", "handler_recall"):
+        payload = rec.get(side)
+        if isinstance(payload, dict) and (
+                payload.get("kind") == "error" or "error" in payload):
+            return {"question_id": qid, "source": side,
+                    "error": str(payload.get("error"))[:300]}
+    return None
+
+
 def movement_report(baseline: list[dict], mutated: list[dict],
                     leg: str) -> dict:
     """Compare one mutation arm to the baseline per question. ``leg`` is the
     leg the mutation is NAMED to move; the report records the named-leg
-    movement plus any collateral movement (reported, never hidden)."""
+    movement plus any collateral movement (reported, never hidden).
+
+    Questions whose record is a per-question EXCEPTION are EXCLUDED from
+    flip detection and named in ``excluded_errors``: an all-red fault record
+    is not evidence that the mutation moved the leg, and crediting it would
+    let a substrate failure satisfy the movement gate (the 'instrument is
+    decoration' hazard the gate exists to prevent).
+    """
     base = _leg_map(baseline)
     mut = _leg_map(mutated)
     keys = {"l1_abstain": "L1", "l2_provenance": "L2", "l3_grounding": "L3"}
     named = keys[leg]
-    named_flips, collateral = [], {}
+    faulted = _err_qids(baseline) | _err_qids(mutated)
+    named_flips, collateral, excluded = [], {}, []
     for qid, b in base.items():
         m = mut.get(qid)
-        if m is None:
+        if m is None or qid in faulted:
+            if qid in faulted:
+                excluded.append(qid)
             continue
         for k, label in keys.items():
             if b[k] and not m[k]:
@@ -756,7 +793,10 @@ def movement_report(baseline: list[dict], mutated: list[dict],
         l1_dir[k] += 1
     return {"named_leg": named, "named_leg_flips": named_flips,
             "named_leg_moved": bool(named_flips),
-            "collateral": collateral, "l1_directions": l1_dir}
+            "collateral": collateral, "l1_directions": l1_dir,
+            "baseline_errors": len(_err_qids(baseline)),
+            "mutated_errors": len(_err_qids(mutated)),
+            "excluded_errors": sorted(excluded)}
 
 
 # ── known-GREEN (committed recorded transports) ─────────────────────────────
@@ -1005,7 +1045,20 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                 "M3_l3_red": mov["M3_L3"]["named_leg_moved"],
                 "M3_l1_red": mov["M3_L1"]["named_leg_moved"],
             }
-            fired["all"] = all(fired.values())
+            # An arm carrying per-question EXCEPTIONS is not valid movement
+            # evidence: its faults are excluded from flip detection above and
+            # its flips are not credited here. A faulted arm makes the whole
+            # control NOT fired (=> VOID), never quietly fired.
+            faulted_arms = [name for name, recs in
+                            (("baseline", base), ("M1", m1), ("M2", m2),
+                             ("M2_control", m2c), ("M3", m3))
+                            if _err_qids(recs)]
+            fired["arms_error_free"] = not faulted_arms
+            fired["faulted_arms"] = faulted_arms
+            fired["all"] = (all(fired[k] for k in
+                                ("M1_l2_red", "M2_l1_red", "M3_l3_red",
+                                 "M3_l1_red"))
+                            and fired["arms_error_free"])
             mov["fired"] = fired
             # The substitution's SIGNATURE: with a blank output the retired
             # substitution launders a reader failure into a fabricated
@@ -1109,10 +1162,6 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         receipt["live"] = {
             "per_question": live,
             "shape_rate": shape_rate,
-            "substrate_errors": [
-                {"question_id": r.get("question_id"),
-                 "error": r.get("error")}
-                for r in live if r.get("error")],
             "abstain_pn": _pn(live, "l1_abstain"),
             "provenance_pn": _pn(live, "l2_provenance"),
             "grounding_pn": _pn(live, "l3_grounding"),
@@ -1148,6 +1197,8 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                 for floor in (1, 2, 3, 4, 5, 6)},
         }
         degraded = [r for r in live if r.get("retrieval_degraded")]
+        substrate = [e for r in live if (e := _substrate_error(r))]
+        receipt["live"]["substrate_errors"] = substrate
         receipt["caveats"] = [
             ("L3 is a LEXICAL FLOOR, not semantic entailment: the gold turn "
              "head must be in evidence AND the evidence and the committed "
@@ -1171,6 +1222,16 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
 
         reasons: list[str] = []
         abort = False
+        if substrate:
+            # A per-question exception or a shipping-handler error envelope
+            # lowers a leg without looking like a fault in the aggregate. A
+            # contaminated run is reported as such and can never ADOPT — a
+            # substrate fault must not be laundered into a quality result.
+            where = sorted({f"{e['source']}:{e['question_id']}"
+                            for e in substrate})
+            reasons.append(f"CONTAMINATED — {len(substrate)} substrate "
+                           f"fault(s) ({', '.join(where)})")
+            abort = True
         if shape_rate < SHAPE_RATE_ADOPT:
             reasons.append(f"shape_rate {shape_rate:.3f} < "
                            f"{SHAPE_RATE_ADOPT:.2f}")
