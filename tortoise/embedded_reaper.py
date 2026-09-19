@@ -58,6 +58,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -1877,13 +1878,47 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # the dir intact (retried next sweep); a stray marker on a later rename
     # failure is inert (redis ignores unknown files; the marker is simply
     # re-written on the next successful rename).
+    #
+    # #4098 (CWE-377 / SEI CERT FIO21-C): the candidate dir is discovered
+    # in a SHARED, world-writable tempdir (Linux `/tmp`, mode 1777), so the
+    # marker write must never follow a symlink the dir's owner planted
+    # there — a plain `open(path, "w")` turns "write a marker" into
+    # "truncate any file the reaper's uid can write". O_NOFOLLOW alone
+    # protects only the basename, so the dir is opened O_NOFOLLOW and the
+    # marker is addressed RELATIVE to that fd (the openat pattern;
+    # CVE-2018-6954 is the precedent for skipping it).
     try:
-        with open(os.path.join(dbdir_real, REAPER_OWNED_MARKER), "w") as fh:
-            fh.write("reaper-owned\n")
+        dir_fd = os.open(dbdir_real,
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        logger.warning("stale dir unopenable (%s), skipping: %s",
+                       exc, dbdir_real)
+        return None
+    try:
+        marker_fd = _open_marker_no_follow(dir_fd)
+        if marker_fd is None:
+            logger.warning("could not write reaper marker, aborting: %s",
+                           dbdir_real)
+            return None
+        try:
+            os.write(marker_fd, b"reaper-owned\n")
+        finally:
+            try:  # noqa: SIM105
+                os.close(marker_fd)
+            except OSError:
+                pass
     except OSError:
+        # Pre-#4098 semantics preserved: a marker write/close failure skips
+        # THIS record (the dir is retried next sweep) — it must never abort
+        # the whole sweep, whose remaining records include live orphans.
         logger.warning("could not write reaper marker, aborting: %s",
                        dbdir_real)
         return None
+    finally:
+        try:  # noqa: SIM105
+            os.close(dir_fd)
+        except OSError:
+            pass
     renamed = dbdir_real + STALE_QUARANTINE_SUFFIX + str(time.time_ns())
     try:
         os.rename(dbdir_real, renamed)
@@ -1917,6 +1952,44 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # existing acted assertions hold; the renamed/quarantined path rides in
     # `removed_dir` for --json correlation (plan-review cycle 2).
     return {**record, "removed_dir": renamed}
+
+
+def _open_marker_no_follow(dir_fd: int) -> int | None:
+    """Create/truncate REAPER_OWNED_MARKER inside ``dir_fd``, never
+    following a symlink (#4098, CWE-377).
+
+    Returns a writable fd for a REGULAR file, or None (fail closed). The
+    dir fd pins the parent, `O_NOFOLLOW` + `O_EXCL` refuse a planted
+    symlink/FIFO at the basename, and the `fstat` check refuses anything
+    that is not a regular file. An entry already occupying the name (a
+    planted symlink, a leftover from an aborted rename) is removed first —
+    `unlink` never follows a trailing symlink, and a directory (or an
+    unwritable dir) survives to abort us. A symlink re-planted between the
+    unlink and the create is still refused — `O_EXCL` reports `EEXIST` (and
+    `O_NOFOLLOW` would refuse it independently), and the exhausted retry
+    below fails closed.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    for _attempt in (0, 1):
+        try:
+            fd = os.open(REAPER_OWNED_MARKER, flags, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            try:
+                os.unlink(REAPER_OWNED_MARKER, dir_fd=dir_fd)
+            except OSError:
+                return None
+            continue
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                return None
+        except OSError:
+            os.close(fd)
+            return None
+        return fd
+    return None
 
 
 def _kill(pid: int, sigterm_timeout: float) -> None:

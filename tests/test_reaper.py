@@ -2252,6 +2252,67 @@ def test_stale_dir_reuse_pidfile_rewrite_does_not_refresh_dir_mtime(monkeypatch)
         assert os.path.exists(dbdir)
 
 
+# ── #4098: shared-tempdir marker-write hardening (CWE-377) ──────────
+
+def test_stale_marker_write_never_follows_symlink(monkeypatch):
+    """#4098 / CWE-377 / SEI CERT FIO21-C: the pre-rename marker write must
+    never follow a symlink planted at the marker path.
+
+    The candidate dir is discovered in a SHARED, world-writable tempdir
+    (Linux `/tmp`, mode 1777), so its owner may be a different local uid than
+    the reaper's. A plain `open(path, "w")` at `REAPER_OWNED_MARKER` FOLLOWS a
+    symlink there, converting "write a marker" into "truncate any file the
+    reaper's uid can write".
+
+    The fixture is a decoy aged past the boot-cooldown guard, carrying a REAL
+    dead socket AND a planted symlink at the marker path, with the tempdir
+    redirected onto a scratch base — so the truncation is provably the marker
+    write's and no abort at an earlier guard can explain it.
+
+    Removed the `O_NOFOLLOW`/dir-fd guard (the pre-#4098 body: plain
+    `open(..., "w")`) -> the symlink target is truncated to "reaper-owned\\n",
+    i.e. this test reddens (verified by mutation).
+    """
+    from tortoise.embedded_reaper import (
+        REAPER_OWNED_MARKER,
+        STALE_QUARANTINE_SUFFIX,
+        _is_ephemeral_dir,
+        _run_sweep,
+    )
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        target = base / "victim-writable-file.txt"
+        target.write_text("ORIGINAL CONTENT\n")
+        dbdir, _sock = _make_dead_pid_dir(base, name="tmpEVILXX")
+        # THE ATTACK: the marker path is a symlink out of the candidate dir.
+        (dbdir / REAPER_OWNED_MARKER).symlink_to(target)
+        _backdate_dir(dbdir)  # past STALE_SOCKET_MIN_AGE_DEFAULT
+        assert _is_ephemeral_dir(os.path.realpath(str(dbdir)),
+                                 os.path.realpath(str(base))), \
+            "fixture must be inside the ephemeral namespace — else the " \
+            "refusal would be containment's, not the marker guard's"
+        # No pgrep in the fixture: pass 2 is what must discover the decoy.
+        monkeypatch.setattr("tortoise.embedded_reaper._pgrep_redis_servers",
+                            lambda: [])
+        with monkeypatch_tempdir(base):
+            acted = _run_sweep(dry_run=False, batch_size=None,
+                               sweep_pid_files=False)
+        assert target.read_text() == "ORIGINAL CONTENT\n", \
+            "reaper followed a planted marker symlink and truncated a file " \
+            "outside the candidate dir (CWE-377)"
+        # The hardened write must not leak the candidate either: the planted
+        # entry is removed (never followed) and the dir is REAPED (not merely
+        # renamed and left quarantined by a guard-7/8 abort).
+        dbdir_real = os.path.realpath(str(dbdir))
+        assert any(a.get("dbdir") == dbdir_real for a in acted), \
+            "hardened marker write must still let the sweep reap the dir"
+        assert not [p for p in base.iterdir()
+                    if STALE_QUARANTINE_SUFFIX in p.name], \
+            "the dir must be fully reaped, not left as a quarantine"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 # ── #1383: pipeline integration — quarantine sweep (plan Task 4) ─────
 
 def test_discover_skips_quarantine_dirs():
