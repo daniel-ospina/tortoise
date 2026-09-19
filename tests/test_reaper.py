@@ -2410,6 +2410,65 @@ def test_reaper_lock_never_follows_symlink(tmp_path):
         "the lock open truncated the symlink target (CWE-377)"
 
 
+def test_marker_write_never_truncates_a_planted_hardlink(tmp_path):
+    """#4098 review: a HARDLINK planted at the marker name is a REGULAR file,
+    so an `O_TRUNC` open would truncate a file outside the candidate dir. The
+    `st_nlink == 1` gate refuses it; the attacker's LINK is removed (which
+    never touches the victim's content) and a fresh marker is created — so
+    the write succeeds against a NEW file and the victim is untouched."""
+    from tortoise.embedded_reaper import _open_marker_no_follow
+    victim = tmp_path / "victim.txt"
+    victim.write_text("IMPORTANT\n")
+    cand = tmp_path / "tmpCANDIDATE"
+    cand.mkdir()
+    planted = cand / ".reaper-owned"
+    os.link(str(victim), str(planted))
+    assert os.stat(str(victim)).st_nlink == 2
+    dir_fd = os.open(str(cand), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = _open_marker_no_follow(dir_fd)
+        assert fd is not None, "a fresh marker after unlinking the link"
+        os.write(fd, b"reaper-owned\n")
+        os.close(fd)
+    finally:
+        os.close(dir_fd)
+    assert victim.read_text() == "IMPORTANT\n", \
+        "the marker open truncated the hardlink target"
+    assert os.stat(str(victim)).st_nlink == 1, "the attacker's link must be gone"
+    assert planted.read_text() == "reaper-owned\n"
+
+
+def test_reaper_lock_refuses_a_foreign_owned_lock_dir(tmp_path, monkeypatch):
+    """#4098 review: the lock dir lives in the shared tempdir, so it may have
+    been created by ANOTHER local uid. `exist_ok=True` + `fchmod` do not make
+    that safe (the owner can chmod back and unlink/recreate the lock file,
+    splitting the singleton flock across two inodes) — the dir must be OURS
+    or `acquire()` fails closed."""
+    from tortoise.embedded_reaper import _ReaperLock
+    lock_dir = tmp_path / ".tortoise"
+    lock_dir.mkdir()
+    real_euid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_euid + 1)
+    lock = _ReaperLock(str(lock_dir / ".reaper.lock"))
+    assert lock.acquire() is False, "a foreign-owned lock dir must be refused"
+
+
+def test_lock_holder_pid_never_follows_a_symlinked_lock_dir(
+        tmp_path, monkeypatch):
+    """#4098 review: `O_NOFOLLOW` alone protects the BASENAME, so a symlink
+    planted at `<tempdir>/.tortoise` would still redirect the holder read
+    (log spoofing) and could serve an unbounded file before `signal.alarm` is
+    armed. The read is anchored on the dir fd and must return 'unknown'."""
+    import tortoise.embedded_reaper as _R
+    real_dir = tmp_path / "real-dot-tortoise"
+    real_dir.mkdir()
+    (real_dir / ".reaper.lock").write_text("4242")
+    link = tmp_path / ".tortoise"
+    link.symlink_to(real_dir, target_is_directory=True)
+    monkeypatch.setattr(_R, "_LOCK_PATH", str(link / ".reaper.lock"))
+    assert _R._lock_holder_pid() == "unknown"
+
+
 def test_reaper_lock_holder_pid_never_blocks_on_fifo(tmp_path, monkeypatch):
     """#4098 cycle-2 P1: `_lock_holder_pid()` is evaluated in `main()` BEFORE
     `signal.alarm(timeout)` is armed, so a FIFO planted at the lock path must

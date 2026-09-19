@@ -1904,7 +1904,9 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
                            dbdir_real)
             return None
         try:
-            os.write(marker_fd, b"reaper-owned\n")
+            if os.write(marker_fd, b"reaper-owned\n") != len(
+                    b"reaper-owned\n"):
+                raise OSError("short marker write")
         finally:
             try:  # noqa: SIM105
                 os.close(marker_fd)
@@ -1959,26 +1961,35 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
 
 def _open_marker_no_follow(dir_fd: int) -> int | None:
     """Open REAPER_OWNED_MARKER inside ``dir_fd`` for writing, never
-    following a symlink and never returning a non-regular file (#4098).
+    following a symlink and never truncating through a foreign link (#4098).
 
-    Returns a writable fd for a REGULAR file, or None (fail closed). One
-    `O_CREAT|O_TRUNC|O_NOFOLLOW|O_NONBLOCK` open covers every common case: an
-    absent marker is created; a stale REGULAR marker is overwritten IN PLACE
-    (no write permission on the candidate dir is required, so the pre-#4098
-    overwrite semantics are preserved); a planted symlink is REFUSED (`ELOOP`
-    — `O_NOFOLLOW` protects the basename); and a FIFO cannot block
-    (`O_NONBLOCK`). Anything the open lands on that is not a regular file (a
-    symlink, a FIFO with a reader, a directory) is removed with a
-    `dir_fd`-anchored `unlink` — which never follows a trailing symlink — and
+    Returns a writable fd for a REGULAR, singly-linked file, or None (fail
+    closed). The open is `O_WRONLY|O_CREAT|O_NOFOLLOW|O_NONBLOCK` and
+    deliberately does NOT carry `O_TRUNC`: truncation happens only AFTER the
+    `fstat` gate, because the truncation itself is the primitive. A hardlink
+    planted at the marker name is a REGULAR file that would pass an
+    `O_TRUNC` open and truncate a file outside the candidate dir; the
+    `st_nlink == 1` gate refuses it (the attacker's link, and only that link,
+    is then removed with a `dir_fd`-anchored `unlink`). A stale marker left by
+    this module is singly-linked and is truncated in place via `ftruncate`.
+
+    A planted symlink is REFUSED (`ELOOP` — `O_NOFOLLOW` protects the
+    basename); a FIFO cannot block (`O_NONBLOCK`); a directory is `EISDIR`.
+    Anything the open lands on that fails the gate is removed with the
+    `dir_fd`-anchored `unlink` (which never follows a trailing symlink) and
     retried once; a re-plant in that window, or an entry that cannot be
     unlinked (a directory occupant, an unwritable dir), fails closed.
 
     The `dir_fd` pins the parent, so the write cannot be redirected by a
     swapped parent directory either — `O_NOFOLLOW` alone protects only the
     basename (CVE-2018-6954 is the precedent for skipping `openat`).
+
+    NOTE: this is strictly TIGHTENING, not "no semantic change": a candidate
+    dir that is readable-but-not-writable, or not readable at all, now
+    abandons the record (the occupant cannot be unlinked) instead of writing
+    through it. Fail-closed, and unreachable for redislite/mkdtemp dirs.
     """
-    flags = (os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-             | os.O_NONBLOCK)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
     for _attempt in (0, 1):
         try:
             fd = os.open(REAPER_OWNED_MARKER, flags, 0o600, dir_fd=dir_fd)
@@ -1986,14 +1997,25 @@ def _open_marker_no_follow(dir_fd: int) -> int | None:
             fd = None
         if fd is not None:
             try:
-                is_regular = stat.S_ISREG(os.fstat(fd).st_mode)
+                st = os.fstat(fd)
+                usable = stat.S_ISREG(st.st_mode) and st.st_nlink == 1
             except OSError:
-                is_regular = False
-            if is_regular:
+                usable = False
+            if usable:
+                # Truncate only now, through the verified fd. A short write is
+                # impossible for a 14-byte payload on a regular file, but the
+                # return is checked rather than trusted.
+                try:
+                    os.ftruncate(fd, 0)
+                    os.lseek(fd, 0, os.SEEK_SET)
+                except OSError:
+                    os.close(fd)
+                    return None
                 return fd
             os.close(fd)
         # Occupied by something this must neither follow nor keep: a symlink
-        # (ELOOP), a FIFO (opened non-blocking above), a directory (EISDIR).
+        # (ELOOP), a FIFO (opened non-blocking above), a directory (EISDIR),
+        # or a HARDLINK (regular but nlink > 1).
         try:
             os.unlink(REAPER_OWNED_MARKER, dir_fd=dir_fd)
         except OSError:
@@ -2066,6 +2088,15 @@ class _ReaperLock:
             self._fh = None
             return False
         try:
+            # #4098 review: a PRE-EXISTING `.tortoise` may have been created
+            # by another local uid (any local uid can `mkdir /tmp/.tortoise`),
+            # and `fchmod` tightens the mode without changing ownership — the
+            # owner can chmod back and unlink/recreate the lock file, which
+            # would break the singleton invariant (two reapers on two inodes).
+            # Require the dir to be OURS; otherwise fail closed.
+            if os.fstat(dir_fd).st_uid != os.geteuid():
+                self._fh = None
+                return False
             # Best-effort tighten of a PRE-EXISTING dir. Done through the fd:
             # chmod(2) FOLLOWS a symlink and Linux has no lchmod, so a path
             # chmod would run before the O_NOFOLLOW gate and let a planted
@@ -2083,9 +2114,10 @@ class _ReaperLock:
                 return False
             try:
                 self._fh = os.fdopen(fd, "r+")
-            except OSError:
+            except Exception:
                 # os.fdopen does not take ownership on failure — close the
-                # raw fd itself, or it leaks.
+                # raw fd itself, or it leaks. Guard the BROAD case (not just
+                # OSError) so a non-OSError from fdopen cannot leak the fd.
                 try:  # noqa: SIM105
                     os.close(fd)
                 except OSError:
@@ -2103,8 +2135,12 @@ class _ReaperLock:
             is_regular = False
         if not is_regular:
             # A FIFO opens fine O_RDWR without blocking — never treat it as
-            # the lock. Closed exactly once, here.
-            self._fh.close()
+            # the lock. Closed exactly once, here; an OSError from close must
+            # not turn a fail-closed refusal into an exception.
+            try:  # noqa: SIM105
+                self._fh.close()
+            except OSError:
+                pass
             self._fh = None
             return False
         try:
@@ -2789,30 +2825,44 @@ def _lock_holder_pid() -> str:
     # armed, so `open(FIFO, O_RDONLY)` without O_NONBLOCK would hang reaper
     # startup forever with the watchdog disabled. A non-regular path is
     # "unknown": it can never be the lock this module wrote.
+    #
+    # #4098 review: `O_NOFOLLOW` alone protects only the BASENAME, so a
+    # planted symlink at `<tempdir>/.tortoise` would still redirect the read
+    # (log spoofing) and could serve an arbitrarily large file before the
+    # watchdog is armed. Anchor on the dir fd and address the lock RELATIVE
+    # to it, exactly like `_ReaperLock.acquire` — and cap the read.
+    lock_dir = os.path.dirname(_LOCK_PATH)
     try:
-        fd = os.open(_LOCK_PATH,
-                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        dir_fd = os.open(lock_dir,
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return "unknown"
     try:
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return "unknown"
+            fd = os.open(os.path.basename(_LOCK_PATH),
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
+                         dir_fd=dir_fd)
         except OSError:
             return "unknown"
-        chunks = []
-        while True:
+        try:
             try:
-                chunk = os.read(fd, 256)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return "unknown"
             except OSError:
                 return "unknown"
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks).decode("utf-8", "replace").strip() or "unknown"
+            try:
+                chunk = os.read(fd, 64)   # a pid, not a file
+            except OSError:
+                return "unknown"
+            return chunk.decode("utf-8", "replace").strip() or "unknown"
+        finally:
+            try:  # noqa: SIM105
+                os.close(fd)
+            except OSError:
+                pass
     finally:
         try:  # noqa: SIM105
-            os.close(fd)
+            os.close(dir_fd)
         except OSError:
             pass
 

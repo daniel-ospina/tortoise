@@ -154,11 +154,13 @@ and filed** (never left in the in-scope set).
 
 | # | Adversarial input | Required behavior | Covered by |
 |---|---|---|---|
-| 1 | A `REAPER_OWNED_MARKER` path that is a **symlink** planted in the candidate dir | The marker write must never follow it, and the dir must still be reaped | `test_stale_marker_write_never_follows_symlink` (end-to-end through `_run_sweep`; reddens against the pre-#4098 body) |
+| 1 | A `REAPER_OWNED_MARKER` path that is a **symlink** planted in the candidate dir | The marker write must never follow it, never truncate the target, and must still reap the dir **when the occupant is removable**; an occupant that cannot be `unlink`ed (another uid's entry under a sticky dir, a directory) **fails closed** and the record is skipped | `test_stale_marker_write_never_follows_symlink` (end-to-end through `_run_sweep`; reddens against the pre-#4098 body) |
+| 1b | A **HARDLINK** planted at the marker path (a REGULAR file, so `O_NOFOLLOW` + `S_ISREG` both pass) | Truncation must happen only AFTER the gate, and the gate must require `st_nlink == 1`; the attacker's LINK is removed (never the victim's content) and a fresh marker is created | `test_marker_write_never_truncates_a_planted_hardlink` |
 | 2 | A **non-regular / unremovable occupant** at the marker path (a directory; a re-planted symlink) | Fail **closed**: never return a non-regular fd, never follow, abort the record | `test_marker_write_non_regular_occupant_fails_closed` |
-| 3 | A **FIFO** at the marker path | Never block (`O_NONBLOCK`); remove and replace non-blocking | covered by (2)'s helper path + `O_NONBLOCK` in `_open_marker_no_follow` |
+| 3 | A **FIFO** at the marker path | Never block (`O_NONBLOCK`); remove and replace non-blocking | `test_open_marker_no_follow_replaces_fifo_without_blocking` |
 | 4 | A **transient write failure** (`ENOSPC`) on the marker | Skip THIS record only — never propagate out of `reap()`, never abort the sweep | `test_marker_write_error_skips_one_record_not_the_sweep` |
-| 5 | A **symlink planted at `<tempdir>/.tortoise/.reaper.lock`** (T5) | `_ReaperLock.acquire()` must refuse it (ELOOP), never truncate the target; the lock dir is created 0700 | `test_reaper_lock_never_follows_symlink` |
+| 5 | A **symlink planted at `<tempdir>/.tortoise/.reaper.lock`** (T5) | `_ReaperLock.acquire()` must refuse it (ELOOP), never truncate the target; the lock dir must be **owned by the invoking uid** (a foreign-owned dir fails closed) | `test_reaper_lock_never_follows_symlink`, `test_reaper_lock_refuses_a_foreign_owned_lock_dir` |
+| 5b | A **symlinked `<tempdir>/.tortoise`** (T5) | The holder read must be anchored on the dir fd (basename-only `O_NOFOLLOW` is insufficient) and bounded | `test_lock_holder_pid_never_follows_a_symlinked_lock_dir` |
 
 **ESCALATED — declared out of scope, filed as #4136** (these are NOT in this PR's contract)
 
@@ -186,7 +188,7 @@ and filed** (never left in the in-scope set).
 |---|---|---|
 | **A** | **Provenance guard**: every destruction path requires the candidate dir to be owned by the reaper's euid (`os.stat(…).st_uid == os.geteuid()`, re-checked at action time, `dir_fd`-anchored), which refuses T1-foreign, T2, T3 and T4 in one place | **CHOSEN — but escalated.** It is a behavioral/semantic change (the reaper stops reaping another uid's residue) and needs a human decision on the root-run case. It is *not* shipped in this PR. |
 | **B** | **Private tempdir root**: reaper creates an 0700 root and only reaps inside it | **rejected** — `redislite` (third-party) creates the socket dir with a bare `mkdtemp()` directly under the shared tempdir; the reaper cannot redirect it. Contradicts nothing, but it is unimplementable from this side. |
-| **C** | **`dir_fd` + `O_NOFOLLOW` marker write** (the canonical openat pattern) | **CHOSEN and shipped.** Mechanical, strictly tightening, closes T1 (the demonstrated arbitrary-file-truncation primitive), no semantic change. |
+| **C** | **`dir_fd` + `O_NOFOLLOW` marker write** (the canonical openat pattern) | **CHOSEN and shipped.** Mechanical, **strictly tightening** (a non-readable or non-writable candidate dir is now abandoned rather than written through), closes T1's **symlink and hardlink** variants (`st_nlink == 1`, truncate only after the gate). |
 | **D** | **Socket-derived pid provenance** (`SO_PEERCRED`/`getpeereid` on the probed socket; `pidfd` on Linux) instead of the pidfile | **deferred** — closes T2 at the root (the pid must equal the process on the other end of *our* socket) but requires a live-server protocol binding and a platform matrix; a candidate to fold into the escalated decision. |
 | **E** | **`unshare`/per-suite private `TMPDIR`** | **rejected** — Linux-only, seccomp-fragile test-harness change; already rejected in `docs/drafts/1365-reaper-chaos-alternatives.md`. |
 
@@ -202,9 +204,9 @@ under any outcome of the escalation.
 | `_remove_stale_socket_dir` guard 6 (marker write) | internal | this change (was plain `open(…, "w")`) | ✅ |
 | `_open_marker_no_follow` | new internal helper | this change + tests 1-4 above | ✅ |
 | `_ReaperLock.acquire` (T5) | internal | this change (`O_NOFOLLOW` + 0700 dir + `dir_fd`; was `open(path, "a")`) | ✅ |
-| `_lock_holder_pid` | internal | this change (no-follow read) | ✅ |
+| `_lock_holder_pid` | internal | this change (dir-fd-anchored, `O_NONBLOCK`, bounded read) | ✅ |
 | `_sweep_quarantine_dirs` marker **read** | internal | **unchanged and still attacker-satisfiable** — `os.path.exists` is `os.stat` and DOES follow a symlink (a planted marker symlink to any existing file passes it; only a dangling one fails). Non-destructive, so not a primitive; the provenance question is deferred with #4136 | ✅ (unchanged) |
-| `tests/test_reaper.py` | test | this change (7 new tests across the PR: 1 at the first commit + 6 in this one) | ✅ |
+| `tests/test_reaper.py` | test | this change (10 new tests across the PR: 1 + 9) | ✅ |
 | `docs/scoping/2026-09-18-4098-tmpdir-hardening-scoping.md`, `docs/00_index.md` | docs | this change | ✅ |
 | `tools/install-reaper-schedule.sh` (stale lock-path comment), `docs/infra/embedded-reaper-cron.md` | scheduler/docs | lock-path comment corrected; cron doc unchanged | ✅ |
 | Escalated provenance guard (paths `reap`, `_classify`, `_remove_stale_socket_dir`, `_mark_orphan_confirmation`, `_sweep_quarantine_dirs`) | design decision | **not implemented** — human decision required (#4136) | ⏸ |
