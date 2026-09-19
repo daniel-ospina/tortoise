@@ -588,7 +588,7 @@ def verify_session_capture(harness: str,
         # ── cleanup: delete the probe session (never leave it behind) ────
         report["cleanup"] = _cleanup(
             api_url, api_key, probe_id, keep=keep,
-            capture_attempted=report["capture_attempted"], report=report)
+            capture_attempted=report["capture_attempted"])
     report["exit_code"] = _exit_code(report)
     return report
 
@@ -605,8 +605,7 @@ def _probe_id(harness: str) -> str:
 
 
 def _cleanup(api_url: str, api_key: str, probe_id: str, *,
-             keep: bool, capture_attempted: bool,
-             report: dict[str, Any]) -> dict[str, Any]:
+             keep: bool, capture_attempted: bool) -> dict[str, Any]:
     """Delete the probe session (and its local import receipt).
 
     Deletion is keyed on whether the seam was FIRED (``capture_attempted``),
