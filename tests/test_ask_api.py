@@ -12,7 +12,11 @@ Reuses the test_hosted_api harness (auth override + temp embedded DB).
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -52,6 +56,7 @@ from tortoise.quota import (  # noqa: E402
     _reset_ask_budget_for_tests,
     _reset_ask_loop_state_for_tests,
 )
+from tortoise.schemas import ASK_BUSY_MESSAGE  # noqa: E402
 from tortoise.sdk import _reset_ask_reader_cache_for_tests  # noqa: E402
 
 #: The session the seeded turn belongs to. The ask lane must resolve this
@@ -61,14 +66,61 @@ SEEDED_SESSION_ID = "sess-ask-api"
 
 
 @pytest.fixture(autouse=True)
-def _clean_ask_state():
+def _clean_ask_state(tmp_path, monkeypatch):
+    """Hermetic analytics + telemetry state for EVERY test in this file.
+
+    #3834/#3993: the ask route now emits one ``ask_request`` row per committing
+    request, so this file MUST NOT write to the developer's real
+    ``~/.tortoise/analytics_fallback.jsonl`` — that file is the very evidence
+    the 10s bound was derived from. Pin the JSONL fallback into ``tmp_path``
+    and make the Supabase branch unreachable. **The ``SUPABASE_URL`` deletion
+    is the load-bearing one** (``_track_analytics_event`` short-circuits on
+    ``if url and key:`` and ``_service_key()`` also honours
+    ``SUPABASE_SERVICE_ROLE_KEY``, so deleting the two key names alone is not
+    hermetic).
+    """
+    monkeypatch.setattr(ha_mod, "_ANALYTICS_FALLBACK_PATH",
+                        str(tmp_path / "analytics_fallback.jsonl"))
+    # The FLEET SHELL exports TORTOISE_API_URL=https://api.premiselabs.co, which
+    # flips the route's SDK into REMOTE mode: the fake reader seam is never
+    # reached and the test POSTs REAL requests at PRODUCTION (returning 404/504
+    # nondeterministically). Without this deletion the whole file is
+    # env-dependent — and the base file failed 9/29 under the fleet shell while
+    # passing 29/29 with the var cleared.
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     _reset_ask_budget_for_tests()
     _reset_ask_loop_state_for_tests()
     _reset_ask_reader_cache_for_tests()
+    # The counter is NOT asserted here: a post-reset assert is tautological and
+    # a pre-reset one only fires on a benign race — an assertion that cannot
+    # fail for the reason it appears to exist for is worse than none.
+    ha_mod._reset_ask_telemetry_for_tests()
     yield
-    _reset_ask_budget_for_tests()
-    _reset_ask_loop_state_for_tests()
-    _reset_ask_reader_cache_for_tests()
+    # THE GUARD is this drain: it raises ``AssertionError`` naming the leftover
+    # count if a write is still in flight, so a leak is reported as an ERROR at
+    # the leaking test. The ``finally`` reset then bounds the blast radius to
+    # one test — it must run even when the drain raises (a raise in an autouse
+    # teardown would otherwise cascade to every later test).
+    try:
+        ha_mod._drain_ask_telemetry()
+    finally:
+        _reset_ask_budget_for_tests()
+        _reset_ask_loop_state_for_tests()
+        _reset_ask_reader_cache_for_tests()
+        ha_mod._reset_ask_telemetry_for_tests()
+
+
+def _ask_rows() -> list[dict]:
+    """The ``ask_request`` rows written to the (tmp-pinned) JSONL fallback."""
+    path = ha_mod._ANALYTICS_FALLBACK_PATH
+    if not path or not os.path.exists(path):
+        return []
+    with open(path) as f:
+        rows = [json.loads(ln) for ln in f.read().splitlines() if ln.strip()]
+    return [r for r in rows if r["event_name"] == "ask_request"]
 
 
 # Re-export the harness fixture under the name pytest resolves.
@@ -364,6 +416,47 @@ def test_budget_429_with_retry_after(client, monkeypatch):
     assert r2.status_code == 200
 
 
+@pytest.mark.parametrize("surface", ["hosted", "selfhost"])
+def test_unconvertible_retry_after_omits_the_field_instead_of_raising(surface):
+    """#4020 review: a ``Retry-After`` that ``int(float(...))`` cannot convert
+    must OMIT the body field — which is exactly what BOTH handlers document —
+    and must never raise.
+
+    ``OverflowError`` is an ``ArithmeticError``, NOT a ``ValueError``, so the
+    ``suppress(TypeError, ValueError)`` mirror did not cover it. The escape
+    happened INSIDE the refusal formatter, so the pinned 504 became a 500 —
+    the same class the SDK's own parse already guards with
+    ``_ASK_RETRY_AFTER_CEILING_S``. Non-vacuous: before the fix this raises
+    ``OverflowError`` and the test errors.
+    """
+    import asyncio
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from tortoise import hosted_api as ha_mod
+    from tortoise import selfhost as sh_mod
+    from tortoise.schemas import CODE_TIMEOUT
+
+    handler = {
+        "hosted": ha_mod._ask_path_scoped_http_handler,
+        "selfhost": sh_mod._selfhost_ask_http_handler,
+    }[surface]
+    request = Request({
+        "type": "http", "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": "/v1/ask", "raw_path": b"/v1/ask",
+        "query_string": b"", "root_path": "", "headers": [],
+        "server": ("testserver", 80), "client": ("testclient", 1),
+    })
+    exc = HTTPException(status_code=504, detail=CODE_TIMEOUT,
+                        headers={"Retry-After": "inf"})
+    response = asyncio.run(handler(request, exc))
+    assert response.status_code == 504, "the pinned 504 must survive"
+    body = json.loads(response.body)
+    assert body["error"]["code"] == CODE_TIMEOUT
+    assert "retry_after" not in body["error"], "documented: omitted, not 500"
+
+
 def test_in_flight_cap_429(client, monkeypatch):
     """Per-team in-flight cap 4 → the 5th concurrent ask is 429
     in_flight_limit (Retry-After omitted)."""
@@ -401,6 +494,11 @@ def test_in_flight_cap_429(client, monkeypatch):
     r5 = client.post("/v1/ask", json={"question": "q"})
     assert r5.status_code == 429, r5.text
     assert r5.json()["error"]["code"] == "in_flight_limit"
+    # #3834: the `message`/`retry_after` additions are path-scoped to the
+    # bound-breach 504 — the in-flight 429 keeps its EXACT prior body (no
+    # `Retry-After` header either, unlike the quota 429).
+    assert r5.json() == {"error": {"code": "in_flight_limit"}}
+    assert "Retry-After" not in r5.headers
     release.set()
     for t in threads:
         t.join()
@@ -431,8 +529,18 @@ def test_reader_failure_502(client, monkeypatch):
 
 
 def test_reader_timeout_504(client, monkeypatch):
-    """A hung reader past the (monkeypatched short) _ASK_TIMEOUT_S → 504
-    timeout."""
+    """A hung reader past the (monkeypatched short) ``_ASK_TIMEOUT_S`` → 504
+    ``timeout`` with the #3834 legible refusal — AND a real UPPER bound on the
+    response time (#3993 AC1).
+
+    AC1 exists because ``duration_ms >= 0`` "is satisfied by every possible
+    implementation including a route that takes 59 seconds". So this test
+    induces the delay deterministically (monkeypatched bound + a bounded hung
+    reader) and asserts the refusal arrived inside the bound plus a stated
+    margin; it also pins the emitted ``duration_ms`` to the same bound.
+    Red-able: removing the bound (or leaving ``_ASK_TIMEOUT_S`` at 60) makes
+    the request take the reader's full sleep and the assertion fails.
+    """
     import tortoise.quota as quota_mod
     import tortoise.sdk as sdk_mod
 
@@ -451,9 +559,404 @@ def test_reader_timeout_504(client, monkeypatch):
     # max(0, 0.5-5.0) = 0 and wait_for(timeout<=0) cancels even a free-
     # semaphore acquire (504-at-acquire, never reaching the reader).
     monkeypatch.setattr(quota_mod, "_ASK_EXEC_FLOOR_S", 0.1)
+
+    t0 = time.monotonic()
+    r = client.post("/v1/ask", json={"question": "q"})
+    elapsed = time.monotonic() - t0
+
+    # 1. The refusal contract (#3834): status, header, and the FULL body.
+    assert r.status_code == 504, r.text
+    assert r.headers["Retry-After"] == "2"
+    assert r.json() == {"error": {"code": "timeout", "retry_after": 2,
+                                  "message": ASK_BUSY_MESSAGE}}
+    # header == body (the path-scoped mirror)
+    assert int(r.headers["Retry-After"]) == r.json()["error"]["retry_after"]
+
+    # 2. AC1 — a REAL upper bound (bound + a stated margin covering thread
+    #    start + response serialization).
+    assert elapsed < 0.5 + 2.5, f"refusal took {elapsed:.2f}s"
+
+    # 3. AC1, second half: the PERSISTED duration is bounded too, and the
+    #    refusal arm emitted its own row (status="timeout").
+    ha_mod._drain_ask_telemetry()
+    rows = _ask_rows()
+    assert len(rows) == 1, rows
+    assert rows[0]["properties"]["status"] == "timeout"
+    assert rows[0]["properties"]["error_kind"] == "ask_bounded_timeout"
+    assert rows[0]["properties"]["duration_ms"] <= int((0.5 + 2.5) * 1000)
+
+
+# ── #3834/#3993: the emission is OFF the loop, NON-BLOCKING, and hermetic ────
+
+def test_ask_emission_is_handed_off_the_event_loop(client, monkeypatch):
+    """(a-i) Thread identity at the REAL route: the emission runs on a thread
+    other than the handler's — asserted on the REFUSAL arm, which emits its own
+    row so the assertion cannot ride on the 200 path.
+
+    Includes the precedent's non-vacuity guard: if the probe never ran, the
+    assertion is vacuous — so that is checked FIRST.
+    """
+    import tortoise.quota as quota_mod
+    import tortoise.sdk as sdk_mod
+
+    seen: dict = {}
+
+    def _recorder(org_id, event_name, props=None):
+        # Non-blocking: records the emitting THREAD and returns.
+        seen["emit_thread"] = threading.get_ident()
+        seen["event"] = event_name
+        seen["props"] = props
+
+    class _Hung:
+        def complete(self, *, system, user):
+            time.sleep(5)
+            return "late"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", _Hung)
+    monkeypatch.setattr(quota_mod, "_ASK_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(quota_mod, "_ASK_EXEC_FLOOR_S", 0.1)
+    monkeypatch.setattr(ha_mod, "_track_analytics_event", _recorder)
+    # Sample the HANDLER thread by patching the module the LATE IMPORT reads —
+    # `hosted_api.py` imports `run_ask_bounded` INSIDE the function body, so
+    # there is no `ha_mod.run_ask_bounded` attribute to patch.
+    real = quota_mod.run_ask_bounded
+
+    async def _inline(*a, **k):
+        seen["handler_thread"] = threading.get_ident()
+        return await real(*a, **k)
+
+    monkeypatch.setattr(quota_mod, "run_ask_bounded", _inline)
+
     r = client.post("/v1/ask", json={"question": "q"})
     assert r.status_code == 504, r.text
-    assert r.json() == {"error": {"code": "timeout"}}
+    ha_mod._drain_ask_telemetry()
+
+    # Non-vacuity FIRST — an unrun probe must never read as a pass.
+    assert "handler_thread" in seen and "emit_thread" in seen, \
+        "the probe never ran (vacuous assertion)"
+    assert seen["emit_thread"] != seen["handler_thread"]
+    assert seen["event"] == "ask_request"
+    assert seen["props"]["duration_ms"] >= 0
+
+
+def test_ask_emission_is_non_blocking(monkeypatch):
+    """(a-ii) The helper returns while the write is STILL blocked.
+
+    Thread identity alone cannot distinguish fire-and-forget from an AWAITED
+    ``asyncio.to_thread``, so this probes the property directly with a bounded,
+    guaranteed-release recorder: an inline/awaited implementation blocks for
+    the recorder's hold (~10s) and goes RED; the recorder's own timeout makes
+    the test terminate either way.
+    """
+    import asyncio
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _recorder(org_id, event_name, props=None):
+        started.set()
+        release.wait(timeout=10)
+
+    monkeypatch.setattr(ha_mod, "_track_analytics_event", _recorder)
+
+    async def _probe():
+        try:
+            t0 = time.monotonic()
+            ha_mod._emit_ask_latency_off_path(TEST_ORG_ID, 12.0, "ok")
+            elapsed = time.monotonic() - t0
+            # Non-vacuous: the write really reached the recorder...
+            begin = await asyncio.to_thread(started.wait, 2.0)
+            assert begin, "the write never reached the recorder"
+            # ...and the call had already returned. Margin: ~20x the expected
+            # cost and ~1/20 of the ~10s the recorder holds.
+            assert elapsed < 0.5, f"helper blocked for {elapsed:.2f}s"
+        finally:
+            # INSIDE the coroutine: outside asyncio.run, loop shutdown blocks
+            # on the default executor while the recorder is still parked.
+            release.set()
+            await asyncio.to_thread(ha_mod._drain_ask_telemetry, 5.0)
+
+    asyncio.run(_probe())
+
+
+def test_ask_emission_daemon_thread_branch(monkeypatch):
+    """The daemon-thread branch (no running loop) — a defensive mirror that is
+    unreachable from the async route, so it needs its own test.
+
+    It is deliberately NOT routed through ``_retain_feed_task`` (a Thread has
+    no ``add_done_callback`` and ``threading._active`` already holds it), so
+    this also pins that it still writes and still decrements exactly once.
+    """
+    caller = threading.get_ident()
+    seen: dict = {}
+
+    def _recorder(org_id, event_name, props=None):
+        seen["thread"] = threading.get_ident()
+        seen["props"] = props
+
+    monkeypatch.setattr(ha_mod, "_track_analytics_event", _recorder)
+    assert ha_mod._ask_telemetry_inflight() == 0
+    ha_mod._emit_ask_latency_off_path(TEST_ORG_ID, 7, "ok")
+    ha_mod._drain_ask_telemetry()
+    assert seen["thread"] != caller
+    assert seen["props"] == {"duration_ms": 7, "status": "ok"}
+    assert ha_mod._ask_telemetry_inflight() == 0
+
+
+def test_ask_emission_dispatch_failure_never_changes_the_status(
+        client, monkeypatch):
+    """R1-1/R1-6: a DISPATCH failure must not turn the pinned 504 into a 500,
+    and must not leak the in-flight counter.
+
+    Without this, a mutation reverting the swallow to ``raise`` survives the
+    suite — and so would the ``_log``/``_logger`` NameError the plan-review
+    caught (a raise inside the guard escapes it).
+    """
+
+    import tortoise.quota as quota_mod
+    import tortoise.sdk as sdk_mod
+
+    class _Hung:
+        def complete(self, *, system, user):
+            time.sleep(5)
+            return "late"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", _Hung)
+    monkeypatch.setattr(quota_mod, "_ASK_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(quota_mod, "_ASK_EXEC_FLOOR_S", 0.1)
+
+    # The dispatch itself fails — no future is ever constructed. NARROWED to
+    # the telemetry dispatch: `run_ask_bounded` ALSO uses run_in_executor (with
+    # the wrapped callable plus args), so a blanket patch would break the ask
+    # instead of the emission and the test would pass for the wrong reason.
+    import asyncio as _asyncio
+    _real_rie = _asyncio.BaseEventLoop.run_in_executor
+
+    def _boom(self, executor, func, *args, **kwargs):
+        if not args:
+            raise RuntimeError("dispatch boom")
+        return _real_rie(self, executor, func, *args, **kwargs)
+
+    monkeypatch.setattr(_asyncio.BaseEventLoop, "run_in_executor", _boom)
+
+    r = client.post("/v1/ask", json={"question": "q"})
+    assert r.status_code == 504, r.text
+    ha_mod._drain_ask_telemetry()
+    assert ha_mod._ask_telemetry_inflight() == 0
+
+
+def test_ask_analytics_writer_never_raises_and_is_audible(caplog):
+    """R5-4: the allowlist's silent strip is now logged at WARNING, and the
+    never-raise contract survives it.
+
+    The Stripe caller (``_track_analytics_event(org_id, notify_kind, {"plan":
+    tier, "tier": tier, "status": etype})`` in the Stripe webhook handler)
+    passes ``plan``/``tier``,
+    neither of which is allowlisted — so this branch runs on REAL traffic, and
+    a raise here would 500 a webhook whose event marker was already claimed
+    (dropping the billing notification permanently).
+    """
+    import logging
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+        ha_mod._track_analytics_event("org", "stripe_notify",
+                                      {"plan": "pro", "tier": "pro",
+                                       "status": "ok"})
+    assert "analytics prop stripped" in caplog.text
+    assert "plan" in caplog.text
+
+
+def test_ask_analytics_writer_sends_only_allowlisted_props(monkeypatch):
+    """R5-4's second half: the strip is not just LOGGED, it is still APPLIED —
+    the row actually written carries only allowlisted keys (a fix that logged
+    but forwarded the unknown key would leak unbounded caller props)."""
+    ha_mod._track_analytics_event("org", "stripe_notify",
+                                  {"plan": "pro", "tier": "pro",
+                                   "status": "ok"})
+    path = ha_mod._ANALYTICS_FALLBACK_PATH
+    with open(path) as f:
+        rows = [json.loads(ln) for ln in f.read().splitlines() if ln.strip()]
+    row = rows[-1]
+    # EXACT set (not a subset — a subset assertion is a tautology after the
+    # allowlist filter has run, so it cannot detect the loss class this guards).
+    assert row["properties"] == {"status": "ok"}, row
+
+
+@pytest.mark.parametrize("branch", ["loop", "thread"])
+@pytest.mark.parametrize("boom", ["decrement", "log"])
+def test_ask_emission_failure_path_cannot_escape(monkeypatch, branch, boom):
+    """Cycle-7 regression: on BOTH dispatch-failure paths the fallback
+    decrement and the log are each inside a suppression.
+
+    The harm: this runs on the refusal arm, so anything escaping turns the
+    pinned 504 into a 500 — the exact contract the guard exists to keep. The
+    decrement is not hypothetical: it logs (unsuppressed) when the counter is
+    already zero, i.e. it raises wherever the log handler does.
+    """
+    import threading as _threading
+
+    calls: list = []
+
+    def _fail(*a, **k):
+        calls.append(1)
+        raise RuntimeError(f"{boom} boom")
+
+    monkeypatch.setattr(ha_mod, "_track_analytics_event", lambda *a, **k: None)
+
+    if branch == "loop":
+        class _BoomLoop:
+            def is_closed(self):
+                return False
+
+            def run_in_executor(self, *a, **k):
+                raise RuntimeError("executor boom")
+
+        monkeypatch.setattr(ha_mod.asyncio, "get_running_loop",
+                            lambda: _BoomLoop())
+    else:
+        monkeypatch.setattr(ha_mod.asyncio, "get_running_loop",
+                            _raise_no_loop)
+
+        class _BoomThread:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                raise RuntimeError("cannot start new thread")
+
+        class _ThreadingShim:
+            Thread = _BoomThread
+
+            def __getattr__(self, name):
+                return getattr(_threading, name)
+
+        monkeypatch.setattr(ha_mod, "threading", _ThreadingShim())
+
+    if boom == "decrement":
+        monkeypatch.setattr(ha_mod, "_ask_telemetry_decrement", _fail)
+    else:
+        monkeypatch.setattr(ha_mod._logger, "warning", _fail)
+
+    try:
+        # The whole point: this RETURNS. A raise here is a 504 -> 500.
+        ha_mod._emit_ask_latency_off_path(TEST_ORG_ID, 5, "timeout")
+        assert calls, "the probe never reached the guarded statement (vacuous)"
+    finally:
+        # A suppressed decrement may legitimately have leaked the counter.
+        ha_mod._reset_ask_telemetry_for_tests()
+
+
+def _raise_no_loop():
+    raise RuntimeError("no running event loop")
+
+
+def test_ask_emission_daemon_thread_start_failure(monkeypatch):
+    """R1-6/R2-8: the daemon-thread branch's ``start()`` failure must be the
+    same never-raise / single-decrement contract as the loop branch — a
+    mutation dropping the ``finally`` decrement would leak the counter and a
+    later drain would raise at an unrelated test."""
+    import threading as _threading
+
+    seen: list = []
+
+    def _recorder(*a, **k):
+        seen.append(1)
+
+    monkeypatch.setattr(ha_mod, "_track_analytics_event", _recorder)
+
+    class _BoomThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            raise RuntimeError("cannot start new thread")
+
+    class _ThreadingShim:
+        """Confines the boom to ``hosted_api``'s module global: patching
+        ``threading.Thread.start`` process-wide would also break the test
+        harness' own background threads."""
+
+        Thread = _BoomThread
+
+        def __getattr__(self, name):
+            return getattr(_threading, name)
+
+    monkeypatch.setattr(ha_mod, "threading", _ThreadingShim())
+    # Sync context → the daemon-thread branch. Never raises...
+    ha_mod._emit_ask_latency_off_path(TEST_ORG_ID, 5, "ok")
+    # ...the write never happened...
+    assert seen == []
+    # ...and the counter did not leak (the drain would raise otherwise).
+    ha_mod._drain_ask_telemetry(timeout=1.0)
+    assert ha_mod._ask_telemetry_inflight() == 0
+
+
+def test_ask_telemetry_underflow_is_audible(caplog):
+    """R5-2: a decrement with nothing in flight LOGS (mirroring
+    ``_capture_slot_decrement``) instead of silently clamping — otherwise a
+    leak is invisible and a drain can return with a write still running."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+        ha_mod._reset_ask_telemetry_for_tests()
+        ha_mod._ask_telemetry_decrement()
+    assert "nothing in flight" in caplog.text
+    ha_mod._reset_ask_telemetry_for_tests()
+
+
+def test_ask_bound_pins():
+    """The bound and ALL of its relations (the four scope-AC1 pins)."""
+    import tortoise.quota as quota_mod
+    from tortoise.quota import ASK_BUSY_RETRY_AFTER_S
+    from tortoise.sdk import ASK_RETRY_CAP_S, ASK_SDK_TIMEOUT_S
+
+    assert quota_mod._ASK_TIMEOUT_S == 10
+    assert quota_mod._ASK_TIMEOUT_S + ASK_BUSY_RETRY_AFTER_S < 15
+    assert quota_mod._ASK_TIMEOUT_S > quota_mod._ASK_EXEC_FLOOR_S > 0
+    assert ASK_RETRY_CAP_S >= ASK_BUSY_RETRY_AFTER_S
+    # The per-ATTEMPT transport invariant: a breach is always received as the
+    # typed AskTimeout, never as a socket timeout.
+    assert ASK_SDK_TIMEOUT_S > quota_mod._ASK_TIMEOUT_S
+
+
+def test_ask_per_surface_keys_never_combine():
+    """The allowlist carries `duration_ms` (the #3359 loss class) and the two
+    latency keys are per SURFACE: a MCP tool-call row and a hosted request row
+    are DIFFERENT quantities, so the two producers must build disjoint props.
+    """
+    import inspect
+
+    from tortoise.mcp_server import _emit_mcp_tool_call_telemetry
+
+    assert "duration_ms" in ha_mod._ALLOWED_ANALYTICS_PROPS
+    assert "latency_ms" in ha_mod._ALLOWED_ANALYTICS_PROPS
+    # The MCP producer's row key is `latency_ms` (transport = tool call)...
+    assert "latency_ms" in inspect.getsource(_emit_mcp_tool_call_telemetry)
+    assert "duration_ms" not in inspect.getsource(
+        _emit_mcp_tool_call_telemetry)
+    # ...and the hosted ask producer's is `duration_ms` (transport = HTTP
+    # request). Neither writes the other's key, so no aggregation can silently
+    # add a tool-call duration to an HTTP wait.
+    src = inspect.getsource(ha_mod._emit_ask_latency_off_path)
+    assert "duration_ms" in src and "latency_ms" not in src
+
+
+def test_ask_emission_writes_exactly_one_row_through_the_real_writer(
+        monkeypatch, tmp_path):
+    """The REAL writer path (not a stubbed recorder): with the tmp fallback,
+    one helper call produces exactly one `ask_request` row carrying
+    `duration_ms` — proving the allowlist actually carries the value."""
+    assert str(
+        tmp_path / "analytics_fallback.jsonl") == ha_mod._ANALYTICS_FALLBACK_PATH
+    ha_mod._emit_ask_latency_off_path(TEST_ORG_ID, 42, "ok")
+    ha_mod._drain_ask_telemetry()
+    rows = _ask_rows()
+    assert len(rows) == 1, rows
+    assert rows[0]["properties"] == {"duration_ms": 42, "status": "ok"}
 
 
 def test_ask_exec_floor_guarantees_execution(monkeypatch):

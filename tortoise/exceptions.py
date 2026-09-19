@@ -225,14 +225,25 @@ class AskRetrievalUnavailable(RuntimeError):
 class AskTimeout(RuntimeError):
     """504 ``timeout`` — the bounded ask section exceeded the server's
     ``_ASK_TIMEOUT_S`` (server-504-fired) OR the SDK client-side timeout
-    fired (wire connect/read timeout — ``source`` marks which)."""
+    fired (wire connect/read timeout — ``source`` marks which).
+
+    ``retry_after`` (#3834/#3993): the server's advertised back-off, in
+    seconds, on a **server-fired** 504 — parsed from the ``Retry-After``
+    header, else the body's ``retry_after`` field. ``None`` means "no
+    advertised delay", which is what makes a refusal **non-retryable**: a bare
+    504 (no header, no body field) and a client-fired timeout both carry
+    ``None``. Additive keyword-only with a default, so every existing
+    constructor call is unchanged.
+    """
 
     code = CODE_TIMEOUT
 
     def __init__(self, message: str, *, source: str = "server",
-                 status_code: int | None = 504):
+                 status_code: int | None = 504,
+                 retry_after: float | None = None):
         self.source = source  # "server" (received 504 body) | "client"
         self.status_code = status_code
+        self.retry_after = retry_after
         super().__init__(message)
 
 

@@ -912,3 +912,166 @@ def test_retry_import_identity():
     assert eval_retrieve._is_raw_chunk is is_raw_chunk
     assert eval_retrieve.render_context is render_context
     assert eval_retrieve.DEFAULT_POOL_SIZE is DEFAULT_POOL_SIZE
+
+
+# ── #3834/#3993: the retry primitive's advertised-floor + deadline seams ─────
+# These are the two parameters the ask lane's 504-retry depends on, and the
+# plan-review found both were UNTESTED (C8/C9/C13): "jitter not actually
+# tested", "deadline clamp can go below floor" (undocumented), and a malformed
+# hint could reach ``time.sleep``.
+
+def _capture_sleeps(monkeypatch) -> list:
+    """Patch the primitive's sleep seam and collect every wait it takes."""
+    import tortoise.retry as retry_mod
+    waits: list = []
+    monkeypatch.setattr(retry_mod, "_sleep", waits.append)
+    return waits
+
+
+def _failing_callable(attempts: list):
+    def _fn():
+        attempts.append(1)
+        raise redis_exc.TimeoutError("stall")
+    return _fn
+
+
+def test_advertised_floor_is_a_minimum_with_additive_jitter(monkeypatch):
+    """``delay_for``'s value is an RFC 9110 §10.2.3 MINIMUM: every sleep is
+    ``>= floor`` (never spread below it) and the jitter is ADDITIVE, so the
+    sleeps are not all identical. Both halves are asserted — a fixed
+    ``wait = floor`` (no jitter) and a Full-Jitter ``floor/2 + rand*floor``
+    (which can undershoot the advertised value) each fail here.
+    """
+    waits = _capture_sleeps(monkeypatch)
+    attempts: list = []
+    for _ in range(20):
+        with pytest.raises(WriteStageRetriesExhausted):
+            call_with_predicate(_failing_callable(attempts),
+                                predicate=lambda e: True, retries=1, what="t",
+                                delay_for=lambda e: 2.0)
+    assert len(waits) == 20, waits
+    assert all(2.0 <= w <= 4.0 for w in waits), sorted(waits)
+    assert len(set(waits)) > 1, "the advertised path is not jittered at all"
+
+
+def test_advertised_floor_is_bounded_by_cap(monkeypatch):
+    """A hostile/huge hint is clamped to ``cap`` (so one honoured sleep is at
+    most ``2*cap``) instead of becoming an unbounded sleep."""
+    waits = _capture_sleeps(monkeypatch)
+    attempts: list = []
+    with pytest.raises(WriteStageRetriesExhausted):
+        call_with_predicate(_failing_callable(attempts), predicate=lambda e: True,
+                            retries=1, what="t", cap=3.0,
+                            delay_for=lambda e: 1e9)
+    assert 3.0 <= waits[0] <= 6.0, waits
+
+
+def test_deadline_clamp_wins_over_the_advertised_floor(monkeypatch):
+    """THE DOCUMENTED PRECEDENCE: with less than ``floor`` remaining the sleep
+    is SHORTENED BELOW the advertised minimum — the floor is a minimum for the
+    sleep actually taken, never a licence to sleep past the caller's deadline.
+    """
+    import tortoise.retry as retry_mod
+    waits = _capture_sleeps(monkeypatch)
+    monkeypatch.setattr(retry_mod, "_monotonic", lambda: 100.0)
+    attempts: list = []
+    with pytest.raises(WriteStageRetriesExhausted):
+        call_with_predicate(_failing_callable(attempts), predicate=lambda e: True,
+                            retries=1, what="t", delay_for=lambda e: 2.0,
+                            deadline=100.5)
+    assert waits == [0.5], waits  # clamped: below the 2.0s floor, ON the deadline
+
+
+def test_expired_deadline_stops_before_starting_a_retry(monkeypatch):
+    """No retry sleep BEGINS at/after the deadline: the loop re-raises the
+    ORIGINAL exception — bare and UNWRAPPED even with ``marker_armed=True``
+    (the sentinel must not appear where no retry ever ran), ``on_retry`` never
+    fires, and no sleep is taken."""
+    import tortoise.retry as retry_mod
+    waits = _capture_sleeps(monkeypatch)
+    monkeypatch.setattr(retry_mod, "_monotonic", lambda: 200.0)
+    attempts: list = []
+    retried: list = []
+    with pytest.raises(redis_exc.TimeoutError) as ei:  # NOT the sentinel
+        call_with_predicate(_failing_callable(attempts),
+                            predicate=lambda e: True, retries=3, what="t",
+                            deadline=100.0, marker_armed=True,
+                            on_retry=retried.append)
+    assert not isinstance(ei.value, WriteStageRetriesExhausted)
+    assert len(attempts) == 1, attempts
+    assert waits == [] and retried == []
+
+
+def test_no_deadline_is_inert_for_every_existing_caller(monkeypatch):
+    """Both new parameters default to inert: a caller that passes neither gets
+    exactly the legacy exponential-jitter wait (unchanged semantics)."""
+    waits = _capture_sleeps(monkeypatch)
+    attempts: list = []
+    with pytest.raises(WriteStageRetriesExhausted):
+        call_with_predicate(_failing_callable(attempts), predicate=lambda e: True,
+                            retries=1, what="t", base=2.0, cap=30.0)
+    # attempt 1 → min(2**1, 30) * (0.5 + rand/2) ∈ [1.0, 2.0]
+    assert len(waits) == 1 and 1.0 <= waits[0] <= 2.0, waits
+
+
+@pytest.mark.parametrize("bad,expected", [
+    ("abc", 0.0),        # unparseable → coerced, never escapes as ValueError
+    (float("nan"), 0.0),  # the argument-order pin: max(0.0, nan) IS 0.0
+    (-5.0, 0.0),         # negative → floored at 0
+    # A huge int raises OverflowError from float() — an ArithmeticError, NOT a
+    # ValueError — so this row goes RED if the clamp catches only
+    # (TypeError, ValueError) and the hint then escapes the primitive.
+    (10 ** 400, 0.0),
+])
+def test_malformed_advertised_hint_never_reaches_sleep(monkeypatch, bad, expected):
+    """A malformed/hostile hint must never raise out of the primitive and must
+    never reach ``time.sleep`` un-sanitised. For NaN this pins the ARGUMENT
+    ORDER of the clamp: ``max(nan, 0.0)`` is nan (and ``sleep(nan)`` raises an
+    untyped ValueError), ``max(0.0, nan)`` is 0.0 — reversing the arguments
+    turns this test RED."""
+    waits = _capture_sleeps(monkeypatch)
+    attempts: list = []
+    with pytest.raises(WriteStageRetriesExhausted):
+        call_with_predicate(_failing_callable(attempts), predicate=lambda e: True,
+                            retries=1, what="t", delay_for=lambda e: bad)
+    assert waits == [expected], waits
+
+
+def test_absent_advertised_hint_falls_back_to_exponential(monkeypatch):
+    """``delay_for`` returning ``None`` = "no advertisement" → the legacy
+    exponential path, NOT a zero sleep."""
+    waits = _capture_sleeps(monkeypatch)
+    attempts: list = []
+    with pytest.raises(WriteStageRetriesExhausted):
+        call_with_predicate(_failing_callable(attempts), predicate=lambda e: True,
+                            retries=1, what="t", base=2.0, cap=30.0,
+                            delay_for=lambda e: None)
+    assert 1.0 <= waits[0] <= 2.0, waits
+
+
+def test_sleep_seam_is_a_call_time_indirection_not_an_alias(monkeypatch):
+    """``_sleep`` reads the ``time`` MODULE at call time, so the pre-existing
+    ``monkeypatch.setattr(retry_mod, "time", shim)`` idiom
+    (``tests/test_ingest_v2_parallel.py:_silence_retry_sleep``) keeps working.
+    An import-time alias (``_sleep = time.sleep``) would bind the REAL sleep and
+    turn every such shim into a real, slow sleep — invisible except as runtime.
+    """
+    import tortoise.retry as retry_mod
+
+    class _FakeTime:
+        def __init__(self):
+            self.slept: list = []
+
+        def sleep(self, seconds):
+            self.slept.append(seconds)
+
+        def monotonic(self):
+            return 0.0
+
+    fake = _FakeTime()
+    monkeypatch.setattr(retry_mod, "time", fake)
+    attempts: list = []
+    with pytest.raises(WriteStageRetriesExhausted):
+        call_with_predicate(_failing_callable(attempts), predicate=lambda e: True,
+                            retries=1, what="t")
+    assert len(fake.slept) == 1, fake.slept

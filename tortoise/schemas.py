@@ -25,6 +25,28 @@ ASK_QUESTION_TYPES: tuple[str | None, ...] = (
 #: leap-year aware) is enforced by ``validate_ask_question_date``.
 _ASK_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 
+#: The bound-breach refusal's static, actionable ``message`` (#3834/#3993).
+#: Deliberately carries **NO NUMBER in digits**: the delay is advertised
+#: machine-readably via the ``Retry-After`` header and the body ``retry_after``
+#: field, whose single source of truth is ``quota.ASK_BUSY_RETRY_AFTER_S`` — a
+#: literal here would be a second, silently-drifting copy. Pinned by
+#: ``assert not any(ch.isdigit() for ch in ASK_BUSY_MESSAGE)`` (the digit form is
+#: what the pin can actually enforce; a *spelled-out* number would still pass it,
+#: which is recorded rather than over-claimed).
+#:
+#: **Transport-neutral by design** (code-review #6/#7): this one constant ships
+#: on THREE surfaces, and the MCP tool result has no HTTP response and therefore
+#: no ``Retry-After`` header — a message naming "the header" as the primary
+#: instruction would misdirect the agent on exactly the surface the measurement
+#: came from. So it names the advertised value, then says where to find it per
+#: surface.
+ASK_BUSY_MESSAGE = (
+    "Tortoise is busy or still waking up and could not answer this question "
+    "within its wait budget. Retry after the advertised back-off — the "
+    "`retry_after` field of this body (also the `Retry-After` header on HTTP "
+    "responses)."
+)
+
 import datetime as _dt  # noqa: E402
 import re as _re  # noqa: E402
 
@@ -129,6 +151,7 @@ def valid_question_types() -> str:
 
 
 __all__ = [
+    "ASK_BUSY_MESSAGE",
     "ASK_ERROR_CODES",
     "ASK_QUESTION_TYPES",
     "CODE_INVALID_QUESTION",

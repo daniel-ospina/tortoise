@@ -29,6 +29,26 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def _sleep(seconds: float) -> None:
+    """Injectable sleep seam (#3834).
+
+    A **call-time indirection function**, never an import-time alias
+    (``_sleep = time.sleep``): an alias would bind the real function at import
+    and silently defeat the existing ``monkeypatch.setattr(retry_mod, "time",
+    shim)`` shims (``tests/test_ingest_v2_parallel.py:_silence_retry_sleep``),
+    turning their no-op into real sleeps. Tests patch ``retry._sleep``
+    directly; the ``time`` module is still read at call time so the older shims
+    keep working.
+    """
+    time.sleep(seconds)
+
+
+def _monotonic() -> float:
+    """Injectable clock seam (#3834) — the ``deadline`` is compared against
+    this, so tests can drive the deadline without waiting for it."""
+    return time.monotonic()
+
 #: Network errno set the retry predicate trusts as transport evidence on a
 #: bare ``OSError`` — a deterministic-bug FileNotFoundError/ENOENT or
 #: PermissionError/EACCES is never retried.
@@ -126,7 +146,9 @@ def retryable_transient(exc: BaseException) -> bool:
 def call_with_predicate(fn: Callable[[], Any], *, predicate: Callable[[BaseException], bool],
                         retries: int, what: str, base: float = 2.0,
                         cap: float = 30.0, marker_armed: bool = True,
-                        on_retry: Callable[[BaseException], None] | None = None) -> Any:
+                        on_retry: Callable[[BaseException], None] | None = None,
+                        delay_for: Callable[[BaseException], float | None] | None = None,
+                        deadline: float | None = None) -> Any:
     """Bounded jittered retry of ``fn`` gated by ``predicate`` (R1, #1786).
 
     Shared single-source retry helper — any caller that must NEVER retry a
@@ -144,6 +166,32 @@ def call_with_predicate(fn: Callable[[], Any], *, predicate: Callable[[BaseExcep
       marker (no resume-internal whole-question retry gets a second budget).
     - ``on_retry`` (optional): called with the exception before each
       retry sleep (the caller's per-write retry counter).
+
+    ``delay_for`` / ``deadline`` (#3834, both additive with inert defaults):
+
+    - ``delay_for(e)`` returns the peer's advertised minimum wait in seconds,
+      or ``None``. When it returns a value, the sleep is
+      ``floor + random()*floor`` — i.e. in ``[floor, 2*floor]``. **This is a
+      deliberate departure from Full Jitter:** ``Retry-After`` is an RFC 9110
+      §10.2.3 *minimum*, so the jitter is **additive above the floor** rather
+      than spread around a mean that could undershoot it. ``cap`` bounds the
+      floor, so a single honoured sleep is at most ``2 * cap``. A malformed
+      hint is coerced to ``0.0`` and never escapes: the value is clamped with
+      ``max(0.0, min(float(x), cap))``, whose **argument order is
+      load-bearing** (``max(nan, 0.0) is nan`` → ``time.sleep(nan)`` raises an
+      untyped ``ValueError``; ``max(0.0, nan) == 0.0`` is safe), and the
+      coercion catches ``OverflowError`` as well as ``TypeError``/
+      ``ValueError`` — ``float()`` on a huge ``int`` raises it, and it is an
+      ``ArithmeticError``, not a ``ValueError``.
+    - ``deadline`` is a ``_monotonic()`` instant. No retry sleep **begins**
+      at/after it, and a sleep's END is clamped to it. **The deadline clamp
+      WINS over ``delay_for``'s floor**: with less than ``floor`` remaining the
+      sleep is shortened below the advertised minimum (the floor is a minimum
+      for the sleep actually taken, never a licence to sleep past the
+      caller's deadline). When no time remains the loop re-raises the
+      **original** exception, bare and unwrapped.
+
+    Both defaults are inert for every existing caller.
     """
     for attempt in range(1, retries + 2):
         try:
@@ -156,9 +204,30 @@ def call_with_predicate(fn: Callable[[], Any], *, predicate: Callable[[BaseExcep
                     raise WriteStageRetriesExhausted(e) from e
                 raise
             wait = min(base ** attempt, cap) * (0.5 + random.random() / 2)
+            if delay_for is not None:
+                advertised = delay_for(e)
+                if advertised is not None:
+                    try:
+                        # max(0.0, ...) OUTSIDE min(...): `max(nan, 0.0)` is nan
+                        # (and time.sleep(nan) raises), `max(0.0, nan)` is 0.0.
+                        floor = max(0.0, min(float(advertised), cap))
+                    except (TypeError, ValueError, OverflowError):
+                        # OverflowError too: a hint that is a huge int raises
+                        # it from float(), and it is an ArithmeticError — NOT a
+                        # ValueError — so omitting it broke this seam's stated
+                        # "a malformed hint never escapes" contract. (A huge
+                        # *Decimal* does NOT land here: float() returns inf for
+                        # it, so it is clamped at `cap` above instead.)
+                        floor = 0.0  # a malformed hint never escapes
+                    wait = floor + random.random() * floor
+            if deadline is not None:
+                remaining = deadline - _monotonic()
+                if remaining <= 0:
+                    raise  # bare: re-raise the caught exception, unwrapped
+                wait = min(wait, remaining)
             if on_retry is not None:
                 on_retry(e)
             logger.warning("%s failed (attempt %d/%d): %s; retrying in ~%.1fs",
                            what, attempt, retries, e, wait)
-            time.sleep(wait)
+            _sleep(wait)
     raise AssertionError("unreachable")  # pragma: no cover

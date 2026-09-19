@@ -54,8 +54,17 @@ from tortoise.sdk import (
 
 
 @pytest.fixture(autouse=True)
-def _clean_ask_state():
-    """Reset the shared ask-reader cache + budget between tests."""
+def _clean_ask_state(monkeypatch):
+    """Reset the shared ask-reader cache + budget between tests.
+
+    Also clears the fleet shell's ambient ``TORTOISE_API_URL`` (#4017):
+    ``sdk.ask()`` takes the REMOTE branch whenever it is set, so without this
+    the whole file delegates to production instead of resolving its fake
+    server — 20 failed / 43 passed with it set, 63 passed with it cleared. The
+    test that needs it (``test_ask_retry_...``, below) sets it itself, after
+    this fixture. The suite-wide fix is #4017.
+    """
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     _reset_ask_reader_cache_for_tests()
     from tortoise.quota import _reset_ask_budget_for_tests
     _reset_ask_budget_for_tests()
@@ -872,9 +881,19 @@ class _FakeAskServer:
         self.status = 200
         self.headers: dict[str, str] = {}
         self.handler = None
+        # #3834: scripted PER-REQUEST outcomes ``(status, payload[, headers])``
+        # consumed in order — once exhausted the LAST entry repeats. Lets a
+        # retry test script "504 refusal, then success". Empty (the default)
+        # leaves the legacy single-status behaviour byte-identical.
+        self.sequence: list = []
 
     def _handle(self, body: dict, auth: str) -> tuple[int, dict, dict]:
         self.requests.append((body, auth))
+        if self.sequence:
+            entry = self.sequence[min(len(self.requests) - 1,
+                                     len(self.sequence) - 1)]
+            headers = entry[2] if len(entry) > 2 else self.headers
+            return entry[0], entry[1], headers
         if self.status == 200 and self.responses:
             return 200, self.responses[0], self.headers
         if self.status and self.responses:
@@ -982,6 +1001,50 @@ def test_post_ask_status_mapping(monkeypatch):
             server.stop()
 
 
+@pytest.mark.parametrize("header,body_ra,expected", [
+    # arbitrary-precision JSON int → float() raises OverflowError
+    (None, int("9" * 400), None),
+    # JSON float overflow (json.dumps → Infinity → json.loads → inf)
+    (None, float("inf"), None),
+    ("inf", None, None),
+    ("nan", None, None),
+    ("-5", None, None),
+    ("abc", None, None),
+    # A finite advertisement IS preserved (the value is honest; the
+    # primitive's cap bounds the sleep, not the parse).
+    ("42", None, 42.0),
+])
+def test_ask_429_advertised_hint_is_sanitised(monkeypatch, header, body_ra,
+                                              expected):
+    """The 429 arm applies the SAME finite/>=0 filter as its 504 sibling.
+
+    Without it a huge int became ``None`` (thanks to the OverflowError catch)
+    while a huge FLOAT or an ``inf``/``nan`` header survived verbatim, so
+    ``AskQuotaExceeded.retry_after`` was non-finite on exactly the hints the
+    504 arm rejects: a caller honouring it then dies with the same
+    OverflowError/ValueError, and the MCP lane mirrors ``Infinity``/``NaN``
+    into a JSON tool result. Pins the coercion asymmetry, not just the parse.
+    """
+    payload = {"error": {"code": "quota_exceeded"}}
+    if body_ra is not None:
+        payload["error"]["retry_after"] = body_ra
+    server = _FakeAskServer()
+    server.status = 429
+    server.responses = [payload]
+    if header is not None:
+        server.headers = {"Retry-After": header}
+    server.start(monkeypatch)
+    try:
+        with pytest.raises(AskQuotaExceeded) as ei:
+            _new_sdk().ask("q")
+        assert ei.value.retry_after == expected, (header, body_ra,
+                                                  ei.value.retry_after)
+        # A 429 is never auto-retried (the predicate admits 504 only).
+        assert len(server.requests) == 1, server.requests
+    finally:
+        server.stop()
+
+
 def test_post_ask_404_is_reader_unavailable(monkeypatch):
     """#2013: a code-less 404 on /v1/ask is the EXPECTED gated state
     (the route is NOT registered when the hosted ask exposure is gated
@@ -1037,3 +1100,229 @@ def test_post_ask_timeout_mapping(monkeypatch):
     from tortoise.quota import _ASK_TIMEOUT_S
     assert ASK_SDK_TIMEOUT_S == 75
     assert ASK_SDK_TIMEOUT_S > _ASK_TIMEOUT_S
+
+
+# ── #3834/#3993: the SDK's bounded 504 retry ─────────────────────────────────
+# The retry is NARROW BY CONSTRUCTION: only a SERVER-fired 504 that ADVERTISED
+# a delay. Everything else — a bare 504, a client-fired wire timeout, a 429, a
+# 502 — propagates unchanged on the first attempt.
+
+def _capture_retry_sleeps(monkeypatch) -> list:
+    import tortoise.retry as retry_mod
+    waits: list = []
+    monkeypatch.setattr(retry_mod, "_sleep", waits.append)
+    return waits
+
+
+def test_ask_timeout_retryable_predicate_matrix():
+    """The predicate is the whole safety story of the retry — a matrix, so a
+    widening mutation (e.g. dropping the ``retry_after is not None`` half)
+    turns exactly one row RED."""
+    from tortoise.exceptions import AskReaderUnavailable as _ARU
+    from tortoise.sdk import _ask_timeout_retryable
+
+    assert _ask_timeout_retryable(AskTimeout("t", source="server",
+                                             retry_after=2)) is True
+    # no advertisement → NOT retryable (nothing to honour)
+    assert _ask_timeout_retryable(AskTimeout("t", source="server")) is False
+    # client-fired wire timeout → NOT retryable (the server never refused)
+    assert _ask_timeout_retryable(AskTimeout("t", source="client",
+                                             retry_after=2)) is False
+    # different refusal families → never retried here
+    assert _ask_timeout_retryable(_ARU("reader")) is False
+    assert _ask_timeout_retryable(ValueError("boom")) is False
+
+
+def test_ask_retries_server_504_and_honours_the_advertised_floor(monkeypatch):
+    """504 + advertised delay → ONE retry that sleeps at least the advertised
+    value (and at most twice it), then the success is returned."""
+    waits = _capture_retry_sleeps(monkeypatch)
+    server = _FakeAskServer()
+    ok_payload = server.responses[0]
+    server.sequence = [
+        (504, {"error": {"code": "timeout", "retry_after": 2, "message": "x"}},
+         {"Retry-After": "2"}),
+        (200, ok_payload),
+    ]
+    server.start(monkeypatch)
+    try:
+        result = _new_sdk().ask("q")
+        assert result["answer"] == "ok"
+        assert len(server.requests) == 2, server.requests
+        assert len(waits) == 1
+        assert 2.0 <= waits[0] <= 4.0, waits
+    finally:
+        server.stop()
+
+
+def test_ask_does_not_retry_a_bare_504(monkeypatch):
+    """A 504 with NO advertised delay is not retryable: exactly one attempt,
+    no sleep, and the typed AskTimeout carries ``retry_after is None``."""
+    waits = _capture_retry_sleeps(monkeypatch)
+    server = _FakeAskServer()
+    server.status = 504
+    server.responses = [{"error": {"code": "timeout"}}]
+    server.start(monkeypatch)
+    try:
+        with pytest.raises(AskTimeout) as ei:
+            _new_sdk().ask("q")
+        assert ei.value.source == "server" and ei.value.retry_after is None
+        assert len(server.requests) == 1
+        assert waits == []
+    finally:
+        server.stop()
+
+
+def test_ask_retry_exhaustion_reraises_the_original_unwrapped(monkeypatch):
+    """Exhaustion re-raises the ORIGINAL ``AskTimeout`` — never the
+    ``WriteStageRetriesExhausted`` sentinel (marker_armed=False): the marker is
+    the resume lane's, and an ask retry is not a write stage."""
+    from tortoise.retry import WriteStageRetriesExhausted
+    from tortoise.sdk import ASK_RETRY_ATTEMPTS
+
+    waits = _capture_retry_sleeps(monkeypatch)
+    server = _FakeAskServer()
+    server.sequence = [
+        (504, {"error": {"code": "timeout"}}, {"Retry-After": "2"}),
+    ]
+    server.start(monkeypatch)
+    try:
+        with pytest.raises(AskTimeout) as ei:
+            _new_sdk().ask("q")
+        assert not isinstance(ei.value, WriteStageRetriesExhausted)
+        assert len(server.requests) == ASK_RETRY_ATTEMPTS
+        assert len(waits) == ASK_RETRY_ATTEMPTS - 1
+        assert ei.value.retry_after == 2
+    finally:
+        server.stop()
+
+
+def test_ask_retry_deadline_stops_further_attempts(monkeypatch):
+    """The deadline guard: with NO budget left, no further attempt is STARTED
+    (the exhaustion re-raise is the original, bare)."""
+    import tortoise.sdk as sdk_mod
+
+    waits = _capture_retry_sleeps(monkeypatch)
+    monkeypatch.setattr(sdk_mod, "ASK_RETRY_DEADLINE_S", 0)
+    server = _FakeAskServer()
+    server.sequence = [
+        (504, {"error": {"code": "timeout"}}, {"Retry-After": "2"}),
+    ]
+    server.start(monkeypatch)
+    try:
+        with pytest.raises(AskTimeout):
+            _new_sdk().ask("q")
+        assert len(server.requests) == 1, server.requests
+        assert waits == []
+    finally:
+        server.stop()
+
+
+@pytest.mark.parametrize("header,body_ra,retried", [
+    # Hostile / unparseable advertisements are REJECTED by the SDK filter
+    # (`0 <= ra < inf`), so the refusal is not retried and the typed exception
+    # carries no advertised value.
+    ("nan", None, False),
+    ("-5", None, False),
+    ("inf", None, False),
+    ("Wed, 21 Oct 2015 07:28:00 GMT", None, False),  # HTTP-date (RFC 7231)
+    (None, None, False),
+    # A JSON integer is arbitrary-precision in Python: `float()` on one beyond
+    # ~1.8e308 raises OverflowError (an ArithmeticError, NOT a ValueError), so
+    # this row goes RED if the parse catches only (TypeError, ValueError) — it
+    # escaped as an untyped OverflowError instead of the typed AskTimeout.
+    (None, int("9" * 400), False),
+    # A finite 3h advertisement IS admitted (the value is honest, the
+    # primitive's `cap` bounds the actual sleep, not the parse).
+    ("10800", None, True),
+])
+def test_ask_504_advertised_hint_filter(monkeypatch, header, body_ra, retried):
+    waits = _capture_retry_sleeps(monkeypatch)
+    payload = {"error": {"code": "timeout"}}
+    if body_ra is not None:
+        payload["error"]["retry_after"] = body_ra
+    server = _FakeAskServer()
+    server.sequence = [(504, payload, {"Retry-After": header} if header else {})]
+    server.start(monkeypatch)
+    try:
+        with pytest.raises(AskTimeout) as ei:
+            _new_sdk().ask("q")
+        if retried:
+            assert len(server.requests) > 1, server.requests
+            # The advertised 3h is admitted, but the ACTUAL sleep is bounded by
+            # the PRIMITIVE's cap AND clamped to the caller's remaining
+            # deadline (ASK_RETRY_DEADLINE_S) — the deadline clamp wins, so
+            # nothing here sleeps for hours.
+            from tortoise.sdk import ASK_RETRY_DEADLINE_S
+            assert waits, waits
+            assert all(0 < w <= ASK_RETRY_DEADLINE_S + 0.5 for w in waits), waits
+        else:
+            assert len(server.requests) == 1, server.requests
+            assert waits == []
+            assert ei.value.retry_after is None
+    finally:
+        server.stop()
+
+
+def test_ask_504_body_retry_after_used_when_header_absent(monkeypatch):
+    """The body field is the documented fallback (mirrors the 429 parse): a
+    header-less 504 carrying ``retry_after`` IS retried."""
+    waits = _capture_retry_sleeps(monkeypatch)
+    server = _FakeAskServer()
+    ok_payload = server.responses[0]
+    server.sequence = [
+        (504, {"error": {"code": "timeout", "retry_after": 2}}),
+        (200, ok_payload),
+    ]
+    server.start(monkeypatch)
+    try:
+        assert _new_sdk().ask("q")["answer"] == "ok"
+        assert len(server.requests) == 2
+        assert 2.0 <= waits[0] <= 4.0
+    finally:
+        server.stop()
+
+
+def test_ask_retry_knob_relations_are_pinned():
+    """The knob relations the retry's boundedness rests on."""
+    from tortoise.quota import ASK_BUSY_RETRY_AFTER_S
+    from tortoise.sdk import (
+        ASK_RETRY_ATTEMPTS,
+        ASK_RETRY_CAP_S,
+        ASK_SDK_TIMEOUT_S,
+    )
+
+    assert ASK_RETRY_ATTEMPTS >= 2          # a retry exists at all
+    assert ASK_RETRY_CAP_S >= ASK_BUSY_RETRY_AFTER_S  # the advertised floor fits
+    assert ASK_SDK_TIMEOUT_S > ASK_BUSY_RETRY_AFTER_S
+
+
+@pytest.mark.parametrize("status,body", [
+    (429, {"error": {"code": "quota_exceeded"}}),
+    (429, {"error": {"code": "in_flight_limit"}}),
+    (502, {"error": {"code": "reader_unavailable"}}),
+    (502, {"error": {"code": "retrieval_unavailable"}}),
+    (503, {}),   # code-less residual 5xx (LB/deploy drain)
+    (500, {}),   # code-less handler failure
+])
+def test_ask_non_504_refusals_are_never_retried(monkeypatch, status, body):
+    """Wire-level proof that the retry is scoped to the 504 arm: EVERY other
+    refusal family issues exactly ONE request (the predicate is
+    ``isinstance(e, AskTimeout) and source == "server" and retry_after is not
+    None``, so widening it to "any 5xx" or "any typed ask error" turns one of
+    these rows RED). A 429 with a Retry-After is the sharpest case: it carries a
+    delay and is still NOT retried."""
+    waits = _capture_retry_sleeps(monkeypatch)
+    server = _FakeAskServer()
+    server.status = status
+    server.responses = [body]
+    server.headers = {"Retry-After": "2"}  # even advertised, never retried
+    server.start(monkeypatch)
+    try:
+        with pytest.raises((AskQuotaExceeded, AskInFlightLimit,
+                            AskReaderUnavailable, AskRetrievalUnavailable)):
+            _new_sdk().ask("q")
+        assert len(server.requests) == 1, server.requests
+        assert waits == []
+    finally:
+        server.stop()

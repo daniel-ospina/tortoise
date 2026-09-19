@@ -15,6 +15,7 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import hmac
@@ -267,7 +268,7 @@ class _CaptureSlot:
       request that extracts. The request's own ``release()`` is a no-op once
       the slot is handed off, so a cancelled request cannot free capacity
       while its worker still occupies a pool thread (the shape of
-      `quota.run_ask_bounded`, quota.py:791-816); or
+      `quota.run_ask_bounded`); or
     * the request's own teardown (`release()`) — for a replay / opt-out /
       quota / provider-503 path that never extracts. Without that release the
       reservation would leak and permanently burn capacity.
@@ -1514,7 +1515,7 @@ async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
     ``_suspended_detail()`` DICT) → the captured default handler's response
     with ``exc.headers`` preserved."""
     from tortoise.schemas import (  # noqa: I001
-        ASK_ERROR_CODES, CODE_QUOTA_EXCEEDED, CODE_UNAUTHORIZED,
+        ASK_BUSY_MESSAGE, ASK_ERROR_CODES, CODE_TIMEOUT, CODE_UNAUTHORIZED,
     )
     if request.url.path == "/v1/ask":
         status = exc.status_code
@@ -1525,18 +1526,30 @@ async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
         if (status in (400, 429, 502, 504)
                 and isinstance(detail, str) and detail in ASK_ERROR_CODES):
             body = {"error": {"code": detail}}
-            # The documented 429 body contract ships ``retry_after`` IN THE
-            # BODY (the MCP surface reads it from the body; the SDK falls
-            # back to it when the header is unparseable) — the header alone
-            # would leave the body field absent (P2). Mirror the seconds
-            # when the Retry-After header is present.
-            if (status == 429 and detail == CODE_QUOTA_EXCEEDED
-                    and exc.headers and exc.headers.get("Retry-After")):
+            # The documented body contract ships ``retry_after`` IN THE BODY
+            # (the MCP surface reads it from the body; the SDK falls back to
+            # it when the header is unparseable) — the header alone would
+            # leave the body field absent (P2). Mirror the seconds whenever a
+            # ``Retry-After`` header is present, for ANY status that carries
+            # one: the 429 quota refusal always did, and #3834's 504 bound-
+            # breach refusal now does too. The ``in_flight_limit`` 429 carries
+            # no header → its body stays exactly ``{"error": {"code": …}}``.
+            if exc.headers and exc.headers.get("Retry-After"):
                 # RFC 7231 allows an HTTP-date Retry-After — the body field
-                # is omitted when it cannot be parsed as seconds.
-                with suppress(TypeError, ValueError):
+                # is omitted when it cannot be parsed as seconds. OverflowError
+                # is listed explicitly because it is an ArithmeticError, NOT a
+                # ValueError: ``int(float("inf"))`` raises it, and an escape
+                # here would turn the pinned 504 into a 500 from inside the
+                # refusal formatter itself (#4020 review, same class the SDK's
+                # ``_ASK_RETRY_AFTER_CEILING_S`` parse already guards).
+                with suppress(TypeError, ValueError, OverflowError):
                     body["error"]["retry_after"] = int(
                         float(exc.headers["Retry-After"]))
+            # #3834/#3993: the bound-breach 504 ALSO carries the static,
+            # actionable ``message`` (single source: ``schemas``). Path-scoped
+            # to the timeout arm — no other refusal inherits it.
+            if status == 504 and detail == CODE_TIMEOUT:
+                body["error"]["message"] = ASK_BUSY_MESSAGE
             return JSONResponse(body, status_code=status, headers=exc.headers)
     return await _ask_default_http_exc_handler(request, exc)
 
@@ -1661,8 +1674,8 @@ def _dream_key(org_id: str, graph_namespace: str | None) -> str:
 
 # #3718 (review P1): per-GRAPH dream serialization for the two POOLED pass
 # sites (REST /v1/dream and the write-triggered `_dream_worker` drain). The
-# contract is stated at :1556 — "Serialized per tenant (never two concurrent
-# dreams on one tenant graph)" — and repeated in the epic's test-design surface
+# contract is stated in the Dreaming-queue block above — "Serialized per tenant
+# (never two concurrent dreams on one tenant graph)" — and repeated in the epic's test-design surface
 # map ("new modes must run inside the same serialized worker, not spawn parallel
 # dreams"). Before the off-load the single event loop made both bodies atomic
 # (no await before `sdk.dream`), so the invariant held by construction; now the
@@ -1673,9 +1686,9 @@ def _dream_key(org_id: str, graph_namespace: str | None) -> str:
 # builds its own SDK.
 #
 # NOT covered by this lock, recorded so it is not read as process-wide: the
-# capture path's `_apply_capture_ingest_ep` (sdk.py:1232) still runs
+# capture path's `_apply_capture_ingest_ep` still runs
 # `sdk.dream(mode="local", ...)` on the EVENT LOOP, from
-# `_capture_session_impl` (hosted_api.py:9166). It is on the loop, so taking a
+# `_capture_session_impl`. It is on the loop, so taking a
 # `threading.Lock` there would freeze the loop for a whole pass — the very
 # thing #3718 removes; moving that pass to the pool is the capture-path
 # residual tracked by #3086, not this change.
@@ -4337,17 +4350,32 @@ _SIGNUP_LOCK = asyncio.Lock()
 # #1081 review P3: dict is pruned via done-callback — every distinct IP
 # leaving a completed task would otherwise grow unbounded under the
 # rotating-IP farm this control defends against.
-_SIGNUP_FEED_TASKS: dict[str, asyncio.Task] = {}
+_SIGNUP_FEED_TASKS: dict[str, asyncio.Future] = {}
 
 
-def _retain_feed_task(key: str, task: asyncio.Task) -> None:
-    """Retain an R8 feed task with done-callback cleanup (#1081 review P3).
+def _retain_feed_task(key: str, task: asyncio.Future) -> None:
+    """Retain a fire-and-forget task/future with done-callback cleanup (#1081 review P3).
 
     Pops only when the entry is STILL this task — a same-key replacement
     (a second signup/block from one IP within the first task's lifetime)
     must not have its only strong reference dropped by the FIRST task's
     done-callback (that would let asyncio GC collect the running
     replacement mid-execution → lost record_signup/record_signup_block).
+
+    **Two families share this registry** (#3834/#3993): the signup/block feed
+    tasks (keys ``"signup-"``/``"block-"`` + client IP) and the ask-latency
+    telemetry dispatches (keys ``"ask-telemetry-<id>"``). Two consequences are
+    load-bearing:
+
+    * the parameter is typed ``asyncio.Future``, not ``asyncio.Task`` — a
+      ``Task`` IS a ``Future``, so every existing call site is unchanged, and
+      the ask path can retain the future ``run_in_executor`` returns. A
+      ``threading.Thread`` is NOT admitted (no ``add_done_callback``) and is
+      not retained by design (``threading._active`` holds it).
+    * the key namespace is family-specific, so an ask-side reset can never wipe
+      the signup family's only strong reference (and vice versa). This dict is
+      mutated **only from the event-loop thread** — the ask-side dispatch and
+      its done-callback both run there.
     """
     _SIGNUP_FEED_TASKS[key] = task
 
@@ -5259,7 +5287,9 @@ async def ask_question(body: AskRequest,
     + Retry-After; per-org in-flight cap 4 → 429 ``in_flight_limit``; the
     shared ``run_ask_bounded`` wrapper bounds concurrency (global
     Semaphore(8)) and total per-request latency (``_ASK_TIMEOUT_S`` → 504
-    ``timeout``). Error body: ``{"error": {"code": …, "retry_after": …}}``
+    ``timeout``, carrying ``Retry-After: ASK_BUSY_RETRY_AFTER_S`` + a body
+    ``retry_after``/``message`` — the #3834 legible refusal). Error body:
+    ``{"error": {"code": …, "retry_after": …}}``
     with NO provider/model internals (the #329 scrub) — via the path-scoped
     HTTPException handler. Metering: ``sdk.ask(org_id=org["org_id"])`` —
     the SINGLE call site (the SDK local lane records with an explicit
@@ -5270,6 +5300,7 @@ async def ask_question(body: AskRequest,
     import logging as _ask_log  # noqa: I001
     from datetime import datetime as _dt2
     from tortoise.quota import (
+        ASK_BUSY_RETRY_AFTER_S,
         AskBoundedTimeoutError,
         AskInFlightLimitError,
         ask_budget_retry_after,
@@ -5320,7 +5351,20 @@ async def ask_question(body: AskRequest,
         raise HTTPException(status_code=429,
                             detail=CODE_IN_FLIGHT_LIMIT) from None
     except AskBoundedTimeoutError:
-        raise HTTPException(status_code=504, detail=CODE_TIMEOUT) from None
+        # #3834/#3993: the bound-breach refusal is LEGIBLE — a machine-readable
+        # delay in the ``Retry-After`` header (mirrored into the body's
+        # ``retry_after`` + ``message`` by the path-scoped handler).
+        # Emitted OFF the response path BEFORE the raise: the success site is
+        # never reached on this arm, so the refusal computes its own elapsed
+        # from ``t0``. Note the ``AskValidationError`` / ``AskQuota`` /
+        # ``AskInFlightLimit`` / reader / retrieval arms emit NOTHING.
+        _emit_ask_latency_off_path(
+            org_id,
+            max(0, int((_dt2.now(UTC) - t0).total_seconds() * 1000)),
+            "timeout", "ask_bounded_timeout")
+        raise HTTPException(
+            status_code=504, detail=CODE_TIMEOUT,
+            headers={"Retry-After": str(ASK_BUSY_RETRY_AFTER_S)}) from None
     except AskReaderUnavailable:
         raise HTTPException(status_code=502,
                             detail=CODE_READER_UNAVAILABLE) from None
@@ -5335,6 +5379,10 @@ async def ask_question(body: AskRequest,
         sdk.close()
     # ``duration_ms`` = hosted wall-clock from request receipt to response.
     result["duration_ms"] = max(0, int((_dt2.now(UTC) - t0).total_seconds() * 1000))
+    # #3834/#3993: persisted OFF the response path (the writer does a blocking
+    # POST) so the bound is re-derivable from real data without adding latency
+    # to the response it measures. No new table, no new metric endpoint.
+    _emit_ask_latency_off_path(org_id, result["duration_ms"], "ok")
     return result
 
 
@@ -19670,6 +19718,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "deadline_aborts", "by_stage",
+    # #3993/#3834: ask_request — the ask lane's HOSTED REQUEST wall-clock
+    # (receipt → response). A DIFFERENT quantity from `latency_ms` above (the
+    # MCP tool-call duration, a different transport and workload): never
+    # aggregate or assert the two equal. The SDK-local ask lane does not write
+    # this row.
+    "duration_ms",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -19865,8 +19919,23 @@ def _track_analytics_event(org_id: str, event_name: str,
         # from `.items()` straight out of it. Every in-repo caller passes a
         # dict — this pins the contract for callers added later.
         properties = None
-    props = {k: v for k, v in (properties or {}).items()
-             if k in _ALLOWED_ANALYTICS_PROPS}
+    # #3993/R5-4: the strip is LOGGED, not silent. This silent-strip class has
+    # recurred twice (#3359, commits 9003debbf/ce1bf9716) and was each time
+    # "fixed" by extending the allowlist — so the third instance earns a
+    # signal. WARNING, not debug: this module configures no log level, so a
+    # DEBUG line would be emitted nowhere. The whole loop is inside the
+    # never-raise contract's guard: a logging failure must not escape (the
+    # Stripe caller's props are not allowlisted, and an exception here would
+    # 500 the webhook AFTER its event marker was claimed — dropping the
+    # billing notification permanently).
+    props = {}
+    for k, v in (properties or {}).items():
+        if k in _ALLOWED_ANALYTICS_PROPS:
+            props[k] = v
+        else:
+            with contextlib.suppress(Exception):
+                _logger.warning(
+                    "analytics prop stripped (not allowlisted): %s", k)
     event = {
         "org_id": org_id,
         "event_name": event_name,
@@ -20422,6 +20491,186 @@ def _analytics_alert_store():
     except Exception as e:  # absence of a channel is not a loss
         _logger.warning("analytics alert store unavailable: %s", e)
         return None
+
+
+# ── #3834/#3993: ask-lane latency telemetry (off the response path) ──────────
+# The ask lane's wall-clock (``duration_ms``) is persisted OFF the response
+# path: ``_track_analytics_event`` performs a blocking ``httpx.Client`` POST
+# (up to ``_ANALYTICS_POST_TIMEOUT_S``), so calling it inline would stall every
+# concurrent request on the single-worker loop (the #2988/#3498 class).
+#
+# The in-flight counter is what makes the emission OBSERVABLE from a test: it
+# reaches 0 only after the worker's own ``finally`` has run, so a drain proves
+# the row is on disk. It is guarded by a ``threading.Lock`` — NOT an
+# ``asyncio.Lock`` — because the DECREMENT runs in the worker THREAD (mirrors
+# ``_CAPTURE_IN_FLIGHT_LOCK``).
+_ASK_TELEMETRY_INFLIGHT = 0
+_ASK_TELEMETRY_LOCK = threading.Lock()
+
+
+#: Key namespace for ask-telemetry dispatches retained in
+#: ``_SIGNUP_FEED_TASKS`` (via ``_retain_feed_task``). Family-specific so no
+#: reset can collide with — or wipe — the signup family's entries.
+_ASK_TELEMETRY_KEY_PREFIX = "ask-telemetry-"
+
+
+def _ask_telemetry_increment() -> None:
+    global _ASK_TELEMETRY_INFLIGHT
+    with _ASK_TELEMETRY_LOCK:
+        _ASK_TELEMETRY_INFLIGHT += 1
+
+
+def _ask_telemetry_decrement() -> None:
+    """Release one in-flight ask-telemetry slot.
+
+    The clamp is a safety net, NOT a licence: a decrement with nothing in
+    flight means the accounting leaked somewhere, which would let
+    ``_drain_ask_telemetry`` return while a write is still in flight — so it
+    is logged (mirrors ``_capture_slot_decrement``).
+    """
+    global _ASK_TELEMETRY_INFLIGHT
+    with _ASK_TELEMETRY_LOCK:
+        if _ASK_TELEMETRY_INFLIGHT > 0:
+            _ASK_TELEMETRY_INFLIGHT -= 1
+        else:
+            _logger.warning(
+                "ask telemetry decrement with nothing in flight — accounting "
+                "leak; a drain could return with a write still in flight")
+
+
+def _ask_telemetry_inflight() -> int:
+    """Seam — the current in-flight ask-telemetry write count."""
+    with _ASK_TELEMETRY_LOCK:
+        return _ASK_TELEMETRY_INFLIGHT
+
+
+def _reset_ask_telemetry_for_tests() -> None:
+    """Test seam — zero the counter.
+
+    Deliberately does NOT touch the shared retained-task registry: the ask
+    entries self-prune on completion, and dropping them by prefix would release
+    another family's (signup's) only strong reference. The counter is the only
+    state that is ours to reset.
+    """
+    global _ASK_TELEMETRY_INFLIGHT
+    with _ASK_TELEMETRY_LOCK:
+        _ASK_TELEMETRY_INFLIGHT = 0
+
+
+def _emit_ask_latency_off_path(org_id: str | None, duration_ms: int,
+                               status: str,
+                               error_kind: str | None = None) -> None:
+    """Fire-and-forget ask-latency emission. **Never raises, never blocks.**
+
+    Hands the blocking analytics POST to a NON-loop thread and returns
+    immediately. BOTH dispatch branches swallow and log: telemetry must never
+    change a status code — propagating a dispatch failure would turn the pinned
+    504 into a 500 (or a 200 into a 500), which is exactly the harm this guard
+    exists to prevent (``mcp_server.py``'s ``_emit_mcp_tool_call_telemetry``
+    carries the same contract).
+
+    The counter is incremented exactly once here, and decremented exactly once
+    — by the worker's own ``finally``, or by whichever branch failed to hand
+    the work off.
+
+    Scope of the never-raise claim, stated exactly (it is NOT "every statement
+    is inside a guard"): the two LOG calls and the two FALLBACK decrements on
+    the dispatch-failure paths are each inside a suppression, because those are
+    the statements that actually raise in practice (a raising log handler or
+    stream). ``_ask_telemetry_increment``/``_ask_telemetry_decrement`` take a
+    lock and touch an int — the residual risk is a ``MemoryError``-class
+    failure, which no guard here should pretend to handle.
+    """
+    props = {"duration_ms": duration_ms, "status": status}
+    if error_kind is not None:
+        props["error_kind"] = error_kind
+
+    def _write() -> None:
+        try:
+            _track_analytics_event(org_id, "ask_request", props)
+        except Exception:
+            _logger.debug("ask_request telemetry write failed", exc_info=True)
+        finally:
+            _ask_telemetry_decrement()
+
+    _ask_telemetry_increment()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and not loop.is_closed():
+        # ``run_in_executor`` SUBMITS the worker now; a ``create_task(asyncio.
+        # to_thread(...))`` wrapper would only SCHEDULE it — a loop that stops
+        # ticking would never run the write nor decrement the counter, which is
+        # the very leak the counter exists to detect.
+        fut = None
+        try:
+            fut = loop.run_in_executor(None, _write)
+            _retain_feed_task(f"{_ASK_TELEMETRY_KEY_PREFIX}{id(fut)}", fut)
+            return
+        except BaseException:
+            # Only when NO future was constructed — otherwise the worker (or
+            # its cancellation) owns the single decrement. This decrement is
+            # itself suppressed: it logs a warning when the counter is already
+            # zero, and an escaping log would fail the very contract it
+            # reports on.
+            if fut is None:
+                with contextlib.suppress(Exception):
+                    _ask_telemetry_decrement()
+            # The log is the statement that raises in practice — a handler or
+            # stream that raises on emit — and a raise here would escape as an
+            # untyped error on the refusal arm, i.e. the not-yet-pinned 504
+            # would become a 500 (the same hazard the strip-log at
+            # `_track_analytics_event` suppresses for).
+            with contextlib.suppress(Exception):
+                _logger.warning("ask latency telemetry schedule failed",
+                                exc_info=True)
+            return
+    # Defensive mirror, unreachable from the async route. A Thread has no
+    # ``add_done_callback`` and needs no retention (``threading._active`` holds
+    # it alive), so it is NOT routed through ``_retain_feed_task``.
+    #
+    # BOTH failure modes SWALLOW (mirroring the loop branch): the contract of
+    # this function is NEVER RAISES, and on the refusal arm a raise here turns
+    # the pinned 504 into a 500 — the exact harm the guard exists to prevent.
+    # A bare ``finally`` (no ``except``) is NOT a swallow: it was, and
+    # ``test_ask_emission_daemon_thread_start_failure`` caught it.
+    started = False
+    try:
+        t = threading.Thread(target=_write, daemon=True)
+        t.start()
+        started = True
+    except BaseException:
+        with contextlib.suppress(Exception):
+            _logger.warning("ask latency telemetry thread start failed",
+                            exc_info=True)
+    finally:
+        if not started:
+            with contextlib.suppress(Exception):
+                _ask_telemetry_decrement()
+
+
+def _drain_ask_telemetry(timeout: float = 5.0) -> None:
+    """Block the CALLING thread until no ask-telemetry write is in flight.
+
+    Truthy only for ``> 0``, so ``<= 0`` counts as drained (defensive against a
+    historical leak). On expiry it raises ``AssertionError`` naming the
+    leftover count — a silent return would let a leak cascade and let a caller
+    restore real state while a write is still in flight.
+
+    Sync rather than ``mcp_server._flush_mcp_telemetry`` (which is ``async``):
+    this runs from test teardown with NO loop alive and must be callable from
+    any thread, and it is the *counter reaching 0* — not a future being
+    awaited — that guarantees the worker's ``finally`` has run.
+    """
+    deadline = time.monotonic() + timeout
+    while _ask_telemetry_inflight() > 0:
+        if time.monotonic() >= deadline:
+            leftover = _ask_telemetry_inflight()
+            raise AssertionError(
+                f"ask telemetry not drained after {timeout}s: "
+                f"{leftover} write(s) still in flight")
+        time.sleep(0.01)
 
 
 def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
