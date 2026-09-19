@@ -173,6 +173,20 @@ RATE_LIMITED_BODY = (
     "return false; }"
 )
 
+#: The limiter's CALL SITE, VERBATIM (comments stripped, whitespace collapsed) — the
+#: key derivation must stay this, and nothing may touch `hits` before the call.
+#: `const ip = crypto.randomUUID()` gives every request its own key and
+#: `hits.clear();` before the call wipes the history, and either one makes the
+#: limiter unable to throttle anyone while the body pin above is untouched
+#: (cycle-25 review).
+RATE_LIMIT_CALL_SITE = (
+    'const ip = request.headers.get("CF-Connecting-IP") || "unknown"; if '
+    "(rateLimited(ip, Date.now())) { return fail( 429, \"rate_limited\", \"Too many "
+    "messages from this connection. Please wait a few minutes, or email "
+    "hello@premiselabs.co directly.\", { \"Retry-After\": String(Math.ceil(RATE_WINDOW_MS "
+    "/ 1000)) }, ); }"
+)
+
 #: The confirmation the visitor sees on success, pinned as a VALUE. It states
 #: receipt and nothing more: a reply is the exception (outbound email belongs to
 #: answering a user who wrote first), and while the reader gap is open
@@ -908,6 +922,18 @@ def test_rate_limit_map_is_bounded() -> None:
     assert reviewed == RATE_LIMITED_BODY, (
         "the rate limiter's body changed — re-read it, then update RATE_LIMITED_BODY: "
         f"{reviewed!r}"
+    )
+    # …and the CALL SITE is pinned the same way, because the body pin is scoped to
+    # the function: `const ip = crypto.randomUUID()` (a fresh key per request) or
+    # `hits.clear();` before the call disables throttling entirely without touching
+    # a line of the pinned body (cycle-25 review).
+    called = code.index("rateLimited(", fn_end)
+    site_start = code.rindex("const ip", 0, called)
+    site_end = _brace_end(code, code.index("if (rateLimited(", site_start))
+    site = re.sub(r"\s+", " ", code[site_start:site_end]).strip()
+    assert site == RATE_LIMIT_CALL_SITE, (
+        "the rate limiter's call site changed — re-read it, then update "
+        f"RATE_LIMIT_CALL_SITE: {site!r}"
     )
     # `cutoff` is what the window is filtered BY: `const cutoff = now` (or
     # `Infinity`) makes every stored entry stale, so the window is always empty and
