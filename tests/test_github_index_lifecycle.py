@@ -104,6 +104,7 @@ def client(tmp_path):
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
+            "max_sessions": None,
         }
         _INDEX_JOBS.clear()
         with TestClient(app) as tc:

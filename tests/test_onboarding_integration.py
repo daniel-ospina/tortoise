@@ -52,8 +52,10 @@ def client(tmp_path, monkeypatch):
         "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
         "max_teams": 1,
         # #1922: /v1/demo is quota-gated — the auth override must carry the
-        # fail-closed max_points cap or the seed path 500s.
+        # fail-closed max_points cap or the seed path 500s. #4010: the same
+        # contract covers max_sessions (unlimited → explicit None).
         "max_points": 10000,
+        "max_sessions": None,
     }
     with TestClient(app) as tc:
         yield tc

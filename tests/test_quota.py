@@ -54,11 +54,12 @@ class TestResolveTeamLimits:
         tid = _find_org_id(reg_sdk)
         limits = resolve_org_limits(tid)
         # team_create writes max_api_keys from pricing.json free tier (=2),
-        # but NOT max_points / max_sessions — defaults apply (points from
-        # pricing max_graph_nodes=10000; sessions flat 1000 per #310).
+        # but NOT max_points — the pricing default applies (max_graph_nodes
+        # = 10000). max_sessions has no default at all: it is UNLIMITED per
+        # #4010 (present-but-None).
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
-        assert limits["max_sessions"] == 1000
+        assert limits["max_sessions"] is None
         assert limits["max_users"] == 1
         assert limits["max_graphs"] == 1
 
@@ -234,7 +235,10 @@ class TestNonePreservation:
         assert limits["max_users"] == 2
 
     def test_team_limits_from_node_explicit_zero(self):
-        """P1: explicit 0 is preserved, not conflated with missing."""
+        """P1: explicit 0 is preserved, not conflated with missing.
+
+        #4010: max_sessions is the exception — sessions have no cap, so a
+        stored 0 is NOT honoured (it would be a zero-session cap)."""
         from tortoise.hosted_api import _org_limits_from_node
         node = {"id": "t3", "tier": "free",
                 "max_points": 0, "max_api_keys": 0, "max_sessions": 0}
@@ -243,8 +247,9 @@ class TestNonePreservation:
             f"Explicit 0 should be 0, got {limits['max_points']!r}")
         assert limits["max_api_keys"] == 0, (
             f"Explicit 0 should be 0, got {limits['max_api_keys']!r}")
-        assert limits["max_sessions"] == 0, (
-            f"Explicit 0 should be 0, got {limits['max_sessions']!r}")
+        assert limits["max_sessions"] is None, (
+            f"sessions are unlimited (#4010) — a stored 0 must not cap them, "
+            f"got {limits['max_sessions']!r}")
 
     def test_team_limits_from_node_free_tier_defaults(self):
         """Missing fields on free-tier node → pricing-aligned defaults."""
@@ -253,7 +258,7 @@ class TestNonePreservation:
         limits = _org_limits_from_node(node)
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
-        assert limits["max_sessions"] == 1000
+        assert limits["max_sessions"] is None  # unlimited (#4010)
 
 
 # ── #947 (epic #909 slice 2): sessions branch + is_episodic + constants ──
@@ -262,19 +267,21 @@ class TestSessionsQuota:
     """#947 P0: the sessions branch counts Session nodes, NOT all nodes.
 
     Pre-fix ``_count_resource("sessions")`` fell through to ``MATCH (n)`` —
-    ~25 nodes per captured session → false 402 after ~40 captures. The
-    fixture follows conftest.provision_test_user's convention (direct
-    max_sessions write on the Team node — no tier gives 40, DE2E-7).
+    ~25 nodes per captured session → false 402 after ~40 captures. #4010: the
+    stored ``t.max_sessions`` is no longer honoured as a cap (sessions are
+    unlimited for every tier), so the same fixture that used to gate the 41st
+    capture now stores it — the #947 count property is unchanged.
     """
 
-    def test_sessions_count_returns_session_nodes_and_41st_402(
+    def test_sessions_count_returns_session_nodes_and_41st_lands(
             self, reg_sdk, tmp_path):
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
         tid = _find_org_id(reg_sdk)
         # Inject max_sessions=40 on the Team node (provision_test_user
-        # convention — direct write, DE2E-7 quota fixture).
+        # convention — direct write, DE2E-7 quota fixture). #4010: a direct
+        # stored write is deliberately NOT honoured as a cap.
         reg_sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.max_sessions=40",
             params={"id": tid},
@@ -300,12 +307,16 @@ class TestSessionsQuota:
             assert all_nodes > 40, (
                 f"expected >40 total nodes ({all_nodes}) — the fixture must "
                 "distinguish sessions from the pre-fix all-nodes count")
-            # Resolver picks the injected limit up
+            # #4010: the stored 40 is NOT honoured — the resolver yields None.
             limits = resolve_org_limits(tid)
-            assert limits["max_sessions"] == 40
-            # 41st session → 402-equivalent (DE2E-7)
-            with pytest.raises(QuotaExceededError, match="sessions limit reached"):
-                enforce_org_limit(limits, "sessions", sdk=tenant)
+            assert limits["max_sessions"] is None, (
+                "a stored max_sessions=40 was honoured as a cap — the #4010 "
+                "trap is open")
+            enforce_org_limit(limits, "sessions", sdk=tenant)  # no raise
+            # 41st session is STORED, not refused (was a 402 before #4010).
+            tenant.capture_session(
+                [{"role": "user", "content": "okay"}], session_id="s40")
+            assert count_org_usage(tid, "sessions", sdk=tenant) == 41
         finally:
             tenant.close()
 

@@ -1733,7 +1733,12 @@ rows:
   cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
     — waits for your approval
 - name: tortoise_session_capture
-  served_from: tortoise/mcp_server.py:2971:96ad209c4ce8ffa8
+  # #4010 (PR #4048): the capture bridge now carries `max_sessions` through to
+  # `_check_org_limit` instead of dropping the key (which had silently forced
+  # the 1000 default on every MCP capture). Implementation fix, no surface
+  # growth — re-cut per the gate's remedy, `approval_status` stays
+  # pending-owner-approval.
+  served_from: tortoise/mcp_server.py:2971:6dea8e97898d543e
   family: sessions
   family_rank: 4
   served: http
@@ -1764,7 +1769,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_graph_set_recording
-  served_from: tortoise/mcp_server.py:3112:81031e8df171bcf7
+  served_from: tortoise/mcp_server.py:3121:81031e8df171bcf7
   family: sessions
   family_rank: 4
   served: http
@@ -2097,7 +2102,9 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_onboarding_github_index
-  served_from: tortoise/mcp_server.py:3186:a37403389bc44054
+  # #4010 (PR #4048): line-shift only — the implementation hash is unchanged;
+  # the fingerprint is re-cut because `served_from` includes the line.
+  served_from: tortoise/mcp_server.py:3195:a37403389bc44054
   family: onboarding
   family_rank: 6
   served: http

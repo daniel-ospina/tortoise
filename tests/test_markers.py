@@ -77,6 +77,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
     "test_import_endpoint.py": {"registry": "import-ledger"},
+    "test_issue_4010_sessions_unlimited.py": {"registry": "prod-coupled"},  # #4010: registry seeding (org_create + registry-lane auth) mirrors test_quota/test_commit_endpoint
     "test_index_mcp.py": {"registry": "prod-coupled",
                            "e2e-900": "redirect-derived per-path"},
     "test_invites_email_http.py": {"registry": "prod-coupled"},
@@ -482,6 +483,11 @@ def test_no_redirect_stems_registry_exact():
         # TEST_NO_REDIRECT_STEMS but this pin was not updated, so the
         # repo-wide markers gate red'd on every PR until reconciled here.
         "test_projection_embedded_socket_timeout",
+        # 2026-09-18 #4028: the surface half asserts embedded brute-force
+        # relevance-floor semantics (the docker sig-A vector branch returns no
+        # absolute similarity), so the module joins the carve-out lane —
+        # registered in ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS.
+        "test_precision_leak_4028",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
