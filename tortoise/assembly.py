@@ -1003,7 +1003,7 @@ def synthesize_hits(
 # ══════════════════════════════════════════════════════════════════════════
 # #2165 Task 6 — _assemble_connected (R5/R6/R11/R14/R17): the eval-only ask seam.
 # One single-source fired path shared by run_ask_lane()'s pre-retrieval
-# branch and the public run_ask_assembled(). R14 drift pin: this function
+# branch and the eval-lane run_ask_assembled(). R14 drift pin: this function
 # is imported ONLY by the two eval-lane entry points (tortoise/ask_lane.py)
 # — enforced by a BEHAVIOURAL guard (both entry points fire; a poisoned
 # synthesize raises from both), not a source-text grep (replaced in #3849).
@@ -1040,7 +1040,7 @@ class _AssembledBlock:
 
 @dataclass
 class AssemblyAnswer:
-    """Public run_ask_assembled() return shape (pinned — Task 7's eval arm reads
+    """run_ask_assembled() return shape (pinned — Task 7's eval arm reads
     post_cap_lines for gold-id admission and answer for conversion; field
     names are the arm's contract)."""
     fired: bool
