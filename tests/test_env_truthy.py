@@ -25,6 +25,12 @@ It does NOT police:
   inspected;
 - a **two-step** alias chain (`_a = os.environ.get(X); _r = _a`) — one step
   (`_r = ...`, `_r: str = ...`, `(_r := ...)`) IS resolved;
+- a name whose binding is SHADOWED across scopes: the constant maps are file-global and
+  first-wins (plain assignments before annotated ones), so a same-named LOCAL plain
+  binding can defeat a module-level ANNOTATED anchor (`_ONE: str = "1"`). The two are
+  the same configuration — the fix that makes a module-level plain binding beat an
+  earlier local annotated one is what makes this miss — so no global first-wins map
+  resolves both, and `test_scanner_declares_the_cross_scope_shadowing_residual` pins it;
 - `tests/` beyond `_embedded.py`, `tools/`, `graph-scripts/`, `apps/` — which already
   carry their own literals (`tests/test_product_rerank.py`, `tests/test_monitoring.py`,
   `tests/test_reaper.py`, `tests/test_eval_ingest_cache.py`,
@@ -45,7 +51,9 @@ the shapes listed above" — not "anywhere in the repo, however written". A JS/T
 `website/functions/`, `supabase/functions/`, `client/` and `menu-bar/` found no boolean
 env-truthiness parsing, so there is no cross-language duplication to guard.
 
-The scan resolves: module-level string constants as env names, `.strip().lower()`
+The scan resolves **at least** the following shapes — this list is illustrative, not an
+exhaustive grammar: a shape absent from it and from the boundary list above is unpoliced.
+Module-level string constants as env names (plain or annotated), `.strip().lower()`
 chains, one level of alias indirection (assignment, annotated assignment and walrus), the
 `"1"`/`"0"` anchor on either side of the comparison — written literally or as a
 module-level constant bound to it (scalar or Tuple/Set/List) — `environ.get(...)` after
@@ -844,6 +852,26 @@ def test_scanner_resolves_every_declared_shape(source, shape):
     _, narrow = _scan_source("synthetic.py", source)
     assert {name for _rel, name, _line in narrow} == {"TORTOISE_SYNTH"}, \
         f"{shape} was not resolved by the scanner: {narrow}"
+
+
+def test_scanner_declares_the_cross_scope_shadowing_residual():
+    """The declared residual: the constant maps are file-global and first-wins (plain
+    assignments yielded before annotated ones), so a same-named LOCAL plain binding
+    defeats a module-level ANNOTATED anchor.
+
+    Pinned rather than hidden. The cycle-6 fix — a later module-level plain binding must
+    beat an earlier LOCAL annotated one — is the SAME configuration as this miss, so no
+    global first-wins map resolves both; scope-aware resolution would be the real fix.
+    If this starts resolving, either delete this pin and the matching boundary bullet, or
+    say so in the boundary — do not leave the trade-off undeclared.
+    """
+    source = ('def f():\n    _ONE = "true"\n_ONE: str = "1"\n'
+              'if os.environ.get("TORTOISE_SYNTH") == _ONE:\n    pass\n')
+    _, narrow = _scan_source("synthetic.py", source)
+    assert narrow == [], (
+        "the cross-scope shadowing residual is resolved now — update the declared boundary "
+        f"in the module docstring and this pin (narrow={narrow})"
+    )
 
 
 def test_scanner_flags_a_synthetic_vocabulary_literal():
