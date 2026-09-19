@@ -752,6 +752,22 @@ def test_rate_limit_map_is_bounded() -> None:
     equivalent-but-unrecognised shape) is outside a static gate's reach. The
     behavioural answer is a TS harness that fills the map and asserts its bound;
     the Pages Functions have none (#4108).
+
+    The limiter as a whole is now pinned the same way, and the limit is
+    DEMONSTRATED rather than assumed: twenty-seven review cycles each found a real
+    escape, and the last four independently reached the same conclusion. The pins
+    below certify the reviewed shape and its values — the body verbatim
+    (`RATE_LIMITED_BODY`), the call site verbatim (`RATE_LIMIT_CALL_SITE`), every
+    `hits` reference confined to those regions or the declaration, and the store's
+    own type. They cannot certify BEHAVIOUR, and no finite set of them can:
+    `recent.length = 0;` in three positions, `&& false`, `hits.set(ip, [])`,
+    `hits.clear()` (four locations), `crypto.randomUUID()` as the key,
+    `Date.now = () => NaN` and a honeypot condition that always fires were each
+    green against a static pin set that had just been extended to catch the
+    previous one (cycles 19-27). A static pin's defeat surface over a mutable
+    implementation is unbounded; the honest guard is behavioural — execute the
+    handler and assert the sixth request is 429'd — which is #4108, and that is
+    where the next fix for this file belongs.
     """
     src = _src(FUNCTION_TS)
     assert "MAX_RATE_KEYS" in src
