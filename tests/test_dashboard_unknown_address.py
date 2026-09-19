@@ -51,9 +51,17 @@ REVIEWED_404_SCRIPT = (
 # Elements that can execute or navigate on their own. A not-found page needs
 # none of them, and `<iframe srcdoc="<script>top.location.replace('/')</script>">`
 # navigated a real browser past every other check (#4006 review, cycle 6).
+#
+# `noscript` is the one element where Python's parser and the browser parse the
+# SAME bytes with DIFFERENT rules: the tokenizer raw-texts its content when
+# scripting is enabled (the state the page is served in), while `html.parser`
+# does not — so `<noscript><style></noscript><script>top.location="/"</script></style>`
+# had the guard's parser swallow the script into style data and see only the
+# reviewed snippet, while Chromium ended the style at the browser's
+# `</noscript>` and RAN it. Verified to navigate top-level (#4006 review, cycle 10).
 FORBIDDEN_ELEMENTS = frozenset({
     "iframe", "object", "embed", "applet", "frame", "frameset", "portal",
-    "svg", "math",
+    "svg", "math", "noscript",
 })
 
 # Attributes whose value a browser resolves as a URL. A scheme check must
@@ -103,7 +111,13 @@ class _NotFoundDoc(HTMLParser):
     """
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        # `scripting=True` is the state the page is actually SERVED in: the
+        # browser raw-texts `<noscript>` content and shows it never. Leaving
+        # Python's default (False) made this parser read markup the browser
+        # treats as inert — a divergence in the wrong direction. The element is
+        # also banned outright, which is what closes the scripting-OFF case
+        # where a `<noscript><meta http-equiv=refresh>` would still be honoured.
+        super().__init__(convert_charrefs=True, scripting=True)
         self.meta_http_equiv: list[str] = []
         self.bases: list[str] = []
         self.forms: list[str] = []
