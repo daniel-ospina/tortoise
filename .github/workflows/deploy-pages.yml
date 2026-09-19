@@ -41,8 +41,11 @@ jobs:
         # scripts. The ONE live script is the tortoise-onboarding
         # SKILL.md, mirrored byte-identically into
         # website/apps/dashboard/public/skills/tortoise-onboarding/ (parity
-        # test) and served at app.premiselabs.co/skills/tortoise-onboarding/
-        # by the deploy-dashboard job below (dist build copies public/).
+        # test) and served at
+        # app.premiselabs.co/skills/tortoise-onboarding/SKILL.md by the
+        # deploy-dashboard job below (dist build copies public/).
+        # (The trailing-slash DIRECTORY URL is not a route — since #3523 an
+        # unknown path on the app host is an honest 404, not the dashboard.)
         run: |
           test -s tortoise/onboarding/SKILL.md
           cmp tortoise/onboarding/SKILL.md \
