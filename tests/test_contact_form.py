@@ -64,6 +64,16 @@ README = WEBSITE_DIR / "README.md"
 #: decision, not a code change — it must be argued in the issue, not here.
 CONTACT_TO = "hello@premiselabs.co"
 
+#: The confirmation the visitor sees on success, pinned as a VALUE. It states
+#: receipt and nothing more: a reply is the exception (outbound email belongs to
+#: answering a user who wrote first), and while the reader gap is open
+#: (swarm#18407) a promised reply is a commitment nothing can keep.
+CONFIRMATION_EXACT = 'Thanks — we\'ve received your message.'
+
+#: The email field's hint, pinned verbatim. It states a restriction on USE and
+#: never a commitment to write back.
+HINT_EMAIL_EXACT = "Only used to follow up on this message if we need to; never a mailing list."
+
 
 def _src(path: Path) -> str:
     assert path.is_file(), f"{path.relative_to(REPO_ROOT)} is missing"
@@ -158,21 +168,29 @@ def test_unconfigured_message_gives_the_visitor_the_fallback() -> None:
     assert "not been sent" in branch or "not sent" in branch
 
 
-# ── 3. No email leg: no provider, no credential, no provider call ─────────
+# ── 3. No email leg: no provider, no send-capable credential, no call ─────
 
 
-def test_no_email_provider_or_credential_anywhere_in_the_form_path() -> None:
+def test_no_email_provider_or_send_capable_credential_in_the_form_path() -> None:
     """The email leg is ABSENT from the form's path. `premise-labs#393` is a
     BUDGET TO MANAGE (objective: zero quota-rejected sends), never a reason to
     refuse to build — the form routes into intake because receiving is the
-    mechanism and sending is the exception."""
+    mechanism and sending is the exception.
+
+    One credential DOES travel — the intake's own inbound secret — so the
+    invariant is stated precisely: no SEND-CAPABLE credential, and no provider
+    key of any kind.
+    """
     for path in (FUNCTION_TS, TRANSPORT_TS):
         src = _src(path)
         low = src.lower()
         assert "resend" not in low, f"{path.name} names an email provider"
         assert "api.resend.com" not in low
         assert "RESEND_" not in src, f"{path.name} reads a RESEND_* variable"
-        # No credential of any kind travels from the form.
+        # No SEND-CAPABLE credential travels from the form. The one secret it
+        # does send is the intake's inbound one (`x-inbound-secret`), which
+        # submits an item and nothing else — send-capable provider headers stay
+        # forbidden.
         assert "Bearer" not in src, f"{path.name} constructs a bearer header"
         assert "Authorization" not in src, f"{path.name} sets an authorization header"
 
@@ -292,14 +310,32 @@ def test_the_confirmation_promises_no_reply() -> None:
     """
     src = _src(FUNCTION_TS)
     success = src[src.rindex("return json(") :]
-    assert "received your message" in success, "the confirmation must state receipt"
-    for promise in ("We'll reply", "we will reply", "We will reply", "reply to the address you gave"):
-        assert promise not in src, f"the form promises a reply it cannot guarantee: {promise!r}"
-    # The email field's hint states a PURPOSE restriction (only used to follow up
-    # if we need to), never a commitment to write back.
+    # Pin the VALUE, not a substring: `"…received your message." + " We'll reach
+    # out shortly."` satisfies a substring check and SHIPS the promise (cycle-2
+    # review). Reading the literal and comparing it exactly makes every
+    # rewording — concatenated, templated or rephrased — a failure, which is what
+    # "the confirmation promises nothing further" has to mean. This replaces an
+    # earlier verb blocklist that the same reviewer walked through with "reach
+    # out"/"write back"/"hear from".
+    literal = re.search(r'\{ ok: true, message: ("(?:[^"\\]|\\.)*") \}', success)
+    assert literal is not None, (
+        f"cannot read a literal confirmation from the success return: {success.strip()[:200]!r}"
+    )
+    assert literal.group(1) == f'"{CONFIRMATION_EXACT}"', (
+        f"the confirmation must state receipt and nothing more: {literal.group(1)}"
+    )
+    # The email field's hint states a restriction on USE. It is pinned as the
+    # WHOLE sentence for the same reason: a verb list cannot hold "no promise"
+    # (cycle-2 review found `we'll follow up`, `we'll write back`, `we'll reach
+    # out` and bare `we will reply` all still shipping).
     html = _src(CONTACT_HTML)
-    assert "We reply to this address" not in html, "the email hint promises a reply"
-    assert "never a mailing list" in html, "the no-mailing-list assurance must stay stated"
+    hint = html[html.index('id="contact-email"') : html.index('id="contact-message"')]
+    hint_text = re.search(r"<p[^>]*>(.*?)</p>", hint, re.S)
+    assert hint_text is not None, f"cannot read the email hint: {hint!r}"
+    assert hint_text.group(1).strip() == HINT_EMAIL_EXACT, (
+        "the email hint must state a use-restriction and never a reply promise, got: "
+        f"{hint_text.group(1).strip()!r}"
+    )
 
 
 def test_the_intake_contract_is_recorded_in_the_seam() -> None:
@@ -341,8 +377,21 @@ def test_open_decision_is_recorded_in_the_readme() -> None:
     assert "393" in section and "quota" in section.lower(), (
         "the #393 managed budget behind the intake shape must be recorded"
     )
-    assert "CONTACT_INTAKE_URL" in section, "the seam's one configuration must be named"
-    assert "503" in section
+    # Scope the prose pins to the sentences that carry the contract. A presence
+    # check over the whole section is satisfiable by a token that appears only in
+    # the ASCII diagram or the human-steps list (cycle-1 review), which would let
+    # the documenting sentence be deleted while the pin stayed green.
+    config = section[section.index("**Configuration:**") : section.index("**Spam:**")]
+    assert "CONTACT_INTAKE_URL" in config and "CONTACT_INTAKE_SECRET" in config, (
+        "the Configuration paragraph must name BOTH seam variables"
+    )
+    fail_loud = config[config.index("**Fail-loud contract:**") :]
+    assert "503" in fail_loud and "not_configured" in fail_loud, (
+        "the fail-loud contract must state the 503/not_configured outcome"
+    )
+    assert "**No promise of a reply.**" in section, (
+        "the no-reply confirmation must be stated for the next reader"
+    )
 
 
 # ── 4. Abuse protection and validation ───────────────────────────────────
@@ -386,14 +435,31 @@ def test_honeypot_answers_generic_success() -> None:
 def test_rate_limit_map_is_bounded() -> None:
     """A cap that only removes EXPIRED entries bounds nothing under sustained
     traffic from many addresses — the map would grow without limit and then run
-    an O(n) rebuild per request."""
+    an O(n) rebuild per request.
+
+    The slice starts at the CAP's own loop (`let excess`), not at the
+    `hits.size > MAX_RATE_KEYS` check above it: that check follows the
+    expired-keys sweep, so slicing from there picked up the sweep's
+    `hits.delete(k)` and stayed green when the cap's eviction loop was neutered
+    (cycle-1 review).
+    """
     src = _src(FUNCTION_TS)
     assert "MAX_RATE_KEYS" in src
-    evict = src[src.index("hits.size > MAX_RATE_KEYS") : src.index("return false;")]
-    assert "hits.delete(k)" in evict, "no key eviction under the cap"
-    assert "excess" in evict or "hits.size - MAX_RATE_KEYS" in evict, (
-        "the cap must remove keys until the map is back under it"
+    # Strip comments FIRST: a commented-out eviction loop supplied both tokens and
+    # kept the previous version of this pin green (cycle-2 review).
+    code = re.sub(r"//[^\n]*", "", src)
+    cap = code[code.index("let excess") : code.index("return false;")]
+    # Bind the initializer to the cap: `let excess = 0;` breaks out immediately,
+    # so the loop removes only expired entries and the map is unbounded under many
+    # live keys — the exact bug this test exists to prevent — while both tokens
+    # still appear (cycle-2 review).
+    assert re.search(r"let excess\s*=\s*hits\.size\s*-\s*MAX_RATE_KEYS", cap), (
+        "excess must be derived from the cap, not a constant"
     )
+    loop = cap[cap.index("for (const k of hits.keys())") :]
+    assert re.search(r"if \(excess <= 0\) break;", loop), "the loop must stop at the cap"
+    assert re.search(r"hits\.delete\(k\);", loop), "no key eviction under the cap"
+    assert re.search(r"excess--;|excess -= 1;", loop), "the loop must count down"
 
 
 def test_reply_to_is_validated() -> None:
