@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -78,15 +79,19 @@ FAMILY_REPRODUCERS = (
 # Re-typing the path is how the two could drift (one list edited, the other not).
 MANDATORY_REPRODUCER = FAMILY_REPRODUCERS[0]
 # The assert that stood here (`MANDATORY_REPRODUCER in FAMILY_REPRODUCERS`) was a
-# TAUTOLOGY: `MANDATORY_REPRODUCER` IS `FAMILY_REPRODUCERS[0]`, so membership holds
+# TAUTOLOGY: `MANDATORY_REPRODUCER` IS `FAMILY_REPRODUCERS[0]`, so membership held
 # for ANY value of the tuple and the assert could never fire. It read as protection
-# and supplied none. The invariant that CAN fail — and that actually carries weight —
-# is that the selection is a SET: a duplicated entry is executed twice while
-# `_manifest_receipt` reports `unique_count` once, so the manifest's own count
-# receipt stops describing the run it was taken for.
+# and supplied none. The invariant that CAN fail is that the selection declares each
+# reproducer once. A duplicate cannot be caught downstream: measured, pytest
+# de-duplicates a repeated path — `pytest tests/test_embedded_evidence.py
+# tests/test_embedded_evidence.py --junitxml=...` collects 48 testcases, not 96, and
+# `_manifest_receipt` on a duplicated file list reports count=52 == unique_count=52.
+# This assert is therefore the only place a duplicate declaration is caught, and the
+# defect it prevents is a recorded `selection.files` that names one reproducer twice
+# while claiming to name a set of them.
 assert len(set(FAMILY_REPRODUCERS)) == len(FAMILY_REPRODUCERS), (
-    "FAMILY_REPRODUCERS contains a duplicate entry, so the manifest count receipt "
-    f"cannot describe the run: {FAMILY_REPRODUCERS}"
+    "FAMILY_REPRODUCERS contains a duplicate entry, so the recorded selection "
+    f"names one file twice: {FAMILY_REPRODUCERS}"
 )
 DEFAULT_MARKER = "not track_b and not live"
 
@@ -129,29 +134,45 @@ assert BUCKETS_PASSING and BUCKETS_RED, (
 
 # ---------------------------------------------------------------------------
 # Load bands (D14) — half-open, deterministic at the boundaries.
+#
+# `LOAD_BAND_UNMEASURED` is NOT a band: it is the state `load1()` returns when the
+# host could not be read. Before it existed the sentinel `-1.0` fell through
+# `load_band`'s `return LOAD_BANDS[-1][0]` and was reported as the TOP band (L-C),
+# so a run whose load could not be measured satisfied `load-bands-do-not-overlap`
+# and was recorded as an L-C regime — a proxy silent in exactly the failure case it
+# exists for. The overlap conjunct now requires every run to be in one DECLARED
+# band, so an unmeasured run can never satisfy it.
 # ---------------------------------------------------------------------------
 LOAD_BANDS: tuple[tuple[str, float, float], ...] = (
     ("L-A", 0.0, 12.0),
     ("L-B", 12.0, 24.0),
     ("L-C", 24.0, float("inf")),
 )
+LOAD_UNMEASURED = -1.0
+LOAD_BAND_UNMEASURED = "unmeasured"
 DEFAULT_LOAD_CEILING = 60.0
 
 
 def load_band(value: float) -> str:
-    """The declared half-open band for a load1 value (12.0 -> L-B, 24.0 -> L-C)."""
+    """The declared half-open band for a load1 value (12.0 -> L-B, 24.0 -> L-C).
+
+    A negative sentinel or a non-finite value is `LOAD_BAND_UNMEASURED`, never a
+    band: an unmeasurable load cannot be asserted to lie in a regime.
+    """
+    if not math.isfinite(value) or value < 0.0:
+        return LOAD_BAND_UNMEASURED
     for name, lo, hi in LOAD_BANDS:
         if lo <= value < hi:
             return name
-    return LOAD_BANDS[-1][0]
+    return LOAD_BAND_UNMEASURED
 
 
 def load1() -> float:
-    """The host's 1-minute load average."""
+    """The host's 1-minute load average, or `LOAD_UNMEASURED` if it cannot be read."""
     try:
         return float(os.getloadavg()[0])
     except (OSError, AttributeError):
-        return -1.0
+        return LOAD_UNMEASURED
 
 
 # ---------------------------------------------------------------------------
@@ -212,18 +233,34 @@ CAUSE_CLASSES: dict[str, dict] = {
     #       `module-fork-eexist`, the label reserved for a PRIOR instance's child —
     #       a proxy silent in exactly the case it exists to cover.
     #
-    # The plan doc's `requires_absent: [r"Module fork exited pid:"]` is NOT copied:
-    # it is the same property in a cruder form ("no fork ever exited"), and the
-    # blunt form contradicts witness (a) — the pid-reuse case `started 123 / exited
-    # 123 / started 123` DOES contain an exited line and IS a hang. The counter is a
-    # strict refinement, so it governs. Measured: no captured log holds both the
-    # killing line and an exited line, so the blunt rule would have changed nothing
-    # on this corpus either way — the counter is chosen for soundness, not for today's
-    # count.
+    # The plan doc's `requires_absent: [r"Module fork exited pid:"]` is NOT copied
+    # for the counter witness: it is the same property in a cruder form ("no fork
+    # ever exited"), and the blunt form contradicts that witness — the pid-reuse case
+    # `started 123 / exited 123 / started 123` DOES contain an exited line and IS a
+    # hang. The ordered counter is a strict refinement, so it governs there.
+    #
+    # The same absence rule IS correct for the OTHER witness — the daemon's killing
+    # line. That witness is WEAK: it proves a child was outstanding at SHUTDOWN, not
+    # at the refusal, and says nothing about what caused the refusal. It therefore
+    # supports the class only when nothing else explains the EEXIST:
+    #   * no save/AOF child is present, so the refusal is not better explained by a
+    #     save-child-slot / aof-rewrite-fork refusal; and
+    #   * no `Module fork exited pid:` appears, so the child killed at shutdown is the
+    #     same instance that held the slot at the refusal (had any instance exited,
+    #     the shutdown child could be a later, unrelated one).
+    # Without these constraints the witness was a co-occurrence test: a log whose
+    # EEXIST came from a save child was relabelled a hang because some unrelated
+    # module child lingered to shutdown (measured: /tmp/revsyn/06_bgsave_kill.log
+    # -> module-fork-hang under the unconstrained rule, save-child-slot under this
+    # one). The counter witness carries no such constraints — an outstanding module
+    # fork at end-of-log is direct evidence the slot was held.
     "module-fork-hang": {
         "requires_lines": [FORK_REFUSAL_RE],
         "requires_absent": [],
         "unexited_fork_witnesses": [MODULE_FORK_CHILD_KILLED_RE],
+        "weak_witness_requires_absent": [
+            BGSAVE_ANY_RE, AOF_START_RE, MODULE_FORK_EXITED_RE,
+        ],
         "requires_fork_refusal": True,
         # The class requires a refusal AND an unexited child, so its payload is
         # that the unexited child CAUSED the refusal — and RM_Fork's child-slot
@@ -390,14 +427,20 @@ def label_cause(lines: list[str]) -> tuple[str, dict]:
             # share the `Can't fork for module:` prefix and nothing else.
             continue
         witnesses = spec.get("unexited_fork_witnesses")
-        if witnesses is not None and not (
-            # Two independent witnesses of ONE property: the ordered counter, and the
-            # daemon's own shutdown assertion. Either establishes that a module fork
-            # child outlived its fork, which is what makes the refusal a hang.
-            unexited or any(re.search(p, text) for p in witnesses)
-        ):
-            # The refusal came from a save/AOF child, or from no stale module child.
-            continue
+        if witnesses is not None:
+            # Two independent witnesses of ONE property. The ordered counter
+            # (`unexited`) is direct: a module fork is outstanding at end-of-log, so
+            # the RM_Fork slot check would have failed. The daemon's shutdown
+            # assertion (`weak`) only says a child was outstanding LATER, so it
+            # supports the class only when no save/AOF child and no exited instance
+            # give the refusal a different explanation (see the class comment).
+            weak = any(re.search(p, text) for p in witnesses) and not any(
+                re.search(p, text)
+                for p in spec.get("weak_witness_requires_absent", [])
+            )
+            if not (unexited or weak):
+                # The refusal came from a save/AOF child, or from no stale module child.
+                continue
         if any(re.search(p, text) for p in spec["requires_absent"]):
             continue
         return cause, _cause_evidence(text, hits, started, exited, unexited)
@@ -667,6 +710,54 @@ class _JunitObservation(NamedTuple):
     source: str
 
 
+def _observation_to_json(obs: _JunitObservation) -> dict:
+    """The PERSISTED form of an observation: a LABELLED object, never an anonymous
+    tuple. `_JunitObservation` is a NamedTuple, so `json.dumps` used to write a bare
+    `[observed, failing, source]` triple; reloaded it is a `list`, `isinstance` is
+    False, and `_red_file_list_matches` failed closed on EVERY persisted record — a
+    future verifier re-evaluating a record would reject a red that genuinely ran the
+    selection.
+    """
+    return {
+        "observed": list(obs.observed),
+        "failing": list(obs.failing),
+        "source": obs.source,
+    }
+
+
+def _observation_from_json(value) -> _JunitObservation | None:
+    """Rehydrate the labelled persisted shape. Returns `None` for anything else —
+    including a plain `list` (the selection copy the type exists to refuse) and the
+    anonymous triple a pre-fix record holds, which stays rejected.
+    """
+    if isinstance(value, _JunitObservation):
+        return value
+    if isinstance(value, dict) and {"observed", "failing", "source"} <= set(value):
+        try:
+            return _JunitObservation(
+                tuple(value["observed"]), tuple(value["failing"]), value["source"]
+            )
+        except TypeError:
+            return None
+    return None
+
+
+def _jsonable(value):
+    """Recursively convert the record's in-memory types to their JSON form.
+
+    `json.dumps` cannot be told about a NamedTuple through `default=` — a tuple is
+    serialised before the hook is consulted — so the conversion happens here, at the
+    persistence seam, while the in-memory record keeps the typed observation.
+    """
+    if isinstance(value, _JunitObservation):
+        return _observation_to_json(value)
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
 def _junit_test_files(path: Path) -> _JunitObservation:
     """The run's OWN observed / failing test FILES, read from its junit XML.
 
@@ -887,15 +978,18 @@ def _red_file_list_matches(red_runs: list[dict], files: list[str]) -> bool:
     if not red_runs:
         return False
     for r in red_runs:
-        obs = r.get("observed_files")
+        obs = _observation_from_json(r.get("observed_files"))
         # The observed side must be an OBSERVATION — junit-derived evidence — never
-        # the selection. `list(files)` is a `list`; it is not this type, so a fallback
-        # that substitutes the selection for the run's own evidence is structurally
-        # unable to reach the comparison below. This guards the PROPERTY, not one
-        # mutation: an observation carries the junit it was read from (`source`), the
-        # files it observed, and the files it failed in, so both sides of both checks
-        # below come from the SAME run's own evidence or the check fails closed.
-        if not isinstance(obs, _JunitObservation):
+        # the selection. `list(files)` is a `list`; it is not the labelled object, so a
+        # fallback that substitutes the selection for the run's own evidence is
+        # structurally unable to reach the comparison below. This guards the PROPERTY,
+        # not one mutation: an observation carries the junit it was read from
+        # (`source`), the files it observed, and the files it failed in, so both sides
+        # of both checks below come from the SAME run's own evidence or the check
+        # fails closed. The `dict` branch is the PERSISTED record's shape
+        # (`_observation_to_json`), so a record written to disk and reloaded by a
+        # verifier rehydrates instead of failing closed on every run.
+        if obs is None:
             return False
         observed = {_norm_test_file(f) for f in obs.observed}
         failing = {_norm_test_file(f) for f in obs.failing}
@@ -975,7 +1069,7 @@ def _write_record(rec: dict, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(out.parent), prefix=".rec-", suffix=".tmp")
     with os.fdopen(fd, "w") as fh:
-        json.dump(rec, fh, indent=2, sort_keys=False)
+        json.dump(_jsonable(rec), fh, indent=2, sort_keys=False)
         fh.write("\n")
     os.replace(tmp, out)
 
@@ -1095,7 +1189,9 @@ def _build_record(args: argparse.Namespace) -> dict:
             "declared_band": red_band,
             "green_band": green_band,
             "red_band": red_band,
-            "overlap": bool(bands) and len(bands) == 1,
+            # An UNMEASURED run is not in a band, so it can never satisfy the overlap
+            # claim: the comparison is meaningful only if every run's load was read.
+            "overlap": bool(bands) and LOAD_BAND_UNMEASURED not in bands and len(bands) == 1,
         },
         "environment": {
             "lane": {"uri_unset": True, "carve_out": "1", "expect_uri": False},

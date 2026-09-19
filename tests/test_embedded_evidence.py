@@ -28,38 +28,114 @@ exercising the happy path.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from tools import embedded_evidence as ee
 
+
+def _nonclosing_record(bucket: str = "unexpected-divergence") -> dict:
+    """A record that fails every `closes_issue` conjunct, so a test can inspect the
+    REASON LIST for the one conjunct under test.
+
+    It exists to drive the CONSUMER of a constant rather than assert the constant's
+    own value: a test of a constant is guaranteed by the module import; a test that
+    the consumer reads it can fail.
+    """
+    return {
+        "runs": [{"bucket": bucket, "executed": 1, "tree_moved": False}],
+        "selection": {
+            "name": "carve-out",
+            "files": ["tests/other.py"],
+            "expected_causes": [],
+        },
+        "pin": {
+            "worktree_clean": True,
+            "head_sha": "0" * 40,
+            "commit": "0" * 40,
+            "post_review_dirty": False,
+        },
+        "red": {
+            "cause": None,
+            "same_file_list": False,
+            "at_fixed_commit": {
+                "attempted": False,
+                "appeared": None,
+                "rate_change": False,
+                "mutation": None,
+                "mutation_operator": None,
+                "mutation_target_is_fix_branch": False,
+                "mutation_red_returned": False,
+                "surface": None,
+                "surface_assertion": None,
+            },
+        },
+        "load": {"overlap": False},
+        "record_role": "historical-attestation",
+        "verdict": {"environment_error": False},
+    }
+
+
 # ── cause vocabulary is DERIVED from CAUSE_CLASSES ──────────────────────────
 
 class TestCauseVocabulary:
-    def test_expected_causes_equals_cause_classes_minus_unattributed(self):
-        # Bites the `expected_causes` literal regression: a hand-written list
-        # that omits a class (e.g. `module-fork-eexist`) fails here the moment
-        # that class exists, instead of silently making it unclosable.
-        assert set(ee.EXPECTED_CAUSES) == set(ee.CAUSE_CLASSES) - {"unattributed"}
-
     def test_unattributed_is_never_an_expected_cause(self):
         assert "unattributed" not in ee.EXPECTED_CAUSES
         assert "unattributed" in ee.CAUSE_CLASSES
 
-    def test_expected_causes_preserves_cause_classes_order(self):
-        assert list(ee.EXPECTED_CAUSES) == [
-            c for c in ee.CAUSE_CLASSES if c != "unattributed"
-        ]
-
-    def test_cause_precedence_declares_every_class(self):
-        assert set(ee.CAUSE_PRECEDENCE) | {"unattributed"} == set(ee.CAUSE_CLASSES)
+    def test_every_declared_cause_class_is_reachable(self):
+        # REPLACES two tautologies. `test_expected_causes_equals_cause_classes_minus_
+        # unattributed` compared a derived tuple with its own comprehension, and
+        # `test_cause_precedence_declares_every_class` restated the import-time assert
+        # (which fires before any test can run). This drives the CONSUMER —
+        # `label_cause` — for every declared class. It fails if a class is added to
+        # CAUSE_CLASSES without a witness (set equality) or becomes UNREACHABLE
+        # because it is missing from CAUSE_PRECEDENCE (declared, documented, and never
+        # emitted — the sibling of the class that existed only to invalidate the
+        # record). The record-level consumer is covered by
+        # `test_record_reads_the_derived_cause_vocabulary`.
+        EEXIST = "1:M 01 Jan 2026 00:00:00.200 # Can't fork for module: File exists"
+        witnesses = {
+            "module-fork-hang": [
+                "1:M 01 Jan 2026 00:00:00.000 * Module fork started pid: 7",
+                EEXIST,
+            ],
+            "module-fork-eexist": [EEXIST],
+            "aof-rewrite-fork": [
+                "1:M 01 Jan 2026 00:00:00.000 * Starting BGREWRITEAOF",
+                EEXIST,
+            ],
+            "save-child-slot": [
+                "1:M 01 Jan 2026 00:00:00.000 * Background saving started by pid 1",
+                EEXIST,
+            ],
+        }
+        assert set(witnesses) | {"unattributed"} == set(ee.CAUSE_CLASSES)
+        for name, lines in witnesses.items():
+            assert ee.label_cause(lines)[0] == name, name
+        assert ee.label_cause(["1:M no declared pattern here"])[0] == "unattributed"
 
 
 # ── bucket vocabulary is canonical, and `slow-run` is gone ─────────────────
 
 class TestBucketVocabulary:
-    def test_passing_and_red_partition_the_declared_buckets(self):
-        assert set(ee.BUCKET_NAMES) == ee.BUCKETS_PASSING | ee.BUCKETS_RED
-        assert not (ee.BUCKETS_PASSING & ee.BUCKETS_RED)
+    def test_the_exit_code_classifies_every_declared_bucket(self):
+        # REPLACES `test_passing_and_red_partition_the_declared_buckets`, which was a
+        # tautology: BUCKETS_RED is DEFINED as BUCKET_NAMES - BUCKETS_PASSING, so the
+        # partition and disjointness held for any input. This drives the CONSUMER
+        # (`exit_code`) with the spec's classification hardcoded: a passing bucket
+        # leaves a non-closing record at exit 3, each red bucket is a violation at
+        # exit 1. It fails if a bucket is misclassified, if the vocabulary grows
+        # without a decision, or if the consumer re-spells the sets and drifts.
+        expected = {
+            "green": 3,
+            "unexpected-divergence": 1,
+            "timeout-red": 1,
+            "selection-red": 1,
+        }
+        assert set(expected) == set(ee.BUCKET_NAMES)
+        for name, code in expected.items():
+            assert ee.exit_code(_nonclosing_record(name)) == code, name
 
     def test_slow_run_is_not_a_declared_bucket(self):
         # `slow-run` had four consumer sites and zero producers; it was removed
@@ -76,22 +152,52 @@ class TestBucketVocabulary:
             assert red in ee.BUCKETS_RED
 
 
+# ── an unmeasurable load is not a band (F17) ──────────────────────────────
+
+class TestLoadBands:
+    def test_the_unmeasurable_sentinel_is_a_distinct_non_band_state(self):
+        # The regression: `load_band(-1.0)` fell through to `LOAD_BANDS[-1][0]`,
+        # so an unmeasurable load was reported as the HIGHEST band (L-C). The proxy
+        # was silent in exactly the failure case it exists for.
+        assert ee.load_band(ee.LOAD_UNMEASURED) == ee.LOAD_BAND_UNMEASURED
+        assert ee.load_band(ee.LOAD_UNMEASURED) != "L-C"
+        assert ee.LOAD_BAND_UNMEASURED not in {n for n, _, _ in ee.LOAD_BANDS}
+
+    def test_measured_boundary_values_band_deterministically(self):
+        assert ee.load_band(11.999) == "L-A"
+        assert ee.load_band(12.0) == "L-B"
+        assert ee.load_band(23.999) == "L-B"
+        assert ee.load_band(24.0) == "L-C"
+
+
 # ── mandatory reproducer is DERIVED from FAMILY_REPRODUCERS ────────────────
 
-def test_mandatory_reproducer_is_the_first_family_reproducer():
-    assert ee.FAMILY_REPRODUCERS[0] == ee.MANDATORY_REPRODUCER
-    assert ee.MANDATORY_REPRODUCER in ee.FAMILY_REPRODUCERS
+def test_family_declares_the_mandatory_reproducer():
+    # REPLACES `test_mandatory_reproducer_is_the_first_family_reproducer`, whose
+    # `FAMILY_REPRODUCERS[0] == MANDATORY_REPRODUCER` holds by construction (and
+    # whose membership restated it). The plan's rule 1 is a NAMED file, so this can
+    # actually fail: redefine the constant or rename the path and it bites.
+    assert ee.MANDATORY_REPRODUCER == "tests/test_dr_endpoints.py"
+    assert "tests/test_dr_endpoints.py" in ee.FAMILY_REPRODUCERS
 
 
-def test_family_reproducers_is_a_set():
-    # The module-level guard that REPLACED the old
-    # `assert MANDATORY_REPRODUCER in FAMILY_REPRODUCERS`, which was a TAUTOLOGY:
-    # MANDATORY_REPRODUCER IS FAMILY_REPRODUCERS[0], so membership held for any
-    # value of the tuple and the assert could never fire. This is the invariant that
-    # CAN fail, and that carries weight: a duplicate is executed twice while
-    # `_manifest_receipt` counts it once, so the count receipt stops describing the
-    # run it was taken for.
-    assert len(set(ee.FAMILY_REPRODUCERS)) == len(ee.FAMILY_REPRODUCERS)
+def test_closing_rule_reads_the_mandatory_reproducer():
+    # The CONSUMER: `closes_issue` reports `reproducer-absent` iff the selection
+    # lacks MANDATORY_REPRODUCER. Fails if the conjunct is dropped or checks a
+    # re-typed literal (the duplicated-vocabulary class this file exists for).
+    present = _nonclosing_record()
+    present["selection"] = {
+        "name": "family", "files": [ee.MANDATORY_REPRODUCER], "expected_causes": [],
+    }
+    _, reasons = ee.closes_issue(present)
+    assert "reproducer-absent" not in reasons
+
+    absent = _nonclosing_record()
+    absent["selection"] = {
+        "name": "family", "files": ["tests/other.py"], "expected_causes": [],
+    }
+    _, reasons = ee.closes_issue(absent)
+    assert "reproducer-absent" in reasons
 
 
 # ── a fork cause requires the fork refusal (P2-F) ──────────────────────────
@@ -323,6 +429,71 @@ class TestModuleForkHangIsReachableOnRealEvidence:
         assert ev["module_forks_unexited"] == ["7"]
 
 
+class TestKillingLineWitnessRequiresCausation:
+    """The shutdown assertion is a WEAK witness: it must not relabel a refusal
+    that a save/AOF child better explains.
+
+    `There is a module fork child. Killing it!` proves a child was outstanding at
+    SHUTDOWN, not at the refusal. Used alone it was a co-occurrence test, so a log
+    whose EEXIST came from a background save was relabelled `module-fork-hang`
+    because some unrelated module child lingered. These cases are the reviewer's
+    reproduction (`/tmp/revsyn/*`). The real log's shape — EEXIST + the killing line
+    and NOTHING else — must still label the hang, so the fix withholds the witness
+    only when another explanation is present.
+    """
+
+    KILLING = "1:M 01 Jan 2026 00:05:00.000 # There is a module fork child. Killing it!"
+    EEXIST = "1:M 01 Jan 2026 00:00:00.200 # Can't fork for module: File exists"
+
+    def test_a_save_child_present_with_a_later_killing_line_is_not_a_hang(self):
+        lines = [
+            "1:M 01 Jan 2026 00:00:00.000 * Background saving started by pid 1",
+            self.EEXIST,
+            "1:M 01 Jan 2026 00:00:01.000 * Background saving terminated with success",
+            self.KILLING,
+        ]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "save-child-slot"
+        assert ev["module_fork_child_killed"] is True
+
+    def test_an_aof_child_present_with_a_later_killing_line_is_not_a_hang(self):
+        lines = [
+            "1:M 01 Jan 2026 00:00:00.000 * Starting BGREWRITEAOF",
+            self.EEXIST,
+            self.KILLING,
+        ]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "aof-rewrite-fork"
+        assert ev["module_fork_child_killed"] is True
+
+    def test_an_exited_fork_with_a_later_killing_line_is_not_a_hang(self):
+        # The killing line is the only unexited-child witness. With a fork exited in
+        # between, the shutdown child could be a LATER, unrelated instance, so the
+        # witness cannot establish that the refusal child is the one killed.
+        lines = [
+            "1:M 01 Jan 2026 00:00:00.000 * Module fork exited pid: 7",
+            self.EEXIST,
+            self.KILLING,
+        ]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "module-fork-eexist"
+        assert ev["module_fork_child_killed"] is True
+
+    def test_the_counter_witness_is_unaffected_by_a_co_present_save_child(self):
+        # The fix must not over-constrain: an outstanding module fork is DIRECT
+        # evidence the RM_Fork slot was held, so it labels the hang even when a save
+        # child is also present. Weakening this back toward the save class would
+        # re-open the blind spot the class exists to cover.
+        lines = [
+            "1:M 01 Jan 2026 00:00:00.000 * Background saving started by pid 1",
+            "1:M 01 Jan 2026 00:00:00.100 * Module fork started pid: 7",
+            self.EEXIST,
+        ]
+        cause, ev = ee.label_cause(lines)
+        assert cause == "module-fork-hang"
+        assert ev["module_forks_unexited"] == ["7"]
+
+
 # ── same_file_list compares the red run's OWN observed files ──────────────
 
 class TestSameFileListIsDerived:
@@ -440,6 +611,54 @@ class TestJunitFileExtraction:
             ["tests/a.py"], Path("/tmp/junit.xml"), "not track_b", 60
         )
         assert "junit_family=xunit1" in cmd
+
+
+class TestPersistedObservationRoundTrips:
+    """A record written to disk must reload into something the conjunct can read.
+
+    `_JunitObservation` is a NamedTuple, so `json.dumps` used to write an anonymous
+    `[observed, failing, source]` triple. Reloaded, it was a `list`, `isinstance`
+    was False, and `_red_file_list_matches` failed closed on EVERY persisted record —
+    so a future verifier re-evaluating a record would reject a red that genuinely
+    ran the selection. No consumer exists today, which is why this is integrity, not
+    a live gate.
+    """
+
+    FILES = ["tests/a.py", "tests/b.py"]
+
+    def _record(self):
+        return {
+            "runs": [{
+                "observed_files": ee._JunitObservation(
+                    ("tests/a.py", "tests/b.py"), ("tests/a.py",), "junit-1.xml"
+                )
+            }]
+        }
+
+    def test_a_persisted_record_rehydrates_and_still_certifies(self, tmp_path: Path):
+        out = tmp_path / "record.json"
+        ee._write_record(self._record(), out)
+        reloaded = json.loads(out.read_text())
+        persisted = reloaded["runs"][0]["observed_files"]
+        assert persisted == {
+            "observed": ["tests/a.py", "tests/b.py"],
+            "failing": ["tests/a.py"],
+            "source": "junit-1.xml",
+        }
+        assert ee._red_file_list_matches(reloaded["runs"], self.FILES) is True
+
+    def test_the_anonymous_triple_is_not_accepted_on_read(self):
+        # A pre-fix record's shape. It holds the same values but carries no labels,
+        # so it is not an observation and stays rejected rather than being guessed at.
+        legacy = [{"observed_files": [
+            ["tests/a.py"], ["tests/a.py"], "junit-1.xml",
+        ]}]
+        assert ee._red_file_list_matches(legacy, ["tests/a.py"]) is False
+
+    def test_a_malformed_labelled_object_is_not_accepted(self):
+        assert ee._red_file_list_matches(
+            [{"observed_files": {"observed": ["tests/a.py"]}}], ["tests/a.py"]
+        ) is False
 
 
 class TestBothJunitReadersTolerateATruncatedFile:
@@ -669,6 +888,38 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         ]
         rec = self._record(monkeypatch, runs)
         assert rec["red"]["same_file_list"] is True
+
+    def test_an_unmeasured_run_cannot_pass_the_overlap_conjunct(self, monkeypatch):
+        # The producer must not present an unmeasurable load as a band. Both runs
+        # carry the sentinel's non-band state, so no overlap can be claimed and the
+        # closing rule reports it.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        for r in runs:
+            r["load"]["band"] = ee.load_band(ee.LOAD_UNMEASURED)
+        rec = self._record(monkeypatch, runs)
+        assert rec["load"]["overlap"] is False
+        _, reasons = ee.closes_issue(rec)
+        assert "load-bands-do-not-overlap" in reasons
+
+    def test_a_measured_lc_run_still_passes_the_overlap_conjunct(self, monkeypatch):
+        # The guard must not be over-tight: a genuinely measured L-C run (this
+        # host's regime) still overlaps and is not rejected for the band reason.
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        for r in runs:
+            r["load"]["band"] = ee.load_band(30.0)
+        assert ee.load_band(30.0) == "L-C"
+        rec = self._record(monkeypatch, runs)
+        assert rec["load"]["overlap"] is True
+        _, reasons = ee.closes_issue(rec)
+        assert "load-bands-do-not-overlap" not in reasons
 
     def test_record_rejects_a_red_that_observed_a_different_file_list(self, monkeypatch):
         files = list(ee.FAMILY_REPRODUCERS)
