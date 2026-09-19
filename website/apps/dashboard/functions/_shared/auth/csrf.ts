@@ -38,6 +38,15 @@
  * ONE HELPER, NOT N COPIES. A per-route check would drift — one route would
  * quietly lose its `Origin` test in a refactor and nothing would notice. The
  * rule lives here so it is testable in one place and cannot be half-applied.
+ *
+ * SESSION-GATED MUTATIONS ARE NOT EXEMPT (#4104 review). A route that requires
+ * the `__Host-session` cookie is NOT protected by `SameSite=Lax` alone: the Lax
+ * exemption is same-SITE, and every `*.premiselabs.co` sibling is same-site, so
+ * `tortoise.premiselabs.co` (or XSS there) can drive `/api/session`,
+ * `/api/provision` or `/api/v1/*` with the victim's cookie attached. Those
+ * routes therefore carry the guard too. The generic proxy uses the ORIGIN layer
+ * only (`guardOrigin`) because it must forward the caller's Content-Type for
+ * arbitrary API calls; every other state-changing route uses the full guard.
  */
 import { type Env, json } from "./session";
 
@@ -56,6 +65,17 @@ function isJsonMediaType(raw: string | null): boolean {
   return raw.split(";")[0].trim().toLowerCase() === "application/json";
 }
 
+/**
+ * Methods that can change server state. GET/HEAD/OPTIONS are safe and are
+ * deliberately not routed through this guard (a prefetch must not be blocked,
+ * and a safe method cannot be driven into a state change by a CSRF).
+ */
+const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+export function isStateChangingMethod(method: string): boolean {
+  return STATE_CHANGING_METHODS.has(method.toUpperCase());
+}
+
 /** Compare ORIGINS, not raw strings — normalises case, ports and any path. */
 function isSameOrigin(candidate: string, expected: string): boolean {
   try {
@@ -63,6 +83,29 @@ function isSameOrigin(candidate: string, expected: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Origin layer ONLY, for routes whose request body is not required to be JSON.
+ *
+ * The generic `/api/v1` proxy forwards the caller's Content-Type verbatim — the
+ * upstream API may legitimately accept a non-JSON body — so it cannot use the
+ * media-type layer without breaking real calls. For those routes the `Origin`
+ * test is the whole CSRF protection, and it is sufficient: a browser attaches
+ * `Origin` to every state-changing request (same-origin POSTs included) and
+ * cannot be made to omit it, so a cross-site form post is refused here. An
+ * ABSENT `Origin` is allowed for the same reason as above — it cannot be a
+ * browser cross-site post, and genuinely server-side/test callers omit it.
+ */
+export function guardOrigin(request: Request, env: Env): Response | null {
+  const origin = request.headers.get("Origin");
+  if (origin !== null && !isSameOrigin(origin, appOrigin(env))) {
+    return json(
+      { error: "forbidden_origin", message: "Cross-origin request rejected." },
+      { status: 403 },
+    );
+  }
+  return null;
 }
 
 /**
@@ -86,13 +129,5 @@ export function guardStateChangingRequest(request: Request, env: Env): Response 
   }
 
   // ---- layer 2: Origin, when the browser sent one ----------------------------
-  const origin = request.headers.get("Origin");
-  if (origin !== null && !isSameOrigin(origin, appOrigin(env))) {
-    return json(
-      { error: "forbidden_origin", message: "Cross-origin request rejected." },
-      { status: 403 },
-    );
-  }
-
-  return null;
+  return guardOrigin(request, env);
 }

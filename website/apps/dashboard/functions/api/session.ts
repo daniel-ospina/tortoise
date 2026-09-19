@@ -22,6 +22,7 @@ import {
   readCookie,
   revokeSession,
 } from "../_shared/auth/session";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { ensureSchemaTokenColumns, getAccessTokenForSession } from "../_shared/auth/token";
 import { fetchUserProfile } from "../_shared/auth/supabase";
 
@@ -91,8 +92,22 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   });
 };
 
-/** Explicit sign-out is a POST so it cannot be triggered by a link or a prefetch. */
+/**
+ * Explicit sign-out is a POST so it cannot be triggered by a link or a prefetch.
+ *
+ * Being a POST is NOT the CSRF defence — the shared guard is. See the note at
+ * the top of the handler.
+ */
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  // --- CSRF gate FIRST. This route requires the `__Host-session` cookie, but
+  // `SameSite=Lax` is same-SITE, not same-origin: a forged request from a
+  // `*.premiselabs.co` sibling (or XSS there) arrives WITH the cookie attached,
+  // so the cookie does not protect sign-out. The shared guard refuses a
+  // non-JSON media type (415) and a cross-origin `Origin` (403) before any
+  // state is touched.
+  const csrf = guardStateChangingRequest(request, env);
+  if (csrf) return csrf;
+
   const handle = readCookie(request, SESSION_COOKIE);
 
   if (handle) {

@@ -14,10 +14,16 @@
  *   - Bodies are streamed, never buffered (Cloudflare's own best practice —
  *     buffering large payloads is how a Worker dies on memory).
  *   - Responses are never cached: they are per-user and session-authenticated.
+ *   - State-changing methods are CSRF-guarded by the caller's `Origin` (the
+ *     shared `_shared/auth/csrf.ts` origin layer). The media-type layer is
+ *     deliberately NOT applied here: the proxy must forward the caller's
+ *     Content-Type for arbitrary API calls, so the media type is the upstream
+ *     API's contract, not this proxy's.
  *
  * Failure semantics mirror §8.2: 401 only for "not signed in".
  */
 import { type Env, SESSION_COOKIE, clearCookie, json, readCookie } from "../../_shared/auth/session";
+import { guardOrigin, isStateChangingMethod } from "../../_shared/auth/csrf";
 import {
   ensureSchemaTokenColumns,
   getAccessTokenForSession,
@@ -68,6 +74,21 @@ export const onRequest: PagesFunction<ProxyEnv> = async (ctx) => {
       { error: "websocket_not_supported", detail: "The /api proxy carries request/response JSON only." },
       { status: 426 },
     );
+  }
+
+  // --- CSRF gate for state-changing methods (Origin layer ONLY) ---------------
+  // This route requires the `__Host-session` cookie, but `SameSite=Lax` is
+  // same-SITE: a forged request from a `*.premiselabs.co` sibling arrives WITH
+  // the cookie attached, so the cookie does not protect a write through the
+  // proxy. The MEDIA-TYPE layer is deliberately omitted: this is a generic
+  // proxy that must forward the caller's Content-Type verbatim for arbitrary
+  // upstream API calls, so requiring `application/json` would break legitimate
+  // non-JSON calls. The Origin test alone is sufficient to refuse a cross-site
+  // form post, because a browser attaches `Origin` to every state-changing
+  // request and cannot be made to omit it.
+  if (isStateChangingMethod(request.method)) {
+    const csrf = guardOrigin(request, env);
+    if (csrf) return csrf;
   }
 
   const handle = readCookie(request, SESSION_COOKIE);

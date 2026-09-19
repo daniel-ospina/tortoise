@@ -108,10 +108,16 @@ _NETWORK_IO = re.compile(
     r"\b(?:fetch|XMLHttpRequest|axios|sendBeacon)\s*[(.]|\bcredentials\s*:|\bnavigator\.sendBeacon"
 )
 
-# Client-surface migration is tracked in #3559. These five invariants fail until the
-# remaining browser surfaces migrate. They are xfail — NOT deleted and NOT skipped —
-# so the obligation stays visible and the gate keeps naming the offenders. Flip to
-# strict, then remove the markers, when #3559 lands.
+# Client-surface migration is tracked in #3559. TWO invariants still fail because the
+# remaining browser surfaces have not migrated; they are xfail — NOT deleted and NOT
+# skipped — so the obligation stays visible and the gate keeps naming the offenders.
+#
+# The other three checks in this file whose surfaces DID migrate carry NO marker:
+# a non-strict xfail cannot fail, so it is not a gate — the moment a regression
+# appears it flips XFAIL and CI stays green. Removing the marker is the only state in
+# which the check can actually redden. Do the same for each remaining marker when its
+# invariant passes; do NOT "flip to strict" — a strict xfail still reports a passing
+# test as XPASS and still cannot gate a regression.
 CLIENT_MIGRATION = "client-surface migration outstanding — see #3559"
 
 
@@ -193,9 +199,9 @@ def test_migrated_surfaces_exist():
     """Every surface the BFF owns must still exist, so the migration gate cannot pass vacuously.
 
     `test_migrated_surfaces_do_not_use_supabase_auth_client` records a missing surface as an
-    offender, but it is `xfail(strict=False)`: a deleted or renamed surface makes it fail
-    *as expected*, so the run stays green and the migration gate silently scans nothing.
-    This UNMARKED test makes a vanished surface a hard failure instead.
+    offender too, but this dedicated test keeps the failure independent of the scan
+    patterns and names the vanished surface directly, so a renamed or deleted surface is a
+    hard failure rather than a silently empty migration check.
     """
     missing = [rel for rel in MIGRATED_SURFACES if not (REPO / rel).exists()]
     assert not missing, (
@@ -205,7 +211,6 @@ def test_migrated_surfaces_exist():
     )
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_migrated_surfaces_do_not_use_supabase_auth_client():
     """(A) No `supabase.auth` client session in a migrated surface.
 
@@ -237,14 +242,16 @@ def test_copy_only_exemptions_perform_no_network_io(sources):
     """The COPY_ONLY_SOURCES exemption must be able to FAIL.
 
     This test is deliberately UNMARKED. The same assertion used to live inside
-    `test_no_client_holds_a_bearer_token`, which is `xfail(strict=False)` — so a copy-only
-    file gaining a network call made that test fail *as expected* and the suite stayed
+    `test_no_client_holds_a_bearer_token` while that test was `xfail(strict=False)` — so a
+    copy-only file gaining a network call made it fail *as expected* and the suite stayed
     green. A non-strict xfail turns the guard's failure into XFAIL, and a guard that cannot
-    fail is not a guard (the exact class this PR exists to close).
+    fail is not a guard (the exact class this PR exists to close). Keeping this guard in a
+    test that carries no marker means it can redden even while the two remaining #3559
+    invariants are still xfail.
 
     Taking `sources` here also pins the module-level non-vacuity assertion (the
     browser-source scan found >40 files) to a test that cannot be xfailed, so a broken glob
-    can no longer hide behind the xfail markers either.
+    can no longer hide behind the two remaining xfail markers either.
     """
     scanned = {str(p.relative_to(REPO)) for p in sources}
     for rel in COPY_ONLY_SOURCES:
@@ -262,7 +269,6 @@ def test_copy_only_exemptions_perform_no_network_io(sources):
         )
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_no_client_holds_a_bearer_token(sources):
     """(A) No browser surface may construct an Authorization header from client state.
 
@@ -271,8 +277,8 @@ def test_no_client_holds_a_bearer_token(sources):
     indicate the surface was not migrated.
     """
     # Non-vacuity for the COPY_ONLY exemption lives in the UNMARKED
-    # `test_copy_only_exemptions_perform_no_network_io` — it must not sit inside this
-    # xfail test, where its failure would be swallowed as XFAIL.
+    # `test_copy_only_exemptions_perform_no_network_io` — it must not sit inside a test
+    # that cannot fail, where its failure would be swallowed as XFAIL.
     pat = re.compile(r"Bearer\s*\$\{")
 
     offenders = []
@@ -292,7 +298,6 @@ def test_no_client_holds_a_bearer_token(sources):
     assert not offenders, "client-constructed Bearer headers remain:\n" + "\n".join(offenders)
 
 
-@pytest.mark.xfail(reason=CLIENT_MIGRATION, strict=False)
 def test_the_proxy_has_a_caller(sources):
     """(B) The BFF proxy must actually be used by a client.
 

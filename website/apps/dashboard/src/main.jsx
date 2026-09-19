@@ -4249,7 +4249,15 @@ function claimIntentInFlight() {
     // failure: surface it, keep the user signed in visually, and DO NOT navigate.
     let revoked = false
     try {
-      const res = await fetch(`${API_BASE}/session`, { method: 'POST' })
+      // #4104 (cycle 2): the BFF's shared CSRF guard now covers this route, and
+      // its media-type layer requires `application/json` (a form cannot send
+      // it). Send it explicitly — otherwise the real sign-out 415s. The body is
+      // empty: the guard checks the header, not a payload.
+      const res = await fetch(`${API_BASE}/session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+      })
       revoked = !!res && res.ok
     } catch {
       revoked = false

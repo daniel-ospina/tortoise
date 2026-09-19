@@ -16,9 +16,11 @@
  *   - `__Host-session` cookie is the ONLY client credential. No cookie -> 401.
  *   - The session is resolved server-side; the access token is attached to the
  *     outbound request and is never placed in the response.
- *   - The request body and Content-Type are forwarded verbatim, so the Edge
- *     Function's own validation (#802 identity match, #2323 org_name, #1111
- *     type guard) stays the single authority on the payload.
+ *   - The request body is forwarded verbatim, so the Edge Function's own
+ *     validation (#802 identity match, #2323 org_name, #1111 type guard) stays
+ *     the single authority on the payload. The CSRF guard constrains the media
+ *     type to `application/json` first (the payload IS JSON), so the forwarded
+ *     body is always the JSON the contract describes.
  *   - The upstream status and body are returned as-is; failures are NOT
  *     swallowed into a 200. `Cache-Control` is `no-store` on every path.
  *   - Same-origin only: NO `Access-Control-*` headers are emitted (the browser
@@ -45,6 +47,7 @@ import {
   json,
   readCookie,
 } from "../_shared/auth/session";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import {
   ensureSchemaTokenColumns,
   getAccessTokenForSession,
@@ -104,6 +107,15 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
     res.headers.set("Allow", "POST");
     return res;
   }
+
+  // --- CSRF gate: the session cookie rides along on a same-SITE forged request
+  // from a sibling subdomain (`SameSite=Lax` is not same-origin), so the cookie
+  // does not protect this mutation. The full guard applies because the caller's
+  // body IS the JSON provisioning payload the Edge Function parses — a
+  // text/plain form can never be a legitimate call here. Runs BEFORE the store
+  // is touched or any credential is minted.
+  const csrf = guardStateChangingRequest(request, env);
+  if (csrf) return csrf;
 
   // A missing base URL is a SERVER misconfiguration, not a signed-out user.
   if (!env.SUPABASE_URL) {

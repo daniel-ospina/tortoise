@@ -90,11 +90,16 @@ the token regardless of which subdomain presented it.
 
 - **One auth page** at `app.premiselabs.co/auth` — `functions/auth/index.ts`
   rewrites `/auth` to the `/signup` asset, preserving the query string (invite
-  tokens, `?error=`, `?next=`). The marketing origin
-  (`tortoise.premiselabs.co`) 301s `/auth`, `/signin*`, `/signup`, `/welcome`
-  and `/invite-accept` to the app origin (`website/functions/_middleware.ts`,
-  `website/_redirects`). The card offers GitHub/Google OAuth, API key and
-  email/password.
+  tokens, `?error=`, `?next=`). The marketing origins converge on the app
+  origin, though not all in one hop (`website/functions/_middleware.ts`,
+  `website/_redirects`): the middleware 301s `/auth`, `/signup`, `/welcome` and
+  `/invite-accept` to `app.premiselabs.co` directly, but `/signin*` is a legacy
+  alias with no route on the app origin — `_redirects` maps it to `/auth` **on
+  the tortoise host**, which the middleware then 301s to the app origin
+  (`tortoise.premiselabs.co/signin` → `/auth` → `app.premiselabs.co/auth`); on
+  the company host there is one extra hop first
+  (`premiselabs.co/signin` → `tortoise.premiselabs.co/signin`). The card offers
+  GitHub/Google OAuth, API key and email/password.
 - **Protected pages:** `/welcome` (post-auth landing, decided server-side) and
   the dashboard — both on `app.premiselabs.co`.
 
