@@ -27,6 +27,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -208,13 +209,6 @@ corpus re-index (`index`/`context`) and the unrelated probe beacon (`session
 probe`) are skipped: they are not the path under verification and would touch
 a real graph.
 
-`TORTOISE_TEST_CAPTURE_DELAY` sleeps CLIENT-side, inside the fired hook's own
-capture child, BEFORE delegating to the CLI.  That makes "did a descendant of
-the killed/short-lived hook survive?" a real process question: the delay lives
-in the child, never in the server, so a late POST proves the child outlived
-``_fire`` (a server-side gate would prove only that this server was still
-working).
-
 `TORTOISE_TEST_FORK_MARKER` / `TORTOISE_TEST_FORK_PROBE` / `TORTOISE_TEST_RELEASE_FILE`
 make a guard's outcome depend on the hook FORKING its capture step, never on
 a wall clock: the marker records the instant the fork happened (so a
@@ -249,10 +243,6 @@ if argv and argv[0] in ("session", "sessions") and (_FORK_MARKER or _RELEASE):
         _until = time.monotonic() + 300
         while not os.path.exists(_RELEASE) and time.monotonic() < _until:
             time.sleep(0.05)
-
-delay = float(os.environ.get("TORTOISE_TEST_CAPTURE_DELAY") or 0)
-if delay > 0 and argv and argv[0] in ("session", "sessions"):
-    time.sleep(delay)
 
 sys.path.insert(0, "__SRC__")
 from tortoise.__main__ import main  # noqa: E402
@@ -296,8 +286,10 @@ def _root_for(home: Path, harness: str) -> Path:
     return resolve_install_root(harness, home=home)
 
 
-def _verify(hosted, home, harness, root, *, timeout=20.0, extra_env=None,
+def _verify(hosted, home, harness, root, *, timeout=None, extra_env=None,
             **kw):
+    if timeout is None:
+        timeout = _derived_fire_timeout(home, root, harness)
     _graph, api_url = hosted
     env = {**os.environ, "HOME": str(home),
            "TORTOISE_API_KEY": "tt_test", "TORTOISE_API_URL": api_url}
@@ -338,6 +330,66 @@ def _hook_fork_seconds(home, root, harness, tmp_path):
         ["/bin/bash", "-c", command], input=json.dumps(payload),
         cwd=str(root), env=env, capture_output=True, text=True, timeout=600)
     return time.monotonic() - started
+
+
+#: The hook's time-to-fork per harness, measured once at the CURRENT load and
+#: reused.  The prologue is a property of this box and its load, not of an
+#: individual temp install, so one calibration run per harness replaces the
+#: per-guard measurement a fixed wall-clock constant used to force.
+_FORK_SECONDS: dict[str, float] = {}
+
+
+def _prologue_seconds(home, root, harness):
+    """The hook's time-to-fork at the current load, cached per harness."""
+    if harness not in _FORK_SECONDS:
+        _FORK_SECONDS[harness] = _hook_fork_seconds(
+            home, root, harness, home)
+    return _FORK_SECONDS[harness]
+
+
+def _derived_fire_timeout(home, root, harness):
+    """A fire/observation timeout derived from the hook's own prologue.
+
+    Never a wall-clock constant: the prologue is measured at the CURRENT load
+    (``_prologue_seconds``), and the timeout is a multiple of it plus a margin
+    covering the CLI import/parse/POST that follows the fork.  A root with no
+    fireable seam (the missing-install guard) and a harness this command may
+    not fire (Cursor/Pi) never reach the fire path, so they get a nominal
+    timeout the fire path never consumes.
+    """
+    import tortoise.session_verify as sv
+
+    if not sv.HEADLESS_FIRABLE.get(harness):
+        return 20.0
+    if not sv._registered_capture_command(harness, root):
+        return 20.0
+    return 2.0 * _prologue_seconds(home, root, harness) + 15.0
+
+
+def test_default_fire_timeout_is_derived_not_a_wall_clock(monkeypatch, tmp_path):
+    """``_verify``'s default timeout comes from the hook's own prologue.
+
+    Mutation: restore ``timeout=20.0`` as ``_verify``'s default (a wall-clock
+    constant) — 20.0, not the derived 2 × 5.0 + 15.0 = 25.0, reaches the fire
+    and this REDs.
+    """
+    this = sys.modules[__name__]
+    import tortoise.session_verify as sv
+
+    seen: list[float] = []
+
+    def _spy(*_a, timeout, **_k):
+        seen.append(timeout)
+        return {"exit_code": 0}
+
+    monkeypatch.setattr(this, "verify_session_capture", _spy)
+    monkeypatch.setattr(this, "_FORK_SECONDS", {})
+    monkeypatch.setattr(this, "_hook_fork_seconds", lambda *_a, **_k: 5.0)
+    monkeypatch.setattr(sv, "_registered_capture_command",
+                        lambda *_a, **_k: "true")
+    this._verify(({}, "http://127.0.0.1:1"), tmp_path / "home",
+                 "claude", tmp_path / "root")
+    assert seen == [25.0]
 
 
 # ── the happy path ────────────────────────────────────────────────────────
@@ -431,7 +483,9 @@ def test_guard_unexecutable_seam_reds_installed(hosted, setup, monkeypatch):
 
     monkeypatch.setattr(sv.subprocess, "Popen", _boom)
     graph, _url = hosted
-    report = _verify(hosted, home, "claude", root)
+    # Popen is replaced, so the prologue cannot be measured and the outcome
+    # is deterministic (no process ever exists): a fixed budget, never a race.
+    report = _verify(hosted, home, "claude", root, timeout=20.0)
     assert report["exit_code"] == EXIT_BROKEN, report
     assert report["links"]["installed"]["status"] == "FAIL"
     assert "cannot execute the seam" in report["links"]["installed"]["detail"]
@@ -467,7 +521,8 @@ def test_guard_never_launched_is_not_in_flight_for_the_detaching_shape(
         sv.subprocess, "Popen",
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("cannot exec (test)")))
     graph, _url = hosted
-    report = _verify(hosted, home, "codex", root)
+    # Popen is replaced — a deterministic "no process" for every harness.
+    report = _verify(hosted, home, "codex", root, timeout=20.0)
     assert report["exit_code"] == EXIT_BROKEN, report
     assert report["fire"]["outcome"] == "not-launched", report["fire"]
     assert report["links"]["captured"]["detail"].startswith(
@@ -522,8 +577,10 @@ def test_guard_oserror_after_spawn_is_not_reported_as_never_launched(
             return getattr(self._proc, name)
 
     monkeypatch.setattr(sv.subprocess, "Popen", _SpawnedThenWaitFails)
+    # Popen is replaced, so the prologue cannot be measured; the capture
+    # lands inside communicate() before the wait raises, so no load race.
     with pytest.raises(OSError):
-        _verify(hosted, home, "claude", root)
+        _verify(hosted, home, "claude", root, timeout=20.0)
     assert len(graph.posts) == 1, "the seam really ran and captured"
     assert graph.sessions == {}, "cleanup still deleted what the fire wrote"
 
