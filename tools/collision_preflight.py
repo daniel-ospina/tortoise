@@ -75,15 +75,21 @@ change fixes for claim comments. Shipping it needs a mechanism that can tell a
 holder from a reader (a lane registry, or the board's lane->issue mapping) —
 see the #1233 note in the change report.
 
-Claim comments and lane identity
---------------------------------
-Lanes share ONE GitHub account, so an author login cannot tell this lane's own
-claim comment from another lane's. A ``claim``-shaped comment is attributed to
-this lane only on POSITIVE evidence — a session UUID equal to this session's
-(``$PI_SESSION_ID`` / ``--session``) or a lane marker equal to ours
-(``$COLLISION_PREFLIGHT_LANE`` / ``--lane``). Anything else, including a
-same-account comment with no marker, is NOT ours: "we cannot tell whose it is"
-must never be read as "it is ours".
+Claim comments
+--------------
+A comment matching ``_CLAIM_RE`` is ALWAYS a hit — exactly ``origin/main``'s
+behaviour. Nothing attributes a claim comment to the lane that wrote it. Every
+lane shares ONE GitHub account, so an author login cannot distinguish lanes;
+and six review cycles established that no rule can decide from a comment BODY
+whether a lane marker or session id named in it means the comment IS OURS.
+Cycle 4 extended a claim's span to its clause end and over-tied any later
+marker ("I'll take this on lane W3, not lane W0." → CLEAN); cycle 5 kept the
+claim object and over-tied the verb ("I'll claim this — lane W0 is only cc'd."
+→ CLEAN). English cannot answer "is this marker the holder, or a reference?",
+so the gate stops asking. This is the fail-closed direction: a lane's OWN
+claim comment blocks its own dispatch too, because a false COLLISION costs one
+manual check while a false CLEAN causes duplicate work. The REMEDY line names
+the offending comment so the lane can verify it by hand.
 
 The claim pattern is ``origin/main``'s, UNCHANGED. It is broad by design and
 false-positives on ordinary prose ("taking this into account", "in progress",
@@ -129,7 +135,7 @@ cross-cutting engineering/product words); pass ``--keywords`` to override when
 Usage
 -----
     python3 tools/collision_preflight.py <issue-number>
-        [--repo OWNER/NAME | --repo PATH] [--lane ID] [--session UUID]
+        [--repo OWNER/NAME | --repo PATH]
         [--keywords a,b,c] [--min-keywords N] [--gh PATH] [--git PATH]
         [--timeout SECS] [--pr-limit N] [--closed-pr-limit N]
         [--closed-pr-timeout SECS]
@@ -155,11 +161,9 @@ Env seams (tests point these at stubs; production defaults are the real tools)
     COLLISION_PREFLIGHT_PR_LIMIT          open-PR cap     (default: 1000)
     COLLISION_PREFLIGHT_CLOSED_PR_LIMIT   closed-PR cap    (default: 5000)
     COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT closed-PR REST   (default: 600)
-    COLLISION_PREFLIGHT_LANE              this lane's id  (e.g. W0)
     COLLISION_PREFLIGHT_REPO_ROOTS        ':'-separated roots scanned for
                                           sibling repos (default: parent of the
                                           current repo's main worktree)
-    PI_SESSION_ID / PI_SESSION_FILE       this session's id (claim attribution)
 """
 from __future__ import annotations
 
@@ -244,26 +248,6 @@ REPO_ROOTS_ENV = "COLLISION_PREFLIGHT_REPO_ROOTS"
 # the cap is INCOMPLETE (fail closed), never a silent partial scan.
 CANDIDATE_REPO_CAP = 40
 AMBIGUITY_TIMEOUT = 30.0
-
-# ── lane / session identity (defect 3) ──────────────────────────────────────
-# Lanes are not GitHub accounts: every lane on this fleet shares one login, so
-# a claim comment's AUTHOR cannot distinguish this lane from another. Ownership
-# of a claim comment is therefore established by SESSION UUID or LANE marker,
-# never by authorship alone.
-LANE_ENV = "COLLISION_PREFLIGHT_LANE"
-SESSION_ID_ENV = "PI_SESSION_ID"
-SESSION_FILE_ENV = "PI_SESSION_FILE"
-UUID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
-# `lane X` identities. The grammar must parse the ids this fleet actually
-# uses: a trailing letter is a REAL id (`lane B2c`, this repo's own AGENTS.md)
-# and the colon form (`Lane: W0`) is common. An id the regex cannot parse makes
-# the self-footprint escape hatch inert — with OUR id unparsed, our own claim
-# reads as another lane's and blocks our dispatch. Only case is normalised.
-LANE_MARKER_RE = re.compile(
-    r"(?i)\blane[\s_:-]*([A-Za-z]{1,4}[-_]?\d{1,3}[A-Za-z]?)\b"
-)
 
 STATUS_CLEAN = "CLEAN"
 STATUS_HIT = "HIT"
@@ -403,33 +387,6 @@ _CLAIM_RE = re.compile(
 )
 
 
-# The claim OBJECT, for marker-to-claim tie detection only. `_CLAIM_RE`
-# matches the bare `claim` verb, so a marker attached to the object —
-# `claiming this (session <uuid>)` — would sit outside the match and read as
-# another lane merely naming us. Cycle 4 fixed that by extending EVERY span to
-# its clause end; that over-tied (see `_claim_spans`). This span source keeps
-# the object for the `claim` verb. Span-only: classification stays `_CLAIM_RE`.
-_CLAIM_OBJECT_RE = re.compile(r"(?i)\bclaim(?:ing|ed)?\s+(?:this|it|#\d+)\b")
-
-
-def _claim_spans(body: str) -> list[tuple[int, int]]:
-    """Spans of every claim-shaped match, claim OBJECT included.
-
-    Cycle 4 extended each span to the CLAUSE END so that a marker following
-    the object would count as tied. That over-tied: a marker INSIDE the
-    extended span made the marker-to-claim gap `''`, and
-    `_IDENTITY_LINK_RE.fullmatch('')` is True — so ANY marker later in the
-    sentence counted as ours. A comment that DISCLAIMED our lane ("I'll take
-    this on lane W3, not lane W0") then suppressed the collision and the run
-    exited CLEAN, the only outcome that authorizes dispatch. The clause
-    extension is removed; the object span is kept.
-    """
-    text = _strip_control_sequences(body)
-    spans = {(m.start(), m.end()) for m in _CLAIM_RE.finditer(text)}
-    spans.update((m.start(), m.end()) for m in _CLAIM_OBJECT_RE.finditer(text))
-    return sorted(spans)
-
-
 class SurfaceError(Exception):
     """A surface could not be queried (INCOMPLETE — never CLEAN)."""
 
@@ -444,13 +401,11 @@ class Hit:
 
 @dataclass
 class Identity:
-    """Who is running this pre-flight. `login` is the GitHub account; `lane`
-    and `session_id` are what actually distinguish one lane from another on a
-    fleet where every lane shares the account."""
+    """Who is running this pre-flight. `login` is the GitHub account, the only
+    identity the gate still consumes: it is what the ASSIGNEE surface compares
+    against. Claim comments carry no attribution at all."""
 
     login: str | None = None
-    lane: str | None = None
-    session_id: str | None = None
 
 
 @dataclass
@@ -474,7 +429,6 @@ class Surface:
     note: str = ""
     truncated: bool = False
     truncation_note: str = ""
-    own_ignored: list[str] = field(default_factory=list)
     # The surface was QUERIED but has no signal to offer (e.g. a title whose
     # every term is generic, so the keyword dimension is empty). Not INCOMPLETE
     # — number matching still works — but the verdict must say the surface is
@@ -533,8 +487,13 @@ def _sanitize(text: str | None) -> str:
 # A whole ANSI escape SEQUENCE (its payload included), not just the ESC byte:
 # an OSC 52 clipboard overwrite is `ESC ] 52 ; c ; <payload> BEL`, and
 # stripping only the ESC/BEL leaves `<payload>` behind. Classification runs on
-# the de-sequenced text, so an escape sequence sitting between a claim's
-# object and its clause end cannot hide the claim (`I'll take this ESC… now`).
+# the de-sequenced text, which changes the match in BOTH directions versus
+# matching the raw body (`origin/main`): it RECOVERS a claim whose sequence sat
+# between separated words (`ta ESC king this` -> `taking this`, a body main
+# misses), and it can MERGE a word boundary and DROP a match main would find
+# (`I'll take ESC this` -> `I'll takethis`). A sequence spliced INSIDE a
+# two-word arm is not recovered (`on ESC it now` -> `onit now`) — and main
+# misses that raw body too.
 _ESCAPE_RE = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC … BEL | ST
     r"|\x1b\[[0-?]*[ -/]*[@-~]"            # CSI …
@@ -890,88 +849,6 @@ def scan_pr_surface(
                         "reference (non-blocking)", "weak")
 
 
-def _identity_markers(body: str) -> tuple[set[str], set[str]]:
-    """Session UUIDs and `lane X` markers named in a comment body."""
-    sessions = {m.group(0).lower() for m in UUID_RE.finditer(body or "")}
-    lanes = {m.group(1).upper() for m in LANE_MARKER_RE.finditer(body or "")}
-    return sessions, lanes
-
-
-# Text allowed BETWEEN an identity marker and a claim for the marker to count
-# as TIED to it: whitespace/punctuation, plus identity keywords. A real word
-# ("lane W0 IS DONE HERE — I'll take this") means the marker is a REFERENCE to
-# another lane, not this lane identifying itself, so it must not suppress the
-# collision. This is the reader-vs-holder confusion the #1233 session surface
-# was rejected for; it must not be reintroduced here.
-_IDENTITY_LINK_RE = re.compile(
-    r"(?:[\s\-–—:()\[\]{},.;'\"`|*]|\b(?:session|id|uuid|lane|owner|as|by)\b)*"
-)
-
-
-def _same_line(body: str, a: int, b: int) -> bool:
-    return body.rfind("\n", 0, a) == body.rfind("\n", 0, b)
-
-
-def _marker_tied_to_claim(body: str, m_start: int, m_end: int,
-                          claim_spans: list[tuple[int, int]]) -> bool:
-    """True when an identity marker at [m_start, m_end) sits on the SAME LINE
-    as a claim match and is joined to it only by punctuation/identity words."""
-    for c_start, c_end in claim_spans:
-        if not _same_line(body, m_start, c_start):
-            continue
-        gap = (body[m_end:c_start] if m_end <= c_start
-               else body[c_end:m_start])
-        if _IDENTITY_LINK_RE.fullmatch(gap):
-            return True
-    return False
-
-
-def claim_attribution(body: str, login: str | None, identity: Identity) -> str:
-    """Attribute a claim-shaped comment: ``self`` | ``other`` | ``unknown``.
-
-    Lanes share ONE GitHub account, so the AUTHOR LOGIN ALONE cannot tell this
-    lane's own claim from another lane's — ownership on this tracker is named
-    by LANE / SESSION, never by author. A comment is therefore attributed to
-    this lane only on POSITIVE evidence: a session UUID equal to ours, or a
-    lane marker equal to ours, TIED TO THE CLAIM (same line, punctuation-only
-    gap). MERELY NAMING our marker is not enough: another lane's comment that
-    quotes the fleet board — which contains our lane id and session UUID — is
-    a READER, not a holder, and must still collide. Every other outcome is
-    NOT-OURS, including a same-account comment with no marker at all: "we
-    cannot tell whose it is" must never be read as "it is ours" (#4027).
-    """
-    if not login or login.strip().lower() in ("", "unknown", "ghost", "none"):
-        return "unknown"
-    if not identity.login:
-        # We do not even know who WE are: nothing can be attributed to us.
-        return "unknown"
-    if login.strip().lower() != identity.login.strip().lower():
-        return "other"
-    clean = _strip_control_sequences(body)
-    sessions, lanes = _identity_markers(clean)
-    claim_spans = _claim_spans(clean)
-    if identity.session_id:
-        sid = identity.session_id.strip().lower()
-        if sid in sessions and any(
-            m.group(0).lower() == sid
-            and _marker_tied_to_claim(clean, m.start(), m.end(), claim_spans)
-            for m in UUID_RE.finditer(clean)
-        ):
-            return "self"
-    if identity.lane:
-        lane = identity.lane.strip().upper()
-        if lane in lanes and any(
-            m.group(1).upper() == lane
-            and _marker_tied_to_claim(clean, m.start(), m.end(), claim_spans)
-            for m in LANE_MARKER_RE.finditer(clean)
-        ):
-            return "self"
-    if sessions or lanes:
-        # A marker is present, but it is not ours tied to this claim.
-        return "other"
-    return "unknown"
-
-
 def assignee_attribution(login: str | None, identity: Identity) -> str:
     """Attribute an issue assignee: ``other`` | ``unknown``.
 
@@ -1018,20 +895,20 @@ def scan_issue_surface(
 ) -> None:
     """Assignee + claim comments.
 
-    A claim comment is a hit only when it is NOT attributable to this lane. A
-    comment we can positively attribute to ourselves is recorded as own
-    footprint (printed, non-blocking) rather than as a collision — otherwise a
-    lane could never dispatch the issue it had already claimed.
+    A comment matching `_CLAIM_RE` is ALWAYS a hit — there is no attribution of
+    a claim comment to the lane that wrote it, so a lane's own claim comment
+    blocks its own dispatch too. That is `origin/main`'s behaviour and the
+    fail-closed direction: a false COLLISION costs one manual check, a false
+    CLEAN causes duplicate work. The REMEDY line names the comment so the lane
+    can verify it by hand.
 
-    An ASSIGNEE is handled the same way, but the identity machinery cannot do
-    for it what it does for a comment: GitHub gives only a login, with no lane
-    or session marker. On this shared-account fleet an assignee equal to our
-    own login is therefore NOT attributable to this lane (any lane could have
-    set it), so it is reported as un-attributable and kept as a hit — fail
-    closed. Only a DIFFERENT login is affirmatively another party's. The
-    consequence is deliberate: a lane's own self-assignment still blocks its
-    own dispatch, because suppressing same-account assignments would blind the
-    surface to every other lane on the fleet (a false negative).
+    An ASSIGNEE carries only a login, with no lane or session marker. On this
+    shared-account fleet an assignee equal to our own login is therefore NOT
+    attributable to this lane (any lane could have set it), so it is reported
+    as un-attributable and kept as a hit — fail closed. Only a DIFFERENT login
+    is affirmatively another party's. Suppressing same-account assignments
+    would blind the surface to every other lane on the fleet (a false
+    negative), so a lane's own self-assignment still blocks its own dispatch.
     """
     for assignee in issue_data.get("assignees") or []:
         login = assignee.get("login") if isinstance(assignee, dict) else str(assignee)
@@ -1053,25 +930,17 @@ def scan_issue_surface(
     for comment in issue_data.get("comments") or []:
         body = comment.get("body") or ""
         # Classification is `_CLAIM_RE` (origin/main's pattern), run on the
-        # de-sequenced text so an escape sequence spliced into a claim cannot
-        # hide it. One kind of hit — a claim-shaped comment — no tiers.
+        # de-sequenced text. A claim-shaped comment is a hit — no attribution,
+        # no tiers.
         if not _CLAIM_RE.search(_strip_control_sequences(body)):
             continue
         author = comment.get("author") or {}
         login = author.get("login") if isinstance(author, dict) else (
             str(author) if author else None
         )
-        who = claim_attribution(body, login, identity)
-        if who == "self":
-            surface.own_ignored.append(
-                f"claim comment by {login or 'unknown'} attributed to this lane "
-                f"(session/lane marker): {_one_line(body, 90)}"
-            )
-            continue
         surface.add(
             _comment_ref(comment, login),
-            f"claim-style comment ({who} attribution — not this lane): "
-            + _one_line(body, 90),
+            "claim-style comment: " + _one_line(body, 90),
             "strong",
         )
     if not surface.hits:
@@ -1524,15 +1393,6 @@ def format_report(
                     f"  [{surface_name}] … +{len(surface_hits) - MAX_HITS_SHOWN} "
                     f"more hit(s) on this surface (total {len(surface_hits)})"
                 )
-    own_ignored = [(s.name, note) for s in ordered for note in s.own_ignored]
-    if own_ignored:
-        lines.append("")
-        lines.append(
-            "OWN FOOTPRINT (non-blocking — attributed to THIS lane by session/"
-            "lane marker, so it is not a collision)"
-        )
-        for name, note in own_ignored:
-            lines.append(f"  [{name}] {note}")
     if weak and not strong and not keyword_hits:
         lines.append("")
         lines.append("WEAK SIGNALS (non-blocking — prose is not work)")
@@ -1620,14 +1480,6 @@ def format_report(
             "to restore the keyword dimension."
         )
     return "\n".join(lines) + "\n", EXIT_CLEAN
-
-
-def _session_id_from_file(session_file: str | None) -> str | None:
-    """The session UUID that is the recovery key, from `PI_SESSION_FILE`."""
-    if not session_file:
-        return None
-    match = UUID_RE.search(Path(session_file).name)
-    return match.group(0).lower() if match else None
 
 
 def _resolve_target(args, timeout: float) -> tuple[RepoTarget | None, int]:
@@ -1767,12 +1619,6 @@ def main(argv: list[str] | None = None) -> int:
              "current directory, with a cross-repo ambiguity refusal rather than a "
              "guess (#4027)",
     )
-    parser.add_argument("--lane", default=os.environ.get(LANE_ENV) or None,
-                        help="this lane's id (e.g. W0). Used to recognise the lane's "
-                             f"OWN claim comments (env {LANE_ENV})")
-    parser.add_argument("--session", default=os.environ.get(SESSION_ID_ENV) or None,
-                        help="this session's UUID; also read from PI_SESSION_ID / "
-                             "PI_SESSION_FILE")
     parser.add_argument("--keywords", default=None,
                         help="comma-separated keyword override when gh cannot supply the title")
     parser.add_argument("--min-keywords", type=int, default=DEFAULT_MIN_KEYWORDS,
@@ -1845,11 +1691,9 @@ def main(argv: list[str] | None = None) -> int:
     if refusal is not None:
         return refusal
 
-    # Identity: the GitHub login plus the lane/session that actually distinguish
-    # one lane from another on an account shared by every lane.
-    session_id = (args.session or os.environ.get(SESSION_ID_ENV)
-                  or _session_id_from_file(os.environ.get(SESSION_FILE_ENV)))
-    identity = Identity(login=None, lane=args.lane, session_id=session_id)
+    # Identity: only the GitHub login survives. The ASSIGNEE surface compares it
+    # to the assignee; claim comments carry no attribution at all.
+    identity = Identity(login=None)
     rc, out, _err, _to = _run(
         [args.gh, "api", "user", "-q", ".login"],
         target.path or os.getcwd(), args.timeout,

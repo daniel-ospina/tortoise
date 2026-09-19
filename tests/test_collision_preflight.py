@@ -146,9 +146,6 @@ SURFACE_ROWS = (
     "issue keywords",
 )
 
-DEFAULT_TEST_SESSION = "01a0b01d-ab9f-74d8-bbe1-1e218fc752b2"
-
-
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True,
                    capture_output=True, text=True)
@@ -204,8 +201,6 @@ class CollisionPreflightTest(unittest.TestCase):
         self.gh_dir.mkdir()
         self.gh = _write_exec(self.gh_dir / "gh", GH_STUB)
         (self.gh_dir / "user.txt").write_text("test-agent")
-        self.session_id = DEFAULT_TEST_SESSION
-        self.lane = "W0"
         # Default: every GitHub surface is queryable and empty.
         self.gh_fixtures(open_prs=[], closed_prs=[], issue=self.issue_payload())
 
@@ -217,8 +212,9 @@ class CollisionPreflightTest(unittest.TestCase):
     def issue_payload(self, title="florfenicol dosing audit", assignees=(),
                       comments=(), state="OPEN", comment_author=None) -> dict:
         """`comments` items are body strings (author "someone") or
-        `(author_login, body)` tuples — attribution is the whole point of
-        defect 3, so the author must be controllable."""
+        `(author_login, body)` tuples. The author is still controllable so a
+        test can assert the comment is NAMED (the REMEDY line), even though
+        claim comments are no longer attributed by author."""
         rendered = []
         for comment in comments:
             if isinstance(comment, dict):
@@ -270,8 +266,6 @@ class CollisionPreflightTest(unittest.TestCase):
                  gh_bin: Path | None = None):
         env = dict(os.environ)
         env["GH_STUB_DIR"] = str(self.gh_dir)
-        env["COLLISION_PREFLIGHT_LANE"] = self.lane
-        env["PI_SESSION_ID"] = self.session_id
         if env_extra:
             env.update({k: str(v) for k, v in env_extra.items()})
         cmd = [PYTHON, str(TOOL), str(issue)]
@@ -919,30 +913,38 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("could not be probed", out)
         self.assertNotIn("VERDICT: CLEAN", out)
 
-    # ── defect 3: attribute claims, never just "a claim-shaped match" ───────
+    # ── claims ALWAYS collide; there is no self-attribution (cycle 6) ───────
 
-    def test_own_lane_marked_claim_is_own_footprint_not_a_collision(self):
-        # Same account as us (test-agent), marked with OUR lane. Lanes share one
-        # GitHub login, so authorship alone cannot establish this — the lane
-        # marker can, and then the lane's own claim must NOT block its own unit.
-        self.gh_fixtures(issue=self.issue_payload(comments=[
-            ("test-agent", "Owner: lane W0 — claiming this for W0."),
-        ]))
-        rc, out = self.run_tool(env_extra={"COLLISION_PREFLIGHT_LANE": "W0"})
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
-        self.assertIn("OWN FOOTPRINT", out)
-        self.assertNotIn("do NOT dispatch", out)
-
-    def test_own_claim_marked_with_our_session_id_is_own_footprint(self):
-        sid = "01a0b01d-ab9f-74d8-bbe1-1e218fc752b2"
-        self.gh_fixtures(issue=self.issue_payload(comments=[
-            ("test-agent", f"claiming this (session {sid})."),
-        ]))
-        rc, out = self.run_tool(env_extra={"PI_SESSION_ID": sid})
-        self.assertEqual(rc, 0, out)
-        self.assertIn("VERDICT: CLEAN", out)
-        self.assertIn("OWN FOOTPRINT", out)
+    def test_every_claim_shaped_comment_collides_including_our_own_marker(self):
+        # The invariant the gate now rests on: identity-tied claim attribution
+        # is REMOVED, so a comment matching `_CLAIM_RE` ALWAYS collides —
+        # exactly origin/main's behaviour. That deliberately includes a comment
+        # carrying OUR OWN lane marker or session id: a lane's own claim blocks
+        # its own dispatch, because a false COLLISION costs one manual check
+        # while a false CLEAN causes duplicate work. The bodies below are the
+        # reproductions the removed tie rules mis-read as CLEAN, plus the
+        # reader-vs-holder shapes (a pasted fleet board).
+        our_session = "01a0b01d-ab9f-74d8-bbe1-1e218fc752b2"
+        for body in (
+            "I'll claim this — lane W0 is only cc'd.",
+            "I'll claim #4027. lane W0 handles follow-up.",
+            "I'll claim this. 'lane W0 owns it'",
+            "I'll take this on lane W3, not lane W0.",
+            "I'll take this, and lane W0 owns the follow-up.",
+            f"Claiming this.\n\nFLEET BOARD — lane table W0 session `{our_session}`",
+            "lane W0 is done here — I'll take this",
+            "Owner: lane W0 — claiming this.",
+            f"claiming this (session {our_session}).",
+        ):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("test-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertNotIn("VERDICT: CLEAN", out)
+                self.assertIn("claim-style comment", out)
 
     def test_second_party_claim_still_collides(self):
         # The other direction, and the one that must never weaken: a claim by a
@@ -986,15 +988,16 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertIn("other-agent", out)
 
     def test_same_account_unmarked_claim_fails_closed(self):
-        # RESIDUAL, deliberately: another lane can share our account and post an
-        # unmarked claim. "We cannot tell whose it is" must never read as "ours".
+        # Another lane shares our account; an unmarked claim by it must still
+        # collide. With attribution removed there is no "whose is it" question
+        # left to get wrong — every claim-shaped comment is a hit.
         self.gh_fixtures(issue=self.issue_payload(comments=[
             ("test-agent", "I will handle this."),
         ]))
         rc, out = self.run_tool()
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
-        self.assertIn("unknown attribution", out)
+        self.assertIn("claim-style comment", out)
 
     def test_claim_pattern_is_main_and_false_positives_carry_a_remedy(self):
         # Cycle-4 scoping decision: classification is origin/main's `_CLAIM_RE`,
@@ -1036,9 +1039,8 @@ class CollisionPreflightTest(unittest.TestCase):
         # The reverted contract, asserted directly so a future re-introduction
         # of tiering cannot land silently: classification is exactly
         # `_CLAIM_RE` — no `classify_claim`, no strong/weak split. These two
-        # groups only assert MATCHING; whether a match BLOCKS is decided
-        # separately by attribution (a `self` claim is `own_ignored`, not a
-        # hit), asserted in the attribution tests above.
+        # groups only assert MATCHING; every match BLOCKS, with no attribution
+        # (asserted in the tests above).
         cp = _tool_module()
         self.assertFalse(hasattr(cp, "classify_claim"))
         self.assertFalse(hasattr(cp, "_CLAIM_WEAK_RE"))
@@ -1104,44 +1106,6 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("comment by other-agent [id IC_kwDOAAA123]", out)
         self.assertIn("REMEDY", out)
-
-    def test_other_lane_marker_quoting_fleet_board_still_collides(self):
-        # A shared-account comment that merely MENTIONS our lane id / session
-        # UUID (a pasted fleet board) is a READER, not a holder. Merely naming
-        # our marker must NOT suppress the collision — the reader-vs-holder
-        # confusion the #1233 session surface was rejected for. The third body
-        # is the shape a clause-extended claim span over-tied: our marker sits
-        # AFTER the claim in the same sentence and the comment DISCLAIMS our
-        # lane, so it must still collide.
-        real_session = "01a0b01d-ab9f-74d8-bbe1-1e218fc752b2"
-        for body in (
-            f"Claiming this.\n\nFLEET BOARD — lane table W0 session `{real_session}`",
-            "lane W0 is done here — I'll take this",
-            "I'll take this on lane W3, not lane W0.",
-        ):
-            with self.subTest(body=body):
-                self.gh_fixtures(issue=self.issue_payload(comments=[
-                    ("test-agent", body),
-                ]))
-                rc, out = self.run_tool(env_extra={"PI_SESSION_ID": real_session})
-                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
-                self.assertIn("VERDICT: COLLISION", out)
-                self.assertNotIn("VERDICT: CLEAN", out)
-
-    def test_lane_marker_parses_trailing_letter_and_colon(self):
-        # `lane B2c` (trailing letter) and `Lane: W0` (colon) are real ids in
-        # this fleet. If the parser cannot read OUR id, our own claim reads as
-        # another lane's and blocks our dispatch — the escape hatch is inert.
-        for lane, body in (("B2c", "Owner: lane B2c — claiming this."),
-                           ("W0", "Lane: W0 — claiming this.")):
-            with self.subTest(lane=lane):
-                self.gh_fixtures(issue=self.issue_payload(comments=[
-                    ("test-agent", body),
-                ]))
-                rc, out = self.run_tool(env_extra={"COLLISION_PREFLIGHT_LANE": lane})
-                self.assertEqual(rc, 0, out)
-                self.assertIn("VERDICT: CLEAN", out)
-                self.assertIn("OWN FOOTPRINT", out)
 
     # ── terminal-injection hardening (#4027 P2-J) ──────────────────────────
 
