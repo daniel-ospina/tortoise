@@ -259,9 +259,12 @@ def main(argv: list[str]) -> int:
     def _fingerprint(fn) -> str | None:
         """Code-object identity — see the note in tools/surface_manifest.py.
 
-        Built from `co_filename`, `co_firstlineno` and a digest of `co_code` rather than
-        from `__module__`/`__qualname__`, because those are writable strings a shadow can
-        simply copy from the tool it is replacing.
+        Built from `co_filename` and a digest of `co_code` rather than from
+        `__module__`/`__qualname__`, because those are writable strings a shadow can
+        simply copy from the tool it is replacing.  `co_firstlineno` is deliberately
+        NOT part of the identity: a pure code move (an edit elsewhere in the file)
+        is not a change to the served implementation, yet it shifts every handler
+        below it and reddened the gate on an unchanged surface.
         """
         code = getattr(fn, "__code__", None)
         if code is None:
@@ -274,7 +277,7 @@ def main(argv: list[str]) -> int:
         except Exception:
             rel = Path(code.co_filename).name
         return (
-            f"{rel}:{code.co_firstlineno}:"
+            f"{rel}:"
             f"{_hashlib.sha256(code.co_code).hexdigest()[:16]}"
         )
 

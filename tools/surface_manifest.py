@@ -313,13 +313,14 @@ def telemetry_tools() -> set[str]:
 def _component_fingerprint(fn) -> str | None:
     """A fingerprint of the IMPLEMENTATION behind a tool component.
 
-    Deliberately built from the CODE OBJECT (`co_filename`, `co_firstlineno`, and a digest
-    of `co_code`), not from `__module__` / `__qualname__`. Those two attributes are plain
+    Deliberately built from the CODE OBJECT (`co_filename` and a digest of `co_code`),
+    not from `__module__` / `__qualname__`. Those two attributes are plain
     writable strings, so a shadow function can copy an approved tool's identity exactly and
     pass a name-based comparison while serving different code (verified: a shadow that set
     `__module__ = "tortoise.mcp_server"` and `__qualname__ = "tortoise_search"` replaced an
     approved tool with the gate green). A code object cannot be forged so cheaply — a
-    different implementation means a different file/line/digest.
+    different implementation means a different file/digest.  `co_firstlineno` is
+    deliberately NOT part of the identity: a pure code move is not a served change.
 
     NOT a security boundary: code running in-process can patch `__code__` too. This catches
     the accident and the casual substitution, which is what the gate is for; see the
@@ -338,7 +339,7 @@ def _component_fingerprint(fn) -> str | None:
     except Exception:
         rel = Path(code.co_filename).name
     return (
-        f"{rel}:{code.co_firstlineno}:"
+        f"{rel}:"
         f"{hashlib.sha256(code.co_code).hexdigest()[:16]}"
     )
 
