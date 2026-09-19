@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 # all-MiniLM-L6-v2 as the default (evidence gate: recall +15.7%, p=0.0005;
 # HNSW spot-check cleared). Rotating the embedder = editing this line.
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+#: #4194: the model's vector width, in ONE place. The Point HNSW index is
+#: created with this width (tortoise/projection/__init__.py) and the vector leg
+#: requires it, so a stored vector of any other length is not a near-miss — it
+#: is a broken leg. ``compute_embeddings`` validates against this and degrades a
+#: wrong-length vector to ``None`` (fail-soft: the Point is still written, the
+#: read path declares the leg impaired) rather than handing it to ``vecf32``.
+EMBEDDING_DIM = 384
 # Supply-chain pin (VULN-001, security review): resolved HF commit at bake time
 # (2026-08-21). A mutable tag would silently serve tampered weights.
 EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
@@ -369,24 +376,66 @@ class EmbeddingModel:
         return self._model.encode(texts, batch_size=batch_size, show_progress_bar=False)
 
 
+def _truncate_for_embedding(content: str, max_tokens: int) -> str:
+    """The ONE stored-text composition used by every write-side embedder.
+
+    Word-truncation to ``max_tokens`` before encoding prevents OOM. Shared by
+    :func:`compute_embedding` and :func:`compute_embeddings` so the batched
+    and single forms can never compose a different string for the same input
+    (#4194).
+    """
+    return " ".join(content.split()[:max_tokens])
+
+
+def compute_embeddings(
+    texts: list[str], max_tokens: int = 512,
+) -> list[list[float] | None]:
+    """Batched form of :func:`compute_embedding` — SAME embedder, per text.
+
+    Returns one entry per input text: an :data:`EMBEDDING_DIM`-long list, or
+    ``None`` where the model is unavailable / the encode failed / the model
+    returned a wrong-length vector. This exists so a whole capture window can
+    be embedded in ONE model call instead of one per turn (#4194) without
+    forking the embedder: it routes through the same ``EmbeddingModel``
+    singleton, the same :func:`_truncate_for_embedding` composition and the
+    same un-normalised model output as :func:`compute_embedding`, so a batched
+    vector and a single vector are byte-identical for the same text. A stored
+    vector MUST agree with the query encoder (model, dimension, normalisation)
+    or the dense leg still "runs" and returns garbage — worse than an honest
+    empty leg — so the dimension is ENFORCED here, not assumed.
+    """
+    if not texts:
+        return []
+    model = EmbeddingModel.get()
+    if model is None:
+        return [None] * len(texts)
+    try:
+        truncated = [_truncate_for_embedding(t, max_tokens) for t in texts]
+        vecs = model.encode(truncated)
+        if vecs is None or len(vecs) != len(texts):
+            return [None] * len(texts)
+        out: list[list[float] | None] = []
+        for vec in vecs:
+            row = vec.tolist()
+            # The mismatch trap: a wrong-length vector "runs" and poisons the
+            # leg. Degrade it to None (fail-soft, visible) instead.
+            out.append(row if len(row) == EMBEDDING_DIM else None)
+        return out
+    except Exception:
+        return [None] * len(texts)
+
+
 def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None:
     """Compute embedding for a single text. Returns 384-dim list or None.
 
     Truncates to max_tokens before encoding to prevent OOM.
-    Returns None if model unavailable or encoding fails.
+    Returns None if model unavailable, encoding fails, or the model returns a
+    wrong-length vector.
+
+    Delegates to :func:`compute_embeddings` so the single and batched forms
+    share one composition and can never diverge (#4194).
     """
-    model = EmbeddingModel.get()
-    if model is None:
-        return None
-    try:
-        words = content.split()[:max_tokens]
-        truncated = " ".join(words)
-        vec = model.encode([truncated])
-        if vec is None or len(vec) == 0:
-            return None
-        return vec[0].tolist()
-    except Exception:
-        return None
+    return compute_embeddings([content], max_tokens)[0]
 
 
 def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:

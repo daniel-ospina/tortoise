@@ -143,6 +143,19 @@ def test_seed_capture_turn_store_is_capture_exact(sdk):
     assert is_episodic is True, sessions[0]
     assert [list(r) for r in edges] == [["sess-x", i] for i in ids]
 
+    # #4194 — the ONE deliberate seeder/capture divergence: the seeder does NOT
+    # embed its turns. The real capture path now DOES (both turn-write paths),
+    # but the ask lane must keep exercising the un-backfilled / no-embedder
+    # store its consumers actually read until #4197's backfill decision. Pin
+    # the ABSENCE so a future "restore seeder/capture parity" edit cannot
+    # silently erase that coverage (the #3914 drift class this file owns).
+    embedded = sdk._get_proj().g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-x_t' "
+        "AND t.embedding IS NOT NULL RETURN count(t)").result_set
+    assert embedded[0][0] == 0, (
+        "seed_capture_turn_store must not embed turns until #4197 — see its "
+        "#4194 comment")
+
     # Pre-mutation blank gate: nothing at all is written for a blank session.
     assert seed_capture_turn_store(
         sdk, "sess-blank", [{"role": "user", "content": ""}]) == []

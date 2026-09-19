@@ -202,6 +202,14 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     proj = sdk._get_proj()
     now = merge_capture_session(sdk, session_id, len(windowed), now=now)
     turn_ids: list[str] = []
+    # #4194 deliberately does NOT embed here. The real capture write paths now
+    # store a turn embedding (same local embedder as the query encoder), but
+    # ask-lane fixtures must keep seeding the shape their consumers actually
+    # meet in production today: a store captured before #4194 (or one captured
+    # with no embedder installed) has NO turn embedding, and its backlog
+    # re-embedding is the user-facing choice owned by #4197. Seeding an
+    # embedding here would hide the keyword-only dense-leg degradation the ask
+    # lane must still survive. Revisit with #4197.
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         turn_id = f"{session_id}_t{i}"
