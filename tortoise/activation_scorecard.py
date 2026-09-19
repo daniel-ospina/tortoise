@@ -467,11 +467,20 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     truncated, and every fetched row placeable and classifiable. Otherwise it
     stays ``None`` and the exclusion counters (``unparseable_analytic_rows``,
     ``unclassifiable_analytic_rows``, ``analytics_window_out_of_range``) say
-    why.
+    why. Those counters follow the same EXACT OR ABSENT rule: ``None`` means
+    the fold that computes them never ran, never a literal ``0``.
     """
     # EVERY counter is initialised here, not only on the failure paths: the
     # detail key set is identical on every return path, so a consumer read of
     # (say) the exclusion counts does not vary with `state`.
+    #
+    # EXACT OR ABSENT (the rule `recall_attempted_any` already follows): every
+    # count derived by a fold starts as `None` — "we did not count" — and is
+    # replaced by an int only once the fold that computes it has run. A literal
+    # `0` here would assert "we counted and found none" on the refusal paths
+    # (`analytics_page_cap_truncated`, `analytics_window_not_supplied`,
+    # `analytics_window_predicate_not_applied`) where the fold is gated OFF and
+    # the truth is that the count was withheld.
     detail: dict[str, Any] = {
         "recall_attempted_any": None,
         "recall_attempted_after_memory": None,
@@ -479,11 +488,11 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         "recall_rows_fetched": None,
         "recall_page_cap": RECALL_PAGE_CAP,
         "recall_truncated": False,
-        "unparseable_analytic_rows": 0,
-        "unclassifiable_analytic_rows": 0,
-        "unparseable_analytic_rows_wide": 0,
-        "unclassifiable_analytic_rows_wide": 0,
-        "analytics_window_out_of_range": 0,
+        "unparseable_analytic_rows": None,
+        "unclassifiable_analytic_rows": None,
+        "unparseable_analytic_rows_wide": None,
+        "unclassifiable_analytic_rows_wide": None,
+        "analytics_window_out_of_range": None,
         "retrieval_tool_allowlist": sorted(RETRIEVAL_TOOL_ALLOWLIST),
         "retrieval_tool_allowlist_wide": sorted(RETRIEVAL_TOOL_ALLOWLIST_WIDE),
     }
@@ -523,8 +532,11 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
                 continue
             if not (window[0] <= stamp.isoformat() < window[1]):
                 out_of_range += 1
+        # The scan RAN, so this is an exact count: 0 means "checked, nothing
+        # outside the window". It stays `None` only when no window was supplied
+        # — the same exact-or-absent rule as the counters below.
+        detail["analytics_window_out_of_range"] = out_of_range
         if out_of_range:
-            detail["analytics_window_out_of_range"] = out_of_range
             window_failed = True
             _logger.warning(
                 "activation scorecard: %d analytics row(s) fell outside the "
@@ -757,7 +769,7 @@ LIMITATIONS: tuple[str, ...] = (
     "COUNTS an org-wide stream. A multi-graph org that produced memory only in "
     "a non-default graph can read `not_measurable` "
     "(`no_memory_produced_in_lifetime`) even though its windowed recall calls "
-    "are counted in `detail.recall_attempted_any` when that count is exact"
+    "are counted in `detail.recall_attempted_any` when that count is exact "
     "(a windowed, untruncated, fully-placeable read; otherwise it is None and "
     "the exclusion counters name why). The state is graph-scoped, "
     "the count is org-wide. Surfacing the ambiguity is #4039.",

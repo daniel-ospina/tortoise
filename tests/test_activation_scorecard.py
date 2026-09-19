@@ -1400,6 +1400,56 @@ def test_stage4_detail_key_set_is_identical_on_every_return_path():
     assert set(measured) == set(unread) == set(out_of_range)
 
 
+def test_stage4_exclusion_counters_are_absent_not_zero_when_the_fold_did_not_run():
+    """Exact-or-absent: a ``0`` asserts "we counted and found none". Where the
+    fold that computes the stage-4 exclusion counters never ran, the counter is
+    ``None`` ("we did not count"), never a literal ``0``. The old literal-zero
+    init reported ``unparseable_analytic_rows == 0`` on the truncation and
+    window-failure refusal paths while the count was withheld BECAUSE a row was
+    unplaceable — the false zero the fold's own comment forbids."""
+    from tortoise.activation_scorecard import recall_stages
+    window = ("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00")
+    clean = [{"properties": {"tool_name": "tortoise_search"},
+              "created_at": "2026-09-16T12:00:00+00:00"}]
+    counters = ("unparseable_analytic_rows", "unclassifiable_analytic_rows",
+                "unparseable_analytic_rows_wide",
+                "unclassifiable_analytic_rows_wide")
+
+    # The fold RAN on the clean read: each exclusion counter is an exact 0.
+    _, measured = recall_stages(clean, "2026-09-16T01:00:00+00:00",
+                                memory_sessions=1, window=window)
+    for key in counters:
+        assert measured[key] == 0, (key, measured)
+
+    # Truncated page: the exclusion fold is gated off -> absent, never 0.
+    _, truncated = recall_stages(clean * 1000, "2026-09-16T01:00:00+00:00",
+                                 memory_sessions=1, window=window,
+                                 truncated=True)
+    for key in counters:
+        assert truncated[key] is None, (key, truncated)
+
+    # Window failure: absent too, and the window counter names the reason.
+    _, failed = recall_stages(
+        [*clean, {"properties": {"tool_name": "tortoise_recall"},
+                  "created_at": "2027-01-01T00:00:00+00:00"}],
+        "2026-09-16T01:00:00+00:00", memory_sessions=1, window=window)
+    for key in counters:
+        assert failed[key] is None, (key, failed)
+    assert failed["analytics_window_out_of_range"] == 1, failed
+
+    # No window: neither the exclusion fold nor the window scan ran -> every
+    # staged counter is absent, including the window counter.
+    _, no_window = recall_stages(clean, "2026-09-16T01:00:00+00:00",
+                                 memory_sessions=1)
+    for key in (*counters, "analytics_window_out_of_range"):
+        assert no_window[key] is None, (key, no_window)
+
+    # A store that was never read: absent, not a false zero.
+    _, unread = recall_stages(None, None, reason="analytics_store_unreachable")
+    for key in (*counters, "analytics_window_out_of_range"):
+        assert unread[key] is None, (key, unread)
+
+
 def test_counting_rows_without_a_window_fails_closed():
     """The window re-check is not optional. Reading rows without verifying
     their window is the silent-dropped-bound class this PR fixed one layer

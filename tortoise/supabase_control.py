@@ -49,8 +49,9 @@ no new deps, matching the analytics-write pattern in hosted_api.py.
 
 Query dialect: ``query(table, select, filters, method, json_body, order,
 limit)`` where filters are ``(column, op, value)`` tuples with ops
-``eq | neq | is`` (None → ``IS NULL``) and ``lte`` (ISO-8601 cutoff,
-used by the deleted-org purge sweep, #302). ``method`` supports
+``eq | neq | is`` (None → ``IS NULL``) and the ordered, NULL-excluding
+``gt | gte | lt | lte`` (``lte`` is the ISO-8601 cutoff used by the
+deleted-org purge sweep, #302). ``method`` supports
 ``GET | POST | PATCH | DELETE`` (DELETE is used only by the post-grace
 hard-delete purge). The test fake implements the SAME interface over
 in-memory rows, so the resolution logic is shared verbatim between CI
