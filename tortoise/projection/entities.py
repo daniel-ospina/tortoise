@@ -232,6 +232,13 @@ class _EntityHandlers:
     # reported by the undeclared-list warning below, NOT suppressed here.
     _POINT_DECLARED_PROPS: frozenset = frozenset({
         "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
+        # #3689 review P2 (A): the four canonical annotator dims are legitimately
+        # carried on a PointAdded snapshot by `create_point(annotator_*=…)` /
+        # `_update_entity` — declaring them keeps the replay open-set
+        # passthrough from logging a FALSE `"Point prop %r is not declared"`
+        # drift warning on every rebuild.
+        "annotator_bias", "annotator_precision",
+        "annotator_consistency", "annotator_directness",
     })
     # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
     # key is declared here. Arrays are not fulltext-indexed and the canonical

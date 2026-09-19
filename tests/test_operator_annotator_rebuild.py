@@ -119,11 +119,16 @@ def test_annotator_dims_survive_rebuild(sup):
     assert _dims(sdk, op) == pre, "annotator dims were erased by rebuild_all"
 
 
-def test_rebuild_does_not_leak_deleted_incarnation_dims(sup):
+def test_rebuild_does_not_leak_deleted_incarnation_dims(sup, tmp_path):
     """A delete→recreate of the same id must not put the OLD incarnation's
     annotation on the new one. ``rebuild_all`` pass-1a hoists every creation
-    before pass-1b folds, so the fold needs the #2488 survivor gate to match
-    the chronological ``apply()``/``fold()`` (#330 parity; review P1)."""
+    before pass-1b folds, so the fold needs the survivor gate to match the
+    chronological ``apply()`` (#330 parity; review P1).
+
+    The oracle is the LIVE ``apply()`` path (not the pure ``fold()``):
+    ``_apply_one`` REPLACES the ``{id: point}`` entry wholesale while
+    ``apply()`` MERGEs node props, so ``fold()`` certifies behaviour the live
+    path does not exhibit (#3689 review P2)."""
     _, events, sdk = sup
     op = _operator(sdk)
     sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
@@ -148,12 +153,61 @@ def test_rebuild_does_not_leak_deleted_incarnation_dims(sup):
         "projection_version": 2, "point": recreate,
     })
     _rewrite_journal(events, records)
+    # Live chronological oracle on a SEPARATE graph: replay every record
+    # through the real apply() dispatcher, then compare to this graph's
+    # rebuild_all().
+    oracle = TortoiseSDK(str(tmp_path / "oracle.db"))
+    try:
+        for r in records:
+            oracle._get_proj().apply(r)
+        applied = {k: (oracle.get_point(op) or {}).get(k) for k in DIMS}
+    finally:
+        oracle.close()
     _rebuild(sdk, events)
     rebuilt = _dims(sdk, op)
-    folded = {k: fold(records)[op].get(k) for k in DIMS}
     assert rebuilt == {k: None for k in DIMS}, (
         "rebuild_all resurrected the deleted incarnation's annotator dims")
-    assert rebuilt == folded, "rebuild_all diverged from the pure fold (#330)"
+    assert rebuilt == applied, (
+        "rebuild_all diverged from the live apply() oracle (#330)")
+
+
+def test_bare_upsert_does_not_suppress_prior_annotation(sup, tmp_path):
+    """P2#3: the annotator-dim survivor gate must advance only across a REAL
+    hard-delete boundary — not any ``PointAdded``. A duplicate same-id
+    creation with no intervening delete MERGEs live (``_upsert_point_props``
+    never clears ``annotator_*``), so an annotation at an earlier seq is
+    still live-truth and replay must keep it. Differential against a live
+    ``apply()`` oracle."""
+    _, events, sdk = sup
+    op = _operator(sdk)
+    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    pre = _dims(sdk, op)
+    records = _journal(events)
+    snap = next(r["point"] for r in records
+                if r.get("type") == "OperatorAdded"
+                and r["point"]["id"] == op)
+    duplicate = dict(snap)
+    duplicate.pop("embedding", None)
+    duplicate.pop("content_hash", None)
+    records.append({
+        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:02+00:00",
+        "type": "PointAdded", "initiated_by": "raw-producer",
+        "projection_version": 2, "point": duplicate,
+    })
+    _rewrite_journal(events, records)
+    oracle = TortoiseSDK(str(tmp_path / "oracle.db"))
+    try:
+        for r in records:
+            oracle._get_proj().apply(r)
+        applied = {k: (oracle.get_point(op) or {}).get(k) for k in DIMS}
+    finally:
+        oracle.close()
+    _rebuild(sdk, events)
+    rebuilt = _dims(sdk, op)
+    assert rebuilt == pre, (
+        "a bare same-id re-emit over-suppressed the earlier annotation")
+    assert rebuilt == applied, (
+        "rebuild_all diverged from the live apply() oracle (#330)")
 
 
 def test_annotator_dims_survive_double_rebuild(sup):
@@ -164,6 +218,26 @@ def test_annotator_dims_survive_double_rebuild(sup):
     _rebuild(sdk, events)
     _rebuild(sdk, events)
     assert _dims(sdk, op) == pre
+
+
+def test_update_entity_annotator_dims_survive_rebuild(sup):
+    """#4094 (P1 of the #3689 review): ``update_entity``'s Point branch wrote
+    ``annotator_*`` with ``SET n += $p`` and emitted NO journal record, so
+    ``rebuild_all`` restored the operator from its creation snapshot and the
+    dims were gone — silently. The Point branch must journal the mutation."""
+    _, events, sdk = sup
+    op = _operator(sdk)
+    sdk.update_entity(op, annotator_bias=0.11, annotator_precision=0.22)
+    pre = _dims(sdk, op)
+    assert pre == {
+        "annotator_bias": 0.11,
+        "annotator_precision": 0.22,
+        "annotator_consistency": None,
+        "annotator_directness": None,
+    }
+    _rebuild(sdk, events)
+    assert _dims(sdk, op) == pre, (
+        "update_entity annotator dims were erased by rebuild_all")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -519,6 +593,34 @@ def test_rebuild_skips_ungated_point_revised_content(sup):
     assert _dims(sdk, op)["annotator_bias"] == 0.5
 
 
+def test_corrupt_new_content_fold_matches_rebuild(sup):
+    """P2#2 (fold-parity #330): ``_apply_one`` assigned ``new_content``
+    unconditionally while ``_revise_point`` drops an UNWRITABLE one before
+    building its query — so a corrupt ``PointRevised`` made the pure fold and
+    ``rebuild_all`` silently disagree. Both must drop the same edit."""
+    _, events, sdk = sup
+    pid = sdk.create_point("statement", "original content",
+                           status="live")["id"]
+    before = sdk.get_point(pid)["content"]
+    records = _journal(events)
+    for seq, corrupt in ((7, "a\x00b"), (8, "a\ud800b"),
+                         (9, {"nested": 1}), (10, float("inf"))):
+        records.append({
+            "event_id": sdk.ulid(),
+            "ts": f"2026-09-18T00:00:{seq:02d}+00:00",
+            "type": "PointRevised", "initiated_by": "raw-producer",
+            "projection_version": 2, "id": pid, "new_content": corrupt,
+        })
+    _rewrite_journal(events, records)
+    folded = fold(records)[pid]["content"]
+    _rebuild(sdk, events)
+    rebuilt = sdk.get_point(pid)["content"]
+    assert folded == before, "fold applied an unwritable new_content"
+    assert rebuilt == before, "rebuild applied an unwritable new_content"
+    assert folded == rebuilt, (
+        "fold/rebuild diverged on a corrupt new_content (#330)")
+
+
 def test_rebuild_skips_point_revised_with_unwritable_id(sup):
     _, events, sdk = sup
     op = _operator(sdk)
@@ -684,15 +786,22 @@ def test_apply_folds_operator_annotated(sup):
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_operator_annotated_graph_event_payload_unchanged(sup):
-    """The JSONL extras must NOT rename the shipped :GraphEvent payload."""
+    """The JSONL extras must NOT rename the shipped :GraphEvent payload.
+
+    Distinct dim values: identical values (0.5 ×4) pin only the KEY names and
+    cannot detect a transposition of the four values in the emit dict — a real
+    regression for every ``events_poll`` consumer (#3689 review P2).
+    """
     _, _, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.5, 0.5, 0.5, 0.5)
+    sdk.annotate_operator(op, 0.11, 0.22, 0.33, 0.44)
     evs = sdk.events_poll(types=["OperatorAnnotated"])["events"]
     assert len(evs) == 1
     payload = evs[0]["payload"]
     assert payload["id"] == op
-    for short in ("bias", "precision", "consistency", "directness"):
-        assert payload[short] == 0.5
+    assert payload["bias"] == 0.11
+    assert payload["precision"] == 0.22
+    assert payload["consistency"] == 0.33
+    assert payload["directness"] == 0.44
     assert not any(k in payload for k in DIMS), (
         "the JSONL annotator_* extras leaked into the :GraphEvent payload")

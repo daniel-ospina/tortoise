@@ -1367,8 +1367,16 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         rid = ev.get("id")
         p = points.get(rid) if _writable_id(rid) else None
         if p:
-            if ev.get("new_content") is not None:
-                p["content"] = ev["new_content"]
+            # #3689 review P2: gate the content edit EXACTLY as
+            # ``_revise_point`` does — an UNWRITABLE new_content (NUL/lone-
+            # surrogate str, map, non-finite float, ...) is dropped there and
+            # must be dropped here too, or the pure fold and ``rebuild_all``
+            # silently disagree, breaking the #330 parity contract this module
+            # declares (``_apply_one`` is the single source of fold
+            # semantics).
+            new_content = ev.get("new_content")
+            if new_content is not None and _annotator_value_ok(new_content):
+                p["content"] = new_content
             # Phase 1: discard new_context for v2+ events (#49)
             if ev.get("new_context") is not None and ev.get("projection_version", 0) < 2:
                 p["context"] = ev["new_context"]
@@ -2847,10 +2855,39 @@ class FalkorProjection(
         # PointAdded — the pass-1b trailing-sweep survivor anchor (recorded
         # here because pass-1a sees PointAdded in journal order over the
         # SAME events list the pass-1b sweep's enumerate indexes).
+        #
+        # #3689 review P2: a SECOND anchor, ``last_ann_drop_seq``, is the
+        # equivalent boundary for the NON-terminalizing annotator folds —
+        # a real hard-delete (EntityMutated op=delete / PointsMerged) followed
+        # by a creation, tracked here in journal order. The two anchors differ
+        # on a bare same-id re-emission with NO delete: terminalizing folds
+        # treat any PointAdded as a boundary (a fresh snapshot clears the old
+        # terminal flags — pinned by tests/test_pointinvalidated_rebuild.py),
+        # but a bare re-emit only MERGEs live and never clears ``annotator_*``,
+        # so gating the annotator folds on it silently dropped a live-valid
+        # annotation (``update_entity``/raw-producer duplicate snapshot).
         last_recreate_seq: dict[str, int] = {}
+        last_ann_drop_seq: dict[str, int] = {}
+        # ids hard-deleted since their last creation — a following creation is
+        # a RE-creation (new incarnation), not a bare upsert.
+        pending_deleted: set[str] = set()
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
             t = ev.get("type")
+            # #3689 review P2: observe hard deletes in the same ordered scan
+            # (EntityMutated delete is the #3299 record; PointsMerged deletes
+            # every merge_id in pass-1b) so a following creation can be told
+            # apart from a bare upsert.
+            if t == "EntityMutated" and ev.get("op") == "delete":
+                rid = ev.get("id")
+                if isinstance(rid, str):
+                    pending_deleted.add(rid)
+                continue
+            if t == "PointsMerged":
+                for mid in ev.get("merge_ids") or []:
+                    if isinstance(mid, str):
+                        pending_deleted.add(mid)
+                continue
             if t in ("PointAdded", "OperatorAdded"):
                 # #331 (review r3): ev.get — missing 'point' key handled by
                 # the isinstance guard, not KeyError.
@@ -2879,6 +2916,11 @@ class FalkorProjection(
                 # silently drop a pre-promote invalidate fold).
                 if t in ("PointAdded", "OperatorAdded"):
                     last_recreate_seq[p["id"]] = seq
+                # #3689 review P2: the annotator folds' drop boundary is a
+                # REAL delete→recreate, not a bare upsert (see above).
+                if p["id"] in pending_deleted:
+                    last_ann_drop_seq[p["id"]] = seq
+                    pending_deleted.discard(p["id"])
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
@@ -3035,18 +3077,22 @@ class FalkorProjection(
                 rid = ev.get("id")
                 if isinstance(rid, str):
                     max_inline_seq[rid] = seq
-                # #3689 review P1: a PRE-recreation revise's annotator dims
+                # #3689 review P1/P2: a PRE-recreation revise's annotator dims
                 # died with the deleted incarnation live — fold them only when
-                # the revision postdates the id's last hoisted creation (the
-                # #2488 survivor anchor). Without this gate the pass-1a hoist
+                # the revision postdates the id's last HARD-DELETE boundary
+                # (``last_ann_drop_seq``). Without this gate the pass-1a hoist
                 # leaks the dead incarnation's dims onto the re-created node,
-                # diverging from the chronological apply()/fold() (#330).
-                anchor = (
-                    last_recreate_seq.get(rid)
+                # diverging from the chronological apply()/fold() (#330);
+                # gating on the terminalizing ``last_recreate_seq`` anchor
+                # instead would over-suppress a bare same-id re-emit (which
+                # MERGEs live and never clears a dim).
+                ann_anchor = (
+                    last_ann_drop_seq.get(rid)
                     if isinstance(rid, str) else None)
                 self._revise_point(
                     ev, set_updated_at=True,
-                    skip_annotator_dims=(anchor is not None and seq <= anchor))
+                    skip_annotator_dims=(
+                        ann_anchor is not None and seq <= ann_anchor))
             elif t == "OperatorAnnotated":
                 # #3689 pass-1b rebuild parity: apply() folds the explicit
                 # annotation record, and the rebuild chain needs the SAME
@@ -3055,15 +3101,17 @@ class FalkorProjection(
                 # it is the only carrier (a raw producer, or a PointRevised
                 # pruned from the journal).
                 #
-                # #3689 review P1: pass-1a hoists EVERY creation before this
-                # loop, so an annotation that predates the id's last creation
-                # would otherwise fold onto the re-created incarnation — its
-                # subject died with the deleted node live. Gate on the SAME
-                # #2488 survivor anchor the EntityMutated delete one branch
-                # above uses (isinstance-guarded id, matching shape).
+                # #3689 review P1/P2: pass-1a hoists EVERY creation before this
+                # loop, so an annotation that predates the id's last HARD-DELETE
+                # boundary would otherwise fold onto the re-created incarnation
+                # — its subject died with the deleted node live. Gate on
+                # ``last_ann_drop_seq`` (real delete→recreate), NOT the
+                # terminalizing ``last_recreate_seq``: a bare same-id re-emit
+                # has no dead incarnation and must not drop the annotation
+                # (#3689 review P2).
                 if isinstance(ev.get("id"), str):
-                    anchor = last_recreate_seq.get(ev["id"])
-                    if anchor is not None and seq <= anchor:
+                    ann_anchor = last_ann_drop_seq.get(ev["id"])
+                    if ann_anchor is not None and seq <= ann_anchor:
                         continue
                 if self._apply_annotator(ev) == 0:
                     # #3689: the defect was SILENT loss — an annotation that
@@ -4452,9 +4500,14 @@ class FalkorProjection(
 
         The durable counterpart of ``annotate_operator``'s live
         ``update_point`` write. A non-terminalizing property write, so it
-        folds INLINE (parity with the ``PointRevised`` branch; the
-        ``last_recreate_seq`` survivor rule governs terminalizing folds
-        only). The dims have no edge/graph-shape effect, so pass 2 cannot
+        folds INLINE (parity with the ``PointRevised`` branch). Its pass-1b
+        survivor gate is ``last_ann_drop_seq`` — the REAL hard-delete→recreate
+        boundary — NOT the terminalizing folds' ``last_recreate_seq``
+        (``last_recreate_seq`` advances on any creation; a bare same-id re-emit
+        MERGEs live and never clears a dim, so gating the annotator fold on it
+        silently dropped a live-valid annotation; #3689 review P2). The gate
+        lives at the pass-1b call site; this method folds whatever the caller
+        admits. The dims have no edge/graph-shape effect, so pass 2 cannot
         clobber them. Returns the matched node count (1 when the operator
         exists; 0 = unwritable/absent id, no dim present, or the Point is
         absent) — the fold-miss signal, mirroring ``_fold_entity_mutation``.
@@ -4479,9 +4532,11 @@ class FalkorProjection(
 
         ``skip_annotator_dims`` (#3689): suppress ONLY the annotator-dim
         fold. ``rebuild_all`` sets it for a revision that predates the id's
-        last hoisted creation (the dead incarnation's dims must not leak onto
-        the re-created node); chronological callers (``apply()``) leave it
-        False. Content/embedding replay is unaffected.
+        last HARD-DELETE boundary (``last_ann_drop_seq`` — a real
+        delete→recreate; the dead incarnation's dims must not leak onto the
+        re-created node). A bare same-id re-emit is NOT such a boundary, so it
+        never suppresses a live-valid dim. Chronological callers (``apply()``)
+        leave it False. Content/embedding replay is unaffected.
         """
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")  # noqa: F841
