@@ -7,15 +7,6 @@ and the MCP auth layer can import without a cycle (``mcp_auth`` imports
 ``tortoise.sdk``, so ``sdk``/``metering``/``quota`` cannot import
 ``tortoise.mcp_auth``).
 
-The module ALSO hosts the product-level ask-exposure gate
-``ask_exposure_enabled()`` (#2013) precisely because it is the cycle-free,
-stdlib-only, neutral import point shared by ``hosted_api.py`` (the /v1/ask
-route gate) and ``mcp_server.py`` (the MCP listing/call-time gates) — a
-product gate must not live in either importer, and any other home would
-re-import one of them. The zero-import/stdlib-only/neutral contract is
-load-bearing: nothing here may grow an import, and both importers must
-stay importable from the other's context.
-
 Why a dedicated flag (not the org_id VALUE, not ``_transport_mode``):
 
   * hosted org ids are RAW — only graph names are ``org_``-prefixed
@@ -35,7 +26,6 @@ rely on ``not org_id`` (org_id=None) and do NOT need the flag.
 """
 from __future__ import annotations
 
-import os
 from contextvars import ContextVar
 
 #: True while a SELFHOST HTTP MCP transport is serving the request. Read by
@@ -44,11 +34,3 @@ from contextvars import ContextVar
 #: condition. Set ONLY by selfhost transport code.
 _selfhost_transport: ContextVar[bool] = ContextVar("_selfhost_transport",
                                                    default=False)
-
-
-def ask_exposure_enabled() -> bool:
-    """#2013 PRODUCT-GATING: hosted ask-exposure gate — OFF by default.
-    ``TORTOISE_ENABLE_ASK=1`` (tests/dev) unlocks; unset/anything-else
-    keeps the exposure gated off. Shared by hosted_api.py (/v1/ask route
-    registration) and mcp_server.py (tortoise_ask call/listing gates)."""
-    return os.environ.get("TORTOISE_ENABLE_ASK") == "1"

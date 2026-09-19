@@ -13,7 +13,7 @@ aboutObjects: tortoise
 
 | Area | Path |
 | --- | --- |
-| Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
+| Ask lane — **EVAL-ONLY** (`tortoise/ask_lane.py`, #1987/#3849: no REST route, no SDK method, no MCP tool) | `docs/product/answer-surface.md` |
 | **MCP tool surface + public SDK methods** — the curated list: every tool and public method, what it does, what uses it, a recommendation and its rationale; the approved baseline (`config/surface-manifest.yml`) and the gate that blocks unapproved expansion (#3863) | `docs/product/mcp-sdk-surface.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
 | **Ship-test instrument** — the per-deploy clean-browser onboarding walk (signup → wizard → connected only when the server observed it) + the observation artifact (#3806) | `docs/runbook/3806-ship-test-instrument.md` |

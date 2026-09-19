@@ -1,7 +1,7 @@
 """#2165 — pure pre-retrieval shape classifier + subject-term extraction (PRCA).
 
 Deterministic (zero-LLM, zero-retrieval) router that owns the fired decision
-for the connected-assembly branch in ``sdk.ask()``. High-precision ordered
+for the connected-assembly branch in ``ask_lane.run_ask_lane()``. High-precision ordered
 regexes over the question text; nothing else — no model, no graph.
 
 Shapes with MEASURED census support (tests/_assembly_census.json — the 133-Q
@@ -9,7 +9,7 @@ temporal taxonomy, see docs/plans/2026-09-08-2165-connected-assembly.md):
 
 * ``current-state`` — "what is the current status of X?" (fixture canary;
   the census's 2 current-state rows are duration-morphology and correctly do
-  NOT fire — the measured fireable subset is the fixture + product lane).
+  NOT fire — the measured fireable subset is the fixture + eval lane).
 * ``ordering`` — two-subject "Which X first, A or B?" / "Who ... first,
   A or B?" (the census's ordering/compare 34: the shape-typical rows fire;
   duration/count/N-ary rows that the SEMANTIC census filed under
@@ -149,7 +149,7 @@ _RE_CURRENT = re.compile(
     r"^\s*(?:what|which|how)\b[^?]*?\bcurrent\s+(?:status|state)\s+of\s+"
     r"(?P<a>[^?]+?)\??\s*$",
     re.IGNORECASE | re.DOTALL)
-# current-state "is X still …" (product-lane state question)
+# current-state "is X still …" (ask-lane state question)
 _RE_CURRENT_STILL = re.compile(
     r"^\s*is\s+(?P<a>.+?)\s+still\s+(?:live|active|around|in\s+use|mine)"
     r"\??\s*$", re.IGNORECASE | re.DOTALL)
@@ -515,7 +515,7 @@ def docker_resolver_port(sdk) -> ResolverPort:
 # state IS the answer) nor to Points). One batched typed walk (never
 # row-level N+1, never blind BFS): state slice
 # (Object status/supersededBy/supersededAt in ONE statement), dated spine
-# (aboutObject Points ∪ Event-aboutObject edges ∪ product-lane eventId
+# (aboutObject Points ∪ Event-aboutObject edges ∪ ask-lane eventId
 # join), evidence view (points with validity + EP). Per-lane date ladder
 # when → createdAt (sentinel-stripped) → eventId-joined startedAt (R2);
 # parse-fail FALLS THROUGH the ladder (never undated while a usable date
@@ -1001,13 +1001,16 @@ def synthesize_hits(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# #2165 Task 6 — _assemble_connected (R5/R6/R11/R14/R17): the product seam.
-# One single-source fired path shared by ask()'s pre-retrieval branch and
-# the public sdk.ask_assembled(). R14 drift pin: this function is imported
-# ONLY by sdk.ask()'s branch and sdk.ask_assembled (a source-text test
-# enforces it). The fired envelope wraps ONLY the content stages
+# #2165 Task 6 — _assemble_connected (R5/R6/R11/R14/R17): the eval-only ask seam.
+# One single-source fired path shared by run_ask_lane()'s pre-retrieval
+# branch and the eval-lane run_ask_assembled(). R14 drift pin: this function
+# is imported ONLY by the two eval-lane entry points (tortoise/ask_lane.py)
+# — enforced by a BEHAVIOURAL guard (both entry points fire; a poisoned
+# synthesize raises from both), not a source-text grep (replaced in #3849).
+# The fired envelope wraps ONLY the content stages
 # (classify->resolve->walk->render->decorate->enrich->assemble); the ONE
-# reader call stays under the shared ask()/ask_assembled reader envelope.
+# reader call stays under the shared run_ask_lane()/run_ask_assembled()
+# reader envelope.
 # ══════════════════════════════════════════════════════════════════════════
 
 # Object recall-excluded statuses (the successor-EXISTENCE probe treats an
@@ -1021,15 +1024,15 @@ _RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
 @dataclass(frozen=True)
 class _AssembledBlock:
     """Internal fired block (content stages only — NO reader, NO answer).
-    Ask() and ask_assembled() both consume this and add their own envelope
-    (shared reader machinery, metering, response shape)."""
+    run_ask_lane() and run_ask_assembled() both consume this and add their
+    own envelope (shared reader machinery, metering, response shape)."""
     fired: bool
     shape: str | None
     subjects: tuple
     slices: dict
     admission: dict
     post_cap_lines: list
-    # NOTE: evidence/context_tokens are NOT computed here — ask()/the
+    # NOTE: evidence/context_tokens are NOT computed here — run_ask_lane()/the
     # assembled path render post_cap_lines through the SHARED
     # render_context/estimate path so the alignment invariant
     # (context_tokens == estimate_tokens(evidence)) holds by construction.
@@ -1037,7 +1040,7 @@ class _AssembledBlock:
 
 @dataclass
 class AssemblyAnswer:
-    """Public ask_assembled() return shape (pinned — Task 7's eval arm reads
+    """run_ask_assembled() return shape (pinned — Task 7's eval arm reads
     post_cap_lines for gold-id admission and answer for conversion; field
     names are the arm's contract)."""
     fired: bool
@@ -1086,7 +1089,8 @@ def _probe_visible_successors(sdk, slices: AssemblySlices) -> frozenset[str]:
 
 def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
                         caps: dict | None = None) -> _AssembledBlock:
-    """The fired content pipeline (env-gated at the CALLER — ask() reads
+    """The fired content pipeline (env-gated at the CALLER —
+    run_ask_lane() reads
     TORTOISE_ASK_CONNECTED_ASSEMBLY BEFORE calling; this function assumes
     the gate already passed and fires when the question routes).
 
@@ -1094,8 +1098,8 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
     render (synthesize_hits) -> decorate real rows (annotate_ask_hits —
     synthesized rows have no id and are untouched) -> explicit
     why.enrich_items when W4 is on (R5/R17; id-less rows skipped by the
-    guard) -> assemble_context(caps). NEVER raises untyped: the ask()
-    envelope maps any raise to AskRetrievalUnavailable.
+    guard) -> assemble_context(caps). NEVER raises untyped: the
+    run_ask_lane() envelope maps any raise to AskRetrievalUnavailable.
     """
     from tortoise.retrieval import assemble_context
     if caps is None:
