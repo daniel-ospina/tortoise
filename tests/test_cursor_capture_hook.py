@@ -362,22 +362,27 @@ def _capture_argv(log: Path) -> list[str]:
     return [t for t in log.read_text(encoding="utf-8").split() if t != "DONE"]
 
 
-def test_hook_prefers_cursor_transcript_path_over_the_payloads_txt(tmp_path):
-    """Cursor resolves the SAME transcript twice and the two disagree for
-    `sessionEnd`.  `executeHookForStep` computes the payload's
-    ``transcript_path`` with ``preferJsonl = (stop || subagentStop)`` — FALSE
-    for sessionEnd — so `getTranscriptPath` walks ``['txt','jsonl']`` and hands
-    the hook the `.txt` whenever one exists.  `_buildHookEnvironment` computes
-    ``CURSOR_TRANSCRIPT_PATH`` with ``preferJsonl=true`` → ``['jsonl','txt']``:
-    the env var is the BETTER source, and it is the JSONL when both exist.
+def test_hook_uses_cursor_transcript_path_when_the_payload_transcript_is_null(tmp_path):
+    """Cursor hands `sessionEnd` the transcript in TWO places and they can
+    disagree.  `executeHookForStep` computes the payload's ``transcript_path``
+    with ``preferJsonl = (stop || subagentStop)`` — FALSE for sessionEnd — so
+    `getTranscriptPath` walks ``['txt','jsonl']`` and can hand the hook a
+    `.txt`; `_buildHookEnvironment` computes ``CURSOR_TRANSCRIPT_PATH`` with
+    ``preferJsonl=true`` → ``['jsonl','txt']``.  When the payload's own path is
+    ``null`` (transcripts off for the composer), the env var is the ONLY way a
+    JSONL transcript can be found at all.
 
-    A `.txt` fed to the JSONL parser (`parse_cursor`) yields 0 turns, so the
-    capture files nothing while the hook still exits 0 — the silent
-    no-capture this seam exists to prevent.  The hook must take the env var.
+    A `.txt` fed to the JSONL parser (`parse_cursor`) yields 0 turns, so a
+    capture that resolved one would file nothing while the hook still exits 0
+    — the silent no-capture this seam exists to prevent.
 
-    Mutation: drop the ``$CURSOR_TRANSCRIPT_PATH`` preference (read the
-    payload's ``transcript_path`` only, as the pre-fix hook did) — the argv
-    names the `.txt` and this REDs."""
+    Mutation: drop the ``$CURSOR_TRANSCRIPT_PATH`` candidate from the hook's
+    candidate list.  This payload carries ``transcript_path: null`` and no
+    store entry exists under the tmp ``HOME``, so NO candidate remains, no
+    capture runs, the fake `tortoise` never writes its log, and
+    ``_wait_for_done`` REDs.  (A non-null payload ``.txt`` normalises to the
+    SAME ``.jsonl`` sibling, so that shape left the argv unchanged and pinned
+    nothing — which is why this test uses the env-only shape.)"""
     home = tmp_path / "home"
     bindir = tmp_path / "bin"
     log = tmp_path / "argv.log"
@@ -386,11 +391,11 @@ def test_hook_prefers_cursor_transcript_path_over_the_payloads_txt(tmp_path):
     _fake_tortoise(bindir, log)
 
     sid = "86bd7492-46a1-4bee-a91f-0a4ea4a10ee1"
-    txt, jsonl = _write_cursor_pair(tmp_path, sid)
+    _txt, jsonl = _write_cursor_pair(tmp_path, sid)
 
     proc, _ = _run_hook(
         json.dumps({"conversation_id": sid, "session_id": sid,
-                    "transcript_path": str(txt), "reason": "window_close",
+                    "transcript_path": None, "reason": "window_close",
                     "hook_event_name": "sessionEnd"}),
         home=home, bindir=bindir,
         extra_env={"CURSOR_TRANSCRIPT_PATH": str(jsonl)})
