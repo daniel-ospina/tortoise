@@ -441,6 +441,22 @@ def test_the_confirmation_promises_no_reply() -> None:
     # scripts and styles dropped, tags to spaces, entities unescaped, whitespace
     # collapsed.
     page_markup = re.sub(r"<(script|style)\b.*?</\1>", " ", html_src, flags=re.S | re.I)
+    # CSS-generated copy is rendered text the visitor reads — and a screen reader
+    # announces it — so `content:` values are scanned rather than discarded with
+    # the block: `.lede::after { content: "We'll reply within two business days." }`
+    # showed the promise to every visitor while every pin stayed green, because
+    # `<style>` was dropped wholesale (cycle-10 review).
+    css_text = " ".join(
+        unescape(m.group(1) or m.group(2))
+        for block in re.findall(r"<style\b[^>]*>(.*?)</style>", html_src, flags=re.S | re.I)
+        # Comments cannot render, so they are stripped first — a CSS comment
+        # documenting the rule must not fail the suite, exactly as with the TS and
+        # script scans (cycle-10 review).
+        for m in re.finditer(
+            r'''content\s*:\s*(?:"([^"]*)"|'([^']*)')''',
+            re.sub(r"/\*.*?\*/", "", block, flags=re.S),
+        )
+    )
     # ATTRIBUTE-carried copy is visitor-facing too (cycle-5 review): the meta
     # description is what search engines and link previews show, and a
     # placeholder / aria-label / title / alt is text the visitor reads in the
@@ -455,11 +471,12 @@ def test_the_confirmation_promises_no_reply() -> None:
         for m in re.finditer(r'''=\s*(?:"([^"]*)"|'([^']*)')''', page_markup)
     )
     page_text = " ".join(
-        (unescape(re.sub(r"<[^>]+>", " ", page_markup)) + " " + attr_text).split()
+        (unescape(re.sub(r"<[^>]+>", " ", page_markup)) + " " + attr_text + " " + css_text).split()
     )
     found = re.search(REPLY_PROMISE_VERBS, page_text, re.I)
     assert found is None, (
-        f"the contact page promises a reply (in its text or an attribute): {found and found.group(0)!r}"
+        "the contact page promises a reply (in its text, an attribute or CSS "
+        f"content): {found and found.group(0)!r}"
     )
     # No client-side string may promise a reply either — and the scan runs over
     # the whole stripped script as well as each literal, because a promise SPLIT at
@@ -616,6 +633,26 @@ def test_rate_limit_map_is_bounded() -> None:
     assert 100 <= int(cap_value.group(1)) <= 50_000, (
         f"MAX_RATE_KEYS must be a real bound, got {cap_value.group(1)}"
     )
+    # The limiter's OWN threshold matters at least as much, and is pinned the same
+    # way: `RATE_LIMIT = 1_000_000_000` makes `recent.length >= RATE_LIMIT`
+    # untrippable — throttling silently becomes a no-op while every token assertion
+    # above still holds (cycle-10 review). The window is written as arithmetic
+    # (`10 * 60 * 1000`), so only a product of integer literals is accepted and the
+    # value is computed from the factors — never `eval`.
+    for name, lo, hi in (("RATE_LIMIT", 1, 100), ("RATE_WINDOW_MS", 60_000, 86_400_000)):
+        defined = re.search(rf"{name}\s*=\s*([^;]+);", code)
+        assert defined is not None, f"{name} must be defined"
+        literal = defined.group(1).strip()
+        assert re.fullmatch(r"[\d_]+(?:\s*\*\s*[\d_]+)*", literal), (
+            f"{name} must be a product of integer literals, got {literal!r}"
+        )
+        value = 1
+        for factor in re.split(r"\s*\*\s*", literal):
+            value *= int(factor.replace("_", ""))
+        assert lo <= value <= hi, (
+            f"{name} must be a real bound, got {literal} = {value}: outside [{lo}, {hi}] "
+            "throttling is effectively disabled"
+        )
     # Strip BOTH comment forms FIRST: a commented-out eviction loop supplied every
     # pinned token as TEXT and kept an earlier version of this pin green (cycle-2
     # review), and stripping only `//` left `/* … */` able to do the same
