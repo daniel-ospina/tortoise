@@ -18,6 +18,7 @@ import os
 from dataclasses import dataclass
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
+from .retention import RESTORE_WINDOW_DAYS  # #4179 single window authority
 
 _AES_KEY_SIZE = 32
 
@@ -38,12 +39,13 @@ _SYNCABLE_REQUIRED = (
 # R2 bucket locks (Cloudflare rule API — NOT S3 Object Lock; see
 # docs/ops/registry-backup-dr.md §#2319) are prefix-scoped Age retentions that
 # block delete/overwrite within the window. BACKUP_LOCK_DAYS must stay
-# strictly below the #2304 trash-grace default (7 days — hosted_api
-# _TRASH_GRACE_DAYS) so a purged graph's artifacts (>= grace days old when the
-# purge erases them) are never inside the lock window — the erasure promise
-# stays honest. Default 3 days protects the recovery-critical hourly window.
+# strictly below the restore window (tortoise/retention.py RESTORE_WINDOW_DAYS
+# = 7 days — the #4179 authority; named in docs/retention-and-deletion.md) so a
+# purged graph's artifacts (>= grace days old when the purge erases them) are
+# never inside the lock window — the erasure promise stays honest. Default 3
+# days protects the recovery-critical hourly window.
 LOCK_DAYS_MIN = 1
-LOCK_DAYS_MAX = 6
+LOCK_DAYS_MAX = RESTORE_WINDOW_DAYS - 1  # keep strictly below the purge window
 DEFAULT_LOCK_DAYS = 3
 
 # Mirror-store creds (second-region/second-account copy, env-guarded). When
