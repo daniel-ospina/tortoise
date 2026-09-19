@@ -160,6 +160,19 @@ def _decode_escapes(text: str) -> str:
         return chr(codepoint) if 0 < codepoint <= 0x10FFFF else ""
 
     return _ESCAPE.sub(repl, text)
+#: The limiter's body, VERBATIM (comments stripped, whitespace collapsed) — see the
+#: pin in `test_rate_limit_map_is_bounded` for why this exists.
+RATE_LIMITED_BODY = (
+    "function rateLimited(ip: string, now: number): boolean { const cutoff = now - "
+    "RATE_WINDOW_MS; const recent = (hits.get(ip) || []).filter((t) => t > cutoff); if "
+    "(recent.length >= RATE_LIMIT) { hits.set(ip, recent); return true; } "
+    "recent.push(now); hits.delete(ip); hits.set(ip, recent); if (hits.size > "
+    "MAX_RATE_KEYS) { for (const [k, v] of hits) { if (v.every((t) => t <= cutoff)) "
+    "hits.delete(k); } let excess = hits.size - MAX_RATE_KEYS; for (const k of "
+    "hits.keys()) { if (excess <= 0) break; hits.delete(k); excess--; } } "
+    "return false; }"
+)
+
 #: The confirmation the visitor sees on success, pinned as a VALUE. It states
 #: receipt and nothing more: a reply is the exception (outbound email belongs to
 #: answering a user who wrote first), and while the reader gap is open
@@ -878,6 +891,24 @@ def test_rate_limit_map_is_bounded() -> None:
             f"reference, so mutating it there empties the stored history and the "
             f"limiter never throttles — {span.strip()[:60]!r}"
         )
+    # ── The class, closed by construction ─────────────────────────────────
+    # Blocklisting statement shapes does NOT converge here. `recent.length = 0;`
+    # (after the filter, after the push, after the write-back), `&& false` on the
+    # predicate, `hits.set(ip, [])` and `hits.clear()` each defeated a different
+    # pin while every other assertion still held — cycles 19-24 found one more
+    # statement shape every time, because a static pin set has an UNBOUNDED defeat
+    # surface over a mutable implementation. So the reviewed body itself is pinned
+    # VERBATIM (comments stripped, whitespace collapsed — reformatting and comments
+    # are not changes): any statement change fails HERE until a human re-reads the
+    # limiter. That is the honest static form of this guard — a tripwire, not a
+    # proof — and the behavioural answer (fill the map, assert the bound and the
+    # trip) remains #4108. The semantic pins above are kept for the error messages
+    # and for the values.
+    reviewed = re.sub(r"\s+", " ", code[fn_start:fn_end]).strip()
+    assert reviewed == RATE_LIMITED_BODY, (
+        "the rate limiter's body changed — re-read it, then update RATE_LIMITED_BODY: "
+        f"{reviewed!r}"
+    )
     # `cutoff` is what the window is filtered BY: `const cutoff = now` (or
     # `Infinity`) makes every stored entry stale, so the window is always empty and
     # the trip can never fire — while `RATE_WINDOW_MS` stays "used" by the
