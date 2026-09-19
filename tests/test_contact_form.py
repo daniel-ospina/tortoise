@@ -754,11 +754,35 @@ def test_rate_limit_map_is_bounded() -> None:
         "the limiter must have exactly one un-limited exit — a second `return false;` "
         "(for instance on its own trip) makes throttling a no-op"
     )
-    trip = re.search(r"if\s*\(\s*recent\.length\s*>=\s*RATE_LIMIT\s*\)[^}]*", body)
+    trip = re.search(r"if\s*\(\s*recent\.length\s*>=\s*RATE_LIMIT\s*\)", body)
     assert trip is not None, "the limiter's trip comparison must be present"
-    assert re.search(r"\breturn true;", trip.group(0)), (
+    # The trip is bounded to its REAL block and its exit must be a DIRECT statement
+    # of that block: the earlier `[^}]*` span stopped at the first nested `}`, so
+    # `if (recent.length >= RATE_LIMIT) { if (false) { return true; } ... }` kept
+    # the token inside the matched span while the real branch fell through to
+    # `return false;` and the limiter stayed a no-op (cycle-16 review). Same
+    # technique as the cap guard's nesting test.
+    trip_at = trip.start()
+    trip_block = body[trip_at : _brace_end(body, trip_at)]
+    assert re.search(r"\breturn true;", trip_block), (
         "the limiter's trip must RETURN TRUE: `return false;` there never throttles "
         "anyone while every other pin stays green"
+    )
+    trip_inner = trip_block[trip_block.index("{") + 1 : -1]
+    trip_head = trip_inner[: trip_inner.index("return true;")]
+    assert trip_head.count("{") - trip_head.count("}") == 0, (
+        "the trip's `return true;` must be a direct statement of the trip body — "
+        "nested in a disabled branch (`if (false) { return true; }`) the limiter "
+        "stays a no-op while every pin is satisfied"
+    )
+    # …and a BRACELESS nested branch adds no brace at all, so the depth check above
+    # misses it — `if (!true) return true;` inside the trip left the limiter a no-op
+    # with the suite green (cycle-16 review). Nothing may stand between the trip's
+    # statement boundary and the exit but whitespace.
+    trip_stmt = re.split(r"[;{}]", trip_head)[-1]
+    assert not re.search(r"\b(?:if|while|for)\b", trip_stmt), (
+        "the trip's `return true;` must not be the braceless body of another branch: "
+        f"{trip_stmt.strip()[:60]!r}"
     )
     # `recent` is the trip's INPUT, and an untrippable input makes the trip a dead
     # branch: `filter(() => false)` leaves it permanently empty, so
