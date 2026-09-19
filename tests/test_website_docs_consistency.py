@@ -1019,6 +1019,13 @@ class _IdCollector(HTMLParser):
     markup. Fail-loud is the direction a duplicate-id guard must err in: a false
     positive is a red test a human reads, while a false negative ships the
     defect.
+
+    The OPPOSITE direction is possible too, and it is SILENT: the stdlib switches
+    to raw text by tag name with no foreign-content awareness, so markup a
+    browser parses inside `<svg><style>…</style></svg>` is invisible here. That
+    limit is only safe while no covered page reaches it —
+    `test_no_covered_page_makes_the_id_collectors_declared_limit_live` enforces
+    exactly that — and removing it is tracked in #4118.
     """
 
     def __init__(self) -> None:
@@ -1124,6 +1131,60 @@ def test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id() -> None:
     assert _duplicate_element_ids(
         '<template><div id="dup"></div></template><div id="dup"></div>'
     ) == {"dup": [1, 1]}
+
+
+# Foreign-content roots: a browser does not switch to raw text inside these, so
+# the stdlib's tag-name-only switch diverges there (see `_IdCollector`).
+_FOREIGN_ROOTS = frozenset({"svg", "math"})
+
+
+class _ForeignRawtextProbe(HTMLParser):
+    """Raw-text start tags opened while a foreign-content root is open.
+
+    A nesting-insensitive counter is enough for a PRE-CONDITION check: it can
+    over-report (a 13.2.6.5 breakout leaves the browser in HTML content while
+    this counter still counts the root as open) and never under-reports, and
+    over-reporting only asks for a hand check.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.depth = 0
+        self.hits: list[tuple[str, int]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _FOREIGN_ROOTS:
+            self.depth += 1
+        elif self.depth and tag in self.CDATA_CONTENT_ELEMENTS:
+            self.hits.append((tag, self.getpos()[0]))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _FOREIGN_ROOTS and self.depth:
+            self.depth -= 1
+
+
+@pytest.mark.parametrize("page", _all_website_pages(), ids=lambda p: p.name)
+def test_no_covered_page_makes_the_id_collectors_declared_limit_live(
+    page: Path,
+) -> None:
+    """Guard the guard: the collector's declared SILENT miss must stay unreached.
+
+    `HTMLParser` switches to raw text by tag name with no foreign-content
+    awareness, while a browser inside `<svg>`/`<math>` does not — so markup
+    inside `<svg><style>…</style></svg>` is a real element to the browser and no
+    element to the collector. Unlike the over-count `_IdCollector` documents,
+    this one is a MISS, and it is only safe while no covered page reaches it:
+    this test fails the moment one does. Removing the limit is tracked in #4118.
+    """
+    probe = _ForeignRawtextProbe()
+    probe.feed(_read(page))
+    assert not probe.hits, (
+        f"website/{page.name} opens {probe.hits} inside `<svg>`/`<math>`. The id "
+        f"collector cannot see markup inside such an element while a browser "
+        f"does, so a duplicate id there would be MISSED (silently). Check this "
+        f"page by hand, and fix the collector (#4118) rather than relaxing this "
+        f"assertion."
+    )
 
 
 # The top-level page set as of #3436 (2026-09-18). This pins the DERIVATION'S
