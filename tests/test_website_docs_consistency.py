@@ -1000,33 +1000,64 @@ def test_product_hero_offers_the_blog() -> None:
 
 
 class _IdCollector(HTMLParser):
-    """The `id` of every element the parser attaches to the document.
+    """The `id` of every element the stdlib tokenizer reports as a start tag.
 
     `handle_starttag` is the right hook: the tokenizer emits no start tag inside
     a comment — which is exactly the #3436 false positive, a raw-text scan that
     counted the removal note quoting `<section id="beta-gate">` as a second
     element.
 
-    Only the FIRST `id` attribute on a tag is read — the tokenizer drops the
-    rest — and an empty value is treated as no id at all, because
-    `getElementById("")` matches nothing and two elements with `id=""` are not
-    a collision a script can observe.
+    Only the FIRST `id` attribute on a tag is read — the stdlib hands over every
+    one of a duplicate pair, while a browser keeps the first — and an empty value
+    is treated as no id at all, because `getElementById("")` matches nothing and
+    two elements with `id=""` are not a collision a script can observe.
 
-    Deliberately OVER-counted, and it fails LOUD when it is: the collector can
-    count an `id` a browser does not expose as a document element. `<template>`
-    content is the pinned case — a browser keeps it in an inert fragment that
-    `getElementById` never reaches, while the stdlib parses it as ordinary
-    markup. Fail-loud is the direction a duplicate-id guard must err in: a false
-    positive is a red test a human reads, while a false negative ships the
-    defect.
+    TWO KNOWN DIVERGENCES from a browser, in opposite directions. Both are
+    inherited from the stdlib tokenizer rather than modelled here, and neither
+    is an exhaustive list — this is a tokenizer's view of a document, not a
+    browser's:
 
-    The OPPOSITE direction is possible too, and it is SILENT: the stdlib switches
-    to raw text by tag name with no foreign-content awareness, so markup a
-    browser parses inside `<svg><style>…</style></svg>` is invisible here. That
-    limit is only safe while no covered page reaches it —
-    `test_no_covered_page_makes_the_id_collectors_declared_limit_live` enforces
-    exactly that — and removing it is tracked in #4118.
+      * OVER-count: an `id` a browser does not expose as a document element.
+        `<template>` content is the pinned case — a browser keeps it in an inert
+        fragment `getElementById` never reaches, while the stdlib parses it as
+        ordinary markup. This direction is fail-loud, the one a duplicate-id
+        guard must err in: a false positive is a red test a human reads, while a
+        false negative ships the defect.
+      * UNDER-count, and SILENT: a construct where the stdlib stops emitting
+        start tags and a browser does not. `<svg><style>…</style></svg>` is the
+        case that has bitten: the stdlib switches to raw text by tag name, with
+        no foreign-content awareness. `tests/_html_links.py` documents the same
+        class of tokenizer divergence for the link extractor and #3970 tracks
+        its limits; #4118 lists the ones found for this collector so far and
+        would remove them by extracting ids through that render-fidelity seam
+        instead of maintaining a second parser.
+
+    `test_no_covered_page_makes_the_id_collectors_declared_limit_live` is the
+    mitigation for the silent direction — the module's idiom for a limit that
+    cannot yet be modelled — and it covers the `<svg>`-raw-text case only.
     """
+
+    @property
+    def _support_cdata(self) -> bool:
+        """False: `<![CDATA[ … ]]>` is CDATA only INSIDE foreign content.
+
+        `HTMLParser` ships this as unconditional ``True``, so it reads a CDATA
+        section in HTML content too, where a browser makes it a BOGUS COMMENT
+        ending at the first `>`. With no `]]>` anywhere, the parser then swallows
+        the rest of the document — `<div id="dup"></div><![CDATA[ > <div
+        id="dup"></div> ]]>` is two elements in Chromium and one here. This
+        collector does not model foreign content, so the browser answer is
+        plainly `False`; `tests/_html_links.py` derives the same value from its
+        foreign-context depth, which this class does not track.
+        """
+        return False
+
+    @_support_cdata.setter
+    def _support_cdata(self, flag: bool) -> None:
+        # The stdlib assigns this during `reset()`; the derived value above is the
+        # authority, so the write is accepted and ignored.
+        del flag
+
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -1157,6 +1188,10 @@ class _ForeignRawtextProbe(_IdCollector):
     over-report (a 13.2.6.5 breakout leaves the browser in HTML content while
     this counter still counts the root as open), and over-reporting only asks
     for a hand check.
+
+    It covers the `<svg>`-raw-text case and no more — the tokenizer has other
+    browser divergences (`_IdCollector` says so, and #4118 lists them), so a
+    green run here is evidence about this one path, not a clean bill of health.
     """
 
     def __init__(self) -> None:
@@ -1190,7 +1225,8 @@ def test_no_covered_page_makes_the_id_collectors_declared_limit_live(
     inside `<svg><style>…</style></svg>` is a real element to the browser and no
     element to the collector. Unlike the over-count `_IdCollector` documents,
     this one is a MISS, and it is only safe while no covered page reaches it:
-    this test fails the moment one does. Removing the limit is tracked in #4118.
+    the parametrized assertion fails the moment one does. This is ONE divergence,
+    not all of them (#4118).
     """
     probe = _ForeignRawtextProbe()
     probe.feed(_read(page))
@@ -1201,6 +1237,36 @@ def test_no_covered_page_makes_the_id_collectors_declared_limit_live(
         f"page by hand, and fix the collector (#4118) rather than relaxing this "
         f"assertion."
     )
+
+
+def test_the_declared_limit_probe_fires_on_the_construct_it_names() -> None:
+    """Guard the guard: pin the probe's UNHIT branch.
+
+    The parametrized test only ever asserts `not probe.hits` over real pages, so
+    a probe that silently stopped detecting anything would leave it green on
+    every page — the vacuous-guard shape this module already pins for
+    `_guard_reachable_for`'s sentinel branch.
+    """
+    live = _ForeignRawtextProbe()
+    live.feed('<svg><textarea><div id="dup"></div></textarea></svg>')
+    assert live.hits == [("textarea", 1)], (
+        f"the probe did not detect a suppressed tag inside `<svg>` (got "
+        f"{live.hits!r}), so `test_no_covered_page_makes_the_id_collectors_"
+        f"declared_limit_live` is vacuously green and the limit could be live on "
+        f"a covered page. `textarea` exercises the RCDATA path, which a "
+        f"CDATA-only probe missed."
+    )
+    for outside in (
+        '<style>.x{}</style><div id="a"></div>',
+        '<svg><div id="a"></div></svg><textarea>t</textarea>',
+    ):
+        quiet = _ForeignRawtextProbe()
+        quiet.feed(outside)
+        assert not quiet.hits, (
+            f"the probe reports {quiet.hits!r} OUTSIDE foreign content in "
+            f"{outside!r}, where the collector and a browser agree — it would "
+            f"fail every page rather than guard one."
+        )
 
 
 # The top-level page set as of #3436 (2026-09-18). This pins the DERIVATION'S
