@@ -647,6 +647,12 @@ surfaces:
   # hosted_api import), the window guard did not run for the very change it
   # guards. Dual-registered with `api` (same #2938 precedent).
   - test_session_import_codex.py
+  # #2901: the canonical terminal-status vocabulary + its consumer parity.
+  # A change to `tortoise/live.py` (the canonical home) or
+  # `tortoise/indexer/github_indexer.py` / the graph-scripts maps to no named
+  # surface, so `core` is the arm that runs on the very change it guards (same
+  # #2498 rationale as test_lifecycle_guards.py above).
+  - test_terminal_status_vocabulary.py
   ep:
   - test_a9_direct_edge_traversal.py
   # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
