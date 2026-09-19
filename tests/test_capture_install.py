@@ -1683,6 +1683,78 @@ def test_cursor_hooks_status_calls_a_malformed_entry_a_manual_fix(home):
     assert "hooks upgrade" not in r.stdout, r.stdout
 
 
+def test_cursor_flat_validator_matches_cursor_null_and_float_semantics():
+    """Cursor's validator uses presence (``e.field !== void 0``) then
+    ``typeof``, so an explicit JSON ``null`` on matcher/timeout/failClosed/
+    model is REJECTED, while ``loop_limit: null`` and an integral ``version``
+    (``1.0`` — ``Number.isInteger(1.0)`` is true) are valid.
+
+    Mutation: test with ``is not None`` (conflating JSON null with absent) —
+    the null cases are accepted and this REDs; test version with
+    ``isinstance(int)`` — ``1.0`` is rejected and this REDs."""
+    from tortoise.hook_install import (  # noqa: I001
+        _flat_entry_is_harness_valid, _is_positive_int_value)
+    assert _flat_entry_is_harness_valid({"command": "/bin/other"})
+    assert _flat_entry_is_harness_valid({"command": "/bin/other",
+                                         "timeout": 30})
+    assert _flat_entry_is_harness_valid({"command": "/bin/other",
+                                         "loop_limit": None})
+    assert _flat_entry_is_harness_valid({"type": "prompt", "prompt": "hi"})
+    for bad in (
+        {"command": "/bin/other", "timeout": None},
+        {"command": "/bin/other", "matcher": None},
+        {"command": "/bin/other", "failClosed": None},
+        {"type": "prompt", "prompt": "hi", "model": None},
+        {"command": "/bin/other", "timeout": "30s"},
+        {"command": "/bin/other", "type": None},
+    ):
+        assert not _flat_entry_is_harness_valid(bad), bad
+    assert _is_positive_int_value(1)
+    assert _is_positive_int_value(1.0)
+    assert not _is_positive_int_value(0)
+    assert not _is_positive_int_value(True)
+    assert not _is_positive_int_value("1")
+
+
+def test_cursor_upgrade_refuses_structure_even_when_version_is_bad(home):
+    """A document with BOTH a bad version and a structural defect is a MANUAL
+    fix: `upgrade` must REFUSE, not repair the version and leave a file Cursor
+    still rejects.
+
+    Mutation: report the version finding and skip the structural one (the
+    pre-fix ordering) — `upgrade` sets version=1, appends its entry, returns
+    ok, and this REDs."""
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor" / "hooks.json").write_text(json.dumps(
+        {"hooks": {capture_install.CURSOR_EVENT: [
+            {"hooks": [{"type": "command", "command": "/x"}]}]}}))
+    root = capture_install.cursor_home(home)
+
+    kinds = {f.kind for f in hook_install.detect_install(root, "cursor")}
+    assert "settings-unreadable-entry" in kinds, kinds
+    assert "settings-invalid-version" in kinds, kinds
+    result = hook_install.upgrade_install(root, "cursor")
+    assert result.refused is not None, result.actions
+
+
+def test_cursor_version_1_0_is_valid_and_not_rewritten(home):
+    """JS ``Number.isInteger(1.0)`` is true, so a user's ``"version": 1.0``
+    is valid; the installer must not report drift or rewrite it.
+
+    Mutation: use ``isinstance(version, int)`` — 1.0 reads as invalid, is
+    flagged/rewritten, and this REDs."""
+    (home / ".cursor").mkdir(parents=True)
+    (home / ".cursor" / "hooks.json").write_text(json.dumps(
+        {"version": 1.0, "hooks": {capture_install.CURSOR_EVENT: []}}))
+    root = capture_install.cursor_home(home)
+
+    findings = [f for f in hook_install.detect_install(root, "cursor")
+                if f.kind == "settings-invalid-version"]
+    assert findings == [], findings
+    assert install_capture("cursor", home=home).ok
+    assert _cursor_json(home)["version"] == 1.0
+
+
 def test_cursor_root_is_home_scoped_and_ignores_an_unrelated_env(
         tmp_path, monkeypatch):
     """Cursor resolves ``~/.cursor/hooks.json`` and has NO config-dir env var —

@@ -646,8 +646,7 @@ def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
         # Cursor 3.20.21 logs `Invalid user config: Config version must be a
         # number`).  Set it when absent/invalid; never overwrite a valid value.
         version = data.get("version")
-        if not (isinstance(version, int) and not isinstance(version, bool)
-                and version >= 1):
+        if not hook_install._is_positive_int_value(version):
             data["version"] = 1
     hooks = data.get("hooks")
     if hooks is None:
@@ -663,11 +662,12 @@ def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
         raise ValueError(f'"{event}" entries are not a list')
     if flat:
         # Cursor's validator rejects the WHOLE document — after which NO hook
-        # fires — on a bad `version`, an unknown event key, a non-list event,
-        # or any entry it cannot parse.  Refuse loudly rather than append
-        # beside a broken entry and report success (#3819).  (The version key
-        # is set above, so only structural problems remain here.)
-        refusal = hook_install._flat_document_refusal(data)
+        # fires — on an unknown event key, a non-list event, or any entry it
+        # cannot parse.  Refuse loudly rather than append beside a broken
+        # entry and report success (#3819).  (The version key is set above,
+        # and structure is checked independently of it so a bad version can
+        # never mask a structural defect.)
+        refusal = hook_install._flat_structure_refusal(data)
         if refusal:
             raise ValueError(f"hooks.json {refusal}")
     registered: list[dict] = []

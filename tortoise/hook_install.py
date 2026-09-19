@@ -1319,6 +1319,27 @@ _FLAT_KNOWN_EVENTS = frozenset({
 })
 
 
+def _is_positive_int_value(value: object) -> bool:
+    """True for a JSON positive integer the way JS ``Number.isInteger`` sees
+    it — an ``int >= 1``, or an integral ``float`` (``1.0`` is a valid Cursor
+    ``version``; ``json.loads`` yields a Python float for ``1.0``).
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 1
+    if isinstance(value, float):
+        return value.is_integer() and value >= 1
+    return False
+
+
+#: Regex constructs Python accepts but JS ``new RegExp`` REJECTS.  The two
+#: engines cannot be mirrored exactly, so a Python-only construct is a definite
+#: JS-invalid matcher (reject); a matcher Python rejects is conservatively
+#: refused too (loud beats a silent whole-file rejection).
+_PYTHON_ONLY_REGEX = ("(?P<", "(?P=", "(?#", "(?(")
+
+
 def _flat_entry_is_harness_valid(entry: object) -> bool:
     """True when ``entry`` is a script object Cursor's ``hooks.json``
     validator (``Uvd``/``Fvd``/``Bvd``/``Ovd`` in 3.20.21) ACCEPTS.
@@ -1330,61 +1351,76 @@ def _flat_entry_is_harness_valid(entry: object) -> bool:
     ``timeout``, integer/null ``loop_limit``, boolean ``failClosed``, prompt
     ``model``) rather than a subset: a partial validator CERTIFIES a foreign
     entry Cursor will reject (#3819).
+
+    Presence, not ``None``, is the test.  Cursor checks ``e.field !== void 0``
+    then ``typeof``, so an explicit JSON ``null`` is present-and-wrong and is
+    REJECTED (``typeof null`` is ``"object"``) — except ``loop_limit``, which
+    Cursor explicitly allows to be ``null``.
     """
     if not isinstance(entry, dict):
         return False
-    if entry.get("type") == "prompt":
+    has_type = "type" in entry
+    htype = entry.get("type")
+    if htype == "prompt":
         prompt = entry.get("prompt")
         if not (isinstance(prompt, str) and prompt.strip()):
             return False
-        model = entry.get("model")
-        if model is not None and not (isinstance(model, str) and model.strip()):
+        if "model" in entry and not (
+                isinstance(entry["model"], str) and entry["model"].strip()):
             return False
-    elif entry.get("type") in (None, "command"):
+    elif htype == "command" or not has_type:
         if not isinstance(entry.get("command"), str):
             return False
     else:
         return False
-    matcher = entry.get("matcher")
-    if matcher is not None:
+    if "matcher" in entry:
+        matcher = entry["matcher"]
         if not isinstance(matcher, str):
             return False
+        if matcher not in ("", "*") and any(
+                token in matcher for token in _PYTHON_ONLY_REGEX):
+            return False  # JS rejects a Python-only construct
         if matcher not in ("", "*"):
             try:
                 re.compile(matcher)
             except re.error:
-                return False
-    timeout = entry.get("timeout")
-    if timeout is not None:
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                return False  # may be JS-valid, but refuse loudly
+    if "timeout" in entry:
+        timeout = entry["timeout"]
+        if (isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float)) or timeout <= 0):
             return False
-        if timeout <= 0:
+    if "loop_limit" in entry:
+        loop_limit = entry["loop_limit"]
+        if loop_limit is not None and (
+                isinstance(loop_limit, bool) or not isinstance(loop_limit, int)
+                or loop_limit <= 0):
             return False
-    loop_limit = entry.get("loop_limit")
-    if loop_limit is not None:
-        if isinstance(loop_limit, bool) or not isinstance(loop_limit, int):
-            return False
-        if loop_limit <= 0:
-            return False
-    fail_closed = entry.get("failClosed")
-    return fail_closed is None or isinstance(fail_closed, bool)
+    fail_closed_present = "failClosed" in entry
+    return not (fail_closed_present
+                and not isinstance(entry["failClosed"], bool))
 
 
-def _flat_document_refusal(data: dict) -> str | None:
-    """A populated refusal when Cursor's validator would REJECT ``data`` — in
-    which case Cursor loads NO hooks at all — else ``None``.
-
-    Checks the WHOLE document: the required positive-integer ``version``,
-    that every ``hooks`` key is a known Cursor step, that every value is a
-    list, and that every entry passes :func:`_flat_entry_is_harness_valid`.
-    Scoped to the whole document, not just the event being merged: an invalid
-    entry under ANY event invalidates the file (#3819).
-    """
+def _flat_version_refusal(data: dict) -> str | None:
+    """A populated refusal when ``data`` lacks a valid positive-integer
+    ``version`` (JS ``Number.isInteger``), else ``None``."""
     version = data.get("version")
-    if not (isinstance(version, int) and not isinstance(version, bool)
-            and version >= 1):
+    if not _is_positive_int_value(version):
         return (f'needs a positive integer "version" (found {version!r}) — '
                 "Cursor rejects the WHOLE file without it")
+    return None
+
+
+def _flat_structure_refusal(data: dict) -> str | None:
+    """A populated refusal when ``data`` has a structural problem Cursor's
+    validator rejects (an unknown event, a non-list event, an unparseable
+    entry) — ANYWHERE under ``hooks`` — else ``None``.
+
+    Deliberately INDEPENDENT of ``version``: a document can have both a bad
+    version and a structural defect, and the structural one is a manual fix
+    (``upgrade`` must refuse, not "repair" the version and leave the file
+    rejected) — so the two are reported as distinct findings.
+    """
     hooks = data.get("hooks")
     if hooks is None:
         return None
@@ -1403,6 +1439,14 @@ def _flat_document_refusal(data: dict) -> str | None:
     return None
 
 
+def _flat_document_refusal(data: dict) -> str | None:
+    """Structure first, then version — the first defect Cursor would reject
+    on.  (Callers that repair the version themselves check the structure
+    directly, so a structural defect is never masked by a bad version.)
+    """
+    return _flat_structure_refusal(data) or _flat_version_refusal(data)
+
+
 def _settings_findings(layout: HarnessLayout, data: dict,
                        root: str | os.PathLike[str] | None = None,
                        ) -> list[Finding]:
@@ -1412,14 +1456,19 @@ def _settings_findings(layout: HarnessLayout, data: dict,
         # Cursor's validator rejects the WHOLE document — after which NO hook
         # fires — on a missing/non-positive `version`, an unknown event key, a
         # non-list event value, or any entry it cannot parse (verified live
-        # against Cursor 3.20.21, #3819).  `upgrade` repairs the version; the
-        # structural cases are a manual fix (see `upgrade_install`'s refusal).
-        refusal = _flat_document_refusal(data)
-        if refusal:
+        # against Cursor 3.20.21, #3819).  The STRUCTURAL defect is reported
+        # separately and is a manual fix (`upgrade` refuses on it); only a bad
+        # version alone is repairable by `upgrade`.
+        structure = _flat_structure_refusal(data)
+        if structure:
             findings.append(Finding(
-                "settings-invalid-version" if "version" in refusal
-                else "settings-unreadable-entry",
-                f"{layout.harness} hooks.json {refusal}"))
+                "settings-unreadable-entry",
+                f"{layout.harness} hooks.json {structure}"))
+        version = _flat_version_refusal(data)
+        if version:
+            findings.append(Finding(
+                "settings-invalid-version",
+                f"{layout.harness} hooks.json {version}"))
     for spec in layout.scripts:
         entries = hooks.get(spec.event)
         expected_entry = _expected_entry(layout, spec, root)
@@ -1756,10 +1805,10 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
     if layout.flat_entry:
         # Cursor's `hooks.json` REQUIRES a positive-integer `version`; without
         # it Cursor rejects the WHOLE file and loads no hooks.  Set it when
-        # absent/invalid, never overwrite a user's valid value.
+        # absent/invalid, never overwrite a user's valid value.  (A valid
+        # `1.0` counts — JS `Number.isInteger(1.0)` is true.)
         version = data.get("version")
-        if not (isinstance(version, int) and not isinstance(version, bool)
-                and version >= 1):
+        if not _is_positive_int_value(version):
             data["version"] = 1
             actions.append(
                 f"settings: set \"version\" to 1 in {layout.harness} "
