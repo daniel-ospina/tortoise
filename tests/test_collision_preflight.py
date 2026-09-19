@@ -414,6 +414,21 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("[issue assignee/comments]", out)
         self.assertIn("assignee:other-agent", out)
+        self.assertIn("another account", out)
+
+    def test_assignee_shared_account_is_unattributable_but_still_a_hit(self):
+        # Every lane shares ONE account, so an assignee equal to our own login
+        # cannot be attributed to THIS lane — nor can it be ruled out as any
+        # other lane's. Suppressing it would blind the surface to every lane on
+        # the fleet (a false negative, the worse failure mode), so it stays a
+        # hit and the report says WHY (fail closed).
+        self.gh_fixtures(issue=self.issue_payload(assignees=("test-agent",)))
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("assignee:test-agent", out)
+        self.assertIn("shared account", out)
+        self.assertIn("fail closed", out)
 
     def test_issue_claim_comment_hit(self):
         self.gh_fixtures(issue=self.issue_payload(comments=("I'm working on this now.",)))
@@ -491,7 +506,8 @@ class CollisionPreflightTest(unittest.TestCase):
         # That is an EVALUATED, empty keyword dimension — not an unqueryable
         # surface — so it must read CLEAN, never INCOMPLETE. A wider stoplist
         # made this reachable ("fix graph delete error"), and conflating it with
-        # a missing title would turn a clean run into exit 2.
+        # a missing title would turn a clean run into exit 2. It is still BLIND
+        # for keyword matching and the verdict must say so (#3378 P2-1).
         self.gh_fixtures(issue=self.issue_payload(title="fix graph delete error"))
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
@@ -499,6 +515,7 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("INCOMPLETE", out)
         self.assertIn("0 distinctive keyword(s)", out)
         self.assertIn("excluded:", out)
+        self.assertIn("BLIND", out)
 
         # ... and a NUMBER hit under that generic-only title is still a hit.
         _git(self.repo, "branch", "fix/3061-generic-title")
@@ -506,6 +523,19 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("matched issue-number (3061)", out)
+
+    def test_blind_keyword_surface_is_annotated_on_the_verdict(self):
+        # The historical claim "the run cannot be CLEAN without the title" was
+        # false: --keywords can complete the dimension, and a zero-distinctive
+        # title still reported a complete 7/7 scan. When no distinctive keyword
+        # exists the verdict must say BLIND instead of advertising completeness.
+        self.gh_fixtures(issue=self.issue_payload(title=None))
+        rc, out = self.run_tool(keywords=" ")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("title: (unavailable", out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("BLIND", out)
+        self.assertIn("keyword-only collision could be missed", out)
 
     def test_worktree_structural_token_is_not_a_collision(self):
         # Title contains "worktree"; the worktree lives under a `.worktrees/`
@@ -754,12 +784,16 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("repo: test-owner/test-repo", out)
         self.assertIn("title: florfenicol dosing audit", out)
 
-    def test_target_repo_is_sent_on_every_gh_call(self):
+    def test_repo_scoped_gh_calls_carry_the_resolved_slug(self):
         # The exact mechanism of the cross-repo false CLEAN: gh resolving the
-        # repo from the CWD instead of the intended target. Every gh surface
-        # must carry the explicit selector; the REST path must be literal
-        # (gh api has no --repo flag, so `{owner}/{repo}` placeholders would
-        # again resolve from the cwd).
+        # repo from the CWD instead of the intended target. Every
+        # REPOSITORY-SCOPED gh surface must carry the explicit selector; the
+        # REST path must be literal (gh api has no --repo flag, so
+        # `{owner}/{repo}` placeholders would again resolve from the cwd).
+        # The two deliberate non-repo-scoped calls are `gh repo view` (which
+        # DISCOVERS the slug, so it cannot carry it) and `gh api user` (the
+        # lane's account identity, not a repository); the claim in AGENTS.md is
+        # scoped to repository-scoped calls precisely because of them.
         rc, out = self.run_tool()
         self.assertEqual(rc, 0, out)
         self.assertIn("test-owner/test-repo",
@@ -809,6 +843,29 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertNotIn("VERDICT: CLEAN", out)
         self.assertIn("no-local-clone", out)
+
+    def test_repo_selector_is_case_insensitive_for_the_clone(self):
+        # GitHub and `gh --repo` accept `Owner/Name`, so a case-different
+        # selector must still find the local clone rather than leaving every
+        # git surface INCOMPLETE (a false exit 2 that blocks dispatch).
+        other = self._sibling_repo("other-repo", "other-owner/other-repo")
+        rc, out = self.run_tool(repo_arg="OTHER-OWNER/other-repo", cwd=self.repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("repo: OTHER-OWNER/other-repo", out)
+        self.assertIn(f"local checkout: {os.path.realpath(other)}", out)
+        self.assertIn("VERDICT: CLEAN", out)
+
+    def test_empty_repo_argument_is_usage_error(self):
+        # Path("") IS a directory, so an empty --repo used to take the PATH
+        # branch and run the git surfaces against the cwd while the report
+        # printed "local checkout: (none — git surfaces INCOMPLETE)". An unset
+        # shell variable must be a usage error, never the cwd.
+        for bad in ("", "   "):
+            with self.subTest(bad=bad):
+                rc, out = self.run_tool(repo_arg=bad)
+                self.assertEqual(rc, 3, out)
+                self.assertNotIn("VERDICT: CLEAN", out)
+                self.assertIn("empty/whitespace", out)
 
     def test_omitted_repo_refuses_when_number_resolves_in_two_repos(self):
         self._sibling_repo("other-repo", "other-owner/other-repo")
@@ -866,9 +923,17 @@ class CollisionPreflightTest(unittest.TestCase):
         # The other direction, and the one that must never weaken: a claim by a
         # DIFFERENT party still blocks, loudly — for every genuine claim
         # phrasing, so tightening the regex cannot quietly disable the surface.
+        # The second group is the set the over-narrowed regex had DROPPED
+        # (fail-open) and that the anchored restore brings back.
         for body in ("/claim", "I'll take this", "working on this now",
                      "dispatching #3061", "taking this", "Claiming this.",
-                     "I will implement this", "assigned to me"):
+                     "I will implement this", "assigned to me",
+                     "I'm on it", "On it!", "Handling this",
+                     "I'm working on the collision preflight fix",
+                     "dispatching a sub-agent for #3061",
+                     "dispatching a lane for #4027",
+                     "will fix this", "we will fix this today",
+                     "assigned to @daniel-ospina", "assigned to lane W3"):
             with self.subTest(body=body):
                 self.gh_fixtures(issue=self.issue_payload(comments=[
                     ("other-agent", body),
@@ -892,12 +957,19 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_prose_that_matches_the_old_regex_is_not_a_claim(self):
         # The real #3827 wording, verbatim: every one of these matched the old
-        # regex and forced a false COLLISION on the lane's own artifact.
+        # regex and forced a false COLLISION on the lane's own artifact. The
+        # "claiming that" forms are the ordinary-English shape the docstring
+        # said the regex excluded while the code still matched `that`.
         for body in (
             "the config comment claiming a carve_out pin that does not exist",
             "was a claim about the hour",
             "a green on it would be a vacuous certificate",
             "A coverage claim must be stated PER ITEM, not counted.",
+            "claiming that X",
+            "I am claiming that the tool is broken",
+            "the PR claims that the surface is complete",
+            "the PR claims it is complete",
+            "Source A is claiming that the timeout is fine; that is not enough.",
         ):
             with self.subTest(body=body):
                 self.gh_fixtures(issue=self.issue_payload(comments=[
@@ -907,6 +979,81 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertEqual(rc, 0, out)
                 self.assertIn("VERDICT: CLEAN", out)
                 self.assertNotIn("do NOT dispatch", out)
+
+    def test_other_lane_marker_quoting_fleet_board_still_collides(self):
+        # A shared-account comment that merely MENTIONS our lane id / session
+        # UUID (a pasted fleet board) is a READER, not a holder. Merely naming
+        # our marker must NOT suppress the collision — the reader-vs-holder
+        # confusion the #1233 session surface was rejected for.
+        real_session = "01a0b01d-ab9f-74d8-bbe1-1e218fc752b2"
+        for body in (
+            f"Claiming this.\n\nFLEET BOARD — lane table W0 session `{real_session}`",
+            "lane W0 is done here — I'll take this",
+        ):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("test-agent", body),
+                ]))
+                rc, out = self.run_tool(env_extra={"PI_SESSION_ID": real_session})
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_lane_marker_parses_trailing_letter_and_colon(self):
+        # `lane B2c` (trailing letter) and `Lane: W0` (colon) are real ids in
+        # this fleet. If the parser cannot read OUR id, our own claim reads as
+        # another lane's and blocks our dispatch — the escape hatch is inert.
+        for lane, body in (("B2c", "Owner: lane B2c — claiming this."),
+                           ("W0", "Lane: W0 — claiming this.")):
+            with self.subTest(lane=lane):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("test-agent", body),
+                ]))
+                rc, out = self.run_tool(env_extra={"COLLISION_PREFLIGHT_LANE": lane})
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertIn("OWN FOOTPRINT", out)
+
+    # ── terminal-injection hardening (#4027 P2-J) ──────────────────────────
+
+    def test_control_sequences_in_untrusted_fields_are_stripped(self):
+        # The report IS the artifact a human reads to decide "do NOT dispatch".
+        # ESC/CSI/OSC from a GitHub title or comment body can blank or overwrite
+        # the VERDICT line (and OSC 52 rewrites the clipboard) — a fail-open
+        # class. No control character may reach stdout.
+        evil = "normal\x1b[2K\x1b[1A title"
+        self.gh_fixtures(
+            issue=self.issue_payload(title=evil, comments=[
+                ("other-agent", "I'll take this \x1b]52;c;AAAA\x07 now"),
+            ]),
+            open_prs=[{
+                "number": 1, "title": "evil\x1b[2K pr", "body": "",
+                "headRefName": "fix/evil",
+            }],
+        )
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("I'll take this", out)
+
+    def test_invalid_remote_slug_is_rejected_not_printed(self):
+        # A git-remote-derived slug is untrusted AND printed. A slug that is not
+        # exactly owner/name is rejected, leaving the surfaces INCOMPLETE rather
+        # than spraying control bytes into the report.
+        evil = self.tmp / "evil-repo"
+        evil.mkdir()
+        _git(evil, "init", "-q", "-b", "main", "--template=")
+        _git(evil, "config", "user.email", "test@example.com")
+        _git(evil, "config", "user.name", "Test")
+        _git(evil, "remote", "add", "origin",
+             "https://github.com/evil\x1b[2K/wat.git")
+        rc, out = self.run_tool(repo_arg=str(evil), cwd=self.repo)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertNotIn("\x1b", out)
 
     # ── partial-run prevention ──────────────────────────────────────────────
 

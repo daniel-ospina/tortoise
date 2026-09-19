@@ -16,8 +16,12 @@ Design contract
 ---------------
 0. THE TARGET IS ESTABLISHED, NOT ASSUMED. The tool resolves an explicit
    ``owner/name`` (``--repo owner/name``, or derived from ``--repo PATH``/
-   cwd) and sends it on EVERY ``gh`` call, and it PRINTS the resolved
-   ``owner/name`` and the issue's FULL TITLE in the verdict. A verdict that
+   cwd) and sends it on every REPOSITORY-SCOPED ``gh`` call, and it PRINTS the
+   resolved ``owner/name`` and the issue's FULL TITLE in the verdict. Two
+   calls are deliberately NOT repository-scoped because they cannot be: ``gh
+   repo view`` (a fallback that DISCOVERS the slug — there is nothing to send
+   yet) and ``gh api user`` (the GitHub login that identifies this lane's
+   account, not a repository). A verdict that
    does not name what it measured cannot be trusted: on 2026-09-18 the tool
    resolved TORTOISE #1178 from a tortoise worktree while the target was
    AGENT-INFRA #1178, printed no repository and no title, and returned
@@ -246,7 +250,14 @@ SESSION_FILE_ENV = "PI_SESSION_FILE"
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
-LANE_MARKER_RE = re.compile(r"(?i)\blane[\s_-]+([A-Za-z]{1,4}[-_]?\d{1,3})\b")
+# `lane X` identities. The grammar must parse the ids this fleet actually
+# uses: a trailing letter is a REAL id (`lane B2c`, this repo's own AGENTS.md)
+# and the colon form (`Lane: W0`) is common. An id the regex cannot parse makes
+# the self-footprint escape hatch inert — with OUR id unparsed, our own claim
+# reads as another lane's and blocks our dispatch. Only case is normalised.
+LANE_MARKER_RE = re.compile(
+    r"(?i)\blane[\s_:-]*([A-Za-z]{1,4}[-_]?\d{1,3}[A-Za-z]?)\b"
+)
 
 STATUS_CLEAN = "CLEAN"
 STATUS_HIT = "HIT"
@@ -355,27 +366,42 @@ _STRUCTURAL = {
     "upstream", "worktree", "worktrees", "detached", "bare",
 }
 
-# Claim-shaped comments. Narrow BY CONSTRUCTION: this matches an assertion of
-# INTENT to work the issue, never the ordinary English words "claim" /
-# "claiming" / "working on" / "on it" in prose. The live bug (defect 3): a
-# lane's own long scoping / research-verdict comment on #3827 matched the old
-# regex on "the config comment claiming a carve_out", "was a claim about the
-# hour", "a green on it would be a vacuous certificate" and "A coverage claim
-# must be stated PER ITEM" — every one of them prose, none a claim. A gate that
-# fires on the lane's own artifact is a gate that gets worked around.
+# Claim-shaped comments. This is a GATE, so BOTH failure directions are
+# defects and the corpus below is asserted in both: prose that must NOT hit
+# and genuine claims that MUST hit.
+#
+# FALSE POSITIVE (the #3827 live bug): a lane's own long scoping /
+# research-verdict comment matched the old regex on "the config comment
+# claiming a carve_out", "was a claim about the hour", "a green on it would
+# be a vacuous certificate" and "A coverage claim must be stated PER ITEM" —
+# every one prose, none a claim. The old `\bclaim(?:ing)?\b` also matched the
+# ordinary English `"claiming that X"` the docstring said it excluded. Fixed
+# by requiring `claim` to take a deictic object (`this`/`it`/`#N`) and by NOT
+# matching third-person present (`"the PR claims it ..."`); bare mid-sentence
+# `on it` is prose and is only matched anchored.
+#
+# FALSE NEGATIVE (the over-narrowing that followed): the fix had dropped
+# genuine claim forms the old regex caught (`"I'm on it"`, `"Handling this"`,
+# `"working on the fix"`, `"dispatching a lane for #N"`, `"will fix this"`,
+# `"assigned to …"`), so the gate stopped seeing real claims. They are
+# restored in an ANCHORED form below.
 _CLAIM_RE = re.compile(
-    r"(?i)(?:"
+    r"(?im)(?:"
     r"(?:^|\s)/claim\b|"
-    r"\bclaim(?:ing|ed|s)?\s+(?:this|it|that|#\d+)\b|"
-    r"\bi(?:'ll| will| am|'m|m)\s+(?:take|do|handle|fix|implement|work on|pick|own)\b|"
-    r"\bworking on\s+(?:this|it|#\d+)\b|"
+    r"\bclaim(?:ing|ed)?\s+(?:this|it|#\d+)\b|"
+    r"\bi(?:'ll| will| am|'m|m)\s+(?:take|do|handle|fix|implement|work on|pick|own|get on|jump on)\b|"
+    r"\bworking on\b|"
     r"\bwork(?:ing)?\s+this\b|"
+    r"\bi(?:'m| am)\s+on it\b|"
+    r"^\s*on it\b|"
     r"\bpick(?:ed|ing)?\s+(?:this|it)\s+up\b|"
     r"\btaking\s+(?:this|it)\b|"
-    r"\bdispatch(?:ing)?\s+(?:this|it|#\d+)\b|"
+    r"\bhandling\s+this\b|"
+    r"\bdispatch(?:ing)?\s+(?:(?:a|the)\s+)?(?:this|it|#\d+|lane|sub-?agent|workstream|session)\b|"
     r"\bstarted\s+(?:on\s+)?this\b|"
     r"\balready\s+(?:fixing|working|implementing)\b|"
-    r"\bassigned\s+to\s+me\b|"
+    r"\bassigned\s+to\b|"
+    r"\bwill\s+(?:fix|implement|handle|take|do)\b|"
     r"\bin\s+progress\b"
     r")"
 )
@@ -426,6 +452,11 @@ class Surface:
     truncated: bool = False
     truncation_note: str = ""
     own_ignored: list[str] = field(default_factory=list)
+    # The surface was QUERIED but has no signal to offer (e.g. a title whose
+    # every term is generic, so the keyword dimension is empty). Not INCOMPLETE
+    # — number matching still works — but the verdict must say the surface is
+    # BLIND rather than advertising "7/7 surfaces queried" as complete.
+    blind: bool = False
 
     def add(self, ref: str, detail: str, strength: str) -> None:
         self.hits.append(Hit(self.name, ref, detail, strength))
@@ -461,8 +492,23 @@ def _run(cmd: list[str], cwd: str, timeout: float, env: dict | None = None):
         return 126, "", f"{cmd[0]}: {exc}", False
 
 
+# C0/C1 control characters (ESC/CSI/OSC/BEL/DEL included) are stripped from
+# every UNTRUSTED field before it reaches the report. The report IS the
+# artifact a human reads to decide "do NOT dispatch", and GitHub-sourced text
+# (issue title, comment bodies, PR titles) plus a git-remote-derived slug is
+# attacker-controlled: an ESC sequence can blank or overwrite the VERDICT line
+# on the reading terminal, and OSC 52 can rewrite the clipboard — a fail-open
+# class. \t\n\r are kept here and collapsed to spaces by `_one_line`.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _sanitize(text: str | None) -> str:
+    """Strip terminal control characters from an untrusted string."""
+    return _CONTROL_RE.sub("", text or "")
+
+
 def _one_line(text: str, limit: int = 200) -> str:
-    flat = " ".join((text or "").split())
+    flat = " ".join(_sanitize(text).split())
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
 
@@ -804,6 +850,35 @@ def _identity_markers(body: str) -> tuple[set[str], set[str]]:
     return sessions, lanes
 
 
+# Text allowed BETWEEN an identity marker and a claim for the marker to count
+# as TIED to it: whitespace/punctuation, plus identity keywords. A real word
+# ("lane W0 IS DONE HERE — I'll take this") means the marker is a REFERENCE to
+# another lane, not this lane identifying itself, so it must not suppress the
+# collision. This is the reader-vs-holder confusion the #1233 session surface
+# was rejected for; it must not be reintroduced here.
+_IDENTITY_LINK_RE = re.compile(
+    r"(?:[\s\-–—:()\[\]{},.;'\"`|*]|\b(?:session|id|uuid|lane|owner|as|by)\b)*"
+)
+
+
+def _same_line(body: str, a: int, b: int) -> bool:
+    return body.rfind("\n", 0, a) == body.rfind("\n", 0, b)
+
+
+def _marker_tied_to_claim(body: str, m_start: int, m_end: int,
+                          claim_spans: list[tuple[int, int]]) -> bool:
+    """True when an identity marker at [m_start, m_end) sits on the SAME LINE
+    as a claim match and is joined to it only by punctuation/identity words."""
+    for c_start, c_end in claim_spans:
+        if not _same_line(body, m_start, c_start):
+            continue
+        gap = (body[m_end:c_start] if m_end <= c_start
+               else body[c_end:m_start])
+        if _IDENTITY_LINK_RE.fullmatch(gap):
+            return True
+    return False
+
+
 def claim_attribution(body: str, login: str | None, identity: Identity) -> str:
     """Attribute a claim-shaped comment: ``self`` | ``other`` | ``unknown``.
 
@@ -811,9 +886,12 @@ def claim_attribution(body: str, login: str | None, identity: Identity) -> str:
     lane's own claim from another lane's — ownership on this tracker is named
     by LANE / SESSION, never by author. A comment is therefore attributed to
     this lane only on POSITIVE evidence: a session UUID equal to ours, or a
-    lane marker equal to ours. Every other outcome is NOT-OURS, including a
-    same-account comment with no marker at all: "we cannot tell whose it is"
-    must never be read as "it is ours" (fail closed, #4027).
+    lane marker equal to ours, TIED TO THE CLAIM (same line, punctuation-only
+    gap). MERELY NAMING our marker is not enough: another lane's comment that
+    quotes the fleet board — which contains our lane id and session UUID — is
+    a READER, not a holder, and must still collide. Every other outcome is
+    NOT-OURS, including a same-account comment with no marker at all: "we
+    cannot tell whose it is" must never be read as "it is ours" (#4027).
     """
     if not login or login.strip().lower() in ("", "unknown", "ghost", "none"):
         return "unknown"
@@ -823,12 +901,47 @@ def claim_attribution(body: str, login: str | None, identity: Identity) -> str:
     if login.strip().lower() != identity.login.strip().lower():
         return "other"
     sessions, lanes = _identity_markers(body)
-    if identity.session_id and identity.session_id.strip().lower() in sessions:
-        return "self"
-    if identity.lane and identity.lane.strip().upper() in lanes:
-        return "self"
+    claim_spans = [(m.start(), m.end()) for m in _CLAIM_RE.finditer(body or "")]
+    if identity.session_id:
+        sid = identity.session_id.strip().lower()
+        if sid in sessions and any(
+            m.group(0).lower() == sid
+            and _marker_tied_to_claim(body, m.start(), m.end(), claim_spans)
+            for m in UUID_RE.finditer(body or "")
+        ):
+            return "self"
+    if identity.lane:
+        lane = identity.lane.strip().upper()
+        if lane in lanes and any(
+            m.group(1).upper() == lane
+            and _marker_tied_to_claim(body, m.start(), m.end(), claim_spans)
+            for m in LANE_MARKER_RE.finditer(body or "")
+        ):
+            return "self"
     if sessions or lanes:
-        # A marker is present and it names somebody else.
+        # A marker is present, but it is not ours tied to this claim.
+        return "other"
+    return "unknown"
+
+
+def assignee_attribution(login: str | None, identity: Identity) -> str:
+    """Attribute an issue assignee: ``other`` | ``unknown``.
+
+    GitHub's assignee is a LOGIN only — unlike a comment it carries no lane or
+    session marker. On this fleet every lane shares ONE account, so an assignee
+    equal to our own login CANNOT be attributed to THIS lane: it could be any
+    lane (or a human) that assigned the shared account. Treating login
+    equality as "self" would make the assignee surface blind to every other
+    lane on the fleet — a false negative, the worse of the two failure modes —
+    so it is deliberately NOT treated as positive evidence. A different login
+    is affirmatively ``other``; everything else is ``unknown`` and is kept as
+    a hit by the caller (fail closed).
+    """
+    if not login or login.strip().lower() in ("", "unknown", "ghost", "none"):
+        return "unknown"
+    if not identity.login:
+        return "unknown"
+    if login.strip().lower() != identity.login.strip().lower():
         return "other"
     return "unknown"
 
@@ -842,10 +955,34 @@ def scan_issue_surface(
     comment we can positively attribute to ourselves is recorded as own
     footprint (printed, non-blocking) rather than as a collision — otherwise a
     lane could never dispatch the issue it had already claimed.
+
+    An ASSIGNEE is handled the same way, but the identity machinery cannot do
+    for it what it does for a comment: GitHub gives only a login, with no lane
+    or session marker. On this shared-account fleet an assignee equal to our
+    own login is therefore NOT attributable to this lane (any lane could have
+    set it), so it is reported as un-attributable and kept as a hit — fail
+    closed. Only a DIFFERENT login is affirmatively another party's. The
+    consequence is deliberate: a lane's own self-assignment still blocks its
+    own dispatch, because suppressing same-account assignments would blind the
+    surface to every other lane on the fleet (a false negative).
     """
     for assignee in issue_data.get("assignees") or []:
         login = assignee.get("login") if isinstance(assignee, dict) else str(assignee)
-        surface.add(f"assignee:{login}", "issue is assigned (claimed)", "strong")
+        who = assignee_attribution(login, identity)
+        if who == "other":
+            surface.add(
+                f"assignee:{login}",
+                "issue is assigned to another account (not this lane's) — claimed",
+                "strong",
+            )
+        else:
+            surface.add(
+                f"assignee:{login}",
+                "issue is assigned to the shared account; no lane/session marker "
+                "can attribute it to THIS lane, so it counts as a hit (fail "
+                "closed)",
+                "strong",
+            )
     for comment in issue_data.get("comments") or []:
         body = comment.get("body") or ""
         if not _CLAIM_RE.search(body):
@@ -875,13 +1012,25 @@ def scan_issue_surface(
 
 # ── target-repo resolution (#4027) ──────────────────────────────────────────
 
+def _valid_slug(slug: str | None) -> str | None:
+    """`owner/name` or None. Remote-derived slugs are UNTRUSTED: a git remote
+    URL (or gh output) can carry terminal control sequences or path junk, and
+    the slug is printed in the report. A slug that is not EXACTLY the GitHub
+    slug shape is rejected, leaving its surfaces INCOMPLETE — never printed and
+    never used to reach gh."""
+    if slug and REPO_SLUG_RE.fullmatch(slug):
+        return slug
+    return None
+
+
 def _remote_slug(git_bin: str, path: str, timeout: float) -> str | None:
     """`owner/name` from the repo's git remote, OFFLINE.
 
     Preferred over `gh repo view` because it is deterministic, needs no network,
     and works identically in a linked worktree. Only gitlab/github-style
     `host:owner/name` and `host/owner/name` URLs are understood; anything else
-    falls through to the gh fallback.
+    falls through to the gh fallback. The result is validated with
+    `REPO_SLUG_RE` (`_valid_slug`) because it is printed and sent to gh.
     """
     rc, out, _err, _to = _run([git_bin, "remote", "-v"], path, timeout)
     if rc != 0:
@@ -896,22 +1045,23 @@ def _remote_slug(git_bin: str, path: str, timeout: float) -> str | None:
             continue
         m = re.search(r"[/:]((?:[^/]+))/([^/\s]+?)(?:\.git)?$", url)
         if m and m.group(2):
-            return f"{m.group(1)}/{m.group(2)}"
+            return _valid_slug(f"{m.group(1)}/{m.group(2)}")
     for _name, url in urls:
         m = re.search(r"[/:]((?:[^/]+))/([^/\s]+?)(?:\.git)?$", url)
         if m and m.group(2):
-            return f"{m.group(1)}/{m.group(2)}"
+            return _valid_slug(f"{m.group(1)}/{m.group(2)}")
     return None
 
 
 def _gh_slug(gh_bin: str, path: str, timeout: float) -> str | None:
-    """`owner/name` from gh itself (fallback when there is no usable remote)."""
+    """`owner/name` from gh itself (fallback when there is no usable remote).
+    Validated like every other remote-derived slug before it is printed."""
     rc, out, _err, _to = _run(
         [gh_bin, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
         path, timeout,
     )
     if rc == 0 and out.strip():
-        return out.strip()
+        return _valid_slug(out.strip())
     return None
 
 
@@ -983,9 +1133,14 @@ def candidate_slugs(git_bin: str, timeout: float, roots: list[str]) -> list[str]
 def find_local_clone(selector: str, git_bin: str, timeout: float,
                      roots: list[str]) -> str | None:
     """A local checkout of `selector`, so the git surfaces describe the TARGET
-    repo rather than whatever directory happens to be the cwd."""
+    repo rather than whatever directory happens to be the cwd. The slug
+    comparison is CASE-INSENSITIVE: GitHub and `gh --repo` accept
+    `Owner/Name`, so a case-different selector must find the clone rather than
+    leaving every git surface INCOMPLETE (a false exit 2)."""
+    want = selector.strip().lower()
     for directory in _git_repo_dirs(roots):
-        if _remote_slug(git_bin, directory, timeout) == selector:
+        slug = _remote_slug(git_bin, directory, timeout)
+        if slug and slug.lower() == want:
             return directory
     return None
 
@@ -1103,12 +1258,15 @@ def run_preflight(
         surfaces[SURFACE_KEYWORDS].note = (
             "source: --keywords; 0 usable keyword(s) after parsing"
         )
+        surfaces[SURFACE_KEYWORDS].blind = True
     elif title is not None:
         # The title WAS fetched — it simply contains no distinctive term. That
         # is an evaluated, empty keyword dimension (number matching still runs),
         # NOT an unqueryable surface. Conflating the two turned a title like
         # "fix graph delete" into a spurious INCOMPLETE (exit 2) once the
-        # cross-cutting stoplist was widened (#3325).
+        # cross-cutting stoplist was widened (#3325). It is still BLIND for
+        # keyword matching, and the verdict now says so (#3378 P2-1) instead
+        # of advertising a complete 7/7-surface scan.
         surfaces[SURFACE_KEYWORDS].note = (
             "source: gh issue title; 0 distinctive keyword(s) — every title term "
             "is generic/cross-cutting, so keyword-only matching has no signal "
@@ -1116,6 +1274,7 @@ def run_preflight(
         )
         if suppressed:
             surfaces[SURFACE_KEYWORDS].note += f"; excluded: {', '.join(suppressed)}"
+        surfaces[SURFACE_KEYWORDS].blind = True
     else:
         surfaces[SURFACE_KEYWORDS].incomplete(
             "keyword-source-unavailable: gh issue title could not be fetched and "
@@ -1245,25 +1404,35 @@ def format_report(
     weak = [h for h in hits if h.strength == "weak"]
 
     lines: list[str] = []
-    slug = target.slug or "(unresolved)"
+    slug = _sanitize(target.slug) or "(unresolved)"
     lines.append(f"collision-preflight: issue #{issue}")
     lines.append(f"repo: {slug}   [resolved from: {target.source}]")
     lines.append(
         f"local checkout: {target.path or '(none — git surfaces INCOMPLETE)'}"
     )
     # The FULL title, never truncated: this line is what makes a wrong-target
-    # read visible at the point of use (#4027). "(unavailable)" is itself a
-    # fail-closed signal — the run cannot be CLEAN without it.
-    lines.append(f"title: {title or '(unavailable — target not established)'}")
-    lines.append(f"keywords: {', '.join(keywords) if keywords else '(none)'}")
+    # read visible at the point of use (#4027). When it is unavailable the
+    # report says so, but that is a VISIBILITY aid, not by itself a fail-closed
+    # gate: `--keywords` can make the keyword dimension complete without a
+    # title. The fail-closed signals are the keyword surface's own status (a
+    # missing title with no --keywords is INCOMPLETE) and the BLIND annotation
+    # on the verdict when no distinctive keyword exists at all.
+    lines.append(
+        f"title: {' '.join(_sanitize(title).split()) if title else '(unavailable — target not established)'}"
+    )
+    lines.append(
+        f"keywords: {', '.join(_sanitize(k) for k in keywords) if keywords else '(none)'}"
+    )
     lines.append(f"keyword gate: >= {max(1, min_keywords)} distinct DISTINCTIVE keyword(s) for a keyword-only hit")
     lines.append("")
     lines.append(f"{'SURFACE':<24} {'STATUS':<11} {'HITS':<5} NOTE")
+    blind = [s for s in ordered if s.blind and s.status == STATUS_CLEAN]
     for surface in ordered:
         note = surface.note or ""
         if surface.truncated:
             note = (note + " " if note else "") + "⚠ TRUNCATED — list is partial"
-        lines.append(f"{surface.name:<24} {surface.status:<11} {len(surface.hits):<5} {note}")
+        status = ("BLIND" if surface in blind else surface.status)
+        lines.append(f"{surface.name:<24} {status:<11} {len(surface.hits):<5} {note}")
     if hits:
         lines.append("")
         lines.append("HITS")
@@ -1274,7 +1443,10 @@ def format_report(
             for hit in surface_hits[:MAX_HITS_SHOWN]:
                 tag = {"strong": "number", "keyword": "keyword",
                        "weak": "weak"}.get(hit.strength, hit.strength)
-                lines.append(f"  [{hit.surface}] {hit.ref} — {hit.detail} ({tag})")
+                lines.append(
+                    f"  [{hit.surface}] {_sanitize(hit.ref)} — "
+                    f"{_sanitize(hit.detail)} ({tag})"
+                )
             if len(surface_hits) > MAX_HITS_SHOWN:
                 # The COUNT is complete and visible; only the detail sample is
                 # capped (a completeness check must never hide a count).
@@ -1344,6 +1516,13 @@ def format_report(
         f"VERDICT: CLEAN (exit {EXIT_CLEAN}) — {len(ordered)}/{len(ALL_SURFACES)} surfaces "
         f"queried, no in-flight work found for #{issue} in {slug}"
     )
+    if blind:
+        lines.append(
+            f"  BLIND: {', '.join(s.name for s in blind)} yielded no distinctive "
+            "keyword(s), so a keyword-only collision could be missed. Number "
+            "matching and every other surface are unaffected; supply --keywords "
+            "to restore the keyword dimension."
+        )
     return "\n".join(lines) + "\n", EXIT_CLEAN
 
 
@@ -1363,6 +1542,19 @@ def _resolve_target(args, timeout: float) -> tuple[RepoTarget | None, int]:
     repo_arg = args.repo
     requested = repo_arg is not None
     slug_explicit: str | None = None
+    # An EMPTY/whitespace `--repo` is a usage error, never the cwd: `Path("")`
+    # is a directory, so it used to take the PATH branch with path="" and run
+    # the git surfaces against os.getcwd() while the report claimed "local
+    # checkout: (none — git surfaces INCOMPLETE)". That is exactly the
+    # unset-shell-variable accident this rejects up front.
+    if repo_arg is not None and not repo_arg.strip():
+        print(
+            "collision-preflight: --repo must be `owner/name` or an existing "
+            "directory; got an empty/whitespace value (an unset shell variable "
+            "must not be reinterpreted as the cwd)",
+            file=sys.stderr,
+        )
+        return None, EXIT_USAGE
     if repo_arg is None:
         path = os.getcwd()
         source = "cwd"
@@ -1387,7 +1579,10 @@ def _resolve_target(args, timeout: float) -> tuple[RepoTarget | None, int]:
         current, _how = resolve_slug(args.gh, args.git, path, timeout)
         target.slug = slug_explicit
         target.source = source
-        if current == slug_explicit:
+        # GitHub and `gh --repo` are case-insensitive; compare that way so a
+        # case-different selector still finds the local clone (and the canonical
+        # resolved slug is what is sent to gh).
+        if current and current.lower() == slug_explicit.lower():
             target.path = path
         else:
             target.path = find_local_clone(slug_explicit, args.git, timeout, roots)

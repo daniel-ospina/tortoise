@@ -405,8 +405,10 @@ python3 tools/collision_preflight.py <N> --repo .
 python3 tools/collision_preflight.py <N> --repo owner/name
 ```
 
-**The target is established, never assumed (#4027).** Every `gh` call carries the resolved
-`owner/name`, and the verdict prints it together with the issue's **full title** — a verdict that
+**The target is established, never assumed (#4027).** Every repository-scoped `gh` call carries
+the resolved `owner/name` (the two deliberate exceptions are `gh repo view`, which *discovers* the
+slug and so has nothing to send yet, and `gh api user`, which identifies the lane's account and is
+not repository-scoped), and the verdict prints it together with the issue's **full title** — a verdict that
 does not name what it measured cannot be trusted. An issue **absent** from the target repo is
 `exit 2`, not CLEAN ("not found here" is not "no in-flight work"), and an omitted `--repo` whose
 number resolves in **more than one** sibling repo is **refused**, never guessed at. Issue numbers
