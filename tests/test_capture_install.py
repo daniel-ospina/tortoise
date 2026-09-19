@@ -1350,7 +1350,7 @@ def test_codex_hooks_refuses_an_unresolvable_home_as_a_populated_error(
     The matrix spans BOTH members of the raise-set, which is why the boundary
     is a catch-all rather than an enumeration:
 
-    * ``relhome`` / ``''`` — ``Path.home()`` returns a NON-absolute value
+    * ``relhome`` — ``Path.home()`` returns a NON-absolute value
       VERBATIM and ``default_root`` refuses it with a ``ValueError``.
     * ``~`` and ``~/x`` — ``Path.home()`` itself RAISES ``RuntimeError``:
       ``pathlib`` refuses when the ``~`` expansion is a no-op.  An earlier
@@ -1360,7 +1360,7 @@ def test_codex_hooks_refuses_an_unresolvable_home_as_a_populated_error(
       ``except ValueError`` boundary.
 
     Mutation: restore the enumerated ``except ValueError`` around the root
-    resolution — the ``relhome``/``''`` cases stay green while the
+    resolution — the ``relhome`` cases stay green while the
     ``~``/``~/x`` cases RED with the raw ``RuntimeError`` traceback."""
     cwd = tmp_path / "proj"
     cwd.mkdir()

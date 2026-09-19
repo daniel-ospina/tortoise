@@ -3067,9 +3067,13 @@ def _cmd_hooks(args) -> int:
         # (#4024 P2-1).  The sibling call sites are already guarded
         # (`capture_install`'s catch-all, `doctor`'s `except Exception`);
         # this one was not.
-        home = _P.home()
+        # `_P.home()` stays INSIDE the boundary but in the ELSE arm: it can
+        # RAISE, so it must be guarded, but an explicit `--dir` makes HOME
+        # irrelevant (`_P(explicit_dir)` never consults it) — evaluating it
+        # above the ternary made an unresolvable HOME abort a `--dir` inspect
+        # or repair that would otherwise have worked.
         root = (_P(explicit_dir) if explicit_dir is not None
-                else default_root(layout, home))
+                else default_root(layout, _P.home()))
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:
