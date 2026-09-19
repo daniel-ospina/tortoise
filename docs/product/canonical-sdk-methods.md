@@ -271,31 +271,31 @@ this" is **not** by itself a strong justification, and several entries below fai
 | R2 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context` | none for gaps | Belief-propagation recall. `recall_gaps` — *what the graph does not know* — has **no analogue in any surveyed product**. | **strong** |
 | R3 | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | get/list (12/13) | **Core.** | — |
 | R4 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | Graphiti search, Neo4j retrievers | Graph-native traversal reachable *without* an LLM. Competitors fold traversal into search. The two governance members are ours alone. | adequate |
-| R5 | `status`, `taxonomy`, `list_*`, `audit`, `check_structure`, `validate_domain`, `stale_points`, `summarize_structure`, `dream_health_check`, `dream_health_state`, **`test_guard`** | `cognee.validate` | Graph structural validation — **Cognee has this**, so the claim is *"we differ in kind"*: ours is ontology-aware (`docs/ONTOLOGY.md`) where Cognee checks orphaned edges and identity mismatch generically. **`test_guard` is a test helper on the product surface — no product justification.** | adequate / **weak** |
+| R5 | `status`, `taxonomy`, `list_*`, `audit`, `check_structure`, `validate_domain`, `stale_points`, `summarize_structure`, `dream_health_check`, `dream_health_state`, **`test_guard`** | `cognee.validate` | Graph structural validation — **Cognee has this**, so the claim is *"we differ in kind"*: ours is ontology-aware (`docs/ONTOLOGY.md`) where Cognee checks orphaned edges and identity mismatch generically. **`test_guard` is kept — see the note below the table.** | adequate |
 | R6 | `get_cross_lens_candidates`, `list_dedup_candidates` | `detect_contradictions` (Cognee, internal) | A **read-only** review queue for link candidates — surfaces the candidate, never auto-merges. No competitor exposes candidate review as public API. | adequate |
 | R7 | `get_provenance_chain`, `belief_timeline`, `restore_point_at` | provenance graph (Cognee) | Cognee also has provenance, so ours must differ in kind: ours is **who decided** (Point→authoredBy→Subject→delegation) to their **where it came from**. `belief_timeline` — how a belief itself changed over time — has no analogue. | adequate / strong |
 | R8 | `events_poll`, `list_batch`, `list_batches` | `history` (Mem0), `runs` (Letta) | A graph-native event log with batch containment. | adequate |
-| R9 | `get_confidence`, `calibrate_summary`, `calibration_passed` | **none — verified absent** | **Belief propagation / probabilistic confidence over a graph.** A zero-result repo-wide code search across all 10 vendor organisations returns no belief, confidence or probabilistic method on any client object. | **strong** |
+| R9 | `get_confidence`, `calibrate_summary`, `calibration_passed` | PSL, OpenCog PLN, NARS, Knowledge Vault | Belief propagation over a graph. **Not novel as a mechanism** — PSL, PLN and NARS all do BP with evidence revision, and Knowledge Vault fused probabilistic claims at web scale. **Novel only as a shipped product surface**: no commercial graph database found that ships belief propagation (Neo4j, Neptune, ArangoDB, TigerGraph, Memgraph, FalkorDB treat confidence as an ordinary property). | **strong as product, not as method** |
 | W1 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | add (13/13) | **Core.** | — |
 | W2 | `create_source`, `complete_source` | `write_note`, `add` | A **source with a credibility tier** whose URL *is* its identity. No competitor models source trust; credibility is not a field anywhere in the survey. | **strong** |
 | W3 | `create_edge`, `create_derivation`, `link_source_to_entity` | `add_triplet` (Graphiti) | Typed edges constrained to an ontology allowlist, versus a free-form triplet insert. | adequate |
-| W4 | `create_operator`, `create_direct_edge` | **none — verified absent** | **Epistemic operators (IMPL / NAND) as first-class nodes.** A repo-wide search across the vendor orgs returns only NAND-flash drivers — never a graph operator. Nobody models entailment or incompatibility as a node. | **strong** |
+| W4 | `create_operator`, `create_direct_edge` | `rdfs:subClassOf`, `owl:disjointWith` | ⚠️ **Corrected.** Typed entailment AND incompatibility as first-class relationships are **standard RDF/OWL** (`subClassOf`, `disjointWith`, `complementOf`) — a novelty claim here would be **false**. What is *not* standard: the relation itself as a **weighted, mitigatable graph object with mutation history**. That narrower claim is the defensible one. | **narrow — see correction** |
 | W5 | `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | ingest (13/13) | **Core**, with file-hash resume — Cognee has `sync`, so this is table stakes rather than differential. | — |
 | W6 | `ingest` | add (13/13) | **Core — and the single most capable call on the surface**: one bundle writes points + entities + sources + connections atomically, with local `ref` labels so edges can reference nodes created in the same call. It is currently folded into `capture_knowledge`; see Open items. | — |
 | W7 | `capture_session`, `checkpoint`, `diary_write`, `diary_read` | Letta conversations, Cognee session | Turn a session into memory with LLM extraction. Episodic-memory bucket is real (6/13). | adequate |
-| W8 | `commit_session` | same | **Weak.** This is an internal pipeline split (extractor-v2 + Layer-1 POST) surfaced as a public name. A caller does not experience it as a different *action* from `capture_session`. | **weak** |
+| W8 | `commit_session` | same | Same user action, **different backend**: it extracts locally (5-stage v2 pipeline), Layer-1 validates, then POSTs to `/v1/sessions/commit`. `capture_session` writes to the local graph. The distinction is real — commit needs a hosted endpoint and an API key — but a caller thinks *"capture this session"* either way. | adequate, **badly named** |
 | W9 | `update`, `update_point`, `update_entity` | update (11/13) | **Core.** | — |
 | W10 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | delete (12/13) | **Core.** | — |
 | W11 | `supersede`, `supersede_point`, `invalidate_point` | Graphiti `invalid_at`/`expired_at` | Supersession is **implicit in theirs** (an ingest side effect they never expose) and **explicit in ours** — a first-class operation with edge transfer. | **strong** |
 | W12 | `retract_point` | none | A claim is **withdrawn without a successor**. Every competitor either deletes or supersedes; none retracts. | **strong** |
 | W13 | `promote_point`, `list_drafts`, `quarantine_batch` | Cognee write proposals | Draft→live promotion that also promotes incident operators, under review gating. Nobody else has a draft lifecycle for claims. | adequate |
-| W14 | `operator_action`, `mitigate_operator`, `annotate_operator` | **none — verified absent** | Same ground as W4: acting on an epistemic operator is meaningless in products that have no operators. | **strong** |
+| W14 | `operator_action`, `mitigate_operator`, `annotate_operator` | none | `mitigate_operator` dampens an operator's effective weight — **no surveyed system has a mitigation-bearing operator object**, in RDF/OWL, PSL, Cyc, PLN or any graph DB. This is the narrowest defensible novelty in the operator family. | **strong** |
 | W15 | `set_point_baseline` | **none** | Declares a claim's **starting belief** (the Beta prior) with provenance on who set it. No product has a per-claim prior. | **strong** |
 | W16 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | `mem_scheduler` (MemOS) | Ours recomputes **beliefs** over a graph; MemOS reschedules **storage**. Different in kind, not degree. | **strong** |
 | W17 | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | none | Source credibility is a first-class, scored, cached property. Absent from every product surveyed. | **strong** |
-| W18 | `approve_merge` | **none — absent by omission** | Every surveyed product resolves entities **automatically**. A human gate on a merge is a deliberate refusal of that default, not a missing feature. | **strong** |
+| W18 | `approve_merge` | TerminusDB (claimed) | Every surveyed **memory** product resolves entities automatically. ⚠️ **Corrected:** TerminusDB *claims* change-request/approval on merge (vendor prose, **unverified** — API docs not read), and Cyc historically required human adjudication of contradictions. Our novelty is narrower: the gate is keyed to **epistemic state** (belief deltas, contested claims), not structural field conflicts. | **moderate — trigger differs, shape does not** |
 | W19 | `file_decision`, `file_human_approval` | `propose_sql_write` (Cognee) | Decisions are **graph nodes** that participate in retrieval, not a pending queue beside the graph. | **strong** |
-| N1–N6 | `org_*`, `graph_*`, `membership_*`, `apikey_*`, `invitation_*`, `signup_token_*` | Chroma AdminClient, Weaviate users/roles, Letta access_tokens | Multi-tenant SaaS control plane, required by the hosted product. **Not product surface** — no competitor treats this as memory API, and it is exempt from the read/write guarantee. Two notes: `invitation_*` (8 methods) is **absent across the field** — nobody else invites, they create users directly — but *"nobody does it"* is not a strong reason to keep eight public methods; and this whole block is 34 of 150 methods, or 22% of the surface. | adequate / **weak on size** |
+| N1–N6 | `org_*`, `graph_*`, `membership_*`, `apikey_*`, `invitation_*`, `signup_token_*` | Chroma AdminClient, Weaviate users/roles, Letta access_tokens | Multi-tenant SaaS control plane. **Two sub-blocks, and they are not the same thing.** `signup_token_*` (3) is the **agent self-signup path** — `agent_signup` (#1709) mints org + membership + API key in one transaction, and `signup_token_recover` is documented keyless recovery ("mint a NEW key on the token's org"). Since we intend agents to sign themselves up with an API key, **this is product capability, not admin** — justification upgraded to strong. `invitation_*` (8) is admin: inviting *humans* into an org, which no competitor models as API. | `signup_token_*` **strong**; `invitation_*` adequate / **weak on size** |
 | N7 | `ulid`, `close`, **`test_guard`** | `close` (7/13) | `close` is core lifecycle. **`ulid` is an ID utility no competitor exposes; `test_guard` is a test helper.** | **weak** |
 
 ### What does not survive review
@@ -304,28 +304,58 @@ Evidence, not taste. These are the entries whose justification is weak on its ow
 
 | Entry | Why it fails |
 |---|---|
-| `test_guard` | A test helper on the product surface. No product justification exists. |
-| `ulid` | An internal ID utility. Nothing competitor-side exposes one; callers can generate ULIDs. |
-| `commit_session` | An internal pipeline split, not a distinct user action from `capture_session`. |
-| `invitation_*` (8 methods) | Absent across the field because nobody *invites* — they create users directly. Eight public methods for an administrative flow no competitor models. |
-| `signup_token_*` (3 methods) | Same class as above; token recovery/revocation for an admin flow. |
+| **`ulid`** | An internal ID utility. Nothing competitor-side exposes one; callers can generate ULIDs. |
+| **`invitation_*`** (8 methods) | Absent across the field because nobody *invites* — they create users directly. Eight public methods for an administrative flow no competitor models. |
+| **`commit_session`** — *the name, not the method* | A distinct backend is a fine distinction to keep; the name does not convey it. A caller cannot tell it means "commit to the hosted service" rather than "finish capturing". |
+| **`test_guard`** — *withdrawn, kept* | Its docstring is *"Assert the connected graph is safe for destructive test teardowns… Raises RuntimeError if the graph appears to be a production graph"* — it guards the exact incident this project already suffered (the FalkorDB production wipe). Nothing is wrong with the method; its **classification** is wrong: test infrastructure on the product surface, which should be documented as test-only rather than marketed as a capability. |
+| **`signup_token_*`** — *withdrawn, kept* | Reclassified as the **agent self-signup path**, not admin CRUD: `agent_signup` (#1709) mints org + membership + API key in one transaction, and recovery is keyless by token. If agents are meant to sign themselves up with an API key, this is core product capability. |
 | `complete_source` | Zero code callers. |
 | `backfill_v25` | Already archived — targets a schema several versions old. |
 | The five unresolvable `sdk_method` values | Declarations that do not resolve (`recommendation: fix-declaration` in the manifest). |
 
 ### The honest headline
 
-**Only two capabilities are genuinely unprecedented**, both verified by a zero-result
-repo-wide code search across all ten vendor organisations: **belief propagation /
-probabilistic confidence over a graph**, and **epistemic operators (IMPL / NAND) as
-first-class nodes**. A third — **human approval on merges** — is absent by deliberate
-omission.
+⚠️ **A prior revision of this section was wrong, and the correction matters.** It compared us
+against **memory** products and concluded that two capabilities — belief propagation and
+epistemic operators — were "genuinely unprecedented". That comparison set cannot support the
+claim. Against **graph, knowledge-graph and reasoning systems**, most of it does not survive:
 
-**Cognee is the product that undercuts most "unprecedented" claims.** It alone ships
-contradiction detection, per-claim provenance, graph structural validation, a write-proposal
-approval queue, ontology management, migration/backfill, and cross-product import adapters.
-Four of the capabilities expected to be unique to us had to be re-justified as *"we differ
-in kind"* rather than *"nobody does this"* — recorded above so the weaker claim is not made.
+- **Typed entailment and incompatibility as first-class relationships are standard RDF/OWL**
+  (`rdfs:subClassOf`, `owl:disjointWith`, `owl:complementOf`), long before us. Claiming novelty
+  there would be **false**.
+- **Belief propagation over a graph is not novel as a mechanism** — PSL, OpenCog PLN and NARS
+  all propagate belief with evidence revision; Knowledge Vault fused probabilistic claims at
+  web scale; provenance semirings (PODS 2007) handled provenance *of a probability*.
+- **Contradiction detection is built into production systems** — GraphDB (on the commit path),
+  Stardog (with inconsistency proof trees), Cyc (a Contradiction Resolver).
+- **Approval on merge is at least marketed** — TerminusDB claims change requests, though on
+  **structural** conflicts rather than epistemic ones.
+
+**What survives is narrower, and it is an integration claim, not a capability claim:**
+
+> No documented knowledge system ships belief propagation whose factors are **user-authored
+> epistemic operators**, surfacing contradiction as a **probabilistic contestedness signal**,
+> gated by **human approval**, and driving **confidence-weighted retrieval** — in one product,
+> applied to agent memory.
+
+Each column exists somewhere — Cyc (entailment + contradiction resolver + TMS), PSL and PLN
+(probabilistic BP over typed implication links), Stardog and GraphDB (production entailment,
+inconsistency detection, proof trees). **None ships them together**, and none is a graph store
+with an agent-memory API. Confidence-weighted retrieval is the least crowded of the six.
+
+**The three closest systems**, and why they are not the same thing:
+
+| System | Why it comes close | Why it is not us |
+|---|---|---|
+| **Cyc** | Entailment + disjointness, a Contradiction Resolver, truth maintenance, human adjudication | Its truth model is **five-valued and explicitly non-probabilistic** — Lenat's paper states Cyc "eschews numeric certainty factors" and reasons by argumentation |
+| **PSL / OpenCog PLN** | Probabilistic inference over typed implication links; PLN's Revision merges conflicting evidence | **Frameworks, not stores** — rules live in a program file, not as graph objects; no approval gate, no retrieval layer, no API to a memory product |
+| **Stardog + GraphDB** | Production entailment, built-in inconsistency detection on commit, proof trees showing rule and premises | **Monotonic, two-valued logic.** No belief, no propagation, no confidence-weighted ranking |
+
+**And a gate on making the claim at all:** our own eval spec records that before #855
+contradiction was **invisible** (variance 0.006 against a 0.04 threshold) and attacks *raised*
+confidence. The epistemic differentiator is therefore true **only of the post-#855 engine with
+the thresholds re-calibrated** — otherwise it describes a design aspiration the product does
+not yet exhibit.
 
 Everything else that looks differential is really an instance of the six core buckets with
 our own semantics attached, which is defensible — but it is not a moat, and should not be
