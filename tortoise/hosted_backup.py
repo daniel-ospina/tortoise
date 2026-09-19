@@ -66,6 +66,11 @@ from tortoise.fork_slot import (
 logger = logging.getLogger(__name__)
 
 DUMP_FORMAT = "tortoise-logical-dump-v1"
+# #3895: writer revision. Rev 1 = node list filtered, edge list NOT (an artifact
+# whose edges may reference nodes it does not carry — the unrestorable shape).
+# Rev 2 = both halves restricted to ONE node set: a rev-2 artifact cannot
+# contain a dangling edge, so a reader that finds one has CORRUPTION.
+_DUMP_REVISION = 2
 _MAGIC = b"TB1"
 _NONCE_LEN = 12
 _AES_KEY_SIZE = 32  # AES-256
@@ -219,6 +224,31 @@ def _sanitize_label(lbl: str) -> str:
     return lbl
 
 
+def _coerce_dump_id(value, what: str) -> int:
+    """Strict int coercion for a dump's ids (``dump_id`` / ``src`` / ``dst``).
+
+    #3895 review P1: a non-integer id in a dump is CORRUPTION. The bare
+    ``int()`` this replaces raised ``TypeError`` on a list/dict, which the
+    import endpoint does not catch (it maps ``ValueError``/``KeyError`` to a
+    422 + quarantine) — so a malformed artifact became a 500 with no
+    quarantine record instead of a pre-restore rejection.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"Malformed dump {what}: {value!r} is not an integer id"
+        )
+    return value
+
+
+def _dump_node(internal_id, labels, props) -> dict:
+    """One export-shaped node row (``__dump_id`` bridge + JSON-safe props)."""
+    return {
+        "dump_id": int(internal_id),
+        "labels": [str(l) for l in (labels or [])],  # noqa: E741
+        "props": dict(props or {}),
+    }
+
+
 def dump_graph(g, graph_name: str | None = None) -> dict:
     """Export the complete graph (nodes + edges + props) as a JSON-safe dict.
 
@@ -231,44 +261,206 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
     # exporting them inflates node_count and restore recreates them
     # spuriously. Meta {key:'calibration_milestone'} is DATA (Gate B state)
     # and is NOT excluded (key-scoped).
+
+    #3895 — BOTH halves are exported over the SAME node set. The node list is
+    filtered by ``_is_export_skip_node``, so the edge list must be restricted
+    to it as well: an edge whose endpoint is not in the exported node set can
+    never be re-linked on restore (``restore_graph``'s
+    ``MATCH (a {__dump_id:$s}), (b {__dump_id:$d})`` binds nothing, the edge is
+    silently lost, and the integrity gate refuses the whole artifact). Before
+    this fix the node loop filtered and the edge loop did not — a
+    9997-node / 10000-edge production artifact exported 313 edges that
+    referenced omitted nodes and was unrestorable *by construction*:
+
+    ``Edge restore incomplete: 9687/10000 linked — dump references missing
+    nodes``.
+
+    Two distinct ways an endpoint can be absent from the node list:
+
+    1. **Export-skipped bookkeeping.** The endpoint is one of the singleton
+       runtime markers #1625 excludes (``GraphEventMeta`` / ``TeamMeta`` /
+       ``EpMeta`` / ``Meta{point_fts_v2|event_fts_v2}``). The edge is dropped
+       and COUNTED (``skipped_edge_count``) — never silently. These markers
+       are not addressable by any edge-creating API (they carry no ``id`` /
+       ``eventId`` / ``url``, the keys ``create_edge``/``create_operator``
+       resolve endpoints by), so no *user* edge can have a marker endpoint.
+       This is the documented zero-relationship guard (``GraphEventMeta``
+       and ``GraphEvent`` nodes carry no edges; plan 2026-08-08-432).
+
+    2. **Read-window race.** The endpoint is real content CREATED between
+       the node read and the edge read (two separate queries — each is its
+       own transaction). Dropping it would be user-data loss, so such
+       endpoints are RECONCILED: re-read by ``id()`` and appended to the
+       node list before edges are filtered. This also makes the export
+       robust to a truncated node result-set (an endpoint absent from the
+       node snapshot is recovered rather than lost).
+
+    ``node_count`` and ``edge_count`` therefore describe the SAME node set
+    — every exported edge has BOTH endpoints in ``nodes``, so a fresh dump
+    always links ``len(edges)/len(edges)``.
     """
     from tortoise.hosted_api import _is_export_skip_node
-    nodes = []
+
+    nodes: list[dict] = []
+    nodes_by_id: dict[int, dict] = {}
+    skipped_ids: set[int] = set()
+
+    def _collect(internal_id, labels, props) -> None:
+        labels_list = [str(l) for l in (labels or [])]  # noqa: E741
+        props_dict = dict(props or {})
+        nid = int(internal_id)
+        if _is_export_skip_node(labels_list, props_dict):
+            skipped_ids.add(nid)
+            return
+        node = _dump_node(nid, labels_list, props_dict)
+        nodes.append(node)
+        nodes_by_id[nid] = node
+
     rows = g.query("MATCH (n) RETURN id(n), labels(n), properties(n)").result_set
     for internal_id, labels, props in rows:
-        labels_list = [str(l) for l in (labels or [])]  # noqa: E741
-        if _is_export_skip_node(labels_list, dict(props or {})):
-            continue
-        nodes.append({
-            "dump_id": int(internal_id),
-            "labels": labels_list,
-            "props": dict(props or {}),
-        })
-    edges = []
+        _collect(internal_id, labels, props)
+
+    raw_edges: list[tuple[int, int, str, dict]] = []
+    pending: set[int] = set()
     rows = g.query("MATCH (a)-[r]->(b) RETURN id(a), id(b), type(r), properties(r)").result_set
     for src, dst, rtype, props in rows:
-        edges.append({
-            "src": int(src),
-            "dst": int(dst),
-            "type": str(rtype),
-            "props": dict(props or {}),
-        })
+        s, d = int(src), int(dst)
+        raw_edges.append((s, d, str(rtype), dict(props or {})))
+        for endpoint in (s, d):
+            if endpoint not in nodes_by_id and endpoint not in skipped_ids:
+                pending.add(endpoint)
+
+    # Reconcile every endpoint that the node read did not see and that the
+    # skip predicate did not omit: it exists NOW (an edge cannot exist
+    # without its endpoints), it was created during the read window, and it
+    # is real content — export it instead of losing its edges. Chunked: the
+    # falkordb client inlines list params into the query header, so an
+    # unbounded IN-list is the same header-size hazard `_EMBED_BATCH` exists
+    # for.
+    ordered_pending = sorted(pending)
+    for i in range(0, len(ordered_pending), _EMBED_BATCH):
+        chunk = ordered_pending[i:i + _EMBED_BATCH]
+        for internal_id, labels, props in g.query(
+            "MATCH (n) WHERE id(n) IN $ids RETURN id(n), labels(n), properties(n)",
+            params={"ids": chunk},
+        ).result_set:
+            if int(internal_id) not in nodes_by_id:
+                _collect(internal_id, labels, props)
+
+    unresolved = {
+        endpoint
+        for s, d, _t, _p in raw_edges
+        for endpoint in (s, d)
+        if endpoint not in nodes_by_id and endpoint not in skipped_ids
+    }
+    if unresolved:
+        # Still unresolved AFTER a reconcile that asked for them by id. Two
+        # readings, and they must not be conflated:
+        #   * the node is LIVE but the read did not return it (a truncated
+        #     node result-set, or a failed/truncated reconcile) — the export
+        #     is TORN and dropping the edge would silently lose real data
+        #     in an artifact that then restores "green";
+        #   * the node is GONE (deleted between the two reads) — its edge is
+        #     stale, so dropping it is faithful to the live graph.
+        # Probe for existence to tell them apart. A probe is ONE row, so it
+        # cannot itself be truncated; a probe error propagates: never classify
+        # an edge on a read we could not complete.
+        live = _first_live_node_id(g, unresolved)
+        if live is not None:
+            raise ValueError(
+                f"dump_graph({graph_name}): node id {live} is LIVE but was not "
+                "returned by the node/reconcile read — refusing to write a "
+                "dump that silently drops the edge(s) incident to it. Re-run "
+                "the backup (a torn read must never look green)."
+            )
+
+    edges: list[dict] = []
+    dropped_skipped = 0
+    dropped_stale = 0
+    for s, d, rtype, props in raw_edges:
+        if s in nodes_by_id and d in nodes_by_id:
+            edges.append({"src": s, "dst": d, "type": rtype, "props": props})
+        elif s in skipped_ids or d in skipped_ids:
+            dropped_skipped += 1
+        else:
+            dropped_stale += 1  # endpoint probed ABSENT (stale edge)
+    if dropped_skipped or dropped_stale:
+        # Non-silent: the drop is logged AND persisted in the dump/manifest
+        # (the manifest is plaintext, the dump is encrypted — an operator
+        # must be able to audit this without the backup key).
+        logger.warning(
+            "dump_graph(%s): dropped %d edge(s) incident to export-skipped "
+            "bookkeeping nodes and %d stale edge(s) whose endpoint was "
+            "confirmed absent (deleted mid-read) — dump stays internally "
+            "consistent (node_count=%d, edge_count=%d)",
+            graph_name, dropped_skipped, dropped_stale,
+            len(nodes), len(edges),
+        )
     return {
         "format": DUMP_FORMAT,
+        # #3895: the writer revision. Rev 2 = node and edge sets restricted to
+        # ONE node set (edges are a subset of nodes by endpoint), so a rev-2
+        # artifact CANNOT contain a dangling edge — a reader seeing one has
+        # CORRUPTION, not a legacy artifact, and must not salvage it.
+        "dump_revision": _DUMP_REVISION,
         "dumped_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         "graph_name": graph_name,
+        # node_count/edge_count are counted over the SAME node set — every
+        # edge has both endpoints in ``nodes`` (#3895).
         "node_count": len(nodes),
         "edge_count": len(edges),
+        # Audit trail for the exclusions (never silent).
+        "excluded_node_count": len(skipped_ids),
+        "skipped_edge_count": dropped_skipped,
+        "unresolved_edge_count": dropped_stale,
         "nodes": nodes,
         "edges": edges,
     }
 
 
-def restore_graph(g, dump: dict) -> dict:
+def _first_live_node_id(g, ids: set[int]) -> int | None:
+    """First id in ``ids`` that EXISTS in ``g`` right now, else None.
+
+    Used only to tell a TORN read (node live, not returned) from a STALE edge
+    (node deleted between the two reads) — #3895. One id per query, each
+    returning a single ``count()`` row: a one-row result cannot be truncated,
+    so this cannot itself miss a live node the way a chunked ``IN $ids`` could.
+    A query error propagates — the caller must never classify an edge on a read
+    it could not complete.
+    """
+    for node_id in sorted(ids):
+        n = g.query(
+            "MATCH (n) WHERE id(n) = $id RETURN count(n)", params={"id": node_id}
+        ).result_set[0][0]
+        if int(n) > 0:
+            return node_id
+    return None
+
+
+def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     """Rebuild the graph from a logical dump into graph handle ``g``.
 
-    Returns {"nodes": N, "edges": M}. Raises ValueError on unsafe labels/types or
-    unsupported dump format.
+    Returns ``{"nodes": N, "edges": M}``; with ``allow_dangling_edges=True``
+    the returned dict additionally carries ``dropped_edges`` and
+    ``dropped_edge_endpoints``.
+
+    Raises ValueError on unsafe labels/types, unsupported dump format, or an
+    edge whose endpoint is not in the dump's node list. The last one is the
+    #3895 integrity gate: a pre-fix dump exported edges over EVERY node while
+    its node list omitted the export-skip bookkeeping classes, so edges
+    incident to those markers reference nodes the dump does not carry and the
+    ``MATCH`` binds nothing. Dropping them silently would be partial data
+    loss invisible to verification — hence the refusal.
+
+    ``allow_dangling_edges`` is the explicit, non-silent repair-on-read path
+    for artifacts ALREADY WRITTEN by the pre-#3895 writer (the fixed writer
+    cannot retroactively add the omitted nodes to a file that exists). It
+    restores every linkable edge, DROPS the unlinkable ones, and reports the
+    exact count + endpoint ids in the return value (the callers surface them
+    in the restore/drill record). It is never the default: a dump whose
+    dangling edge is NOT explained by the export-skip class (genuine
+    corruption) must keep failing closed, and the reader cannot prove
+    provenance for a pre-fix artifact.
     """
     if not isinstance(dump, dict) or dump.get("format") != DUMP_FORMAT:
         raise ValueError(
@@ -277,19 +469,92 @@ def restore_graph(g, dump: dict) -> dict:
         )
     nodes = dump.get("nodes", [])
     edges = dump.get("edges", [])
+    # Container types are part of the fail-closed contract: a non-list / a
+    # non-dict prop bag is CORRUPTION and must surface as a ValueError (the
+    # import endpoint maps ValueError to 422 + quarantine), never as an
+    # uncaught TypeError/500 with no quarantine record (#3895 review P1).
+    if not isinstance(nodes, list):
+        raise ValueError(f"Malformed dump: nodes is not a list ({nodes!r})")
+    if not isinstance(edges, list):
+        raise ValueError(f"Malformed dump: edges is not a list ({edges!r})")
+    # #3895: a rev-2 writer restricts BOTH halves to one node set, so it can
+    # never emit a dangling edge. Salvaging a rev-2 artifact would therefore
+    # mask CORRUPTION as a legacy artifact — refuse it. Revision is absent on
+    # every pre-fix artifact (rev 1) by definition.
+    revision = dump.get("dump_revision", 1)
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise ValueError(f"Malformed dump dump_revision: {revision!r}")
+    if allow_dangling_edges and revision >= _DUMP_REVISION:
+        raise ValueError(
+            f"allow_dangling_edges is for pre-#3895 artifacts (dump_revision 1); "
+            f"this artifact declares dump_revision {revision}, whose writer cannot "
+            "emit a dangling edge — a dangling edge here is corruption, not a "
+            "legacy artifact. Refusing to salvage it."
+        )
 
+    # Validate EVERY node/edge before mutating the target graph: a malformed
+    # row or an unsafe relationship type must abort before any node is created
+    # (and as a ValueError — the import endpoint maps it to a 422 + quarantine,
+    # never an uncaught TypeError/500; #3895 review P1).
+    node_rows: list[tuple[int, list[str], dict]] = []
     for n in nodes:
-        if "dump_id" not in n:
-            raise ValueError("Dump node missing dump_id")
+        if not isinstance(n, dict) or "dump_id" not in n:
+            raise ValueError(f"Dump node missing dump_id: {n!r}")
         labels = n.get("labels") or []
-        safe_labels = ":".join(_sanitize_label(l) for l in labels)  # noqa: E741
-        props = dict(n.get("props") or {})
+        if not isinstance(labels, list):
+            raise ValueError(f"Malformed dump node labels: {labels!r}")
+        safe_labels = [_sanitize_label(l) for l in labels]  # noqa: E741
+        raw_props = n.get("props") or {}
+        if not isinstance(raw_props, dict):
+            raise ValueError(f"Malformed dump node props: {raw_props!r}")
+        props = dict(raw_props)
         if _DUMP_ID_PROP in props:
             raise ValueError(
                 f"Node props contain reserved property {_DUMP_ID_PROP!r} — "
                 "refusing to clobber it during restore"
             )
-        props[_DUMP_ID_PROP] = n["dump_id"]
+        node_rows.append((
+            _coerce_dump_id(n["dump_id"], "node dump_id"), safe_labels, props))
+
+    edge_rows: list[tuple[int, int, str, dict]] = []
+    for e in edges:
+        if not isinstance(e, dict) or not all(
+                k in e for k in ("src", "dst", "type")):
+            raise ValueError(f"Malformed dump edge (missing src/dst/type): {e!r}")
+        raw_props = e.get("props") or {}
+        if not isinstance(raw_props, dict):
+            raise ValueError(f"Malformed dump edge props: {raw_props!r}")
+        edge_rows.append((
+            _coerce_dump_id(e["src"], "edge src"),
+            _coerce_dump_id(e["dst"], "edge dst"),
+            _sanitize_label(e["type"]),
+            dict(raw_props),
+        ))
+
+    # The function REBUILDS a graph — it does not merge into one. Rejecting a
+    # dirty target keeps the returned counts coherent (they describe the dump's
+    # content) and keeps the graph-wide `__dump_id` cleanup from clobbering
+    # pre-existing nodes (#3895 review P1). Export-skip bookkeeping (the
+    # projection's FTS markers) is not content and is tolerated.
+    from tortoise.hosted_api import _is_export_skip_node
+    for row in g.query("MATCH (n) RETURN labels(n), properties(n)").result_set:
+        labels = [str(l) for l in (row[0] or [])]  # noqa: E741
+        if not _is_export_skip_node(labels, dict(row[1] or {})):
+            raise ValueError(
+                "restore_graph target graph is not empty — it rebuilds a graph "
+                "from a dump, it does not merge into an existing one. Restore "
+                "into a fresh temp graph instead."
+            )
+    # Baseline AFTER the emptiness check: a tolerated export-skip marker may
+    # carry an edge, so the graph's total edge count is not necessarily this
+    # restore's count (#3895 review P2).
+    baseline_edges = int(g.query(
+        "MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+
+    for dump_id, labels, props in node_rows:
+        props = dict(props)
+        props[_DUMP_ID_PROP] = dump_id
+        safe_labels = ":".join(labels)
         if safe_labels:
             g.query(f"CREATE (n:{safe_labels}) SET n = $p", params={"p": props})
         else:
@@ -301,9 +566,9 @@ def restore_graph(g, dump: dict) -> dict:
     # limits; a plain-list embedding would poison vector search — search_engine
     # documents this).
     embed_rows = [
-        {"id": n["dump_id"], "v": n["props"]["embedding"]}
-        for n in nodes
-        if isinstance(n.get("props", {}).get("embedding"), list)
+        {"id": dump_id, "v": props["embedding"]}
+        for dump_id, _labels, props in node_rows
+        if isinstance(props.get("embedding"), list)
     ]
     for i in range(0, len(embed_rows), _EMBED_BATCH):
         chunk = embed_rows[i:i + _EMBED_BATCH]
@@ -313,25 +578,80 @@ def restore_graph(g, dump: dict) -> dict:
             params={"rows": chunk},
         )
 
-    for e in edges:
-        if not all(k in e for k in ("src", "dst", "type")):
-            raise ValueError(f"Malformed dump edge (missing src/dst/type): {e!r}")
-        safe_type = _sanitize_label(e["type"])
+    # Which dump endpoints actually materialized? Computed structurally (one
+    # query) instead of one probe-MATCH per edge — a 10k-edge dump would
+    # otherwise pay 10k round-trips.
+    present_ids = {
+        int(row[0]) for row in g.query(
+            f"MATCH (n) WHERE n.{_DUMP_ID_PROP} IS NOT NULL "
+            f"RETURN n.{_DUMP_ID_PROP}"
+        ).result_set
+    }
+
+    def _linkable(row: tuple[int, int, str, dict]) -> bool:
+        return row[0] in present_ids and row[1] in present_ids
+
+    unlinkable = [row for row in edge_rows if not _linkable(row)]
+    missing_endpoints = sorted({
+        endpoint
+        for _s, _d, _t, _p in unlinkable
+        for endpoint in (_s, _d)
+        if endpoint not in present_ids
+    })
+
+    for s, d, safe_type, props in edge_rows:
+        if s not in present_ids or d not in present_ids:
+            continue
         g.query(
             f"MATCH (a {{{_DUMP_ID_PROP}:$s}}), (b {{{_DUMP_ID_PROP}:$d}}) "
             f"CREATE (a)-[r:{safe_type}]->(b) SET r = $p",
-            params={"s": e["src"], "d": e["dst"], "p": dict(e.get("props") or {})},
+            params={"s": s, "d": d, "p": props},
         )
 
     g.query(f"MATCH (n) WHERE n.{_DUMP_ID_PROP} IS NOT NULL REMOVE n.{_DUMP_ID_PROP}")
-    # Edge integrity: every dumped edge must have been linkable. A dangling
-    # src/dst (missing node) would otherwise be silently dropped while the
-    # caller reports len(edges) — partial data loss invisible to verification.
-    actual_edges = g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
-    if int(actual_edges) != len(edges):
+    # Delta over THIS restore (the graph may hold tolerated skip-marker edges).
+    created_edges = int(g.query(
+        "MATCH ()-[r]->() RETURN count(r)").result_set[0][0]) - baseline_edges
+    total_edges = len(edge_rows)
+
+    if unlinkable and not allow_dangling_edges:
+        # Fail closed. The message names the exact count, the missing endpoint
+        # ids, and the only node class a pre-#3895 writer omitted — a bare
+        # "dump references missing nodes" is what made this undiagnosable.
+        shown = ", ".join(str(x) for x in missing_endpoints[:10])
+        more = "" if len(missing_endpoints) <= 10 else \
+            f" (+{len(missing_endpoints) - 10} more)"
         raise ValueError(
-            f"Edge restore incomplete: {actual_edges}/{len(edges)} linked — "
-            "dump references missing nodes"
+            f"Edge restore incomplete: {created_edges}/{total_edges} linked — "
+            f"{len(unlinkable)} edge(s) reference node id(s) absent from the "
+            f"dump's node list [{shown}{more}]. A pre-fix logical dump "
+            f"(#3895) exports edges over EVERY node while its node list "
+            f"omits the export-skip bookkeeping classes (GraphEventMeta, "
+            f"TeamMeta, EpMeta, Meta{{point_fts_v2, event_fts_v2}}), so an "
+            f"edge incident to one of those can never be linked. Re-write the "
+            f"artifact with the fixed writer for a complete restore, or run the "
+            f"pipeline-level salvage repair "
+            f"(restore_backup(..., allow_dangling_edges=True)) to restore the "
+            f"{created_edges} linkable edge(s) with these {len(unlinkable)} "
+            f"reported as dropped — it is not exposed on the customer restore "
+            f"route by design."
+        )
+    # Invariant: the dump's node set and edge set agree (#3895). If the
+    # created count disagrees with what the dump promises to link, the dump
+    # is internally inconsistent — refuse rather than report a partial
+    # restore as complete.
+    if created_edges != total_edges - len(unlinkable):
+        raise ValueError(
+            f"Edge restore incomplete: {created_edges}/"
+            f"{total_edges - len(unlinkable)} linkable edge(s) created — "
+            f"dump/restore disagree on the edge set"
+        )
+    if unlinkable:
+        logger.warning(
+            "restore_graph: dropped %d unlinkable edge(s) referencing "
+            "absent node id(s) %s — allow_dangling_edges=True (legacy "
+            "pre-#3895 artifact)",
+            len(unlinkable), missing_endpoints,
         )
     # ACTUAL node count from the graph (not the dump bookkeeping) — the
     # verification gate must compare real graph state, mirroring the edge check.
@@ -341,13 +661,18 @@ def restore_graph(g, dump: dict) -> dict:
     # TeamMeta node made actual = expected + 1 → RestoreVerificationError).
     # The dst projection's open re-creates the FTS Meta markers, which the
     # dump excludes; calibration_milestone is data and IS counted.
-    from tortoise.hosted_api import _is_export_skip_node
     actual_nodes = 0
     for row in g.query("MATCH (n) RETURN labels(n), properties(n)").result_set:
         labels = [str(l) for l in (row[0] or [])]  # noqa: E741
         if not _is_export_skip_node(labels, dict(row[1] or {})):
             actual_nodes += 1
-    return {"nodes": int(actual_nodes), "edges": int(actual_edges)}
+    result = {"nodes": int(actual_nodes), "edges": int(created_edges)}
+    if unlinkable:
+        # Only reachable with allow_dangling_edges=True — the strict path
+        # raised above. Reported, never silent.
+        result["dropped_edges"] = len(unlinkable)
+        result["dropped_edge_endpoints"] = missing_endpoints
+    return result
 
 
 # ── storage (S3-compatible / in-memory) ──────────────────────────────────────
@@ -937,8 +1262,20 @@ def create_backup(
         "org_id": org_id,
         "graph_name": graph_name,
         "created_at": dump["dumped_at"],
+        # #3895: node_count and edge_count are counted over the SAME node set
+        # (every exported edge has both endpoints in the exported node list) —
+        # the manifest is plaintext and readable without the backup key, so an
+        # operator can trust the pair and audit the exclusions directly.
         "node_count": dump["node_count"],
         "edge_count": dump["edge_count"],
+        "excluded_node_count": dump.get("excluded_node_count", 0),
+        # #3895: the writer revision, so a reader can tell a legacy (rev 1)
+        # artifact — the only kind eligible for salvage — from a rev-2 one,
+        # whose writer cannot emit a dangling edge (a dangling edge there is
+        # corruption).
+        "dump_revision": dump.get("dump_revision", 1),
+        "skipped_edge_count": dump.get("skipped_edge_count", 0),
+        "unresolved_edge_count": dump.get("unresolved_edge_count", 0),
         "sha256": hashlib.sha256(blob).hexdigest(),
         "format": DUMP_FORMAT,
     }
@@ -1290,6 +1627,7 @@ def _promote_payload_fork_free(
     temp_name: str,
     expected_nodes: int,
     expected_edges: int,
+    allow_dangling_edges: bool = False,
 ) -> dict:
     """Install a VERIFIED payload into ``live_g`` with NO ``GRAPH.COPY``.
 
@@ -1300,8 +1638,13 @@ def _promote_payload_fork_free(
 
     * the live graph must be EMPTY first (the logical restore APPENDS; the
       pre-swap delete is best-effort, so emptiness is re-checked here);
-    * the restored counts must equal the counts the temp graph was verified
-      against, else it raises; and
+    * the restored counts must match the counts the temp graph was verified
+      against — node count exactly, and edges counted together with a legacy
+      payload's dropped unlinkable edges exactly as
+      :func:`_restore_into_temp_verify_swap`'s temp verification counts them
+      (``counts["edges"] + dropped_edges``), with ``allow_dangling_edges``
+      threaded through so the SAME payload the temp verify accepted is not
+      re-refused here, else it raises; and
     * a failure names the verified temp graph as intact and the live graph as
       NOT restored — the temp graph is never presented as the live one.
     """
@@ -1328,13 +1671,17 @@ def _promote_payload_fork_free(
             f"{live_now} nodes — refusing to append the restore) — verified "
             f"temp graph {temp_name} intact"
         )
-    promoted = restore_graph(live_g, payload)
+    promoted = restore_graph(
+        live_g, payload, allow_dangling_edges=allow_dangling_edges)
     if (promoted.get("nodes") != expected_nodes
-            or promoted.get("edges") != expected_edges):
+            or promoted.get("edges") + int(promoted.get("dropped_edges", 0))
+            != expected_edges):
         raise RestoreVerificationError(
             f"Restore swap failed (fork slot wedged; fork-free promotion "
             f"restored {promoted.get('nodes')}/{expected_nodes} nodes, "
-            f"{promoted.get('edges')}/{expected_edges} edges) — verified temp "
+            f"{promoted.get('edges')} edges "
+            f"(+{int(promoted.get('dropped_edges', 0))} dropped unlinkable), "
+            f"expected {expected_edges} — verified temp "
             f"graph {temp_name} intact"
         )
     return promoted
@@ -1560,6 +1907,7 @@ def _restore_into_temp_verify_swap(
     expected_nodes: int | None = None,
     expected_edges: int | None = None,
     stamp: Callable[[], None] | None = None,
+    allow_dangling_edges: bool = False,
 ) -> dict:
     """Temp-graph restore → verify → atomic swap — the shared stage behind
     ``restore_backup`` and the hosted ``POST /v1/organizations/{org_id}/import``
@@ -1575,6 +1923,13 @@ def _restore_into_temp_verify_swap(
     ``stamp``: optional post-swap callback (control-plane metadata, best-effort
         at the caller): ``restore_backup`` stamps ``backup_restored_at`` via the
         registry; the import endpoint stamps its ``last_import_sha256`` ledger.
+    ``allow_dangling_edges`` (#3895): opt-in repair-on-read for artifacts
+        written by the pre-fix writer. The restore drops the edges whose
+        endpoints the dump omits, verifies the count against the payload with
+        those drops accounted for, and returns them in ``restored``
+        (``dropped_edges`` / ``dropped_edge_endpoints``). Default False — a
+        dangling edge the export-skip class does not explain keeps failing
+        closed.
 
     Flow: restore into ``{live_name}_restore_{ts}_{rnd}`` → verify node+edge
     counts → empty-backup-over-live guard → pre-restore safety copy of the
@@ -1621,7 +1976,8 @@ def _restore_into_temp_verify_swap(
     pre_name = f"{live_name}_pre_restore_{ts_str}"
     temp_g = db.select_graph(temp_name)
     try:
-        counts = restore_graph(temp_g, payload)
+        counts = restore_graph(
+            temp_g, payload, allow_dangling_edges=allow_dangling_edges)
     except Exception:
         # validation failure (unsafe label, dangling edge, malformed edge) —
         # drop the staging graph; the live graph was never touched
@@ -1645,13 +2001,14 @@ def _restore_into_temp_verify_swap(
             f"Restore verification failed: {counts['nodes']} nodes restored, "
             f"expected {expected_nodes} — live graph untouched"
         )
-    if counts["edges"] != expected_edges:
+    if counts["edges"] + int(counts.get("dropped_edges", 0)) != expected_edges:
         try:  # noqa: SIM105
             temp_g.delete()
         except Exception:
             pass
         raise RestoreVerificationError(
-            f"Restore verification failed: {counts['edges']} edges restored, "
+            f"Restore verification failed: {counts['edges']} edges restored "
+            f"(+{int(counts.get('dropped_edges', 0))} dropped unlinkable), "
             f"expected {expected_edges} — live graph untouched"
         )
 
@@ -1799,6 +2156,7 @@ def _restore_into_temp_verify_swap(
                 live_g, payload,
                 live_name=live_name, temp_name=temp_name,
                 expected_nodes=expected_nodes, expected_edges=expected_edges,
+                allow_dangling_edges=allow_dangling_edges,
             )
         except Exception as promo_exc:
             logger.exception(
@@ -1869,8 +2227,18 @@ def restore_backup(
     key: bytes | None = None,
     target_graph: str | None = None,
     drill: bool = False,
+    allow_dangling_edges: bool = False,
 ) -> dict:
     """Restore an org graph from a stored backup: verify → temp graph → swap.
+
+    ``allow_dangling_edges`` (#3895): opt-in repair-on-read for an artifact
+    written by the pre-fix dump writer — its edge list references nodes its
+    node list omits, so the strict path refuses the whole artifact. With this
+    flag the linkable edges are restored, the unlinkable ones are dropped, and
+    the exact count + endpoint ids are returned in ``restored``
+    (``dropped_edges`` / ``dropped_edge_endpoints``) — never silently. Default
+    False: a dangling edge not explained by the export-skip class still fails
+    closed.
 
     ``db``: falkordb Connection handle (e.g. ``sdk._get_proj().db``) — temp graph and
     the live graph live on the same server.
@@ -1969,6 +2337,7 @@ def restore_backup(
         db, payload,
         live_name=live_name,
         stamp=(None if drill else lambda: _stamp_backup_restored(registry, org_id)),
+        allow_dangling_edges=allow_dangling_edges,
     )
     result["backup_key"] = backup_key
     return result
