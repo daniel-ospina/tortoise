@@ -27,8 +27,12 @@ pytest output are recorded in the PR body / the lane report):
   report ``unconfigured`` again (the pre-alignment read-path mapping) → the
   ``degraded`` tests and the cross-lane parity rows RED.
 * **Drop the status write** — make ``_with_read_status`` a no-op → every
-  ``TestReadPathStates`` state assertion REDs (``KeyError: 'status'``) and the
-  hosted-route ON test REDs.
+  state assertion that ROUTES THROUGH it REDs (``KeyError: 'status'``). The
+  three tests that set the term directly on the ``_get_proj()`` failure path
+  (two on ``tortoise_fts_query``, one on ``recall_state``) stay green under
+  that mutation, as does the hosted-route ON test — it monkeypatches
+  ``_data_sdk`` with a fake that writes the term itself, so the real
+  ``_with_read_status`` is never invoked.
 
 These run on the embedded lane (``TORTOISE_TEST_CARVE_OUT=1``) or a
 ``TORTOISE_DB_URI`` (``tests/conftest.py`` session gate).
@@ -175,19 +179,25 @@ class TestCrossLaneParity:
         """The boundary half is the REAL client lane, not a copy.
 
         ``tortoise/tortoise_client.py`` (the S9 skill-wiring client) imports
-        these terms from the home module, and its exit-code map is the
+        the terms from the home module, and its exit-code map is the
         #3832/D5 split the vocabulary exists to protect: ``degraded`` (off by
         outage) and ``unconfigured`` (off by policy) must stay DISTINCT.
+
+        The BINDING is what is pinned, not string identity: CPython interns
+        identifier-like literals, so a re-forked ``STATUS_DEGRADED =
+        "degraded"`` in the client would still satisfy ``is``. Asserting the
+        client module's own ``status_vocabulary`` binding is what actually
+        catches a re-fork.
         """
         from tortoise import tortoise_client
 
-        assert tortoise_client.STATUS_AVAILABLE is status_vocabulary.STATUS_AVAILABLE
-        assert tortoise_client.STATUS_EMPTY is status_vocabulary.STATUS_EMPTY
+        assert tortoise_client.status_vocabulary is status_vocabulary
         assert (tortoise_client.STATUS_DEGRADED
-                is status_vocabulary.STATUS_DEGRADED)
+                == status_vocabulary.STATUS_DEGRADED)
         assert (tortoise_client.STATUS_UNCONFIGURED
-                is status_vocabulary.STATUS_UNCONFIGURED)
+                == status_vocabulary.STATUS_UNCONFIGURED)
         codes = tortoise_client._STATUS_EXIT_CODES
+        assert set(codes) == set(status_vocabulary.CLIENT_STATUS_TERMS)
         assert codes[status_vocabulary.STATUS_DEGRADED] != codes[
             status_vocabulary.STATUS_UNCONFIGURED]
 
