@@ -846,6 +846,16 @@ def test_rate_limit_map_is_bounded() -> None:
     assert re.search(r"recent\.push\(\s*now\s*\)", body), (
         "the window must be extended with the CURRENT timestamp, or the limiter never trips"
     )
+    # …and the filtered window must REACH that push intact: cycle-15 pinned the
+    # filter's shape, but a plain statement in between — `recent.length = 0;` —
+    # leaves the stored history permanently `[now]`, so the trip can never fire
+    # while the filter, the push and the trip's own pins all still hold
+    # (cycle-19 review). Nothing may touch `recent` between the trip and the push.
+    between = body[_brace_end(body, trip_at) : body.index("recent.push(now)")]
+    assert not re.search(r"\brecent\b", between), (
+        "nothing may mutate the filtered window between the trip and the push: "
+        f"{between.strip()[:60]!r}"
+    )
     # The GUARD is part of the cap: inverting it (`<` instead of `>`) disables
     # eviction entirely while the loop below still reads correctly, and the guard
     # sat outside the old slice (cycle-3 review).
