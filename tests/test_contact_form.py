@@ -835,13 +835,22 @@ def test_rate_limit_map_is_bounded() -> None:
     # still holds — `cutoff` stays "used" by the sweep, so nothing else notices
     # (cycle-15 review). The window's own shape is pinned, and the entry it gains
     # must carry the CURRENT timestamp.
-    window = re.search(
-        r"\(?\s*([A-Za-z_$][\w$]*)\s*(?::\s*[^)=]+)?\s*\)?\s*=>\s*\1\s*>=?\s*cutoff",
-        body,
-    )
-    assert window is not None, (
-        "the rate window must keep only entries newer than `cutoff` — an empty filter "
-        "turns the trip into a dead branch and the limiter into a no-op"
+    # …and the window declaration is pinned as a WHOLE statement (fullmatch, not a
+    # sub-shape search): `re.search` over a prefix of the predicate accepted
+    # `(t) => t > cutoff && false`, which empties the window and makes the trip a
+    # dead branch with the suite green — the exact fail-open this pin's message
+    # forbids, reachable with a literal suffix rather than indirection
+    # (cycle-21 review).
+    window_stmt = re.search(r"const recent\s*=\s*([^;]+);", body)
+    assert window_stmt is not None, "the rate window must be a single statement"
+    assert re.fullmatch(
+        r"\s*\(\s*hits\.get\(\s*ip\s*\)\s*\|\|\s*\[\s*\]\s*\)\s*\.filter\(\s*"
+        r"\(?\s*([A-Za-z_$][\w$]*)\s*(?::\s*[^)=]+)?\s*\)?\s*=>\s*\1\s*>=?\s*cutoff\s*\)\s*",
+        window_stmt.group(1),
+    ), (
+        "the window must be exactly `(hits.get(ip) || []).filter((t) => t > cutoff)` — "
+        f"got {window_stmt.group(1).strip()!r}: any suffix (`&& false`, a chained "
+        "`.filter`) empties it and makes the trip a dead branch"
     )
     assert re.search(r"recent\.push\(\s*now\s*\)", body), (
         "the window must be extended with the CURRENT timestamp, or the limiter never trips"
