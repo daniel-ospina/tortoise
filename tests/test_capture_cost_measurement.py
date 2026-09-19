@@ -1260,7 +1260,8 @@ def test_report_cli_rejects_unusable_input(tmp_path, capsys):
 # embedded DB and deep-equal the row the REAL writer receives.
 
 _B7_TEAM = {"org_id": "team-b7-cost", "tier": "free", "key_id": "k-b7",
-            "legacy_full_access": True, "max_points": 100000}
+            "legacy_full_access": True, "max_points": 100000,
+            "max_sessions": None}
 
 _B7_S2 = ('{"entities": [], "events": [], "operators": [], '
           '"points": [{"content": "s2 point", '

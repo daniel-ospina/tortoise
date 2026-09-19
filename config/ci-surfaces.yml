@@ -35,6 +35,7 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
+  - test_telemetry_registration.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -145,6 +146,9 @@ surfaces:
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #4010: the session-cap removal — drives the hosted capture path + the
+  # registry resolver, so it belongs with the quota/api surface.
+  - test_issue_4010_sessions_unlimited.py
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
@@ -538,6 +542,7 @@ surfaces:
   - test_notify.py
   - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
   - test_open_kinds.py
+  - test_operator_annotator_rebuild.py   # #3689 journaled OperatorAnnotated + PointRevised annotator dims survive rebuild_all
   - test_operator_source_search.py
   - test_operator_source_unit.py
   - test_ops_safety.py
@@ -584,6 +589,7 @@ surfaces:
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
+  - test_precision_leak_4028.py  # #4028: vector-leg relevance floor (hermetic units) + embedded surface tests (embedded_only)
   - test_2952_degraded_read.py   # #2952 (B)+(C): embedder warm-up + declared single-leg reads (docker-lane)
   - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
@@ -642,6 +648,12 @@ surfaces:
   # hosted_api import), the window guard did not run for the very change it
   # guards. Dual-registered with `api` (same #2938 precedent).
   - test_session_import_codex.py
+  # #2901: the canonical terminal-status vocabulary + its consumer parity.
+  # A change to `tortoise/live.py` (the canonical home) or
+  # `tortoise/indexer/github_indexer.py` / the graph-scripts maps to no named
+  # surface, so `core` is the arm that runs on the very change it guards (same
+  # #2498 rationale as test_lifecycle_guards.py above).
+  - test_terminal_status_vocabulary.py
   ep:
   - test_a9_direct_edge_traversal.py
   # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
@@ -978,6 +990,7 @@ slow_files:
 # Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
 # + test_markers).
 carve_out:
+- test_precision_leak_4028.py  # #4028: the surface half asserts embedded brute-force floor semantics
 - test_graph_integrity_gate.py
 - test_per_session_census.py
 - test_resume_gate_parity.py
