@@ -1716,6 +1716,32 @@ def test_cursor_flat_validator_matches_cursor_null_and_float_semantics():
     assert not _is_positive_int_value("1")
 
 
+def test_cursor_flat_validator_regex_and_loop_limit_semantics():
+    """The matcher is judged only in the SAFE direction: a JS-only-valid
+    matcher Python rejects must be ACCEPTED (a valid Cursor config must still
+    install), a Python-only construct JS rejects must be REFUSED, an integral
+    float ``loop_limit`` is valid, and a matcher Python cannot compile must not
+    escape as a traceback.
+
+    Mutation: refuse on any Python ``re.error`` — the JS-only matcher is
+    refused and this REDs; drop the Python-only denylist — ``(?i)a`` is
+    accepted and this REDs; use ``isinstance(int)`` for loop_limit — ``2.0``
+    is refused and this REDs."""
+    from tortoise.hook_install import _flat_entry_is_harness_valid as ok
+    # JS-only but valid: a named group and a Unicode property escape
+    assert ok({"command": "/x", "matcher": "(?<name>a)"})
+    assert ok({"command": "/x", "matcher": "\\p{L}+"})
+    # Python-only: JS `new RegExp` throws on each of these
+    for bad in ("(?i)a", "(?>a)", "a*+", "(?P<n>a)"):
+        assert not ok({"command": "/x", "matcher": bad}), bad
+    # an integral float loop_limit is valid (JS Number.isInteger(2.0))
+    assert ok({"command": "/x", "loop_limit": 2.0})
+    assert not ok({"command": "/x", "loop_limit": 0})
+    # deeply nested groups must not escape as a traceback
+    result = ok({"command": "/x", "matcher": "(" * 600 + ")" * 600})
+    assert isinstance(result, bool)
+
+
 def test_cursor_upgrade_refuses_structure_even_when_version_is_bad(home):
     """A document with BOTH a bad version and a structural defect is a MANUAL
     fix: `upgrade` must REFUSE, not repair the version and leave a file Cursor

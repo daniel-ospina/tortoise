@@ -1333,11 +1333,16 @@ def _is_positive_int_value(value: object) -> bool:
     return False
 
 
-#: Regex constructs Python accepts but JS ``new RegExp`` REJECTS.  The two
-#: engines cannot be mirrored exactly, so a Python-only construct is a definite
-#: JS-invalid matcher (reject); a matcher Python rejects is conservatively
-#: refused too (loud beats a silent whole-file rejection).
-_PYTHON_ONLY_REGEX = ("(?P<", "(?P=", "(?#", "(?(")
+#: Regex syntax Python accepts but JS ``new RegExp`` REJECTS — a definite
+#: JS-invalid matcher (refuse).  Inline flags (``(?i`` etc.), atomic groups
+#: (``(?>``), possessive quantifiers (``*+ ++ ?+ {m,n}+``), and Python's own
+#: group syntax compile in Python and throw in JS, so accepting them would let
+#: a Cursor-invalid file through.
+_PYTHON_ONLY_REGEX = re.compile(
+    r"\(\?(?:P<|P=|#|\(|[imsxaLu])"      # Python group syntax / inline flags
+    r"|\(\?>"                            # atomic group
+    r"|(?:[*+?]|\{\d+(?:,\d*)?\})\+"    # possessive quantifier
+)
 
 
 def _flat_entry_is_harness_valid(entry: object) -> bool:
@@ -1377,14 +1382,22 @@ def _flat_entry_is_harness_valid(entry: object) -> bool:
         matcher = entry["matcher"]
         if not isinstance(matcher, str):
             return False
-        if matcher not in ("", "*") and any(
-                token in matcher for token in _PYTHON_ONLY_REGEX):
-            return False  # JS rejects a Python-only construct
         if matcher not in ("", "*"):
-            try:
+            # The two regex engines cannot be mirrored exactly, so judge only
+            # the SAFE direction: a Python-only construct is a definite
+            # JS-invalid matcher (REFUSE); if Python cannot compile it for any
+            # other reason, JS may well accept it (``(?<name>…)``, ``\p{L}``)
+            # — do NOT block installation on a valid Cursor config, and never
+            # raise (a deeply nested pattern raises RecursionError, not
+            # re.error).
+            if _PYTHON_ONLY_REGEX.search(matcher):
+                return False
+            with contextlib.suppress(Exception):
+                # Python cannot judge a JS-only-valid matcher (``(?<name>…)``,
+                # ``\p{L}``); do NOT block installation on a valid Cursor
+                # config, and never raise (a deeply nested pattern raises
+                # RecursionError, not re.error).
                 re.compile(matcher)
-            except re.error:
-                return False  # may be JS-valid, but refuse loudly
     if "timeout" in entry:
         timeout = entry["timeout"]
         if (isinstance(timeout, bool)
@@ -1393,8 +1406,8 @@ def _flat_entry_is_harness_valid(entry: object) -> bool:
     if "loop_limit" in entry:
         loop_limit = entry["loop_limit"]
         if loop_limit is not None and (
-                isinstance(loop_limit, bool) or not isinstance(loop_limit, int)
-                or loop_limit <= 0):
+                isinstance(loop_limit, bool)
+                or not _is_positive_int_value(loop_limit)):
             return False
     fail_closed_present = "failClosed" in entry
     return not (fail_closed_present
