@@ -1039,16 +1039,19 @@ class _IdCollector(HTMLParser):
 
     @property
     def _support_cdata(self) -> bool:
-        """False: `<![CDATA[ … ]]>` is CDATA only INSIDE foreign content.
+        """False: a CDATA section is CDATA only INSIDE foreign content.
 
-        `HTMLParser` ships this as unconditional ``True``, so it reads a CDATA
-        section in HTML content too, where a browser makes it a BOGUS COMMENT
-        ending at the first `>`. With no `]]>` anywhere, the parser then swallows
-        the rest of the document — `<div id="dup"></div><![CDATA[ > <div
-        id="dup"></div> ]]>` is two elements in Chromium and one here. This
-        collector does not model foreign content, so the browser answer is
-        plainly `False`; `tests/_html_links.py` derives the same value from its
-        foreign-context depth, which this class does not track.
+        `HTMLParser` ships this as unconditional ``True``, and honouring
+        `<![CDATA[ … ]]>` in HTML content makes the tokenizer swallow everything
+        up to `]]>` — where a browser ends a BOGUS COMMENT at the first `>`
+        instead, so the rest of the document is real markup. That is a SILENT
+        miss, the direction that must not happen.
+
+        This collector does not model foreign content, so it has to pick ONE
+        value: `False` errs LOUD there (it counts markup a browser inside
+        `<svg>`/`<math>` does not expose) and matches a browser everywhere else.
+        `tests/_html_links.py` derives the value from its foreign-context depth,
+        which this class does not track.
         """
         return False
 
@@ -1157,6 +1160,13 @@ def test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id() -> None:
     ) == {}
     # A repeated ATTRIBUTE is dropped by the tokenizer before a browser sees it.
     assert _duplicate_element_ids('<div id="dup" id="dup"></div>') == {}
+    # A CDATA section in HTML content (the `_support_cdata` override, #4118):
+    # honouring it would swallow to `]]>`, where a browser ends the comment at
+    # the first `>` and parses the rest as markup. Pinned because no real page
+    # reaches the construct, so nothing else here would notice a regression.
+    assert _duplicate_element_ids(
+        '<div id="dup"></div><![CDATA[ > <div id="dup"></div> ]]>'
+    ) == {"dup": [1, 1]}
     # An `id` in `<template>` content IS counted: a browser keeps that content
     # inert in a fragment `getElementById` never reaches, while the stdlib parses
     # it as markup. That is the fail-loud direction, pinned so changing it is
@@ -1320,6 +1330,11 @@ def test_every_website_page_is_selectable_by_ci() -> None:
     The assertion is on `test_files` rather than `surfaces`, for the reason
     `_guard_reachable_for` documents: a page that selects a DIFFERENT surface
     keeps `surfaces` non-empty while this file still never executes.
+
+    This subsumes the older `test_every_in_scope_page_is_selectable_by_ci`, whose
+    page set is a strict subset of this one. That test is deliberately kept: it
+    documents the BLOG guard's scope, and deleting a `#3950` ratchet inside an
+    id-uniqueness change would be scope creep, not a simplification.
     """
     unselectable = [
         f"website/{page.name}"
