@@ -158,6 +158,50 @@ class _NotFoundDoc(HTMLParser):
             self._buf.append(data)
 
 
+def _strip_html_comments(body: str) -> str:
+    """Remove HTML comments the way the HTML5 tokenizer does.
+
+    Python's HTMLParser closes a comment only at a `--` followed by optional
+    whitespace and `>`; the spec ALSO closes it at the ABRUPT-EMPTY-COMMENT
+    form `<!-->` (and `<!--->`), and at `--!>`.
+    So `<!--><script>location.replace('…')</script>-->` was swallowed into one
+    comment by the parser while Chromium ended the comment at `<!-->` and RAN
+    the script — the payload never reached `handle_starttag`, so neither the
+    pin nor the `<`-ban nor the URL checks saw it (#4006 review, cycle 8).
+
+    The guard therefore does not delegate comment boundaries to a parser whose
+    model differs from the browser's: it strips them first, by the spec's rules,
+    and parses what is left. A not-found page's own normal comments are removed
+    here too, which is harmless — the browser does not execute them either.
+    """
+    out: list[str] = []
+    i = 0
+    while True:
+        start = body.find("<!--", i)
+        if start == -1:
+            out.append(body[i:])
+            break
+        out.append(body[i:start])
+        j = start + 4
+        if body.startswith(">", j):
+            j += 1                       # abrupt-empty-comment: <!-->
+        elif body.startswith("->", j):
+            j += 2                       # abrupt closing: <!--->
+        else:
+            end = body.find("-->", j)
+            bang = body.find("--!>", j)
+            if end == -1 and bang == -1:
+                j = len(body)
+            elif end == -1:
+                j = bang + 4
+            elif bang == -1:
+                j = end + 3
+            else:
+                j = min(end + 3, bang + 4)
+        i = j
+    return "".join(out)
+
+
 def _first_wins() -> dict[str, tuple[str, int]]:
     """First-match lookup over `_redirects`.
 
@@ -208,7 +252,15 @@ def test_top_level_404_html_exists() -> None:
     # `eval(atob(…))` family contains no token to match at all. So the guard
     # constrains the SHAPE of the page instead.
     doc = _NotFoundDoc()
-    doc.feed(body)
+    # Parse the comment-STRIPPED body: the guard's comment model must be the
+    # browser's, or a payload hides inside the gap between them.
+    cleaned = _strip_html_comments(body)
+    assert "<!--" not in cleaned, (
+        "404.html still contains a comment opener after comment stripping — the "
+        "stripper and the browser disagree about comment boundaries, which is "
+        "where a payload hides (#4006 review)"
+    )
+    doc.feed(cleaned)
     assert not doc.meta_http_equiv, (
         "404.html carries a meta http-equiv. A not-found page has no use for one "
         "here — security headers are set at the edge (public/_headers) — and the "
