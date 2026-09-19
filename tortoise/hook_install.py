@@ -1334,15 +1334,23 @@ def _is_positive_int_value(value: object) -> bool:
 
 
 #: Regex syntax Python accepts but JS ``new RegExp`` REJECTS — a definite
-#: JS-invalid matcher (refuse).  Inline flags (``(?i`` etc.), atomic groups
-#: (``(?>``), possessive quantifiers (``*+ ++ ?+ {m,n}+``), and Python's own
-#: group syntax compile in Python and throw in JS, so accepting them would let
-#: a Cursor-invalid file through.
+#: JS-invalid matcher (refuse).  Inline flags and scoped flag removal (``(?i``,
+#: ``(?-i:``), atomic groups (``(?>``), possessive quantifiers (``*+ ++ ?+
+#: {m,n}+``), and Python's own group syntax compile in Python and throw in JS,
+#: so accepting them would let a Cursor-invalid file through.  The possessive
+#: alternative requires an UNESCAPED quantifier char (``\++`` is valid in both
+#: engines).
 _PYTHON_ONLY_REGEX = re.compile(
-    r"\(\?(?:P<|P=|#|\(|[imsxaLu])"      # Python group syntax / inline flags
+    r"\(\?(?:P<|P=|#|\(|-|[imsxaLu])"    # Python group syntax / inline flags
     r"|\(\?>"                            # atomic group
-    r"|(?:[*+?]|\{\d+(?:,\d*)?\})\+"    # possessive quantifier
+    r"|(?<!\\)(?:[*+?]|\{\d+(?:,\d*)?\})\+"  # possessive quantifier
 )
+
+#: Regex syntax JS ``new RegExp`` accepts but Python ``re`` REJECTS.  Used only
+#: when Python cannot compile a matcher: if one of these is present the matcher
+#: is ASSUMED JS-valid (do not block a valid Cursor config); otherwise a compile
+#: failure is a genuine refusal (both engines reject it).
+_JS_ONLY_REGEX = re.compile(r"\(\?<[A-Za-z_]|\\[pP]\{|\\k<|\\u\{")
 
 
 def _flat_entry_is_harness_valid(entry: object) -> bool:
@@ -1385,19 +1393,19 @@ def _flat_entry_is_harness_valid(entry: object) -> bool:
         if matcher not in ("", "*"):
             # The two regex engines cannot be mirrored exactly, so judge only
             # the SAFE direction: a Python-only construct is a definite
-            # JS-invalid matcher (REFUSE); if Python cannot compile it for any
-            # other reason, JS may well accept it (``(?<name>…)``, ``\p{L}``)
-            # — do NOT block installation on a valid Cursor config, and never
-            # raise (a deeply nested pattern raises RecursionError, not
-            # re.error).
+            # JS-invalid matcher (REFUSE).  If Python cannot compile it, accept
+            # ONLY when the matcher carries a known JS-only construct
+            # (``(?<name>…)``, ``\p{L}``); a compile failure with no such
+            # marker means both engines reject it (REFUSE).  Never raise — a
+            # deeply nested pattern raises RecursionError, not re.error.
             if _PYTHON_ONLY_REGEX.search(matcher):
                 return False
+            compiled = False
             with contextlib.suppress(Exception):
-                # Python cannot judge a JS-only-valid matcher (``(?<name>…)``,
-                # ``\p{L}``); do NOT block installation on a valid Cursor
-                # config, and never raise (a deeply nested pattern raises
-                # RecursionError, not re.error).
                 re.compile(matcher)
+                compiled = True
+            if not compiled and not _JS_ONLY_REGEX.search(matcher):
+                return False
     if "timeout" in entry:
         timeout = entry["timeout"]
         if (isinstance(timeout, bool)
@@ -1450,14 +1458,6 @@ def _flat_structure_refusal(data: dict) -> str | None:
                 return (f'a "{event}" entry is not a script object Cursor '
                         f"can parse ({entry!r})")
     return None
-
-
-def _flat_document_refusal(data: dict) -> str | None:
-    """Structure first, then version — the first defect Cursor would reject
-    on.  (Callers that repair the version themselves check the structure
-    directly, so a structural defect is never masked by a bad version.)
-    """
-    return _flat_structure_refusal(data) or _flat_version_refusal(data)
 
 
 def _settings_findings(layout: HarnessLayout, data: dict,
