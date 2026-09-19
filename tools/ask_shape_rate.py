@@ -895,15 +895,18 @@ def seed_timing(questions: list[dict], n: int = 1) -> dict:
 
 # ── main ────────────────────────────────────────────────────────────────────
 
-def _attempts() -> tuple[int, ...]:
+def _attempts(retry: bool = True) -> tuple[int, ...]:
     """Attempts per question. A transient substrate failure (an embedded
     FalkorDB socket vanishing mid-run — OBSERVED repeatedly on a
     load-average-100+ host) is an INFRASTRUCTURE fault, not a product
-    result; retrying once on a fresh store keeps a valid measurement
-    obtainable without laundering the fault. Only a question that fails
-    BOTH attempts is recorded as a per-question FAIL, with its reason and
-    the attempt count."""
-    return (1, 2)
+    result; retrying on a fresh store keeps a valid measurement obtainable
+    without laundering the fault. Only a question that fails EVERY attempt is
+    recorded as a per-question FAIL, with its reason and the attempt count.
+
+    ``retry=False`` (the M2-control arm) runs ONCE: its ``AskReaderUnavailable``
+    records are the designed fail-loud signal, not faults to retry.
+    """
+    return (1, 2, 3) if retry else (1,)
 
 
 def _fault_record(question: dict, error: str, attempts: int) -> dict:
@@ -921,16 +924,18 @@ def _fault_record(question: dict, error: str, attempts: int) -> dict:
 
 def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
              blank: bool, retired_substitution: bool,
-             mutation=None, limit: int | None = None) -> list[dict]:
+             mutation=None, limit: int | None = None,
+             retry_substrate: bool = True) -> list[dict]:
     """Seed + run one movement-control arm over the fixture (bounded by
     ``limit``). Deterministic transports; no provider calls."""
     import tortoise.sdk as sdk_mod
     records = []
     subset = questions[:limit] if limit else questions
+    attempts = _attempts(retry_substrate)
     for q in subset:
         rec: dict | None = None
         last_err = ""
-        for attempt in _attempts():
+        for attempt in attempts:
             sdk_mod._reset_ask_reader_cache_for_tests()
             sdk = sdk_mod.TortoiseSDK(_fresh_db(f"m_{arm}_{attempt}"))
             reader = BlankReader() if blank else probe
@@ -956,15 +961,18 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
                 sdk_mod._default_ask_reader_factory = saved
                 sdk.close()
                 sdk_mod._reset_ask_reader_cache_for_tests()
-            if rec is not None and not rec.get("error"):
+            if rec is not None and _substrate_error(rec) is None:
                 rec["attempts"] = attempt
                 break
-            last_err = (rec or {}).get("error") or last_err
+            if rec is not None:
+                fault = _substrate_error(rec)
+                last_err = ((fault or {}).get("error")
+                            or str(rec.get("error") or ""))
             rec = None
-            if attempt != _attempts()[-1]:
+            if attempt != attempts[-1]:
                 time.sleep(1.0)   # let a thrashing host settle
         if rec is None:
-            rec = _fault_record(q, last_err, _attempts()[-1])
+            rec = _fault_record(q, last_err, attempts[-1])
         records.append(rec)
     return records
 
@@ -1049,6 +1057,7 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             print("[movement] M2-control (blank output, fixed fail-loud)...")
             m2c = _run_arm(questions, arm="m2c", probe=None, blank=True,
                            retired_substitution=False,
+                           retry_substrate=False,
                            limit=args.movement_limit)
             print("[movement] M3 (drop gold sessions' turns)...")
             m3 = _run_arm(questions, arm="m3", probe=ProbeReader(),
@@ -1159,7 +1168,8 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         for i, q in enumerate(questions):
             rec: dict | None = None
             last_err = ""
-            for attempt in _attempts():
+            live_attempts = _attempts()
+            for attempt in live_attempts:
                 sdk_mod._reset_ask_reader_cache_for_tests()
                 sdk = sdk_mod.TortoiseSDK(_fresh_db(f"live_{attempt}"))
                 try:
@@ -1174,15 +1184,18 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                 finally:
                     sdk.close()
                     sdk_mod._reset_ask_reader_cache_for_tests()
-                if rec is not None and not rec.get("error"):
+                if rec is not None and _substrate_error(rec) is None:
                     rec["attempts"] = attempt
                     break
-                last_err = (rec or {}).get("error") or last_err
+                if rec is not None:
+                    fault = _substrate_error(rec)
+                    last_err = ((fault or {}).get("error")
+                                or str(rec.get("error") or ""))
                 rec = None
-                if attempt != _attempts()[-1]:
+                if attempt != live_attempts[-1]:
                     time.sleep(1.0)
             if rec is None:
-                rec = _fault_record(q, last_err, _attempts()[-1])
+                rec = _fault_record(q, last_err, live_attempts[-1])
             # A per-question exception is a FAIL, never a VOID and never a
             # dropped question — only a RESULT whose provider is not the pin
             # makes the run VOID (a low rate must not be laundered as a void,
