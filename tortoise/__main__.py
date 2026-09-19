@@ -3507,9 +3507,11 @@ def _cmd_sessions_import(args) -> int:
     2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
     receipt so an explicit re-import can re-attempt extraction once a key is
     configured. Re-import of the
-    same content is a no-op (receipt exists ⇒ already imported) — and even a
-    re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi parses its own record shape (#3667 — it no longer
+    same content is a no-op (receipt exists ⇒ already imported). A re-POST of
+    an already-extracted session converges server-side (same session_id ⇒ no
+    new Session or turn Points); a re-POST of a DEFERRED keyless session
+    re-attempts extraction and mints its memory Points (#4188). pi parses its
+    own record shape (#3667 — it no longer
     aliases the codex parser, which returned 0 turns for real Pi sessions).
     The parsed conversation is windowed to the hosted turn cap
     (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi

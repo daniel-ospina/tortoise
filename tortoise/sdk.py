@@ -3284,9 +3284,9 @@ class TortoiseSDK:
         # ids with IN-CAPTURE-ONLY dedup, and _extract_session_llm folds
         # partial emissions live even on raise — a failed M2 attempt leaves
         # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
-        # #1727 hole the replay skip closed). Retry fires only when BOTH the
-        # prior attempt ran v2 (capture_extractor recorded) AND this request
-        # runs v2 (env != m2) — otherwise replay (safe no-op).
+        # #1727 hole the replay skip closed). Retry fires only when the prior
+        # attempt ran a CONVERGENT lane (v2, or the keyless "none" lane —
+        # #3892) AND this request runs v2 (env != m2) — otherwise replay.
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
         # #3892: a keyless capture records lane "none" (no lane ran), and a
@@ -3761,7 +3761,8 @@ class TortoiseSDK:
             # (zero-write no-op; the stored value — True or legacy None —
             # stays untouched, matching the replay posture).
             # Review (PR #2473): the SET also records the extractor lane that
-            # RAN (v2/m2) so the retry gate (above) can require a v2 prior —
+            # RAN (v2/m2/none) so the retry gate (above) can require a
+            # convergent prior —
             # the M2 lane's partial emissions are non-convergent ULID claims,
             # never retried.
             # Non-fatal bookkeeping (codebase posture: receipt/last-error/

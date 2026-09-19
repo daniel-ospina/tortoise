@@ -8426,6 +8426,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # since #3914. #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    #
+    # #3892: metering truth. The turn loop below runs for EVERY request, so a
+    # re-capture of a GROWN transcript writes NEW turn Points even when the
+    # branch taken extracts nothing (a keyless re-capture, or a keyless retry
+    # on the M2 lane). The write-op/abuse meter keys on the ACTUAL write — the
+    # prior stored-turn count — not on which branch ran (see the meter below).
+    prior_turn_count = 0
+    if session_existed:
+        _prior_turns = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+            "WHERE t.is_episodic = true RETURN count(t)",
+            params={"sid": session_id}).result_set
+        prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
+
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         # P1 #1529 (D10, #721 parity): isinstance-first content coercion — a
@@ -8868,19 +8882,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         logging.getLogger("tortoise.api").exception(
             "session capture audit write failed (non-fatal)")
     # Metering (#681): best-effort write-op count for overage billing. A
-    # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
-    # not inflate metering/abuse with phantom writes (review PR #1827).
-    # #3892: a keyless re-capture takes the TRUE-retry lane, and its turn loop
-    # may write NEW turn Points when the transcript has grown (the harness
-    # re-captures a resumed session), so a keyless retry IS metered like any
-    # other retry. The conservative over-count on an identical-payload retry is
-    # accepted (the abuse counter below already documents that posture);
-    # skipping the meter instead would be a billing/abuse blind spot.
-    if not session_existed or retry_failed_capture:
+    # replay (session_existed) with an UNCHANGED transcript writes ZERO nodes —
+    # an idempotent re-POST must not inflate metering/abuse with phantom writes
+    # (review PR #1827). #3892: a re-capture of a GROWN transcript writes new
+    # turn Points even when the branch extracts nothing (keyless re-capture, or
+    # an M2-lane keyless retry), so the meter keys on the ACTUAL write
+    # (`prior_turn_count`), not on which branch ran — otherwise those paths are
+    # a billing/abuse blind spot. The conservative over-count for the abuse leg
+    # is the documented posture.
+    if (not session_existed or retry_failed_capture
+            or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt. A keyless
-        # retry is metered too: its turn loop may write new turn Points on a
-        # grown transcript (see the #3892 lead-in above).
+        # retry is metered too: see the #3892 lead-in above.
         _record_write_op(org)
         # #3359: one capture_cost row per capture ATTEMPT that ran an
         # extraction (successful or errored — a failed extraction that made

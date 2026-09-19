@@ -325,6 +325,43 @@ def test_hosted_m2_lane_discloses_the_refused_keyless_retry(monkeypatch, client)
     assert "TORTOISE_SESSION_EXTRACTOR=m2" in warnings, warnings
 
 
+def test_metering_counts_a_grown_keyless_recapture(monkeypatch, client):
+    """#4188 (review cycle 3): the turn loop runs for EVERY request, so a
+    keyless re-capture of a GROWN transcript writes NEW turn Points even
+    though its branch extracts nothing. It must be metered — keying the meter
+    on which branch ran (not on the actual write) was a billing/abuse blind
+    spot."""
+    import tortoise.hosted_api as ha_mod
+    meter: list = []
+    monkeypatch.setattr(
+        ha_mod, "_record_write_op",
+        lambda org, nodes_written=0: meter.append(
+            (org["org_id"], nodes_written)))
+
+    # 1) keyed capture (mock seam on) succeeds → a fresh write is metered.
+    one = [{"role": "user", "content": "first turn"}]
+    r1 = client.post("/v1/sessions", json={
+        "conversation": one, "session_id": "s-meter-grown"})
+    assert r1.status_code == 200, r1.text
+    assert meter, "a fresh capture must be metered"
+
+    # 2) keyless re-capture of the SAME session with a GROWN transcript: the
+    #    prior SUCCEEDED (so the retry gate does NOT fire) but the turn loop
+    #    writes a new turn Point — metered on the actual write.
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    meter.clear()
+    grown = [*one, {"role": "assistant", "content": "second turn"}]
+    r2 = client.post("/v1/sessions", json={
+        "conversation": grown, "session_id": "s-meter-grown"})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["extraction_mode"] == "no-provider", r2.json()
+    assert meter, \
+        "a grown keyless re-capture writes a new turn Point and must be metered"
+
+
 def test_default_llm_with_provider_key_422_on_empty(monkeypatch, client):
     """P1 #1529: an EMPTY conversation is now rejected with 422 before any
     write (the old "graceful" 200 + extracted:0 is the E2E-8 owned negative
