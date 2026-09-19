@@ -744,6 +744,17 @@ EXPECTED_CLASSIFICATION = {
     # recommended: cloudflare-purge.ts is best-effort and fail-open by design
     "CF_API_TOKEN": ("recommended", ["production"]),
     "CF_ZONE_ID": ("recommended", ["production"]),
+    # #2409 contact form: absent → the endpoint answers 503 not_configured
+    # (loud, actionable) while the rest of the site serves normally. Deliberately
+    # NOT `required`: that would red every deploy — including the one shipping
+    # the form — until the endpoint is bound. Promote it once bound. It is a
+    # plain intake URL plus the intake's OWN inbound shared secret for the
+    # website_contact producer (that secret can submit an item and nothing else —
+    # no send, no read); the form is an intake producer (receiving is the
+    # mechanism; sending is the exception), and #393 is a budget to manage —
+    # never a reason to refuse to build.
+    "CONTACT_INTAKE_URL": ("recommended", ["production"]),
+    "CONTACT_INTAKE_SECRET": ("recommended", ["production"]),
 }
 
 

@@ -204,7 +204,7 @@ PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
 FOOTER_PAGES = ("/auth", "/signup", "/signin", "/self-hosted.html", "/faq")
 CRAWL_PAGES = (
     "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
-    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq",
+    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq", "/contact",
 )
 
 # ── Pinned canonical sentences (T1/T2 Step 2 — the authoritative set; ──────
