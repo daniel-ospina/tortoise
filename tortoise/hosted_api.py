@@ -49,6 +49,12 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import API_KEY_PREFIXES, hash_api_key
+from tortoise.capture_receipts import (  # #3809: ONE key definition
+    capture_last_error_key as _capture_last_error_key,
+)
+from tortoise.capture_receipts import (
+    capture_receipt_key as _capture_receipt_key,
+)
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.hosted_backup import (
     MemoryStorage,
@@ -9431,20 +9437,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # REGISTERED onboarding state keys (Task 11's registration table) — an
 # unregistered key would be silently dropped by the _update_onboarding_state
 # allowlist filter.
-
-def _capture_receipt_key(harness: str | None) -> str:
-    """Receipt state key for a harness — per-harness when present, the bare
-    legacy key for no-harness hooks (T1-P3 None-guard)."""
-    return f"session_capture_receipt_{harness}" if harness else \
-        "session_capture_receipt"
-
-
-def _capture_last_error_key(harness: str | None) -> str | None:
-    """Per-harness last-error state key. No bare variant is registered — a
-    legacy no-harness hook has no per-harness dashboard row to read it."""
-    if not harness:
-        return None
-    return f"session_capture_last_error_{harness}"
+#
+# #3809: the key SPELLING lives in ONE place — ``tortoise.capture_receipts``
+# — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
+# so both this server and ``tortoise session verify`` derive the same name.
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,
@@ -10402,6 +10398,25 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             "created_at": er[3],
         })
 
+    # #3809: the session's graph SOURCE node (`session:<id>`, ontology v3.6 §4.6
+    # agentSession) — so `tortoise session verify` can prove the session
+    # "appears in the graph as a source" over the REST surface rather than
+    # inferring it from the presence of turn points. Additive: a degraded
+    # capture that never materialized the Source reports `source: null`,
+    # never a fabricated stub.
+    source = None
+    source_rows = proj.g.query(
+        "MATCH (src:Source {url:$url}) "
+        "RETURN src.url, src.sourceKind, src.eventId",
+        params={"url": f"session:{session_id}"},
+    ).result_set
+    if source_rows:
+        source = {
+            "url": source_rows[0][0],
+            "sourceKind": source_rows[0][1],
+            "eventId": source_rows[0][2],
+        }
+
     return {
         "id": sess[0],
         "created_at": sess[1],
@@ -10418,6 +10433,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,
+        "source": source,
     }
 
 
