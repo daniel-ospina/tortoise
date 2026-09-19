@@ -130,40 +130,42 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 **Different axis — exempt, not gated:** `docs/event-catalog.md` (the 30-day
 `TORTOISE_EVENT_RETENTION_DAYS` operational event log, not a deletion promise).
 
-## Proposed public wording — PENDING OWNER APPROVAL
+## Public wording — §6 APPROVED (2026-09-18); Deletion-scope/DPA pending
 
-> ⛔ **Do not publish until the owner approves.** This is the draft for
-> `website/privacy.html` §6 / §"Deletion scope" and `website/dpa.html` §11.
-> The PR that applies it is opened as a draft for exactly this reason.
+> **Privacy §6 is OWNER-APPROVED.** The owner ruled (2026-09-18): *"Delete =
+> gone from your view immediately · restorable for 7 days · no copy remains
+> after about four weeks."* The approved §6 bullets are quoted below and are now
+> applied to `website/privacy.html` and its mirror
+> `docs/drafts/2026-08-08-657-privacy-draft.md`. The §"Deletion scope" and
+> `website/dpa.html` §11 sentences are aligned to the same one-number style and
+> are **pending the owner's confirmation** — the PR stays a draft until they are.
+>
+> **Division of labour.** The policy copy states **one number** (four weeks)
+> plus the single graph exception. The 24-hour / 7-day / 4-weekly rotation, the
+> per-graph-vs-entity distinction, the best-effort purge caveat, the mirror
+> note, and the open backups-on-a-delete decision live in the sections above.
+> The doc explains; the policy states. Neither may contradict the other.
 
-**Privacy §6 — replace the two list items:**
+**Privacy §6 — the approved list items (applied):**
 
-> **Knowledge graphs.** Deleting a knowledge graph removes it from your view
+> **Memory graphs.** Deleting a memory graph removes it from your view
 > immediately and revokes its API keys. It stays restorable from the
-> organization's "Trash" for **7 days** (the single source of truth is the
-> [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)).
-> After the 7-day window the graph is permanently erased, together with its
-> backup copies.
+> organization's "Trash" for 7 days. After that it is permanently erased,
+> together with its backup copies.
 
-> **Backups.** Snapshots of live data are kept on a rolling schedule of 24
-> hourly, 7 daily, and 4 weekly copies, so a snapshot of data that was *live*
-> at the time may persist for up to about **four weeks**. This is a backup
-> horizon, not a retention claim about content you delete. At the end of a
-> deleted graph's 7-day window we erase its own backup copies from our primary
-> storage; that erasure is best-effort and is not retried if an individual copy
-> cannot be removed, and copies held in our secondary disaster-recovery store
-> (disabled by default) are not deleted.
+> **Backups.** Our backups cover the last four weeks. A backup taken while your
+> data was live can therefore still contain it for up to four weeks. A deleted
+> memory graph is not in that category — its own backups are erased when its
+> 7-day window ends.
 
-**Privacy §"Deletion scope" — replace the closing sentence:**
+**Privacy §"Deletion scope" — the aligned closing sentence (pending confirmation):**
 
-> A knowledge graph deleted in the product follows its **7-day recovery
-> window** before permanent erasure, as described in §6. Deleting a team
-> account removes access immediately and is restorable for 7 days.
+> A deleted memory graph, user account, or team account remains restorable for
+> 7 days before permanent erasure, as described in §6; the
+> [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)
+> is the single source of truth for these windows.
 
-**DPA §11 — replace the "limited additional period" phrase:**
+**DPA §11 — the aligned one-number form (pending confirmation):**
 
-> … data in backups is retained for a limited period on a rolling 24-hour /
-> 7-day / 4-weekly schedule (about four weeks at most for snapshots of data
-> that was live; backups of a deleted team account are not yet erased on this
-> schedule, as recorded in the retention and deletion policy) to maintain
-> integrity, and is not used for any other purpose.
+> … data in backups retained for up to four weeks — our backups cover the last
+> four weeks — to maintain integrity and not used for any other purpose.

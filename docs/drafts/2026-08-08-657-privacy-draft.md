@@ -159,8 +159,8 @@ Retention carve-outs, stated honestly:
 
 - **Billing and transactional records** are retained as required by applicable law, including tax and accounting obligations (GDPR Art. 17(3) carve-out for legal compliance).
 - **Analytics data** is handled in accordance with the analytics section (§3) and the retention terms of each analytics provider; analytics data is not silently claimed to be deleted.
-- **Knowledge graphs.** Deleting a knowledge graph removes it from your view immediately and revokes its API keys. It stays restorable from the organization's "Trash" for **7 days** (the single source of truth is the [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md)). After the 7-day window the graph is permanently erased, together with its backup copies.
-- **Backups.** Snapshots of live data are kept on a rolling schedule of 24 hourly, 7 daily, and 4 weekly copies, so a snapshot of data that was *live* at the time may persist for up to about **four weeks**. This is a backup horizon, not a retention claim about content you delete. At the end of a deleted graph's 7-day window we erase its own backup copies from our primary storage; that erasure is best-effort and is not retried if an individual copy cannot be removed, and copies held in our secondary disaster-recovery store (disabled by default) are not deleted.
+- **Memory graphs.** Deleting a memory graph removes it from your view immediately and revokes its API keys. It stays restorable from the organization's "Trash" for 7 days. After that it is permanently erased, together with its backup copies.
+- **Backups.** Our backups cover the last four weeks. A backup taken while your data was live can therefore still contain it for up to four weeks. A deleted memory graph is not in that category — its own backups are erased when its 7-day window ends.
 
 ## 7. Security (outline ⑦)
 
@@ -262,7 +262,7 @@ This policy is versioned. When this policy changes, the version number and effec
 
 **What this channel covers.** The email channel covers: (a) account data, (b) non-account data, (c) users who cannot log in to their account, and (d) access, export, and objection requests. It is the general-purpose rights channel for this release.
 
-**Deletion scope.** When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained. A knowledge graph deleted in the product follows its 7-day recovery window before permanent erasure, as described in §6.
+**Deletion scope.** When a deletion request is fulfilled, account and associated data is deleted or de-identified, subject to the retention carve-outs in §6 (billing/transactional records retained as required by law; analytics data handled per the analytics section). Deletion does not extend to content you have already shared publicly or to data that others have lawfully obtained. A deleted memory graph, user account, or team account remains restorable for 7 days before permanent erasure, as described in §6; the [retention and deletion policy](https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md) is the single source of truth for these windows.
 
 **Self-service deletion (future).** An in-product self-service account deletion feature does not exist at the time of this publication, so this policy does not promise one. If a self-service deletion feature is added to the product, this policy will be updated to describe it.
 
