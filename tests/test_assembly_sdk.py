@@ -633,7 +633,24 @@ def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
 def test_caps_bind_and_no_starvation(sdk, monkeypatch):
     """Fired caps: assemble_context item cap (40) + 8000-token + 32 KiB byte
     caps bind post-CAP lines; slice-level truncation is authoritative BEFORE
-    the item cap (admission.truncated on the hub)."""
+    the item cap (admission.truncated on the hub).
+
+    The caps are SET here to a known small shape rather than read from the
+    product defaults (#4105 raised the ask-lane defaults to 200/200/200/
+    16000/128KiB) - this test pins the cap-BINDING mechanism, and a
+    default change must not silently un-bind it."""
+    from tortoise.retrieval import (
+        ASK_CONTEXT_BYTE_CAP_ENV,
+        ASK_CONTEXT_ITEM_CAP_ENV,
+        ASK_CONTEXT_TOKEN_CAP_ENV,
+        ASK_POOL_SIZE_ENV,
+        ASK_RETRIEVAL_LIMIT_ENV,
+    )
+    monkeypatch.setenv(ASK_RETRIEVAL_LIMIT_ENV, "40")
+    monkeypatch.setenv(ASK_CONTEXT_ITEM_CAP_ENV, "40")
+    monkeypatch.setenv(ASK_POOL_SIZE_ENV, "120")
+    monkeypatch.setenv(ASK_CONTEXT_TOKEN_CAP_ENV, "8000")
+    monkeypatch.setenv(ASK_CONTEXT_BYTE_CAP_ENV, "32768")
     ag.build_base_graph(sdk)
     ag.build_hub_graph(sdk, n_points=60)
     aa = run_ask_assembled(sdk, 
