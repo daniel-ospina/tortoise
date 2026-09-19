@@ -1,7 +1,7 @@
 {
   "instrument": "tools/ask_shape_rate.py",
   "instrument_sha256": "a8e4125544d9c2c3e547537473f70689abd2c542d077aeff7fb346177359fd1a",
-  "generated_at": "2026-09-19T00:23:03.872727+00:00",
+  "generated_at": "2026-09-19T00:31:03.754287+00:00",
   "fixture": {
     "path": "tests/fixtures/ask_spotcheck_composition.json",
     "sha256": "7f4062643323af4e5d0fec0b98bb3e3ca8499362c3f7e07a83c55f07633d15fa",
@@ -13,7 +13,7 @@
     "n_turns": 10470,
     "tree_pin": {
       "asserted": true,
-      "sha": "2cf3323cc5edc9546065ff2ba2f462f7395922ff"
+      "sha": "9a4ba7abe6158d42bc479a25b799bb76d07b73a2"
     }
   },
   "decision_rule": {
@@ -55,11 +55,11 @@
       {
         "question_id": "0100672e",
         "turns": 486,
-        "seed_s": 1.44
+        "seed_s": 1.9
       }
     ],
     "total_turns_all_21": 10470,
-    "extrapolated_full_21_s": 31.0
+    "extrapolated_full_21_s": 40.9
   },
   "known_green": {
     "ok": true,
@@ -93,19 +93,19 @@
   "movement": {
     "baseline": {
       "l1_pn": {
-        "passed": 16,
+        "passed": 21,
         "n": 21,
-        "rate": 0.7619047619047619
+        "rate": 1.0
       },
       "l2_pn": {
-        "passed": 15,
+        "passed": 21,
         "n": 21,
-        "rate": 0.7142857142857143
+        "rate": 1.0
       },
       "l3_pn": {
-        "passed": 15,
+        "passed": 20,
         "n": 21,
-        "rate": 0.7142857142857143
+        "rate": 0.9523809523809523
       },
       "per_question": [
         {
@@ -134,11 +134,11 @@
         },
         {
           "question_id": "1de5cff2",
-          "l1": false,
-          "l2": false,
-          "l3": false,
-          "abstained": null,
-          "error": "AskRetrievalUnavailable: annotation unavailable: ConnectionError"
+          "l1": true,
+          "l2": true,
+          "l3": true,
+          "abstained": false,
+          "error": null
         },
         {
           "question_id": "2133c1b5",
@@ -150,11 +150,11 @@
         },
         {
           "question_id": "26bdc477",
-          "l1": false,
-          "l2": false,
-          "l3": false,
-          "abstained": null,
-          "error": "AskRetrievalUnavailable: annotation unavailable: ConnectionError"
+          "l1": true,
+          "l2": true,
+          "l3": true,
+          "abstained": false,
+          "error": null
         },
         {
           "question_id": "830ce83f",
@@ -191,7 +191,7 @@
         {
           "question_id": "d6233ab6",
           "l1": true,
-          "l2": false,
+          "l2": true,
           "l3": true,
           "abstained": false,
           "error": null
@@ -222,11 +222,11 @@
         },
         {
           "question_id": "eace081b",
-          "l1": false,
-          "l2": false,
-          "l3": false,
-          "abstained": null,
-          "error": "AskRetrievalUnavailable: annotation unavailable: ConnectionError"
+          "l1": true,
+          "l2": true,
+          "l3": true,
+          "abstained": false,
+          "error": null
         },
         {
           "question_id": "f4f1d8a4_abs",
@@ -262,19 +262,19 @@
         },
         {
           "question_id": "gpt4_93159ced_abs",
-          "l1": false,
-          "l2": false,
-          "l3": false,
-          "abstained": null,
-          "error": "AskRetrievalUnavailable: annotation unavailable: ConnectionError"
+          "l1": true,
+          "l2": true,
+          "l3": true,
+          "abstained": true,
+          "error": null
         },
         {
           "question_id": "gpt4_d84a3211",
-          "l1": false,
-          "l2": false,
-          "l3": false,
-          "abstained": null,
-          "error": "AskRetrievalUnavailable: annotation unavailable: ConnectionError"
+          "l1": true,
+          "l2": true,
+          "l3": true,
+          "abstained": false,
+          "error": null
         }
       ]
     },
@@ -284,42 +284,41 @@
         "0100672e",
         "0a995998",
         "1d4e3b97",
+        "1de5cff2",
         "2133c1b5",
+        "26bdc477",
         "830ce83f",
         "b0479f84",
         "ba358f49_abs",
         "ceb54acb",
+        "d6233ab6",
         "e4e14d04",
         "e831120c",
         "e9327a54",
+        "eace081b",
         "f4f1d8a4_abs",
         "gpt4_6ed717ea",
         "gpt4_7a0daae1",
-        "gpt4_8279ba02"
+        "gpt4_8279ba02",
+        "gpt4_93159ced_abs",
+        "gpt4_d84a3211"
       ],
       "named_leg_moved": true,
-      "collateral": {
-        "L1": [
-          "0100672e"
-        ],
-        "L3": [
-          "0100672e"
-        ]
-      },
+      "collateral": {},
       "l1_directions": {
         "must_abstain_green": 3,
         "must_abstain_red": 0,
-        "must_not_abstain_green": 17,
-        "must_not_abstain_red": 1
+        "must_not_abstain_green": 18,
+        "must_not_abstain_red": 0
       },
       "per_question": [
         {
           "question_id": "0100672e",
-          "l1": false,
+          "l1": true,
           "l2": false,
-          "l3": false,
-          "abstained": null,
-          "error": "AskRetrievalUnavailable: annotation unavailable: ConnectionError"
+          "l3": true,
+          "abstained": false,
+          "error": null
         },
         {
           "question_id": "0a995998",
@@ -489,34 +488,31 @@
         "0100672e",
         "0a995998",
         "1d4e3b97",
+        "1de5cff2",
         "2133c1b5",
+        "26bdc477",
         "830ce83f",
         "b0479f84",
-        "ba358f49_abs",
         "ceb54acb",
         "d6233ab6",
         "e4e14d04",
         "e831120c",
         "e9327a54",
+        "eace081b",
         "gpt4_6ed717ea",
         "gpt4_7a0daae1",
-        "gpt4_8279ba02"
+        "gpt4_8279ba02",
+        "gpt4_d84a3211"
       ],
       "named_leg_moved": true,
       "collateral": {
-        "L2": [
-          "0100672e",
-          "0a995998",
-          "830ce83f",
-          "ba358f49_abs",
-          "ceb54acb",
-          "gpt4_7a0daae1"
-        ],
         "L3": [
           "0100672e",
           "0a995998",
           "1d4e3b97",
+          "1de5cff2",
           "2133c1b5",
+          "26bdc477",
           "830ce83f",
           "b0479f84",
           "ceb54acb",
@@ -524,15 +520,18 @@
           "e4e14d04",
           "e831120c",
           "e9327a54",
+          "eace081b",
           "f4f1d8a4_abs",
           "gpt4_6ed717ea",
           "gpt4_7a0daae1",
-          "gpt4_8279ba02"
+          "gpt4_8279ba02",
+          "gpt4_93159ced_abs",
+          "gpt4_d84a3211"
         ]
       },
       "l1_directions": {
-        "must_abstain_green": 2,
-        "must_abstain_red": 1,
+        "must_abstain_green": 3,
+        "must_abstain_red": 0,
         "must_not_abstain_green": 0,
         "must_not_abstain_red": 18
       },
@@ -540,18 +539,18 @@
         {
           "question_id": "0100672e",
           "l1": false,
-          "l2": false,
+          "l2": true,
           "l3": false,
-          "abstained": null,
-          "error": "AskRetrievalUnavailable: annotation unavailable: ConnectionError"
+          "abstained": true,
+          "error": null
         },
         {
           "question_id": "0a995998",
           "l1": false,
-          "l2": false,
+          "l2": true,
           "l3": false,
-          "abstained": null,
-          "error": "ConnectionError: Error 2 connecting to /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpze1e0c30/redis.socket. No such file or directory."
+          "abstained": true,
+          "error": null
         },
         {
           "question_id": "1d4e3b97",
@@ -588,10 +587,10 @@
         {
           "question_id": "830ce83f",
           "l1": false,
-          "l2": false,
+          "l2": true,
           "l3": false,
-          "abstained": null,
-          "error": "ConnectionError: Error 2 connecting to /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpbo0god6x/redis.socket. No such file or directory."
+          "abstained": true,
+          "error": null
         },
         {
           "question_id": "b0479f84",
@@ -603,16 +602,16 @@
         },
         {
           "question_id": "ba358f49_abs",
-          "l1": false,
-          "l2": false,
+          "l1": true,
+          "l2": true,
           "l3": false,
-          "abstained": null,
-          "error": "AskRetrievalUnavailable: annotation unavailable: ConnectionError"
+          "abstained": true,
+          "error": null
         },
         {
           "question_id": "ceb54acb",
           "l1": false,
-          "l2": false,
+          "l2": true,
           "l3": false,
           "abstained": true,
           "error": null
@@ -676,7 +675,7 @@
         {
           "question_id": "gpt4_7a0daae1",
           "l1": false,
-          "l2": false,
+          "l2": true,
           "l3": false,
           "abstained": true,
           "error": null
@@ -713,7 +712,9 @@
         "0100672e",
         "0a995998",
         "1d4e3b97",
+        "1de5cff2",
         "2133c1b5",
+        "26bdc477",
         "830ce83f",
         "b0479f84",
         "ba358f49_abs",
@@ -722,10 +723,13 @@
         "e4e14d04",
         "e831120c",
         "e9327a54",
+        "eace081b",
         "f4f1d8a4_abs",
         "gpt4_6ed717ea",
         "gpt4_7a0daae1",
-        "gpt4_8279ba02"
+        "gpt4_8279ba02",
+        "gpt4_93159ced_abs",
+        "gpt4_d84a3211"
       ],
       "named_leg_moved": true,
       "collateral": {
@@ -733,24 +737,32 @@
           "0100672e",
           "0a995998",
           "1d4e3b97",
+          "1de5cff2",
           "2133c1b5",
+          "26bdc477",
           "830ce83f",
           "b0479f84",
           "ba358f49_abs",
           "ceb54acb",
+          "d6233ab6",
           "e4e14d04",
           "e831120c",
           "e9327a54",
+          "eace081b",
           "f4f1d8a4_abs",
           "gpt4_6ed717ea",
           "gpt4_7a0daae1",
-          "gpt4_8279ba02"
+          "gpt4_8279ba02",
+          "gpt4_93159ced_abs",
+          "gpt4_d84a3211"
         ],
         "L3": [
           "0100672e",
           "0a995998",
           "1d4e3b97",
+          "1de5cff2",
           "2133c1b5",
+          "26bdc477",
           "830ce83f",
           "b0479f84",
           "ceb54acb",
@@ -758,10 +770,13 @@
           "e4e14d04",
           "e831120c",
           "e9327a54",
+          "eace081b",
           "f4f1d8a4_abs",
           "gpt4_6ed717ea",
           "gpt4_7a0daae1",
-          "gpt4_8279ba02"
+          "gpt4_8279ba02",
+          "gpt4_93159ced_abs",
+          "gpt4_d84a3211"
         ]
       },
       "l1_directions": {
@@ -947,7 +962,9 @@
         "0100672e",
         "0a995998",
         "1d4e3b97",
+        "1de5cff2",
         "2133c1b5",
+        "26bdc477",
         "830ce83f",
         "b0479f84",
         "ceb54acb",
@@ -955,10 +972,13 @@
         "e4e14d04",
         "e831120c",
         "e9327a54",
+        "eace081b",
         "f4f1d8a4_abs",
         "gpt4_6ed717ea",
         "gpt4_7a0daae1",
-        "gpt4_8279ba02"
+        "gpt4_8279ba02",
+        "gpt4_93159ced_abs",
+        "gpt4_d84a3211"
       ],
       "named_leg_moved": true,
       "collateral": {
@@ -966,7 +986,9 @@
           "0100672e",
           "0a995998",
           "1d4e3b97",
+          "1de5cff2",
           "2133c1b5",
+          "26bdc477",
           "830ce83f",
           "b0479f84",
           "ceb54acb",
@@ -974,26 +996,34 @@
           "e4e14d04",
           "e831120c",
           "e9327a54",
+          "eace081b",
           "gpt4_6ed717ea",
           "gpt4_7a0daae1",
-          "gpt4_8279ba02"
+          "gpt4_8279ba02",
+          "gpt4_d84a3211"
         ],
         "L2": [
           "0100672e",
           "0a995998",
           "1d4e3b97",
+          "1de5cff2",
           "2133c1b5",
+          "26bdc477",
           "830ce83f",
           "b0479f84",
           "ba358f49_abs",
           "ceb54acb",
+          "d6233ab6",
           "e4e14d04",
           "e831120c",
           "e9327a54",
+          "eace081b",
           "f4f1d8a4_abs",
           "gpt4_6ed717ea",
           "gpt4_7a0daae1",
-          "gpt4_8279ba02"
+          "gpt4_8279ba02",
+          "gpt4_93159ced_abs",
+          "gpt4_d84a3211"
         ]
       },
       "l1_directions": {
@@ -1009,7 +1039,9 @@
         "0100672e",
         "0a995998",
         "1d4e3b97",
+        "1de5cff2",
         "2133c1b5",
+        "26bdc477",
         "830ce83f",
         "b0479f84",
         "ceb54acb",
@@ -1017,9 +1049,11 @@
         "e4e14d04",
         "e831120c",
         "e9327a54",
+        "eace081b",
         "gpt4_6ed717ea",
         "gpt4_7a0daae1",
-        "gpt4_8279ba02"
+        "gpt4_8279ba02",
+        "gpt4_d84a3211"
       ],
       "named_leg_moved": true,
       "collateral": {
@@ -1027,24 +1061,32 @@
           "0100672e",
           "0a995998",
           "1d4e3b97",
+          "1de5cff2",
           "2133c1b5",
+          "26bdc477",
           "830ce83f",
           "b0479f84",
           "ba358f49_abs",
           "ceb54acb",
+          "d6233ab6",
           "e4e14d04",
           "e831120c",
           "e9327a54",
+          "eace081b",
           "f4f1d8a4_abs",
           "gpt4_6ed717ea",
           "gpt4_7a0daae1",
-          "gpt4_8279ba02"
+          "gpt4_8279ba02",
+          "gpt4_93159ced_abs",
+          "gpt4_d84a3211"
         ],
         "L3": [
           "0100672e",
           "0a995998",
           "1d4e3b97",
+          "1de5cff2",
           "2133c1b5",
+          "26bdc477",
           "830ce83f",
           "b0479f84",
           "ceb54acb",
@@ -1052,10 +1094,13 @@
           "e4e14d04",
           "e831120c",
           "e9327a54",
+          "eace081b",
           "f4f1d8a4_abs",
           "gpt4_6ed717ea",
           "gpt4_7a0daae1",
-          "gpt4_8279ba02"
+          "gpt4_8279ba02",
+          "gpt4_93159ced_abs",
+          "gpt4_d84a3211"
         ]
       },
       "l1_directions": {
@@ -1245,7 +1290,7 @@
       "all": true
     },
     "substitution_signature": {
-      "must_abstain_green_M2": 2,
+      "must_abstain_green_M2": 3,
       "must_abstain_green_M2_control": 0,
       "must_not_abstain_red_M2": 18,
       "must_not_abstain_red_M2_control": 18
@@ -1261,7 +1306,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1673,
+        "duration_ms": 1431,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1375,7 +1420,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1647,
+        "duration_ms": 1439,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1494,11 +1539,11 @@
         "question_id": "1d4e3b97",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "The context does not contain information about why the user's bike performs better during Sunday group rides.",
+        "answer_head": "The context does not contain any information about why the user's bike performs better during Sunday group rides.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1190,
+        "duration_ms": 1149,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1617,7 +1662,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1617,
+        "duration_ms": 1433,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1725,13 +1770,13 @@
       {
         "question_id": "2133c1b5",
         "expected_abstain": false,
-        "abstained": true,
-        "answer_head": "I don't know how long you've been living in your current apartment in Harajuku. The memory mentions you've been living in Harajuku for 3 months, but it doesn't ",
+        "abstained": false,
+        "answer_head": "You've been living in Harajuku for 3 months.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1350,
-        "l1_abstain": false,
+        "duration_ms": 1287,
+        "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
           "8ca0085a_1",
@@ -1836,7 +1881,7 @@
         "gold_answer_span_words": 2,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": true
       },
       {
         "question_id": "26bdc477",
@@ -1846,7 +1891,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 2154,
+        "duration_ms": 1853,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -1961,7 +2006,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1185,
+        "duration_ms": 1467,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2073,11 +2118,11 @@
         "question_id": "b0479f84",
         "expected_abstain": false,
         "abstained": false,
-        "answer_head": "**Dynasties** and **Chasing Coral** are both exceptional nature documentaries worth watching.",
+        "answer_head": "Based on your interest in nature and wildlife documentaries, **Dynasties** and **Chasing Coral** are both excellent recommendations.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 957,
+        "duration_ms": 1234,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2175,10 +2220,10 @@
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
-          "shared_span": "dynasties and chasing coral are both exceptional nature documentaries",
-          "shared_span_words": 9,
-          "longest_common_span": "dynasties and chasing coral are both exceptional nature documentaries",
-          "longest_common_span_words": 9,
+          "shared_span": "dynasties and chasing coral are both",
+          "shared_span_words": 6,
+          "longest_common_span": "dynasties and chasing coral are both",
+          "longest_common_span_words": 6,
           "ok": true
         },
         "gold_answer_span": "that are similar",
@@ -2195,7 +2240,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1570,
+        "duration_ms": 1220,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -2310,11 +2355,11 @@
         "question_id": "ceb54acb",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "I don't know. The context only mentions \"sexual compulsions\" as a shorter term; it does not contain the other four options you're asking about.",
+        "answer_head": "I don't know. The context only mentions \"sexual compulsions\" as a shorter term; it does not list the other four options.",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1430,
+        "duration_ms": 1309,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2434,7 +2479,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1738,
+        "duration_ms": 1737,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2556,7 +2601,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1612,
+        "duration_ms": 1597,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2666,7 +2711,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1636,
+        "duration_ms": 1350,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2780,11 +2825,11 @@
         "question_id": "e9327a54",
         "expected_abstain": false,
         "abstained": true,
-        "answer_head": "The context does not mention a dessert shop with giant milkshakes. It does include family-friendly Orlando dining and dessert spot recommendations, but no such ",
+        "answer_head": "The context does not mention a dessert shop with giant milkshakes. It does include a discussion of family-friendly dessert spots in Orlando, but no such specifi",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 2113,
+        "duration_ms": 1310,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2814,23 +2859,75 @@
         ],
         "gold_covered_ask": true,
         "handler_search": {
-          "kind": "error",
-          "error": "Error 2 connecting to /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpai_tgusn/redis.socket. No such file or directory."
+          "ids": [
+            "answer_ultrachat_480665",
+            "answer_ultrachat_480665",
+            "answer_ultrachat_480665",
+            "30e58d0c_1",
+            "ultrachat_353915",
+            "answer_ultrachat_480665",
+            "ultrachat_95525",
+            "answer_ultrachat_480665",
+            "answer_ultrachat_480665",
+            "sharegpt_kXjhIjQ_256",
+            "sharegpt_I4ie50S_0",
+            "c58fdf1e_2",
+            "8221810f_3",
+            "ba944cdc",
+            "ultrachat_353915",
+            "61e1ba53_2",
+            "ultrachat_95525",
+            "ultrachat_353915",
+            "ultrachat_61138",
+            "b10dce5e",
+            "ultrachat_63871",
+            "sharegpt_kXjhIjQ_256",
+            "ultrachat_144328",
+            "sharegpt_I4ie50S_0",
+            "c0d099e6_2",
+            "8ed77bea_1",
+            "ultrachat_61138",
+            "b10dce5e",
+            "ultrachat_95525",
+            "ultrachat_144328",
+            "11decc61",
+            "ultrachat_353915",
+            "c81897cd_2",
+            "c0d099e6_2",
+            "c58fdf1e_2",
+            "sharegpt_kXjhIjQ_256",
+            "e91e8a2e_1",
+            "ultrachat_61138",
+            "sharegpt_gPFzM9v_121",
+            "ba944cdc"
+          ],
+          "n_hits": 40
         },
         "handler_recall": {
-          "kind": "error",
-          "error": "Error 2 connecting to /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpai_tgusn/redis.socket. No such file or directory."
+          "ids": [
+            "answer_ultrachat_480665",
+            "answer_ultrachat_480665",
+            "answer_ultrachat_480665",
+            "30e58d0c_1",
+            "ultrachat_353915",
+            "answer_ultrachat_480665",
+            "ultrachat_95525",
+            "answer_ultrachat_480665",
+            "answer_ultrachat_480665",
+            "sharegpt_kXjhIjQ_256"
+          ],
+          "n_hits": 10
         },
-        "l2_provenance": false,
+        "l2_provenance": true,
         "l2a_ask_gold": true,
-        "l2b_search": false,
-        "l2b_recall": false,
+        "l2b_search": true,
+        "l2b_recall": true,
         "l3_grounding": false,
         "l3": {
           "gold_turn_head_present": true,
           "shared_span": null,
           "shared_span_words": 0,
-          "longest_common_span": "family friendly",
+          "longest_common_span": "in orlando",
           "longest_common_span_words": 2,
           "ok": false
         },
@@ -2848,7 +2945,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 25937,
+        "duration_ms": 1257,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -2878,17 +2975,69 @@
         ],
         "gold_covered_ask": true,
         "handler_search": {
-          "kind": "error",
-          "error": "Error 2 connecting to /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpmkl03qoz/redis.socket. No such file or directory."
+          "ids": [
+            "answer_8a791264_2",
+            "4d04b866",
+            "02eae87c_1",
+            "answer_8a791264_2",
+            "answer_8a791264_2",
+            "f340a3db",
+            "answer_8a791264_2",
+            "answer_8a791264_1",
+            "b4a4168e_3",
+            "sharegpt_HOO59Ue_137",
+            "164bd5a4",
+            "answer_8a791264_1",
+            "4d04b866",
+            "02eae87c_1",
+            "164bd5a4",
+            "9fc5f03d_1",
+            "29a18eab_3",
+            "4dae77d3",
+            "02eae87c_1",
+            "9316aae3_1",
+            "4d04b866",
+            "4dae77d3",
+            "29a18eab_3",
+            "172a26d2",
+            "sharegpt_t8L5CeI_0",
+            "9fc5f03d_1",
+            "sharegpt_rPXCHPU_0",
+            "02eae87c_1",
+            "413b57cb_3",
+            "1dcfb9a0_2",
+            "1dcfb9a0_2",
+            "answer_8a791264_2",
+            "1dcfb9a0_2",
+            "ultrachat_455723",
+            "1dcfb9a0_2",
+            "b4a4168e_3",
+            "02eae87c_1",
+            "sharegpt_sNQwa6v_0",
+            "29a18eab_3",
+            "9316aae3_1"
+          ],
+          "n_hits": 40
         },
         "handler_recall": {
-          "kind": "error",
-          "error": "Error 2 connecting to /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpmkl03qoz/redis.socket. No such file or directory."
+          "ids": [
+            "answer_8a791264_2",
+            "4d04b866",
+            "02eae87c_1",
+            "answer_8a791264_2",
+            "answer_8a791264_2",
+            "f340a3db",
+            "answer_8a791264_2",
+            "answer_8a791264_1",
+            "b4a4168e_3",
+            "sharegpt_HOO59Ue_137"
+          ],
+          "n_hits": 10
         },
-        "l2_provenance": false,
+        "l2_provenance": true,
         "l2a_ask_gold": true,
-        "l2b_search": false,
-        "l2b_recall": false,
+        "l2b_search": true,
+        "l2b_recall": true,
         "l3_grounding": true,
         "l3": {
           "gold_turn_head_present": true,
@@ -2902,17 +3051,17 @@
         "gold_answer_span_words": 1,
         "ctx_recall": true,
         "retrieval_degraded": true,
-        "pass": false
+        "pass": true
       },
       {
         "question_id": "f4f1d8a4_abs",
         "expected_abstain": true,
         "abstained": true,
-        "answer_head": "The context does not mention a birthday gift from your dad. It mentions a stand mixer given by your sister and a silver necklace given to your sister.",
+        "answer_head": "The context does not mention a birthday gift from your dad. It mentions a stand mixer given by your sister and a silver necklace given to your sister, but nothi",
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 18378,
+        "duration_ms": 1758,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -3026,7 +3175,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1770,
+        "duration_ms": 1421,
         "l1_abstain": true,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3136,7 +3285,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1970,
+        "duration_ms": 1686,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3257,7 +3406,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 2172,
+        "duration_ms": 1567,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3366,7 +3515,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1816,
+        "duration_ms": 1553,
         "l1_abstain": true,
         "_abs_marker_agreement": true,
         "ask_session_ids": [
@@ -3484,7 +3633,7 @@
         "provider": "deepseek-direct",
         "route": "deepseek-direct",
         "model": "deepseek-v4-flash",
-        "duration_ms": 1604,
+        "duration_ms": 1433,
         "l1_abstain": false,
         "_abs_marker_agreement": null,
         "ask_session_ids": [
@@ -3592,17 +3741,17 @@
         "pass": false
       }
     ],
-    "shape_rate": 0.19047619047619047,
+    "shape_rate": 0.2857142857142857,
     "substrate_errors": [],
     "abstain_pn": {
-      "passed": 10,
+      "passed": 11,
       "n": 21,
-      "rate": 0.47619047619047616
+      "rate": 0.5238095238095238
     },
     "provenance_pn": {
-      "passed": 19,
+      "passed": 21,
       "n": 21,
-      "rate": 0.9047619047619048
+      "rate": 1.0
     },
     "grounding_pn": {
       "passed": 10,
@@ -3677,9 +3826,8 @@
   "verdict": {
     "decision": "DO-NOT-CLAIM",
     "reasons": [
-      "shape_rate 0.190 < 0.80",
-      "provenance 19/21 < 21/21",
-      "abstain 10/21 < 21/21",
+      "shape_rate 0.286 < 0.80",
+      "abstain 11/21 < 21/21",
       "grounding 10/21 < 18/21"
     ],
     "claim_allowed": null
