@@ -189,6 +189,27 @@ def test_legacy_caps_dict_derives_the_byte_ceiling(monkeypatch):
         assert resolve_byte_cap_from_caps({"context_byte_cap": bad}) == derived
     assert resolve_byte_cap_from_caps(
         {"context_byte_cap": 1 << 50}) == MAX_ASK_CONTEXT_BYTE_CAP
+
+
+def test_legacy_token_cap_values_are_validated_on_the_dict_seam(monkeypatch):
+    """The DERIVED leg is the last resort, so it must not be the one place a
+    nominal value slips through unvalidated: an unvalidated dict token cap
+    would resolve a different ceiling on the dict seam than the env seam
+    resolves for the same nominal input (and would RAISE on ``None``/str)."""
+    derived = max(DEFAULT_CONTEXT_BYTE_CAP,
+                  DEFAULT_ASK_CONTEXT_TOKEN_CAP * BYTES_PER_TOKEN_FLOOR)
+    # out-of-range / non-positive / non-int dict values fall back, exactly as
+    # the env knob does — never a raise, never a third ceiling.
+    for bad in (0, -1, 1 << 30, None, "not-a-number", 4096.5, True):
+        assert resolve_byte_cap_from_caps(
+            {"context_token_cap": bad}) == derived, bad
+    # a numeric STRING is accepted on both seams, to the same value
+    monkeypatch.setenv(ASK_CONTEXT_TOKEN_CAP_ENV, "32000")
+    assert resolve_byte_cap_from_caps({"context_token_cap": "32000"}) == 256000
+    assert resolve_ask_retrieval_caps()["context_byte_cap"] == 256000
+    monkeypatch.delenv(ASK_CONTEXT_TOKEN_CAP_ENV)
+    assert resolve_byte_cap_from_caps(
+        {"context_token_cap": "32000"}) == 256000
     # The env leg must be honoured too, or a legacy-dict caller assembles at a
     # different ceiling than the env-pinned ask lane and an A/B across the two
     # seams compares budgets instead of behaviour.

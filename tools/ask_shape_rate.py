@@ -1589,18 +1589,19 @@ def main(argv: list[str] | None = None) -> int:
           f"{fixture_shape['n_sessions']} turns={fixture_shape['n_turns']} "
           f"abs={fixture_shape['n_abs']}")
 
-    if args.mode == "seed-timing":
-        assert_embedder()
-        st = seed_timing(questions, n=args.seed_timing_questions)
-        print(json.dumps(st, indent=2))
-        return EXIT_ADOPT
-
     try:
+        if args.mode == "seed-timing":
+            assert_embedder()
+            st = seed_timing(questions, n=args.seed_timing_questions)
+            print(json.dumps(st, indent=2))
+            return EXIT_ADOPT
+
         return run_full(args, questions, fixture_shape)
     finally:
         # Drop the last scratch docker graph and restore TORTOISE_DB_URI on
-        # EVERY exit path (VOID, not-adopt, raise) — the atexit registration
-        # is the backstop, not the primary teardown.
+        # EVERY exit path that can have created one (seed-timing, VOID,
+        # not-adopt, raise) — the atexit registration is the backstop, not
+        # the primary teardown.
         _drop_scratch_graph()
 
 
