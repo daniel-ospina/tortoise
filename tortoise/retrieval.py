@@ -485,7 +485,7 @@ def estimate_tokens_ask(text: str) -> int:
     token/char (OVER-estimated versus the DeepSeek rate, so the meter can
     never under-count). Because the multiplier is conservative, on
     CJK-heavy pools the resolved BYTE ceiling binds FIRST (the ask-lane
-    default is 128 KiB, DERIVED from the 16 000-token cap by #4105; the old
+    default is 128 000 bytes, DERIVED from the 16 000-token cap by #4105; the old
     32 KiB literal bound at ~10.9K chars ≈ ~6.5-7.6K estimated tokens).
 
     This is a conservative ESTIMATE, never an exact bill; it is the source
@@ -745,7 +745,8 @@ def assemble_context(
     re-export ``assemble_context as _assemble_context`` never passes it). The
     ASK lane passes the resolved ``byte_cap`` (#4105 — it was a 32 KiB
     literal): the assembled evidence is enforced to
-    BOTH the 8000-token estimate cap AND a 32 KiB UTF-8 byte cap
+    BOTH the resolved token cap AND the resolved byte cap (defaults
+    16 000 estimated tokens / 128 000 bytes; #4105)
     independently, by the SAME mechanism as the token cap — WHOLE-HIT DROP
     (lowest-ranked hits dropped until under budget, never mid-hit character
     truncation), so decoding the evidence never splits a character

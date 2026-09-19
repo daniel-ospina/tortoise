@@ -84,9 +84,14 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
         assemble_context,
         dedup_pool,
         resolve_ask_boost_multipliers,
-        resolve_ask_retrieval_caps,
+        resolve_byte_cap_from_caps,
     )
-    byte_cap = resolve_ask_retrieval_caps()["context_byte_cap"]
+    # The byte ceiling FOLLOWS this helper's own 8000-token cap (not the
+    # product's 16000-token default) so the mirror stays a mirror: a byte
+    # ceiling derived from a token cap the helper does not apply would
+    # admit a different set than the pipeline it mirrors.
+    byte_cap = resolve_byte_cap_from_caps(
+        {"context_token_cap": 8000})
     hits = sdk.tortoise_fts_query(
         question, limit=limit, pool_size=120, include_terminal=True,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf)

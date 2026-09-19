@@ -6,8 +6,9 @@ byte-identical, has_answer passthrough.
 
 Task 5 — the eval-only ask lane (``tortoise/ask_lane.py``, #3849): local-lane
 pipeline (validation FIRST,
-exactly ONE model call incl. empty context — no pre-gate), 8k/40/32KiB caps,
-resolved question_date semantics, the per-namespace reader cache
+exactly ONE model call incl. empty context — no pre-gate), resolved caps
+(200/200/16000/derived since #4105; the cap-binding tests pin their own
+shape), resolved question_date semantics, the per-namespace reader cache
 (tokens-race, key isolation, failed-build, lifecycle), and both-not-either
 (search surfaces
 never invoke the reader). The hosted-mode ``_post_ask`` client was removed
