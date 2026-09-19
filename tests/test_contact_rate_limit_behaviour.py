@@ -255,13 +255,17 @@ DRIVER = r"""
 const vm = require("node:vm");
 const encode = JSON.stringify;
 const emit = console.log.bind(console);
-// The sandbox is EMPTY on purpose: a `vm` context already has its own complete set of
-// ECMAScript intrinsics, and passing this realm's `Object`/`JSON`/`Map` in would hand the
-// limiter this realm's prototypes — enough to poison `Object.prototype.toJSON`. No
-// `process` and no `require` are reachable there either. (`console` does exist in the
-// context, which is why the payload must be the single nonce-tagged line: an extra line is
-// refused rather than believed.)
-const sandbox = {};
+// The sandbox is an object with NO prototype, which is not cosmetic: a contextified global
+// forwards unknown properties to the sandbox OBJECT, so with a plain `{}` the inside can
+// reach this realm through the prototype chain —
+// `globalThis.constructor.constructor("return this")()` lands on the HOST global, and from
+// there it can poison this realm's prototypes and forge the payload. `Object.create(null)`
+// makes that expression return the context's own global. The context keeps its own complete
+// set of intrinsics; passing this realm's in would hand over this realm's prototypes. No
+// `process` and no `require` are reachable there either, and the context's `console` is a
+// sink: its output does not reach this process's stdout (verified), so the single nonce-tagged
+// line the harness reads can only be the driver's own.
+const sandbox = Object.create(null);
 vm.createContext(sandbox);
 // The constants and the store come OUT of the built limiter rather than being declared
 // twice: the harness reads them from the source under test, so a mutation to any of them
@@ -644,10 +648,11 @@ def _observe(code: str) -> dict:
     it did not have the harness ask for is rejected.
     """
     nonce = "nonce-" + secrets.token_hex(8)
-    driver = (
-        DRIVER.replace("__LIMITER__", json.dumps(_limiter_source(code))).replace(
-            "__NONCE__", nonce
-        )
+    # The nonce is substituted BEFORE the limiter source is embedded: substituting after it
+    # would rewrite a `__NONCE__` inside the code under test, handing it the tag it is
+    # supposed to be unable to forge.
+    driver = DRIVER.replace("__NONCE__", nonce).replace(
+        "__LIMITER__", json.dumps(_limiter_source(code))
     )
     result = subprocess.run(
         [NODE, "-e", driver],
@@ -983,9 +988,11 @@ def _key_failures(code: str) -> list[str]:
     * every use of `hits` is a dot-method call this check can see — bracket notation,
       optional chaining and a destructured `get` would leave the live operations
       unexamined while the count stayed satisfied by dead ones;
-    * neither `ip` nor `now` is REASSIGNED. Reading the call sites only shows the keys are
-      the same EXPRESSION; a lossy transform applied first (`ip = ip.replace(/\./g, "")`)
-      makes two distinct clients share a bucket while every argument still reads `ip`.
+    * neither `ip` nor `now` is REASSIGNED — in any assignment form (`=`, `|=`, `>>=`,
+      `||=`, ...) or as a `for (... of ...)` target. Reading the call sites only shows the
+      keys are the same EXPRESSION; a lossy transform applied first
+      (`ip = ip.replace(/\./g, "")`, `now |= 0`) changes what the store sees while every
+      argument still reads the same name.
 
     That third property is why this is a read and not a scenario: the transform is injective
     over any address corpus (dot-stripping is on dotted quads), so no scenario can see it.
@@ -1003,11 +1010,18 @@ def _key_failures(code: str) -> list[str]:
             "it cannot certify"
         )
     for name in ("ip", "now"):
-        if re.search(rf"(?<![.\w]){name}\s*=(?!=)", function_body):
+        # Any assignment form, not just a bare `=`: `now |= 0` coerces the clock into int32
+        # (at `Date.now()` that wraps NEGATIVE, so the window arithmetic is wrong) while
+        # leaving the cutoff expression, the call sites and the read line intact.
+        if re.search(
+            rf"(?<![.\w]){name}\s*(?:[+\-*/%&|^]|\|\||&&|\?\?|>>>|>>|<<)?=(?!=)",
+            function_body,
+        ) or re.search(rf"for\s*\(\s*{name}\s+of\b", function_body):
             failures.append(
                 f"`{name}` is reassigned in the limiter — a lossy transform applied to it "
-                "(stripping dots, slicing, normalising) makes distinct clients share one "
-                "bucket while every call site still reads the same name"
+                "(stripping dots, slicing, normalising, coercing to int32) makes distinct "
+                "clients share one bucket, or shifts the window, while every call site "
+                "still reads the same name"
             )
     # Every use of `hits` must be a dot-method call the scan above can see. A different
     # spelling of the SAME operations — bracket notation, optional chaining, a
@@ -1103,6 +1117,10 @@ def test_the_context_boundary_cannot_be_crossed() -> None:
         "Object.prototype.toJSON = () => '{}';\n"
         "  Object.prototype.hasOwnProperty = () => false;",
         climb,
+        # The reachable form of the climb: no host value is needed at all, because a
+        # contextified global forwards unknown properties to the sandbox OBJECT.
+        "globalThis.constructor.constructor('return this')()"
+        ".Object.prototype.toJSON = () => '{}';",
     ):
         mutated = _apply_mutation(signature, literal + "\n  " + injection, real)
         assert _observe(mutated) == _observe(real), (
@@ -1418,17 +1436,6 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "the cutoff is coerced into int32",
         r"const cutoff = now - RATE_WINDOW_MS;",
         "const cutoff = (now - RATE_WINDOW_MS) | 0;",
-    ),
-    (
-        "the limiter climbs out through a host-realm value",
-        r"function rateLimited\(ip: string, now: number\): boolean \{",
-        "function rateLimited(ip: string, now: number): boolean {\n"
-        "  const raw = hits.get(ip);\n"
-        "  if (raw && !(raw instanceof Array)) {\n"
-        "    raw.constructor.constructor('return this')().Object.prototype.toJSON = "
-        "() => '{}';\n"
-        "  }\n"
-        "  return false;",
     ),
     (
         "the address is normalised before it is used",
