@@ -29,7 +29,7 @@ import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-from tortoise import hosted_api as ha  # noqa: E402
+from tortoise import hosted_api as ha
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HOSTED_API = _REPO_ROOT / "tortoise" / "hosted_api.py"
@@ -92,6 +92,7 @@ def patch_client(tmp_path, monkeypatch):
     monkeypatch.setattr(ha, "_org_email", lambda org_id: None)
     ha.app.dependency_overrides[ha.get_current_org] = lambda: team
     with TestClient(ha.app) as c:
+        c._jsonl = tmp_path / "analytics.jsonl"
         yield c
     ha.app.dependency_overrides.clear()
 
@@ -191,6 +192,40 @@ def test_strict_mode_does_not_break_the_capture_path(tmp_path, monkeypatch):
         ha._track_onboarding_event({"org_id": "team-1"}, "cap", aha=True)
 
 
+def test_non_dict_properties_is_tolerated(tmp_path, monkeypatch):
+    """A non-dict properties value must not make the reporter raise or count
+    (it is normalized to None before the drop is computed)."""
+    _outcome, rows = _emit(tmp_path, monkeypatch, "capture_cost", ["aha"])
+    assert rows
+    assert not any(k[0] == "analytics_props" for k in ha._TELEMETRY_DROP_COUNTS)
+
+
+def test_concurrent_drops_count_exactly_and_warn_once():
+    """The lock makes 'always counted' and 'reported at most once' hold under
+    the threaded emit sites (`asyncio.to_thread`, the MCP executor)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    n = 50
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(
+            lambda _: ha._report_unregistered("concurrency", "same", {"k"}),
+            range(n)))
+    assert ha._TELEMETRY_DROP_COUNTS[
+        ("concurrency", "same", ("k",))] == n
+    assert len([m for m in ha._TELEMETRY_DROP_REPORTED
+                if m[0] == "concurrency"]) == 1
+
+
+def test_drop_state_is_bounded_for_distinct_client_keys():
+    """An authenticated client sending unique unknown field names cannot grow
+    the process-global drop state without bound (the PATCH front door keys it
+    on request-body fields)."""
+    for i in range(ha._TELEMETRY_DROP_MAX_MARKERS + 25):
+        ha._report_unregistered("bounded", "distinct", {f"k{i}"})
+    assert len(ha._TELEMETRY_DROP_COUNTS) <= ha._TELEMETRY_DROP_MAX_MARKERS + 1
+    assert len(ha._TELEMETRY_DROP_REPORTED) <= ha._TELEMETRY_DROP_MAX_MARKERS
+
+
 # ── S1: the analytics prop filter / the shipped billing loss ────────────────
 
 def test_billing_emit_carries_plan_and_tier(tmp_path, monkeypatch):
@@ -258,9 +293,11 @@ def test_write_onboarding_state_flow_strip_is_reported(monkeypatch, caplog):
     import tortoise.supabase_control as sc
 
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+    persisted: dict = {}
 
     class _FakeReg:
         def query(self, *args, **kwargs):
+            persisted.update(kwargs.get("params") or {})
             return self
 
     class _FakeSdk:
@@ -271,6 +308,10 @@ def test_write_onboarding_state_flow_strip_is_reported(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         ha._write_onboarding_state("org-1",
                                    {"prompt_pasted": True, "fork": "self"})
+    # The strip itself is unchanged: FLOW keys never reach the persisted jsonb.
+    persisted_state = json.loads(persisted["state"])
+    assert "fork" not in persisted_state
+    assert persisted_state.get("prompt_pasted") is True
     assert ha._TELEMETRY_DROP_COUNTS[
         ("onboarding_state", "flow_keys_stripped_at_write", ("fork",))] == 1
     assert any("fork" in r.getMessage() for r in caplog.records)
@@ -288,6 +329,15 @@ def test_unknown_onboarding_patch_field_is_reported_not_refused(patch_client):
         in ha._TELEMETRY_DROP_COUNTS
 
 
+def test_strict_unknown_patch_field_is_a_validation_error(
+        patch_client, monkeypatch):
+    """Strict mode on the front door surfaces as a 422 — the ValueError
+    subclass is load-bearing (not an opaque 500)."""
+    monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
+    r = patch_client.patch("/v1/onboarding/state", json={"bogus_key": 1})
+    assert r.status_code == 422
+
+
 def test_artifact_copied_invalid_enum_is_reported(patch_client, caplog):
     """An enum-invalid beacon still emits no event and returns 200, but the
     rejected value is now reported instead of vanishing."""
@@ -298,12 +348,14 @@ def test_artifact_copied_invalid_enum_is_reported(patch_client, caplog):
     assert ("artifact_copied", "invalid_enum", ("harness",)) \
         in ha._TELEMETRY_DROP_COUNTS
     assert any("harness" in rec.getMessage() for rec in caplog.records)
+    # The event still does NOT fire — no artifact_copied row was written.
+    assert not patch_client._jsonl.exists()
 
 
 # ── S6 + the structural gate: every emitted prop key must be registered ─────
 
 class _Call:
-    __slots__ = ("path", "lineno", "func", "event", "keys")
+    __slots__ = ("event", "func", "keys", "lineno", "path")
 
     def __init__(self, path, lineno, func, event, keys):
         self.path = path
@@ -365,39 +417,64 @@ def _walk_without_nested(node):
         yield from _walk_without_nested(child)
 
 
-def _dict_assignments(func_node):
+def _callee_name(func_node):
+    if isinstance(func_node, ast.Name):
+        return func_node.id
+    if isinstance(func_node, ast.Attribute):
+        return func_node.attr
+    return None
+
+
+def _function_return_dicts(tree):
+    """{func_name: keys} for functions whose top-level return is a dict literal.
+
+    Needed for the capture_cost emit site, which passes the result of
+    ``_capture_cost_props(...)`` — a CALL, not a literal — so the walk must
+    resolve the helper's own field set instead of silently skipping it.
+    """
+    out: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for stmt in node.body:
+            if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Dict):
+                keys = _literal_dict_keys(stmt.value)
+                if keys is not None:
+                    out[node.name] = keys
+    return out
+
+
+def _dict_assignments(func_node, helper_returns):
     out: dict[str, set[str]] = {}
     for stmt in _walk_without_nested(func_node):
+        target = None
+        value = None
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
                 and isinstance(stmt.targets[0], ast.Name):
-            keys = _literal_dict_keys(stmt.value)
-            if keys is not None:
-                out[stmt.targets[0].id] = keys
+            target, value = stmt.targets[0].id, stmt.value
         elif isinstance(stmt, ast.AnnAssign) \
                 and isinstance(stmt.target, ast.Name) \
                 and stmt.value is not None:
-            keys = _literal_dict_keys(stmt.value)
-            if keys is not None:
-                out[stmt.target.id] = keys
+            target, value = stmt.target.id, stmt.value
+        if target is None or value is None:
+            continue
+        keys = _literal_dict_keys(value)
+        if keys is None and isinstance(value, ast.Call):
+            keys = helper_returns.get(_callee_name(value.func))
+        if keys is not None:
+            out[target] = keys
     return out
 
 
 class _Collector(ast.NodeVisitor):
-    def __init__(self, path):
+    def __init__(self, path, helper_returns):
         self.path = path
+        self.helper_returns = helper_returns
         self.calls: list[_Call] = []
         self.scopes: list[dict[str, set[str]]] = []
 
-    @staticmethod
-    def _name(node):
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Attribute):
-            return node.attr
-        return None
-
     def visit_FunctionDef(self, node):
-        self.scopes.append(_dict_assignments(node))
+        self.scopes.append(_dict_assignments(node, self.helper_returns))
         self.generic_visit(node)
         self.scopes.pop()
 
@@ -412,7 +489,7 @@ class _Collector(ast.NodeVisitor):
                                 _resolve_keys(props_arg, self.scopes)))
 
     def visit_Call(self, node):
-        callee = self._name(node.func)
+        callee = _callee_name(node.func)
         if callee == "_track_analytics_event":
             event_arg = node.args[1] if len(node.args) >= 2 else None
             props_arg = node.args[2] if len(node.args) >= 3 else None
@@ -432,7 +509,7 @@ class _Collector(ast.NodeVisitor):
                     keys.add(kw.arg)
             self.calls.append(_Call(self.path, node.lineno, callee, None,
                                     keys if resolved else None))
-        elif node.args and self._name(node.args[0]) == "_track_analytics_event":
+        elif node.args and _callee_name(node.args[0]) == "_track_analytics_event":
             # Partial application: `asyncio.to_thread(_track_analytics_event,
             # org, event, props)` — the capture_cost emit site.
             event_arg = node.args[2] if len(node.args) >= 3 else None
@@ -443,8 +520,9 @@ class _Collector(ast.NodeVisitor):
 
 
 def _collect(path):
-    collector = _Collector(path)
-    collector.visit(ast.parse(path.read_text()))
+    tree = ast.parse(path.read_text())
+    collector = _Collector(path, _function_return_dicts(tree))
+    collector.visit(tree)
     return collector.calls
 
 
@@ -462,7 +540,7 @@ def test_every_emitted_prop_key_is_allowlisted():
     """
     calls = _collect(_HOSTED_API) + _collect(_MCP_SERVER)
     resolved = [c for c in calls if c.keys]
-    assert len(resolved) >= 8, (
+    assert len(resolved) >= 10, (
         "the AST walk resolved suspiciously few emit sites — the walk is "
         f"broken, not the code: {calls}")
 
@@ -470,6 +548,13 @@ def test_every_emitted_prop_key_is_allowlisted():
     # The billing site's event name is a variable, so pin the walk to it by
     # its keys: if `plan`/`tier` are not inspected, the walk has a hole.
     assert {"plan", "tier"} <= all_keys
+    # Pin the two sites whose props are NOT a bare literal dict, so a future
+    # refactor that makes either unresolvable FAILS here instead of silently
+    # dropping it from the guard.
+    assert any(c.func == "_track_analytics_event(to_thread)" and c.keys
+               for c in calls), "capture_cost emit site did not resolve"
+    assert any(c.path.name == "mcp_server.py" and c.keys
+               for c in calls), "mcp_tool_call emit site did not resolve"
 
     violations = {}
     for call in resolved:
