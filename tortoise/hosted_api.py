@@ -24536,6 +24536,41 @@ async def billing_portal(request: Request, org: dict = Depends(get_current_org_s
     return await asyncio.to_thread(_billing_portal_sync, org)
 
 
+# #4335: a broken/misconfigured price catalog used to degrade silently — a
+# total billing outage looked exactly like a UI preference, and the dashboard
+# could only fall back to a marketing link. Emit the exception class + message
+# ONCE per outage at WARNING and latch the emission so the per-request /v1/team
+# call cannot flood the log. A success clears the latch so a NEW breakage after
+# a recovery is still reported.
+_checkout_catalog_failure_logged = False
+
+
+def _log_checkout_catalog_failure(exc: Exception) -> None:
+    """One visible WARNING per catalog outage (#4335).
+
+    This stays best-effort / non-5xx (registry and selfhost legitimately run
+    without Stripe) — but the degradation must be diagnosable. The exception
+    message can embed a raw STRIPE_PRICE_IDS value (PriceCatalog validation
+    quotes the offending id), so it is scrubbed through the repo's own secret
+    scrubber before it reaches the log — the secret value is never emitted.
+    """
+    global _checkout_catalog_failure_logged
+    if _checkout_catalog_failure_logged:
+        return
+    _checkout_catalog_failure_logged = True
+    try:  # the scrubber must never mask the warning it exists to make safe
+        from tortoise.billing import _scrub_secrets
+        detail = _scrub_secrets(str(exc))
+    except Exception:  # noqa: BLE001
+        detail = type(exc).__name__
+    _logger.warning(
+        "checkout price catalog unavailable (%s: %s) — checkout price ids "
+        "will be empty until STRIPE_PRICE_IDS is fixed",
+        type(exc).__name__,
+        detail,
+    )
+
+
 def _default_checkout_price_id() -> str | None:
     """Server-resolved default checkout price: pro monthly (#310 Task 9).
 
@@ -24544,12 +24579,16 @@ def _default_checkout_price_id() -> str | None:
     when the catalog is unconfigured (missing env → BillingConfigError on
     PriceCatalog() construction; registry/selfhost must not 500 /v1/team).
     """
+    global _checkout_catalog_failure_logged
     try:
         from tortoise.billing import PriceCatalog
         catalog = PriceCatalog()
-        return catalog.price_for("pro", "monthly") or None
-    except Exception:
+        price = catalog.price_for("pro", "monthly") or None
+    except Exception as exc:  # noqa: BLE001 — best-effort, never 5xx /v1/team
+        _log_checkout_catalog_failure(exc)
         return None
+    _checkout_catalog_failure_logged = False
+    return price
 
 
 def _checkout_price_ids() -> dict[str, str]:
@@ -24558,15 +24597,19 @@ def _checkout_price_ids() -> dict[str, str]:
     CTAs — never hardcoded in the client). Free/anon ($0) have no checkout.
     Best-effort {} when the catalog is unconfigured.
     """
+    global _checkout_catalog_failure_logged
     try:
         from tortoise.billing import PriceCatalog
         catalog = PriceCatalog()
-        return {
+        ids = {
             tier: pid for tier in ("solo", "pro", "team")
             if (pid := catalog.price_for(tier, "monthly")) is not None
         }
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — best-effort, never 5xx /v1/team
+        _log_checkout_catalog_failure(exc)
         return {}
+    _checkout_catalog_failure_logged = False
+    return ids
 
 
 

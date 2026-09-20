@@ -1161,6 +1161,70 @@ class TestTeamInfoBillingSurface:
         assert body["checkout_price_id"] is None
         assert body["checkout_price_ids"] == {}
 
+    def test_team_info_catalog_failure_logged_once(self, billing_client,
+                                                    monkeypatch, caplog):
+        """#4335: an unconfigured/broken catalog must be OBSERVABLE — exactly
+        ONE WARNING naming the exception class, cached so a second /v1/team
+        does not re-log. The message never carries the secret value."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        monkeypatch.delenv("STRIPE_PRICE_IDS", raising=False)
+        # The latch is process-global; start this test from a clean state.
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                            raising=False)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r1 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+            r2 = billing_client["client"].get("/v1/team",
+                                              headers=billing_client["headers"])
+        assert r1.status_code == 200, r1.text
+        assert r2.status_code == 200, r2.text
+        warnings = [rec for rec in caplog.records
+                    if "checkout price catalog unavailable" in rec.getMessage()]
+        assert len(warnings) == 1, (
+            f"expected exactly one cached WARNING, got {len(warnings)}")
+        assert "BillingConfigError" in warnings[0].getMessage()
+
+    def test_team_info_catalog_failure_log_scrubs_secret_value(
+            self, billing_client, monkeypatch, caplog):
+        """#4335: a malformed catalog can carry a secret-shaped value (a Stripe
+        key pasted into a price-id slot). PriceCatalog quotes the offending id
+        in its error, so the WARNING must scrub it — the secret must never
+        reach the log."""
+        import logging
+
+        import tortoise.hosted_api as hosted_api
+
+        bad = json.loads(json.dumps(VALID_CATALOG))
+        bad["solo"]["monthly"]["id"] = "sk_live_SUPERSECRET1234567890"
+        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(bad))
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                            raising=False)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r = billing_client["client"].get("/v1/team",
+                                             headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        warnings = [rec.getMessage() for rec in caplog.records
+                    if "checkout price catalog unavailable" in rec.getMessage()]
+        assert len(warnings) == 1, warnings
+        msg = warnings[0]
+        assert "sk_live_SUPERSECRET" not in msg, msg
+        assert "***" in msg, msg
+        assert "BillingError" in msg, msg
+
+    def test_checkout_catalog_latch_clears_after_success(self, billing_client,
+                                                         monkeypatch):
+        """#4335: a success resets the latch, so a NEW outage after a recovery
+        is reported again instead of being silently absorbed forever."""
+        import tortoise.hosted_api as hosted_api
+
+        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", True,
+                            raising=False)
+        assert hosted_api._checkout_price_ids()  # valid catalog from the fixture env
+        assert hosted_api._checkout_catalog_failure_logged is False
+
     def test_team_info_subscription_status_none_when_unset(self, billing_client):
         """Node field unset → None (the Billing page renders 'Free plan')."""
         r = billing_client["client"].get("/v1/team",

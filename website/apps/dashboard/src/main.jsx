@@ -41,6 +41,9 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from 
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom } from './keyAllowance.js'
+// #4335: the billing CTA's honest-unavailable derivation — one pure source so
+// the three render sites cannot drift (see billingCta.js).
+import { COMPARE_PLANS_URL, checkoutCtaFor } from './billingCta.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -954,6 +957,31 @@ function wizardWorkflowsText(key, mode) {
   return `${WORKFLOWS_PROMPT}\n\n${wizardPromptText('claude-web', 2, key, mode)}`
 }
 
+// #4335: the checkout CTA for the billing surfaces in this issue's scope
+// (Billing plan cards, welcome plan chooser, API-keys cap notice). A missing
+// server price id renders a DISABLED Upgrade control + the honest reason; it
+// never becomes a marketing link. The caller may add the secondary
+// "Compare plans" link. Other CTAs (header badge #4331; the error-banner and
+// Graphs-tab upgrade buttons) are out of scope here.
+function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost' }) {
+  const cta = checkoutCtaFor(priceId)
+  if (cta.disabled) {
+    return (
+      <>
+        <button className={className} disabled aria-disabled="true" title={cta.reason}>
+          {cta.label}
+        </button>
+        <span className="dim small" role="note" style={{ marginTop: 6 }}>{cta.reason}</span>
+      </>
+    )
+  }
+  return (
+    <button className={className} onClick={onUpgrade} disabled={pending}>
+      {pending ? 'Opening checkout…' : cta.label}
+    </button>
+  )
+}
+
 // #4330: ONE cap notice, TWO surfaces — the API Keys tab and the create-key
 // modal. Extracted so the upgrade CTA cannot drift between them; the modal MUST
 // carry it. Before this, a create-key 402 advanced the modal to a broken 'done'
@@ -963,13 +991,8 @@ function CapNotice({ text, team, checkoutPending, onUpgrade }) {
   return (
     <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
       <span className="dim small">{text}</span>
-      {team?.checkout_price_id ? (
-        <button className="ghost small" onClick={onUpgrade} disabled={checkoutPending}>
-          {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-        </button>
-      ) : (
-        <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
-      )}
+      <UpgradeCta priceId={team?.checkout_price_id} onUpgrade={onUpgrade} pending={checkoutPending} className="ghost small" />
+      <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
     </div>
   )
 }
@@ -7992,12 +8015,11 @@ function claimIntentInFlight() {
                                     >
                                       Start free
                                     </button>
-                                  ) : hasPrice ? (
-                                    <button className="ghost" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
-                                      {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                                    </button>
                                   ) : (
-                                    <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                                    <>
+                                      <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} />
+                                      <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
+                                    </>
                                   )}
                                 </div>
                               )
@@ -9589,12 +9611,11 @@ function claimIntentInFlight() {
                       <button className="ghost" onClick={manageBilling} disabled={billingPending}>
                         {billingPending ? 'Opening portal…' : 'Manage subscription'}
                       </button>
-                    ) : hasPrice ? (
-                      <button className="btn-primary" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
-                        {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                      </button>
                     ) : (
-                      <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                      <>
+                        <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} className="btn-primary" />
+                        <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
+                      </>
                     )}
                   </div>
                 )
