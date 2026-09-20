@@ -2019,6 +2019,13 @@ assert_not_contains "$JOB_ENV" "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN is NOT j
 assert_not_contains "$JOB_ENV" "TELEGRAM_CHAT_ID" "TELEGRAM_CHAT_ID is NOT job-level (step env only, P3-6)"
 assert_not_contains "$JOB_ENV" "FLY_API_TOKEN" "FLY_API_TOKEN is NOT job-level (step env only)"
 assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env only)"
+# GitHub env precedence is STEP > JOB > WORKFLOW, so refusing PROD_PROBE_URLS on
+# the step is not enough: a job-level value reaches the script just as well and
+# narrows the production set, classifying the auth probe a DRILL ([DRILL]-titled,
+# no page, self-heal disarmed) while the diff looks correct. Found in review — the
+# step-scoped refusal below passes with a job-level PROD_PROBE_URLS present.
+assert_not_contains "$JOB_ENV" "PROD_PROBE_URLS" \
+  "PROD_PROBE_URLS is NOT job-level either (env precedence: job-level reaches the script and silently drills the auth probe)"
 
 # ── 96: the workflow drives the auth surface as its OWN step (#3628) ───────
 AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
@@ -2053,6 +2060,15 @@ assert_contains "$(grep '^AUTH_PROBE_URL=' "$WATCHDOG" || true)" "$AUTH_PROBE_UR
   "the watchdog script's AUTH_PROBE_URL matches the step's probe URL (else the run is silently a DRILL)"
 assert_not_contains "$AUTH_STEP" "PROD_PROBE_URLS" \
   "the auth step does not set PROD_PROBE_URLS (a second route to a silent DRILL)"
+# A step-scoped guard cannot see a SECOND step: the old target can be re-added
+# under a new name ("legacy check", a copy-paste, another surface) and refile the
+# false PROD DEGRADED incident with every guard above still green. So assert the
+# INVENTORY, not just this step — no comment-stripped line in the workflow may
+# name the pre-#4054 auth target. (Review mutant: a second step carrying
+# PROBE_URL/PROBE_HOST_LABEL on the old host passed the step-scoped guard.)
+AUTH_WORKFLOW_CODE="$(grep -v '^[[:space:]]*#' "$AUTH_WORKFLOW" || true)"
+assert_not_contains "$AUTH_WORKFLOW_CODE" "tortoise.premiselabs.co/auth/start" \
+  "no second step re-adds the pre-#4054 auth target (a 'legacy' probe would refile the false incident)"
 assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
