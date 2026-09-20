@@ -1255,10 +1255,12 @@ def test_expect_uri_gated_iff_uri():
     assert "--manifest /tmp/expected-nodeids.txt" in guard["run"]
     # The canary producer is gated to half b + post-merge (cycle-5 P1-7
     # option (b): exactly ONE leg writes, no last-writer-wins clobber).
+    # #4367: the nightly schedule trigger was removed, so post-merge is
+    # `push` alone — the gate no longer names the retired event.
     producer = next(s for s in steps
                     if s.get("name", "").startswith("Canary producer"))
-    assert producer["if"] == "github.event_name == 'push' || " \
-        "github.event_name == 'schedule'", "producer must be post-merge only"
+    assert producer["if"] == "github.event_name == 'push'", \
+        "producer must be post-merge only"
     assert 'if [ "${{ matrix.half }}" = "b" ]; then' in producer["run"], \
         "the producer must be gated on half b (one writer)"
 
@@ -1538,7 +1540,7 @@ def test_slow_selected_echo_transform_roundtrips_into_legs():
 
 def test_canary_streak_job_consumes_half_b_artifacts_only():
     """Task 9 Step 6 (cycle-5 P1-7/cycle-6 P1-7): the canary-streak job is
-    post-merge only (push/schedule), needs [test] (matrix fan-in), consumes
+    post-merge only (push), needs [test] (matrix fan-in), consumes
     the HALF-B artifact set + the previous streak artifact via the
     classifier, and uploads the new streak. It must never read a
     steps-output value (the classifier's own pin lives in
@@ -1724,7 +1726,7 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     assert runs_integrity("manifest-integrity"), \
         "the drift job must actually run the integrity check"
     assert drift.get("if", "always()") in _always, (
-        "the drift job must be unconditional (push/PR/schedule) — an `if:` "
+        "the drift job must be unconditional (push/PR) — an `if:` "
         "would silently drop drift enforcement on the events it excludes")
     assert not drift.get("continue-on-error"), (
         "the drift job must not be continue-on-error: a failed check would "

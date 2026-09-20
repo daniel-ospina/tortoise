@@ -1,6 +1,7 @@
 """Projection — fold the event log into the current graph.
 
-The log is the source of truth; a projection is a derived, rebuildable view.
+This is the reconstruction path: the log is folded into a derived, rebuildable
+view and is NOT the durability authority (see docs/durability-posture.md).
 `_apply_one` is the single source of fold semantics, shared by the pure `fold`
 (batch) and every incremental backend, so an incrementally-updated projection and
 `fold(read_all())` can never diverge.
@@ -1342,7 +1343,47 @@ _NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
     "DocumentCreated",
     "SourceCreated",
     "DirectEdgeRepoint",
+    # JSONL-only siblings of the two above: both have REAL fold branches in
+    # ``apply``/``rebuild_all``, but neither has a representation in this
+    # ``{id: point}`` index (a Session node is not a Point; the about* edge
+    # is a flat descriptor) — so without them every replayed record logged
+    # the ``unrecognized event type`` warning, contradicting the set's
+    # documented contract that the warning is reserved for a type OUTSIDE
+    # the vocabulary.
+    "EntityLinked",
+    "SessionRecorded",
 })
+
+
+# ── #3860: the ONE ownership identity — (kind, id) ────────────────────────
+# A node is owned by its (graph label, id) pair. Both the rebuild survivor
+# anchor (``last_recreate_seq``) and the replay fold (``_fold_entity_mutation``
+# → ``_delete_entity_by_id``) key on that pair, so a delete can never be
+# suppressed by — or match — a node of another kind. This table is the ONLY
+# source of the label→id-property mapping; a journal ``label`` is NEVER
+# interpolated into the Cypher label position (it must be a member of
+# ``_CANONICAL_ENTITY_LABELS``, else the fold falls back to the legacy id-wide
+# delete). Mirrored by the live writer ``sdk._delete_entity``.
+_CANONICAL_ENTITY_ID_PROPS: tuple[tuple[str, str], ...] = (
+    ("Point", "id"), ("Subject", "id"), ("Object", "id"),
+    ("Document", "id"), ("Source", "id"), ("Event", "eventId"),
+)
+_CANONICAL_ENTITY_LABELS: frozenset[str] = frozenset(
+    label for label, _ in _CANONICAL_ENTITY_ID_PROPS)
+_ENTITY_ID_PROP: dict[str, str] = {
+    label: prop for label, prop in _CANONICAL_ENTITY_ID_PROPS}
+_NON_POINT_ENTITY_LABELS: frozenset[str] = (
+    _CANONICAL_ENTITY_LABELS - {"Point"})
+
+
+def _owns_point(label: object) -> bool:
+    """True when an ``EntityMutated``-style ``label`` may own a POINT node.
+
+    #3860: a *known* non-Point canonical label does not own a Point; a
+    missing/unknown label keeps the legacy id-wide semantics, so it is
+    treated as possibly owning one (the fold falls back id-wide there too).
+    """
+    return not (isinstance(label, str) and label in _NON_POINT_ENTITY_LABELS)
 
 
 def _apply_one(points: dict[str, dict], ev: dict) -> None:
@@ -1424,12 +1465,16 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             if isinstance(mid, str):
                 points.pop(mid, None)
     elif t == "EntityMutated":
-        # #3299: the write-surface mutation record. In-memory points are keyed
-        # by id, so `op=delete` drops the point; other ops (rename/restatus)
-        # are no-ops on this pure-point index until a sibling extends them.
+        # #3299/#3860: the write-surface mutation record. In-memory points are
+        # keyed by id, so `op=delete` drops the point; other ops (rename/
+        # restatus) are no-ops on this pure-point index until a sibling
+        # extends them. #3860: identity is (kind, id) — a delete naming a
+        # DIFFERENT canonical kind does not own a Point and must not pop it;
+        # a missing/unknown label keeps the legacy id-wide delete (parity
+        # with the graph fold's fallback).
         if ev.get("op") == "delete":
             rid = ev.get("id")
-            if isinstance(rid, str):
+            if isinstance(rid, str) and _owns_point(ev.get("label")):
                 points.pop(rid, None)
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
@@ -1564,6 +1609,167 @@ class RebuildDroppedEpisodicPoints(RuntimeError):
 _JOURNAL_CREATING_EVENT_TYPES = frozenset({
     "PointAdded", "OperatorAdded", "PointPromoted", "OperatorPromoted",
 })
+
+
+# #3722 review (cycle 5) P2: the labels a journaled hard delete can actually
+# REMOVE. Replay's ``EntityMutated`` op=delete replays ``_delete_entity_by_id``
+# — #3860 SCOPED it to the record's own canonical ``label``, so a delete record
+# removes that ONE label; only a MISSING/unknown label falls back to the legacy
+# id-wide delete across all six. The live ``_delete_entity`` is the same six and
+# documents "Session/APIKey/Org/Tag nodes are intentionally NOT deleted".
+# ``PointsMerged`` deletes Points only. So a journaled hard delete can NEVER
+# remove a ``:Session`` node, and the staleness rule must not suppress a
+# Session-source link just because an unrelated Point/Object with the same id
+# was deleted later. #3722 review (cycle 6) P2: the reader keys these sets
+# PER LABEL under the id (``{id: {label: max_seq}}``), so a delete that cannot
+# remove a label never supplies that label's boundary seq either — unioning
+# them across deletes conflated an ``EntityMutated`` delete with a later
+# ``PointsMerged`` and over-suppressed a live link.
+_HARD_DELETE_LABELS = frozenset({
+    "Point", "Subject", "Object", "Document", "Source", "Event",
+})
+_POINTS_MERGED_LABELS = frozenset({"Point"})
+
+
+def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
+    """Per-``(id, label)`` journal seq of the LAST hard delete that can remove
+    that label — ``{id: {label: max_delete_seq}}``.
+
+    EXACT, not conservative: the inner map records, per label the delete can
+    actually REMOVE, the latest seq of such a delete, so
+    ``_hard_delete_suppresses`` is literally "is there a hard delete AFTER seq
+    L that can remove THIS label?" — ``entry.get(label) > L``.
+
+    The hard-delete EVENT TYPES are the same ones ``_journal_hard_deleted_ids``
+    derives (``EntityMutated`` op=delete, #3299; ``PointsMerged``, whose
+    merged-away ids replay through ``_delete``) — but the ID SETS can differ:
+    that helper gates each id by ``_owns_point`` (#3860), dropping an id whose
+    record names a known non-Point kind. (Envelope shape is NOT a difference:
+    both readers normalize, so a nested payload is seen either way — #3722.)
+    Retraction is deliberately
+    NOT included — ``_retract`` tombstones and the node survives. The OUTER
+    key is the id; the INNER keys are the labels that delete removes:
+
+    * ``EntityMutated`` op=delete replays ``_delete_entity_by_id``, which
+      #3860 scoped to the record's own canonical ``label`` — that label ALONE
+      gets the seq. A missing/unknown label falls back to the legacy id-wide
+      delete across ``_HARD_DELETE_LABELS`` (all six get the seq), matching
+      ``_delete_entity_by_id(label=None)``.
+    * ``PointsMerged`` replays ``_delete`` — a ``:Point`` only
+      (``_POINTS_MERGED_LABELS``), so only ``Point`` gets the seq.
+
+    A ``:Session`` source is therefore never suppressed — no journaled hard
+    delete can remove it — so a same-id delete of another label cannot drop a
+    live ``(Session)-[:aboutObject]->(Object)`` edge (live != replay).
+
+    #3722 review (cycle 6) P2 — the SHAPE must be per-``(id, label)``. An
+    earlier revision paired the MAX delete seq for an id with a label set
+    UNIONED across ALL of that id's deletes, so the boundary asked "could SOME
+    delete of this id remove this label?" while comparing against the LATEST
+    delete's seq. That is unsound whenever the latest delete is a
+    ``PointsMerged`` (removes Points only) while the label came from an
+    EARLIER ``EntityMutated`` — which at that revision recorded all six
+    labels, the fold being id-wide before #3860: it OVER-suppressed, silently
+    DROPPING a live edge on replay (an Object re-created under a
+    deleted-then-merged id lost its ``(Point)-[:aboutObject]->(Object)`` link
+    in every engine). Per-label max seq removes the cross-delete conflation
+    entirely — there is no residual over-approximation to document here.
+
+    Used by the ``EntityLinked`` fold: the fold is an unconditional
+    MATCH…MERGE, so without this boundary a link whose endpoint was deleted
+    and later re-created under the SAME id came back on replay while live had
+    no such edge (ids are reused routinely). The seq space is the enumerate
+    index over the SAME journal list the replay engines walk, so callers must
+    pass the full events list, un-filtered.
+
+    The payload is read from the NORMALIZED record (``_norm``), not the raw
+    envelope. ``_norm`` splices ``ev["point"]`` over the envelope, and THAT
+    is the shape ``apply()``'s ``PointsMerged`` branch and ``rebuild_all``'s
+    pass-1b branch delete through. The nested shape is a SUPPORTED journal
+    shape, pinned by
+    ``tests/test_projection.py::test_falkor_apply_points_merged_nested_format``
+    (#325) — ``{"type":"PointsMerged","point":{"keep_id":k,
+    "merge_ids":[x]}}``. Reading the RAW record missed the delete entirely
+    (returned ``{}``), so the staleness rule never suppressed a link whose
+    endpoint was merged away, and the deleted link resurrected on the
+    re-created point. A nested ``EntityMutated`` op=delete was hidden the
+    same way.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for seq, ev in enumerate(events):
+        if not isinstance(ev, dict):
+            continue
+        # #3722 review (cycle 5): read the NORMALIZED record — the shape the
+        # replay folds actually delete through (see docstring SHAPE).
+        ev = _norm(ev)
+        t = ev.get("type")
+        if t == "EntityMutated" and ev.get("op") == "delete":
+            rid = ev.get("id")
+            if isinstance(rid, str):
+                # #3860: identity is (kind, id) — the fold is SCOPED to the
+                # record's own canonical label, so the labels THIS delete can
+                # remove are that label alone. A missing/unknown label falls
+                # back to the legacy id-wide delete, matching
+                # ``_delete_entity_by_id(label=None)``.
+                label = ev.get("label")
+                labels = ({label} if isinstance(label, str)
+                          and label in _CANONICAL_ENTITY_LABELS
+                          else _HARD_DELETE_LABELS)
+                _merge_hard_delete(out, rid, seq, labels)
+        elif t == "PointsMerged":
+            # #331: `or []` also covers an explicit "merge_ids": null.
+            for mid in ev.get("merge_ids") or []:
+                if isinstance(mid, str):
+                    _merge_hard_delete(out, mid, seq, _POINTS_MERGED_LABELS)
+    return out
+
+
+def _merge_hard_delete(out, rid, seq, labels) -> None:
+    """Record a hard delete of ``rid`` at ``seq``: per-label MAX seq.
+
+    ``labels`` is the set of labels THIS delete can remove, so each label's
+    slot is advanced INDEPENDENTLY — never unioned across deletes (#3722
+    review cycle 6: unioning is what conflated an ``EntityMutated`` delete
+    with a later ``PointsMerged``).
+    """
+    by_label = out.get(rid)
+    if by_label is None:
+        by_label = {}
+        out[rid] = by_label
+    for label in labels:
+        prev = by_label.get(label)
+        if prev is None or seq > prev:
+            by_label[label] = seq
+
+
+def _hard_delete_suppresses(hard_delete_seqs, endpoint_id, label,
+                            seq) -> bool:
+    """True when a recorded hard delete of ``(label, endpoint_id)`` lands AFTER
+    ``seq`` — exactly "a delete after L that can remove THIS label" (#3722
+    review cycle 6 P2; see ``journal_hard_delete_seqs``).
+
+    ``endpoint_id``/``label`` come from a journal FILE, so BOTH are type-gated:
+    a list/dict label would raise ``TypeError: unhashable`` on the membership
+    test, and a non-string id could never have been written (``_writable_id``)
+    so it cannot be stale.
+    """
+    if not isinstance(endpoint_id, str) or not isinstance(label, str):
+        return False
+    entry = hard_delete_seqs.get(endpoint_id)
+    if not entry:
+        return False
+    if isinstance(entry, dict):
+        del_seq = entry.get(label)
+        return del_seq is not None and del_seq > seq
+    if isinstance(entry, tuple):
+        # Cycle-5 ``{id: (max_seq, labels)}``: no in-repo producer emits this
+        # any more; the union it carries OVER-suppresses (cycle 6), so it is
+        # tolerated only for an external caller holding the old shape.
+        del_seq, labels = entry
+        return del_seq > seq and label in labels
+    # Pre-cycle-5 ``{id: int}`` (no labels): fall back to the id-only test over
+    # the removable-label set.
+    return entry > seq and label in _HARD_DELETE_LABELS
 
 
 class FalkorProjection(
@@ -2011,8 +2217,9 @@ class FalkorProjection(
     def _auto_health_recover(self) -> None:
         """Health check on open + transparent JSONL recovery (embedded only).
 
-        The event log is the source of truth; the projection a derived view.
-        Two corruption modes are caught:
+        The projection is a derived view folded from the domain event log (the
+        reconstruction source — not the durability authority; see
+        docs/durability-posture.md). Two corruption modes are caught:
           1. Unresponsive graph (open succeeded, queries fail).
           2. Lost graph — 0 nodes while the adjacent JSONL log has events
              (redislite starts fresh when its RDB is corrupt, interrupted
@@ -2249,6 +2456,21 @@ class FalkorProjection(
             return self._fold_entity_mutation(ev)
         elif t == "EventRecorded":
             return self._upsert_event(ev)
+        elif t == "EntityLinked":
+            # #3664: the capture entity-attachment replay consumer — an
+            # idempotent about* edge MERGE keyed on the flat logical ids
+            # (Session/Point -> Object). JSONL-only record (no GraphEvent).
+            # Folded INLINE here because ``apply`` sees one event and the live
+            # caller's endpoints already exist; the whole-journal apply()-based
+            # engines (``rebuild``/``recover_from_log``) buffer the type and
+            # call ``fold_deferred_entity_links`` after the pass, matching
+            # ``rebuild_all``'s trailing sweep on a forward-reference journal.
+            return self._fold_entity_linked(ev)
+        elif t == "SessionRecorded":
+            # #3664: the :Session node's journal carrier — the capture MERGE
+            # is a raw write, so without this a rebuild lost the node (and
+            # made any EntityLinked edge from it unreplayable).
+            return self._fold_session_recorded(ev)
         elif t == "SubjectAdded":
             self._upsert_subject(ev)
         elif t == "ObjectSuperseded":
@@ -2342,15 +2564,39 @@ class FalkorProjection(
         them journaled the destruction — so the #3947 invariant exempts them.
         Retraction is deliberately NOT in this set: ``_retract`` tombstones
         and the node survives, so it can never look like a lost Point.
+
+        Identity is ``(kind, id)``, not bare id (#3860): only a deleted record
+        that is (or may be) a Point exempts its id, so a foreign-kind delete
+        can never hide an unrecreatable episodic Point and fail this guard OPEN.
+
+        Each event is read in its NORMALIZED form (``_norm``), mirroring
+        ``journal_hard_delete_seqs``: in a NESTED record the ``EntityMutated``
+        payload (``id``/``op``/``label``) rides inside ``point`` while ``type``
+        stays on the envelope, so reading the raw envelope sees no ``op`` and
+        the delete is missed entirely — its id would then never be exempted
+        (#3722).
         """
         deleted: set[str] = set()
         for ev in events:
             if not isinstance(ev, dict):
                 continue
+            # #3722: read the NORMALIZED record — the shape the replay folds
+            # actually delete through (``_norm`` splices ``ev["point"]`` over
+            # the envelope). Reading the raw envelope missed a NESTED
+            # ``EntityMutated`` op=delete entirely, so its id was never
+            # exempted and the pre-wipe proof REFUSED a rebuild the replay
+            # would have completed (false block on a healthy store).
+            ev = _norm(ev)
             t = ev.get("type")
             if t == "EntityMutated" and ev.get("op") == "delete":
+                # #3860: identity is (kind, id) — only a POINT-kind delete (or
+                # an unknown/missing label, treated as possibly-Point) exempts
+                # a Point id from this roster. A foreign-kind record must not
+                # hide an unrecreatable episodic Point (the guard would then
+                # fail OPEN — permit the silent destruction it exists to
+                # refuse).
                 rid = ev.get("id")
-                if isinstance(rid, str):
+                if isinstance(rid, str) and _owns_point(ev.get("label")):
                     deleted.add(rid)
             elif t == "PointsMerged":
                 # #331: `or []` also covers an explicit "merge_ids": null.
@@ -2427,8 +2673,22 @@ class FalkorProjection(
         episodic_before = self._episodic_point_ids()
         self._assert_episodic_points_recreatable(episodic_before, events)
         self.g.query("MATCH (n) DETACH DELETE n")
-        for ev in events:
+        # #3664: this engine feeds ``apply()`` ONE record at a time, so an
+        # ``EntityLinked`` whose endpoint is created LATER in the journal would
+        # fold to nothing. Defer the type to a trailing sweep — the same
+        # forward-reference treatment ``rebuild_all`` gives it — so the replay
+        # engines agree. The fold is an idempotent MERGE, order-free by
+        # construction. Records are buffered WITH their journal seq so the
+        # sweep can apply the hard-delete staleness rule (#3722 review P2): a
+        # link whose endpoint was hard-deleted AFTER it must not resurrect.
+        hard_delete_seqs = journal_hard_delete_seqs(events)
+        entity_link_events: list[tuple[int, dict]] = []
+        for seq, ev in enumerate(events):
+            if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
+                entity_link_events.append((seq, ev))
+                continue
             self.apply(ev)
+        self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -2875,11 +3135,18 @@ class FalkorProjection(
         # but a bare re-emit only MERGEs live and never clears ``annotator_*``,
         # so gating the annotator folds on it silently dropped a live-valid
         # annotation (``update_entity``/raw-producer duplicate snapshot).
-        last_recreate_seq: dict[str, int] = {}
-        last_ann_drop_seq: dict[str, int] = {}
-        # ids hard-deleted since their last creation — a following creation is
-        # a RE-creation (new incarnation), not a bare upsert.
-        pending_deleted: set[str] = set()
+        last_recreate_seq: dict[tuple[str, str], int] = {}
+        # #3860: bare-id max over kinds — the LEGACY fallback anchor for a
+        # delete record with a missing/unknown label (the fold falls back
+        # id-wide there, so the anchor must too, else a legitimate
+        # delete→recreate Point is destroyed).
+        last_recreate_seq_any: dict[str, int] = {}
+        last_ann_drop_seq: dict[tuple[str, str], int] = {}
+        # (kind, id) pairs hard-deleted since their last creation — a
+        # following creation of the SAME kind is a RE-creation (new
+        # incarnation), not a bare upsert. #3860: keyed by (kind, id), so a
+        # foreign-kind delete cannot advance the POINT annotator boundary.
+        pending_deleted: set[tuple[str, str]] = set()
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
             t = ev.get("type")
@@ -2889,13 +3156,16 @@ class FalkorProjection(
             # apart from a bare upsert.
             if t == "EntityMutated" and ev.get("op") == "delete":
                 rid = ev.get("id")
-                if isinstance(rid, str):
-                    pending_deleted.add(rid)
+                # #3860: only a Point-kind delete (or a missing/unknown
+                # label, which the fold treats as possibly-Point) advances the
+                # POINT annotator boundary.
+                if isinstance(rid, str) and _owns_point(ev.get("label")):
+                    pending_deleted.add(("Point", rid))
                 continue
             if t == "PointsMerged":
                 for mid in ev.get("merge_ids") or []:
                     if isinstance(mid, str):
-                        pending_deleted.add(mid)
+                        pending_deleted.add(("Point", mid))
                 continue
             if t in ("PointAdded", "OperatorAdded"):
                 # #331 (review r3): ev.get — missing 'point' key handled by
@@ -2924,12 +3194,13 @@ class FalkorProjection(
                 # never clears outdated/CORRECTS, so seeding from it would
                 # silently drop a pre-promote invalidate fold).
                 if t in ("PointAdded", "OperatorAdded"):
-                    last_recreate_seq[p["id"]] = seq
+                    last_recreate_seq[("Point", p["id"])] = seq
+                    last_recreate_seq_any[p["id"]] = seq
                 # #3689 review P2: the annotator folds' drop boundary is a
                 # REAL delete→recreate, not a bare upsert (see above).
-                if p["id"] in pending_deleted:
-                    last_ann_drop_seq[p["id"]] = seq
-                    pending_deleted.discard(p["id"])
+                if ("Point", p["id"]) in pending_deleted:
+                    last_ann_drop_seq[("Point", p["id"])] = seq
+                    pending_deleted.discard(("Point", p["id"]))
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
@@ -2940,6 +3211,21 @@ class FalkorProjection(
                 self._upsert_point_props(p)
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
+        # #3664: EntityLinked records are deferred to a trailing sweep that
+        # runs after PASS 2 (see the sweep before pass 2b). The deferral is
+        # for the SOURCE endpoint: the TARGET is already created by pass-1b
+        # ObjectRegistered/DocumentCreated (the same dispatch loop that
+        # defers this type also folds `self._upsert_object(ev)`), but a
+        # Session SOURCE may exist only because pass 2's
+        # `_upsert_point_edges(contains_session=…)` recreated it
+        # (`_link_session`) — folding at the end of pass 1b matched only the
+        # TARGET endpoint, so it silently dropped the journaled
+        # `(Session)-[:aboutObject]->(Object)` edge whenever the journal had
+        # no `SessionRecorded` for it. The fold is an idempotent MERGE, so
+        # running it later changes nothing else. Records are buffered WITH
+        # their journal (enumerate) seq so the sweep can apply the hard-delete
+        # staleness rule (#3722 review P2) in the SAME seq space pass 1a uses.
+        entity_link_events: list[tuple[int, dict]] = []
         # #2488: ONE cross-family deferred list for point re-stamp folds —
         # PointSuperseded (#2423) + PointInvalidated (#2488) — carrying the
         # journal (enumerate) seq: the trailing sweep's survivor rule and
@@ -3034,41 +3320,32 @@ class FalkorProjection(
                 # was already superseded live by that re-creation, so it must
                 # not be folded (same anchor variable and comparison shape as
                 # the point_re_stamp_folds sweep below).
-                # RESIDUAL (P2-1, tracked separately — B5): this survivor
-                # anchor is ID-KEYED and LABEL-BLIND. ``last_recreate_seq`` is
-                # seeded from PointAdded/OperatorAdded by bare id, while the
-                # EntityMutated fold below (and the live delete it mirrors) is
-                # id-wide across all six labels. A cross-label id collision —
-                # a raw producer that reuses a non-namespaced id across, say,
-                # Point and Subject — can therefore OVER-SUPPRESS a legitimate
-                # delete: replay skips it and the other label's entity is
-                # resurrected, diverging from live. PRECONDITION: cross-label
-                # id collision via a non-namespaced raw producer; public id
-                # schemes are namespaced (pt_/sub-/obj-/doc-/ULID), so the SDK
-                # surface cannot reach it. Documented here, NOT fixed — do not
-                # mistake this anchor for label-correct.
+                # #3860: identity is (kind, id). The anchor consults the
+                # record's LABEL, so a Point/Operator creation can suppress
+                # ONLY a delete of the same kind — a foreign-kind node sharing
+                # the id no longer suppresses a legitimate delete. A missing/
+                # unknown label (malformed or pre-#3299 raw record) falls back
+                # to the any-kind max, preserving the legacy bare-id
+                # semantics because the fold falls back id-wide there too.
                 rid = ev.get("id")
-                anchor = (
-                    last_recreate_seq.get(rid)
-                    if isinstance(rid, str) else None)
+                anchor = None
+                if isinstance(rid, str):
+                    label = ev.get("label")
+                    if isinstance(label, str) and label in _CANONICAL_ENTITY_LABELS:
+                        anchor = last_recreate_seq.get((label, rid))
+                    else:
+                        anchor = last_recreate_seq_any.get(rid)
                 if anchor is not None and seq <= anchor:
                     continue
                 matched = self._fold_entity_mutation(ev)
                 if matched == 0 and ev.get("op") == "delete":
-                    # P2-2 fold-miss signal (the journal claims a delete whose
+                    # Fold-miss signal (the journal claims a delete whose
                     # entity never re-existed on this replay — mirrors the
                     # ObjectSuperseded / PointSuperseded / PointInvalidated
-                    # 0-row warnings).
-                    # RESIDUAL (P2-2, tracked separately — B5): the SDK emits
-                    # ONE EntityMutated record per matched LABEL (sdk.py
-                    # ``_delete_entity``), but this fold is ID-WIDE across all
-                    # six labels — so a successful multi-label delete's SECOND
-                    # record matches 0 and trips this warning even though the
-                    # delete succeeded. PRECONDITION: a cross-label id
-                    # collision via a raw, non-namespaced producer; public ids
-                    # are namespaced, so the SDK surface cannot reach it. Kept
-                    # audible deliberately; see also the label-blind survivor
-                    # anchor above.
+                    # 0-row warnings). #3860: the fold is now kind-scoped, so
+                    # a multi-label live delete's per-label records each
+                    # match their own node instead of the second one matching
+                    # 0.
                     logger.warning(
                         "rebuild: EntityMutated delete fold matched no "
                         "entity (event_id=%s id=%r label=%r) — deleted "
@@ -3096,7 +3373,7 @@ class FalkorProjection(
                 # instead would over-suppress a bare same-id re-emit (which
                 # MERGEs live and never clears a dim).
                 ann_anchor = (
-                    last_ann_drop_seq.get(rid)
+                    last_ann_drop_seq.get(("Point", rid))
                     if isinstance(rid, str) else None)
                 self._revise_point(
                     ev, set_updated_at=True,
@@ -3119,7 +3396,7 @@ class FalkorProjection(
                 # has no dead incarnation and must not drop the annotation
                 # (#3689 review P2).
                 if isinstance(ev.get("id"), str):
-                    ann_anchor = last_ann_drop_seq.get(ev["id"])
+                    ann_anchor = last_ann_drop_seq.get(("Point", ev["id"]))
                     if ann_anchor is not None and seq <= ann_anchor:
                         continue
                 if self._apply_annotator(ev) == 0:
@@ -3210,6 +3487,14 @@ class FalkorProjection(
                 direct_repoint_events.append(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
+            elif t == "EntityLinked":
+                # #3664: defer to the trailing sweep (see declaration), with
+                # the journal seq the hard-delete staleness rule needs.
+                entity_link_events.append((seq, ev))
+            elif t == "SessionRecorded":
+                # #3664: the :Session node must exist before any deferred
+                # EntityLinked fold FROM it runs (the sweep below).
+                self._fold_session_recorded(ev)
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
@@ -3225,7 +3510,7 @@ class FalkorProjection(
                 # vocabulary must not be dropped silently.
                 logger.warning("unrecognized event type %r — skipped", t)
 
-        # Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
+        # ── Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
         # creation events (see the branch above). Warn on 0-row folds — a
         # fold that matched nothing during rebuild means the journal claims
         # a supersession whose Object never re-existed. Since #2194,
@@ -3291,7 +3576,7 @@ class FalkorProjection(
         supersede_last: dict[str, tuple[int, dict]] = {}
         invalidate_survivors: list[tuple[int, dict]] = []
         for fsq, ev in point_re_stamp_folds:
-            anchor = last_recreate_seq.get(ev["id"])
+            anchor = last_recreate_seq.get(("Point", ev["id"]))
             if anchor is not None and fsq <= anchor:
                 # Pre-re-creation fold — dropped (id-reuse survivor rule).
                 continue
@@ -3409,11 +3694,14 @@ class FalkorProjection(
         # a process death between the wipe and here IS recovered on the next
         # run (and by `recover_from_log`) — the sidecar-recovery test
         # exercises exactly that. The residual applies only to (a) a
-        # journal-only `rebuild()`, which has no sidecar at all (and yields
-        # the `_link_session` stub), and (b) a sidecar written next to a log
+        # journal-only `rebuild()` over a journal that carries NO
+        # `SessionRecorded` (a pre-#3664 journal, or a hosted/journal-less
+        # lane) — the `_link_session` stub is then the only Session state —
+        # and (b) a sidecar written next to a log
         # dir the embedded opener cannot see — see the warning above the
-        # sidecar write. The durable JOURNAL Session carrier remains
-        # #2296/#3722, and is deliberately NOT re-invented here.
+        # sidecar write. For a post-#3664 journal the durable carrier is the
+        # `SessionRecorded` record (folded by `_fold_session_recorded`), so a
+        # journaled capture no longer depends on this snapshot.
         for props in session_snapshot:
             sid = props.get("id")
             if not sid:
@@ -3491,6 +3779,34 @@ class FalkorProjection(
                     # disabling the guard for that class (review P2-1).
                     operator_created_seq.setdefault(p["id"], seq)
                 self._upsert_point_edges(p, contains_session=raw_contains_session)
+
+        # ── Pass 2 entity-link sweep (#3664) ──────────────────────────────
+        # Fold each deferred EntityLinked record into its idempotent about*
+        # edge. Placed HERE — after pass 2 recreated every `:Session`
+        # container (`_upsert_point_edges(contains_session=…)` →
+        # `_link_session`), and after the pre-wipe snapshot restore above —
+        # and BEFORE pass 2b's create-before-transfer sweep (which the
+        # DirectEdgeRepoint structural leg relies on: it re-points/deletes
+        # `about*` edges whose base edge must already exist). Folding at the
+        # end of pass 1b matched only the TARGET endpoint: a `:Session`
+        # source that exists solely because a PointAdded carried
+        # `contains_session` was not yet created there, so the journaled
+        # `(Session)-[:aboutObject]->(Object)` edge was silently lost.
+        #
+        # A 0-row fold means EITHER endpoint was never re-created by any
+        # journaled event (pre-#2194 journal, unjournaled producer, delete
+        # race) — honest: the journal could not reproduce that attachment.
+        # It is NOT a target-only condition: `_fold_entity_linked` MATCHes
+        # BOTH endpoints, so a missing SESSION/POINT SOURCE — the exact class
+        # this sweep move exists for — is the same 0-row outcome. No warning
+        # for it: unlike a supersession fold-miss (which means a claim of
+        # state was lost), an absent link endpoint is simply an absent
+        # entity. A MALFORMED record is different and DOES warn (inside the
+        # fold). A stale link suppressed by the hard-delete rule is a silent
+        # skip, counted as dropped and never applied (see
+        # `fold_deferred_entity_links`).
+        self.fold_deferred_entity_links(
+            entity_link_events, journal_hard_delete_seqs(events))
 
         # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
@@ -4407,9 +4723,20 @@ class FalkorProjection(
             # but NOT `db.idx.vector.createNodeIndex`). Record which API
             # succeeded on self._vector_index_api for the query path.
             if not getattr(self, '_is_embedded', False):
+                # #4194/#4280: the width is the ONE constant the STORE declares
+                # (`FalkorProjection.required_embedding_dim`), so a FRESH index
+                # creation and the write path cannot disagree — a bare literal
+                # here plus a rotated `EMBEDDING_DIM` would bless vectors the
+                # index cannot hold (the mismatched-vector trap).
+                # ⛔ This single-sources CREATION only: an EXISTING index is
+                # never reconciled (both 'already' branches below assume it is
+                # correct). A dimension change is still the documented
+                # drop-and-recreate operation, not a constant edit.
+                from ..embeddings import EMBEDDING_DIM
                 try:
                     self.g.query(
-                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
+                        "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                        f"{EMBEDDING_DIM}, 'HNSW')"
                     )
                     self._vector_index_api = 'procedure'
                 except Exception as e:
@@ -4426,7 +4753,8 @@ class FalkorProjection(
                         try:
                             self.g.query(
                                 "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
-                                "OPTIONS {dimension: 384, similarityFunction: 'cosine'}"
+                                f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                                "similarityFunction: 'cosine'}"
                             )
                             self._vector_index_api = 'cypher'
                         except Exception as e2:
@@ -4442,6 +4770,43 @@ class FalkorProjection(
             logging.getLogger(__name__).info(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
+
+    @property
+    def required_embedding_dim(self) -> int | None:
+        """The embedding width THIS store can hold, for the write path to declare.
+
+        #4280: the width constraint belongs to the Point HNSW INDEX, so this
+        answers "does this store have one" — ``self._vector_index_api``, set by
+        ``_ensure_indexes`` (called from ``__init__``) to the API that actually
+        created or found the index. It stays ``None`` whenever no index exists:
+
+          * embedded (FalkorDBLite) — index creation is skipped by design
+            (see the vector-index block above: "Embedded mode (redislite) uses
+            brute-force vec.euclideanDistance instead");
+          * a FalkorDB engine older than 4.x — the whole index block is
+            skipped;
+          * index creation FAILED on a non-embedded store.
+
+        Every one of those three lanes reads through
+        ``search_engine.run_vector_query``'s DIMENSION-AGNOSTIC brute-force
+        branch, so a self-consistent encoder of any width is fully usable there
+        and is NOT dropped. Keying this on the deployment flag
+        (``_is_embedded``) instead of on the index's existence silently NULLed
+        usable vectors on cases 2 and 3 — the #4280 failure shape on another
+        lane (review finding, PR #4280).
+
+        With an index present the width is :data:`EMBEDDING_DIM`, the width the
+        index is created with — a stored vector of any other width is a broken
+        leg, not a near-miss. Callers pass this to
+        ``embeddings.encode_for_store`` / ``encode_batch_for_store`` — NOT to
+        the ``compute_embedding`` / ``compute_embeddings`` seam, which takes no
+        width (that seam is a widely-replaced interception point; see
+        ``encode_for_store``'s docstring).
+        """
+        if self._vector_index_api is None:
+            return None  # no Point vector index → brute-force, any width
+        from ..embeddings import EMBEDDING_DIM
+        return EMBEDDING_DIM
 
     def backfill_document_search_text(self) -> int:
         """#125: set _searchText=title on Documents missing it (idempotent).
@@ -4577,8 +4942,10 @@ class FalkorProjection(
         # on compute failure, set to None rather than preserving old embedding (#19).
         if new_content is not None:
             try:
-                from tortoise.embeddings import compute_embedding
-                emb = compute_embedding(new_content) if new_content else None
+                from tortoise.embeddings import encode_for_store
+                emb = (encode_for_store(
+                    new_content, self.required_embedding_dim)
+                    if new_content else None)
                 params["embedding"] = emb  # None = wipe stale embedding for empty content
             except Exception:
                 params["embedding"] = None  # wipe stale embedding on failure (#19)
@@ -4622,20 +4989,32 @@ class FalkorProjection(
             params=params,
         )
 
-    def _delete_entity_by_id(self, id_val: str) -> int:
-        """Hard-delete a canonical entity by id across all six labels.
+    def _delete_entity_by_id(self, id_val: str,
+                             label: str | None = None) -> int:
+        """Hard-delete a canonical entity by id.
 
-        The replay counterpart of the SDK's live ``_delete_entity`` (#3299):
-        the SAME six-label loop, so replay removes exactly what live removed.
+        The replay counterpart of the SDK's live ``_delete_entity`` (#3299).
         The id predicate is the identity as written (``id`` for
         Point/Subject/Object/Document/Source, ``eventId`` for Event) — never
         re-derived from a live node (the node is already gone). Returns the
         node count deleted (0 = a fold-miss: the entity was already absent).
+
+        #3860: identity is (kind, id). When ``label`` is one of the canonical
+        six the delete is SCOPED to that kind — a delete record owns only the
+        node kind it names, so it can never destroy a foreign-kind node that
+        happens to share the id. ``label=None`` (missing/unknown, i.e. a
+        malformed or pre-#3299 raw record) keeps the legacy id-wide delete
+        across all six labels, preserving the "a delete must survive replay"
+        guarantee for every record shape. The label is NEVER interpolated from
+        the journal: only members of ``_CANONICAL_ENTITY_ID_PROPS`` reach the
+        Cypher label position.
         """
+        if label is not None and label in _CANONICAL_ENTITY_LABELS:
+            branches = ((label, _ENTITY_ID_PROP[label]),)
+        else:
+            branches = _CANONICAL_ENTITY_ID_PROPS
         total = 0
-        for label, prop in (("Point", "id"), ("Subject", "id"),
-                            ("Object", "id"), ("Document", "id"),
-                            ("Source", "id"), ("Event", "eventId")):
+        for label, prop in branches:
             r = self.g.query(
                 f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n "
                 f"RETURN count(n)",
@@ -4651,11 +5030,17 @@ class FalkorProjection(
         ONE record type, dispatching on the ``op`` discriminator so replay
         reproduces the exact live end-state (the design chose this over one
         event type per label×operation). ``op="delete"`` hard-deletes the
-        canonical entity by id, mirroring the live ``_delete_entity`` —
-        the ontology §5 contract: delete hard-deletes, retract tombstones.
+        canonical entity, mirroring the live ``_delete_entity`` — the
+        ontology §5 contract: delete hard-deletes, retract tombstones.
         The sibling lanes (#3300 MCP Point delete, #3312 unjournaled update,
         #3377 unjournaled rename) extend this dispatch rather than adding
         record types.
+
+        #3860: the live ``_delete_entity`` is id-wide but emits ONE record per
+        MATCHED label; replaying each record scoped to its own label is
+        therefore the same net effect (N labels present live → N records → N
+        kind-scoped folds), while a record can no longer destroy a foreign-kind
+        node that merely shares the id.
 
         Returns the affected node count (0 for an unknown op or an
         already-absent entity) — the fold-miss signal, so a rebuild can warn
@@ -4670,13 +5055,13 @@ class FalkorProjection(
         if not isinstance(rid, str):
             # #331 parity: malformed id → skip, never crash the fold.
             return 0
-        # P2-3: the fold is INTENTIONALLY id-wide (all six labels) because
-        # the live ``_delete_entity`` it mirrors is id-wide too — there is no
-        # divergence today. The record carries ``label`` (the identity as
-        # written) but this op does not read it. Any FUTURE per-label op
-        # (retract / rename — #3312, #3377) MUST begin resolving
-        # ``ev["label"]`` here, or replay stops matching the live write.
-        return self._delete_entity_by_id(rid)
+        # #3860: identity is (kind, id). Scope the fold to the record's
+        # canonical label; a missing/unknown label falls back to the legacy
+        # id-wide delete (``label=None``). The raw label never reaches the
+        # Cypher label position — only the allowlisted branch does.
+        label = ev.get("label")
+        return self._delete_entity_by_id(
+            rid, label if isinstance(label, str) else None)
 
     def list_graphs(self) -> list[str]:
         """List all graph names in the database."""

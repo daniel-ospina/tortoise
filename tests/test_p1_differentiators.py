@@ -183,7 +183,7 @@ class TestEntityProjection:
 class TestStubs:
     def test_connectors_package_exists(self):
         from tortoise.connectors import __doc__ as _doc
-        assert "P1-5" in _doc or True  # just import check  # noqa: SIM222
+        assert "P1-5" in _doc  # the stub's docstring names the P1-5 phase
 
     def test_auth_stub_exists(self):
         import tortoise.auth  # noqa: F401

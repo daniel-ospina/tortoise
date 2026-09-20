@@ -228,7 +228,11 @@ DEFAULT_PROBE_URL="https://api.premiselabs.co/v1/organizations"
 # drives this URL as a SECOND, DEDICATED STEP with its own expected status and
 # required header; the probe is deliberately NOT generalised into a target
 # list (that would rewrite safety-critical restart logic for no gain).
-AUTH_PROBE_URL="https://tortoise.premiselabs.co/auth/start"
+# The SESSION-BEARING origin is `app.premiselabs.co` (#4054 moved the BFF off
+# the marketing project, which is the decided topology): `tortoise.*` answers
+# 404 for /auth/start BY DESIGN, so probing it watched a route no user path
+# touches — the same blindness #3628 was filed to end, one host to the left.
+AUTH_PROBE_URL="https://app.premiselabs.co/auth/start"
 # The SET of production probe URLs. `is_prod` is decided by SET MEMBERSHIP, not
 # by a boolean flag: an unrecognised URL is ALWAYS a drill, so a typo'd or
 # forgotten flag can never arm self-heal against an unexpected host (fail
@@ -380,7 +384,10 @@ set_incident_identity() { # <is_prod>
   if [ "$1" = "1" ]; then
     # A per-target label is REQUIRED when more than one production target
     # exists: the title is the dedupe key. The workflow's auth step therefore
-    # passes PROBE_HOST_LABEL=tortoise.premiselabs.co explicitly.
+    # passes PROBE_HOST_LABEL=app.premiselabs.co explicitly — and the label MUST
+    # be the host the step actually probes, because an incident is found by
+    # EXACT title: a label that drifts from the URL retires the old incident
+    # instead of resolving it (the harness pins the pair, derived).
     PROBE_HOST_LABEL="${PROBE_HOST_LABEL:-api.premiselabs.co}"
     DOWN_MARKER="[monitor] PROD DOWN"
     DEGRADED_MARKER="[monitor] PROD DEGRADED"

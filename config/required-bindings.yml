@@ -155,7 +155,7 @@ projects:
           colocated-topology decision (ADR-001).
 
       # Required: /api/v1/* answers `503 proxy_not_configured` without it, and the
-      # proxy at website/functions/api/v1/[[path]].ts depends on it. It is SET in
+      # proxy at website/apps/dashboard/functions/api/v1/[[path]].ts depends on it. It is SET in
       # production and preview as of 2026-09-16 — verified live: /api/v1/teams now
       # returns 401 `not_signed_in` instead of the old 503. Flip back to
       # `recommended` only if the proxy loses its callers again.
@@ -165,7 +165,7 @@ projects:
         envs: [production]
         note: >-
           Upstream for the /api/v1 Token Handler proxy
-          (website/functions/api/v1/[[path]].ts). Without it the proxy answers
+          (website/apps/dashboard/functions/api/v1/[[path]].ts). Without it the proxy answers
           503 proxy_not_configured.
 
   # ─────────────────────────────────────────────────────────────────────

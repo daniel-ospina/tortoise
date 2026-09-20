@@ -62,6 +62,8 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
+import time
 import uuid as _uuid
 from datetime import UTC, datetime, timezone
 
@@ -70,6 +72,21 @@ import httpx
 from .retention import RESTORE_WINDOW_HOURS  # #4179 single window authority
 
 _logger = logging.getLogger(__name__)
+
+
+def _record_client_call(started: float) -> None:
+    """Record ONE control-plane HTTP call as ``(duration, thread name)``.
+
+    #3498 item 2 — the FALSIFIER: a call recorded on ``MainThread`` ran on the
+    event loop, i.e. was never offloaded. Instrumentation is best-effort and
+    must never affect auth, so every failure here is swallowed.
+    """
+    try:
+        from .monitoring import record_control_plane_client_call
+        record_control_plane_client_call(
+            time.perf_counter() - started, threading.current_thread().name)
+    except Exception:  # pragma: no cover — telemetry must never break auth
+        pass
 
 # Env-var names: SUPABASE_SERVICE_ROLE_KEY is the canonical name (edge
 # functions, supabase/README.md); SUPABASE_SERVICE_KEY is the legacy name —
@@ -277,8 +294,12 @@ class SupabaseControlPlane:
         }
         try:
             import httpx  # noqa: F401
-            resp = self._http.post(url, params={"select": "*"},
-                                   headers=headers, json=body or {})
+            started = time.perf_counter()
+            try:
+                resp = self._http.post(url, params={"select": "*"},
+                                       headers=headers, json=body or {})
+            finally:
+                _record_client_call(started)
         except RuntimeError:
             raise
         except Exception as e:  # transport errors — fail closed
@@ -427,32 +448,36 @@ class SupabaseControlPlane:
             # A per-request timeout is forwarded ONLY when supplied — httpx
             # reads ``timeout=None`` as "disable timeouts".
             req_kwargs = {} if timeout is None else {"timeout": timeout}
-            if method == "GET":
-                resp = self._http.get(url, params=params, headers=headers,
-                                      **req_kwargs)
-            elif method == "PATCH":
-                headers["Content-Type"] = "application/json"
-                # return=representation when a select is given → the caller
-                # sees the UPDATED rows ([] when the WHERE matched nothing),
-                # enabling atomic conditional claims (single UPDATE ... WHERE
-                # + rowcount via body, PR #1264 review P2).
-                headers["Prefer"] = ("return=representation" if select
-                                      else "return=minimal")
-                resp = self._http.patch(url, params=params, headers=headers,
-                                        json=json_body or {}, **req_kwargs)
-            elif method == "POST":
-                headers["Content-Type"] = "application/json"
-                headers["Prefer"] = "return=representation"
-                resp = self._http.post(url, params=params, headers=headers,
-                                       json=json_body or {}, **req_kwargs)
-            elif method == "DELETE":
-                # PostgREST row delete (service role). Only used by the
-                # post-grace hard-delete purge (#302) — soft paths PATCH.
-                headers["Prefer"] = "return=minimal"
-                resp = self._http.delete(url, params=params, headers=headers,
-                                         **req_kwargs)
-            else:
-                raise ValueError(f"unsupported method {method!r}")
+            started = time.perf_counter()
+            try:
+                if method == "GET":
+                    resp = self._http.get(url, params=params, headers=headers,
+                                          **req_kwargs)
+                elif method == "PATCH":
+                    headers["Content-Type"] = "application/json"
+                    # return=representation when a select is given → the caller
+                    # sees the UPDATED rows ([] when the WHERE matched nothing),
+                    # enabling atomic conditional claims (single UPDATE ... WHERE
+                    # + rowcount via body, PR #1264 review P2).
+                    headers["Prefer"] = ("return=representation" if select
+                                          else "return=minimal")
+                    resp = self._http.patch(url, params=params, headers=headers,
+                                            json=json_body or {}, **req_kwargs)
+                elif method == "POST":
+                    headers["Content-Type"] = "application/json"
+                    headers["Prefer"] = "return=representation"
+                    resp = self._http.post(url, params=params, headers=headers,
+                                           json=json_body or {}, **req_kwargs)
+                elif method == "DELETE":
+                    # PostgREST row delete (service role). Only used by the
+                    # post-grace hard-delete purge (#302) — soft paths PATCH.
+                    headers["Prefer"] = "return=minimal"
+                    resp = self._http.delete(url, params=params, headers=headers,
+                                             **req_kwargs)
+                else:
+                    raise ValueError(f"unsupported method {method!r}")
+            finally:
+                _record_client_call(started)
         except RuntimeError:
             raise
         except Exception as e:  # transport errors — fail closed
@@ -3002,6 +3027,22 @@ def update_org_billing(cp, org_id: str, updates: dict) -> None:
     body = {k: v for k, v in updates.items() if k in allowed}
     if not body:
         return
+    # #4216: Stripe delivers the period bounds as Unix EPOCH INTS. These
+    # columns are ``timestamptz``, whose input function rejects a bare JSON
+    # number (PostgREST populates the record and Postgres raises
+    # ``date/time field value out of range: "1756348800"``) — verified against
+    # PGlite. The REGISTRY twin stores the int verbatim because
+    # ``metering._anchor_instant`` accepts both shapes, but the control plane
+    # can only bind an ISO-8601 instant. Normalising HERE — the one seam every
+    # Supabase-lane billing write passes through (checkout and
+    # ``customer.subscription.updated``) — fixes every writer at once without
+    # changing what the webhook handlers pass. (The registry twin does NOT use
+    # this seam: ``mirror_subscription`` writes the graph directly and
+    # ``_anchor_instant`` reads its epoch ints.)
+    for _col in ("current_period_start", "current_period_end"):
+        _v = body.get(_col)
+        if isinstance(_v, (int, float)) and not isinstance(_v, bool):
+            body[_col] = datetime.fromtimestamp(float(_v), tz=UTC).isoformat()
     cp.query(
         "organizations",
         method="PATCH",

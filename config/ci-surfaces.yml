@@ -32,6 +32,11 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py, which
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
+  # #3498: the control-plane auth/session HTTP must not run on the event loop.
+  # Same dual registration as the three loop-responsiveness guards above, for
+  # the same reason: the file it guards is tortoise/hosted_api.py (and
+  # tortoise/monitoring.py), which selects the `api` surface.
+  - test_control_plane_offload_3498.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
@@ -143,6 +148,11 @@ surfaces:
   # REPLACES the `core` fallback, so a core-only registration would never run
   # on an api-only PR. Same #2938 dual-membership convention.
   - test_cohort_cost_cap.py
+  # #4194: the turn-write embedding path. Dual-registered with `core` (the
+  # SDK capture loop owns there) and `eval` (tortoise/embeddings.py selects
+  # eval) because the hosted copy of the same loop lives in the api-owned
+  # tortoise/hosted_api.py — a hosted-only tweak must run this file.
+  - test_turn_embedding_write_path_4194.py
   - test_hosted_auth.py
   - test_cross_tenant_read_isolation.py  # #3663: capture->read cross-tenant READ isolation (hosted api: search/sessions/detail/export + backups + MCP list_graphs + namespace opener)
   - test_hosted_backup.py
@@ -151,6 +161,12 @@ surfaces:
   # #3154 note in tools/ci_selection.py). A hosted_backup.py-only change now
   # selects this file (docker-lane; dump/restore round-trips).
   - test_dump_edge_asymmetry_3895.py
+  # #3902: the per-graph event-log counter (:GraphEventMeta.last_seq) must
+  # survive the backup boundary. Registered under `api` because
+  # tortoise/hosted_backup.py owns that surface (see the #3154 note in
+  # tools/ci_selection.py) — a hosted_backup.py-only change selects this file
+  # (docker-lane; dump → create_backup → restore_backup swap).
+  - test_restore_seq_3902.py
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
@@ -358,8 +374,13 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
+  # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
+  # write/read marker split. No DB, no network — default `core` surface is correct.
+  - test_4220_blog_residue_cleanup.py
   - test_ask_eval_only.py
   - test_capture_cost_measurement.py
+  - test_capture_entity_attachment_3664.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -396,11 +417,21 @@ surfaces:
   - test_collision_preflight.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
+  - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
+  # #4194: captured turn Points must carry the embedding the dense leg
+  # searches. Registered here because this file pins the unpatterned engine
+  # module `tortoise/search_engine.py` (run_vector_query /
+  # declared_degraded_read), which matches no SOURCE_PATTERNS entry and so
+  # falls to the `core` fallback. Dual-registered with `api` (the hosted copy of
+  # the loop in `tortoise/hosted_api.py`) and `eval`
+  # (`tortoise/embeddings.py`). Note `tortoise/sdk.py` is a SHARED_MODULE, so an
+  # sdk.py-only change already runs the full matrix.
+  - test_turn_embedding_write_path_4194.py
   - test_capture_session_supersession_e2e.py
   - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api
   - test_rebuild_turn_points_3947.py
@@ -408,6 +439,12 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  - test_shared_state_concurrency.py
+  - test_shared_state_events.py
+  - test_shared_state_events_claim.py
+  - test_shared_state_imports.py
+  - test_shared_state_monitoring.py
+  - test_shared_state_recovery.py
   - test_tmpdir_hygiene_4096.py  # #4096: AST guard — no pytest fixture may mkdtemp a tree without reclaiming it (meta test; reads tests/**, no DB)
   # #3755: session-start.sh must fire the install-probe beacon even when
   # `tortoise context` fails (the digest was `|| exit 0`, which skipped the
@@ -473,6 +510,12 @@ surfaces:
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
+  # #2881: the durability authority's anti-scatter gate — only
+  # docs/durability-posture.md may bind a journal/event log to "source of truth".
+  # Registered under `core` (the fallback surface for a tortoise/*.py claim site)
+  # AND `tier1` (below), so a docs-only ONTOLOGY.md wording edit cannot
+  # reintroduce the claim without the gate running.
+  - test_durability_posture.py
   - test_e2e9_point_in_time.py
   - test_e2e_journey.py
   - test_embedded_concurrency.py
@@ -676,6 +719,15 @@ surfaces:
   - test_suspension_parity.py
   - test_taxonomy.py
   - test_tool_registry.py
+  # #4282 (Node A scoreboard): every registered tool + SDK binding must RESOLVE to a
+  # live callable. The test executes the resolution (getattr / mcp._list_tools), never
+  # greps source. The five known-dead entries are carried as xfail(strict=True) bound
+  # to #4282, the implementation epic for the owner-approved canonical list
+  # (docs/product/canonical-mcp-tools.md, merged 8375c7921): a SIXTH dead entry is not
+  # in that ledger and fails the build, and repairing one XPASSes to red. RED BY
+  # DESIGN — it is the instrument that keeps the surface measurable until #4282
+  # repairs these declarations.
+  - test_surface_resolution.py
   - test_topic_summarization.py
   - test_tortoise_search.py
   - test_trash_quota.py            # #2467 restore respects the max_graphs quota (fake CP)
@@ -804,6 +856,12 @@ surfaces:
   # website/functions/_middleware.ts under Node) and the console's move to the
   # app origin. Pure/harness — no wrangler, no network.
   - test_admin_origin_redirect.py
+  # #4316: the agent DELETE surface's P1 draft-only guard + ownership/status
+  # predicates, executed against website/functions/blog/api/posts/[[path]].ts
+  # under Node with a stubbed fetch (no wrangler, no network, no DB). The E2E
+  # environment cannot express the cross-agent 403 (one key) or archived→409
+  # (the agent API cannot archive) — those cases live here.
+  - test_blog_agent_delete_guard.py
   - test_dashboard_unknown_address.py
   - test_github_connect.py
   - test_github_connector.py
@@ -822,6 +880,7 @@ surfaces:
   - test_capabilities_endpoint.py  # #2004 (W8): docker-lane catalog endpoint + build-fork gate tests
   - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
   - test_onboarding_analytics_patch.py
+  - test_onboarding_auto_complete.py
   - test_onboarding_endpoints.py
   - test_onboarding_false_completion_repair.py  # #3912: false decide-completed repair + guard (docker-lane)
   - test_onboarding_health_flip.py
@@ -987,6 +1046,11 @@ surfaces:
   - eval/write_path/test_write_path_operator_lane.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
+  # #4194: the write path now embeds turns via tortoise/embeddings.py's
+  # compute_embeddings (the batch form of compute_embedding); a change to
+  # that module selects `eval`, so this file is dual-registered here and in
+  # `core`/`api`.
+  - test_turn_embedding_write_path_4194.py
   - test_battery_retrieval_preflight.py  # #2985: pins tortoise/embeddings.py EmbeddingModel.get probe + recall_state leg_trace provenance (also battery)
   - test_calibrate_thresholds.py
   # #2938: direct unit tests of eval-mapped sources — tortoise/embeddings.py
@@ -1009,6 +1073,7 @@ tier1:
 - test_config.py
 - test_crypto.py
 - test_decide.py
+- test_durability_posture.py  # #2881: durability authority + scoped source-of-truth gate
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
@@ -1128,6 +1193,24 @@ durations:
 # must model (hand values are stale local timings, off by up to 37x).
 # duration_coverage_issues() floors coverage at 90% (#3400).
 # Regenerate from tools/ci_timing.py / the run's junit artifacts.
+#
+# #4221: the six `test_shared_state_*.py` files (moved out of
+# tortoise/shared_state/tests/, where no CI lane collected them) enter the fast
+# pool for the first time here. They have NO CI junit measurement — a file that
+# never ran cannot appear in an artifact — and this map's own #3400 policy is
+# that measured CI wall time is taken over local timings (local values on the
+# #4221 verification host were inflated by a concurrent e2e lane to 0.1-37s for
+# the same file). They are therefore entered at the flat 2.0s default, which is
+# the conservative floor rather than a measurement: it keeps coverage at 100%
+# instead of silently dropping the six back to the default anyway, and cannot
+# mis-balance the LPT pack. Refresh these six from the first post-merge main
+# run that includes them.
+  test_shared_state_concurrency.py: 2.0
+  test_shared_state_events.py: 2.0
+  test_shared_state_events_claim.py: 2.0
+  test_shared_state_imports.py: 2.0
+  test_shared_state_monitoring.py: 2.0
+  test_shared_state_recovery.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
@@ -1278,6 +1361,7 @@ durations:
   test_battery_corpus_v11.py: 3.2
   test_tenancy_spine.py: 3.2
   test_collision_preflight.py: 3.0
+  test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
   test_free_team_entitlement.py: 3.0
   test_integration_search.py: 3.0
   test_kind_classifier.py: 3.0
@@ -1635,6 +1719,10 @@ durations:
   test_navigation.py: 0.0
   test_no_tests_imports_in_production.py: 0.0
   test_onboard_prompt_ref.py: 0.0
+  # #3949: 24 tests, ~0.02s of junit testcase time (run 35392801726, test-b
+  # leg) — the file's own cost is negligible; the lane's shared session fixture
+  # is not attributable to it. Refresh from the first post-merge main run.
+  test_onboarding_auto_complete.py: 0.0
   test_onboarding_seed.py: 0.0
   test_onboarding_variants.py: 0.0
   test_operator_source_unit.py: 0.0
