@@ -131,17 +131,24 @@ BSL_TOKENS = (
     re.compile(r"\bbsl[\s._-]*(?:v(?:ersion)?[\s._-]*)?1\.1\b", re.I),
 )
 BSL_NAMES = (re.compile(r"business\s+source\s+license(\s+1\.1)?", re.I),)
-# A file whose whole body IS (or carries) a licence/notice is scanned whole-file
-# for the canonical NAME, not just in its first lines: the real BSL text carries
-# the name at line 2 AND again at line 28 and never carries the `BUSL` token, so
-# a composite file that keeps the MIT markers and appends the BSL terms slips
-# past a window scan. Covered name forms (verified bypasses, each closed in
-# review): a composite `LICENSE`; a `*.license` sidecar; and — found by the
-# code-review gate — the dashed/suffixed forms `LICENSE-BSL`, `LICENSE-2.0.txt`
-# and `third_party_licenses.txt`, which a prefix-only pattern missed while the
-# comment (and §7) claimed the `LICENSE*` glob.
+# A file whose NAME looks like a licence/notice is scanned whole-file for the
+# canonical NAME, not just in its first lines: the real BSL text carries the name
+# at line 2 AND again at line 28 and never carries the `BUSL` token, so a
+# composite file that keeps the MIT markers and appends the BSL terms slips past
+# a window scan. Recognised: any name carrying a licence/notice token followed
+# by a non-alphanumeric or the end — `LICENSE`, `LICENSE.md`, `LICENSE-BSL`,
+# `LICENSE 2.txt`, `LICENSE (copy).txt` (the duplicate names Finder/Windows
+# produce), `license copy.txt`, `third_party_licenses.txt`,
+# `THIRD-PARTY-NOTICES.txt`, `COPYING.LESSER`, `COPYRIGHT`. Deliberately NOT
+# `licensee-notes.md` (an alphanumeric continuation means the word is not the
+# token — it is prose about licensing), which is why a bare `LICENSE*` glob
+# would be wrong; likewise a name with no separator at all (`LICENSEBSL`) is out
+# of reach and is stated as such in docs/license-notes.md §7.
+# Every form below was a review finding at some point: the original pattern
+# missed `*.license` sidecars, then the dashed/suffixed forms, then the
+# space/bracket forms.
 LICENCE_FILE_RE = re.compile(
-    r"(^|[._-])(licen[cs]es?|copying|notices?)([._-].*)?$", re.I
+    r"(licen[cs]es?|copying|notices?|copyright)([^A-Za-z0-9]|$)", re.I
 )
 LICENCE_DIRS = ("LICENSES", "LICENCES", "NOTICES")
 

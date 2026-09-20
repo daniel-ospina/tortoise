@@ -152,12 +152,14 @@ def test_licence_sidecar_suffix_is_scanned_whole_file(tmp_path: Path) -> None:
 
 
 def test_dashed_and_suffixed_licence_names_are_scanned_whole_file(tmp_path: Path) -> None:
-    """`LICENSE-BSL` / `LICENSE-2.0.txt` / `third_party_licenses.txt` — the
-    forms a prefix-only pattern missed while the comment claimed `LICENSE*`."""
+    """The name forms a narrower pattern missed — dashed/suffixed names, the
+    space/bracket duplicates Finder and Windows produce, and `COPYRIGHT`."""
     module = _load()
-    for name in ("LICENSE-BSL", "LICENSE-2.0.txt", "third_party_licenses.txt", "COPYING.txt"):
+    for i, name in enumerate(("LICENSE-BSL", "LICENSE-2.0.txt", "third_party_licenses.txt",
+                              "COPYING.txt", "LICENSE 2.txt", "LICENSE (copy).txt",
+                              "license copy.txt", "COPYRIGHT")):
         assert module.is_licence_file(Path(name)), name
-        surface = tmp_path / name.replace(".", "-")
+        surface = tmp_path / f"surface-{i}"
         surface.mkdir()
         (surface / "LICENSE").write_text(MIT_TEXT)
         (surface / name).write_text("filler\n" * 30 + BSL_TEXT)
@@ -319,10 +321,15 @@ def test_marker_matcher_is_case_and_whitespace_insensitive() -> None:
 
 def test_licence_file_name_detection() -> None:
     module = _load()
-    for name in ("LICENSE", "LICENSE.md", "COPYING", "NOTICE", "MIT.license", "COPYING.txt",
-                 "LICENSE-BSL", "LICENSE-2.0.txt", "third_party_licenses.txt"):
+    for name in ("LICENSE", "LICENSE.md", "COPYING", "NOTICE", "NOTICES.txt", "COPYRIGHT",
+                 "MIT.license", "COPYING.txt", "COPYING.LESSER", "LICENSE-BSL",
+                 "LICENSE-2.0.txt", "third_party_licenses.txt", "THIRD-PARTY-NOTICES.txt",
+                 "LICENSE 2.txt", "LICENSE (copy).txt", "license copy.txt", "LICENSE.txt.bak"):
         assert module.is_licence_file(Path(name)), name
     assert module.is_licence_file(Path("SKILL.md")) is False
+    # an alphanumeric continuation means the word is not the token
     assert module.is_licence_file(Path("licensee-notes.md")) is False
+    assert module.is_licence_file(Path("licensing-notes.md")) is False
     assert module.is_licence_file(Path("licenses") / "terms.txt") is True
     assert module.is_licence_file(Path("licences") / "terms.txt") is True
+    assert module.is_licence_file(Path("NOTICES") / "terms.txt") is True

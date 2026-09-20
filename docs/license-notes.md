@@ -198,23 +198,29 @@ and a prose *mention* look different and only one of them is a regression:
   separates a claim from a mention.
 - the **canonical name** (`business source license [1.1]`) counts in a file's
   first 20 lines (frontmatter + header comment, where a licence header lives)
-  **or anywhere** in a licence/notice file — `LICENSE*`, `COPYING*`,
-  `NOTICE*`/`NOTICES*`, `*.license`-style sidecars (`MIT.license`), suffixed
-  forms (`third_party_licenses.txt`, `THIRD-PARTY-NOTICES.txt`), and
-  `LICENSES/`/`LICENCES/`/`NOTICES/` directories. The whole-file rule exists
-  because the engine's own BSL text carries the name at line 2 *and* line 28 and
-  never carries the `BUSL` token, so a composite file that keeps the MIT markers
-  and appends the BSL terms would otherwise pass.
+  **or anywhere** in a licence/notice file. A file is a licence/notice file
+  when its NAME carries a licence/notice token followed by a non-alphanumeric
+  or the end: `LICENSE`, `LICENSE.md`, `LICENSE-BSL`, `LICENSE 2.txt`,
+  `LICENSE (copy).txt`, `license copy.txt`, `third_party_licenses.txt`,
+  `THIRD-PARTY-NOTICES.txt`, `MIT.license`, `COPYING.LESSER`, `COPYRIGHT`,
+  `NOTICES.txt`, or any file under `LICENSES/`/`LICENCES/`/`NOTICES/`. A name
+  whose token continues as a word (`licensee-notes.md`, `licensing-notes.md`)
+  is prose about licensing, not a licence, and is scanned in the window only.
+  The whole-file rule exists because the engine's own BSL text carries the name
+  at line 2 *and* line 28 and never carries the `BUSL` token, so a composite
+  file that keeps the MIT markers and appends the BSL terms would otherwise
+  pass — and a stray `Business *Source* License` or British `Licence` spelling
+  in prose is not a declared marker of ours.
 
 Symlinked directories **are** followed (a skill dir symlinked into the surface
 is still served by the Pages copy, so it is still asserted). Reads — and the
 summary stream — are UTF-8-pinned, so a C/POSIX locale can neither silently skip
 every non-ASCII file (all four served skills are heavily non-ASCII) nor turn a
-diagnosis into a traceback. **Reach limits, stated rather than implicit:** a
-canonical-name declaration buried past the first 20 lines of a file that is
-*not* named as a licence/notice file is out of reach; and a file that is not
-valid UTF-8 carries no assertion (the licence file itself is reported as an
-explicit error in that case, not a traceback).
+diagnosis into a traceback. **Reach limits, stated rather than implicit:** a canonical-name declaration
+buried past the first 20 lines of a file that is *not* named as a licence/notice
+file is out of reach (including a name with no separator at all, `LICENSEBSL`);
+and a file that is not valid UTF-8 carries no assertion (the licence file itself
+is reported as an explicit error in that case, not a traceback).
 
 **Backstop (enforced in CI):** `validation/check-license-surface.py` asserts
 (1) the per-directory licence exists and declares MIT, and (2) **no file under
