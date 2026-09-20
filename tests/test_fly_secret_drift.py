@@ -322,11 +322,11 @@ def test_duplicate_declaration_is_exit_2():
     assert "duplicate declaration" in r.stderr
 
 
-def test_payload_not_a_single_variable_is_exit_2():
-    """A payload the scan cannot scope must fail closed, not scan nothing.
+def test_assignment_outside_the_accumulator_is_still_seen():
+    """Execution sees a payload built WITHOUT the accumulator variable.
 
-    `flyctl secrets set NEWKEY=1` on its own line makes the assignment scope
-    unreadable; scanning no lines would silently disable the Fly half.
+    The old parse-based scan keyed on the literal `ARGS` and missed
+    `flyctl secrets set NEWKEY=1` entirely; executing the block cannot.
     """
     wf = _fixture(
         "off-args.yml",
@@ -338,9 +338,14 @@ jobs:
           flyctl secrets set NEWKEY=1 --app fixture-app --stage
 """,
     )
-    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "off-args.json"), workflow=wf)
-    assert r.returncode == 2, r.stdout + r.stderr
-    assert "payload variable" in r.stderr
+    manifest = _fixture(
+        "off-args-manifest.txt", "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "off-args.json"), manifest=manifest, workflow=wf
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNDECLARED" in r.stdout and "NEWKEY" in r.stdout
 
 
 def test_comment_lines_are_not_propagation():
@@ -491,7 +496,8 @@ jobs:
   j:
     steps:
       - run: |
-          if [ -z "${{ secrets.WRONG_KEY }}" ]; then exit 1; fi
+          if [ -z "${{ secrets.WRONG_KEY }}" ]; then echo missing; fi
+      - run: |
           ARGS="FOO=${{ secrets.RIGHT_KEY }}"
           flyctl secrets set --stage $ARGS
 """,
@@ -517,7 +523,57 @@ jobs:
     )
     r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "no-assignments.json"), workflow=wf)
     assert r.returncode == 2, r.stdout + r.stderr
-    assert "no assignment to it was found" in r.stderr
+    assert "empty when every GitHub secret is present" in r.stderr
+
+
+def test_step_level_if_makes_every_name_conditional():
+    """A YAML `if:` on the payload step gates the whole payload.
+
+    It is not part of the `run:` shell, so execution cannot see it.
+    """
+    wf = _fixture(
+        "step-if.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "step-if.json"),
+        manifest=_fixture(
+            "step-if-manifest.txt",
+            "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n",
+        ),
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "1 conditionally propagated" in r.stdout
+    assert "0 managed" in r.stdout
+
+
+def test_fly_toml_env_boundary_is_the_env_table_only():
+    """A key assigned in another table (`[[vm]]`/`[build]`) is not `[env]`.
+
+    The real fly.toml has `[build]`, `[checks]` and `[[vm]]` tables, so a
+    whole-file search would accept a `fly-toml-env` declaration for `cpus`.
+    """
+    toml = _fixture(
+        "tables.toml",
+        'app = "fixture-app"\n\n[build]\n  dockerfile = "Dockerfile.hosted"\n\n'
+        '[env]\n  ENV_ONLY_KEY = "1"\n\n[[vm]]\n  cpus = 2\n',
+    )
+    manifest = _fixture(
+        "tables-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\ncpus  fly-toml-env\n",
+    )
+    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "tables.json"), manifest=manifest, toml=toml)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "STALE DECLARATION" in r.stdout and "cpus" in r.stdout
 
 
 def test_malformed_manifest_is_exit_2_not_clean():
