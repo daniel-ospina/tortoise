@@ -2619,9 +2619,9 @@ function claimIntentInFlight() {
   // states both fields (never computed here). `nodeState` is null when the
   // server has not supplied both numbers OR the tenant graph could not be
   // read (`graph_ready === false`) — a failed read must never render as a
-  // confident "0 / N (0%)". `nodeHint` is the at/near-limit nudge and
-  // `nodeNext` the next plan this deployment can actually check out (both
-  // consumed by the Billing card and the header upgrade control).
+  // confident "0 / N (0%)". `nodeHint` is the at/near-limit nudge (Billing
+  // card only); `nodeNext` is the next plan this deployment can actually
+  // check out (consumed by both the Billing nudge and the header control).
   const nodeState = team && team.graph_ready !== false ? nodeUsage(team) : null
   const nodeNext = nextUpgradePlan(planOptions(), team)
   // `hasUpgrade` keeps the nudge copy honest: no "upgrade for a higher

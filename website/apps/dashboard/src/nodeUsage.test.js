@@ -257,9 +257,10 @@ test('#4331: an active subscriber keeps the portal path, not a checkout control'
   assert.match(header, /canManageSubscription && \(/, 'the Manage-subscription control remains')
 })
 
-test('#4331: the cap-banner Upgrade CTA routes Stripe customers to the portal too', () => {
-  // The 402/quota banners call upgrade(); it must not hand a subscriber the
-  // 409-ing checkout (the same remedy-routing rule as header/nudge/grid).
+test('#4331: the cap-banner Upgrade CTA routes an ACTIVE subscriber to the portal (canceled/unpaid keep checkout, #1623)', () => {
+  // The 402/quota banners call upgrade(); it must not hand an active
+  // subscriber the 409-ing checkout (the same remedy-routing rule as
+  // header/nudge/grid FOR the active/trialing/past_due set).
   const start = flat.indexOf('async function upgrade()')
   assert.notEqual(start, -1, 'upgrade() must exist')
   const fn = flat.slice(start, flat.indexOf('async function manageBilling()', start))
