@@ -47,40 +47,30 @@ The freeze is on **tools and endpoints** — nothing is added, removed, renamed 
 either surface without explicit human approval. A **response field** that is off by default and
 leaves the response unchanged is **not** a gate failure, but must be recorded.
 
-## The reconciliation — MCP 98 → 23
+## The reconciliation — MCP 98 → 25
 
-Every group of current tools reaches one of the destinations below. **This is a map of where
-the groups go, not an enumeration of all 98** — a name can legitimately sit in two buckets when
-it is reachable from two call sites, and this list was reconstructed by hand. **The authoritative
-per-name bridge table is Phase 0.1.**
+**GENERATED — see `docs/product/bridge-table.md`**, produced by
+`uv run python tools/bridge_table.py`.
 
-| Destination | Current tools that reach it |
+An earlier version of this section carried a hand-built bucket map. It has been **deleted**, not
+corrected: it drifted from the registry in three separate ways (it named `run_onboarding` as a
+destination after the same document dropped it; it listed a target that is not in the 25; and it
+could not be checked). The generator replaces it, and unlike the map it **fails the build** when
+the map and the registry disagree — a mismatch is a finding, not something to reconcile by hand.
+
+**What it establishes, from the registry at build time:**
+
+| | |
 |---|---|
-| **→ `create_entity`** | `create_point` `create_event` `create_subject` `create_object` `create_document` `create_operator` `create_edge` `create_source` |
-| **→ `search_knowledge`** | `search` `query` `paginated_query` `query_points_by_tag` |
-| **→ `list_knowledge`** | `get` `list_pointkinds` `list_tags` `list_namespaces` `list_sources` |
-| **→ `get_entity`** | `get_point` `get_events` `get_operator` `get_source_reliability` `entity_profile` `get_governance` `get_session` |
-| **→ `check_confidence`** | `get_confidence` `compute_confidence` `recall` `calibrate_summary` `belief_timeline` `provenance` |
-| **→ `explore_connections`** | `traverse` `expand_relationships` `session_context` |
-| **→ `graph_overview`** | `overview` `status` `stale` `check_structure` `audit` `taxonomy` `summarize_structure` `validate_domain` `dream_health` |
-| **→ `poll_events`** | `events_poll` |
-| **→ `refresh_confidence`** | `dream` `promote_point` |
-| **→ `review_link_candidates`** | `review_connections` `find_cross_lens_candidates` `list_dedup_candidates` |
-| **→ `manage_source_trust`** | `set_source_tier` `assess_source` |
-| **→ `index_sources_from_directory`** | `index_files` `index_sessions` `ingest_corpus` `mine_conversations` |
-| **→ `adjust_relationship`** | `mitigate_operator` `operator_action` `annotate_operator` |
-| **→ `update_knowledge`** | `update` `update_point` `update_entity` |
-| **→ `supersede_knowledge`** | `supersede` `invalidate` |
-| **→ `delete_knowledge`** | `delete` `delete_point` `delete_entity` |
-| **→ `record_decision`** | `file_decision` `file_human_approval` |
-| **→ `run_onboarding`** | `onboarding_state` `onboarding_seed` `onboarding_demo_create` `onboarding_github_connect` `onboarding_github_index` `onboarding_github_status` `onboarding_session_recording` `pack_install` |
-| **→ tenancy (not on the MCP)** | `list_graphs` `org_create` |
-| **→ removed, no destination** | `ask` (retired #3929) · `checkpoint` `diary_read` `diary_write` (journal, post-beta) · `backfill_v25` `ingest` `session_capture` `packs_list` `graph_set_recording` `set_point_baseline` `retract_point` |
+| Registry tools | **98** |
+| Absorbed into MCP destinations | **71** |
+| Tenancy (SDK/REST only) | **2** |
+| Retired | **25** |
+| MCP target tools | **25** |
 
-**The authoritative per-name bridge table — every current tool, its single destination, and the
-SDK method behind each discriminator — is Phase 0.1.** It is a deliverable precisely because this
-document must not claim a reconciliation it has not computed. The hand-built map above shows the
-shape; it is not the proof.
+**`98 − 25 = 73 retired` is wrong** and circulated in earlier drafts: 25 retire and 71 are
+*absorbed* into the 25 targets. Many current tools map onto one target, so the two numbers are
+not complements.
 
 ## The reconciliation — SDK 150 → 40
 
@@ -100,8 +90,8 @@ beta surface adds four, drops three and splits one:
 
 | | |
 |---|---|
-| **+4** | `get_historical_knowledge` · `mine_knowledge_from_directory` · `write_question` · `verify_connection` |
-| **−3** | `inspect_batch` → `list_knowledge(kind='batch')` · `manage_deployment` (tenancy is not on the MCP) · `run_onboarding` → `verify_connection` |
+| **+4** | `get_historical_knowledge` · `mine_knowledge_from_directory` · `write_question` · `check_connection` |
+| **−3** | `inspect_batch` → `list_knowledge(kind='batch')` · `manage_deployment` (tenancy is not on the MCP) · `run_onboarding` → `check_connection` |
 | **±1** | `revise_knowledge` splits into `update_knowledge` + `supersede_knowledge` |
 | **renames** | `recall_beliefs`→`check_confidence` · `stabilize_beliefs`→`refresh_confidence` · `capture_knowledge`→`mine_knowledge_from_session` · `index_files`→`index_sources_from_directory` · `manage_source_trust` unchanged |
 
@@ -150,7 +140,7 @@ that names its replacement.
 | | Deliverable | Depends on |
 |---|---|---|
 | **3.1** | The 25 tools implemented **on the frozen SDK** | Phase 2 |
-| **3.2** | The 73 retired tools removed; `tortoise_ask` stays retired | 3.1 |
+| **3.2** | The **25 retired** tools removed. The other **71 are absorbed** into the 25 targets — many-to-one. Writing "98 − 25 = 73 retired" conflates the two and is wrong. | 3.1 |
 | **3.3** | The `co_firstlineno` guard defect fixed — see *Coordination* | — |
 
 ### Phase 4 — verification
