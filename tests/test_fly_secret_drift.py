@@ -41,7 +41,7 @@ _FLY_TOML = """\
 app = "fixture-app"
 
 [env]
-  DECLARED_ENV = "1"
+  ENV_ONLY_KEY = "1"
   # NOT_AN_ASSIGNMENT = "1"   <- documented in a comment only; must NOT count
 """
 
@@ -73,7 +73,7 @@ FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY
 STRIPE_PRICE_IDS      gh-secret:STRIPE_PRICE_IDS
 GIT_SHA               workflow
 GITHUB_CLIENT_ID      gh-secret:GH_CLIENT_ID
-DECLARED_ENV          fly-toml-env
+ENV_ONLY_KEY          fly-toml-env
 HAND_SET_FLAG         unmanaged
 LITERALLY_SET         workflow
 MULTILINE_FLAG        workflow
@@ -122,12 +122,13 @@ def _run(
     )
 
 
+# The names the fixture Fly app carries. ENV_ONLY_KEY is deliberately absent: it
+# is declared fly-toml-env, and a Fly secret would shadow [env].
 _ALL_DECLARED = [
     "FASTAPI_INTERNAL_KEY",
     "STRIPE_PRICE_IDS",
     "GIT_SHA",
     "GITHUB_CLIENT_ID",
-    "DECLARED_ENV",
     "HAND_SET_FLAG",
     "LITERALLY_SET",
     "MULTILINE_FLAG",
@@ -137,7 +138,7 @@ _ALL_DECLARED = [
 def test_clean_when_every_fly_secret_is_declared():
     r = _run(_secrets_file(_ALL_DECLARED, "clean.json"))
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "OK: all 8 Fly secret(s) are declared" in r.stdout
+    assert "OK: all 7 Fly secret(s) are declared" in r.stdout
     # STRIPE_PRICE_IDS (inline guard) and MULTILINE_FLAG (multi-line `if`) are
     # conditional, not managed.
     assert "2 conditionally propagated" in r.stdout
@@ -401,6 +402,122 @@ jobs:
     for name in ("INNER_KEY", "OUTER_KEY", "ALT_FORM_KEY"):
         assert name in conditional_block, f"{name} must be conditional, not managed"
     assert "3 conditionally propagated" in r.stdout
+
+
+def test_fly_toml_env_shadowed_by_a_fly_secret_is_stale():
+    """A Fly secret shadows fly.toml `[env]`, so that declaration is not the source."""
+    manifest = _fixture(
+        "shadowed-env.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nENV_ONLY_KEY  fly-toml-env\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY", "ENV_ONLY_KEY"], "shadowed-env.json"),
+        manifest=manifest,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "STALE DECLARATION" in r.stdout and "shadows [env]" in r.stdout
+
+
+def test_shell_spelling_of_the_payload_variable_is_accepted():
+    """`${ARGS}` is the same payload; it must not exit 2."""
+    wf = _fixture(
+        "braces.yml",
+        _WORKFLOW.replace("flyctl secrets set --stage $ARGS", "flyctl secrets set --stage ${ARGS}"),
+    )
+    r = _run(_secrets_file(_ALL_DECLARED, "braces.json"), workflow=wf)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_same_line_shell_variable_is_not_a_fly_secret():
+    """`ARGS_SAVED="$ARGS"` must not be read as declaring ARGS_SAVED."""
+    wf = _fixture(
+        "saved.yml",
+        _WORKFLOW.replace(
+            "          flyctl secrets set --stage $ARGS",
+            '          ARGS_SAVED="$ARGS"\n          flyctl secrets set --stage $ARGS',
+        ),
+    )
+    r = _run(_secrets_file(_ALL_DECLARED, "saved.json"), workflow=wf)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ARGS_SAVED" not in r.stdout
+
+
+def test_alternate_guard_spellings_are_conditional():
+    """`test -n …&&`, `[[ … ]]` and a one-line `if` are guards too.
+
+    The default is CONDITIONAL: anything that could guard an assignment leaves it
+    conditional, so no shell spelling can hide the #4126 state.
+    """
+    wf = _fixture(
+        "spellings.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          test -n "${{ secrets.T_KEY }}" && ARGS="$ARGS TEST_FORM_KEY=1"
+          [[ -n "${{ secrets.D_T_KEY }}" ]] && ARGS="$ARGS DOUBLE_BRACKET_KEY=1"
+          if [ -n "${{ secrets.ONE_KEY }}" ]; then ARGS="$ARGS ONE_LINER_KEY=1"; fi
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "spellings-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+        "TEST_FORM_KEY  workflow\nDOUBLE_BRACKET_KEY  workflow\nONE_LINER_KEY  workflow\n",
+    )
+    r = _run(
+        _secrets_file(
+            ["FASTAPI_INTERNAL_KEY", "TEST_FORM_KEY", "DOUBLE_BRACKET_KEY", "ONE_LINER_KEY"],
+            "spellings.json",
+        ),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    conditional_block = r.stdout.split("CONDITIONAL PROPAGATION")[1].split("OK:")[0]
+    for name in ("TEST_FORM_KEY", "DOUBLE_BRACKET_KEY", "ONE_LINER_KEY"):
+        assert name in conditional_block, f"{name} must be conditional"
+    assert "3 conditionally propagated" in r.stdout
+
+
+def test_gh_secret_declaration_must_feed_that_variable():
+    """A declared GitHub secret must be the one feeding the variable's assignment."""
+    wf = _fixture(
+        "linked.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          if [ -z "${{ secrets.WRONG_KEY }}" ]; then exit 1; fi
+          ARGS="FOO=${{ secrets.RIGHT_KEY }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture("linked-manifest.txt", "FOO  gh-secret:WRONG_KEY\n")
+    r = _run(_secrets_file(["FOO"], "linked.json"), manifest=manifest, workflow=wf)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "does not feed the assignment" in r.stdout
+
+
+def test_payload_with_no_assignment_is_exit_2():
+    """Zero scanned assignments would silently disable the reverse half."""
+    wf = _fixture(
+        "no-assignments.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS=""
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "no-assignments.json"), workflow=wf)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "no assignment to it was found" in r.stderr
 
 
 def test_malformed_manifest_is_exit_2_not_clean():

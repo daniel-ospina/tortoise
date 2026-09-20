@@ -73,7 +73,10 @@ _ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=")
 # NAME is read from the `flyctl secrets set` invocation rather than hardcoded, so
 # renaming the accumulator cannot silently empty the scan.
 _PAYLOAD_CMD_RE = re.compile(r"\bflyctl\s+secrets\s+set\b")
-_SHELL_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+_SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+# Shell constructs that can make a payload assignment conditional. Used with the
+# inverted default: absent all of these, an append is managed.
+_GUARD_TOKENS = ("&&", "||", " if ", " then", "case ", "test ", "[[", "elif ")
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 # A propagation line that only fires when the GitHub secret is non-empty:
 #   [ -n "${{ secrets.X }}" ] && ARGS="$ARGS Y=…"
@@ -173,39 +176,58 @@ def workflow_secret_refs(text: str) -> set[str]:
     return set(_SECRET_REF_RE.findall(text))
 
 
-def workflow_assignments(text: str, payload_var: str) -> tuple[set[str], set[str]]:
-    """``(unconditional, conditional)`` Fly names the workflow assigns.
+def workflow_assignments(
+    text: str, payload_var: str
+) -> tuple[set[str], set[str], dict[str, set[str]]]:
+    """``(unconditional, conditional, sources)`` for the Fly secrets payload.
 
-    Only lines that build the Fly secrets payload (referencing ``payload_var``)
-    count, and a full-line comment never counts — a name mentioned in one is not
-    propagation. A name is CONDITIONAL when the line that assigns it is guarded
-    inline (``[ -n "${{ secrets.X }}" ] && ARGS=…``) or sits inside an ``if``
-    block whose condition reads a GitHub secret: the Fly value is only
-    overwritten while those secrets exist. Nesting is tracked as a stack, so an
-    inner ``fi`` cannot end an enclosing guard early.
+    Only an assignment to ``payload_var`` itself counts, and only names on its
+    RIGHT-hand side: a same-line shell variable (``ARGS_SAVED="$ARGS"``) or a
+    trailing comment is not a Fly variable, and a full-line comment never is.
+
+    ``sources[name]`` is the set of GitHub secret names referenced on the line
+    that assigns ``name`` — so a `gh-secret:<GH_NAME>` declaration must name the
+    secret that actually feeds THAT variable, not merely one mentioned anywhere
+    in the file.
+
+    CONDITIONAL is the DEFAULT. A name counts as managed only when its line is a
+    bare append to the payload — anything that could make the assignment
+    conditional (``&&``, ``||``, ``test``, ``[[``, an enclosing ``if``) leaves it
+    conditional. The direction is deliberate: an over-conditional name is
+    *visible* in the debt list, an over-managed name hides the #4126 case.
     """
     unconditional: set[str] = set()
     conditional: set[str] = set()
+    sources: dict[str, set[str]] = {}
     guard_stack: list[bool] = []
+    lhs_re = re.compile(rf'\b{re.escape(payload_var)}="')
     for raw in text.splitlines():
-        stripped = raw.strip()
-        if stripped.startswith("#"):
+        # A ` # comment` tail is never propagation; the payload values are
+        # `${{\u2026}}` references, which never contain ` #`.
+        code = re.sub(r"(^|\s)#.*$", "", raw)
+        stripped = code.strip()
+        if not stripped:
             continue
         # A one-liner (`if …; then …; fi`) opens and closes on the same line and
         # must not push a frame that is never popped.
         one_liner = bool(re.search(r";\s*fi\s*(;.*)?$", stripped))
         if (stripped.startswith("if ") or stripped == "if") and not one_liner:
-            guard_stack.append(bool(_GUARD_COND_RE.search(raw)))
+            guard_stack.append(bool(_GUARD_COND_RE.search(code)))
         elif _FI_RE.match(stripped) and guard_stack:
             guard_stack.pop()
-        if payload_var in raw:
-            # The accumulator itself (`ARGS=…`) is not a Fly secret.
-            names = set(_ASSIGN_RE.findall(raw)) - {payload_var}
-            if any(guard_stack) or _CONDITIONAL_RE.search(raw):
-                conditional |= names
-            else:
-                unconditional |= names
-    return unconditional, conditional
+        match = lhs_re.search(code)
+        if not match:
+            continue
+        rhs = code[match.end() :]
+        names = set(_ASSIGN_RE.findall(rhs)) - {payload_var}
+        if not names:
+            continue
+        guarded = any(guard_stack) or any(token in code for token in _GUARD_TOKENS)
+        gh_on_line = set(_SECRET_REF_RE.findall(code))
+        for name in names:
+            sources.setdefault(name, set()).update(gh_on_line)
+            (conditional if guarded else unconditional).add(name)
+    return unconditional, conditional, sources
 
 
 def fly_toml_env_keys(text: str) -> set[str]:
@@ -267,7 +289,9 @@ def main() -> int:
     except ValueError as exc:
         _err(f"cannot determine secret provenance: {exc}")
         return 2
-    assigned, assigned_conditionally = workflow_assignments(workflow_text, payload_var)
+    assigned, assigned_conditionally, assignment_sources = workflow_assignments(
+        workflow_text, payload_var
+    )
     if not assigned and not assigned_conditionally:
         _err(
             "cannot determine secret provenance: the flyctl secrets set payload is "
@@ -313,12 +337,18 @@ def main() -> int:
                     f"STALE DECLARATION — {name!r} is declared gh-secret:{gh_name} but "
                     f"deploy-hosted.yml never assigns the Fly variable {name}"
                 )
+            elif gh_name not in assignment_sources.get(name, set()):
+                # Referenced somewhere is not enough: the declared secret must be
+                # the one feeding THIS variable.
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared gh-secret:{gh_name} but "
+                    f"that secret does not feed the assignment of {name} "
+                    f"(found: {sorted(assignment_sources.get(name) or [])})"
+                )
             elif name in assigned_conditionally:
-                # Assigned behind a `[ -n "${{ secrets.X }}" ] &&` guard: while
-                # that GitHub secret is absent the Fly value is untouched, i.e.
-                # hand-managed — the #4126 case. CONSERVATIVE: any guarded
-                # assignment wins over an unguarded one, so a line-split guard
-                # cannot be read as managed.
+                # Assigned behind a guard: while that GitHub secret is absent the
+                # Fly value is untouched, i.e. hand-managed — the #4126 case.
+                # CONSERVATIVE: any guarded assignment wins over an unguarded one.
                 conditional.append(name)
         elif kind == "workflow":
             if name not in assigned and name not in assigned_conditionally:
@@ -328,11 +358,21 @@ def main() -> int:
                 )
             elif name in assigned_conditionally:
                 conditional.append(name)
-        elif kind == "fly-toml-env" and name not in env_keys:
-            violations.append(
-                f"STALE DECLARATION — {name!r} is declared fly-toml-env but is not an "
-                "assigned key in fly.toml's [env] table"
-            )
+        elif kind == "fly-toml-env":
+            if name not in env_keys:
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared fly-toml-env but is not an "
+                    "assigned key in fly.toml's [env] table"
+                )
+            elif name in fly_names:
+                # A Fly SECRET shadows [env], so the version-controlled value is
+                # not what the app reads: the declaration describes a source that
+                # loses to an unmanaged one.
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared fly-toml-env but is also a "
+                    "Fly secret, which shadows [env] (declare the real source "
+                    "instead)"
+                )
         elif kind == "unmanaged" and (name in assigned or name in assigned_conditionally):
             violations.append(
                 f"STALE DECLARATION — {name!r} is declared unmanaged but "
