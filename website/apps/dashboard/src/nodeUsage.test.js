@@ -204,7 +204,7 @@ test('#4331: the Billing card shows nodes_used / max_nodes and never fabricates 
     'the Memories card must mirror the node card\'s uncertainty')
 })
 
-test('#4331: the node bar shares the write-ops treatment with amber/red thresholds', () => {
+test('#4331: the node bar colour is graduated (accent < 80%, amber ≥ 80%, red at 100%)', () => {
   assert.match(flat, /background: nodeBarColor\(nodeState\.level\)/,
     'the bar colour must come from the level derivation')
   assert.match(flat, /width: `\$\{nodeState\.pct\}%`/, 'the bar width must be the capped pct')

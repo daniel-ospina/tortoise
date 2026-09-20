@@ -2664,10 +2664,11 @@ function claimIntentInFlight() {
 
   async function upgrade() {
     // #4331/#4382: checkout 409s on an ACTIVE subscription (active/trialing/
-    // past_due) — route those to the portal, matching the header / Billing
-    // nudge / plan-grid remedy routing. Canceled/unpaid keep checkout so a
-    // lapsed customer can re-subscribe (#1623), and a free team still starts
-    // its first checkout.
+    // past_due) — route those to the portal, the same portal remedy the
+    // header / Billing nudge / plan grid use (those gate on the WIDER
+    // canManageSubscription; here the set is deliberately narrower).
+    // Canceled/unpaid keep checkout so a lapsed customer can re-subscribe
+    // (#1623); a free team still starts its first checkout.
     if (hasActiveSubscription) { await manageBilling(); return }
     await upgradeToPrice(team?.checkout_price_id)
   }
@@ -9610,10 +9611,12 @@ function claimIntentInFlight() {
                   </p>
                 </div>
               )}
-              {/* #4331: node usage bar + at/near-limit nudge. Same progress
-                  treatment as write ops — accent < 80%, amber ≥ 80%, red at
-                  100% — plus the upgrade nudge (Free: keep writing; paid: a
-                  higher allowance). The nudge deliberately promises no
+              {/* #4331: node usage bar + at/near-limit nudge. Same track and
+                  geometry as the write-ops bar, but graduated by level —
+                  accent < 80%, amber ≥ 80%, red at 100% (the write-ops bar
+                  stays accent at every level) — plus the upgrade nudge
+                  (Free: keep writing; paid: a higher allowance). The nudge
+                  deliberately promises no
                   chargeable node overage: the owner DECIDED it (option B,
                   ~$2/10k nodes/mo above cap on Solo/pro/Team, 2026-09-20)
                   but it is NOT implemented in this lane. */}
