@@ -1,8 +1,10 @@
 // #1623: plan display data for the dashboard Billing page — a build-time
 // import of product/pricing.json (single source of truth, same file the
 // server's tier limits and the marketing product.html pricing grid read).
-// Unlike product.html's hand-maintained mirror (which needs a parity test,
-// tests/test_website_static.py), this IS the file — no drift possible.
+// The imported DATA cannot drift — this IS the file. The tier DISPLAY names
+// below (TIER_LABELS) are a separate hand-maintained map, guarded against
+// product.html's `labels` map by
+// tests/test_website_static.py::TestDisplayLabelParity (#4336).
 //
 // Price ids are NOT here: they stay server-resolved (STRIPE_PRICE_IDS via
 // /v1/team's checkout_price_ids — the client never hardcodes Stripe ids,
