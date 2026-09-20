@@ -347,8 +347,9 @@ class _EntityHandlers:
         # produced a junk vector in the HNSW index.
         if not op and p.get("content"):
             try:
-                from tortoise.embeddings import compute_embedding
-                embedding = compute_embedding(p.get("content", ""))
+                from tortoise.embeddings import encode_for_store
+                embedding = encode_for_store(
+                    p.get("content", ""), self.required_embedding_dim)
             except Exception:
                 pass
 
@@ -1057,8 +1058,9 @@ class _EntityHandlers:
         # Compute embedding for Subject name (#7845)
         embedding = None
         try:
-            from tortoise.embeddings import compute_embedding
-            embedding = compute_embedding(name)
+            from tortoise.embeddings import encode_for_store
+            embedding = encode_for_store(
+                name, self.required_embedding_dim)
         except Exception:
             pass
         # #1918: canonical id must win on MATCH too — parity with the #1155
@@ -1120,8 +1122,9 @@ class _EntityHandlers:
         # Compute embedding from name (#7845)
         embedding = None
         try:
-            from tortoise.embeddings import compute_embedding
-            embedding = compute_embedding(name)
+            from tortoise.embeddings import encode_for_store
+            embedding = encode_for_store(
+                name, self.required_embedding_dim)
         except Exception:
             pass
         # #1155-P1: canonical id must win on MATCH too. The produces-edge
@@ -1309,8 +1312,9 @@ class _EntityHandlers:
             ]))
             if doc_content.strip():
                 try:
-                    from tortoise.embeddings import compute_embedding
-                    embedding = compute_embedding(doc_content)
+                    from tortoise.embeddings import encode_for_store
+                    embedding = encode_for_store(
+                        doc_content, self.required_embedding_dim)
                 except Exception:
                     pass
         # #125 capture fields — use ev.get(field) with NO default so None →
@@ -1435,8 +1439,9 @@ class _EntityHandlers:
             ]))
             if event_content.strip():
                 try:
-                    from tortoise.embeddings import compute_embedding
-                    embedding = compute_embedding(event_content)
+                    from tortoise.embeddings import encode_for_store
+                    embedding = encode_for_store(
+                        event_content, self.required_embedding_dim)
                 except Exception:
                     pass
         props = {

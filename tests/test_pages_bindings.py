@@ -853,7 +853,7 @@ EXPECTED_CLASSIFICATION = {
         # recommended: correct in-source default
         "APP_ORIGIN": ("recommended", ["production"]),
         "AUTH_CALLBACK_URL": ("recommended", ["production"]),
-        # required: SET in production+preview, and website/functions/api/v1/[[path]].ts
+        # required: SET in production, and website/apps/dashboard/functions/api/v1/[[path]].ts
         # answers `503 proxy_not_configured` without it (verified live: after it was
         # set, /api/v1/teams returns 401 not_signed_in instead). The old
         # `recommended` note said "the moment a client calls it" — that is now.

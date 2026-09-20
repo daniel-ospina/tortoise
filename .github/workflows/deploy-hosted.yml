@@ -54,6 +54,11 @@ on:
       - 'tortoise/**'
       - 'packs/**'          # #1929: pack content changes must redeploy (G1 gate)
       - 'tests/sample_transcript.txt'  # #1929: the image copies it (mine-conversation example)
+      - 'product/pricing.json'        # #4246: Dockerfile.hosted COPYs it and tortoise/pricing.py
+                                      # reads it at /app/product/pricing.json — without this a
+                                      # pricing-only change never redeployed the hosted image,
+                                      # so prod kept serving the previous pricing while the
+                                      # required pricing-artifact check stayed green.
       - 'fly.toml'
       - 'Dockerfile.hosted'
       - 'entrypoint.sh'
