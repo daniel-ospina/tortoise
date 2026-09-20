@@ -413,6 +413,12 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  - test_shared_state_concurrency.py
+  - test_shared_state_events.py
+  - test_shared_state_events_claim.py
+  - test_shared_state_imports.py
+  - test_shared_state_monitoring.py
+  - test_shared_state_recovery.py
   - test_tmpdir_hygiene_4096.py  # #4096: AST guard — no pytest fixture may mkdtemp a tree without reclaiming it (meta test; reads tests/**, no DB)
   # #3755: session-start.sh must fire the install-probe beacon even when
   # `tortoise context` fails (the digest was `|| exit 0`, which skipped the
@@ -1133,6 +1139,24 @@ durations:
 # must model (hand values are stale local timings, off by up to 37x).
 # duration_coverage_issues() floors coverage at 90% (#3400).
 # Regenerate from tools/ci_timing.py / the run's junit artifacts.
+#
+# #4221: the six `test_shared_state_*.py` files (moved out of
+# tortoise/shared_state/tests/, where no CI lane collected them) enter the fast
+# pool for the first time here. They have NO CI junit measurement — a file that
+# never ran cannot appear in an artifact — and this map's own #3400 policy is
+# that measured CI wall time is taken over local timings (local values on the
+# #4221 verification host were inflated by a concurrent e2e lane to 0.1-37s for
+# the same file). They are therefore entered at the flat 2.0s default, which is
+# the conservative floor rather than a measurement: it keeps coverage at 100%
+# instead of silently dropping the six back to the default anyway, and cannot
+# mis-balance the LPT pack. Refresh these six from the first post-merge main
+# run that includes them.
+  test_shared_state_concurrency.py: 2.0
+  test_shared_state_events.py: 2.0
+  test_shared_state_events_claim.py: 2.0
+  test_shared_state_imports.py: 2.0
+  test_shared_state_monitoring.py: 2.0
+  test_shared_state_recovery.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
