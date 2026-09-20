@@ -138,35 +138,51 @@ def marker_present(screen: str | None) -> bool:
     return BOOT_BLOCK_MARKER in (screen or "")
 
 
+def _last_status_bar_end(screen: str | None) -> int:
+    """Offset just past the LAST status bar in the capture, or -1 if none."""
+    matches = list(READY_RE.finditer(screen or ""))
+    return matches[-1].end() if matches else -1
+
+
 def status_bar_present(screen: str | None) -> bool:
-    """pi's TUI status bar is drawn — the TUI owns stdin now."""
-    return bool(READY_RE.search(screen or ""))
+    """pi's TUI status bar appears somewhere in the capture."""
+    return _last_status_bar_end(screen) >= 0
 
 
 def boot_blocked(screen: str | None) -> bool:
     """True when pi is sitting at the `Press any key to continue...` prompt.
 
-    Read as an ASYMMETRY, not a position: the marker is present and the TUI's
-    status bar is not. Both halves matter, and neither alone is safe:
+    ORDER, not mere presence. The pane is blocked iff the prompt marker exists
+    with NO status bar rendered after it:
 
     * the marker ALONE is ambiguous — pi's `regular` TUI mode renders inline, so
       once the prompt has been satisfied the line stays visible above the input
-      box forever (observed live: 62 lines from the end of an 80-line capture on
-      a healthy pane). Position-based rules ("the marker is not last") misread a
-      live block as safe as soon as ANY boot output follows the prompt, and then
-      the gate feeds the brief to the prompt — the corruption this tool exists to
-      prevent;
-    * the status bar ALONE is the positive readiness signal, and it is drawn
-      only after the prompt is satisfied.
+      box for the life of the session (observed live: 62 lines from the end of an
+      80-line capture on a healthy pane). Position-relative rules ("the marker is
+      not last") misread a live block as safe as soon as ANY boot output follows
+      the prompt, and then feed the brief to the prompt — the corruption this
+      tool exists to prevent;
+    * the status bar ALONE is equally ambiguous in the other direction — a pane
+      that PREVIOUSLY ran pi still shows the old session's status bar in the
+      capture, above a freshly printed prompt. Matching "any status bar" there
+      also declared the pane ready and fed the prompt the brief (reproduced: the
+      prompt ate the prefix).
 
-    A boot-blocked pane has no status bar, so the two are mutually exclusive.
+    Requiring the bar to come AFTER the prompt settles both cases, because the
+    bar is drawn only once the prompt has been satisfied — for the CURRENT
+    process.
     """
-    return marker_present(screen) and not status_bar_present(screen)
+    if not screen:
+        return False
+    marker_at = screen.rfind(BOOT_BLOCK_MARKER)
+    if marker_at < 0:
+        return False
+    return _last_status_bar_end(screen) < marker_at
 
 
 def screen_ready(screen: str | None) -> bool:
-    """True when pi's TUI owns stdin (its status bar is drawn)."""
-    return status_bar_present(screen)
+    """True when pi's TUI owns stdin: a status bar drawn after any prompt."""
+    return status_bar_present(screen) and not boot_blocked(screen)
 
 
 def text_on_screen(screen: str | None, fp: str) -> bool:
@@ -176,10 +192,13 @@ def text_on_screen(screen: str | None, fp: str) -> bool:
     the fallback comparison strips ALL whitespace, which survives a wrap at a
     space AND a wrap mid-token.
 
-    A false positive here is SAFE: it downgrades recovery from "re-send the
-    text" to "send a bare Enter", and a bare Enter on a non-empty composer
-    submits it while a bare Enter on an empty composer is a no-op. The final
-    artifact check still decides success.
+    A false positive here costs a re-send attempt, not correctness: the recovery
+    still has to confirm the artifact before reporting success, so a message that
+    was never delivered ends at `sent-but-not-consumed` (fail closed) rather than
+    a false success. That fail-closed direction is why the search covers the
+    whole capture rather than only the composer region: mistaking transcript text
+    for composer text costs an extra `release-only` attempt, while the opposite
+    mistake duplicates a message.
     """
     if not fp:
         return False
@@ -264,7 +283,15 @@ def is_consumed(
 
 
 def recovery_action(screen: str | None, fp: str) -> str:
-    """Choose the cheapest safe recovery for an unconsumed send."""
+    """Choose the cheapest safe recovery for an unconsumed send.
+
+    An UNREADABLE screen (`None` — the read-screen call failed) deliberately
+    degrades to `release-only`: a bare Enter cannot duplicate anything, whereas a
+    blind re-send into a composer that already holds the message would submit it
+    twice. Never choose `resend` from a screen we could not read.
+    """
+    if screen is None:
+        return R_RELEASE
     if boot_blocked(screen):
         return R_DISMISS_RESEND
     if text_on_screen(screen, fp):
@@ -314,8 +341,23 @@ class Cmux:
         except FileNotFoundError:
             return CmuxResult(127, "", f"cmux binary not found: {self.binary}", argv)
         except subprocess.TimeoutExpired:
-            return CmuxResult(124, "", f"cmux timed out: {' '.join(argv)}", argv)
+            # NEVER echo the message operand: `send` puts the brief after `--`,
+            # so a raw argv dump would write the whole payload (which may carry
+            # credentials or confidential content) into the caller's log. The
+            # tool otherwise logs only byte counts and a 40-char fingerprint.
+            return CmuxResult(124, "", self._describe(argv), argv)
         return CmuxResult(proc.returncode, proc.stdout or "", proc.stderr or "", argv)
+
+    @staticmethod
+    def _describe(argv: list[str]) -> str:
+        """`cmux <subcommand> ...` with any message operand redacted."""
+        safe = list(argv)
+        if "--" in safe:
+            cut = safe.index("--")
+            payload = safe[cut + 1 :]
+            size = sum(len(part.encode()) for part in payload)
+            safe = [*safe[: cut + 1], f"<{size} bytes redacted>"]
+        return f"cmux timed out: {' '.join(safe)}"
 
     # -- concrete operations ------------------------------------------------- #
 
@@ -362,6 +404,7 @@ class DispatchResult:
     attempts: int = 0
     recoveries: list[str] = field(default_factory=list)
     fingerprint: str = ""
+    reason: str = ""
 
     def as_json(self) -> dict:
         return {
@@ -371,6 +414,7 @@ class DispatchResult:
             "attempts": self.attempts,
             "recoveries": self.recoveries,
             "fingerprint": self.fingerprint,
+            "reason": self.reason,
         }
 
 
@@ -408,9 +452,15 @@ class Dispatcher:
             )
         return workspace_entry(result.out, workspace)
 
-    def screen(self, workspace: str, surface: str | None = None) -> str:
+    def screen(self, workspace: str, surface: str | None = None) -> str | None:
+        """The pane text, or None when read-screen FAILED.
+
+        None is a distinct state from "": an unreadable pane must not be treated
+        as one that is simply not ready yet, or the gate would send blind and the
+        recovery could pick `resend` from no information at all.
+        """
         result = self.cmux.read_screen(workspace, surface=surface)
-        return result.out if result.rc == 0 else ""
+        return result.out if result.rc == 0 else None
 
     def wait_for_workspace(self, workspace: str, timeout: float) -> dict | None:
         """Wait for a freshly-created workspace to appear in `list-workspaces`.
@@ -443,7 +493,7 @@ class Dispatcher:
         confirmation and recovery still gate success.
         """
         deadline = self.now() + timeout
-        screen = ""
+        screen: str | None = ""
         announced = False
         dismissals = 0
         logged_failure = False
@@ -471,7 +521,12 @@ class Dispatcher:
             # Deadline is checked AFTER the dismissal attempt and BEFORE the
             # sleep, so a zero timeout still gets one probe + one dismissal.
             if self.now() >= deadline:
-                if boot_blocked(screen):
+                if screen is None:
+                    self.log(
+                        f"  read-screen FAILED on all {dismissals + 1} probe(s) — "
+                        f"pane state is unknown"
+                    )
+                elif boot_blocked(screen):
                     self.log(
                         f"  still boot-blocked after {dismissals} dismissal attempt(s); "
                         f"last rc={dismissal.rc if dismissals else 'n/a'}"
@@ -517,6 +572,10 @@ class Dispatcher:
         fp = fingerprint(text)
         if not fp:
             return DispatchResult(False, "empty-message", "nothing to send")
+        # A negative --retries would make the confirmation loop body never run
+        # while the text has ALREADY been transmitted, producing a false
+        # "sent-but-not-consumed" for a message that may well have landed.
+        retries = max(0, retries)
 
         tag = f"[{label}] " if label else ""
         try:
@@ -537,7 +596,7 @@ class Dispatcher:
         # --- gate: never send into a boot-blocked prompt -------------------- #
         self.log(f"{tag}waiting for {workspace} to be safe to send…")
         try:
-            ready, blocked_now, _ = self.wait_until_safe_to_send(
+            ready, blocked_now, gate_screen = self.wait_until_safe_to_send(
                 workspace, ready_timeout, surface
             )
         except CmuxTransportError as exc:
@@ -552,6 +611,17 @@ class Dispatcher:
                 f"boot-block prompt after {ready_timeout:g}s — refusing to send "
                 f"(bytes sent at that prompt are eaten, and a partial eat submits "
                 f"a truncated turn)",
+                fingerprint=fp,
+            )
+        if not ready and gate_screen is None:
+            # We could not read the pane AND never saw a ready signal. Sending
+            # blind here is how a brief gets fed to a prompt we cannot see.
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace} could not be read (`cmux read-screen` failed) "
+                f"and no ready signal was seen in {ready_timeout:g}s — refusing to "
+                f"send blind",
                 fingerprint=fp,
             )
         if not ready:
@@ -584,6 +654,11 @@ class Dispatcher:
 
         # --- confirm the ARTIFACT, then recover ----------------------------- #
         result = DispatchResult(False, "sent-but-not-consumed", "", fingerprint=fp)
+        # The grace window is at least a full consume budget: a submission that is
+        # real but slow to appear (cmux writes it at the turn boundary, and under
+        # load reads time out) must not be mistaken for a lost one, because
+        # re-sending it would duplicate the message in the lane.
+        grace = max(RECOVERY_GRACE_TIMEOUT, consume_timeout)
         for attempt in range(1, retries + 2):
             result.attempts = attempt
             try:
@@ -594,6 +669,7 @@ class Dispatcher:
                 result.status = "transport-error"
                 result.detail = f"{tag}cmux unreachable while confirming: {exc}"
                 return result
+            result.reason = reason
             if consumed:
                 result.ok = True
                 result.status = "consumed"
@@ -616,7 +692,7 @@ class Dispatcher:
                 # catch up — re-sending a message that did in fact land would
                 # DUPLICATE it in the lane.
                 late_consumed, late_reason, _ = self.wait_consumed(
-                    workspace, before, fp, RECOVERY_GRACE_TIMEOUT
+                    workspace, before, fp, grace
                 )
                 if late_consumed:
                     result.ok = True
@@ -667,8 +743,8 @@ class Dispatcher:
         result.status = "sent-but-not-consumed"
         result.detail = (
             f"{tag}{workspace} sent-but-not-consumed after {result.attempts} "
-            f"attempt(s) ({result.detail or 'no confirmation'}) — the bytes were "
-            f"transmitted but never became a conversation message. "
+            f"attempt(s) — last reason: {result.reason or 'no-confirmation-poll'}. "
+            f"The bytes were transmitted but never became a conversation message. "
             f"Recoveries tried: {', '.join(result.recoveries) or 'none'}. "
             f"Inspect: cmux read-screen --workspace {workspace} --lines 40"
         )
@@ -744,8 +820,9 @@ def _cmd_wait_ready(args: argparse.Namespace) -> int:
     payload = {
         "ready": ready,
         "boot_blocked_now": blocked_now,
+        "screen_readable": screen is not None,
         "workspace": args.workspace,
-        "screen_tail": "\n".join(screen.splitlines()[-6:]),
+        "screen_tail": "\n".join((screen or "").splitlines()[-6:]),
     }
     print(json.dumps(payload, indent=2) if args.json else payload)
     return 0 if ready else 1

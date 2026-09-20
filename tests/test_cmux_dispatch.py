@@ -18,6 +18,7 @@ Run under pytest:  python3 -m pytest tests/test_cmux_dispatch.py -q
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -185,6 +186,38 @@ class TestScreenClassification(unittest.TestCase):
         self.assertFalse(cd.boot_blocked(SCREEN_READY_WITH_PROMPT_IN_SCROLLBACK))
         self.assertTrue(cd.screen_ready(SCREEN_READY_WITH_PROMPT_IN_SCROLLBACK))
 
+    def test_mid_boot_with_neither_marker_nor_status_bar_is_not_a_block(self):
+        """Pins the `marker_present` half of the rule: a plain mid-boot screen is
+        NOT ready and NOT blocked — it must simply keep waiting, never be
+        mistaken for a live prompt (a false refusal)."""
+        mid_boot = (
+            "[audit-logger] \u2705 Loaded\n"
+            "[builtin-tools] Registered: web_search, web_fetch, todo_write, task\n"
+            "[loop-enforcer] \u2705 Loaded\n"
+        )
+        self.assertFalse(cd.marker_present(mid_boot))
+        self.assertFalse(cd.status_bar_present(mid_boot))
+        self.assertFalse(cd.boot_blocked(mid_boot))
+        self.assertFalse(cd.screen_ready(mid_boot))
+
+    def test_STALE_status_bar_above_a_live_prompt_is_STILL_a_block(self):
+        """A pane restarted after a previous pi session still shows the PREVIOUS
+        session's status bar in the capture, above the freshly printed prompt.
+        Matching any status bar there declared the pane ready and fed the prompt
+        the brief (the prompt then ate the prefix). Readiness must be ordered:
+        the bar has to come AFTER the last prompt."""
+        stale = (
+            "[tortoise-capture] Captured session abc (2 turns)\n"
+            "\u21914.0k \u2193151 R17k CH81.2% $0.001 3.0%/700k (auto)"
+            "                    (deepseek) deepseek-flash \u2022 high\n"
+            "[audit-logger] \u2705 Loaded\n"
+            "Warning: Global tools/ directory contains custom tools.\n"
+            "\nPress any key to continue...\n"
+        )
+        self.assertTrue(cd.status_bar_present(stale), "the stale bar IS present")
+        self.assertTrue(cd.boot_blocked(stale), "but the prompt is LIVE")
+        self.assertFalse(cd.screen_ready(stale))
+
     def test_truncated_turn_screen_does_not_contain_the_fingerprint(self):
         fp = cd.fingerprint(PROBE)
         self.assertFalse(cd.text_on_screen(SCREEN_TRUNCATED_TURN, fp))
@@ -261,6 +294,15 @@ class TestConsumption(unittest.TestCase):
         after = self._entry("running the ongoing migration now")
         consumed, _ = cd.is_consumed(before, after, cd.fingerprint("go"))
         self.assertFalse(consumed, "a substring hit must not count as delivery")
+
+    def test_a_superset_containing_but_not_starting_with_the_fp_is_not_consumed(self):
+        """This is the test that actually pins HEAD-ANCHORING: with an unanchored
+        `in` test, this screen reports consumed."""
+        fp = cd.fingerprint(PROBE)
+        before = self._entry(None, None)
+        after = self._entry("context prefixed to " + PROBE)
+        self.assertIn(fp, cd.submitted_message(after))
+        self.assertFalse(cd.is_consumed(before, after, fp)[0])
 
     def test_presence_semantics_used_by_verify(self):
         """`verify` asks 'did this text land?', not 'is it newer than my
@@ -404,6 +446,7 @@ class FakeCmux:
         enter_is_noop: int = 0,
         never_consumes: bool = False,
         submit_lag_polls: int = 0,
+        screen_unreadable: bool = False,
     ) -> None:
         self.state = "boot_block" if boot_block else "ready"
         self.boot_polls = boot_polls
@@ -414,6 +457,7 @@ class FakeCmux:
         #: become visible. cmux writes `latest_submitted_*` at the turn boundary,
         #: so a reader can observe a submission as absent for a beat.
         self.submit_lag_polls = submit_lag_polls
+        self.screen_unreadable = screen_unreadable
         self.lag_remaining = 0
         self.visible: str | None = None
 
@@ -459,6 +503,8 @@ class FakeCmux:
     def read_screen(
         self, workspace: str, lines: int = 80, surface: str | None = None
     ) -> cd.CmuxResult:
+        if self.screen_unreadable:
+            return cd.CmuxResult(1, "", "cmux read-screen: command timed out")
         self._tick()
         if self.state == "boot_block":
             return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)
@@ -652,6 +698,58 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(
             fake.sent_log.count(PROBE), 1, "the brief must never be re-sent"
         )
+
+    def test_unreadable_screen_degrades_recovery_to_release_only(self):
+        """An unreadable pane must never produce a blind re-send: a bare Enter
+        cannot duplicate, a blind re-send into a composer already holding the
+        message submits it twice."""
+        self.assertEqual(cd.recovery_action(None, cd.fingerprint(PROBE)), cd.R_RELEASE)
+
+    def test_unreadable_pane_is_refused_rather_than_sent_blind(self):
+        """An unreadable pane + no ready signal must REFUSE. Treating a failed
+        read as an empty screen falls through to "sending anyway" — i.e. a brief
+        written into a prompt the tool cannot see."""
+        fake = FakeCmux(screen_unreadable=True)
+        result = self._send(fake, ready_timeout=0.0)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(fake.submitted, [])
+        self.assertNotIn(PROBE, fake.sent_log)
+
+    def test_negative_retries_are_clamped_and_still_confirm(self):
+        """`range(1, retries+2)` with a negative value would skip the loop body
+        entirely AFTER the text was already transmitted, reporting a false
+        sent-but-not-consumed for a message that did land."""
+        fake = FakeCmux()
+        result = self._send(fake, retries=-5)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(result.attempts, 1)
+
+    def test_failure_detail_carries_the_reason_not_a_placeholder(self):
+        fake = FakeCmux(never_consumes=True)
+        result = self._send(fake, consume_timeout=0.0, retries=0)
+        self.assertFalse(result.ok)
+        self.assertNotIn("no confirmation)", result.detail)
+        self.assertIn("not-at-the-head-of-latest-submitted-message", result.detail)
+
+    def test_timeout_in_run_redacts_the_message_operand(self):
+        """Drive the real `Cmux.run` timeout branch — not just the helper."""
+        with mock.patch.object(
+            subprocess, "run", side_effect=subprocess.TimeoutExpired("cmux", 1)
+        ):
+            result = cd.Cmux().run(["send", "--workspace", "w", "--", "SECRET-BRIEF"])
+        self.assertEqual(result.rc, 124)
+        self.assertNotIn("SECRET-BRIEF", result.err)
+        self.assertIn("redacted", result.err)
+
+    def test_timeout_error_redacts_the_message_operand(self):
+        """The timeout path must not dump the brief (which may carry secrets)
+        into the caller's log."""
+        described = cd.Cmux._describe(
+            ["send", "--workspace", "w", "--", "SECRET-BRIEF-CONTENT"]
+        )
+        self.assertNotIn("SECRET-BRIEF-CONTENT", described)
+        self.assertIn("redacted", described)
 
     def test_unknown_workspace_fails_closed_after_a_bounded_appearance_wait(self):
         # `cmux new-workspace` returns before the workspace is enumerable, so a
