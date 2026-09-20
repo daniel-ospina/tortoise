@@ -14,6 +14,8 @@ aboutObjects: tortoise-hosted-platform
 
 # Registry/Knowledge-Graph Backup DR — Runbook (#596)
 
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
+
 > "registry" naming is retained from the registry-era design — the content is
 > **per-team knowledge graphs** (control-plane metadata migrates to Supabase
 > under #669). Since #2313 the sweep covers EVERY active graph of a team

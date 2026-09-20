@@ -3254,13 +3254,58 @@ def _cmd_session(args) -> int:
         return _cmd_session_capture(args, api_key, api_url)
     elif args.session_cmd == "probe":
         return _cmd_session_probe(args, api_key, api_url)
+    elif args.session_cmd == "verify":
+        return _cmd_session_verify(args, api_key, api_url)
     elif args.session_cmd == "list":
         return _cmd_session_list(api_key, api_url)
     elif args.session_cmd == "view":
         return _cmd_session_view(args, api_key, api_url)
     else:
-        print("Unknown session command. Try capture, probe, list, or view.", file=sys.stderr)
+        print("Unknown session command. Try capture, probe, verify, list, or "
+              "view.", file=sys.stderr)
         return 1
+
+
+def _cmd_session_verify(args, api_key: str, api_url: str) -> int:
+    """`tortoise session verify` — one-command behavioural install check.
+
+    Thin CLI boundary over :func:`tortoise.session_verify.verify_session_capture`:
+    the whole chain runs inside ONE catch-all, so every failure on the
+    resolve/fire/observe path is a populated message plus a non-zero exit —
+    never an uncaught traceback out of the CLI.  A ``MemoryError`` is
+    re-raised first (resource exhaustion is not a refusal; the handler
+    allocates).  Deliberately NOT an ``except (A, B)`` tuple — the next
+    unenumerated member refutes a finite enumeration (#3987/#3988 class).
+    """
+    from pathlib import Path
+
+    from tortoise.session_verify import (
+        EXIT_BROKEN,
+        render_report,
+        verify_session_capture,
+    )
+
+    try:
+        report = verify_session_capture(
+            args.harness,
+            api_key=api_key,
+            api_url=api_url,
+            home=Path.home(),
+            install_dir=getattr(args, "dir", None),
+            timeout=float(getattr(args, "timeout", 90.0)),
+            keep=bool(getattr(args, "keep", False)),
+        )
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(f"verify failed: {e.__class__.__name__}: {e}", file=sys.stderr)
+        return EXIT_BROKEN
+    if getattr(args, "json", False):
+        import json as _json
+        print(_json.dumps(report, indent=2))
+    else:
+        print(render_report(report))
+    return int(report.get("exit_code", EXIT_BROKEN))
 
 
 def _parse_transcript(text: str) -> list:
@@ -3391,6 +3436,21 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             file=_sys.stderr,
         )
         return 1
+    # #4188: never report an unqualified success for a DEFERRED capture — a
+    # keyless store is a 2xx with extraction skipped. Surface the receipt's
+    # no-provider mode + additive warnings (stderr), mirroring
+    # _cmd_session_import. Only the no-provider mode means "not extracted":
+    # "replayed" means a PRIOR capture SUCCEEDED, so its memory points DO
+    # exist — printing "memory points were not extracted" for it would be a
+    # false statement about the session.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    _capture_mode = result.get("extraction_mode")
+    if _capture_mode == _CAPTURE_NO_PROVIDER_MODE:
+        print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
+              "memory points were extracted", file=_sys.stderr)
+    if result.get("warnings"):
+        print("capture warnings: " + "; ".join(
+            str(w) for w in result["warnings"]), file=_sys.stderr)
     print(f"Captured session: {session_id}")
     print(f"  Turns: {len(turns)}")
     print(f"  Source: {transcript_path.stem}")
@@ -3492,11 +3552,16 @@ def _cmd_sessions_import(args) -> int:
 
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
-    or a content-hash-derived one), and a LOCAL receipt is written ONLY on a
-    2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
-    same content is a no-op (receipt exists ⇒ already imported) — and even a
-    re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi parses its own record shape (#3667 — it no longer
+    or a content-hash-derived one), and a LOCAL receipt is written on a 2xx
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) — EXCEPT a deferred keyless
+    2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
+    receipt so an explicit re-import can re-attempt extraction once a key is
+    configured. Re-import of the
+    same content is a no-op (receipt exists ⇒ already imported). A re-POST of
+    an already-extracted session converges server-side (same session_id ⇒ no
+    new Session or turn Points); a re-POST of a DEFERRED keyless session
+    re-attempts extraction and mints its memory Points (#4188). pi parses its
+    own record shape (#3667 — it no longer
     aliases the codex parser, which returned 0 turns for real Pi sessions).
     The parsed conversation is windowed to the hosted turn cap
     (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
@@ -3617,10 +3682,24 @@ def _cmd_sessions_import(args) -> int:
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
 
-    # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
-    # state key; this LOCAL marker makes re-import a cheap no-op) and the
-    # local failure breadcrumb is cleared.
+    # A keyed 2xx ⇒ the receipt lands (the server also wrote the per-harness
+    # receipt state key; this LOCAL marker makes re-import a cheap no-op) and
+    # the local failure breadcrumb is cleared.
+    # #4188: a keyless capture STORES the turns and SKIPS extraction. Writing
+    # the local "imported" receipt would make every later explicit re-import
+    # skip the POST, so the session could never gain memory points once a key
+    # appears — and the owner ruling requires an EXPLICIT re-capture to
+    # extract (nothing here spends automatically). Deferred ⇒ NO local
+    # receipt: the server keeps the graph state truthful (capture_ok=False,
+    # lane "none") and re-running this import after the key is set re-attempts
+    # extraction on the #2335 TRUE-retry lane.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
     _clear_capture_error(harness)
+    if result.get("extraction_mode") == _CAPTURE_NO_PROVIDER_MODE:
+        print("import deferred: no LLM provider key — turns stored, "
+              "extraction skipped; re-run this import once a key is "
+              "configured.", file=_sys.stderr)
+        return 0
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),
@@ -5286,15 +5365,15 @@ def _cmd_doctor(args):
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
     # 5.5 Session extraction — LLM provider (#1197)
-    # POST /v1/sessions (capture) fails closed with 503 when no LLM provider
-    # key is configured (#822 — regex extraction removed as a product path;
-    # this is the beta testers' most-critical feature). Doctor surfaces the
-    # configured provider/model BEFORE testers hit a silent 503. Hosted mode
-    # (FLY_APP_NAME — precedent: hosted_api.py, sdk.py) treats
-    # provider-missing as a HARD failure: the flagship feature cannot work at
-    # all. Local/selfhosted is a warning — capture still fails closed, but
-    # there is no hosted SLA at stake. Mirrors hosted_api._llm_provider_available
-    # + sdk._build_session_llm_extractor exactly (the seam they must agree on).
+    # A missing LLM provider key no longer refuses a capture (#3892 owner
+    # ruling): the Session + its turn Points are still STORED and searchable,
+    # and only the LLM extraction into memory points is skipped. Doctor
+    # surfaces the missing provider BEFORE testers wonder why nothing reaches
+    # memory. Hosted mode (FLY_APP_NAME — precedent: hosted_api.py, sdk.py)
+    # still treats provider-missing as a HARD failure: the flagship extraction
+    # feature cannot work at all, so ops must not ship it. Local/selfhosted is
+    # a warning. Mirrors hosted_api._llm_provider_available +
+    # sdk._build_session_llm_extractor exactly (the seam they must agree on).
     import os as _os
     hosted = bool(_os.environ.get("FLY_APP_NAME"))
     mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
@@ -5354,7 +5433,8 @@ def _cmd_doctor(args):
                         results.append(("OpenRouter model", "⚠️", warning))
         else:
             detail = (
-                "no LLM provider key — POST /v1/sessions fails closed (503). "
+                "no LLM provider key — captures are STORED (turns only), but "
+                "LLM extraction into memory is skipped. "
                 f"Set one of: {' / '.join(_LLM_PROVIDER_KEYS)} "
                 "(docs/infra-runbook.md §4.6)."
             )
@@ -6391,6 +6471,11 @@ def _cmd_key_create(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
+    # #3809: the harness choices for `session verify` come from the module's
+    # single HARNESSES tuple, which is itself derived from
+    # capture_install.CAPTURE_SEAM — one definition, never a second list that
+    # could drift.
+    from tortoise.session_verify import HARNESSES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
@@ -6656,6 +6741,34 @@ def main(argv: list[str] | None = None) -> int:
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
+    # #3809: one-command behavioural install verification — fire the installed
+    # seam and assert installed -> captured -> in-memory, exiting non-zero on
+    # any broken link. Named `verify` to sit in the existing
+    # `session capture|probe|list|view` grammar (a noun-verb subcommand of the
+    # session surface); NOT a new top-level verb, which would duplicate the
+    # session namespace `capture`/`probe` already own.
+    session_verify = session_sp.add_parser(
+        "verify",
+        help="Verify a harness install end-to-end: installed -> captured -> "
+             "in memory (#3809)")
+    session_verify.add_argument(
+        "--harness", required=True, choices=list(HARNESSES),
+        help="Harness to verify (claude | codex | cursor | pi)")
+    session_verify.add_argument(
+        "--dir", default=None,
+        help="Install root to verify (claude: project dir; codex: $CODEX_HOME; "
+             "cursor: ~/.cursor; pi: ~/.pi/agent/extensions) — default: the "
+             "harness's own root")
+    session_verify.add_argument(
+        "--timeout", type=float, default=90.0,
+        help="Seconds to wait for the fired seam's capture (default: 90)")
+    session_verify.add_argument(
+        "--keep", action="store_true",
+        help="Do NOT delete the probe session after asserting (it is "
+             "reported, never silently left behind)")
+    session_verify.add_argument(
+        "--json", action="store_true",
+        help="Emit the machine-readable report (for CI)")
     # #1727 Slice 2 (Task 15): T2 backfill — `tortoise sessions import`
     # (plural — the plan's pinned CLI shape) ingests historical transcripts
     # from harness stores (codex / claude-desktop / cursor / pi).

@@ -390,7 +390,7 @@ Public repository that houses:
 | Reviewing a PR | `skills/code-review/SKILL.md` | Unreviewed code in production |
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
-| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N>` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+| Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `python3 tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
 
 ### ⛔ HARD RULE: Collision Pre-Flight Before Any Dispatch
 
@@ -398,8 +398,22 @@ Before spawning a workstream, opening a worktree, or dispatching a sub-agent for
 run the collision pre-flight — **all surfaces, untruncated**:
 
 ```bash
-python3 tools/collision_preflight.py <N>
+# from the target repo's worktree (`--repo .` pins the target to THIS repo):
+python3 tools/collision_preflight.py <N> --repo .
+# or name the repo explicitly (required when dispatching an issue that lives in
+# another repo — the tool RESOLVES the target, it never infers it from the cwd):
+python3 tools/collision_preflight.py <N> --repo owner/name
 ```
+
+**The target is established, never assumed (#4027).** Every repository-scoped `gh` call carries
+the resolved `owner/name` (the two deliberate exceptions are `gh repo view`, which *discovers* the
+slug and so has nothing to send yet, and `gh api user`, which identifies the lane's account and is
+not repository-scoped), and the verdict prints it together with the issue's **full title** — a verdict that
+does not name what it measured cannot be trusted. An issue **absent** from the target repo is
+`exit 2`, not CLEAN ("not found here" is not "no in-flight work"), and an omitted `--repo` whose
+number resolves in **more than one** sibling repo is **refused**, never guessed at. Issue numbers
+collide across the fleet (`#4027` exists in tortoise, eldato and swarm), so pass `--repo` — omitting
+it will refuse more often than not, by design.
 
 It checks open **and** recently-closed PRs (title / headRef; a PR **body** counts only as an
 explicit closing reference — `Closes`/`Fixes`/`Resolves #N` — because cross-reference prose such

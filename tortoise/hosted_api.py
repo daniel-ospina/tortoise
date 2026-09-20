@@ -49,6 +49,12 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import API_KEY_PREFIXES, hash_api_key
+from tortoise.capture_receipts import (  # #3809: ONE key definition
+    capture_last_error_key as _capture_last_error_key,
+)
+from tortoise.capture_receipts import (
+    capture_receipt_key as _capture_receipt_key,
+)
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.hosted_backup import (
     MemoryStorage,
@@ -82,7 +88,11 @@ from tortoise.projection import (
     _journal_append_product,  # #1686: org_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
+from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
+    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
+    _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
+    _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
@@ -100,6 +110,13 @@ from tortoise.sdk import (
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.supabase_control import _service_key  # #3677
+
+# #4179: the team-account and user-account restore windows derive from the ONE
+# authority (tortoise/retention.py). Do not hard-code a window here — see
+# docs/retention-and-deletion.md. The user-account constant records the promise
+# for the support/email deletion path (there is no self-service deletion yet).
+TEAM_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
+USER_ACCOUNT_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
 
 _logger = logging.getLogger(__name__)
 
@@ -265,7 +282,7 @@ class _CaptureSlot:
       while its worker still occupies a pool thread (the shape of
       `quota.run_ask_bounded`, quota.py:791-816); or
     * the request's own teardown (`release()`) — for a replay / opt-out /
-      quota / provider-503 path that never extracts. Without that release the
+      quota / no-provider path that never extracts. Without that release the
       reservation would leak and permanently burn capacity.
 
     #3129: the same slot also owns the request's in-flight SESSION key, but on a
@@ -7976,10 +7993,12 @@ def _llm_provider_keys() -> tuple[str, ...]:
 
 # Provider env keys the hosted deployment can use for LLM-grade extraction.
 # The provider/model choice is a product decision (deploy-time) — this module
-# only reports availability so capture fails closed when no key is configured.
+# only reports availability, which now decides one thing: whether a capture
+# runs LLM extraction or skips it with a visible "no-provider" receipt (#3892).
 # The regex extraction loop was REMOVED as a product path (#822): LLM
-# extraction is the default (and only) capture extraction, and the no-key
-# case fails closed with 503.
+# extraction is the default (and only) capture extraction. A missing key no
+# longer refuses the capture — the Session + its turn Points are still stored
+# and stay searchable; only the extraction into memory points is skipped.
 _LLM_PROVIDER_KEYS: tuple[str, ...] = _llm_provider_keys()
 
 
@@ -7987,8 +8006,8 @@ def _llm_provider_available() -> bool:
     """True when an LLM provider key is configured (or the TORTOISE_SESSION_
     LLM_MOCK=1 test seam is on — precedent: TORTOISE_BACKUP_STORAGE=memory /
     RATE_LIMIT_DISABLED). Must agree with tortoise.sdk._build_session_llm_extractor
-    (which consumes the same key set); a mismatch would fail the 503 gate open
-    or closed wrongly."""
+    (which consumes the same key set); a mismatch would extract when no
+    extractor can be built, or skip extraction when one can."""
     if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
         return True
     return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
@@ -7999,7 +8018,7 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     """Capture an agent session and extract turns as episodic Points.
 
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
-    the provider 503 / quota 402) so disabled orgs do no quota work at all; any
+    the quota 402) so disabled orgs do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
     dashboard failure sub-line reads this, NOT client state) — except the #3060
     capacity 429 and the #3129 in-flight 409, which are server conditions — and
@@ -8130,12 +8149,12 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
 
-    SCOPE — the retry is closed on the **v2 lane only**, and only for IN-PROCESS
-    cancellation:
+    SCOPE — the retry is closed to the CONVERGENT lanes (v2, and the keyless
+    "none" lane, #3892), and only for IN-PROCESS cancellation:
 
-    * the TRUE-retry gate requires BOTH the prior lane AND the retrying request
-      to be v2 (`prior_capture_extractor == "v2"` **and** the request's
-      `TORTOISE_SESSION_EXTRACTOR != "m2"`, #2473), so an abandoned **m2**
+    * the TRUE-retry gate requires the prior lane to be convergent — v2, or the
+      keyless "none" lane (#3892) — AND the retrying request's
+      `TORTOISE_SESSION_EXTRACTOR != "m2"` (#2473), so an abandoned **m2**
       capture re-POSTed still replays, and so does an abandoned v2 capture
       re-POSTed after the deployment's lane was switched to m2. Both are the
       documented, deliberate consequence of #2473: re-running m2 over a failed
@@ -8180,18 +8199,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
 
-    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old
-    "403 → 422 → 503 → 402" was stale, pre-#1927):
+    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
+    list was stale, pre-#1927):
       1. boundary 422 — invalid harness / conversation shape (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed
          payload;
       2. 409 — session_recording disabled (state-conflict);
-      3. 503 — no LLM provider;
-      4. 400 — turn cap > MAX_SESSION_TURNS;
-      5. 422 — empty/blank stored-window transcript (handler-level);
-      6. 402 — quota (skipped when session_existed).
+      3. 400 — turn cap > MAX_SESSION_TURNS;
+      4. 422 — empty/blank stored-window transcript (handler-level);
+      5. 402 — quota (skipped when session_existed).
+    #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
+    the capture is stored for every request and ONLY the LLM extraction is
+    skipped, reported truthfully as receipt mode "no-provider".
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -8238,18 +8259,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                       "sessions.")
         raise HTTPException(status_code=409, detail=detail)
 
-    # #822: LLM extraction is the default (and only) capture extraction —
-    # the regex loop was removed as a product path. No provider key →
-    # fail-closed 503 (matching today's `required` semantics; the
-    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured).
-    if not _llm_provider_available():
-        raise HTTPException(
-            status_code=503,
-            detail="Session extraction requires an LLM provider key (set "
-                   f"{' / '.join(_LLM_PROVIDER_KEYS)}). The regex extraction "
-                   "loop was removed as a product path (#822) — capture is "
-                   "disabled until a provider is configured.",
-        )
+    # #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL — a missing
+    # provider key does NOT refuse the capture. The Session MERGE and the
+    # mechanical turn Points run UNCHANGED below; ONLY the LLM extraction into
+    # memory points is skipped, and the receipt says so truthfully
+    # (`extraction_mode` "no-provider" + the additive warning). The key gates
+    # EXTRACTION, not STORAGE: the stored turns are searchable with no key at
+    # all (FTS is DB-side; the dense leg is a local model). The
+    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured. Mirrors
+    # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
+    # pre-#3892 503-first refusal.
+    no_provider = not _llm_provider_available()
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         # #2335 WI-1c: the turn-cap refusal is a structured record (the
@@ -8324,19 +8344,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to the v2 lane (the ONLY
-    # convergent lane — content-addressed pt_<sha> ids + graph content_hash
-    # resolution fold a re-attempt's partial claims onto the same nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
+    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
+    # content_hash resolution fold a re-attempt's partial claims onto the same
+    # nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
-    # replay skip closed). Retry fires only when the prior ran v2 AND this
-    # request runs v2 (env != m2) — otherwise replay (safe no-op).
+    # replay skip closed). Retry fires only when the prior ran a CONVERGENT
+    # lane (v2, or the keyless "none" lane, #3892) AND this request runs v2
+    # (env != m2) — otherwise replay (safe no-op).
+    # #3892 / #4007: a keyless capture records lane "none" (no lane ran), and
+    # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
+    # captured without a key gets its memory points once a key appears, on an
+    # EXPLICIT re-capture (never automatically). "none" is retry-eligible for
+    # the same reason "v2" is: it minted no claims of its own, and its turn ids
+    # are deterministic, so the re-attempt converges. The m2 exclusion is
+    # UNCHANGED and deliberate (see tortoise/sdk.py's retry gate).
     prior_capture_ok = session_row[1]
     prior_capture_extractor = session_row[2]
     retry_failed_capture = (
         session_existed and prior_capture_ok is False
-        and prior_capture_extractor == "v2"
+        and prior_capture_extractor in ("v2", "none")
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -8357,7 +8386,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #2335 WI-2b: a TRUE-retry re-POST (capture_ok False) re-runs
     # extraction and mints NEW non-episodic points — it is NOT a zero-node
     # replay, so the estimate gate must fire for it too (a retry can 402).
-    if not session_existed or retry_failed_capture:
+    # #3892: a keyless capture mints ZERO non-episodic points (only the
+    # episodic turn Points, which the points quota excludes), so the
+    # extraction estimate must not 402-block it — same rationale as the
+    # replay skip above. `_check_org_limit(org, "sessions")` still runs, but
+    # sessions are unlimited since #4010, so it is vacuous in practice.
+    if (not session_existed or retry_failed_capture) and not no_provider:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
         sdk_org = _data_sdk(org)
@@ -8534,6 +8568,35 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # since #3914. #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    #
+    # #3892: metering truth. The turn loop below runs for EVERY request, so a
+    # re-capture of a GROWN transcript writes NEW turn Points even when the
+    # branch taken extracts nothing (a keyless re-capture, or a keyless retry
+    # on the M2 lane). The write-op/abuse meter keys on the ACTUAL write — the
+    # prior stored-turn count — not on which branch ran (see the meter below).
+    prior_turn_count = 0
+    if session_existed:
+        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
+        # meter, and it sits AFTER the Session MERGE that already committed —
+        # a transient graph error here must never 500 a committed capture
+        # (the file's posture, and every sibling bookkeeping read in this
+        # function). On failure 0 makes the meter OVER-count
+        # (`len(windowed) > 0`), the documented conservative posture, never a
+        # blind spot. It also must not abort the keyless→keyed upgrade this
+        # PR exists to enable.
+        try:
+            _prior_turns = proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true RETURN count(t)",
+                params={"sid": session_id}).result_set
+            prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "prior_turn_count read failed (non-fatal, metering over-counts)",
+                exc_info=True)
+            prior_turn_count = 0
+
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         # P1 #1529 (D10, #721 parity): isinstance-first content coercion — a
@@ -8628,19 +8691,54 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # warning below — the default vocabulary produces no minted kinds to
     # flag, so a log line alone would leave the degradation invisible).
     tenant_vocab_warning: str | None = None
-    if session_existed and not retry_failed_capture:
+    if no_provider:
+        # #3892 (owner ruling 2026-09-18): no provider key — the capture is
+        # still a capture. The Session MERGE + the mechanical turn loop above
+        # ran UNCHANGED, so the turns are STORED and searchable; only the LLM
+        # extraction into memory points is skipped, with the truthful mode +
+        # additive warning the assembly below reports. Placed BEFORE the
+        # #1727 replay branch ON PURPOSE: a keyless call must ALWAYS be
+        # reported as keyless, never as a silent "replayed" that hides the
+        # missing provider. Byte-parity with sdk.capture_session (#4014) — for
+        # keyless calls this branch defines the behaviour, and keyed behaviour
+        # is byte-identical (no_provider is False for a keyed call).
+        if state is not None and not session_existed:
+            # #3129: arm the abandoned-capture marker for a genuine FRESH
+            # attempt only — a keyless RE-capture of an existing session is
+            # replay-shaped (it records nothing below) and must not arm a write
+            # that could downgrade a succeeded prior to capture_ok=False.
+            state["attempted"] = True
+            state["proj"] = proj
+            state["lane"] = "none"
+        meta = {
+            "provider": None, "route": None, "failover_used": False,
+            "errors": [],
+            "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+            "mode": _CAPTURE_NO_PROVIDER_MODE,
+            # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+            # (additive meta contract), empty here (not fabricated).
+            "stats": {},
+        }
+    elif session_existed and not retry_failed_capture:
         # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
         # (capture_ok True) or the session predates capture_ok (legacy None —
         # presumed captured). A prior FAILED capture falls through to
         # extraction — retry is TRUE.
-        meta = {"errors": [], "warnings": [], "mode": "replayed",
+        _replay_warnings = [
+            "session already captured (same session_id) — no new extraction"]
+        if prior_capture_ok is False and prior_capture_extractor == "none":
+            # #3892 / #4007: the prior was a KEYLESS store — extraction has
+            # NEVER run for it. When this deployment is on the non-convergent
+            # M2 lane the re-attempt is refused, so a bare "already captured"
+            # would be a FALSE statement of this state and would hide the
+            # remedy. Disclose it, in the SAME words as sdk.capture_session.
+            _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        meta = {"errors": [], "warnings": _replay_warnings,
+                "mode": "replayed",
                 "route": None, "provider": None,
                 # #2335 WI-1a: hosted replayed carries no extractor_v2
                 # telemetry — stats always-present, empty on replay.
                 "stats": {}}
-        extraction_errors: list = []
-        extraction_warnings = [
-            "session already captured (same session_id) — no new extraction"]
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         if state is not None:
             state["attempted"] = True
@@ -8657,8 +8755,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 slot, sdk._extract_session_llm,
                 windowed, session_id, now)
         except ValueError as e:
-            # no-key fail-closed (outer 503 gate normally catches this first;
-            # belt-and-braces so an inner/outer drift never 500s, #1468).
+            # inner provider-gate drift on the M2 lane → a clean fail-closed
+            # 503 (mirrors the v2 branch below; belt-and-braces so an
+            # inner/outer drift never 500s, #1468). A keyless request never
+            # reaches here — it skips extraction entirely (#3892).
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
         if state is not None:
@@ -8731,11 +8831,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extraction failure keeps 200 + additive errors (the mutation already
     # happened — turn points landed — and E2E-8 permits "non-200 OR additive
     # warnings"; a non-200 would hide the partial write).
+    # #3892: the receipt reads the meta of WHICHEVER branch ran — including
+    # the keyless "no-provider" branch and a keyless RE-capture of an EXISTING
+    # session (which the replay-meta block below would otherwise leave with
+    # unset warnings). Mirrors sdk.capture_session's unconditional read.
+    extraction_errors = list(meta.get("errors") or [])
+    extraction_warnings = list(meta.get("warnings") or [])
     if not session_existed or retry_failed_capture:
-        # #2335 WI-2b: a retry's meta errors/warnings must surface (the
-        # re-attempted extraction's outcome, not the failed first attempt's).
-        extraction_errors = list(meta.get("errors") or [])
-        extraction_warnings = list(meta.get("warnings") or [])
         # #2444: partial-extraction failures are the product's live error surface —
         # surface them to Sentry (when enabled) with org/session context so an
         # agent (or the inbound intake) can act on recurring signatures.
@@ -8785,12 +8887,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent
     # writer's create is an idempotent no-op).
-    if not session_existed or retry_failed_capture:
+    if not session_existed or (retry_failed_capture and not no_provider):
         # #2335 WI-2b: a retry re-runs the mint — the deterministic Event id
         # (_session_capture_event_id) converges on the SAME node (MERGE), and
         # the retry-minted points get the provenance stamp + typed-Source
         # upgrade they need. (Refresh of startedAt/endedAt on the retry is
         # CORRECT — the successful retry is the real capture.)
+        # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
+        # materialization — a keyless attempt extracts nothing, so there is
+        # nothing to stamp, while re-minting re-journals EventRecorded and
+        # refreshes startedAt on every call. Byte-parity with
+        # sdk.capture_session.
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
@@ -8932,11 +9039,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         logging.getLogger("tortoise.api").exception(
             "session capture audit write failed (non-fatal)")
     # Metering (#681): best-effort write-op count for overage billing. A
-    # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
-    # not inflate metering/abuse with phantom writes (review PR #1827).
-    if not session_existed or retry_failed_capture:
+    # replay (session_existed) with an UNCHANGED transcript writes ZERO nodes —
+    # an idempotent re-POST must not inflate metering/abuse with phantom writes
+    # (review PR #1827). #3892: a re-capture of a GROWN transcript writes new
+    # turn Points even when the branch extracts nothing (keyless re-capture, or
+    # an M2-lane keyless retry), so the meter keys on the ACTUAL write
+    # (`prior_turn_count`), not on which branch ran — otherwise those paths are
+    # a billing/abuse blind spot. The conservative over-count for the abuse leg
+    # is the documented posture.
+    # #3892 (review cycle 1, P2): a KEYLESS re-capture of an UNCHANGED
+    # transcript writes nothing — its turn ids are deterministic, so the loop
+    # MERGEs onto the same Points — yet `retry_failed_capture` is True for it
+    # (prior lane "none"), which would meter a phantom write-op and charge the
+    # full transcript length on the abuse leg. The retry arm therefore applies
+    # only when the retry can EXTRACT (a keyed retry mints points); the
+    # grown-transcript arm still covers the keyless case that really writes.
+    if (not session_existed or (retry_failed_capture and not no_provider)
+            or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
-        # replay) — metering + abuse records fire for the re-attempt.
+        # replay) — metering + abuse records fire for the re-attempt. A keyless
+        # retry is metered too: see the #3892 lead-in above.
         _record_write_op(org)
         # #3359/#3665: one measured-cost ledger + analytics row per capture
         # ATTEMPT that ran an extraction (successful or errored — a failed
@@ -9214,6 +9336,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     mode = meta.get("mode")
     if extraction_errors:
         effective_mode = "error" if mode != "empty" else "empty"
+    elif mode == _CAPTURE_NO_PROVIDER_MODE:
+        # #3892: the keyless capture — turns stored, extraction skipped.
+        # Reported under its OWN name, never folded into "llm" (which would
+        # claim an extraction that did not happen) nor "replayed". Checked
+        # before `route` for parity with sdk.capture_session.
+        effective_mode = _CAPTURE_NO_PROVIDER_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
     elif mode == "replayed":
@@ -9335,11 +9463,31 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # before the Session MERGE — nothing to record there.
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
-    if not session_existed or retry_failed_capture:
+    # #3892: what THIS attempt RECORDS on the Session. A keyed attempt records
+    # its real outcome + lane, exactly as before. A KEYLESS attempt records
+    # capture_ok=False + lane "none" (no extraction lane ran) — recording
+    # ok=True / lane "v2" instead would make a LATER capture WITH a key take
+    # the #1727 replay branch, silently extracting nothing and leaving the
+    # stored session permanently points-less. False + "none" is what the #2335
+    # TRUE-retry gate consumes, so the later keyed capture re-attempts and the
+    # deterministic turn ids converge. Byte-parity with sdk.capture_session
+    # (#4014). A keyless attempt records this ONLY when it CREATES the session:
+    # a keyless RE-capture must not rewrite a prior attempt's record (a prior
+    # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
+    _capture_ok_record = False if no_provider else _capture_ok
+    _capture_extractor_record = (
+        "none" if no_provider
+        else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
+              else "v2"))
+    _record_session_state = (
+        (not session_existed) if no_provider
+        else (not session_existed or retry_failed_capture))
+    if _record_session_state:
         # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
         # retry) — a replay performs NO Session write (zero-write no-op).
         # Review (PR #2473): the SET records the extractor lane that RAN so
-        # the retry gate can require a v2 prior (M2 partials never retried).
+        # the retry gate can require a convergent prior (M2 partials never
+        # retried).
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
@@ -9357,10 +9505,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "MATCH (s:Session {id:$sid}) "
                 "SET s.capture_ok=$ok, "
                 "    s.capture_extractor=$extractor",
-                params={"sid": session_id, "ok": _capture_ok,
-                        "extractor": "m2" if os.environ.get(
-                            "TORTOISE_SESSION_EXTRACTOR") == "m2"
-                        else "v2"})
+                params={"sid": session_id, "ok": _capture_ok_record,
+                        "extractor": _capture_extractor_record})
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")
@@ -9431,20 +9577,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # REGISTERED onboarding state keys (Task 11's registration table) — an
 # unregistered key would be silently dropped by the _update_onboarding_state
 # allowlist filter.
-
-def _capture_receipt_key(harness: str | None) -> str:
-    """Receipt state key for a harness — per-harness when present, the bare
-    legacy key for no-harness hooks (T1-P3 None-guard)."""
-    return f"session_capture_receipt_{harness}" if harness else \
-        "session_capture_receipt"
-
-
-def _capture_last_error_key(harness: str | None) -> str | None:
-    """Per-harness last-error state key. No bare variant is registered — a
-    legacy no-harness hook has no per-harness dashboard row to read it."""
-    if not harness:
-        return None
-    return f"session_capture_last_error_{harness}"
+#
+# #3809: the key SPELLING lives in ONE place — ``tortoise.capture_receipts``
+# — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
+# so both this server and ``tortoise session verify`` derive the same name.
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,
@@ -10402,6 +10538,25 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             "created_at": er[3],
         })
 
+    # #3809: the session's graph SOURCE node (`session:<id>`, ontology v3.6 §4.6
+    # agentSession) — so `tortoise session verify` can prove the session
+    # "appears in the graph as a source" over the REST surface rather than
+    # inferring it from the presence of turn points. Additive: a degraded
+    # capture that never materialized the Source reports `source: null`,
+    # never a fabricated stub.
+    source = None
+    source_rows = proj.g.query(
+        "MATCH (src:Source {url:$url}) "
+        "RETURN src.url, src.sourceKind, src.eventId",
+        params={"url": f"session:{session_id}"},
+    ).result_set
+    if source_rows:
+        source = {
+            "url": source_rows[0][0],
+            "sourceKind": source_rows[0][1],
+            "eventId": source_rows[0][2],
+        }
+
     return {
         "id": sess[0],
         "created_at": sess[1],
@@ -10418,6 +10573,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,
+        "source": source,
     }
 
 
@@ -12199,7 +12355,7 @@ async def delete_graph(graph_id: str, org_id: str,
 
 # ── #2304 trash surface (delete = quarantine → restore within grace) ───────
 # Owner Option C: a deleted custom graph sits in the org's TRASH for a
-# disclosed recovery window (default 7 days — the purge grace), then is
+# disclosed recovery window (default _TRASH_GRACE_DAYS — the purge grace), then is
 # physically erased. These endpoints are the owner/admin RESTORE surfaces:
 # they are SESSION-ONLY (a revoked graph key can never reach a tombstone)
 # and role-gated owner/admin (mirrors delete_graph's session branch). Keys
@@ -12373,7 +12529,7 @@ async def list_trash(org_id: str,
     graph can never be here. ``deleted_at`` absent = legacy tombstone
     (predates #2304 — treated as past-grace by the purge). Past-window and
     legacy rows remain LISTED (pending the purge) but are NOT restorable:
-    restore 410s them (#2465 — the 7-day window is a hard server-side
+    restore 410s them (#2465 — the _TRASH_GRACE_DAYS window is a hard server-side
     bound); the purge erases them on its cadence."""
     await _require_owner_admin_session(user, org_id)
     org = await _org_node(org_id)
@@ -12467,14 +12623,14 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             detail="Graph was purged (data physically erased) — not "
                    "restorable; re-create it from scratch")
     # #2465: the recovery window is a HARD server-side bound — a row past
-    # its 7 days (or a legacy tombstone with no deleted_at) is pending
+    # its _TRASH_GRACE_DAYS window (or a legacy tombstone with no deleted_at) is pending
     # permanent erasure and no longer restorable, matching the UI copy and
     # privacy §6 ("refused for restoration once the window has passed").
     # Only the purge clears these rows (operator cadence — #2317).
     if _trash_grace_expired(row.get("deleted_at")):
         raise HTTPException(
             status_code=410,
-            detail="The 7-day recovery window has passed — this graph is "
+            detail=f"The {_TRASH_GRACE_DAYS}-day recovery window has passed — this graph is "
                    "pending permanent erasure and can no longer be restored")
     name = (row.get("name") or "").strip()
     if name and await _trash_name_conflict(org_id, name, graph_id):
@@ -15808,7 +15964,7 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
 @app.delete("/v1/organizations/{org_id}", status_code=202)
 async def delete_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
-    """E2E-6-D — owner-only org deletion (soft delete → 24h grace → hard delete).
+    """E2E-6-D — owner-only org deletion (soft delete → TEAM_DELETE_GRACE_HOURS grace → hard delete).
 
     Immediate cascade, access-kill first: all API keys revoked (tt_ auth
     fails closed), active memberships marked removed (JWT-session access
@@ -15816,10 +15972,11 @@ async def delete_org(org_id: str, request: Request,
     promised ``grace_hours`` stamped LAST — a partial failure leaves the
     org not marked deleted and retries re-run the full cascade. The boot
     + hourly purge hard-deletes the org graph and control-plane rows once
-    the stored grace window elapses — deletion is irreversible within 24
-    hours (issue #302 indicator); the purge honors the stored window even
-    if the env var changes mid-grace. Immutable audit_events rows are
-    preserved by design (the delete trail survives).
+    the stored grace window elapses — the deletion then becomes irreversible
+    (issue #302 indicator, harmonised by #4179); the purge honors the
+    stored window even if the env default changes mid-grace (the env var is
+    only the fallback for rows with no stored grace). Immutable audit_events
+    rows are preserved by design (the delete trail survives).
 
     AuthZ-first: non-owners get 403 whether or not the org exists or is
     delete-pending (no existence oracle). Idempotent: repeat calls by the
@@ -15837,7 +15994,8 @@ async def delete_org(org_id: str, request: Request,
     if org_node is None:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
+    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
+                                       str(TEAM_DELETE_GRACE_HOURS)))
     if deleted_at:
         # Idempotent replay: already scheduled — same grace answer (200),
         # using the STORED grace window (promise made at schedule time).
@@ -16032,9 +16190,12 @@ def _purge_deleted_orgs() -> None:
 
     Runs at boot + hourly inside the event-retention loop (via
     asyncio.to_thread — sync DB work must not block the loop, #310). The
-    env cutoff pre-filters, then each org's STORED grace_hours (the
-    promise made at schedule time) decides — a config change mid-grace can
-    never hard-delete an org before its promised hard_delete_after.
+    fetch is a SUPERSET of every soft-deleted row (``deleted_at <= now``);
+    each org's STORED grace_hours (the promise made at schedule time) is
+    the sole authority, and the env var is only the fallback for rows that
+    carry no stored grace. A config change mid-grace therefore neither
+    hard-deletes an org before its promised hard_delete_after NOR defers
+    it past that promise (#4179).
 
     Registry mode cascades Membership/APIKey/Invitation nodes and drops
     the org graph; Supabase mode sweeps the registry nodes provision_tenant
@@ -16048,9 +16209,18 @@ def _purge_deleted_orgs() -> None:
     a purge failure never crashes the loop.
     """
     try:
-        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
-        env_cutoff = (datetime.now(UTC) - timedelta(hours=env_grace)).isoformat()
+        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
+                                          str(TEAM_DELETE_GRACE_HOURS)))
         now_dt = datetime.now(UTC)
+        # #4179 P1: the fetch must be a SUPERSET of every stored promise. The
+        # env default is only the fallback for a row with no stored
+        # grace_hours, so it must never pre-filter a row whose STORED promise
+        # already expired — a `now - env_grace` cutoff deferred a legacy
+        # 24h-stamped org by up to (env - stored) when
+        # TEAM_DELETE_GRACE_HOURS grew 24h→168h, purging it ~144h PAST its
+        # hard_delete_after. `deleted_at <= now` selects every soft-deleted
+        # row; `_past_grace` then decides each one on its own stored window.
+        scan_cutoff = now_dt.isoformat()
 
         def _past_grace(row_deleted_at, row_grace_hours) -> bool:
             """Stored grace (promised at schedule time) wins over env."""
@@ -16074,11 +16244,11 @@ def _purge_deleted_orgs() -> None:
             for row in cp.query(
                 "organizations",
                 select=["id", "graph_name", "grace_hours", "deleted_at"],
-                filters=[("deleted_at", "lte", env_cutoff)],
+                filters=[("deleted_at", "lte", scan_cutoff)],
             ):
                 org_id = row["id"]
                 if not _past_grace(row.get("deleted_at"), row.get("grace_hours")):
-                    continue  # env shrank — honor the stored promise
+                    continue  # stored promise decides (env = fallback only)
                 try:
                     # Registry cascade FIRST, control-plane LAST: the orgs
                     # row is the retry anchor — a failed registry purge or
@@ -16115,11 +16285,11 @@ def _purge_deleted_orgs() -> None:
             "MATCH (t:Team) WHERE t.deleted_at IS NOT NULL "
             "AND t.deleted_at < $cutoff "
             "RETURN t.id, t.graph_name, t.grace_hours, t.deleted_at",
-            params={"cutoff": env_cutoff},
+            params={"cutoff": scan_cutoff},
         ).result_set
         for org_id, graph_name, stored_grace, row_deleted_at in rows:
             if not _past_grace(row_deleted_at, stored_grace):
-                continue  # env shrank — honor the stored promise
+                continue  # stored promise decides (env = fallback only)
             try:
                 _purge_registry_org(sdk, org_id, graph_name)
                 _audit_logger.append(
@@ -23283,7 +23453,7 @@ async def backups_sweep(request: Request):
 async def backups_purge(request: Request, body: dict | None = None):
     """#2304 — trash purge: physically erase every expired tombstone
     (custom graphs deleted > grace_days ago, plus legacy tombstones).
-    Internal-key only. Optional ``{"grace_days": N}`` overrides the 7-day
+    Internal-key only. Optional ``{"grace_days": N}`` overrides the _TRASH_GRACE_DAYS
     default (operator drills). Ownership-guarded namespace drops, idempotent,
     per-org/`-graph isolation; purged rows are stamped (kept — audit).
     In-flight guard: a concurrent purge returns 202.
