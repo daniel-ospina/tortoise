@@ -957,8 +957,16 @@ class TestBootReconcile:
             bl.reconcile_org(billing_client["sdk"], org_id)
 
     def test_boot_reconcile_hanging_stripe_never_blocks_boot(self, monkeypatch, billing_client):
-        """review fix 3: the reconcile thread is daemon + budgeted — lifespan
-        yields immediately even if Stripe hangs."""
+        """The lifespan's startup half must RETURN (not block) even with a
+        hanging Stripe client.
+
+        NOTE(#4262): the boot billing-reconcile daemon thread this test was
+        written for no longer exists (nothing creates a `billing-reconcile`
+        thread and `reconcile_org` has no production caller), so the Stripe /
+        `_iter_registered_orgs` monkeypatches below are inert and the test now
+        covers only "lifespan startup is non-blocking". Tracked for removal or
+        rewrite in #4262.
+        """
         import threading  # noqa: I001
         import time
         import tortoise.hosted_api as ha
@@ -979,11 +987,14 @@ class TestBootReconcile:
 
         started = time.monotonic()
         threads_before = threading.active_count()  # noqa: F841
+        thread_error: list[BaseException] = []
 
         # Run the lifespan's startup half in a thread and assert it RETURNS
         # (does not block) while Stripe hangs. The real app is required:
         # `_lifespan(None)` crashed immediately in `_start_liveness(None)`,
-        # so the assertion could never fail.
+        # so the assertion could never fail. The error list is required too:
+        # an exception inside the thread KILLS it, which would otherwise read
+        # as a successful return (`is_alive()` False) and mask the crash.
         def _run():
             from tortoise.hosted_api import _lifespan, app  # noqa: I001
             import asyncio
@@ -992,14 +1003,18 @@ class TestBootReconcile:
             async def _lifespan_quick():
                 async with _lifespan(app):
                     return
-            asyncio.run(_lifespan_quick())
+            try:
+                asyncio.run(_lifespan_quick())
+            except BaseException as exc:
+                thread_error.append(exc)
 
         t = threading.Thread(target=_run)
         t.start()
         t.join(timeout=5)
         elapsed = time.monotonic() - started
         assert elapsed < 5, "lifespan must not block on a hanging Stripe client"
-        assert not t.is_alive()  # lifespan returned
+        assert not t.is_alive(), "lifespan thread did not return within 5s"
+        assert not thread_error, f"lifespan raised in its thread: {thread_error!r}"
 
 
 class TestTeamInfoBillingSurface:

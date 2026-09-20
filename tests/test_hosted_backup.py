@@ -629,7 +629,7 @@ def test_restore_rejects_unreadable_manifest(monkeypatch):
         proj.close()
 
 
-def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
+def test_restore_verify_count_mismatch_swaps_live_graph(monkeypatch):
     """#1625: verification keys off the AUTHENTICATED payload node LIST, not
     the forgeable plaintext manifest node_count. Forge the manifest's
     node_count (the plaintext a naive verifier would trust) → restore must

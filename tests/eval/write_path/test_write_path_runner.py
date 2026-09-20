@@ -59,9 +59,11 @@ def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
     parsed = runner.parse_roundtrip(
         session_id, conversation, fixture["harness"], workdir=tmp_path
     )
+    # `parse_roundtrip` raises RunError on any drift, and this deep-equality
+    # assert already enforces role AND content preservation for every turn — a
+    # separate role comparison here would be dead (it could only fail after
+    # this line had failed first).
     assert parsed == conversation
-    # roles kept: the round-trip preserves EVERY turn's role exactly
-    assert [t["role"] for t in parsed] == [t["role"] for t in conversation]
     assert all(t["content"] for t in parsed)
 
 
