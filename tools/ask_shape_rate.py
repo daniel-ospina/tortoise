@@ -1292,7 +1292,9 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                   f"L3={int(bool(rec.get('l3_grounding')))} "
                   f"pass={int(bool(rec.get('pass')))} "
                   f"abs={int(bool(rec.get('abstained')))} "
+                  f"deg={int(bool(rec.get('retrieval_degraded')))} "
                   f"ctx={rec.get('ctx_recall')} "
+                  f"tokens={rec.get('context_tokens')} "
                   f"prov={rec.get('provider')} "
                   f"{rec.get('duration_ms')}ms "
                   f"{rec.get('error') or ''}")
