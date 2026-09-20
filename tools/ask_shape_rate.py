@@ -1362,14 +1362,14 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
              "seeding mode "
              + ("'embedded': " if SEED_TURNS_EMBEDDED_BY_DEFAULT
                 else "'un-embedded-backlog': ")
-             + "the reason names WHICH leg failed and why. `no_embeddings`/"
-             "`no_embedder` means no turn vector was stored; `timeout` means "
-             "the multi-strategy collector deadline fired under load; "
-             "`breaker_open`/`query_failed`/`index_missing` name other leg "
-             "failures. So a degraded read is NOT by itself evidence of a "
-             "missing vector: in embedded mode the seeder writes the "
-             "product's own vector by default (#4194), and a `no_embeddings` "
-             "reason there means the EMBEDDER was unavailable for the seed."
+             + "this receipt records only the BOOLEAN `retrieval_degraded` — "
+             "it does NOT carry the leg reason, so a degraded read here is "
+             "NOT by itself evidence of a missing vector: in embedded mode "
+             "the seeder writes the product's own vector by default (#4194). "
+             "The reason taxonomy (`no_embeddings`/`no_embedder`/`timeout`/"
+             "`breaker_open`/`query_failed`/`index_missing`) is visible in a "
+             "leg-trace diagnostic, e.g. docs/runbook/"
+             "w7a_gold_rank_diagnostic.py."
              ) if degraded
             else "no retrieval_degraded question observed",
             ("The reader is deepseek/deepseek-v4-flash at temperature 0, "

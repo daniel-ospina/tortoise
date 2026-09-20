@@ -34,6 +34,11 @@ frozen instrument at all. Worktree `/tmp/4202-dense`; `--pin-sha` asserted `HEAD
 
 **The frozen instrument cannot see the dense leg — by construction — and that is the finding.**
 
+> **Superseded (W7A, 2026-09-20):** the ask seeder now embeds turn Points **by
+> default**; the un-embedded store is the explicit `embed=False` variant (the
+> #4197 backlog). The passage below records the pre-W7A baseline and is kept as
+> history, not as current behaviour.
+
 `tools/ask_shape_rate.py` (and the whole ask-fixture family) seeds through
 `tools/ask_spotcheck.py::seed_capture_turn_store`, and #4194 **deliberately** leaves that seeder
 **without turn embeddings** — it must keep modelling the un-backfilled / no-embedder store the

@@ -62,7 +62,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import re
 import sys
@@ -90,8 +89,6 @@ from tortoise.sdk import (  # noqa: E402
     _normalize_turn_role,
     _session_llm_transcript,
 )
-
-_logger = logging.getLogger(__name__)
 
 _COMMITTED_FIXTURE = os.path.join(
     _REPO_ROOT, "tests", "fixtures", "ask_spotcheck_composition.json")
