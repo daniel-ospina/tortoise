@@ -7,7 +7,7 @@ import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 // nodes_used/max_nodes pair, the nudge derivation, and the next purchasable
 // plan for the header upgrade control. Pure, node --test unit-tested
 // (nodeUsage.test.js).
-import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage } from './nodeUsage.js'
+import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage, nodeUsageText } from './nodeUsage.js'
 import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
@@ -2656,6 +2656,11 @@ function claimIntentInFlight() {
   }
 
   async function upgrade() {
+    // #4331/#4382: an existing Stripe customer cannot start a NEW checkout —
+    // POST /v1/billing/checkout 409s on an active subscription — so route
+    // them to the portal, matching the header / Billing nudge / plan-grid
+    // remedy routing. Everyone else starts a checkout.
+    if (canManageSubscription) { await manageBilling(); return }
     await upgradeToPrice(team?.checkout_price_id)
   }
 
@@ -9574,8 +9579,11 @@ function claimIntentInFlight() {
                     demo-excluded). Both the value and the denominator come
                     from nodeState, so an absent field / unreadable graph shows
                     "—" rather than a fabricated 0. */}
-                <div className="card"><div className="card-val">{nodeState ? nodeState.used.toLocaleString() : '—'}</div><div className="card-label">Nodes used{nodeState ? ` / ${nodeState.max.toLocaleString()}` : ''}</div></div>
-                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
+                <div className="card"><div className="card-val">{nodeState ? nodeState.used.toLocaleString() : '—'}</div><div className="card-label">Nodes used{nodeState && nodeState.max > 0 ? ` / ${nodeState.max.toLocaleString()}` : ''}</div></div>
+                {/* The sibling graph-derived count: a broken graph reads
+                    `graph_ready=false` with `point_count=0`, so mirror the
+                    node card's honesty instead of showing a fabricated 0. */}
+                <div className="card"><div className="card-val">{team.graph_ready === false ? '—' : (team.point_count ?? 0)}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
               </div>
@@ -9611,12 +9619,12 @@ function claimIntentInFlight() {
                     }} />
                   </div>
                   <p className="dim small" style={{ marginTop: 6 }}>
-                    {nodeState.used.toLocaleString()} / {nodeState.max.toLocaleString()} nodes used ({nodeState.pct}%)
+                    {nodeUsageText(nodeState)}
                   </p>
                   {nodeHint && (
                     <p className="dim small" style={{ marginTop: 4 }}>
                       {nodeHint}{' '}
-                      {/* Same remedy routing as the plan cards above: an
+                      {/* Same remedy routing as the Billing plans grid below: an
                           existing Stripe customer (active/trialing/past_due/
                           canceled/unpaid) manages through the portal —
                           checkout 409s on an active subscription — while

@@ -21,6 +21,7 @@ import {
   nodeBarColor,
   nodeNudge,
   nodeUsage,
+  nodeUsageText,
 } from './nodeUsage.js'
 import { stripComments } from './testSupport.js'
 
@@ -80,13 +81,26 @@ test('#4331: a stored max_nodes=0 is a REAL absolute cap, not "unknown"', () => 
   assert.match(nodeNudge({ tier: 'free', nodes_used: 0, max_nodes: 0 }), /reached your node limit/i)
 })
 
-test('#4331: the level uses the unrounded ratio (99.5% must not read as reached)', () => {
-  assert.equal(nodeUsage({ nodes_used: 995, max_nodes: 1000 }).pct, 100)
+test('#4331: the displayed pct never crosses a threshold the level has not', () => {
+  // 99.5% is near, NOT reached: display must not say 100% over a near bar.
+  assert.equal(nodeUsage({ nodes_used: 995, max_nodes: 1000 }).pct, 99)
   assert.equal(nodeUsage({ nodes_used: 995, max_nodes: 1000 }).level, 'near')
-  // 79.5% rounds to 80 for DISPLAY but is still under the nudge threshold.
-  assert.equal(nodeUsage({ nodes_used: 795, max_nodes: 1000 }).pct, 80)
+  // 79.5% is still ok: display must not say 80% with no nudge.
+  assert.equal(nodeUsage({ nodes_used: 795, max_nodes: 1000 }).pct, 79)
   assert.equal(nodeUsage({ nodes_used: 795, max_nodes: 1000 }).level, 'ok')
+  assert.equal(nodeUsage({ nodes_used: 800, max_nodes: 1000 }).pct, 80)
   assert.equal(nodeUsage({ nodes_used: 800, max_nodes: 1000 }).level, 'near')
+  assert.equal(nodeUsage({ nodes_used: 1000, max_nodes: 1000 }).pct, 100)
+  assert.equal(nodeUsage({ nodes_used: 1000, max_nodes: 1000 }).level, 'at_limit')
+})
+
+test('#4331: nodeUsageText renders the usage, and a 0-cap as a blocked state', () => {
+  assert.equal(nodeUsageText(null), null)
+  assert.equal(nodeUsageText(nodeUsage({ nodes_used: 999, max_nodes: 1000 })),
+    '999 / 1,000 nodes used (99%)')
+  const zero = nodeUsageText(nodeUsage({ nodes_used: 0, max_nodes: 0 }))
+  assert.doesNotMatch(zero, /\d+\s*\/\s*0|100%/, `0-cap must not render a ratio: ${zero}`)
+  assert.match(zero, /limit reached/i, zero)
 })
 
 // ── 2. Colour thresholds ─────────────────────────────────────────────────
@@ -180,10 +194,14 @@ test('#4331: the Billing card shows nodes_used / max_nodes and never fabricates 
   assert.match(flat, /Nodes used/, 'the Billing stats row must have a Nodes card')
   assert.match(flat, /nodeState \? nodeState\.used\.toLocaleString\(\) : '—'/,
     'the card value must be suppressed (not 0) when the count is unknown')
-  assert.match(flat, /nodeState \? ` \/ \$\{nodeState\.max\.toLocaleString\(\)\}`/,
-    'the card label must show the server max_nodes')
+  assert.match(flat, /nodeState && nodeState\.max > 0 \? ` \/ \$\{nodeState\.max\.toLocaleString\(\)\}`/,
+    'the card label must show the server max_nodes (and no ratio for a 0-cap)')
   assert.match(flat, /team\.graph_ready !== false \? nodeUsage\(team\) : null/,
     'an unreadable graph must make the node figure unknown, not zero')
+  assert.match(flat, /nodeUsageText\(nodeState\)/, 'the bar caption comes from the shared helper')
+  // The sibling Memories card must not fabricate a 0 on a broken graph either.
+  assert.match(flat, /team\.graph_ready === false \? '—' : \(team\.point_count \?\? 0\)/,
+    'the Memories card must mirror the node card\'s uncertainty')
 })
 
 test('#4331: the node bar shares the write-ops treatment with amber/red thresholds', () => {
@@ -237,4 +255,16 @@ test('#4331: an active subscriber keeps the portal path, not a checkout control'
   assert.match(header, /team\.tier !== 'team' && !canManageSubscription/,
     'checkout must not be offered where the subscription is managed via the portal')
   assert.match(header, /canManageSubscription && \(/, 'the Manage-subscription control remains')
+})
+
+test('#4331: the cap-banner Upgrade CTA routes Stripe customers to the portal too', () => {
+  // The 402/quota banners call upgrade(); it must not hand a subscriber the
+  // 409-ing checkout (the same remedy-routing rule as header/nudge/grid).
+  const start = flat.indexOf('async function upgrade()')
+  assert.notEqual(start, -1, 'upgrade() must exist')
+  const fn = flat.slice(start, flat.indexOf('async function manageBilling()', start))
+  assert.match(fn, /if \(canManageSubscription\) \{ await manageBilling\(\); return \}/,
+    'upgrade() must route an existing Stripe customer to the portal')
+  assert.match(fn, /upgradeToPrice\(team\?\.checkout_price_id\)/,
+    'everyone else still starts a checkout')
 })

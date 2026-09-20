@@ -1203,8 +1203,8 @@ class TestTeamInfoBillingSurface:
 
     def test_team_info_nodes_used_fails_soft(self, monkeypatch, billing_client):
         """#4331: a quota-read failure must NOT 500 /v1/team — the node stat
-        degrades to 0 (the graph-recovery soft path) while the rest of the
-        billing surface still renders."""
+        degrades to None (unknown; a failed read is never a genuine 0) while
+        the rest of the billing surface still renders."""
         import tortoise.quota as quota
 
         def _boom(*a, **kw):

@@ -35,13 +35,24 @@ export function nodeUsage(team) {
   if (typeof max !== 'number' || !Number.isFinite(max) || max < 0) return null
   if (max === 0) return { used, max: 0, pct: 100, level: 'at_limit' }
   const ratio = used / max
-  const pct = Math.min(100, Math.round(ratio * 100))
+  // Floor (never round up) and cap below 100: the DISPLAYED percentage must
+  // not cross a threshold the level has not — 99.6% may not read "100%" with
+  // a near-level amber bar, and 79.6% may not read "80%" with no nudge.
+  const pct = ratio >= 1 ? 100 : Math.min(99, Math.floor(ratio * 100))
   return {
     used,
     max,
     pct,
     level: ratio >= 1 ? 'at_limit' : ratio >= NODE_NUDGE_PCT / 100 ? 'near' : 'ok',
   }
+}
+
+// The bar caption. A 0-cap plan has no defined percentage, so state the
+// blocked condition rather than "0 / 0 nodes used (100%)".
+export function nodeUsageText(u) {
+  if (!u) return null
+  if (u.max === 0) return 'Node limit reached — no node allowance on this plan'
+  return `${u.used.toLocaleString()} / ${u.max.toLocaleString()} nodes used (${u.pct}%)`
 }
 
 // Bar colour by level: accent under 80%, amber at >=80%, red at 100% (task
