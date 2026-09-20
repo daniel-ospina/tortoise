@@ -151,11 +151,12 @@ _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
 #    withholds the excuse and tells the reader to still read the specific id;
 #  * the predicate keys on SHAPE, not on the change's identity, so an unrelated
 #    >= _RESHAPE_MIN_ENTRIES-entry shrink would be reported under #4282's name; and
-#  * _BASELINE_ENTRY_COUNT is a frozen literal tied to the PRE-#4282 baseline. The
-#    Phase 0.4 retarget must DELETE this rendezvous machinery: leaving the baseline
-#    at 99 stops the note firing once a successful redesign leaves fewer than
-#    _HOLLOWED_MIN_DEAD entries unresolved, and resetting it to the new size makes
-#    `shrunk` (n <= baseline - _RESHAPE_MIN_ENTRIES) unsatisfiable. Neither is a fix.
+#  * _BASELINE_ENTRY_COUNT and _RESHAPE_MIN_ENTRIES are both expressed against the
+#    PRE-#4282 registry, so this rendezvous machinery is transition-scoped and the
+#    Phase 0.4 retarget must DELETE it rather than re-baseline it: resetting the
+#    baseline to the new registry size makes `shrunk` (n <= baseline - 25)
+#    unsatisfiable, while leaving it at 99 keeps a shrink test that no longer
+#    describes anything under it. Re-baselining is not a fix.
 # Investigate the diff; do not assume.
 _BASELINE_ENTRY_COUNT = 99       # the pre-#4282 registry this instrument pins
 _EXPECTED_MCP_TOOLS = 25         # #4282: 98 -> 25
@@ -176,11 +177,11 @@ _RENDEZVOUS_NOTE = (
     "  entries legitimately stop resolving — a RENDEZVOUS, not an instrument fault.\n"
     "    * RETARGET POINT: retarget this instrument at Phase 0.4, when\n"
     "      tortoise/__init__.py gains __all__ and there is a real declaration to pin.\n"
-    "      This rendezvous machinery is TRANSITION-SCOPED and must be DELETED there:\n"
-    "      _RESHAPE_MIN_ENTRIES is measured against the PRE-#4282 baseline, so leaving\n"
-    "      _BASELINE_ENTRY_COUNT at 99 stops the note firing once the redesign leaves\n"
-    "      fewer than _HOLLOWED_MIN_DEAD entries unresolved, while resetting it to the\n"
-    "      new size makes the shrink test unsatisfiable. Neither is a fix — delete it.\n"
+    "      This rendezvous machinery is TRANSITION-SCOPED and must be DELETED there.\n"
+    "      _BASELINE_ENTRY_COUNT and _RESHAPE_MIN_ENTRIES are measured against the\n"
+    "      PRE-#4282 registry, so re-baselining is not a fix: resetting the baseline to\n"
+    "      the new size makes the shrink test unsatisfiable (n <= baseline - 25), while\n"
+    "      leaving it at 99 leaves a shrink test that no longer describes anything.\n"
     "    * DO NOT weaken, skip or delete this test to make it green. A red that reads\n"
     "      like a bug gets worked around; a red that reads like a rendezvous gets acted\n"
     "      on. Re-point the ledger at the new surface instead.\n"
