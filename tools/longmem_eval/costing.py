@@ -340,8 +340,9 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     Returns ``{n, n_rows, p50, p95, max, total_usd, provider_reported_usd,
     map_priced_usd, unpriced_sessions, priced_sessions, fully_priced,
     calls_without_cost, calls_without_usage, deadline_aborts,
-    unmetered_attempts, excluded_no_calls, excluded_unmeasured, source,
-    map_version, heaviest}``.
+    unattributed_calls, unattributed_captures, unmetered_attempts,
+    excluded_no_calls, excluded_unmeasured, source, map_version,
+    heaviest}``.
     ``source`` is ``provider`` / ``map`` / ``mixed``; ``unpriced_sessions``
     counts sessions whose tokens could NOT be priced even from the map —
     surfaced, never silently zeroed. ``heaviest`` lists the costliest
@@ -364,6 +365,20 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     about, so rows are summed per ``session_id`` FIRST and the distribution
     is over session totals. ``p50``/``p95`` are therefore "$/session" in the
     literal sense.
+
+    #3824 — THE ABSENCE IS A SESSION TOO. A capture that reached the
+    provider but whose roll-up did not survive (the M2 lane, #3747) writes a
+    row carrying ``unattributed`` — and before this change it wrote no row
+    at all, so it contributed to NOTHING here: not ``n_rows``, not ``n``,
+    not ``excluded_no_calls``, not ``unmetered_attempts``. ``unmetered`` is
+    computed WITHIN a row, so a session with no row can never be unmetered —
+    the denominator simply undercounts, and the cohort cap set from it
+    under-refuses in exactly the case it exists to catch. Those disclosed
+    calls now fold into ``attempts`` (they are attempts with no meterable
+    response, like a timed-out call), so they land in ``unmetered_attempts``,
+    the session is excluded as ``unmetered`` rather than mislabelled
+    ``no_calls``, ``fully_priced`` refuses to read true, and
+    ``unattributed_calls`` / ``unattributed_captures`` name the cause.
     """
     costs: list[float] = []
     heaviest: list[dict] = []
@@ -373,6 +388,8 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
     without_cost_total = 0
     without_usage_total = 0
     deadline_aborts = 0
+    unattributed_total = 0
+    unattributed_captures = 0
     unmetered_attempts = 0
     excluded_no_calls = 0
     excluded_unmeasured = 0
@@ -416,14 +433,22 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         without_cost_total += without
         without_usage_total += without_usage
         measured = _measured_calls(props)
+        # #3824: calls the writer disclosed as made-but-unrolled (F2 — the
+        # row exists, the roll-up did not). They are ATTEMPTS with no
+        # meterable response, exactly like a provider-side timeout, so they
+        # fold into ``attempts`` below and reach ``unmetered_attempts``.
+        # Counting them as nothing is the undercount #3824 exists to remove.
+        unattributed = _as_int(props.get("unattributed"))
+        unattributed_total += unattributed
         sid = props.get("session_id")
         sess = sessions.setdefault(
             str(sid) if sid else f"__row{n_rows}",
             {"session_id": sid, "cost": 0.0, "rows": 0, "attempts": 0,
-             "measured": 0, "without": 0, "used_map": False,
-             "used_provider": False, "unpriced": False})
+             "measured": 0, "without": 0, "unattributed": 0,
+             "used_map": False, "used_provider": False, "unpriced": False})
         sess["rows"] += 1
-        sess["attempts"] += _as_int(props.get("calls"))
+        sess["attempts"] += _as_int(props.get("calls")) + unattributed
+        sess["unattributed"] += unattributed
         sess["measured"] += measured
         sess["without"] += without
         if without == 0 and provider_reported:
@@ -449,6 +474,10 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         # case this counter exists for, so excluding it must not also erase
         # the disclosure — nor leave ``fully_priced`` true.
         unmetered_attempts += sess["unmetered"]
+        # #3824: a session whose attempts included unrolled calls is the
+        # capture the reader must be able to NAME, not merely exclude.
+        if sess["unattributed"]:
+            unattributed_captures += 1
         if sess["attempts"] == 0 and sess["measured"] == 0:
             excluded_no_calls += 1
             continue
@@ -484,6 +513,7 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
             "measured_calls": sess["measured"],
             "rows": sess["rows"],
             "calls_without_cost": sess["without"],
+            "unattributed_calls": sess["unattributed"],
             "unmetered_attempts": sess["unmetered"],
             "source": heaviest_source,
         })
@@ -518,8 +548,15 @@ def cost_per_session_distribution(rows: list[dict] | None) -> dict:
         "fully_priced": bool(costs) and unpriced == 0
         and unmetered_attempts == 0,
         # Attempts that produced no meterable response. Possibly billed
-        # upstream, never silently priced at $0.
+        # upstream, never silently priced at $0. Includes #3824's
+        # billed-but-unrolled calls.
         "unmetered_attempts": unmetered_attempts,
+        # #3824: the unrolled-call share of the line above, named by cause.
+        # ``unattributed_calls`` is COUNTED INSIDE ``unmetered_attempts``
+        # (not additive with it); ``unattributed_captures`` is how many
+        # sessions carried any. Both are zero for a replay-only window.
+        "unattributed_calls": unattributed_total,
+        "unattributed_captures": unattributed_captures,
         "calls_without_cost": without_cost_total,
         "calls_without_usage": without_usage_total,
         "deadline_aborts": deadline_aborts,

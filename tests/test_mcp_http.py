@@ -507,8 +507,11 @@ class TestTortoiseHealthTruth:
         depending on the FastMCP call path — handle both."""
         result = body.get("result", {}) if body else {}
         if isinstance(result, dict) and "content" in result:
+            # A RETIRED tool's result carries an extra trailing block with the #3883
+            # warning; it is not part of the payload and is skipped here.
             text = "".join(c.get("text", "") for c in result["content"]
-                           if isinstance(c, dict))
+                           if isinstance(c, dict)
+                           and not c.get("text", "").startswith("RETIRED TOOL"))
             if text:
                 import json
                 try:
@@ -1203,7 +1206,7 @@ class TestAdvertisedToolsAllServed:
         the module-bottom register_all resolves a handler for every registry
         entry (its 'no handler — skipped' warning must never fire). Uses the
         RAW provider listing (bypasses the HTTP _HTTPToolFilter transform,
-        which intentionally hides HTTP-excluded/ask-gated tools)."""
+        which intentionally hides HTTP-excluded/curation-group-scoped tools)."""
         import asyncio
 
         from tortoise import mcp_server
@@ -1668,15 +1671,16 @@ class TestSC5IndexFilesSurface:
             "index_files creates nodes AND edges — must be quota-gated")
 
     def test_legacy_tools_deprecation_markers(self):
-        """Both legacy tools carry the MCP tool-description DEPRECATED marker
-        naming the replacement (plan §6.3 — behavior unchanged, SC4)."""
-        from tortoise.tool_registry import TOOL_REGISTRY
-        by_name = {t.name: t for t in TOOL_REGISTRY}
+        """Both legacy tools are RETIRED (#3883): they keep the DEPRECATED
+        description naming the replacement, and stay http-excluded."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
         for legacy in ("tortoise_index_sessions", "tortoise_ingest_corpus"):
             d = by_name[legacy].description
             assert d.startswith("DEPRECATED"), f"{legacy} missing DEPRECATED marker: {d}"
             assert "tortoise_index_files" in d, f"{legacy} marker must name the replacement"
             assert by_name[legacy].http_policy is False, f"{legacy} must stay http-excluded"
+            assert by_name[legacy].retired_use_instead == "tortoise_index_files(directory)"
 
     def test_index_files_absent_from_http_tools_list(self, mcp_client):
         """E2E-17(e) structural half: the filesystem-walk tool is not

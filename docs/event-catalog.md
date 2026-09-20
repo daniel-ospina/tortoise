@@ -8,7 +8,7 @@
 
 | Type | Version | Emitted by | Payload fields | Producer surface |
 |---|---|---|---|---|
-| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit) | `id`, `kind`, `content_hash` | SDK (MCP, REST, local) |
+| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt`. `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
 | `PointRetracted` | 1 | `TortoiseSDK.retract_point` | `id` | SDK |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |
@@ -27,6 +27,71 @@
 > The EventAPI/CLI/ingest path emits its own legacy events (`PointAdded`,
 > `PointRetracted`, `PointsMerged`, `IngestStarted`) to the EventLog JSONL —
 > unchanged. Hosted/SDK tenants read the `:GraphEvent` stream below.
+
+### JSONL rebuild-journal record shapes (durability, not the `:GraphEvent` stream)
+
+The table above documents the `:GraphEvent` **payload**. The JSONL rebuild
+journal that `rebuild_all` replays is a *second*, differently-shaped store:
+`_emit_event` writes the envelope (`event_id`/`ts`/`type`/`initiated_by`/
+`projection_version`) plus the record's own fields. Four folds carry props that
+the payload does not name:
+
+- **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
+  **canonical** `annotator_bias`/`annotator_precision`/`annotator_consistency`/
+  `annotator_directness` (the payload above keeps the SHORT names
+  `bias`/`precision`/`consistency`/`directness` for the `:GraphEvent`
+  contract). The fold accepts either spelling (`_annotator_dims(aliases=True)`),
+  but an SDK-produced record always carries the long names.
+- **`PointRevised`** — `update_point(**props)` journals the caller's props
+  VERBATIM as extras, so an `annotator_*` key here is a node property of that
+  exact name (never aliased).
+- **`EntityLinked`** (#3664) — the capture entity-attachment record, written by
+  `session_link.link_entity` **only when the SDK has an `event_log_path`**
+  (JSONL-only: it is NOT in `_GRAPH_EVENT_TYPES`). Fields: `id` (source id;
+  also carried as `source_id`), `source_label`, `source_id`, `target_label`,
+  `target_id`, `edge_type`. Folded by `FalkorProjection._fold_entity_linked`
+  as an idempotent MERGE of the flat logical endpoints; `edge_type` and both
+  labels are validated against a frozen vocabulary (an unknown/malformed value
+  is a 0-row NO-OP, never interpolated into Cypher).
+- **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
+  live capture MERGE is a raw write). Fields: `id`, `created_at`,
+  `turn_count`, `is_episodic`, `harness`, `actor_user_id`, and (on the
+  follow-up emission) `entity_links_attempted` / `entity_links_created`, and
+  (on a third, TRAILING emission written right after the live `SET
+  s.capture_ok / s.capture_extractor`) `capture_ok` / `capture_extractor`.
+  The first emission's payload is `{id, created_at, turn_count, is_episodic}`
+  plus `harness` / `actor_user_id` when set. Folded by
+  `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
+  `id` that always sets `is_episodic=true`, coalesce-preserving `created_at` /
+  `actor_user_id` (first writer wins) and taking `turn_count`, `harness`,
+  `entity_links_attempted`, `entity_links_created`, `capture_ok` and
+  `capture_extractor` from the latest record (last writer wins). The capture
+  then emits a **second** `SessionRecorded` after the entity-linking pass
+  carrying the two outcome counters, and a **third** after the
+  attempt-outcome write carrying `capture_ok` / `capture_extractor`, so all
+  of those fields are durable on the `apply()`-based engines too (the first
+  record is emitted before either result is known and cannot carry them; a
+  null `capture_ok` would otherwise read as the legacy "presumed captured"
+  case at the #2335 retry gate).
+
+**Replay ordering.** `EntityLinked` is deferred to a trailing sweep by all
+four whole-journal replay engines (`rebuild_all`, and the `apply()`-based
+`rebuild` / `recover_from_log` / `backup.restore`'s JSONL fallback), so a link
+whose endpoint is created LATER in the journal still folds. A link whose
+endpoint was HARD-DELETED after it is skipped instead (the record itself
+carries no `seq`; each engine pairs it with its journal position — the
+`(journal_seq, record)` index over its events list — and the hard-delete
+boundary is compared against that position), so a same-id re-creation does
+not resurrect the deleted link. On `rebuild_all` the
+sweep runs AFTER pass 2, so a `:Session` source recreated from a
+`contains_session` turn link exists before the fold.
+
+**No down-version guarantee for new folded record types.** An older binary
+rebuilding a journal written by a newer one warns `unrecognized event type 'X'
+— skipped` for a new type it does not know, and silently drops unknown
+`PointRevised` extras. The rebuild path has no pre-wipe allowlist analogous to
+`_assert_episodic_points_recreatable`; forward-only evolution of the JSONL
+record vocabulary is a known limitation, not a supported downgrade path.
 
 ## `:GraphEvent` node schema
 

@@ -495,8 +495,13 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
                 # dict so REST and MCP enforce identical limits (#329).
                 limits = org
             else:
-                # #329: resolve quota limits (registry Org node) — fail-closed
-                # enforcement still applies with defaults if resolution fails.
+                # #329: resolve quota limits (registry Org node). A resolution
+                # FAILURE leaves a keyless {"org_id": ...} — fail-closed, not
+                # "defaults": `enforce_org_limit` raises QuotaCheckError on a
+                # MISSING limit key for every resource (#310 GAP-B, #4010), so
+                # a degraded resolution refuses writes rather than granting
+                # them. (The old comment claimed "defaults" applied; there are
+                # none, and sessions' 1000 fallback was deleted in #4010.)
                 from tortoise.quota import resolve_org_limits
                 try:
                     limits = resolve_org_limits(org["org_id"])

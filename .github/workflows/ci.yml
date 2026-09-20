@@ -44,14 +44,28 @@ jobs:
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE" ] || BASE="origin/main"
-          CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || true)
+          CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"
           echo "$CHANGED"
           cat > /tmp/ci-gates.py <<'PY'
+          import subprocess
           import sys
 
           out = sys.argv[1]
           files = [ln.strip() for ln in sys.stdin if ln.strip()]
+
+          # The client wheel's shared-module set is DERIVED from the build
+          # script via client/shared_modules.sh (#3805). A literal
+          # enumeration here is what silently gated client-build OFF when
+          # tortoise/status_vocabulary.py was staged into the wheel. Fail
+          # closed: an underivable set must never silently skip the leg.
+          _probe = subprocess.run(["bash", "client/shared_modules.sh"],
+                                  capture_output=True, text=True)
+          SHARED = _probe.stdout.split()
+          if _probe.returncode != 0 or not SHARED:
+              print("::error::cannot derive the client wheel's shared modules "
+                    "from client/build_client.sh (client/shared_modules.sh)")
+              sys.exit(1)
 
           def startswith(p):
               return lambda f: f.startswith(p)
@@ -83,6 +97,13 @@ jobs:
               "dashboard": any_file(
                   startswith("website/apps/dashboard/"),
                   isfile("product/pricing.json"),
+                  # #3485: the dashboard's node suite loads the shared
+                  # website/assets/supabase-session.js bridge directly
+                  # (supabaseSessionBridge.test.js). Without this entry a PR
+                  # touching ONLY the bridge selects the `website` surface and
+                  # skips dashboard-js-tests, so the behavioural tests for the
+                  # very file under review would never run.
+                  isfile("website/assets/supabase-session.js"),
               ),
               # uv-lock-check
               "uv_lock": any_file(
@@ -92,12 +113,15 @@ jobs:
               "entrypoints": any_file(
                   isfile("entrypoint.sh", ".ci-checks/check-entrypoint-guards.sh"),
               ),
-              # client-build (wheel staged from client/ + the 3 canonical
-              # shared modules build_client.sh copies into the wheel)
+              # client-build (wheel staged from client/ + the canonical
+              # shared modules build_client.sh copies into the wheel). The
+              # module set is DERIVED from the build script (SHARED, above)
+              # so a newly staged module cannot miss this gate again — the
+              # PR #4044 review regression, where status_vocabulary.py
+              # shipped in the wheel while this predicate named three.
               "client": any_file(
                   startswith("client/"),
-                  isfile("tortoise/mcp_client.py", "tortoise/config.py",
-                         "tortoise/exceptions.py"),
+                  isfile(*["tortoise/" + m for m in SHARED]),
               ),
               # packaging-smoke (wheel/sdist pack catalog + doc-consistency).
               # Pack SOURCE is the root packs/ tree (pyproject maps
@@ -125,7 +149,12 @@ jobs:
                   and not f.startswith("website/apps/"),
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
-                         "tests/test_tenant_provision_cors.mjs"),
+                         "tests/test_tenant_provision_cors.mjs",
+                         # #4481: the blog SSR markdown renderer's harness. Its
+                         # subject (website/functions/blog/_lib.ts) already
+                         # matches the website/ prefix, but the harness itself
+                         # needs a path entry or a test-only PR would not run it.
+                         "tests/test_blog_markdown.mjs"),
                   # #3501: the BFF auth suites live here and had NO path entry,
                   # so a PR touching only them could not trigger the job that
                   # runs them — the job would be skipped, not failed.
@@ -216,8 +245,13 @@ jobs:
               "watchdog_scripts": any_file(
                   startswith(".github/scripts/availability-watchdog"),
                   startswith(".github/scripts/welcome-e2e-monitor"),
+                  # #3810: the record-only baseline recorder — its harness proves
+                  # the record cannot silently lose the cadence factor that
+                  # qualifies every availability figure.
+                  startswith(".github/scripts/availability-record"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
+                  isfile(".github/workflows/availability-record.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
@@ -240,8 +274,29 @@ jobs:
               "dashboard_e2e": any_file(
                   isfile("tests/e2e/test_keys_table_mixed.py"),
                   isfile("tests/e2e/test_graphs_management.py"),
+                  # #4221: `test_session_login_flow.py` is the SHARED HARNESS
+                  # for every migrated dashboard spec (the two CI specs, the
+                  # ship-test guard, and the onboarding suite wired in below),
+                  # so a change to it must re-run this job even though its own
+                  # three tests are not part of the list. It was previously
+                  # listed here while NOTHING ran it — which is the inversion
+                  # #4221 flags; the entry is now load-bearing rather than idle.
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
+                  # #4221: the onboarding wizard spec (36 collected cases) was
+                  # registered and green but never invoked. It is the one spec
+                  # of the four that #4221 named as never-run that still passes
+                  # end-to-end against the CURRENT app (see the issue's follow-up
+                  # for the other three), so it joins the job's pytest list and
+                  # needs this path entry — otherwise a PR touching ONLY it
+                  # skips the job (skipped, not failed). Same #3501 rationale as
+                  # the auth-suite entries under `website` above.
+                  isfile("tests/e2e/test_dashboard_onboarding.py"),
+                  # #3806: the ship-test guard's browser half (real clean-browser
+                  # walk against the built bundle) + the instrument it guards.
+                  isfile("tests/e2e/test_ship_test_onboarding.py",
+                         "tests/test_ship_test_onboarding.py",
+                         "tools/ship_test_onboarding.py"),
                   startswith("website/apps/dashboard/src/"),
                   # public/ is copied verbatim into dist/ by vite (default
                   # publicDir) and was previously only visible via the
@@ -402,7 +457,13 @@ jobs:
       - name: Get changed markdown files
         id: changed
         run: |
-          FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
+          # `--no-renames` is deliberate here, though this is a lint-target list
+          # rather than a changed-set SELECTION set (so the pin that enforces the
+          # flag workflow-wide still applies to it): a rename's deleted .md source
+          # path is tolerated because markdownlint-cli exits 0 on a nonexistent
+          # path, and plain .md deletions already produce exactly such paths.
+          # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
+          FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
         if: steps.changed.outputs.files != ''
@@ -516,6 +577,21 @@ jobs:
       - name: Welcome-e2e auto-file monitor (#2706/#2850)
         run: bash .github/scripts/welcome-e2e-monitor.test.sh
 
+  availability-record:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #3810: recorder surface only
+    # #3810: the RECORD-ONLY baseline instrument's harness. Self-contained:
+    # stubs gh, no network. It proves the record keeps the delivered/intended
+    # cadence factor beside EVERY availability figure (the revert test — drop
+    # it and this job goes red), that DEGRADED is never folded into DOWN, that
+    # restarts= is read from the ledger, and that a low figure never fails the
+    # run (record-only, not a gate). Mirrors availability-watchdog above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Availability record-only baseline (#3810)
+        run: bash .github/scripts/availability-record.test.sh
+
   entrypoint-guards:
     needs: changes
     if: needs.changes.outputs.entrypoints == 'true'  # #2149: entrypoint.sh / its .ci-checks script only
@@ -545,7 +621,7 @@ jobs:
 
   client-build:
     needs: changes
-    if: needs.changes.outputs.client == 'true'  # #2149: client/ + the 3 shared modules in the wheel
+    if: needs.changes.outputs.client == 'true'  # #2149: client/ + the shared modules the build script stages into the wheel (derived — client/shared_modules.sh)
     # #526: the thin-client boundary must hold on EVERY PR — build the
     # tortoise-client wheel, run the acceptance gate in a clean venv (driver
     # imports, engine modules raise ImportError, no engine deps installed),
@@ -565,10 +641,17 @@ jobs:
         run: |
           # Whitelist (PR #1313 conf 88): ANY tortoise/ entry outside the
           # client module set is rejected — including package dirs (e.g.
-          # tortoise/projection/__init__.py) and new engine modules. Must
-          # stay in sync with verify_client.sh Gate 0.
+          # tortoise/projection/__init__.py) and new engine modules. The
+          # module set is DERIVED from the build script via
+          # client/shared_modules.sh (#3805) — the same source
+          # verify_client.sh Gate 0 reads, so the three cannot drift.
+          SHARED_RE="$(bash client/shared_modules.sh | grep -oE '^[A-Za-z0-9_]+' | paste -sd'|' -)"
+          if [ -z "$SHARED_RE" ]; then
+            echo "::error::cannot derive the client wheel's shared modules"
+            exit 1
+          fi
           BAD="$(unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/' | \
-            grep -vE '^tortoise/(__init__|mcp_client|config|exceptions)\.py$' | \
+            grep -vE "^tortoise/(__init__|${SHARED_RE})\\.py$" | \
             grep -vE '^tortoise_client/(__init__|__main__|cli)\.py$' || true)"
           if [ -n "$BAD" ]; then
             echo "::error::non-client entries leaked into the tortoise-client wheel:"
@@ -686,6 +769,19 @@ jobs:
       # this step reds welcome-e2e — it is load-bearing, not belt-and-braces.
       - name: Install wrangler on PATH (required by the #3501 auth suites)
         run: npm install -g wrangler@4.127.0
+      # #4054: the auth suites serve the dashboard's BUILT `dist/` root
+      # (tests/e2e/auth/conftest.py -> ensure_dashboard_dist()). Without a
+      # lockfile-pinned install here, that helper's `npm run build` has no local
+      # vite and fails; it used to run `npx vite build`, which silently did an
+      # AD-HOC install that omitted rollup's platform binary
+      # (`@rollup/rollup-linux-x64-gnu`, the npm optional-dependency gap) and
+      # errored the whole suite at fixture setup. `npm ci` is the same
+      # lockfile-pinned install dashboard-e2e and dashboard-js-tests use, and it
+      # is what provides the platform binary.
+      - name: Install dashboard dependencies (lockfile-pinned, #4054)
+        run: |
+          cd website/apps/dashboard
+          npm ci
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -767,6 +863,8 @@ jobs:
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+      - name: Run blog SSR markdown renderer harness (#4481)
+        run: node --experimental-strip-types tests/test_blog_markdown.mjs
 
   legal-e2e:
     runs-on: ubuntu-latest
@@ -852,6 +950,43 @@ jobs:
           cat /tmp/wrangler.log || true
           echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
+      # #4054: the auth surface (/auth, /signup, /welcome, /invite-accept) moved
+      # to the `tortoise-dashboard` Pages project, so this suite needs a LOCAL
+      # app origin too. Without it the app-surface tests followed the marketing
+      # origin's 301 to DEPLOYED PRODUCTION and asserted against whatever main
+      # had last shipped (they passed that way, which is the worst outcome).
+      - name: Install + build the dashboard bundle (app origin, #4054)
+        run: |
+          cd website/apps/dashboard
+          npm ci
+          npm run build
+      - name: Start wrangler pages dev preview (dashboard dist = app origin, :8790)
+        run: |
+          cd website/apps/dashboard
+          # `--d1 SESSIONS`: the auth pages' session probe is `/api/session`,
+          # which resolves the HttpOnly `__Host-session` cookie against the D1
+          # `sessions` table. Without the binding a request carrying a cookie
+          # answers 503 ("store unreachable") instead of 401/200.
+          for attempt in 1 2; do
+            npx --yes wrangler@4.127.0 pages dev dist --port 8790 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 --d1 SESSIONS \
+              > /tmp/wrangler-app.log 2>&1 &
+            echo $! > /tmp/wrangler-app.pid
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
+                echo "wrangler (app) ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8790' 2>/dev/null || true
+            sleep 3
+          done
+          echo "::error::wrangler (app) dev server failed to start (2 attempts)"
+          tail -50 /tmp/wrangler-app.log || true
+          exit 1
       - name: Run legal pages E2E suite (#657)
         # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
         # crawl fetches unauthenticated production URLs (github.com/LICENSE,
@@ -863,6 +998,7 @@ jobs:
         # before (welcome-e2e collects it without RUN_LEGAL_E2E → self-skips).
         run: >
           RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788
+          APP_BASE_URL=http://127.0.0.1:8790
           TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
           python -m pytest tests/e2e/test_legal_pages.py tests/e2e/test_signup_form_safety_e2e.py
@@ -877,7 +1013,9 @@ jobs:
         # runner VM, so pkill can't touch other jobs)
         run: |
           kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
           pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill -f 'wrangler.*8790' 2>/dev/null || true
           pkill workerd 2>/dev/null || true
           true
 
@@ -956,8 +1094,15 @@ jobs:
         run: |
           cd website/apps/dashboard
           for attempt in 1 2; do
+            # #3501/#4054: `--d1 SESSIONS` is load-bearing. The dashboard's
+            # session gate is `/api/session`, which resolves the HttpOnly
+            # `__Host-session` cookie against the D1 `sessions` table; without
+            # the binding a request carrying that cookie answers 503 ("store
+            # unreachable") instead of 200, so the suite's seeded-session
+            # fixtures can never render the shell. The harness seeds the row it
+            # reads (tests/e2e/test_session_login_flow.py).
             npx --yes wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 \
-              --compatibility-date=2024-09-23 \
+              --compatibility-date=2024-09-23 --d1 SESSIONS \
               > /tmp/wrangler-dash.log 2>&1 &
             echo $! > /tmp/wrangler-dash.pid
             for i in $(seq 1 240); do
@@ -975,10 +1120,28 @@ jobs:
           echo "::error::wrangler (dashboard) dev server failed to start"
           tail -50 /tmp/wrangler-dash.log || true
           exit 1
-      - name: Run keys-table mixed-fixture e2e (#2166/#2178)
+      # #4221: this step used to run three of the seven `RUN_DASHBOARD_E2E`
+      # specs, so the onboarding spec's 36 cases (plus 48 more across the three
+      # stale specs and the flow module named below) were registered, reported
+      # green, and never invoked. The onboarding spec joins the list here; the
+      # others are NOT wired because they are stale against the #3501 BFF
+      # session seam and the #4054 auth-origin move — wiring them would turn
+      # this job red on every run. Evidence and the follow-up are on #4221.
+      #   test_dashboard_identity.py    — 21/22 fail (seeds the retired
+      #                                   `sb-tortoise-auth-token`; mocks only
+      #                                   the legacy absolute api host)
+      #   test_dashboard_gate.py        — 15/19 fail (asserts the pre-#4054
+      #                                   prod-origin /auth redirect target)
+      #   test_dashboard_billing.py     — 4/4 fail (drives the moved /auth page
+      #                                   through the retired local :8788 origin)
+      #   test_session_login_flow.py    — 3/3 fail (same class); the module
+      #                                   itself is the shared harness, so it
+      #                                   stays in the change detector above
+      - name: Run dashboard e2e — keys-table (#2166/#2178), graphs, ship-test guard (#3806), onboarding (#4221)
         run: >
           RUN_DASHBOARD_E2E=1
           python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py
+          tests/e2e/test_ship_test_onboarding.py tests/e2e/test_dashboard_onboarding.py
           -q -rs -p no:cacheprovider
         env:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required

@@ -25,7 +25,14 @@ import pytest
 from bff_test_helpers import pick_free_port, require_toolchain, stop
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-WEBSITE_DIR = REPO_ROOT / "website"
+# The BFF moved to the DASHBOARD Pages project (issue #4054) — FROM
+# `website/functions/` (the `premise-labs` project) TO
+# `website/apps/dashboard/functions/` (the `tortoise-dashboard` project). A
+# Pages project's `functions/` directory must sit beside the site directory, so
+# `wrangler pages dev .` now runs from `website/apps/dashboard`, not `website/`.
+# Running from the old root logs "No Functions. Shimming..." and every /api/*
+# route 404s.
+DASHBOARD_DIR = REPO_ROOT / "website" / "apps" / "dashboard"
 MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
 APP_PORT = int(os.environ.get("AUTH_PROXY_APP_PORT", "8995"))
@@ -70,7 +77,7 @@ def proxied():
 
     app = subprocess.Popen(
         [
-            shutil.which("wrangler"), "pages", "dev", ".",
+            shutil.which("wrangler"), "pages", "dev", "dist",
             "--port", str(APP_PORT), "--ip", "127.0.0.1",
             "--d1", "SESSIONS",
             "-b", f"SUPABASE_URL={MOCK_URL}",
@@ -83,7 +90,7 @@ def proxied():
         "-b", f"APP_ORIGIN={APP}",
             "-b", f"API_ORIGIN={MOCK_URL}",
         ],
-        cwd=str(WEBSITE_DIR),
+        cwd=str(DASHBOARD_DIR),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
     if not _wait(APP_PORT):
@@ -283,6 +290,13 @@ def test_proxy_cannot_escape_the_v1_prefix(proxied):
     reached this handler at all and the 404 came from Pages, not from our guard —
     deleting the guard left the test green. Observing the upstream is the only
     end-to-end proof.
+
+    #4054 note: the dev server is now the DASHBOARD project, which is an SPA — so
+    a normalised-away path is answered by the app shell (`index.html`, 200 +
+    text/html) where the marketing project answered a Pages 404. The status check
+    is therefore applied only when the PROXY actually handled the request (a JSON
+    response); a proxied success is still a hard failure. The upstream-path check
+    below remains the layout-independent proof.
     """
     cookie = _session_cookie()
     _seen_paths(reset=True)
@@ -299,11 +313,23 @@ def test_proxy_cannot_escape_the_v1_prefix(proxied):
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 status = r.status
+                ctype = r.headers.get("Content-Type", "")
                 r.read()
         except urllib.error.HTTPError as e:
             status = e.code
+            ctype = e.headers.get("Content-Type", "")
             e.read()
-        assert status >= 400, f"{hostile} returned {status} — must be refused"
+        # Two outcomes are legitimate and only these:
+        #   1. the PROXY handled it and refused it — a 4xx, served as JSON.
+        #   2. Cloudflare's router resolved the dot-segments before function
+        #      matching, so `/api/v1/[[path]]` never ran and the SPA shell
+        #      answered (HTML). Neither reaches the upstream.
+        # A proxied SUCCESS is neither, and is the regression this guards.
+        if "application/json" in ctype:
+            assert status >= 400, (
+                f"{hostile} was handled by the proxy and answered {status} — "
+                "the traversal guard did not refuse it"
+            )
 
     # Flag anything that could be a traversal, either as a foreign path or as an
     # encoded dot-segment the UPSTREAM may decode. Checking only the namespace
