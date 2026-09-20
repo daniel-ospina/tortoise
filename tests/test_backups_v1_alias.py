@@ -87,3 +87,66 @@ def test_v1_backups_covers_every_method_the_dashboard_family_needs() -> None:
     assert "POST" in methods, methods
     restore_methods = sorted({m for r in _routes("/v1/backups/restore") for m in (r.methods or [])})
     assert "POST" in restore_methods, restore_methods
+
+
+def _contract(route: APIRoute) -> tuple:
+    """The parts of a route that decide whether the alias BEHAVES like its original.
+
+    `route.dependencies` is EMPTY for this family: FastAPI resolves the auth
+    dependency from the handler SIGNATURE into `route.dependant.dependencies`, which
+    is where this has to read. That is not incidental — the two halves of the family
+    are deliberately different (`get_current_org_session_ungated` for the list,
+    `get_current_org_gated` for the create), so an alias that lost or swapped one
+    would be a security change, not a routing detail.
+    """
+    return (
+        route.status_code,
+        route.response_model,
+        tuple(getattr(d.call, "__name__", repr(d.call)) for d in route.dependant.dependencies),
+        tuple(sorted((route.responses or {}).keys())),
+    )
+
+
+def test_the_alias_preserves_the_bare_route_contract() -> None:
+    """Parity of status code, response model, auth dependencies and declared responses.
+
+    Existence + method parity + handler identity are necessary but not sufficient: the
+    same handler object can be registered with different decorator arguments, so an
+    alias could answer 200 where the bare path answers 201, or (worse) be registered
+    without the dependency the bare path carries.
+    """
+    for bare, alias in _PAIRS:
+        bare_by_methods = {frozenset(r.methods or ()): r for r in _routes(bare)}
+        assert bare_by_methods, f"{bare} has no APIRoute"
+        for route in _routes(alias):
+            methods = frozenset(route.methods or ())
+            assert methods in bare_by_methods, (
+                f"{alias} exposes {sorted(methods)}, which {bare} does not"
+            )
+            assert _contract(route) == _contract(bare_by_methods[methods]), (
+                f"{alias} {sorted(methods)} differs from {bare} in status code, response "
+                f"model, auth dependencies or declared responses:\n"
+                f"  alias: {_contract(route)}\n"
+                f"  bare:  {_contract(bare_by_methods[methods])}\n"
+                "Stacked decorators can drift; an alias that dropped the gated "
+                "dependency would open an unauthenticated write path (#4144)."
+            )
+
+
+def test_the_contract_comparison_is_not_vacuous() -> None:
+    """A contract check over empty tuples would pass for any pair of routes — the
+    Python counterpart of the empty-needle glob hole found in the watchdog harness.
+    Assert the family really does carry resolved auth dependencies, and that the gated
+    member is still gated."""
+    by_methods = {frozenset(r.methods or ()): _contract(r) for r in _routes("/backups")}
+    assert by_methods, "/backups has no APIRoute"
+    for methods, contract in by_methods.items():
+        assert contract[2], (
+            f"/backups {sorted(methods)} resolved to NO auth dependency, so the contract "
+            "comparison above proves nothing about auth"
+        )
+    names = {name for contract in by_methods.values() for name in contract[2]}
+    assert "get_current_org_gated" in names, (
+        f"the create route no longer resolves the GATED dependency (found {sorted(names)}) "
+        "— an unauthenticated write path"
+    )
