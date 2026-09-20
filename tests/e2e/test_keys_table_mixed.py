@@ -243,7 +243,8 @@ def _absent_via_legacy() -> dict:
 
 
 def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = None,
-                        key_authed: list | None = None) -> None:
+                        key_authed: list | None = None,
+                        mint_response: tuple[int, dict] | None = None) -> None:
     """Cookie-seeded session + layered api mock (gate.py style, §S5): teams
     rows with role:'owner', a localStorage-seeded LEGACY_RESIDUE that the
     mount PURGES (never probed/adopted — #2246), GET /v1/team/keys returns
@@ -276,6 +277,24 @@ def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = 
             if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([TEAM_ROW]))
+                return
+            # #4330: the create-key modal's mint (POST /v1/team/keys). Opt-in —
+            # when `mint_response` is None the POST keeps falling through to the
+            # generic 401 below, so every pre-existing suite is unchanged. On a
+            # 200 the created row is APPENDED to `keys`, so the reveal's
+            # success-path `loadAll('')` refetch returns it (the "the new key
+            # doesn't show in the table" symptom has a real assertion).
+            if (mint_response is not None
+                    and path.endswith("/v1/team/keys")
+                    and route.request.method == "POST"):
+                status, body = mint_response
+                if status == 200 and body.get("key"):
+                    keys.append(_key_row(body["id"], body["key_prefix"],
+                                         body.get("name"),
+                                         created_via="provisioned",
+                                         expires_at=body.get("expires_at")))
+                route.fulfill(status=status, content_type="application/json",
+                              body=json.dumps(body))
                 return
             if path.endswith("/v1/team/keys") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
@@ -877,3 +896,115 @@ def test_two_team_key_writes_pin_selected_team(page: Page) -> None:
     assert keys_rows["team_a"] == [_managed_row("key_a1", "tt_alpha01", "alpha-ci")], \
         "Alpha's rows must be untouched by writes pinned to Bravo"
     assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
+
+
+# ── #4330: the create-key modal on a FAILED mint ────────────────────────────
+# Owner report (2026-09-20, a production org sitting at its key cap): the
+# create-key modal flipped to its 'done' reveal stage even though the mint had
+# 402'd, so `newKey` was still its initial null. The reveal then rendered an
+# EMPTY `.key-value` box (the owner's "square"), and the fused "Copy & done"
+# control ran `navigator.clipboard.writeText(null)` — which stringifies to the
+# four-character string "null". The cap notice rendered on the tab BEHIND the
+# dialog, and the handler clears `error` on the 402 path, so no surface within
+# the modal said why. Fly log evidence for the trigger:
+#   2026-09-20T12:54:51Z  POST /v1/team/keys?org_id=… 402 Payment Required
+_CAP_402 = (402, {"detail": "Team api_keys limit reached (2). "
+                             "Upgrade your plan to increase it."})
+
+
+def _open_create_modal(page: Page, mint_response: tuple[int, dict],
+                       keys: list[dict]) -> None:
+    """Wire the harness with an opt-in mint response, boot the shell, open the
+    API Keys tab, and open the create-key dialog."""
+    _wire_mixed_harness(page, keys, mint_response=mint_response)
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("tbody tr")).to_have_count(8, timeout=15_000)
+    page.get_by_role("button", name="+ New key").click()
+    expect(page.locator(".key-create-modal")).to_be_visible(timeout=10_000)
+
+
+def test_create_key_402_keeps_the_form_and_surfaces_the_cap_inside_the_modal(
+        page: Page) -> None:
+    """#4330: a rejected mint must NOT advance to the reveal.
+
+    SYNCHRONISED ON THE RESPONSE, not on a bare assertion. The pre-fix build
+    DID flip to the reveal — just not always before a fast poll's first pass —
+    so a test that asserts straight after `click()` can read the pre-flip DOM
+    and go green on the bug (measured: it did, on this very suite). Waiting for
+    the 402 response plus a commit settle pins the END state.
+    """
+    _open_create_modal(page, _CAP_402, _mixed_keys_fixture())
+    modal = page.locator(".key-create-modal")
+    with page.expect_response(lambda r: r.request.method == "POST"
+                              and "/v1/team/keys" in r.url, timeout=15_000):
+        modal.get_by_role("button", name="Create key").click()
+    page.wait_for_timeout(1_500)  # let the settle/commit land before asserting
+
+    # The FORM stays put — no phantom reveal stage. (`exact=True`: the form's
+    # heading "Create new API key" CONTAINS the reveal's "New API key", and
+    # get_by_role's default name match is a case-insensitive substring.)
+    expect(modal.get_by_role("heading", name="Create new API key", exact=True)).to_be_visible()
+    expect(modal.get_by_role("heading", name="New API key", exact=True)).to_have_count(0)
+    # No reveal element at all ⇒ no empty square, and nothing to hand the
+    # clipboard (the old path wrote the literal string "null"). Pre-fix this
+    # was `<h2>New API key</h2>…<code class="key-value"></code>` — the empty
+    # box the owner reported — with a single fused "Copy & done".
+    expect(modal.locator("code.key-value")).to_have_count(0)
+    expect(modal).not_to_contain_text("null")
+    expect(modal.get_by_role("button", name="Copy & done")).to_have_count(0)
+    # The reason renders INSIDE the dialog, with its remedy — the tab-level
+    # banner alone is invisible behind the backdrop.
+    notice = modal.locator(".cap-notice")
+    expect(notice).to_be_visible()
+    expect(notice).to_contain_text("API keys")
+    expect(notice).to_contain_text(re.compile(r"Upgrade|See pricing"))
+    # Nothing was minted, so the table is unchanged.
+    expect(page.locator("tbody tr")).to_have_count(8)
+
+
+def test_create_key_success_reveals_a_real_key_with_separate_copy_and_done(
+        page: Page) -> None:
+    """#4330: the reveal shows the key; Copy and Done are SEPARATE controls;
+    Copy (not dismiss) is what reaches the clipboard; the new row is listed."""
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    new_key = "tt_created_abcdef0123456789"
+    keys = _mixed_keys_fixture()
+    _open_create_modal(
+        page,
+        (200, {"id": "key_mixed_new", "key": new_key,
+               "key_prefix": new_key[:10],
+               "created_at": "2026-09-20T00:00:00.000Z", "name": None}),
+        keys,
+    )
+    modal = page.locator(".key-create-modal")
+    modal.get_by_role("button", name="Create key").click()
+
+    expect(modal.get_by_role("heading", name="New API key", exact=True)).to_be_visible(timeout=10_000)
+    # The key is VISIBLE and complete — never an empty box.
+    expect(modal.locator("code.key-value")).to_have_text(new_key)
+    # Separate controls (the owner's explicit ask): copying must not dismiss.
+    copy_btn = modal.get_by_role("button", name="Copy", exact=True)
+    done_btn = modal.get_by_role("button", name="Done")
+    expect(copy_btn).to_be_visible()
+    expect(done_btn).to_be_visible()
+    # EXACTLY two controls — the fused "Copy & done" split into Copy + Done.
+    expect(modal.locator(".new-key-actions button")).to_have_count(2)
+    expect(modal.get_by_role("button", name="Copy & done")).to_have_count(0)
+
+    copy_btn.click()
+    expect(modal.get_by_role("button", name="Copied ✓")).to_be_visible()
+    assert page.evaluate("navigator.clipboard.readText()") == new_key, \
+        "Copy must write the real key, never a stringified null"
+    expect(modal).to_be_visible()  # Copy keeps the reveal open
+
+    # The created row is listed (the success path refetches).
+    expect(page.locator("tbody tr")).to_have_count(9, timeout=10_000)
+    # Scoped to the table: the reveal's own `code.key-value` carries the same
+    # prefix (the full key does), so a page-wide grep would double-match.
+    expect(page.locator("tbody code", has_text=new_key[:10])).to_have_count(1)
+
+    # Done — already copied, so it closes without a confirm prompt.
+    done_btn.click()
+    expect(modal).to_have_count(0)
