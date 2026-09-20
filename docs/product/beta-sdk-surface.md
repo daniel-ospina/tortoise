@@ -64,7 +64,7 @@ person managing their own account).
 | | **MEMORY — REVISE** | | | |
 | 22 | `update_knowledge` | Change what a stored thing says — **a node or a link** — **or retract it.** Carries `valid_until` / `invalid_at`: retraction is a temporal field on update, not a separate verb | `update_knowledge` | agent |
 | 23 | `supersede_knowledge` | Replace a node with a successor, keeping the history. **Carries an explicit link policy** — whether the old node's links follow the successor | `supersede_knowledge` | agent |
-| 24 | `delete_knowledge` | Remove knowledge — **a node or a link**. Hard removal; there is no undo | `delete_knowledge` | agent, builder |
+| 24 | `delete_knowledge` | Remove knowledge — **a node or a link**. Hard removal; there is no undo. **Choose by the rule: retract when nothing replaced the claim, supersede when a specific successor did, delete when it must not be retained** | `delete_knowledge` | agent, builder |
 | 25 | `adjust_relationship` | Change an existing epistemic link's strength. **Annotating a link is `update_knowledge` on it** | `adjust_relationship` | agent |
 | 26 | `refresh_confidence` | Recompute confidence after changes. **Two scopes: the changed nodes, or the whole graph** — stated as a parameter, not chosen silently | `refresh_confidence` | agent |
 | 27 | `approve_merge` | Approve merging two things the system thinks are the same. **`reject_merge` is not covered — see below** | `approve_merge` | agent |
@@ -77,25 +77,24 @@ person managing their own account).
 | 33 | `restore_memory_graph` | Undo a recoverable delete. **Refuses on a purged graph** | — | builder |
 | 34 | `create_key` | Mint a credential scoped to one memory graph. **The credential carries the tenant** — the client does not pass a graph id | — | builder |
 | 35 | `list_keys` | List a memory graph's credentials | — | builder |
-| 36 | `check_key` | **What does this credential reach?** Makes the isolation promise verifiable | — | builder |
-| 37 | `revoke_key` | Revoke a credential. **Rotation is mint-then-revoke — the new key is live before the old dies** | — | builder |
-| 38 | `add_member` | Grant a person access to the account | — | admin |
-| 39 | `list_members` | List who has access | — | admin |
-| 40 | `remove_member` | Revoke a person's access | — | admin |
+| 36 | `revoke_key` | Revoke a credential. **Rotation is mint-then-revoke — the new key is live before the old dies** | — | builder |
+| 37 | `add_member` | Grant a person access to the account | — | admin |
+| 38 | `list_members` | List who has access | — | admin |
+| 39 | `remove_member` | Revoke a person's access | — | admin |
 | | **PLATFORM** | | | |
-| 41 | `verify_connection` | Check the credential works and report what it reaches. **Programmatic, returns a result — not a wizard** | `verify_connection` | builder |
+| 40 | `check_connection` | **What does this credential reach?** Omit `key_id` to check your own connection; pass one to inspect a specific credential. Makes the isolation promise verifiable. **Programmatic, returns a result — not a wizard** | `check_connection` | builder |
 
-**41 methods** against **150** today. **MCP: 25 tools** — every row except the tenancy block
-(28–40), `write_knowledge_batch` (builder-only, 13) and the constructor/`close` (1–2).
+**40 methods** against **150** today. **MCP: 25 tools** — every row except the tenancy block
+(28–39), `write_knowledge_batch` (builder-only, 13) and the constructor/`close` (1–2).
 
-> **Every name here is a target, not a description of today.** Only five of the 41 exist in the
+> **Every name here is a target, not a description of today.** Only five of the 40 exist in the
 > current SDK. The MCP column names the *target* tool; 24 of the 25 are not registered today.
 > The old→new mapping is in `docs/product/vision-mcp-sdk-surface.md`.
 
 
 ## Tenancy is not on the MCP
 
-The tenancy block (rows 28–40) is **SDK and REST only.** This follows the competitors: Zep and
+The tenancy block (rows 28–39) is **SDK and REST only.** This follows the competitors: Zep and
 Mem0 both put their admin surface on a **separate URL prefix** (`graph/*` vs `user/*`;
 `/api/v1/orgs/…` vs `/v1/memories/`) — it is a different API area, not a set of agent tools.
 MCP is the model-controlled surface by definition. A solo user has one memory graph and needs
@@ -171,19 +170,6 @@ without it a filed question is invisible unless the caller kept the id out of ba
 | **Pairwise / A-B** | a case of Quick |
 | **Human-gated** | `write_question` → `record_decision` → an **approval record** ⚠️ *no approval method exists — see below* |
 | **Retrospective** | `record_decision` on an already-answered question |
-
-## Awaiting the owner
-
-Two items are settled in shape but not yet approved. Full analysis in
-`docs/product/vision-mcp-sdk-surface.md` § *Unsure*.
-
-- **U1 — the revise triangle.** `update_knowledge` (retract), `supersede_knowledge` and
-  `delete_knowledge` each end a claim's life and no row says when to pick which. **Proposed rule:
-  retract when nothing replaced it, supersede when a specific successor did, delete when it must
-  not be retained.** Needs the owner's confirmation before the rows carry it.
-- **U2 — `check_key` vs `verify_connection`.** Both answer "what does this credential reach."
-  **Proposed: collapse to `check_connection(key_id=None)`** — `key_id` selects the thing asked
-  about, not the operation.
 
 ## Named but not solved
 
@@ -282,7 +268,7 @@ Every method on this surface must state these. They are currently unstated for m
 - **Errors.** A typed error, not a string. A caller must be able to distinguish "not found",
   "denied", "invalid", and "temporarily unavailable" without parsing prose.
 
-Confirmed to state pagination in their signatures: rows 3, 4, 8 and 11. **Rows 31, 35 and 39 are lists that must state it too before implementation closes.** Truncation and typed errors are stated here as requirements and are not yet in any signature — that is Phase 2.4 of the plan.
+Confirmed to state pagination in their signatures: rows 3, 4, 8 and 11. **Rows 31, 35 and 38 are lists that must state it too before implementation closes.** Truncation and typed errors are stated here as requirements and are not yet in any signature — that is Phase 2.4 of the plan.
 
 ## Not in beta
 

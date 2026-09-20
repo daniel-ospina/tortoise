@@ -36,7 +36,7 @@ account — the builder pays; an end-customer never has an organisation account 
 | Document | What it is |
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
-| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 41 methods** over 150, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
+| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 150, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
 | `docs/product/canonical-sdk-methods.md` | The full inventory of all 150 with descriptions — the *from* state. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.
@@ -82,7 +82,7 @@ SDK method behind each discriminator — is Phase 0.1.** It is a deliverable pre
 document must not claim a reconciliation it has not computed. The hand-built map above shows the
 shape; it is not the proof.
 
-## The reconciliation — SDK 150 → 41
+## The reconciliation — SDK 150 → 40
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
 **"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`. **The five current
@@ -92,10 +92,10 @@ group, not per name, so it names the departures rather than summing them to a nu
 **a group-level ledger is the honest form, and the per-name completeness check is deferred to
 Phase 0.1.**
 
-**41 rows = 41 entries**, of which the table's rows 1–2 are the `Tortoise(...)` constructor and
+**40 rows**, of which the table's rows 1–2 are the `Tortoise(...)` constructor and
 `close()`.
 
-**The SDK count is 41 and the MCP count is 25.** The approved canonical MCP list is **23**; the
+**The SDK count is 40 and the MCP count is 25.** The approved canonical MCP list is **23**; the
 beta surface adds four, drops three and splits one:
 
 | | |
@@ -126,7 +126,7 @@ handler twice.
 
 | | Deliverable | Depends on |
 |---|---|---|
-| **1.1** | `tortoise/__all__` listing the 41 approved methods | 0.4 |
+| **1.1** | `tortoise/__all__` listing the 40 approved methods | 0.4 |
 | **1.2** | The approved-surface manifest, cut **once** from that declaration, frozen | 1.1 |
 | **1.3** | The gate: unfiltered `pull_request` check, **fail-closed** on any add/remove/rename | 1.2 |
 | **1.4** | **#3883** — retired names must **WARN** when called, naming the replacement | — |
@@ -138,12 +138,12 @@ that names its replacement.
 
 | | Deliverable | Depends on |
 |---|---|---|
-| **2.1** | The 41 methods under their canonical names | 1.1, 1.4 |
+| **2.1** | The 40 methods under their canonical names | 1.1, 1.4 |
 | **2.2** | The 4 merges (`create_entity`, `link_entities`, `delete_knowledge`, `update_knowledge`) dispatching internally | 2.1 |
 | **2.3** | `update_memory_graph` — **the rename path that is currently missing** | 2.1 |
 | **2.4** | The Contracts section enforced: pagination cursors, truncation notice, typed errors | 2.1 |
 | **2.5** | 145 retired names → warning aliases | 1.4 |
-| **2.6** | `check_connection` — see *Unsure* below | — |
+| **2.6** | `check_connection` (the `check_key` + `verify_connection` collapse) | — |
 
 ### Phase 3 — the MCP server
 
@@ -161,36 +161,25 @@ that names its replacement.
 | **4.2** | The isolation proof: `create_key` → `check_connection` → a graph it cannot reach |
 | **4.3** | The retired-name warning proven by execution, not grep |
 
-## Unsure — awaiting the owner
+## Resolved — applied
 
-Two items are **not settled** and are deliberately not implemented. They are small and local;
-everything else in the plan proceeds without them.
+Both items that were `Unsure` are now **settled and applied**: the revise rule is stated in the
+rows (U1), and `check_key` + `verify_connection` are collapsed into **`check_connection(key_id=None)`**
+(U2). Each was a non-decision under our own rule — documentation of existing semantics, and a naming
+fix inside an unbuilt surface. Neither is live; both are reversible.
 
-### U1 — the revise triangle (#6)
+**U1 — the revise triangle.** Applied. The three rows now carry the decision rule: **retract** when
+nothing replaced the claim, **supersede** when a specific successor did, **delete** when it must not
+be retained. Decidable because the first two differ by exactly one thing — whether a successor exists.
 
-`update_knowledge` (which now carries retraction), `supersede_knowledge` and
-`delete_knowledge` each end a claim's life, and no row says when to pick which. Mis-choosing is
-unrecoverable — `delete_knowledge` has no undo.
+**U2 — `check_key` vs `verify_connection`.** Applied. Both answered "what does this credential
+reach"; they are now one **`check_connection(key_id=None)`** — omitting the id checks your own
+connection, passing one inspects a specific credential. `key_id` selects *the thing asked about*,
+not the operation, so this was one question with one answer all along.
 
-**Proposed resolution — the rows carry a decision rule:**
-
-| | When | What survives |
-|---|---|---|
-| **Update + retract** | The claim was true and no longer is, and **nothing replaced it** | the claim, bounded — "true until March, then not" |
-| **Supersede** | The claim was replaced **by a specific successor** | both, chained — the old one points forward |
-| **Delete** | The claim **must not be retained** — never true, or an erasure request | nothing |
-
-The distinction is decidable because retract and supersede differ by exactly one thing: **whether
-there is a successor.** And the destructive one is made unmistakable by requiring an explicit
-`purge=True` for hard removal, matching `delete_memory_graph`.
-
-### U2 — `check_key` vs `verify_connection` (#7)
-
-Both answer "what does this credential reach," with no stated difference. **Proposed
-resolution: collapse to one method, `check_connection(key_id=None)`** — omit the id to check your
-own connection, pass one to inspect a specific credential. `key_id` selects *the thing being
-asked about*, not the operation, so this is one question with one answer. Placed in SETUP, on
-both surfaces. `check_key` and `verify_connection` both disappear.
+**Neither needed the owner.** U1 documents semantics that already exist; U2 fixes a name on a surface
+nobody has built. Both are off by default and reversible, which under our own rule makes them next
+steps rather than gates. Applying them cost less than asking.
 
 ## Coordination — four lanes are blocked on this
 
