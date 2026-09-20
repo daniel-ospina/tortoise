@@ -24466,6 +24466,7 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
     from tortoise.billing import (
         PriceCatalog,
         StripeClient,
+        _subscription_items,
         apply_limits,
         subscription_period_bounds,
     )
@@ -24492,10 +24493,16 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
 
     def _price_id_from(sub: dict) -> str | None:
         """Extract items[0].price.id handling BOTH Stripe shapes: items may be
-        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter)."""
-        items = sub.get("items") or {}
-        rows = items if isinstance(items, list) else items.get("data") or []
-        return (rows[0].get("price", {}) or {}).get("id") if rows else None
+        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter).
+
+        Reads through ``_subscription_items`` so a malformed (scalar) ``items``
+        cannot raise here — the checkout call site is outside any try, and this
+        was the last ``.get`` on an unknown-shape ``items`` (#4216 review).
+        """
+        rows = _subscription_items(sub)
+        if not rows or not isinstance(rows[0], dict):
+            return None
+        return (rows[0].get("price", {}) or {}).get("id")
 
     def _resolve_tier_from_price(price_id: str | None) -> str | None:
         """price → tier; unknown price → None + ops-notify signal."""

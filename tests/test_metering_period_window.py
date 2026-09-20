@@ -768,3 +768,47 @@ def test_checkout_webhook_writes_both_period_bounds(supabase_mode, monkeypatch):
     assert window.start_iso == SUB_START
     assert window.end_iso == SUB_END
 
+
+def test_checkout_with_malformed_items_is_acked_not_500(supabase_mode, monkeypatch):
+    """#4216 → mutation: deref ``.get`` on a scalar ``items`` in
+    ``_price_id_from`` (or drop the shared ``_subscription_items`` guard).
+
+    The checkout call site is OUTSIDE any try, so a malformed payload raised
+    ``AttributeError`` → HTTP 500 before the metadata-tier fallback could run,
+    and Stripe would retry the same malformed event forever.
+
+    RED pre-fix: 500 instead of the 200 ack.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-malformed", "stripe_customer_id": "cus_bad"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {"id": "sub_bad", "status": "active",
+                                           "items": "x"})
+    payload = {
+        "id": "evt_4216_malformed",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-malformed",
+            "customer": "cus_bad",
+            "subscription": "sub_bad",
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    assert resp.status_code == 200, resp.text
+
