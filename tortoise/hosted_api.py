@@ -1286,14 +1286,35 @@ async def _lifespan(app):
 
                 org_source = _control_plane_source()
 
-                def _sweep_orgs() -> list[str]:
+                def _sweep_orgs() -> list[str] | None:
                     from tortoise.backup_sweep import enumerate_orgs
 
                     try:
                         return enumerate_orgs(org_source)
                     except Exception as exc:
+                        # None = UNCONFIRMED census (not an empty universe): the
+                        # watcher evaluates from last-known and never resolves
+                        # incidents off a failed control-plane read.
                         _logger.warning("watcher team enumeration failed: %s", exc)
-                        return []
+                        return None
+
+                # #3658: the watcher's freshness census is the WHOLE org
+                # population, but the eligibility-gated sweep only ever
+                # archives eligible orgs (tier != 'free' AND backup_enabled =
+                # true — `enumerate_eligible_orgs`). Never intersecting the
+                # two sets makes `never` — and therefore NEVER_BACKED_UP —
+                # guaranteed by construction for the entire non-eligible
+                # tail, which floods incidents and makes a genuine
+                # eligible-and-never-backed-up org indistinguishable from
+                # one that was never owed a backup. The provider is wired ONLY
+                # for the eligibility-gated sweep; the legacy all-org sweep
+                # (org_sweep_enabled=False) backs up everyone, so it has no
+                # gate to apply and passes None (gate off). A read failure is
+                # handled by the watcher (last-known-good, then gate off).
+                def _eligible_orgs() -> list[str]:
+                    from tortoise.backup_sweep import enumerate_eligible_orgs
+
+                    return enumerate_eligible_orgs(org_source)
 
                 # #2313 Task 4: the per-graph watcher surface — ACTIVE custom
                 # graphs of an org, read from the SAME control-plane source as
@@ -1333,6 +1354,7 @@ async def _lifespan(app):
                 watcher = BackupWatcher(
                     _backup_storage(), _alert_store_from(cfg),
                     org_provider=_sweep_orgs,
+                    eligible_provider=_eligible_orgs if cfg.org_sweep_enabled else None,
                     graph_provider=_graph_provider,
                     state_reader=read_org_state,
                     driver_heartbeat_reader=lambda: _read_driver_heartbeat(),

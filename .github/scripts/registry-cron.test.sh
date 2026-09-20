@@ -65,6 +65,17 @@
 #  54. an unparseable archive timestamp is never read as fresh
 #  55. a stale watcher AGE alone (running=true, age>30) files WATCHER_DOWN
 #  56. the measurable-empty lock branch is the silent one
+#  57. an empty default prefix is a MEASURED-EMPTY result, not a global
+#      R2_DOWN (#3659 defects 1+3)
+#  58. a failed default listing still consumes the legacy-flat leg (#3659
+#      defect 2)
+#  59. a genuine listing failure surfaces the CLI stderr (#3659 defect 4)
+#  60. an empty top-level pool (JSON `null`, absent CommonPrefixes) is a
+#      measured-EMPTY pool, and a team genuinely named "None" survives
+#  61. an empty legacy-flat prefix (JSON `null`) is measured-empty — it must
+#      not enter flat classification and blank a measured default archive
+#  62. an unparseable top-level listing is UNKNOWN, never an empty pool
+#  63. the top-level listing stderr is captured (not /dev/null'd)
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -128,22 +139,59 @@ case "$op" in
     p="$(argval --prefix)"
     case "$p" in
       "backups/")
-        [ "${STUB_LIST_FAIL:-0}" = "1" ] && exit 1
-        printf '%s' "${R2_TEAMS:-}" ;;
+        [ "${STUB_LIST_FAIL:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
+        # STUB_TOP_NOT_JSON: an exit-0 body the driver's jq cannot decode — the
+        # top-level listing must read as UNKNOWN, never as an empty pool.
+        [ "${STUB_TOP_NOT_JSON:-0}" = "1" ] && { printf 'not json at all'; exit 0; }
+        if [ "$(argval --output)" = "json" ]; then
+          # #3659: model the CLI faithfully — an absent CommonPrefixes renders
+          # as JSON `null`; otherwise the tab-separated fixture prefixes are
+          # rendered as a JSON array.
+          if [ -z "${R2_TEAMS:-}" ]; then printf 'null'; else
+            printf '%s' "$R2_TEAMS" | tr '\t' '\n' | jq -Rsc 'split("\n") | map(select(. != ""))'
+          fi
+        else
+          # `--output text` renders a null JMESPath result as the literal
+          # "None" — mirror it so the pre-fix text path is faithfully modelled
+          # (and case 60 actually discriminates).
+          if [ -z "${R2_TEAMS:-}" ]; then printf 'None'; else printf '%s' "$R2_TEAMS"; fi
+        fi ;;
       */default/)
-        [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && exit 1
+        [ "${STUB_LIST_FAIL_TEAM:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
         # Per-team override so a multi-team case can distinguish WHICH team the
         # driver measured (review R1 test-integrity): with one shared listing
         # every prefix returns the same value and the tab-split regression is
         # invisible (the buggy loop measures only the LAST team).
         case "$p" in
-          "backups/teamZ/default/") printf '%s' "${R2_DEFAULT_LIST_Z:-${R2_DEFAULT_LIST:-}}" ;;
-          "backups/teamA/default/") printf '%s' "${R2_DEFAULT_LIST_A:-${R2_DEFAULT_LIST:-}}" ;;
-          *) printf '%s' "${R2_DEFAULT_LIST:-}" ;;
+          "backups/teamZ/default/") dval="${R2_DEFAULT_LIST_Z:-${R2_DEFAULT_LIST:-}}" ;;
+          "backups/teamA/default/") dval="${R2_DEFAULT_LIST_A:-${R2_DEFAULT_LIST:-}}" ;;
+          *) dval="${R2_DEFAULT_LIST:-}" ;;
+        esac
+        # #3659: emulate awscli's JMESPath evaluation faithfully. An empty
+        # prefix means S3 omits `Contents` entirely, so a sort_by()/max_by()
+        # aggregator over it raises JMESPathTypeError and the CLI exits
+        # non-zero (the driver read that as a storage outage). A total query
+        # (plain projection, no aggregator) returns `null`/`[]` instead, and
+        # `--output json` renders the result as JSON. Simplification: the
+        # fixture has no Contents-level detail, so "prefix has objects but no
+        # dump.enc" is not modelled — the empty fixture stands in for an
+        # absent Contents (the production empty-prefix path).
+        if [ -z "$dval" ]; then
+          case "$(argval --query)" in
+            *sort_by*|*max_by*)
+              echo "JMESPathTypeError: In function sort_by(), invalid type for value: None, expected one of: ['array'], received: \"null\"" >&2
+              exit 255 ;;
+          esac
+        fi
+        case "$(argval --output)" in
+          json) if [ -z "$dval" ]; then printf 'null'; else printf '[\"%s\"]' "$dval"; fi ;;
+          *)    printf '%s' "$dval" ;;
         esac ;;
       backups/*/2)
-        [ "${STUB_FLAT_FAIL:-0}" = "1" ] && exit 1
-        printf '%s' "${R2_FLAT_LIST:-[]}" ;;
+        [ "${STUB_FLAT_FAIL:-0}" = "1" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied" >&2; exit 1; }
+        # #3659: an EMPTY flat prefix renders as JSON `null` (absent Contents),
+        # not `[]` — mirror the real CLI so the empty-prefix path is exercised.
+        if [ -n "${R2_FLAT_LIST:-}" ]; then printf '%s' "$R2_FLAT_LIST"; else printf 'null'; fi ;;
       *)            printf '' ;;
     esac
     ;;
@@ -276,6 +324,7 @@ reset_case() {
         STUB_RECONCILE_CODE STUB_412 STUB_APP_DOWN STUB_R2_DOWN STUB_GET_BODY \
         SIMULATE_APP_DOWN \
         STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
+        STUB_TOP_NOT_JSON \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
         GH_ISSUE_SWEEP_CONFIG_ERROR GH_ISSUE_SWEEP_OFF_STALE GH_ISSUE_SWEEP_NO_COVERAGE \
@@ -958,6 +1007,116 @@ run_driver
 assert_eq "$RC" 0 "56. a lock with a measured-empty pool exits 0"
 assert_contains "$OUT" "leaving silent" "56. the measured-empty lock is the silent branch"
 assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "56. no incident for a measured-empty lock"
+
+# ── 57. an empty default prefix is measured-empty, not a storage outage ───
+# #3659: S3 omits `Contents` on an empty listing, so `sort_by()` raised and the
+# CLI exited non-zero — an EMPTY prefix set the GLOBAL R2_LIST_OK=0 and filed a
+# platform-wide R2_DOWN while the top-level listing had succeeded. It must be
+# a measured result instead: no R2_DOWN, and the honest "prefix present but no
+# default archive" branch (which exists for exactly this) is reached.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST=""          # prefix exists, zero objects under default/
+export R2_FLAT_LIST="[]"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 0 "57. an empty default prefix is a healthy measured pool (exit 0)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_DOWN" "57. an empty prefix files NO R2_DOWN"
+assert_not_contains "$OUT" "storage is only partially reachable" "57. the pool is not called partially reachable"
+assert_contains "$OUT" "team teamA: team prefix present but no default archive" "57. the measured-empty branch is reached"
+
+# ── 58. a failed default call still consumes the legacy-flat leg ──────────
+# #3659 defect 2: the old `team_measured=0; continue` bailed out BEFORE
+# consuming flat_list, so a pre-#2313 legacy-flat default archive was never
+# measured. A genuine per-org default-listing failure must not swallow the
+# leg that answered.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL_TEAM=1        # the default-archive listing CALL fails
+export R2_FLAT_LIST='[["backups/teamA/2024/dump.enc","2024-01-01T00:00:00Z"]]'
+export STUB_STATUS_BODY="$(status_body false null null)"
+run_driver
+assert_eq "$RC" 1 "58. a failed default call with a measured flat leg while OFF exits RED (1)"
+assert_contains "$OUT" "filing STALE (direct leg)" "58. the legacy-flat archive is measured (direct-leg STALE)"
+assert_filed "$(cat "$LOG")" "STALE — teamA" "58. the legacy-flat archive files the per-team STALE"
+assert_contains "$OUT" "default-archive listing FAILED" "58. the genuine call failure is surfaced"
+
+# ── 59. a genuine listing failure surfaces the CLI stderr ────────────────
+# #3659 defect 4: both listings redirected stderr to /dev/null, so the run log
+# could not distinguish an empty prefix from an AccessDenied. The failure must
+# still be a real R2_DOWN AND its cause must be visible.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL_TEAM=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "59. a genuine failed listing exits RED (1)"
+assert_filed "$(cat "$LOG")" R2_DOWN "59. a genuine call failure is still a real R2_DOWN"
+assert_contains "$OUT" "AccessDenied" "59. the CLI stderr is captured, not discarded"
+
+# ── 60. an empty top-level pool is measured-EMPTY, not "None" ──────────
+# #3659: an absent CommonPrefixes renders as JSON `null` (under `--output
+# text` it was the literal "None", indistinguishable from a team id).
+reset_case
+export R2_TEAMS=""              # empty pool → CommonPrefixes absent → JSON null
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 0 "60. an empty pool (JSON null) is a measured-empty exit 0"
+assert_not_contains "$OUT" "team None" "60. no fabricated 'None' team is ever measured"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*SWEEP_NO_COVERAGE" "60. no false coverage incident on an empty pool"
+# A team genuinely named "None" must survive the JSON decode (it must not be
+# conflated with the null-rendering artifact).
+reset_case
+export R2_TEAMS=$'backups/None/'
+export R2_DEFAULT_LIST="$TS_STALE"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "60b. a stale team named 'None' is measured and RED (1)"
+assert_contains "$OUT" "team None: newest archive" "60b. the 'None' team is measured, not dropped"
+
+# ── 61. an empty legacy-flat prefix renders as JSON `null`, not `[]` ─────
+# botocore returns the literal `null` for an absent Contents; the driver must
+# normalize it to the empty list, otherwise it routes into flat classification
+# and an index-read error blanks a MEASURED default archive and files a false
+# R2_DOWN.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"   # default leg MEASURED fresh
+export R2_FLAT_LIST=""                # empty flat prefix → CLI renders `null`
+export STUB_INDEX_FAIL=1              # would fail IF the driver mis-read the null
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 0 "61. a null flat listing with a measured default is healthy (exit 0)"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues .*R2_DOWN" "61. no false R2_DOWN from a null flat listing"
+assert_not_contains "$OUT" "legacy-flat index read FAILED" "61. the null flat listing never enters flat classification"
+
+# ── 62. an unparseable top-level listing is UNKNOWN, not an empty pool ──
+# An exit-0 body the decoder cannot read must not collapse to a measured-empty
+# pool (which would suppress every downstream freshness/coverage signal).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_TOP_NOT_JSON=1             # exit-0 body the driver's jq cannot read
+export R2_DEFAULT_LIST="$TS_STALE"     # a stale archive that must not be ignored
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+run_driver
+assert_eq "$RC" 1 "62. an unparseable top-level listing exits RED (1)"
+assert_contains "$OUT" "R2 top-level listing UNPARSEABLE" "62. the unparseable listing is surfaced"
+assert_filed "$(cat "$LOG")" R2_DOWN "62. unknown is never read as a measured-empty pool"
+
+# ── 63. the top-level listing stderr is captured, not discarded ──────────
+reset_case
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_teams","teams_backed_up":0}'
+run_driver
+assert_eq "$RC" 1 "63. a failed top-level listing exits RED (1)"
+assert_contains "$OUT" "AccessDenied" "63. the top-level CLI stderr is captured, not discarded"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
