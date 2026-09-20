@@ -197,8 +197,10 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
                    help=f"{', '.join(ALLOWED_PREFIXES)} or {BOTH}")
     p.add_argument("--execute", action="store_true",
                    help="actually DELETE; without it the run is a dry-run")
-    p.add_argument("--agent", default=DEFAULT_AGENT,
-                   help=f"created_by guard (default {DEFAULT_AGENT})")
+    p.add_argument("--agent", default=DEFAULT_AGENT, choices=(DEFAULT_AGENT,),
+                   help=f"created_by guard — the only accepted value is {DEFAULT_AGENT} "
+                        "(the E2E agent); any other value is rejected so the guard "
+                        "cannot be pointed at human-authored rows")
     p.add_argument("--project-ref", default=DEFAULT_PROJECT_REF)
     p.add_argument("--via", choices=("auto", "api", "cli"), default="auto")
     return p.parse_args(argv)

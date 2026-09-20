@@ -241,6 +241,20 @@ def _delete_post(url: str, slug: str) -> requests.Response:
     return SESSION.delete(f"{url}/{slug}", headers=AGENT_HEADERS, timeout=20)
 
 
+def _unpublish_best_effort(url: str, slug: str) -> None:
+    """PATCH status=draft, ignoring failure (#4316).
+
+    DELETE is DRAFT-ONLY (the recorded lifecycle has no published→deleted
+    transition), so a caller that may be facing a PUBLISHED row — the pre-clean
+    of a run killed mid-lifecycle — must unpublish first, or the pre-clean's
+    DELETE 409s and leaves the stale slug to collide with its own create.
+    Best-effort: an absent row 404s, which is the normal case.
+    """
+    with contextlib.suppress(Exception):
+        SESSION.patch(f"{url}/{slug}", json={"status": "draft"},
+                      headers=AGENT_HEADERS, timeout=20)
+
+
 def _delete_post_verified(url: str, slug: str) -> None:
     """Delete `slug` and assert the row is GONE, not merely unpublished (#4220).
 
@@ -274,6 +288,7 @@ def test_agent_api_meta_length_contract() -> None:
     # #4220: pre-clean — a crashed prior run can leave this exact slug behind,
     # and then the boundary POST below would 409 instead of 201. Absent is the
     # normal case, so the result is not asserted here.
+    _unpublish_best_effort(url, slug)  # #4316: DELETE is draft-only
     _delete_post(url, slug)
 
     try:
@@ -340,8 +355,10 @@ def test_publish_lifecycle_crawler_visibility() -> None:
     title = f"Lifecycle E2E {slug}"
 
     # #4220: pre-clean — a crashed prior run can leave this slug PUBLISHED, which
-    # would fail the "draft → 404" assertion below. Delete it first (absent is
-    # the normal case, so the result is not asserted here).
+    # would fail the "draft → 404" assertion below. Unpublish (DELETE is
+    # draft-only — #4316) then delete it first (absent is the normal case, so
+    # the result is not asserted here).
+    _unpublish_best_effort(url, slug)
     _delete_post(url, slug)
 
     def create() -> None:
@@ -413,4 +430,63 @@ def test_publish_lifecycle_crawler_visibility() -> None:
         # the row in the production review queue forever.
         with contextlib.suppress(Exception):
             unpublish_agent()
+        _delete_post_verified(url, slug)
+
+
+@BLOG_WRITE
+@NO_AGENT_KEY
+def test_delete_refuses_a_published_post() -> None:
+    """#4316 P1: DELETE is DRAFT-ONLY — a published post must survive it.
+
+    The recorded lifecycle (plan §W4) is draft → published → archived
+    (terminal): there is no published→deleted transition. `created_by` is the
+    CREATOR while an operator publishes with `published_by`, so without the
+    draft-only guard the agent key could irreversibly destroy an
+    operator-approved, LIVE article.
+
+    Falsifiable in both directions: pre-fix, the DELETE returns 200 and the
+    article disappears; and the still-served assertion catches a 409 that
+    deleted anyway (a refusal that is not real).
+    """
+    url = f"{TORTISE}/blog/api/posts"
+    slug = "lifecycle-e2e-published-delete"
+
+    def patch(payload: dict) -> requests.Response:
+        return SESSION.patch(f"{url}/{slug}", json=payload, headers=AGENT_HEADERS, timeout=20)
+
+    # Pre-clean: a crashed prior run can leave this slug published (DELETE is
+    # draft-only) or draft. Unpublish, then delete; absent is the normal case.
+    _unpublish_best_effort(url, slug)
+    _delete_post(url, slug)
+
+    try:
+        r = SESSION.post(
+            url,
+            json={"title": f"Delete guard {slug}", "body": "live body", "slug": slug},
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 201, f"create → {r.status_code} {r.text[:200]}"
+        r = patch({"status": "published"})
+        assert r.status_code == 200, f"publish → {r.status_code} {r.text[:200]}"
+
+        refused = _delete_post(url, slug)
+        assert refused.status_code == 409, (
+            f"DELETE published → {refused.status_code} (want 409) {refused.text[:200]}"
+        )
+        assert refused.json().get("error") == "published", refused.text[:200]
+
+        # The refusal must be REAL: the published article is still served.
+        live = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+        assert live.status_code == 200, (
+            f"published post gone after a refused DELETE ({live.status_code}) — the guard deleted it anyway"
+        )
+
+        # And the draft-only guard is a status gate, not a broken delete: once
+        # unpublished, the same call removes the row.
+        assert patch({"status": "draft"}).status_code == 200, "unpublish failed"
+        assert _delete_post(url, slug).status_code == 200, "draft DELETE after unpublish failed"
+    finally:
+        with contextlib.suppress(Exception):
+            patch({"status": "draft"})
         _delete_post_verified(url, slug)

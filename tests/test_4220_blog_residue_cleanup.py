@@ -101,6 +101,34 @@ def test_scope_is_identical_across_enumerate_count_and_delete():
         assert where in sql, sql
 
 
+# ── Guard B is PINNED: `--agent` is not a knob ─────────────────────────────
+
+def test_agent_flag_accepts_only_the_e2e_agent():
+    """P2 (#4316): `--agent` cannot be pointed at any other created_by value.
+
+    The docstring and the runbook both claim every statement is AND-ed with
+    ``created_by = 'blog-e2e'``. A free-text flag falsified that claim: passing
+    another agent name (or a human author) would target rows the E2E agent never
+    created. argparse refuses it with exit code 2 — falsifiable: a plain
+    ``default=`` flag (the pre-fix shape) accepts the value and this raises
+    nothing.
+    """
+    assert cleanup._parse(["--prefix", "both"]).agent == cleanup.DEFAULT_AGENT
+    assert cleanup._parse(["--prefix", "both", "--agent", cleanup.DEFAULT_AGENT]).agent == cleanup.DEFAULT_AGENT
+    with pytest.raises(SystemExit) as ei:
+        cleanup._parse(["--prefix", "both", "--agent", "hello-tortoise"])
+    assert ei.value.code == 2
+
+
+def test_unknown_agent_is_refused_before_any_sql():
+    """The refusal happens at parse time — no statement is ever issued."""
+    rec = Recorder()
+    with pytest.raises(SystemExit) as ei:
+        cleanup.main(["--prefix", "both", "--agent", "hello-tortoise", "--execute"], runner=rec)
+    assert ei.value.code == 2
+    assert rec.queries == [], f"SQL ran for a refused --agent value: {rec.queries}"
+
+
 # ── Dry-run is genuinely non-destructive ───────────────────────────────────
 
 def test_dry_run_issues_no_delete():

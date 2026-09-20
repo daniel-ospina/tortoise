@@ -11,7 +11,11 @@
 //                               so every deploy deposited drafts in the review
 //                               queue forever (#4220).
 //                               `archived` is terminal — DELETE refuses it (409),
-//                               exactly as PATCH does.
+//                               exactly as PATCH does. DRAFT-ONLY: the recorded
+//                               lifecycle (plan W4) is draft → published →
+//                               archived (terminal) with no published→deleted
+//                               transition, so a published post must be
+//                               unpublished first (409 otherwise).
 //
 // Auth: X-Agent-Key header → sha256 vs blog_agent_keys (service_role read).
 // Writes: service-role key (env SUPABASE_SERVICE_ROLE_KEY — server-side only).
@@ -472,11 +476,14 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
     patch.review_note = null;
   }
 
-  // status=not.eq.archived guards the TOCTOU window (post archived between GET and PATCH)
+  // created_by + status=not.eq.archived make ownership and the terminal state
+  // predicates on the write itself, not a read-then-trust gate: a row that
+  // changed hands or was archived between GET and PATCH is left untouched.
   let res: Response;
   try {
     res = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/blog_posts?slug=eq.${encodeURIComponent(slug)}&status=not.eq.archived`,
+      `${env.SUPABASE_URL}/rest/v1/blog_posts?slug=eq.${encodeURIComponent(slug)}` +
+        `&created_by=eq.${encodeURIComponent(agent.agentName)}&status=not.eq.archived`,
       {
         method: "PATCH",
         headers: serviceHeaders(env),
@@ -530,11 +537,18 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
 //   - 404 unknown slug; 403 slug owned by a different agent.
 //   - 409 archived — the terminal state is preserved; an archived record is not
 //     deletable through the agent API (an operator can, via SQL).
+//   - 409 published (any non-draft) — the recorded lifecycle (plan W4) is
+//     draft → published → archived (terminal) and has NO published→deleted
+//     transition, so this path never destroys a live article: a published post
+//     must be unpublished (status→draft) first. created_by is the CREATOR, not
+//     the publisher — an operator publishes with published_by while created_by
+//     stays the creating agent — so without this guard the agent key could
+//     irreversibly delete an operator-approved, already-published article.
 //   - 200 {deleted:true, slug}.
-// The ownership predicate is repeated IN the DELETE (created_by=eq.<agent>) so a
-// row that changed hands between the ownership read and the delete cannot be
-// removed — the check is a predicate on the destructive statement, not a
-// read-then-trust gate.
+// Both predicates are repeated IN the DELETE (created_by=eq.<agent> AND
+// status=eq.draft) so a row that changed hands — or was published — between the
+// ownership read and the delete cannot be removed: the checks are predicates on
+// the destructive statement, not a read-then-trust gate.
 export const onRequestDelete: PagesFunction<Env> = async ({ request, env, params, waitUntil }) => {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return err(503, "not_configured", "agent API not configured");
@@ -563,12 +577,16 @@ export const onRequestDelete: PagesFunction<Env> = async ({ request, env, params
   if (!post) return err(404, "not_found", "post not found");
   if (post.status === "archived") return err(409, "archived", "archived is terminal");
   if (post.created_by !== agent.agentName) return err(403, "forbidden", "you can only delete posts you created");
+  // DRAFT-ONLY guard (P1): the lifecycle has no published→deleted transition.
+  if (post.status !== "draft") {
+    return err(409, "published", "published posts must be unpublished before deletion");
+  }
 
   let res: Response;
   try {
     res = await fetch(
       `${env.SUPABASE_URL}/rest/v1/blog_posts?slug=eq.${encodeURIComponent(slug)}` +
-        `&created_by=eq.${encodeURIComponent(agent.agentName)}&status=not.eq.archived`,
+        `&created_by=eq.${encodeURIComponent(agent.agentName)}&status=eq.draft`,
       { method: "DELETE", headers: serviceHeaders(env) },
     );
   } catch {
@@ -580,8 +598,8 @@ export const onRequestDelete: PagesFunction<Env> = async ({ request, env, params
   }
 
   // Prefer: return=representation → the deleted row(s). Empty means the row
-  // vanished between the read and the delete (or archived concurrently): report
-  // 404 rather than claiming a delete that did not happen.
+  // vanished, was published, or was archived between the read and the delete:
+  // report 404 rather than claiming a delete that did not happen.
   let deleted: Array<{ id: string; slug: string }> = [];
   try {
     deleted = (await res.json()) as Array<{ id: string; slug: string }>;

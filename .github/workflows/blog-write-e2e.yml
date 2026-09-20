@@ -77,6 +77,24 @@ jobs:
             echo "::error::BLOG_E2E_AGENT_KEY repo secret is required (provision agent_name='blog-e2e' in blog_agent_keys)"
             exit 1
           fi
+      - name: Guard the write key — tortoise_host allowlist
+        # BLOG_E2E_AGENT_KEY is a PRODUCTION write-capable key and is sent as
+        # X-Agent-Key to `tortoise_host`, a free-text input. A typo (or a paste
+        # of the wrong URL) would hand the key to an arbitrary host, so only the
+        # known blog origins may receive it. *.pages.dev is deliberately NOT a
+        # bare wildcard — any Cloudflare user can own a `<name>.pages.dev`, so
+        # the wildcard is scoped to THIS project's preview deployments.
+        env:
+          TORTOISE_HOST_INPUT: ${{ inputs.tortoise_host }}
+        run: |
+          host="${TORTOISE_HOST_INPUT%/}"
+          case "$host" in
+            https://tortoise.premiselabs.co|https://*.premiselabs.co|https://*.premise-labs.pages.dev|http://127.0.0.1:*|http://localhost:*)
+              echo "write-key host allowed: $host" ;;
+            *)
+              echo "::error::tortoise_host '$TORTOISE_HOST_INPUT' is not allowlisted (tortoise.premiselabs.co | *.premiselabs.co | *.premise-labs.pages.dev | localhost) — refusing to send BLOG_E2E_AGENT_KEY there"
+              exit 1 ;;
+          esac
       - name: Install e2e deps
         run: |
           pip install pytest requests playwright pytest-playwright

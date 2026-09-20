@@ -659,9 +659,11 @@ jobs:
   #   CF_API_TOKEN + CF_ZONE_ID (edge-cache purge #1865)
   # (no SUPABASE_JWT_SECRET — the admin gate validates sessions via
   # Supabase /auth/v1/user; ops step documented in the epic README).
-  # The lifecycle/meta E2E tests need BLOG_E2E_AGENT_KEY (a valid agent key
-  # provisioned in blog_agent_keys as agent_name='blog-e2e') — without it
-  # those tests SKIP. Set it as a GitHub Actions secret.
+  # The lifecycle/meta E2E tests (the only tests needing BLOG_E2E_AGENT_KEY, a
+  # valid agent key provisioned in blog_agent_keys as agent_name='blog-e2e') do
+  # NOT run here: this job holds no write-capable key. Run them on demand via
+  # the `Blog write E2E (manual, #4220)` workflow
+  # (.github/workflows/blog-write-e2e.yml).
   # continue-on-error: warn-only — the deploy is already live.
   verify-blog:
     runs-on: ubuntu-latest
