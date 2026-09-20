@@ -28,9 +28,11 @@ def test_session_continuity_resolves_db_path(monkeypatch):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     src = open("tortoise/session_continuity.py").read()  # noqa: SIM115
     assert "resolve_db_path" in src
-    assert 'os.environ.get("TORTOISE_DB_URI")' not in src.split("def ")[-1].split("if __name__")[0] or True
-    # The demo block must call resolve_db_path, not read TORTOISE_DB_URI
+    # The demo block must call resolve_db_path() and must NOT read the URI
+    # with a bare `.get("TORTOISE_DB_URI")` (no default -> None when unset,
+    # which is the 'Set TORTOISE_DB_URI' dead-end #176 replaced).
     demo_block = src.split('if __name__')[1] if 'if __name__' in src else src
+    assert 'os.environ.get("TORTOISE_DB_URI")' not in demo_block
     assert "resolve_db_path()" in demo_block
 
 

@@ -47,9 +47,6 @@ class TestSearchNameError:
             pytest.fail(
                 f"relationship_filter='badformat' raised NameError: {e}"
             )
-        except Exception:
-            # Other exceptions (e.g., DB errors in temp db) are acceptable
-            pass
 
     def test_relationship_filter_no_predicate_no_nameerror(self, sdk):
         """relationship_filter with colon but empty predicate should not crash."""
@@ -62,8 +59,6 @@ class TestSearchNameError:
             pytest.fail(
                 f"relationship_filter=':target' raised NameError: {e}"
             )
-        except Exception:
-            pass
 
     def test_relationship_filter_no_target_no_nameerror(self, sdk):
         """relationship_filter with colon but empty target should not crash."""
@@ -76,8 +71,6 @@ class TestSearchNameError:
             pytest.fail(
                 f"relationship_filter='predicate:' raised NameError: {e}"
             )
-        except Exception:
-            pass
 
     def test_ascii_arrow_traversal_path_no_nameerror(self, sdk):
         """ASCII '->' in traversal_path should log a warning, not crash."""
@@ -90,8 +83,6 @@ class TestSearchNameError:
             pytest.fail(
                 f"traversal_path='Product->Feature' raised NameError: {e}"
             )
-        except Exception:
-            pass
 
     def test_traversal_path_no_nameerror(self, sdk):
         """Unicode 'Product→Feature' traversal_path (no matching pack relation)."""
@@ -104,29 +95,26 @@ class TestSearchNameError:
             pytest.fail(
                 f"traversal_path='Product→Feature' raised NameError: {e}"
             )
-        except Exception:
-            pass
 
     def test_resolve_traversal_path_direct_ascii_arrow(self, sdk):
         """Direct call to _resolve_traversal_path with ASCII '->'."""
         try:
             result = sdk._resolve_traversal_path("Product->Feature")
-            assert result is None, "ASCII arrow should return None"
         except NameError as e:
             pytest.fail(
                 f"_resolve_traversal_path('Product->Feature') raised NameError: {e}"
             )
-        except Exception:
-            pass
+        # The assertion lives OUTSIDE the try: an AssertionError is an
+        # Exception, so inside it would be swallowed and could never fire.
+        assert result is None, "ASCII arrow should return None"
 
     def test_resolve_traversal_path_short_segment(self, sdk):
         """_resolve_traversal_path with only one segment (no arrow)."""
         try:
             result = sdk._resolve_traversal_path("Product")
-            assert result is None, "Single segment should return None"
         except NameError as e:
             pytest.fail(
                 f"_resolve_traversal_path('Product') raised NameError: {e}"
             )
-        except Exception:
-            pass
+        # Outside the try — see the ascii-arrow test above.
+        assert result is None, "Single segment should return None"

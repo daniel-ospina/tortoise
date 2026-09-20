@@ -639,6 +639,7 @@ def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
         _seed(proj.g)
+        source_dump = dump_graph(proj.g, graph_name="tortoise")
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
@@ -657,11 +658,21 @@ def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         # restore must SUCCEED (verification derives from the authenticated
-        # payload nodes list, not the forgeable manifest node_count)
+        # payload nodes list, not the forgeable manifest node_count) AND must
+        # actually SWAP the live graph — a silent no-op restore would leave
+        # the pre-restore marker in place.
         restore_backup(
             proj.db, registry, store, dump_key,
             org_id="team_x", graph_name="tortoise",
         )
+        # re-select: the projection's graph handle is stale after the swap
+        live = proj.db.select_graph("tortoise")
+        assert live.query(
+            "MATCH (p:Point {id:'pt-x'}) RETURN count(p)"
+        ).result_set[0][0] == 0, "pre-restore marker survived — restore did not swap"
+        live_dump = dump_graph(live, graph_name="tortoise")
+        assert _norm_nodes(live_dump["nodes"]) == _norm_nodes(source_dump["nodes"]), (
+            "restored node set differs from the backed-up payload")
         proj.close()
 
 

@@ -60,7 +60,8 @@ def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
         session_id, conversation, fixture["harness"], workdir=tmp_path
     )
     assert parsed == conversation
-    assert [t["role"] for t in parsed] == ["user", "assistant"] or True  # roles kept
+    # roles kept: the round-trip preserves EVERY turn's role exactly
+    assert [t["role"] for t in parsed] == [t["role"] for t in conversation]
     assert all(t["content"] for t in parsed)
 
 

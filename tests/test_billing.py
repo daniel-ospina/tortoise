@@ -979,15 +979,18 @@ class TestBootReconcile:
 
         started = time.monotonic()
         threads_before = threading.active_count()  # noqa: F841
-        # invoke the boot-reconcile closure directly (as the lifespan does)
+
+        # Run the lifespan's startup half in a thread and assert it RETURNS
+        # (does not block) while Stripe hangs. The real app is required:
+        # `_lifespan(None)` crashed immediately in `_start_liveness(None)`,
+        # so the assertion could never fail.
         def _run():
-            from tortoise.hosted_api import _lifespan  # noqa: I001
+            from tortoise.hosted_api import _lifespan, app  # noqa: I001
             import asyncio
             # simulate lifespan startup: create the thread, don't await it
             ha_threads = [t for t in threading.enumerate() if t.name == "billing-reconcile"]  # noqa: F841
-            # Call the internal closure via a fresh lifespan run in a thread.
             async def _lifespan_quick():
-                async with _lifespan(None):
+                async with _lifespan(app):
                     return
             asyncio.run(_lifespan_quick())
 
@@ -996,7 +999,7 @@ class TestBootReconcile:
         t.join(timeout=5)
         elapsed = time.monotonic() - started
         assert elapsed < 5, "lifespan must not block on a hanging Stripe client"
-        assert not t.is_alive() or True  # lifespan returned
+        assert not t.is_alive()  # lifespan returned
 
 
 class TestTeamInfoBillingSurface:

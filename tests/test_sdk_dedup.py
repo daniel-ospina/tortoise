@@ -46,7 +46,9 @@ class TestDedupAlwaysPersistsHash:
         p2 = sdk.create_point("hypothesis", content, dedup=True,
                               credibility="T1")
         assert p1["id"] == p2["id"]
-        assert p2.get("credibility") != "T1" or True  # baseline preserved
+        # baseline preserved: the late credibility='T1' must not be written
+        # onto the existing point — dedup returns the ORIGINAL unchanged.
+        assert p2.get("credibility") == p1.get("credibility")
 
 
 class TestCrossContextDedup:
