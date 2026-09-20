@@ -741,14 +741,20 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     ``pool="auth"`` (default) is the AUTH-CRITICAL pool; ``pool="telemetry"``
     is a SEPARATE pool for best-effort work, so telemetry can never park the
     auth slots (#3498 review P1).
+
+    An UNKNOWN selector raises rather than falling back to auth: the pool
+    choice is the only thing keeping best-effort work off the auth-critical
+    capacity, so a typo must fail closed, not silently revert the split.
     """
     if pool == "telemetry":
         return daemon_worker(CONTROL_PLANE_TELEMETRY_WORKER_NAME,
                              workers=CONTROL_PLANE_TELEMETRY_WORKERS,
                              max_backlog=CONTROL_PLANE_TELEMETRY_BACKLOG)
-    return daemon_worker(CONTROL_PLANE_WORKER_NAME,
-                         workers=CONTROL_PLANE_WORKERS,
-                         max_backlog=CONTROL_PLANE_BACKLOG)
+    if pool == "auth":
+        return daemon_worker(CONTROL_PLANE_WORKER_NAME,
+                             workers=CONTROL_PLANE_WORKERS,
+                             max_backlog=CONTROL_PLANE_BACKLOG)
+    raise ValueError(f"unknown control-plane pool {pool!r}")
 
 
 def record_control_plane_offload(op: str, duration_s: float) -> None:

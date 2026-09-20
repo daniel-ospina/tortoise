@@ -221,6 +221,37 @@ def test_best_effort_uses_a_separate_pool_from_auth():
     assert telemetry.workers == monitoring.CONTROL_PLANE_TELEMETRY_WORKERS
 
 
+def test_unknown_pool_fails_closed():
+    """The pool selector is the only thing keeping best-effort work off auth
+    capacity — a typo must raise, not silently fall back to the auth pool."""
+    with pytest.raises(ValueError, match="unknown control-plane pool"):
+        monitoring.control_plane_worker("best_effort")
+
+
+def test_cp_offload_routes_best_effort_to_the_telemetry_pool(monkeypatch):
+    """WIRING guard (mutation-verified gap, #3498 re-review P1): the factory
+    test above does not cross ``_cp_offload``, so reverting
+    ``pool="telemetry" if best_effort else "auth"`` kept every test green.
+    Record what ``_cp_offload`` actually passes."""
+    seen: list[str] = []
+
+    async def _recorder(fn, *, op, pool="auth"):
+        seen.append(pool)
+        return "ok"
+
+    monkeypatch.setattr(ha, "run_control_plane_call", _recorder)
+
+    async def _run():
+        await ha._cp_offload(lambda: None, op="critical")
+        await ha._cp_offload(lambda: None, op="telemetry", best_effort=True)
+
+    asyncio.run(_run())
+    assert seen == ["auth", "telemetry"], (
+        f"_cp_offload pool routing is wrong: {seen} — best-effort must use the "
+        "telemetry pool (the P1 regression this guard exists for)"
+    )
+
+
 #: Ops whose helper is documented BEST-EFFORT / never-raise: an offload failure
 #: must be swallowed, never a 503. Keep in sync with the `best_effort=True`
 #: sites; the structural test below fails if one loses the flag.
@@ -232,12 +263,14 @@ _NEVER_RAISE_OPS = frozenset({
 def test_never_raise_offload_sites_pass_best_effort():
     """Structural guard for the review's "telemetry must not gate auth" fix:
     every `_cp_offload` wrapping a never-raise helper carries
-    ``best_effort=True``, so a future edit cannot silently re-introduce a 503
-    on that lane."""
+    ``best_effort=True``, AND the set of best-effort ops is exactly the declared
+    never-raise set — so a rename/deletion cannot hollow the guard out.
+    """
     import ast
 
     tree = ast.parse(Path(ha.__file__).read_text())
     offenders = []
+    best_effort_ops: set[str] = set()
     for call in ast.walk(tree):
         if not isinstance(call, ast.Call):
             continue
@@ -248,14 +281,21 @@ def test_never_raise_offload_sites_pass_best_effort():
             continue
         kwargs = {kw.arg: kw.value for kw in call.keywords}
         op = kwargs.get("op")
-        if not (isinstance(op, ast.Constant) and op.value in _NEVER_RAISE_OPS):
+        if not isinstance(op, ast.Constant):
             continue
         best_effort = kwargs.get("best_effort")
-        if not (isinstance(best_effort, ast.Constant) and best_effort.value is True):
+        marked = isinstance(best_effort, ast.Constant) and best_effort.value is True
+        if marked:
+            best_effort_ops.add(op.value)
+        if op.value in _NEVER_RAISE_OPS and not marked:
             offenders.append((call.lineno, op.value))
     assert not offenders, (
         "never-raise offload site(s) missing best_effort=True: "
         f"{offenders} — telemetry must not be able to fail auth"
+    )
+    assert best_effort_ops == _NEVER_RAISE_OPS, (
+        "the best-effort op set drifted from the declared never-raise set: "
+        f"sites use {sorted(best_effort_ops)}, declared {sorted(_NEVER_RAISE_OPS)}"
     )
 
 

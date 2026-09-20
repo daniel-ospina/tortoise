@@ -242,6 +242,11 @@ def _unoffloaded_calls(node: ast.AST,
                         continue
                     visit(arg)
                 for kw in current.keywords:
+                    # The callable may be passed by KEYWORD (``fn=``/``func=``)
+                    # — it still runs on the worker, so skip it the same way.
+                    if kw.arg in ("fn", "func") and isinstance(
+                            kw.value, (ast.Lambda, ast.Name)):
+                        continue
                     visit(kw.value)
                 return
             name = resolved(current.func)
@@ -467,6 +472,22 @@ def test_detector_flags_an_eagerly_evaluated_boundary_argument():
         if name in CONTROL_PLANE_OFFLOAD_INVENTORY
     ]
     assert hits == [(2, "user_memberships")]
+
+
+def test_detector_ignores_a_keyword_callable_argument():
+    """``fn=lambda: user_memberships(...)`` runs on the worker — the callable
+    slot is skipped whether positional or keyword."""
+    src = (
+        "async def handler():\n"
+        "    await _cp_offload(fn=lambda: user_memberships(cp, uid), op='x')\n"
+    )
+    node = ast.parse(src).body[0]
+    hits = [
+        name
+        for name, _call in _unoffloaded_calls(node)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == []
 
 
 def test_session_pinned_org_is_a_pure_predicate():
