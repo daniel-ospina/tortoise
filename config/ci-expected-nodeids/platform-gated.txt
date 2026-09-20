@@ -1,0 +1,16 @@
+# Runtime half of the platform-gate guard (#4215).
+#
+# tests/test_markers.py::PLATFORM_GATED_TESTS enumerates platform-gated files by
+# SCANNING SOURCE. Ten review cycles showed a source scan cannot close that class
+# (a new spelling is always possible), so this file asserts the property at
+# RUNTIME instead: the file's tests must still be COLLECTED in the lane that runs
+# it. COLLECTED, not passed — the two darwin-gated tests legitimately skip on the
+# ubuntu runners, and a skip is still a <testcase>. A gate that hides a test from
+# collection removes it from the junit and reds here, whatever its spelling.
+#
+# PROVENANCE: the 4 nodeids of test_fork_safety_3845.py observed in CI run 35518962357
+# (head fd23a4033), job test-d14-hosted-api — the same junit as embedded-only.txt, filtered.
+tests/test_fork_safety_3845.py::test_embedded_choke_point_runs_at_the_proven_fork_safe_level
+tests/test_fork_safety_3845.py::test_env_override_is_honoured_and_loud
+tests/test_fork_safety_3845.py::test_fork_child_does_not_hang_with_the_production_config
+tests/test_fork_safety_3845.py::test_without_the_fix_the_same_race_hangs_a_child

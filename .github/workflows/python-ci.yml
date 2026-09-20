@@ -1594,6 +1594,19 @@ jobs:
             else
               python3 tools/skip-guard.py /tmp/pytest.log
             fi
+            # #4215: the runtime half of the platform-gate guard. The manifest
+            # above is regenerated from THIS tree's --collect-only, so a gate that
+            # removes a test removes it from BOTH sides and the check stays green.
+            # This checked-in set is frozen: the platform-gated file's tests must
+            # still be COLLECTED — skipped counts, because the two darwin-gated
+            # ones legitimately skip on the ubuntu runners, and a skip still
+            # emits a <testcase>. A gate that hides one from collection cannot
+            # spell its way out of the junitxml. --manifest-only: this lane's
+            # skips are the exempt reason family, so the docker-calibrated
+            # matchers must not run here.
+            python3 tools/skip-guard.py /tmp/pytest.log \
+              --junitxml=/tmp/junit.xml \
+              --manifest config/ci-expected-nodeids/platform-gated.txt --manifest-only
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
@@ -1696,6 +1709,20 @@ jobs:
           passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
           echo "embedded_only-marked tests passed: $passed"
           [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
+          # #4207: the floor above is a COUNT of PASSED lines, so a single
+          # subtracted test leaves ~35 and the step stays green — and the pin in
+          # tests/test_markers.py reads this step's TEXT, so a deselecting flag
+          # passed through a shell variable is invisible to it as well. Neither
+          # can see a subtraction. The checked-in manifest is the FROZEN
+          # known-good set: every nodeid must still appear as a junitxml
+          # <testcase> (passed OR skipped) or this reds and NAMES the one that
+          # vanished. Supersets are fine — a new marked test needs no edit here.
+          # --manifest-only: this lane's skips are the expected state (URI unset),
+          # so the docker-calibrated skip matchers would false-red every e2e
+          # module (24, measured); the coverage property is what this lane owes.
+          python3 tools/skip-guard.py /tmp/pytest-d14.log \
+            --junitxml=/tmp/junit-d14.xml \
+            --manifest config/ci-expected-nodeids/embedded-only.txt --manifest-only
       - name: Upload D14 log (measurement artifact, #2188)
         if: always()
         continue-on-error: true

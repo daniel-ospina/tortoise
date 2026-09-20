@@ -375,6 +375,7 @@ surfaces:
   - test_ask_eval_only.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
+  - test_ci_expected_manifests.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;

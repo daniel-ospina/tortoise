@@ -83,6 +83,14 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
   --junitxml <path>                  junitxml from the same pytest run, written
                                      with -o junit_family=xunit1 so every
                                      <testcase> carries file/line attributes.
+  --manifest-only                    compare the expected nodeids and NOTHING
+                                     else (#4207). The skip-anomaly matchers
+                                     are calibrated for the docker lane, where a
+                                     live-FalkorDB/embedder skip is an anomaly;
+                                     in a URI-less lane those skips are the
+                                     EXPECTED state and would false-red every
+                                     e2e module. Use this where the property is
+                                     "the frozen nodeid set is still COLLECTED".
 
   Every expected nodeid must appear as a junitxml <testcase> — passed OR
   skipped-with-reason; a missing nodeid (deselected, file dropped from $FILES,
@@ -695,11 +703,22 @@ def _main_emit_manifest(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     if "--emit-manifest" in argv:
         return _main_emit_manifest(argv)
+    # #4207: `--manifest-only` compares the expected nodeids and NOTHING ELSE.
+    # The three skip-anomaly matchers are calibrated for the docker lane, where
+    # a live-FalkorDB or embedder skip is an anomaly; in a URI-less lane (the
+    # embedded_only selection) those skips are the EXPECTED state, so applying
+    # them there false-reds on every e2e module (24 of them, measured). The
+    # coverage property — "every frozen nodeid is still collected" — is
+    # lane-independent, and that is the one to assert in such a lane.
+    manifest_only = "--manifest-only" in argv
+    if manifest_only:
+        argv = [a for a in argv if a != "--manifest-only"]
     log_path, manifest_path, junit_path = _parse_args(argv)
     if log_path is None:
         print(
             f"usage: {argv[0]} <path-to-pytest.log> "
-            "[--manifest <expected-nodeids.txt>] [--junitxml <path>]\n"
+            "[--manifest <expected-nodeids.txt>] [--junitxml <path>] "
+            "[--manifest-only]\n"
             f"       {argv[0]} --emit-manifest \"<space-joined $FILES>\" "
             "[--marker <expr>] [--output <path>]\n"
             "exit 0 = no live-FalkorDB skips (or no log / no manifest); "
@@ -753,6 +772,12 @@ def main(argv: list[str]) -> int:
             if contract_error:
                 print(f"❌ {contract_error}", file=sys.stderr)
                 observed = set()  # reconstruction impossible → all absent
+        if manifest_only:
+            # In a lane whose skips are expected, the ONLY property asserted is
+            # that the frozen expected set is still collected (#4207).
+            falkor_violations = []
+            embedder_violations = []
+            collection_violations = []
         missing = sorted(expected - observed)
         return _report(missing, falkor_violations, embedder_violations,
                        collection_violations)
