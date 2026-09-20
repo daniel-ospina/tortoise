@@ -1,0 +1,853 @@
+#!/usr/bin/env python3
+"""cmux_dispatch.py — artifact-verified dispatch to a cmux pane (#4292).
+
+WHY THIS EXISTS
+---------------
+`cmux send` reports success when *bytes were written to the terminal*, not when
+the bytes became a pi conversation message. Two distinct failures sit downstream
+of that syscall and are therefore invisible to any exit code:
+
+  1. SEND-DURING-BOOT RACE. Bytes written before pi's TUI takes over stdin land
+     in the terminal input buffer. The text can sit unsent in the composer
+     forever, or be discarded. `cmux send` returns 0 for both calls.
+  2. BOOT-BLOCK PROMPT. A freshly-booted pi can print
+
+         Press any key to continue...
+
+     and await `process.stdin.once("data")`
+     (pi `dist/migrations.js::showDeprecationWarnings`, reached from
+     `dist/main.js` when `appMode === "interactive"` and the deprecation
+     warnings list is non-empty — e.g. a `~/.pi/agent/tools/` directory holding
+     anything other than the auto-extracted fd/rg binaries). The prompt consumes
+     whatever arrives *as its keypress*, so a pointer sent at that moment is
+     EATEN — or, worse, its prefix is eaten and the remainder is submitted as a
+     truncated turn. Boot never completes until some byte arrives.
+
+The rule this tool enforces: **verify the ARTIFACT, not the send.** Confirmation
+is a read of whether the message became a conversation message
+(`cmux list-workspaces --json` -> `latest_submitted_message`), with the pane
+screen as the discriminator between "sitting unsent in the composer" (release
+with a bare Enter) and "never arrived" (re-send). A dispatch that cannot be
+confirmed exits non-zero with `sent-but-not-consumed`; it never reports success
+on an unconsumed send.
+
+PREVENTION, then DETECTION
+--------------------------
+The confirmation check is a BACKSTOP. The boot-block case has already run a
+corrupted turn by the time anything could observe it, so the tool also gates the
+send: it refuses to write into a pane that is sitting on the prompt, because
+those bytes are what the prompt consumes. Readiness is an asymmetry — the prompt
+marker AND the absence of pi's status bar (see `boot_blocked`) — never a
+position-based guess.
+
+USAGE
+-----
+    python3 tools/cmux_dispatch.py send --workspace workspace:12 \
+        --label B4 --file /path/to/brief.txt
+    python3 tools/cmux_dispatch.py wait-ready --workspace workspace:12
+    python3 tools/cmux_dispatch.py verify --workspace workspace:12 --text "pointer"
+    python3 tools/cmux_dispatch.py state --workspace workspace:12
+
+EXIT CODES
+----------
+    0  consumed — the message became a conversation message
+    1  sent-but-not-consumed, or never-became-ready — NOT success
+    2  usage error (missing/invalid input, unknown workspace)
+    3  cmux transport error (binary missing, socket refused, non-zero rc)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
+
+#: The exact string pi prints before awaiting a keypress.
+BOOT_BLOCK_MARKER = "Press any key to continue"
+
+#: pi's status bar context-window indicator, e.g. `0.0%/700k (auto)` on a fresh
+#: idle pane and `3.8%/700k (auto)` mid-turn. Its presence is the cheapest
+#: reliable "the TUI owns stdin now" signal: the status bar is drawn only after
+#: the boot-block prompt has been satisfied. Note that a *fresh idle* pane shows
+#: NO `↑`/`↓` counters — do not key readiness off those.
+READY_RE = re.compile(r"\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmM]\b")
+
+#: Fingerprint length. `latest_submitted_message` is truncated by cmux at 240
+#: chars with a trailing `…`, so the fingerprint MUST come from the head of the
+#: message. 40 is comfortably inside that budget while being long enough to be
+#: message-specific.
+FINGERPRINT_CHARS = 40
+
+DEFAULT_READY_TIMEOUT = 180.0
+DEFAULT_CONSUME_TIMEOUT = 45.0
+DEFAULT_APPEAR_TIMEOUT = 30.0
+DEFAULT_POLL = 2.0
+DEFAULT_RETRIES = 2
+
+#: Readiness wait used by the boot-block recovery path. Deliberately NOT the
+#: caller's `--ready-timeout`: that flag answers "how long may I wait before the
+#: FIRST send" (0 is a legitimate "I believe the pane is already up"). Once we
+#: have dismissed a boot-block prompt we know the pane is mid-boot, so the
+#: re-send must wait for the TUI regardless of what the caller asked for.
+RECOVERY_READY_TIMEOUT = 180.0
+
+#: Grace window granted to the artifact before we ever ADD bytes back to the
+#: pane. `latest_submitted_*` is written at the turn boundary and can lag the
+#: poll by a beat; re-sending a message that did land would DUPLICATE it. A
+#: re-send is the one recovery whose failure mode is worse than not recovering,
+#: so it is gated on a short re-read rather than taken on the first miss.
+RECOVERY_GRACE_TIMEOUT = 6.0
+
+# Recovery actions
+R_NONE = "none"
+R_RELEASE = "release-only"
+R_RESEND = "resend"
+R_DISMISS_RESEND = "dismiss-and-resend"
+
+
+# --------------------------------------------------------------------------- #
+# Pure decision helpers (unit-tested without any cmux)
+# --------------------------------------------------------------------------- #
+
+
+def normalize(text: str | None) -> str:
+    """Collapse all runs of whitespace to single spaces (cmux does the same)."""
+    return " ".join((text or "").split())
+
+
+def fingerprint(message: str, limit: int = FINGERPRINT_CHARS) -> str:
+    """A short, head-anchored, whitespace-normalized identity for a message.
+
+    Head-anchored because cmux truncates the stored message at 240 chars.
+    """
+    return normalize(message)[:limit]
+
+
+def marker_present(screen: str | None) -> bool:
+    """The boot-block prompt string appears anywhere in the capture."""
+    return BOOT_BLOCK_MARKER in (screen or "")
+
+
+def status_bar_present(screen: str | None) -> bool:
+    """pi's TUI status bar is drawn — the TUI owns stdin now."""
+    return bool(READY_RE.search(screen or ""))
+
+
+def boot_blocked(screen: str | None) -> bool:
+    """True when pi is sitting at the `Press any key to continue...` prompt.
+
+    Read as an ASYMMETRY, not a position: the marker is present and the TUI's
+    status bar is not. Both halves matter, and neither alone is safe:
+
+    * the marker ALONE is ambiguous — pi's `regular` TUI mode renders inline, so
+      once the prompt has been satisfied the line stays visible above the input
+      box forever (observed live: 62 lines from the end of an 80-line capture on
+      a healthy pane). Position-based rules ("the marker is not last") misread a
+      live block as safe as soon as ANY boot output follows the prompt, and then
+      the gate feeds the brief to the prompt — the corruption this tool exists to
+      prevent;
+    * the status bar ALONE is the positive readiness signal, and it is drawn
+      only after the prompt is satisfied.
+
+    A boot-blocked pane has no status bar, so the two are mutually exclusive.
+    """
+    return marker_present(screen) and not status_bar_present(screen)
+
+
+def screen_ready(screen: str | None) -> bool:
+    """True when pi's TUI owns stdin (its status bar is drawn)."""
+    return status_bar_present(screen)
+
+
+def text_on_screen(screen: str | None, fp: str) -> bool:
+    """True when the message fingerprint is visible on the pane.
+
+    The composer wraps long lines, so an exact substring match is not enough:
+    the fallback comparison strips ALL whitespace, which survives a wrap at a
+    space AND a wrap mid-token.
+
+    A false positive here is SAFE: it downgrades recovery from "re-send the
+    text" to "send a bare Enter", and a bare Enter on a non-empty composer
+    submits it while a bare Enter on an empty composer is a no-op. The final
+    artifact check still decides success.
+    """
+    if not fp:
+        return False
+    if fp in normalize(screen):
+        return True
+    return re.sub(r"\s+", "", fp) in re.sub(r"\s+", "", screen or "")
+
+
+def parse_workspaces(json_text: str) -> dict[str, dict]:
+    """Index `cmux list-workspaces --json` output by BOTH `ref` and `id`."""
+    try:
+        payload = json.loads(json_text or "{}")
+    except json.JSONDecodeError:
+        return {}
+    index: dict[str, dict] = {}
+    for entry in payload.get("workspaces") or []:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("ref", "id"):
+            value = entry.get(key)
+            if value:
+                index[str(value)] = entry
+    return index
+
+
+def workspace_entry(json_text: str, workspace: str) -> dict | None:
+    """Resolve a workspace by ref, id, or (as a last resort) unique ref suffix."""
+    index = parse_workspaces(json_text)
+    if workspace in index:
+        return index[workspace]
+    # `workspace:12` vs `12` and vice versa.
+    digits = re.sub(r"^\D+", "", workspace)
+    if digits:
+        for key, entry in index.items():
+            if key.endswith((":" + digits, "-" + digits)) or key == digits:
+                return entry
+    return None
+
+
+def submitted_message(entry: dict | None) -> str:
+    """Normalized `latest_submitted_message` of a workspace entry."""
+    if not entry:
+        return ""
+    return normalize(entry.get("latest_submitted_message"))
+
+
+def is_consumed(
+    before: dict | None,
+    after: dict | None,
+    fp: str,
+    require_novelty: bool = True,
+) -> tuple[bool, str]:
+    """Did the message become a conversation message?
+
+    With `require_novelty` (the `send` path) the submission must also be NEW
+    relative to `before`, so a pointer whose text equals the previous message
+    cannot be reported as success forever. Without it (the `verify` path) a
+    present, head-anchored fingerprint is the whole question.
+
+    The match is ANCHORED at the head: the fingerprint is the message's head, and
+    cmux stores the submitted message from its head. An unanchored substring test
+    would report a short dispatch (`"go"`) as delivered by any unrelated turn
+    that happened to contain it — the fleet dispatches into shared lanes, so that
+    coincidence is reachable in practice.
+    """
+    if not after:
+        return False, "workspace-not-found"
+    current = submitted_message(after)
+    if not fp:
+        return False, "empty-fingerprint"
+    if not current.startswith(fp):
+        return False, "not-at-the-head-of-latest-submitted-message"
+    if not require_novelty:
+        return True, "present"
+    if (
+        submitted_message(before) == current
+        and (before or {}).get("latest_submitted_at")
+        == after.get("latest_submitted_at")
+    ):
+        return False, "unchanged-from-previous-submission"
+    return True, "submitted"
+
+
+def recovery_action(screen: str | None, fp: str) -> str:
+    """Choose the cheapest safe recovery for an unconsumed send."""
+    if boot_blocked(screen):
+        return R_DISMISS_RESEND
+    if text_on_screen(screen, fp):
+        return R_RELEASE
+    return R_RESEND
+
+
+# --------------------------------------------------------------------------- #
+# cmux transport
+# --------------------------------------------------------------------------- #
+
+
+class CmuxTransportError(RuntimeError):
+    """cmux itself could not be reached or refused the call.
+
+    Distinct from "the workspace is not in the list": a broken transport is an
+    OPERATIONAL failure the caller must not confuse with a missing workspace.
+    """
+
+
+@dataclass
+class CmuxResult:
+    rc: int
+    out: str = ""
+    err: str = ""
+    argv: list[str] = field(default_factory=list)
+
+
+class Cmux:
+    """Thin, injectable wrapper over the cmux CLI."""
+
+    def __init__(self, binary: str = "cmux", timeout: float = 30.0) -> None:
+        self.binary = binary
+        self.timeout = timeout
+
+    def run(self, argv: list[str], timeout: float | None = None) -> CmuxResult:
+        env = dict(os.environ)
+        env.setdefault("CMUX_QUIET", "1")  # silence the legacy-alias notice on stderr
+        try:
+            proc = subprocess.run(
+                [self.binary, *argv],
+                capture_output=True,
+                text=True,
+                timeout=timeout or self.timeout,
+                env=env,
+            )
+        except FileNotFoundError:
+            return CmuxResult(127, "", f"cmux binary not found: {self.binary}", argv)
+        except subprocess.TimeoutExpired:
+            return CmuxResult(124, "", f"cmux timed out: {' '.join(argv)}", argv)
+        return CmuxResult(proc.returncode, proc.stdout or "", proc.stderr or "", argv)
+
+    # -- concrete operations ------------------------------------------------- #
+
+    def list_workspaces_json(self) -> CmuxResult:
+        # `--id-format uuids` OMITS `ref` entirely (verified against cmux: the
+        # entry carries only id + index), which silently breaks every
+        # ref-addressed dispatch (`--workspace workspace:12` -> not found).
+        # `both` emits ref AND id so either form resolves.
+        return self.run(["list-workspaces", "--json", "--id-format", "both"])
+
+    def read_screen(
+        self, workspace: str, lines: int = 80, surface: str | None = None
+    ) -> CmuxResult:
+        argv = ["read-screen", "--workspace", workspace, "--lines", str(lines)]
+        if surface:
+            argv += ["--surface", surface]
+        return self.run(argv)
+
+    def send_text(self, workspace: str, text: str, surface: str | None = None) -> CmuxResult:
+        argv = ["send", "--workspace", workspace]
+        if surface:
+            argv += ["--surface", surface]
+        # `--` so a message beginning with `-` is never parsed as a flag.
+        argv += ["--", text]
+        return self.run(argv)
+
+    def send_enter(self, workspace: str, surface: str | None = None) -> CmuxResult:
+        # A BARE ENTER IN THE ESCAPE FORM. cmux turns the two-character sequence
+        # `\n` into Enter; a literal newline byte arrives as text and does not
+        # submit (reproduced by the Decision relay 2026-09-17).
+        return self.send_text(workspace, "\\n", surface)
+
+
+# --------------------------------------------------------------------------- #
+# Dispatcher
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class DispatchResult:
+    ok: bool
+    status: str
+    detail: str
+    attempts: int = 0
+    recoveries: list[str] = field(default_factory=list)
+    fingerprint: str = ""
+
+    def as_json(self) -> dict:
+        return {
+            "ok": self.ok,
+            "status": self.status,
+            "detail": self.detail,
+            "attempts": self.attempts,
+            "recoveries": self.recoveries,
+            "fingerprint": self.fingerprint,
+        }
+
+
+class Dispatcher:
+    def __init__(
+        self,
+        cmux: Cmux,
+        sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], float] = time.monotonic,
+        log: Callable[[str], None] | None = None,
+        poll: float = DEFAULT_POLL,
+    ) -> None:
+        self.cmux = cmux
+        self.sleep = sleep
+        self.now = now
+        self.poll = poll
+        self._log = log or (lambda message: print(message, file=sys.stderr))
+
+    def log(self, message: str) -> None:
+        self._log(message)
+
+    # -- reads --------------------------------------------------------------- #
+
+    def workspace_state(self, workspace: str) -> dict | None:
+        """The workspace's entry, or None when it is not listed.
+
+        Raises `CmuxTransportError` when cmux itself failed — a broken transport
+        must never be reported as "unknown workspace".
+        """
+        result = self.cmux.list_workspaces_json()
+        if result.rc != 0:
+            raise CmuxTransportError(
+                result.err.strip()
+                or f"cmux list-workspaces --json rc={result.rc}"
+            )
+        return workspace_entry(result.out, workspace)
+
+    def screen(self, workspace: str, surface: str | None = None) -> str:
+        result = self.cmux.read_screen(workspace, surface=surface)
+        return result.out if result.rc == 0 else ""
+
+    def wait_for_workspace(self, workspace: str, timeout: float) -> dict | None:
+        """Wait for a freshly-created workspace to appear in `list-workspaces`.
+
+        `cmux new-workspace` returns before the workspace is enumerable, so an
+        immediate lookup can miss it for several seconds. Reported separately
+        from `sent-but-not-consumed` because the diagnosis is different.
+        """
+        deadline = self.now() + timeout
+        while True:
+            entry = self.workspace_state(workspace)
+            if entry is not None:
+                return entry
+            if self.now() >= deadline:
+                return None
+            self.sleep(self.poll)
+
+    # -- readiness (Defect 2 / send-during-boot race) ------------------------ #
+
+    def wait_until_safe_to_send(
+        self, workspace: str, timeout: float, surface: str | None = None
+    ) -> tuple[bool, bool, str]:
+        """Poll until sending cannot be eaten by a boot-block prompt.
+
+        Returns `(ready, blocked_now, last_screen)`.
+
+        `blocked_now` matters: if the prompt is ON SCREEN at the deadline the pane
+        is PROVABLY not accepting input, so the caller must refuse. If the prompt
+        was seen earlier but is gone now, the caller may proceed best-effort —
+        confirmation and recovery still gate success.
+        """
+        deadline = self.now() + timeout
+        screen = ""
+        announced = False
+        dismissals = 0
+        logged_failure = False
+        while True:
+            screen = self.screen(workspace, surface)
+            if boot_blocked(screen):
+                if not announced:
+                    self.log(
+                        "  boot-block prompt detected — dismissing with a bare Enter "
+                        "(pi dist/migrations.js::showDeprecationWarnings)"
+                    )
+                    announced = True
+                dismissal = self.cmux.send_enter(workspace, surface)
+                dismissals += 1
+                if dismissal.rc != 0 and not logged_failure:
+                    # A dismissal that does not land leaves the pane wedged for
+                    # the whole timeout with no explanation. Never swallow this.
+                    logged_failure = True
+                    self.log(
+                        f"  WARN: boot-block dismissal REJECTED rc={dismissal.rc}: "
+                        f"{dismissal.err.strip() or 'no stderr'}"
+                    )
+            elif screen_ready(screen):
+                return True, False, screen
+            # Deadline is checked AFTER the dismissal attempt and BEFORE the
+            # sleep, so a zero timeout still gets one probe + one dismissal.
+            if self.now() >= deadline:
+                if boot_blocked(screen):
+                    self.log(
+                        f"  still boot-blocked after {dismissals} dismissal attempt(s); "
+                        f"last rc={dismissal.rc if dismissals else 'n/a'}"
+                    )
+                return False, boot_blocked(screen), screen
+            self.sleep(self.poll)
+
+    # -- confirmation (Defect 1) --------------------------------------------- #
+
+    def wait_consumed(
+        self,
+        workspace: str,
+        before: dict | None,
+        fp: str,
+        timeout: float,
+        require_novelty: bool = True,
+    ) -> tuple[bool, str, dict | None]:
+        deadline = self.now() + timeout
+        after: dict | None = None
+        reason = "no-poll"
+        while True:
+            after = self.workspace_state(workspace)
+            consumed, reason = is_consumed(before, after, fp, require_novelty)
+            if consumed:
+                return True, reason, after
+            if self.now() >= deadline:
+                return False, reason, after
+            self.sleep(self.poll)
+
+    # -- the whole operation ------------------------------------------------- #
+
+    def send_message(
+        self,
+        workspace: str,
+        text: str,
+        surface: str | None = None,
+        label: str = "",
+        ready_timeout: float = DEFAULT_READY_TIMEOUT,
+        consume_timeout: float = DEFAULT_CONSUME_TIMEOUT,
+        appear_timeout: float = DEFAULT_APPEAR_TIMEOUT,
+        retries: int = DEFAULT_RETRIES,
+    ) -> DispatchResult:
+        fp = fingerprint(text)
+        if not fp:
+            return DispatchResult(False, "empty-message", "nothing to send")
+
+        tag = f"[{label}] " if label else ""
+        try:
+            before = self.wait_for_workspace(workspace, appear_timeout)
+        except CmuxTransportError as exc:
+            return DispatchResult(
+                False, "transport-error", f"{tag}cmux unreachable: {exc}", fingerprint=fp
+            )
+        if before is None:
+            return DispatchResult(
+                False,
+                "unknown-workspace",
+                f"{tag}{workspace} not found in `cmux list-workspaces --json` "
+                f"after {appear_timeout:g}s",
+                fingerprint=fp,
+            )
+
+        # --- gate: never send into a boot-blocked prompt -------------------- #
+        self.log(f"{tag}waiting for {workspace} to be safe to send…")
+        try:
+            ready, blocked_now, _ = self.wait_until_safe_to_send(
+                workspace, ready_timeout, surface
+            )
+        except CmuxTransportError as exc:
+            return DispatchResult(
+                False, "transport-error", f"{tag}cmux unreachable: {exc}", fingerprint=fp
+            )
+        if blocked_now:
+            return DispatchResult(
+                False,
+                "never-became-ready",
+                f"{tag}{workspace} is sitting on the `Press any key to continue...` "
+                f"boot-block prompt after {ready_timeout:g}s — refusing to send "
+                f"(bytes sent at that prompt are eaten, and a partial eat submits "
+                f"a truncated turn)",
+                fingerprint=fp,
+            )
+        if not ready:
+            self.log(
+                f"{tag}no ready signal after {ready_timeout:g}s — sending anyway "
+                f"(confirmation will decide)"
+            )
+
+        # --- transmit ------------------------------------------------------- #
+        self.log(f"{tag}sending {len(text.encode())} bytes to {workspace}…")
+        text_result = self.cmux.send_text(workspace, text, surface)
+        if text_result.rc != 0:
+            return DispatchResult(
+                False,
+                "transport-error",
+                f"{tag}cmux send (text) rc={text_result.rc}: "
+                f"{text_result.err.strip() or 'no stderr'}",
+                fingerprint=fp,
+            )
+        enter_result = self.cmux.send_enter(workspace, surface)
+        if enter_result.rc != 0:
+            return DispatchResult(
+                False,
+                "sent-but-not-consumed",
+                f"{tag}text accepted but the submit Enter failed "
+                f"(rc={enter_result.rc}) — the message may sit unsent",
+                attempts=1,
+                fingerprint=fp,
+            )
+
+        # --- confirm the ARTIFACT, then recover ----------------------------- #
+        result = DispatchResult(False, "sent-but-not-consumed", "", fingerprint=fp)
+        for attempt in range(1, retries + 2):
+            result.attempts = attempt
+            try:
+                consumed, reason, _ = self.wait_consumed(
+                    workspace, before, fp, consume_timeout
+                )
+            except CmuxTransportError as exc:
+                result.status = "transport-error"
+                result.detail = f"{tag}cmux unreachable while confirming: {exc}"
+                return result
+            if consumed:
+                result.ok = True
+                result.status = "consumed"
+                result.detail = (
+                    f"{tag}{workspace} confirmed: message became a conversation "
+                    f"message (attempt {attempt}, {reason})"
+                )
+                return result
+
+            if attempt > retries:
+                break
+
+            screen = self.screen(workspace, surface)
+            action = recovery_action(screen, fp)
+            result.recoveries.append(action)
+            self.log(f"{tag}not consumed ({reason}) — recovery: {action}")
+
+            if action in (R_RESEND, R_DISMISS_RESEND):
+                # Do not ADD bytes until the artifact has had a grace window to
+                # catch up — re-sending a message that did in fact land would
+                # DUPLICATE it in the lane.
+                late_consumed, late_reason, _ = self.wait_consumed(
+                    workspace, before, fp, RECOVERY_GRACE_TIMEOUT
+                )
+                if late_consumed:
+                    result.ok = True
+                    result.status = "consumed"
+                    result.detail = (
+                        f"{tag}{workspace} confirmed: message became a conversation "
+                        f"message (attempt {attempt}, {late_reason}, confirmed in the "
+                        f"pre-recovery grace window — no duplicate sent)"
+                    )
+                    return result
+
+            if action == R_RELEASE:
+                # The message is visibly sitting in the composer unsent: a bare
+                # Enter releases it. Re-sending the text here would DUPLICATE it.
+                self.cmux.send_enter(workspace, surface)
+            elif action == R_DISMISS_RESEND:
+                # The text was eaten by the boot-block prompt (possibly its
+                # prefix, leaving a corrupted turn). Dismiss, wait for the TUI,
+                # then send the full text again — but ONLY if the pane actually
+                # became safe. Feeding the prompt a second time would recreate
+                # the very corruption this tool prevents.
+                self.cmux.send_enter(workspace, surface)
+                recovery_ready, recovery_blocked, _ = self.wait_until_safe_to_send(
+                    workspace, RECOVERY_READY_TIMEOUT, surface
+                )
+                if recovery_blocked:
+                    result.ok = False
+                    result.status = "never-became-ready"
+                    result.detail = (
+                        f"{tag}{workspace} still on the boot-block prompt after "
+                        f"{RECOVERY_READY_TIMEOUT:g}s — the message was eaten and "
+                        f"the re-send was REFUSED rather than fed to the prompt. "
+                        f"Re-dispatch once the pane is idle."
+                    )
+                    return result
+                if not recovery_ready:
+                    self.log(
+                        f"{tag}recovery: no ready signal — re-sending anyway "
+                        f"(confirmation will decide)"
+                    )
+                self.cmux.send_text(workspace, text, surface)
+                self.cmux.send_enter(workspace, surface)
+            else:
+                self.cmux.send_text(workspace, text, surface)
+                self.cmux.send_enter(workspace, surface)
+
+        result.ok = False
+        result.status = "sent-but-not-consumed"
+        result.detail = (
+            f"{tag}{workspace} sent-but-not-consumed after {result.attempts} "
+            f"attempt(s) ({result.detail or 'no confirmation'}) — the bytes were "
+            f"transmitted but never became a conversation message. "
+            f"Recoveries tried: {', '.join(result.recoveries) or 'none'}. "
+            f"Inspect: cmux read-screen --workspace {workspace} --lines 40"
+        )
+        return result
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+
+def _read_message(args: argparse.Namespace) -> str | None:
+    if args.file:
+        try:
+            with open(args.file, encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError as exc:
+            print(f"MISSING {args.file}: {exc}", file=sys.stderr)
+            return None
+    else:
+        text = args.text or ""
+    return " ".join(text.split())
+
+
+_EXIT_FOR_STATUS = {
+    "transport-error": 3,
+    "unknown-workspace": 2,
+}
+
+
+def _cmd_send(args: argparse.Namespace) -> int:
+    text = _read_message(args)
+    if text is None:
+        return 2
+    if not text:
+        print("refusing to send an empty message", file=sys.stderr)
+        return 2
+    if re.search(r"\\[nr]", text):
+        print(
+            "WARN: message contains a literal backslash-n/backslash-r sequence — "
+            "cmux converts it to Enter, which would split the message across turns.",
+            file=sys.stderr,
+        )
+    dispatcher = Dispatcher(Cmux(args.cmux))
+    result = dispatcher.send_message(
+        args.workspace,
+        text,
+        surface=args.surface,
+        label=args.label,
+        ready_timeout=args.ready_timeout,
+        consume_timeout=args.consume_timeout,
+        appear_timeout=args.appear_timeout,
+        retries=args.retries,
+    )
+    if args.json:
+        print(json.dumps(result.as_json(), indent=2))
+    else:
+        print(("OK " if result.ok else "FAIL ") + result.detail)
+    if result.ok:
+        return 0
+    return _EXIT_FOR_STATUS.get(result.status, 1)
+
+
+def _cmd_wait_ready(args: argparse.Namespace) -> int:
+    dispatcher = Dispatcher(Cmux(args.cmux))
+    try:
+        ready, blocked_now, screen = dispatcher.wait_until_safe_to_send(
+            args.workspace, args.timeout, args.surface
+        )
+    except CmuxTransportError as exc:
+        print(f"cmux unreachable: {exc}", file=sys.stderr)
+        return 3
+    payload = {
+        "ready": ready,
+        "boot_blocked_now": blocked_now,
+        "workspace": args.workspace,
+        "screen_tail": "\n".join(screen.splitlines()[-6:]),
+    }
+    print(json.dumps(payload, indent=2) if args.json else payload)
+    return 0 if ready else 1
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """Is this text present as a SUBMITTED conversation message in the pane?
+
+    Presence, not novelty: `verify` answers "did this text land?", so unlike the
+    `send` path it must not demand that the submission be newer than a baseline —
+    it takes the baseline itself, and a delta test would report an
+    already-submitted message as NOT-CONSUMED (exit 1) for ever.
+    """
+    text = _read_message(args)
+    if text is None:
+        return 2
+    fp = fingerprint(text)
+    dispatcher = Dispatcher(Cmux(args.cmux))
+    try:
+        before = dispatcher.workspace_state(args.workspace)
+        if before is None:
+            print(f"unknown workspace: {args.workspace}", file=sys.stderr)
+            return 2
+        consumed, reason, _after = dispatcher.wait_consumed(
+            args.workspace, before, fp, args.timeout, require_novelty=False
+        )
+    except CmuxTransportError as exc:
+        print(f"cmux unreachable: {exc}", file=sys.stderr)
+        return 3
+    print(f"{'CONSUMED' if consumed else 'NOT-CONSUMED'} ({reason})")
+    return 0 if consumed else 1
+
+
+def _cmd_state(args: argparse.Namespace) -> int:
+    dispatcher = Dispatcher(Cmux(args.cmux))
+    try:
+        entry = dispatcher.workspace_state(args.workspace)
+    except CmuxTransportError as exc:
+        print(f"cmux unreachable: {exc}", file=sys.stderr)
+        return 3
+    if entry is None:
+        print(f"unknown workspace: {args.workspace}", file=sys.stderr)
+        return 2
+    keys = (
+        "ref",
+        "id",
+        "custom_title",
+        "current_directory",
+        "latest_submitted_message",
+        "latest_submitted_at",
+        "latest_conversation_message",
+    )
+    print(json.dumps({key: entry.get(key) for key in keys}, indent=2))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="cmux_dispatch.py",
+        description="Artifact-verified cmux dispatch (#4292).",
+    )
+    parser.add_argument("--cmux", default="cmux", help="cmux binary (default: cmux)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    send = sub.add_parser("send", help="send a message and confirm it became a turn")
+    send.add_argument("--workspace", required=True)
+    send.add_argument("--surface")
+    send.add_argument("--label", default="")
+    send.add_argument("--file")
+    send.add_argument("--text")
+    send.add_argument("--ready-timeout", type=float, default=DEFAULT_READY_TIMEOUT)
+    send.add_argument("--consume-timeout", type=float, default=DEFAULT_CONSUME_TIMEOUT)
+    send.add_argument("--appear-timeout", type=float, default=DEFAULT_APPEAR_TIMEOUT)
+    send.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
+    send.add_argument("--json", action="store_true")
+    send.set_defaults(func=_cmd_send)
+
+    ready = sub.add_parser("wait-ready", help="poll until the pane can accept input")
+    ready.add_argument("--workspace", required=True)
+    ready.add_argument("--surface")
+    ready.add_argument("--timeout", type=float, default=DEFAULT_READY_TIMEOUT)
+    ready.add_argument("--json", action="store_true")
+    ready.set_defaults(func=_cmd_wait_ready)
+
+    verify = sub.add_parser("verify", help="confirm a message became a turn")
+    verify.add_argument("--workspace", required=True)
+    verify.add_argument("--file")
+    verify.add_argument("--text")
+    verify.add_argument("--timeout", type=float, default=DEFAULT_CONSUME_TIMEOUT)
+    verify.set_defaults(func=_cmd_verify)
+
+    state = sub.add_parser("state", help="dump a workspace's conversation state")
+    state.add_argument("--workspace", required=True)
+    state.set_defaults(func=_cmd_state)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

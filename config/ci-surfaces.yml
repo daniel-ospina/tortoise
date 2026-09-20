@@ -415,6 +415,10 @@ surfaces:
   - test_bfs_audit.py
   - test_boot_regressions.py
   - test_collision_preflight.py
+  # #4292: hermetic tests for the artifact-verified cmux dispatcher
+  # (tools/cmux_dispatch.py). No DB, no network, no cmux — pure decision logic
+  # plus a fake pane that reproduces the boot-block / send-during-boot races.
+  - test_cmux_dispatch.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
@@ -1368,6 +1372,7 @@ durations:
   test_tenancy_spine.py: 3.2
   test_collision_preflight.py: 3.0
   test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
+  test_cmux_dispatch.py: 1.3
   test_free_team_entitlement.py: 3.0
   test_integration_search.py: 3.0
   test_kind_classifier.py: 3.0
