@@ -505,6 +505,14 @@ function SettingsTab(props) {
         <p className="dim small">
           When session recording is on, sessions from tools with capture installed are filed to this Organization as memory sources — extraction into memory is controlled by the toggle in Memory sources.
         </p>
+        {/* #4258: the extraction-off state is honest on this home too — a row
+            reading "0 extracted" must be distinguishable from a failure or a
+            missing provider key. */}
+        {!sessionsLoading && state && state.capture_extract === false && (
+          <p className="dim small">
+            Extraction into memory is off — captured sessions are stored but not turned into memories. Change it under Memory sources above.
+          </p>
+        )}
         {/* #2000 (W4) review P2-3: honest states — never a fabricated
             "recording is off" while the onboarding state is still loading
             or failed to fetch (session_recording defaults ON, #1927). */}
@@ -9806,11 +9814,12 @@ function MemorySources(props) {
         <div className="toggle-body">
           <h4>Extract sessions into memory</h4>
           <p>
-            When on, each captured session is also extracted into memories once
-            a provider key is configured (uses your provider key). When off,
-            sessions are stored only — their turns stay searchable, but nothing
-            is extracted, and sessions captured while this is off stay
-            unextracted until they are captured again.
+            When on, each session captured through this service is also
+            extracted into memories once a provider key is configured (uses a
+            configured provider key). When off, those sessions are stored only
+            — their turns stay searchable, but nothing is extracted, and
+            sessions captured while this is off stay unextracted until they are
+            captured again.
           </p>
           {!sessionsOn && (
             <p className="dim small">Turn on agent session recording to change this.</p>
