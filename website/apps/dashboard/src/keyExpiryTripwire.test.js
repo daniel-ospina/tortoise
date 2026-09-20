@@ -128,7 +128,7 @@ test('#2426: the show-once key card states the expiry (server echo / never)', ()
   const rotStart = mainJsx.indexOf('async function regenerateKey(')
   assert.notEqual(rotStart, -1, 'regenerateKey must exist')
   const rotBody = mainJsx.slice(rotStart, mainJsx.indexOf('\n  async function ', rotStart + 1))
-  assert.match(rotBody, /const plaintext = revealablePlaintext\(mk && \(mk\.key \|\| mk\.api_key\)\)/,
+  assert.match(rotBody, /const plaintext = revealableMintPlaintext\(mk\)/,
     'rotate derives the replacement plaintext through the shareable non-blank-string predicate')
   assert.match(rotBody, /if \(!plaintext\) \{/, 'rotate must refuse a plaintext-less mint')
   assert.ok(rotBody.indexOf('if (!plaintext) {') < rotBody.indexOf('setRotatedKey({ plaintext: plaintext'),
