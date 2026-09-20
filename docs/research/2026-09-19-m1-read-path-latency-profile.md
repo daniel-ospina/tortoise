@@ -81,7 +81,7 @@ Committed receipt: `evidence/2026-09-19-m1-read-path-latency.json`.
 | `post_ask_annotate` | 2.6 | 9.0 | 9.0 | `annotate_ask_hits` (session date/speaker) — **1 round-trip** |
 | `dedup` | 0.008 | 0.012 | 0.012 | `dedup_pool` |
 | `evidence_boost` | 0.21 | 0.24 | 0.24 | A5 stored-mark boost (no marks → no-op) |
-| `assemble` | 0.54 | 0.84 | 0.84 | `assemble_context` (8k tok / 32 KiB caps) |
+| `assemble` | 0.54 | 0.84 | 0.84 | `assemble_context` (pre-#4105 8k tok / 32 KiB caps) |
 | `render` | 0.098 | 0.112 | 0.112 | `render_context` |
 | `token_estimate` | 8.9 | 10.1 | 10.1 | `estimate_tokens_ask` (pure-Python word count, several calls) |
 | `rerank` (A7, default OFF) | 0.007 | 0.014 | 0.014 | no-op |

@@ -946,7 +946,7 @@ def test_oversized_hit_skip_and_caps(monkeypatch):
     evidence never splits a character (no U+FFFD).
 
     The caps are SET explicitly: #4105 raised the ask-lane defaults to
-    200/200/16000/128KiB, and this test pins the CAP-BINDING mechanism at a
+    200/200/16000/128000 bytes, and this test pins the CAP-BINDING mechanism at a
     known small shape rather than depending on the product defaults."""
     monkeypatch.setenv("TORTOISE_ASK_RETRIEVAL_LIMIT", "40")
     monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", "40")

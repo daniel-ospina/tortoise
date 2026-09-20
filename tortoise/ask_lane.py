@@ -617,6 +617,10 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
                 question_date=question_date,
                 context_item_cap=caps["context_item_cap"],
                 byte_cap=caps["context_byte_cap"],
+                # #4105: the non-ASCII surcharge is OPT-IN — the ask lane is
+                # the one caller that opts in, so the shared function (and
+                # its eval re-export, #2070) keeps pre-#4105 default behaviour.
+                nonascii_token_surcharge=True,
                 stats=_asm_stats)
             # #4105 honest budget: the byte ceiling was a hard literal, so a
             # raised item/token cap was SILENTLY a no-op past 32 KiB. The

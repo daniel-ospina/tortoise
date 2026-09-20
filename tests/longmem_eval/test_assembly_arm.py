@@ -96,7 +96,7 @@ def _env_clean(monkeypatch):
     monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)
     # #4105: pin the HISTORICAL ask-lane caps. This module's "DEFAULT" arm is
     # the pool-40 shape (its whole R9 contract is a statement about that
-    # shape); the product defaults were raised to 200/200/16000/128KiB and
+    # shape); the product defaults were raised to 200/200/16000/128000 bytes and
     # would otherwise admit both deep golds and make the discriminator
     # vacuous. The byte ceiling is pinned too — otherwise it would DERIVE
     # from whatever token cap a widened arm sets.

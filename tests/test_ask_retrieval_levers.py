@@ -88,9 +88,16 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
                   evidence_boost: bool = False,
                   limit: int = 40, item_cap: int = 40) -> list[dict]:
     """The ask lane's retrieval→annotate→dedup→boost→assemble sequence
-    (mirrors tools/ask_recall_bench.py::_retrieve_pipeline; no reader).
-    The BYTE ceiling is the lane's resolved cap (#4105 — it was a 32 KiB
-    literal, which silently capped every item/token raise above it)."""
+    (the retrieval SEQUENCE mirrors tools/ask_recall_bench.py::
+    _retrieve_pipeline; no reader).
+
+    The BYTE ceiling deliberately does NOT mirror the bench's frozen
+    ``BYTE_CAP = 32768`` (that bench is the pre-#4105 baseline of record): it
+    is the LANE's resolved cap, derived below from this helper's own
+    8000-token budget (#4105 — the lane's ceiling was a 32 KiB literal, which
+    silently capped every item/token raise above it). A byte ceiling derived
+    from a token cap this helper does not apply would admit a different set
+    than the pipeline it mirrors."""
     from tortoise.retrieval import (
         DEFAULT_MAX_CHUNKS_PER_SESSION,
         apply_evidence_boost,
@@ -321,11 +328,19 @@ def test_retrieval_degraded_honest_when_embedder_absent():
         # Here we pin the #4105-resolved cap posture (the ask lane's window
         # is now env-resolvable AND honest — the historical 40/40/8000
         # truncated at a 32 KiB literal, so a raise above it was a no-op).
+        # Here we pin the shipped window LITERALLY: the cap posture is the
+        # measured 200/200/200/16000/128000. Inequalities alone cannot
+        # detect a changed literal, and the pre-#4105 pin was an exact dict —
+        # replacing it with three tautologies left the window unpinned.
         from tortoise.retrieval import resolve_ask_retrieval_caps
         caps = resolve_ask_retrieval_caps()
-        assert caps["limit"] >= caps["context_item_cap"]
-        assert caps["pool_size"] >= caps["limit"]
-        assert caps["context_byte_cap"] >= caps["context_token_cap"]
+        assert caps == {
+            "limit": 200,
+            "pool_size": 200,
+            "context_item_cap": 200,
+            "context_token_cap": 16000,
+            "context_byte_cap": 128000,
+        }
     finally:
         sdk.close()
 

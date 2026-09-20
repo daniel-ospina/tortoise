@@ -271,7 +271,7 @@ def ask_env_boost_float(name: str, default: float) -> float:
 def resolve_ask_retrieval_caps() -> dict:
     """A6 (#2070) / #4105: resolve the ask lane's retrieval-window limit,
     pool depth and assembly caps IN TANDEM (env-gated; #4105 defaults
-    200/200/200/16000/128KiB, measured on the frozen D3 fixture). Returns
+    200/200/200/16000/128000 bytes, measured on the frozen D3 fixture). Returns
     ``{"limit", "pool_size", "context_item_cap", "context_token_cap",
     "context_byte_cap"}`` — the single resolution ``run_ask_lane()`` threads
     into ``tortoise_fts_query(limit=…, pool_size=…)``, ``assemble_context``
@@ -364,8 +364,10 @@ def resolve_byte_cap_from_caps(caps: dict) -> int:
 
     Precedence: an explicit ``context_byte_cap`` in the dict, else the
     explicit ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` env, else a ceiling DERIVED
-    from the dict's own token cap (falling back to the ask lane's default
-    token cap when the dict carries none). Each of the three legs is
+    from the dict's own token cap (that token cap resolving the
+    ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` env knob when the dict carries none,
+    and only falling back to the ask-lane default when the env is unset too).
+    Each of the three legs is
     VALIDATED and clamped exactly as ``resolve_ask_retrieval_caps`` validates
     the env one, so a nominal value can never resolve to two different
     ceilings depending on which seam a caller came through — an A/B
@@ -425,8 +427,10 @@ def resolve_token_cap_from_caps(caps: dict) -> int:
     honour ``0`` / an out-of-range entry and RAISE on ``None`` or a
     non-numeric string, resolving a different window — or a crash — on the
     dict seam than the env seam resolves for the same nominal input). An
-    absent key falls back to ``DEFAULT_ASK_CONTEXT_TOKEN_CAP``, so a dict
-    with no token cap resolves like ``caps=None``.
+    absent key resolves the SAME env knob the env seam reads
+    (``TORTOISE_ASK_CONTEXT_TOKEN_CAP``, else
+    ``DEFAULT_ASK_CONTEXT_TOKEN_CAP``), so a dict with no token cap resolves
+    like ``caps=None``.
     """
     if "context_token_cap" not in caps:
         # An ABSENT key means "no dict-level pin" — resolve the SAME env knob
@@ -447,10 +451,12 @@ def resolve_token_cap_from_caps(caps: dict) -> int:
 def resolve_item_cap_from_caps(caps: dict) -> int:
     """A caps dict's ``context_item_cap``, validated like the env knob.
 
-    Same family as ``resolve_token_cap_from_caps``: an absent, non-numeric or
-    out-of-range entry resolves to ``DEFAULT_ASK_CONTEXT_ITEM_CAP`` rather
-    than reaching ``assemble_context`` and raising — a legacy caps dict must
-    not turn a bad entry into a failed ask when the env seam falls back.
+    Same family as ``resolve_token_cap_from_caps``: a non-numeric or
+    out-of-range entry resolves to ``DEFAULT_ASK_CONTEXT_ITEM_CAP``, and an
+    ABSENT key resolves the env knob ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` (else
+    that default) — never reaching ``assemble_context`` and raising — so a
+    legacy caps dict cannot turn a bad entry into a failed ask when the env
+    seam falls back.
     """
     if "context_item_cap" not in caps:
         return ask_env_int(ASK_CONTEXT_ITEM_CAP_ENV,
@@ -885,6 +891,7 @@ def assemble_context(
     question_date: str | None = None,
     context_item_cap: int | None = None,
     byte_cap: int | None = None,
+    nonascii_token_surcharge: bool = False,
     stats: dict | None = None,
 ) -> list[dict]:
     """Budget-capped, rank-interleaved reader context (C1 #1745).
@@ -903,12 +910,15 @@ def assemble_context(
     ``byte_cap`` (#1987 Task 5, P1-2): keyword-only, default None = unchanged
     behavior (the extraction/search AND eval lanes are unaffected — the eval
     re-export ``assemble_context as _assemble_context`` never passes it).
-    ⚠️ #4105: the non-ASCII token surcharge is charged in the SHARED token
-    accounting regardless of ``byte_cap``, so on CJK/emoji pools the token
-    budget — not the byte cap — is what newly bounds those runs on EVERY
-    lane (ASCII-only input is byte-identical to the pre-#4105 arithmetic).
-    The ASK lane passes the resolved ``byte_cap`` (#4105 — it was a 32 KiB
-    literal): the assembled evidence is enforced to
+    ⚠️ #4105: the non-ASCII token surcharge is OPT-IN
+    (``nonascii_token_surcharge``, default False) and charged only when a
+    caller turns it on, so the shared function's DEFAULT accounting — and
+    therefore the eval re-export — stays byte-identical to the pre-#4105
+    arithmetic on every script. That is the #2070 boundary ("cap changes are
+    ask-lane-local; the eval re-export is byte-identical unless the
+    measurement explicitly opts in"): the shared function changes nothing by
+    default. The ASK lane opts in AND passes the resolved ``byte_cap``
+    (#4105 — it was a 32 KiB literal): the assembled evidence is enforced to
     BOTH the resolved token cap AND the resolved byte cap (defaults
     16 000 estimated tokens / 128 000 bytes; #4105)
     independently, by the SAME mechanism as the token cap — WHOLE-HIT DROP
@@ -935,8 +945,10 @@ def assemble_context(
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
     ``Current Date: …`` header words + the per-block non-ASCII surcharge
-    (``_ask_token_surcharge``, #4105 — zero for ASCII text, the estimator's
-    overage for unspaced CJK/emoji runs, so ``context_tokens`` is bounded by
+    (``_ask_token_surcharge``, #4105 — charged only when
+    ``nonascii_token_surcharge`` is on; zero for ASCII text, the estimator's
+    overage for unspaced CJK/emoji runs, so an opted-in caller's
+    ``context_tokens`` is bounded by
     ``max_context_tokens`` on every script); the 1.1 markup multiplier
     applies
     ONCE per block on the CUMULATIVE raw total, so the accepted set's FINAL
@@ -1017,19 +1029,24 @@ def assemble_context(
         claim_bearing += 1
         block = _render_block(h)
         cost = len(block.split())
-        sur_cost = _ask_token_surcharge(block)
+        sur_cost = _ask_token_surcharge(block) if nonascii_token_surcharge else 0
         if int((words + cost) * 1.1) + surcharge + sur_cost \
                 > max_context_tokens:
             dropped_by_token_cap += 1
             continue  # skip this hit; keep later ones (no starvation)
-        if byte_cap is not None:
+        block_bytes = len(block.encode("utf-8")) + 2
+        if byte_cap is not None and bytes_used + block_bytes > byte_cap:
             # whole-hit drop under the byte cap — a hit is fully in or fully
             # out; the skip keeps later (lower-ranked) hits' chance like the
             # token cap (no starvation), mirroring the token-budget behavior.
-            if bytes_used + len(block.encode("utf-8")) + 2 > byte_cap:
-                dropped_by_byte_cap += 1
-                continue
-            bytes_used += len(block.encode("utf-8")) + 2
+            dropped_by_byte_cap += 1
+            continue
+        # ``bytes_used`` is accumulated on EVERY accepted hit, not only when
+        # a byte cap is set: the admission census reports it, and a
+        # ``bytes_used`` that silently reads 0 on the no-byte-cap path (the
+        # eval / extraction / search callers) is exactly the lying-census
+        # class #4105 removes.
+        bytes_used += block_bytes
         selected.append(h)
         words += cost
         surcharge += sur_cost
@@ -1252,7 +1269,11 @@ def _rank_delta(scored: list[tuple[dict, float, int]], orig_index: int) -> bool:
 # evidence — a distilled point + its own source raw chunks + its source turns
 # all restate the same fact, each occupying a window slot. The reader window
 # is a FROZEN measurement lens (never a change target); the EVIDENCE PACKAGE
-# handed to it is the product. These helpers build that package over the
+# handed to it is the product. (#4105 later reopens the WINDOW itself for the
+# ask lane specifically — the caps are now resolved in tandem,
+# 200/200/200/16000/128000 bytes — while this wave's own thesis stands: the
+# package, not the window, is where the assembly work invests.) These helpers
+# build that package over the
 # annotated pool (pure functions over hit dicts — no graph dependency, so
 # the eval, MCP/SDK consumers and hermetic tests share the identical code).
 #

@@ -75,6 +75,18 @@ def _hits(n: int, *, words: int = 300, content: str | None = None) -> list[dict]
 
 def test_resolve_defaults_are_the_measured_window():
     caps = resolve_ask_retrieval_caps()
+    # A LITERAL pin of the shipped window. Comparing only against the
+    # ``DEFAULT_*`` constants cannot detect a changed literal (both sides
+    # would move together), so the measured 200/200/200/16000/128000 window
+    # is asserted here verbatim — a typo in ``DEFAULT_ASK_RETRIEVAL_LIMIT``
+    # must fail this test.
+    assert caps == {
+        "limit": 200,
+        "pool_size": 200,
+        "context_item_cap": 200,
+        "context_token_cap": 16000,
+        "context_byte_cap": 128000,
+    }
     assert caps["limit"] == DEFAULT_ASK_RETRIEVAL_LIMIT
     assert caps["context_item_cap"] == DEFAULT_ASK_CONTEXT_ITEM_CAP
     assert caps["context_token_cap"] == DEFAULT_ASK_CONTEXT_TOKEN_CAP
@@ -372,7 +384,8 @@ def test_nonascii_text_is_bounded_by_the_token_cap_not_only_the_byte_cap():
         stats: dict = {}
         selected = assemble_context(
             hits, top_k=200, max_context_tokens=16000,
-            context_item_cap=200, byte_cap=128000, stats=stats)
+            context_item_cap=200, byte_cap=128000,
+            nonascii_token_surcharge=True, stats=stats)
         evidence = render_context(selected)
         assert len(evidence.encode("utf-8")) <= 128000, label
         assert estimate_tokens_ask(evidence) <= 16000, (label,
@@ -388,11 +401,37 @@ def test_ascii_accounting_is_unchanged_by_the_surcharge():
     stats: dict = {}
     selected = assemble_context(
         _hits(8), top_k=200, max_context_tokens=16000,
-        context_item_cap=200, byte_cap=128000, stats=stats)
+        context_item_cap=200, byte_cap=128000,
+        nonascii_token_surcharge=True, stats=stats)
     assert stats["nonascii_token_surcharge"] == 0
     assert selected == assemble_context(
         _hits(8), top_k=200, max_context_tokens=16000,
-        context_item_cap=200, byte_cap=128000)
+        context_item_cap=200, byte_cap=128000,
+        nonascii_token_surcharge=True)
+
+
+def test_surcharge_is_opt_in_so_the_eval_reexport_is_byte_identical():
+    """#2070 boundary (recorded decision, docs/planning/
+    2026-08-31-2070-scoping-package.md:78): the eval re-export of
+    ``assemble_context`` must be byte-identical to the pre-#4105 function
+    unless the measurement opts in. The surcharge is therefore OPT-IN — the
+    DEFAULT call charges nothing, even on a CJK pool — and only the ask-lane
+    call sites pass ``nonascii_token_surcharge=True``."""
+    hits = _hits(10, words=500, content="中" * 3000)
+    default_stats: dict = {}
+    default_selected = assemble_context(
+        hits, top_k=200, max_context_tokens=16000,
+        context_item_cap=200, byte_cap=128000, stats=default_stats)
+    assert default_stats["nonascii_token_surcharge"] == 0
+    opted_stats: dict = {}
+    opted_selected = assemble_context(
+        hits, top_k=200, max_context_tokens=16000,
+        context_item_cap=200, byte_cap=128000,
+        nonascii_token_surcharge=True, stats=opted_stats)
+    assert opted_stats["nonascii_token_surcharge"] > 0
+    # The opted-in accounting is strictly tighter: it can only ever drop
+    # MORE from the same pool, never admit a hit the default refused.
+    assert len(opted_selected) <= len(default_selected)
 
 
 def test_stats_absent_is_a_no_op_for_pure_callers():

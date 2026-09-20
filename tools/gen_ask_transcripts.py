@@ -124,7 +124,10 @@ def _render_user_message(sdk: TortoiseSDK, question: str,
         max_context_tokens=caps["context_token_cap"],
         question_date=question_date,
         context_item_cap=caps["context_item_cap"],
-        byte_cap=caps["context_byte_cap"])
+        byte_cap=caps["context_byte_cap"],
+        # #4105: the ask lane opts in to the non-ASCII surcharge; this
+        # generator must assemble exactly as the lane it snapshots does.
+        nonascii_token_surcharge=True)
     evidence = render_context(assembled, question_date=question_date)
     from tortoise.reader import detect_question_type
     qtype = detect_question_type(question)

@@ -1469,7 +1469,7 @@ durations:
   eval/retrieval/test_bootstrap.py: 0.9
   test_agent_ops_pack.py: 0.9
   test_ask_retrieval_levers.py: 0.9
-  test_ask_retrieval_budget.py: 0.0
+  test_ask_retrieval_budget.py: 2.0
   test_battery_arms_real.py: 0.9
   test_capability_catalog.py: 0.9
   test_capture_session_supersession_e2e.py: 0.9

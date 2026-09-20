@@ -1198,6 +1198,11 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         question_date=question_date,
         context_item_cap=item_cap,
         byte_cap=byte_cap,
+        # #4105: opt in to the non-ASCII token surcharge — this is the ask
+        # lane's connected path, so the bound must hold on CJK/emoji pools
+        # too. The shared function's DEFAULT (and thus the eval re-export,
+        # #2070) stays pre-#4105 byte-identical.
+        nonascii_token_surcharge=True,
         stats=cap_stats)
     if not selected:
         # P1-1: both halves resolved but the assembly has NOTHING to say
