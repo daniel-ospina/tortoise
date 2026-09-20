@@ -1612,9 +1612,9 @@ _JOURNAL_CREATING_EVENT_TYPES = frozenset({
 
 # #3722 review (cycle 5) P2: the labels a journaled hard delete can actually
 # REMOVE. Replay's ``EntityMutated`` op=delete replays ``_delete_entity_by_id``
-# — id-wide across exactly these six labels, whatever the record's own
-# ``label`` field says (the emitter writes one record per MATCHED label, but
-# the fold is id-wide). The live ``_delete_entity`` is the same six and
+# — #3860 SCOPED it to the record's own canonical ``label``, so a delete record
+# removes that ONE label; only a MISSING/unknown label falls back to the legacy
+# id-wide delete across all six. The live ``_delete_entity`` is the same six and
 # documents "Session/APIKey/Org/Tag nodes are intentionally NOT deleted".
 # ``PointsMerged`` deletes Points only. So a journaled hard delete can NEVER
 # remove a ``:Session`` node, and the staleness rule must not suppress a
@@ -1639,16 +1639,19 @@ def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
     ``_hard_delete_suppresses`` is literally "is there a hard delete AFTER seq
     L that can remove THIS label?" — ``entry.get(label) > L``.
 
-    The hard-delete record set is the same one ``_journal_hard_deleted_ids``
+    The hard-delete EVENT TYPES are the same ones ``_journal_hard_deleted_ids``
     derives (``EntityMutated`` op=delete, #3299; ``PointsMerged``, whose
-    merged-away ids replay through ``_delete``); retraction is deliberately
+    merged-away ids replay through ``_delete``) — but the ID SETS now differ:
+    that helper additionally gates each id by ``_owns_point`` (#3860), dropping
+    an id whose record names a known non-Point kind. Retraction is deliberately
     NOT included — ``_retract`` tombstones and the node survives. The OUTER
     key is the id; the INNER keys are the labels that delete removes:
 
-    * ``EntityMutated`` op=delete replays ``_delete_entity_by_id`` — id-wide
-      across exactly ``_HARD_DELETE_LABELS`` (all six get the seq), whatever
-      the record's own ``label`` field says (the emitter writes one record per
-      MATCHED label, but the fold is id-wide).
+    * ``EntityMutated`` op=delete replays ``_delete_entity_by_id``, which
+      #3860 scoped to the record's own canonical ``label`` — that label ALONE
+      gets the seq. A missing/unknown label falls back to the legacy id-wide
+      delete across ``_HARD_DELETE_LABELS`` (all six get the seq), matching
+      ``_delete_entity_by_id(label=None)``.
     * ``PointsMerged`` replays ``_delete`` — a ``:Point`` only
       (``_POINTS_MERGED_LABELS``), so only ``Point`` gets the seq.
 
@@ -1662,7 +1665,8 @@ def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
     delete of this id remove this label?" while comparing against the LATEST
     delete's seq. That is unsound whenever the latest delete is a
     ``PointsMerged`` (removes Points only) while the label came from an
-    EARLIER ``EntityMutated`` (removes all six): it OVER-suppressed, silently
+    EARLIER ``EntityMutated`` — which at that revision recorded all six
+    labels, the fold being id-wide before #3860: it OVER-suppressed, silently
     DROPPING a live edge on replay (an Object re-created under a
     deleted-then-merged id lost its ``(Point)-[:aboutObject]->(Object)`` link
     in every engine). Per-label max seq removes the cross-delete conflation
@@ -1699,7 +1703,16 @@ def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
         if t == "EntityMutated" and ev.get("op") == "delete":
             rid = ev.get("id")
             if isinstance(rid, str):
-                _merge_hard_delete(out, rid, seq, _HARD_DELETE_LABELS)
+                # #3860: identity is (kind, id) — the fold is SCOPED to the
+                # record's own canonical label, so the labels THIS delete can
+                # remove are that label alone. A missing/unknown label falls
+                # back to the legacy id-wide delete, matching
+                # ``_delete_entity_by_id(label=None)``.
+                label = ev.get("label")
+                labels = ({label} if isinstance(label, str)
+                          and label in _CANONICAL_ENTITY_LABELS
+                          else _HARD_DELETE_LABELS)
+                _merge_hard_delete(out, rid, seq, labels)
         elif t == "PointsMerged":
             # #331: `or []` also covers an explicit "merge_ids": null.
             for mid in ev.get("merge_ids") or []:

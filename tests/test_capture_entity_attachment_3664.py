@@ -711,7 +711,7 @@ def test_hard_delete_boundary_is_per_id_and_label(tmp_path):
     then asked "could SOME delete of this id remove this label?" while
     comparing against the LATEST delete's seq — unsound whenever the latest
     delete is a ``PointsMerged`` (Points only) while the label came from an
-    EARLIER ``EntityMutated op=delete`` (all six labels).
+    EARLIER ``EntityMutated op=delete`` (at that revision, id-wide).
 
     Reachable: an id is hard-deleted, an Object is RE-CREATED under it, an
     ``EntityLinked`` records the attachment, a Point reuses the same id, and a
@@ -736,7 +736,8 @@ def test_hard_delete_boundary_is_per_id_and_label(tmp_path):
          "point": {"id": "pt-src", "content": "src",
                    "pointKind": "statement"}},
         {"type": "ObjectRegistered", "id": "obj-z", "name": "obj-z"},
-        # An EARLIER hard delete of "dup" — removes all six canonical labels.
+        # An EARLIER hard delete of "dup" naming the Object kind — removes
+        # ONLY ``Object`` (#3860: the fold is scoped to its own label).
         {"type": "EntityMutated", "id": "dup", "op": "delete",
          "label": "Object"},
         # The Object is RE-CREATED under the same id.
@@ -780,6 +781,102 @@ def test_hard_delete_boundary_is_per_id_and_label(tmp_path):
         # Non-vacuous in BOTH directions: the Object endpoint is alive (so the
         # surviving edge is real) and the re-created Point endpoint is alive
         # (so the suppressed edge is stale, not endpoint-less).
+        assert proj.g.query(
+            "MATCH (:Object {id:'dup'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+        assert proj.g.query(
+            "MATCH (:Point {id:'dup'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+    finally:
+        sdk.close()
+
+
+def test_foreign_kind_delete_does_not_suppress_surviving_kind_link(
+        tmp_path):
+    """A hard delete naming ONE canonical kind must suppress only that kind's
+    endpoint label — never a same-id link whose endpoint is a DIFFERENT kind
+    (#3860).
+
+    ``journal_hard_delete_seqs`` recorded an ``EntityMutated`` op=delete
+    boundary under ALL SIX ``_HARD_DELETE_LABELS``, ignoring the record's own
+    ``label``. After #3860 scoped the replay fold (``_delete_entity_by_id``) to
+    the record's canonical label, that boundary is over-broad: a POINT-kind
+    delete of id ``dup`` still recorded a boundary for ``Object``, so
+    ``_hard_delete_suppresses`` suppressed a live
+    ``(Point)-[:aboutObject]->(Object {id:'dup'})`` edge the replay never
+    deletes — a live edge silently DROPPED in all four replay engines.
+
+    Journal: a source Point and a Point ``dup``; a Point-side link BEFORE the
+    delete (must be SUPPRESSED — the non-vacuous converse) and an Object-side
+    link whose TARGET is a same-id Object ``dup``, also BEFORE the delete (must
+    SURVIVE). The single POINT-kind delete of ``dup`` sits after both links,
+    so it removes the Point ``dup`` only. The Object ``dup`` is registered
+    before both links and never deleted, so it survives independently; the
+    Point ``dup`` is RE-created between the links and the delete, so a
+    suppressed link is SUPPRESSION, not an absent node.
+
+    (``_hard_delete_suppresses`` fires only on ``del_seq > link_seq``, so the
+    surviving-kind link must precede the delete to be at risk at all.)
+
+    MUTATION: restore the unconditional
+    ``_merge_hard_delete(out, rid, seq, _HARD_DELETE_LABELS)`` in
+    ``journal_hard_delete_seqs`` → the Object-side link is suppressed in all
+    four engines and this REDs (observed ``[0, 0]`` against ``[1, 0]``).
+    """
+    object_link = (
+        "MATCH (:Point {id:'pt-src'})-[:aboutObject]->"
+        "(:Object {id:'dup'}) RETURN count(*)")
+    point_link = (
+        "MATCH (:Point {id:'dup'})-[:aboutObject]->"
+        "(:Object {id:'obj-z'}) RETURN count(*)")
+    events = [
+        {"type": "PointAdded",
+         "point": {"id": "pt-src", "content": "src",
+                   "pointKind": "statement"}},
+        # A POINT under "dup" — the kind the delete below genuinely owns.
+        {"type": "PointAdded",
+         "point": {"id": "dup", "content": "p1",
+                   "pointKind": "statement"}},
+        {"type": "ObjectRegistered", "id": "obj-z", "name": "obj-z"},
+        # The Point-side link (seq 3): its SOURCE endpoint is the deleted
+        # kind, so the Point delete below must suppress it.
+        {"type": "EntityLinked", "id": "dup", "source_id": "dup",
+         "source_label": "Point", "target_label": "Object",
+         "target_id": "obj-z", "edge_type": "aboutObject"},
+        # A FOREIGN kind re-uses the SAME id: an Object named "dup".
+        {"type": "ObjectRegistered", "id": "dup", "name": "dup"},
+        # The Object-side link (seq 5): its TARGET is that Object. The Point
+        # delete does not own an Object, so this edge must SURVIVE.
+        {"type": "EntityLinked", "id": "pt-src", "source_id": "pt-src",
+         "source_label": "Point", "target_label": "Object",
+         "target_id": "dup", "edge_type": "aboutObject"},
+        # The POINT-kind delete of "dup" — AFTER both links. It removes the
+        # Point "dup" only: it suppresses the seq-3 Point-side link and must
+        # NOT suppress the seq-5 Object-side link.
+        {"type": "EntityMutated", "id": "dup", "op": "delete",
+         "label": "Point"},
+        # Re-create the POINT "dup": the endpoint exists again, so the seq-3
+        # link's absence is SUPPRESSION, not an absent endpoint.
+        {"type": "PointAdded",
+         "point": {"id": "dup", "content": "p2",
+                   "pointKind": "statement"}},
+    ]
+    sdk = TortoiseSDK(str(tmp_path / "foreign-kind-delete.db"))
+    try:
+        proj = sdk._get_proj()
+        events_dir = tmp_path / "events"
+        _write_journal(events_dir, events)
+        got = _replay_all_four_engines(
+            proj, tmp_path, events_dir, [object_link, point_link])
+        assert got == {
+            "rebuild_all": [1, 0],
+            "rebuild": [1, 0],
+            "recover_from_log": [1, 0],
+            "backup_restore": [1, 0],
+        }, got
+        # Non-vacuous BOTH ways: the surviving Object endpoint and the
+        # re-created Point endpoint both exist, so [1, 0] is a real
+        # survive/suppress pair and not a pair of absent nodes.
         assert proj.g.query(
             "MATCH (:Object {id:'dup'}) RETURN count(*)"
         ).result_set[0][0] == 1
