@@ -37,6 +37,7 @@ __all__ = [  # noqa: RUF022
     "BillingError", "BillingConfigError", "StripeAPIError",
     "PriceCatalog", "StripeClient",
     "effective_tier", "apply_limits", "subscription_plan",
+    "subscription_period_bounds",
     "mirror_subscription", "reconcile_org",
 ]
 
@@ -500,6 +501,47 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
     )
 
 
+def _subscription_items(sub: dict) -> list:
+    """A Stripe subscription's item rows, for either payload shape.
+
+    Stripe returns ``items`` as a ``{'data': [...]}`` envelope; fixtures and
+    older payloads use a flat list. Anything else yields ``[]``.
+    """
+    items = (sub or {}).get("items") or {}
+    rows = items if isinstance(items, list) else (items or {}).get("data") or []
+    return rows if isinstance(rows, list) else []
+
+
+def subscription_period_bounds(sub: dict) -> tuple:
+    """The subscription's billing period bounds — ``(start, end)`` — or
+    ``(None, None)`` when the payload carries neither.
+
+    #4216: Stripe API ``2025-03-31.basil`` moved ``current_period_start`` /
+    ``current_period_end`` OFF the top-level Subscription resource and onto its
+    subscription ITEMS. Read the top level first (pre-Basil, and the shape the
+    registry twin has always stored), then fall back to ``items[0]``. WITHOUT
+    the fallback a Basil-or-later account silently writes NO window and the
+    paying org stays unmeterable — the defect this fixes.
+
+    Values are returned AS-IS (whatever the API version emitted: a Unix epoch
+    int pre-Basil, an ISO-8601 string on newer versions, or ``None``); each
+    caller's own truthiness/None guard decides whether to write. A non-dict
+    ``sub`` yields ``(None, None)``.
+    """
+    if not isinstance(sub, dict):
+        return None, None
+    item = next(iter(_subscription_items(sub)), {})
+    if not isinstance(item, dict):
+        item = {}
+    start = sub.get("current_period_start")
+    end = sub.get("current_period_end")
+    if start is None:
+        start = item.get("current_period_start")
+    if end is None:
+        end = item.get("current_period_end")
+    return start, end
+
+
 def subscription_plan(sub: dict) -> tuple[str, str]:
     """Resolve (tier, interval) from a Stripe subscription's items[0].price.id.
 
@@ -549,24 +591,21 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     if sub.get("id"):
         set_fields += ", t.subscription_id=$subscription_id"
         params["subscription_id"] = sub["id"]
-    # #3825 (D10) / #4216: the METER WINDOW ANCHOR is a PAIR — the registry
-    # twin of ``organizations.current_period_start`` / ``current_period_end``.
-    # ``metering._current_period`` resolves a subscription org's window from
-    # BOTH bounds and RAISES for a half-known anchor (a SIGNAL: every caller
-    # absorbs it, alerts the operator and serves — #3981), so a mirror that
-    # writes only one leaves the org permanently window-unresolvable and its
-    # cohort cap unenforceable. Each bound is written ONLY when the payload
+    # #4216: read the bounds through the top-level-then-item helper, so a
+    # Basil-or-later Stripe account (period fields on the subscription ITEMS)
+    # still writes a window. Each bound is written ONLY when the payload
     # carries it, so a partial subscription object can never NULL OUT a bound
     # already stored. (A payload that carries ONE bound and not the other still
     # leaves a half-known anchor — the meter refuses it loudly and
     # ``20260919000001`` repairs it; that is the documented, reported state, not
     # a silent one.)
-    if sub.get("current_period_start"):
+    period_start, period_end = subscription_period_bounds(sub)
+    if period_start:
         set_fields += ", t.current_period_start=$period_start"
-        params["period_start"] = sub["current_period_start"]
-    if sub.get("current_period_end"):
+        params["period_start"] = period_start
+    if period_end:
         set_fields += ", t.current_period_end=$period_end"
-        params["period_end"] = sub["current_period_end"]
+        params["period_end"] = period_end
     if customer_email:
         set_fields += ", t.customer_email=$customer_email"
         params["customer_email"] = customer_email

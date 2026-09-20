@@ -30,8 +30,10 @@
 --      direction the original backfill lacked. Its producer is a PARTIAL
 --      subscription payload (a ``mirror_subscription`` / a
 --      ``customer.subscription.updated`` event that carried one bound and not
---      the other — Stripe moved the period fields onto subscription items, so a
---      partial object is a real shape).
+--      the other). NOTE: since Stripe API ``2025-03-31.basil`` the period
+--      fields live on the subscription ITEMS; the webhook readers use
+--      ``billing.subscription_period_bounds`` (top-level, then item) so a
+--      Basil-or-later account still writes the anchor.
 --   3. an org whose interval is UNUSABLE and NOT DERIVABLE from stored data —
 --      **both bounds missing** (the shape ``checkout.session.completed`` left
 --      behind: it wrote ``subscription_id`` and no period at all), or **both
@@ -69,12 +71,12 @@
 -- for every unusable-anchor class.
 --
 -- ⚠️ The deploy-time report is BEST-EFFORT, not durable: the returned set lives
--- only for that statement, ``db push`` does not print result sets, and the
--- PGlite schema-drill discards them (it has no notice channel) — so in CI the
--- returned rows ARE the evidence and the WARNING may not surface. The durable,
--- ongoing detector is the #3981 runtime alert. (``reconcile_org`` is NOT a
--- repair path here: it has no production caller and is registry-lane only, so
--- it can never repair a Supabase ``organizations`` row.)
+-- only for that statement, ``db push`` does not print result sets, and this
+-- schema-drill's ``db.exec`` discards notices — so in CI the returned rows ARE
+-- the evidence and the WARNING may not surface. The durable, ongoing detector
+-- is the #3981 runtime alert. (``reconcile_org`` is NOT a repair path here: it
+-- has no production caller and is registry-lane only, so it can never repair a
+-- Supabase ``organizations`` row.)
 --
 -- OPERATIONAL NOTE. The function is granted to ``service_role`` only and is safe
 -- to run at any time: every UPDATE is guarded on the missing bound, so a re-run

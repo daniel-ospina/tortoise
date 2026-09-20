@@ -24463,7 +24463,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
     """
     import json as _json
 
-    from tortoise.billing import PriceCatalog, StripeClient, apply_limits
+    from tortoise.billing import (
+        PriceCatalog,
+        StripeClient,
+        apply_limits,
+        subscription_period_bounds,
+    )
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -24558,9 +24563,11 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                 # "subscription fetch failed" 200 — deliberate and consistent
                 # with #2789: a taken payment must never sit unretried on free
                 # limits. The previous outer except covered the whole block.
-                window = {k: sub[k] for k in
-                          ("current_period_start", "current_period_end")
-                          if sub.get(k)}
+                period_start, period_end = subscription_period_bounds(sub)
+                window = {k: v for k, v in (
+                    ("current_period_start", period_start),
+                    ("current_period_end", period_end),
+                ) if v}
                 if window:
                     try:
                         _set(window)
@@ -24620,8 +24627,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         updates: dict = {}
         if data.get("id"):
             updates["subscription_id"] = data["id"]
-        if data.get("current_period_end"):
-            updates["current_period_end"] = data["current_period_end"]
+        # #4216: read the period through the top-level-then-item helper — a
+        # Basil-or-later Stripe account carries the bounds on the subscription
+        # ITEMS, and reading only the top level would drop the anchor entirely.
+        period_start, period_end = subscription_period_bounds(data)
+        if period_end:
+            updates["current_period_end"] = period_end
         # #3825 / D10: the METER WINDOW ANCHOR. The cost meter totals usage
         # over the subscription's OWN billing period so it reconciles with the
         # invoice line, and only the period END was persisted — leaving the
@@ -24630,8 +24641,8 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         # changes, and a calendar-month fallback would put a paying org's
         # spend on a row the cap's window read never looks at). This event
         # carries the authoritative start next to the end already written here.
-        if data.get("current_period_start"):
-            updates["current_period_start"] = data["current_period_start"]
+        if period_start:
+            updates["current_period_start"] = period_start
         if status:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be

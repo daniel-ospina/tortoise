@@ -393,7 +393,9 @@ def test_checkout_written_window_makes_the_cap_enforceable(
     ``subscription_id`` and NO period, so ``metering._current_period`` raised,
     ``enforce_cohort_cost_cap`` absorbed it (#3981) and this over-cap capture
     returned 200 with the extraction running — the cap silently unenforceable
-    for a paying org.
+    for a paying org. (With the checkout fix reverted, the anchor assertion
+    below fires first; with THAT removed, the capture 200s — the 402 vs 200
+    contrast is the same mutation either way.)
 
     Mutations caught: reverting the checkout window write (the 402 becomes a
     200); and the gate substituting a calendar month for a subscription org
