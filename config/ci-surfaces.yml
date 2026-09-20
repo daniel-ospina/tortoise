@@ -1741,3 +1741,4 @@ durations:
   test_website_static.py: 0.0
   test_weights.py: 0.0
   test_weights_mitigation.py: 0.0
+  test_backups_v1_alias.py: 0.01
