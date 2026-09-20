@@ -42,13 +42,11 @@ actually made, the clipboard assert compares against the card's own text, the
 build fork's FOURTH key row, and the catalog check is backed by a registry-only
 mock name (not the offline fallback).
 
-**CI lane (known gap — issue filed):** this spec is opt-in (`RUN_DASHBOARD_E2E`)
-and is NOT wired into `.github/workflows/ci.yml` — its `dashboard-e2e` step runs
-only `test_keys_table_mixed.py` + `test_graphs_management.py`. On CI the only
-automated guard for these four fixes is the static source-scan tripwire
-(`website/apps/dashboard/src/wizardConnectTripwire.test.js`), which cannot
-observe a runtime stray modal or a clipboard overwrite. Run this spec locally
-against a fresh `dist/` whenever the connect step changes.
+**CI lane:** this spec is opt-in (`RUN_DASHBOARD_E2E`) and, since #4221, IS
+wired into `.github/workflows/ci.yml` — the `dashboard-e2e` job's step runs it
+alongside `test_keys_table_mixed.py` / `test_graphs_management.py` /
+`test_ship_test_onboarding.py`, against the same two-origin harness. Run it
+locally against a fresh `dist/` whenever the connect step changes.
 """
 from __future__ import annotations
 
