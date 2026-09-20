@@ -1,5 +1,5 @@
 ---
-title: "Canonical SDK method surface — the target list, de-duplicated"
+title: "Canonical SDK method surface — the inventory, de-duplicated (NOT the target)"
 type: synthesis
 domain: capability
 doc_status: live
@@ -18,18 +18,24 @@ related:
   - "#4176"
 ---
 
-# Canonical SDK method surface
+# Canonical SDK method surface — an inventory, not the target
 
-**Status: pending owner approval.** This is the target shape of `TortoiseSDK`'s public
-surface — every method placed in exactly one group, the duplicates collapsed, and the
-gaps named. It is the SDK counterpart to `docs/product/canonical-mcp-tools.md` (the
-owner-approved tool list), and it was produced by the same process: cluster by user
-action, collapse true duplicates, keep genuine variants, and check the result against
-what comparable products converge on.
+**Read this for coverage, not for names.** This document is two things: an **inventory of all 150
+methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and an
+alongside that, an **earlier target sketch** (32 groups over 149 names).
 
-> This document is a **target**, not a record of what exists. It changes no code. The
-> generated view of the surface *as it is today* is `docs/product/mcp-sdk-surface.md`,
-> rendered from `config/surface-manifest.yml`; the freeze from #3863 covers the tool
+> ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
+> Where the two disagree, that doc governs. They really do disagree: this sketch says
+> `write_knowledge` and `stabilize_beliefs` where the current target says
+> `write_knowledge_batch` and `refresh_confidence`. Note also that this file's second table
+> ("What we have that competitors do not") reuses the R/W/N labels for *different* groups —
+> cross-reference by method name, never by label.
+
+**Status: pending owner approval on the inventory.** The MCP side of the surface is the
+owner-approved `docs/product/canonical-mcp-tools.md`.
+
+> This document changes no code. The generated view of the surface *as it is today* is
+> `docs/product/mcp-sdk-surface.md`, rendered from `config/surface-manifest.yml`; the freeze from #3863 covers the tool
 > surface, and nothing here is implemented until the owner approves.
 
 ## The count
@@ -62,7 +68,10 @@ That principle is **not yet honest on the SDK layer**, and this document records
 Three read-named methods write the main graph, and the entire control plane writes on a
 cold handle. Both are itemised under **Declaration defects**.
 
-## The target list
+## The groups (the earlier sketch)
+
+> ⛔ **This is the 32-group sketch, not the 40-method target.** It is kept for its coverage and its
+> rationale. For the target names, read `docs/product/beta-sdk-surface.md`.
 
 **The names are the approved MCP names.** A capability has one name across both layers —
 the MCP tool and the SDK method behind it. An earlier revision of this document invented a
@@ -297,7 +306,7 @@ public SDK/API surface?** Counts were derived by parsing source with `ast`, not 
 **Where this lands for us.** 150 public methods on one flat class is ~5.5× the largest flat
 surface observed (Pinecone's `Index`, 27). But the
 evidence does **not** say "delete 128 methods" — it says **namespace**, and it says
-**collapse the aliases**. The target list above does exactly that: **32 groups over 149
+**collapse the aliases**. The sketch above does exactly that: **32 groups over 149
 names** — 26 memory-facing (R1–R9, W1–W17) and 6 control-plane namespaces (N1–N6) —
 reached by grouping and merging, with the primitives still reachable and `backfill_v25`
 archived. The
@@ -343,6 +352,12 @@ at the tool layer:
 `retract_point` · `dream` · `tortoise_fts_query` · `close`
 
 ## What we have that competitors do not — and why
+
+> **⚠️ This table uses its own W/N numbering, which is NOT the numbering of the 32-group target
+> list above.** The labels `R1–R9`, `W1–W17`, `N1–N6` are reused here for different groups: above,
+> `W2` is `write_knowledge`; here, `W2` is `create_source`/`complete_source`. This table also uses
+> `W18`, `W19` and `N7`, which exist nowhere in the target list. **Cross-reference by method name,
+> never by label.** Reconciling the two schemes is part of Phase 0.3, which owns the per-name map.
 
 Every method outside the **consensus core** needs a justification strong enough to survive
 review. The core, measured across 13 competitors, is only **six capability buckets** —

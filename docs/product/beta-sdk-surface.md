@@ -88,12 +88,19 @@ person managing their own account).
 **40 methods** against **150** today. **MCP: 25 tools** — every row except the tenancy block
 (28–39), `write_knowledge_batch` (builder-only, 13) and the constructor/`close` (1–2).
 
-> **Every name here is a target, not a description of today.** Only five of the 40 exist in the
-> current SDK. The MCP column names the *target* tool. None of the 25 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only 3 (`create_entity`, `get_entity`, `approve_merge`) have a prefixed equivalent. So it is **25 of 25 by name**, or **22 of 25** if you normalise the prefix.
-> The old→new mapping is in `docs/product/vision-mcp-sdk-surface.md`.
+> **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the
+> current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the 25 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only 3 (`create_entity`, `get_entity`, `approve_merge`) have a prefixed equivalent. So it is **25 of 25 by name**, or **22 of 25** if you normalise the prefix.
+> The old→new mapping is a **Phase 0.3 deliverable and does not exist yet** — do not look for it.
+Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every
+*current* tool to its destination but does not name the target's replacing name.
 
 
 ## Tenancy is not on the MCP
+
+
+> **On the competitor evidence below:** these figures come from a competitive research pass and
+> are **not independently verified in this repo**. Treat them as *reported*, not *confirmed* —
+> the same caveat `docs/product/canonical-sdk-methods.md` carries in its Verification notes.
 
 The tenancy block (rows 28–39) is **SDK and REST only.** This follows the competitors: Zep and
 Mem0 both put their admin surface on a **separate URL prefix** (`graph/*` vs `user/*`;
@@ -253,7 +260,7 @@ Recorded so they are not silently dropped. None is required for beta:
 | `file_decision` | → rows 20/21 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. |
 | `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` | → rows 30–33 `*_memory_graph*`. |
 | narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` | **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. |
-| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool, a CLI command and its own test file. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |
+| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), though no dedicated test file — it is exercised from other suites. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |
 | `capture_session` / `commit_session` | → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. |
 | `file_decision`'s `options`/`evidence`/`choice` | Preserved in `record_decision`'s inline shortcut form. |
 
@@ -269,7 +276,9 @@ Every method on this surface must state these. They are currently unstated for m
 - **Errors.** A typed error, not a string. A caller must be able to distinguish "not found",
   "denied", "invalid", and "temporarily unavailable" without parsing prose.
 
-Confirmed to state pagination in their signatures: rows 3, 4, 8 and 11. **Rows 31, 35 and 38 are lists that must state it too before implementation closes.** Truncation and typed errors are stated here as requirements and are not yet in any signature — that is Phase 2.4 of the plan.
+**Pagination is a requirement, not an observation.** Every row in this list is a target: rows 3, 4,
+8 and 11 have no `def` on `TortoiseSDK` today, so there is no signature to confirm anything in.
+These four *must* state pagination when implemented. **Rows 31, 35 and 38 are lists that must state it too before implementation closes.** Truncation and typed errors are stated here as requirements and are not yet in any signature — that is Phase 2.4 of the plan.
 
 ## Not in beta
 

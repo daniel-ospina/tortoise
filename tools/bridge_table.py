@@ -200,7 +200,6 @@ DISCRIMINATORS = {
     "link_entities": "*(relation kind)*",
     "adjust_relationship": "*(strength)*",
     "supersede_knowledge": "*(link policy)*",
-    "record_decision": "*(inline question, or a question_id)*",
 }
 
 VALID_DEST = set(TARGET_MCP) | {"REMOVED"}
@@ -236,9 +235,6 @@ def _registry_rows() -> list[dict]:
             # The only resolution test that matters: is there a real method?
             "resolves": bool(declared) and hasattr(TortoiseSDK, declared),
             "read_only": bool(getattr(entry.annotations, "readOnlyHint", False)),
-            "http_policy": bool(getattr(entry, "http_policy", False)),
-            "hosted_only": bool(getattr(entry, "hosted_only", False)),
-            "has_handler": getattr(entry, "handler_override", None) is not None,
         })
     return rows
 

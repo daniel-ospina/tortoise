@@ -37,9 +37,16 @@ account — the builder pays; an end-customer never has an organisation account 
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
 | **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 150, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
-| `docs/product/canonical-sdk-methods.md` | The full inventory of all 150 with descriptions — the *from* state. |
+| `docs/product/canonical-sdk-methods.md` | The full inventory of all 150 with descriptions, grouped into 32 groups. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.
+
+**Which target governs, stated once so no lane has to guess:** `canonical-mcp-tools.md` is the
+authority for **MCP names** (23, owner-approved and merged), and **`beta-sdk-surface.md` is the
+authority for the SDK target (40)**. `canonical-sdk-methods.md` is the *inventory of what exists
+today* plus an earlier 32-group target sketch; its names are superseded wherever the two disagree
+— e.g. it says `write_knowledge` and `stabilize_beliefs` where the current target says
+`write_knowledge_batch` and `refresh_confidence`. Read it for coverage, not for names.
 
 ## Scope of the freeze
 
@@ -72,6 +79,14 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 **The four bucket rows sum to 98.** (The last row is the target *surface*, not a bucket —
 25 targets received those 80 absorbed tools many-to-one, so it is not part of the sum.)
 
+† **`run_onboarding` is in the approved 23-tool list — it is tool #23, absorbing the seven
+`onboarding_*` tools — and the beta 25 drops it in favour of `check_connection`.** That is not a
+contradiction with the bridge table, which describes the **25-tool target**: `run_onboarding` was
+a proposed merge of seven registry tools, the 25 drops it, so those seven have no destination and
+are correctly `REMOVED`. **They are one of the genuine retirements** — `check_connection` replaces
+the proposed entry point and absorbs none of them. (An earlier draft of this footnote claimed
+`run_onboarding` was never in the approved list; that was false and is corrected here.)
+
 **`98 − 25 = 73 retired` is wrong** and circulated in earlier drafts: 15 retire, 2 are tenancy-only,
 1 is absorbed into a builder-only SDK method that is not on the MCP, and 80 are
 absorbed into the 25 targets. Many current tools map onto one target, so the two numbers are
@@ -80,12 +95,15 @@ not complements.
 ## The reconciliation — SDK 150 → 40
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
-**"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`. **The five current
-names the target reuses verbatim are `create_entity`, `get_entity`, `approve_merge`, `close`
-and `list_sources`** (the last as `list_knowledge(kind='source')`). The ledger is written per
-group, not per name, so it names the departures rather than summing them to a number —
-**a group-level ledger is the honest form, and the per-name completeness check is deferred to
-Phase 0.1.**
+**"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`.
+
+**Exactly four target names are reused verbatim from the current SDK:** `create_entity`,
+`get_entity`, `approve_merge` and `close`. Everything else on the 40 is a new name, a renamed
+name, or a merge — which is why the per-name old→new mapping matters and is a **Phase 0.3
+deliverable that does not exist yet**. (`list_sources` is *not* one of the four: it is a current
+name that folds into the target `list_knowledge(kind='source')`, so the question it asks survives
+but the name does not.) The ledger is written per group, not per name — a group-level ledger is the
+honest form, and the per-name completeness check is deferred to Phase 0.3.
 
 **40 rows**, of which the table's rows 1–2 are the `Tortoise(...)` constructor and
 `close()`.
@@ -96,7 +114,7 @@ beta surface adds four, drops three and splits one:
 | | |
 |---|---|
 | **+4** | `get_historical_knowledge` · `mine_knowledge_from_directory` · `write_question` · `check_connection` |
-| **−3** | `inspect_batch` → `list_knowledge(kind='batch')` · `manage_deployment` (tenancy is not on the MCP) · `run_onboarding` → `check_connection` |
+| **−3** | `inspect_batch` → `list_knowledge(kind='batch')` · `manage_deployment` (tenancy is not on the MCP) · `run_onboarding` → `check_connection` † |
 | **±1** | `revise_knowledge` splits into `update_knowledge` + `supersede_knowledge` |
 | **renames** | `recall_beliefs`→`check_confidence` · `stabilize_beliefs`→`refresh_confidence` · `capture_knowledge`→`mine_knowledge_from_session` · `index_files`→`index_sources_from_directory` · `manage_source_trust` unchanged |
 
