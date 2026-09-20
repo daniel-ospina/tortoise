@@ -7,32 +7,44 @@ drift from the code it cites. The destination map is data in the generator; ever
 below is arithmetic computed against the live registry. The generator **fails the build**
 if the map and the registry disagree — a mismatch is a finding, not something to reconcile.
 
-**Registry: 98 tools → 71 absorbed into MCP destinations · 2 tenancy (SDK/REST only) · 25 retired.**
+**Registry: 98 tools → 80 absorbed into the 25 MCP targets · 1 absorbed into a builder-only SDK method (not on the MCP) · 2 tenancy (SDK/REST only) · 15 retired.**
 
-**These are not the same number.** The MCP has **25** tools; **25** current tools retire and **71** are absorbed into those 25 — many-to-one. Writing "98 minus 25 equals 73 retired" conflates the two, and is wrong.
+**These are not the same number.** The MCP has **25** tools; **15** current tools retire, **2** are tenancy-only, **1** is absorbed into a builder-only SDK method that is not on the MCP, and **80** are absorbed into those 25 — many-to-one. Writing "98 minus 25 equals 73 retired" conflates the two, and is wrong.
 
 ---
 
-## Part A — the discriminator map
+## Part A — the merged tools
 
-The target tools that are *merged* dispatch internally on a discriminator. A discriminator
-value with no method behind it is invisible until someone writes the handler and finds
-nothing to call — which is exactly what this part exists to catch.
+A *merged* target absorbs more than one current tool, so it dispatches internally on a
+discriminator. **Which tools are merged is computed from the map** — not listed by hand — and
+**whether the method exists is read from `sdk_defs`**. A discriminator value with no method
+behind it is invisible until someone writes the handler and finds nothing to call, which is
+what this part exists to catch.
 
-| Target tool | Discriminator | SDK method it must call | Exists |
+Only the `Discriminator` column is authored data: it is a design fact about the target, not
+something derivable from today's code.
+
+| Target tool | Sources absorbed | Discriminator | Exists |
 |---|---|---|---|
-| `create_entity` | `type=` | `create_entity` | yes |
-| `link_entities` | *(relation kind)* | `link_entities` | no — see Part C |
-| `list_knowledge` | `kind=` | `list_knowledge` | no — see Part C |
-| `update_knowledge` | *(retract fields)* | `update_knowledge` | no — see Part C |
-| `delete_knowledge` | *(node or link)* | `delete_knowledge` | no — see Part C |
-| `graph_overview` | `section=` | `graph_overview` | no — see Part C |
-| `adjust_relationship` | *(strength)* | `adjust_relationship` | no — see Part C |
-| `refresh_confidence` | `scope=` | `refresh_confidence` | no — see Part C |
-| `record_decision` | *(inline question)* | `record_decision` | no — see Part C |
+| `graph_overview` | 10 | `section=` | **no — Part C1** |
+| `list_knowledge` | 10 | `kind=` | **no — Part C1** |
+| `check_confidence` | 7 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `create_entity` | 6 | `type=` | yes |
+| `get_entity` | 6 | `type=` | yes |
+| `search_knowledge` | 5 | `mode=` (full-text / hybrid) | **no — Part C1** |
+| `update_knowledge` | 4 | *(which fields — incl. the retract fields)* | **no — Part C1** |
+| `adjust_relationship` | 3 | *(strength)* | **no — Part C1** |
+| `delete_knowledge` | 3 | *(node or link)* | **no — Part C1** |
+| `explore_connections` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `index_sources_from_directory` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `refresh_confidence` | 3 | `scope=` | **no — Part C1** |
+| `review_link_candidates` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `link_entities` | 2 | *(relation kind)* | **no — Part C1** |
+| `manage_source_trust` | 2 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `poll_events` | 2 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `supersede_knowledge` | 2 | *(link policy)* | **no — Part C1** |
 
-**The `Exists` column is the finding.** Of the nine merged tools, only one has a method
-behind it today. The rest are Phase 2 work, not renames.
+**17 merged targets. 2 of them have a method behind them today.** The other **15** are Phase 2 work, not renames.
 
 ## Part B — every current tool and its single destination
 
@@ -64,8 +76,8 @@ behind it today. The rest are Phase 2 work, not renames.
 | 24 | `tortoise_diary_read` | `tool_registry.py:552` | `diary_read` | yes | `REMOVED` |
 | 25 | `tortoise_diary_write` | `tool_registry.py:544` | `diary_write` | no | `REMOVED` |
 | 26 | `tortoise_dream` | `tool_registry.py:385` | `dream` | no | `refresh_confidence` |
-| 27 | `tortoise_dream_health` | `tool_registry.py:400` | `dream_health_check` | yes | `REMOVED` |
-| 28 | `tortoise_entity_profile` | `tool_registry.py:518` | `entity_profile` ⚠️ **does not resolve** | yes | `REMOVED` |
+| 27 | `tortoise_dream_health` | `tool_registry.py:400` | `dream_health_check` | yes | `graph_overview` |
+| 28 | `tortoise_entity_profile` | `tool_registry.py:518` | `entity_profile` ⚠️ **does not resolve** | yes | `explore_connections` |
 | 29 | `tortoise_events_poll` | `tool_registry.py:497` | `events_poll` | yes | `poll_events` |
 | 30 | `tortoise_expand_relationships` | `tool_registry.py:259` | `expand_relationships` | yes | `explore_connections` |
 | 31 | `tortoise_file_decision` | `tool_registry.py:453` | `file_decision` | no | `write_question` |
@@ -75,19 +87,19 @@ behind it today. The rest are Phase 2 work, not renames.
 | 35 | `tortoise_get_confidence` | `tool_registry.py:371` | `get_confidence` | yes | `check_confidence` |
 | 36 | `tortoise_get_entity` | `tool_registry.py:876` | `get_entity` | yes | `get_entity` |
 | 37 | `tortoise_get_events` | `tool_registry.py:788` | `get_events` | yes | `poll_events` |
-| 38 | `tortoise_get_governance` | `tool_registry.py:945` | `get_owned_entities` | yes | `REMOVED` |
+| 38 | `tortoise_get_governance` | `tool_registry.py:945` | `get_owned_entities` | yes | `get_entity` |
 | 39 | `tortoise_get_operator` | `tool_registry.py:436` | `get_point` | yes | `get_entity` |
 | 40 | `tortoise_get_point` | `tool_registry.py:233` | `get_point` | yes | `get_entity` |
-| 41 | `tortoise_get_session` | `tool_registry.py:795` | `get_session` | yes | `REMOVED` |
+| 41 | `tortoise_get_session` | `tool_registry.py:795` | `get_session` | yes | `get_entity` |
 | 42 | `tortoise_get_source_reliability` | `tool_registry.py:850` | `get_source_reliability` | no | `list_knowledge` |
 | 43 | `tortoise_graph_set_recording` | `tool_registry.py:612` | **none declared** | no | `REMOVED` |
-| 44 | `tortoise_health` | `tool_registry.py:574` | `health` ⚠️ **does not resolve** | yes | `REMOVED` |
+| 44 | `tortoise_health` | `tool_registry.py:574` | `health` ⚠️ **does not resolve** | yes | `graph_overview` |
 | 45 | `tortoise_index_files` | `tool_registry.py:811` | `index_directory` | no | `index_sources_from_directory` |
 | 46 | `tortoise_index_sessions` | `tool_registry.py:802` | `index_sessions` | no | `index_sources_from_directory` |
-| 47 | `tortoise_ingest` | `tool_registry.py:651` | `ingest` | no | `REMOVED` |
+| 47 | `tortoise_ingest` | `tool_registry.py:651` | `ingest` | no | `sdk:write_knowledge_batch` |
 | 48 | `tortoise_ingest_corpus` | `tool_registry.py:642` | `ingest_corpus` | no | `index_sources_from_directory` |
 | 49 | `tortoise_invalidate` | `tool_registry.py:479` | `invalidate_point` | no | `supersede_knowledge` |
-| 50 | `tortoise_issue_insight` | `tool_registry.py:629` | `issue_insight` | yes | `REMOVED` |
+| 50 | `tortoise_issue_insight` | `tool_registry.py:629` | `issue_insight` | yes | `search_knowledge` |
 | 51 | `tortoise_list_batch` | `tool_registry.py:172` | `list_batch` | yes | `list_knowledge` |
 | 52 | `tortoise_list_batches` | `tool_registry.py:183` | `list_batches` | yes | `list_knowledge` |
 | 53 | `tortoise_list_dedup_candidates` | `tool_registry.py:308` | `list_dedup_candidates` | yes | `review_link_candidates` |
@@ -122,12 +134,12 @@ behind it today. The rest are Phase 2 work, not renames.
 | 82 | `tortoise_search` | `tool_registry.py:248` | `tortoise_fts_query` | yes | `search_knowledge` |
 | 83 | `tortoise_search_sessions` | `tool_registry.py:826` | `search_sessions` | yes | `search_knowledge` |
 | 84 | `tortoise_session_capture` | `tool_registry.py:590` | **none declared** | no | `mine_knowledge_from_session` |
-| 85 | `tortoise_session_context` | `tool_registry.py:581` | `session_context` | yes | `REMOVED` |
-| 86 | `tortoise_set_point_baseline` | `tool_registry.py:364` | `set_point_baseline` | no | `REMOVED` |
+| 85 | `tortoise_session_context` | `tool_registry.py:581` | `session_context` | yes | `check_confidence` |
+| 86 | `tortoise_set_point_baseline` | `tool_registry.py:364` | `set_point_baseline` | no | `refresh_confidence` |
 | 87 | `tortoise_set_source_tier` | `tool_registry.py:868` | `set_source_tier` | no | `manage_source_trust` |
 | 88 | `tortoise_stale` | `tool_registry.py:707` | `stale_points` | yes | `graph_overview` |
 | 89 | `tortoise_status` | `tool_registry.py:566` | `status` | yes | `graph_overview` |
-| 90 | `tortoise_suggest_entry_points` | `tool_registry.py:240` | `suggest_entry_points` | yes | `REMOVED` |
+| 90 | `tortoise_suggest_entry_points` | `tool_registry.py:240` | `suggest_entry_points` | yes | `search_knowledge` |
 | 91 | `tortoise_summarize_structure` | `tool_registry.py:124` | `summarize_structure` | yes | `graph_overview` |
 | 92 | `tortoise_supersede` | `tool_registry.py:486` | `supersede` | no | `supersede_knowledge` |
 | 93 | `tortoise_taxonomy` | `tool_registry.py:680` | `taxonomy` | yes | `graph_overview` |
@@ -141,35 +153,36 @@ behind it today. The rest are Phase 2 work, not renames.
 
 | Destination | Count |
 |---|---|
-| `REMOVED` | 25 |
+| `REMOVED` | 15 |
+| `graph_overview` | 10 |
 | `list_knowledge` | 10 |
-| `graph_overview` | 8 |
-| `check_confidence` | 6 |
+| `check_confidence` | 7 |
 | `create_entity` | 6 |
-| `get_entity` | 4 |
+| `get_entity` | 6 |
+| `search_knowledge` | 5 |
 | `update_knowledge` | 4 |
 | `adjust_relationship` | 3 |
 | `delete_knowledge` | 3 |
+| `explore_connections` | 3 |
 | `index_sources_from_directory` | 3 |
+| `refresh_confidence` | 3 |
 | `review_link_candidates` | 3 |
-| `search_knowledge` | 3 |
-| `explore_connections` | 2 |
 | `link_entities` | 2 |
 | `manage_source_trust` | 2 |
 | `poll_events` | 2 |
-| `refresh_confidence` | 2 |
 | `supersede_knowledge` | 2 |
 | `approve_merge` | 1 |
 | `mine_knowledge_from_directory` | 1 |
 | `mine_knowledge_from_session` | 1 |
 | `record_decision` | 1 |
 | `register_source` | 1 |
+| `sdk:write_knowledge_batch` | 1 |
 | `tenancy:create_memory_graph` | 1 |
 | `tenancy:list_memory_graphs` | 1 |
 | `write_question` | 1 |
 | **total** | **98** |
 
-Destination rows: **26**. Sum of counts: **98**. Registry tools: **98**. **MATCH**
+Destination rows: **27**. Registry tools: **98**.
 
 ## Part C — blockers
 
@@ -201,6 +214,7 @@ Destination rows: **26**. Sum of counts: **98**. Registry tools: **98**. **MATCH
 | `refresh_confidence` | MCP | no `def` on TortoiseSDK |
 | `create_memory_graph` | tenancy | no `def` on TortoiseSDK |
 | `list_memory_graphs` | tenancy | no `def` on TortoiseSDK |
+| `write_knowledge_batch` | sdk-only | no `def` on TortoiseSDK |
 
 **These are not renames.** They are new methods that must be built in Phase 2, and the
 plan listed them as if they were renames. This is what Part A exists to catch.

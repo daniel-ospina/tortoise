@@ -80,7 +80,8 @@ DESTINATION = {
     "tortoise_get_entity": "get_entity",
     "tortoise_get_point": "get_entity",
     "tortoise_get_operator": "get_entity",
-    "tortoise_get_session": "REMOVED",
+    "tortoise_get_session": "get_entity",
+    "tortoise_get_governance": "get_entity",
     "tortoise_update_point": "update_knowledge",
     "tortoise_update_entity": "update_knowledge",
     "tortoise_update": "update_knowledge",
@@ -96,8 +97,8 @@ DESTINATION = {
     "tortoise_paginated_query": "list_knowledge",
     "tortoise_query_points_by_tag": "list_knowledge",
     "tortoise_search_sessions": "search_knowledge",
-    "tortoise_suggest_entry_points": "REMOVED",
-    "tortoise_issue_insight": "REMOVED",
+    "tortoise_suggest_entry_points": "search_knowledge",
+    "tortoise_issue_insight": "search_knowledge",
     "tortoise_list_sources": "list_knowledge",
     "tortoise_list_topics": "list_knowledge",
     "tortoise_list_tags": "list_knowledge",
@@ -107,14 +108,14 @@ DESTINATION = {
     "tortoise_taxonomy": "graph_overview",
     "tortoise_overview": "graph_overview",
     "tortoise_status": "graph_overview",
+    "tortoise_health": "graph_overview",
     "tortoise_stale": "graph_overview",
     "tortoise_check_structure": "graph_overview",
     "tortoise_audit": "graph_overview",
     "tortoise_summarize_structure": "graph_overview",
     "tortoise_validate_domain": "graph_overview",
-    "tortoise_entity_profile": "REMOVED",
-    "tortoise_health": "REMOVED",
-    "tortoise_get_governance": "REMOVED",
+    "tortoise_dream_health": "graph_overview",
+    "tortoise_entity_profile": "explore_connections",
     # ── Confidence / reasoning ──────────────────────────────────────
     "tortoise_get_confidence": "check_confidence",
     "tortoise_compute_confidence": "check_confidence",
@@ -122,11 +123,10 @@ DESTINATION = {
     "tortoise_calibrate_summary": "check_confidence",
     "tortoise_belief_timeline": "check_confidence",
     "tortoise_provenance": "check_confidence",
-    "tortoise_session_context": "REMOVED",
+    "tortoise_session_context": "check_confidence",
     "tortoise_dream": "refresh_confidence",
     "tortoise_promote_point": "refresh_confidence",
-    "tortoise_dream_health": "REMOVED",
-    "tortoise_set_point_baseline": "REMOVED",
+    "tortoise_set_point_baseline": "refresh_confidence",
     # ── Traversal ───────────────────────────────────────────────────
     "tortoise_traverse": "explore_connections",
     "tortoise_expand_relationships": "explore_connections",
@@ -146,7 +146,7 @@ DESTINATION = {
     "tortoise_index_files": "index_sources_from_directory",
     "tortoise_index_sessions": "index_sources_from_directory",
     "tortoise_ingest_corpus": "index_sources_from_directory",
-    "tortoise_ingest": "REMOVED",
+    "tortoise_ingest": "sdk:write_knowledge_batch",
     "tortoise_session_capture": "mine_knowledge_from_session",
     "tortoise_mine_conversations": "mine_knowledge_from_directory",
     "tortoise_backfill_v25": "REMOVED",
@@ -177,6 +177,30 @@ DESTINATION = {
     "tortoise_graph_set_recording": "REMOVED",
     # ── Analytics ───────────────────────────────────────────────────
     "tortoise_analyze": "REMOVED",
+}
+
+# Namespaces whose suffix must be a real method name. `tenancy:` = the tenancy block
+# (SDK/REST only); `sdk:` = a builder-only SDK method that is NOT on the MCP.
+NAMESPACES = ("tenancy:", "sdk:")
+
+# ─────────────────────────────────────────────────────────────────────
+# AUTHORED DATA — the one column that is a design fact rather than a
+# derivation. Everything else in Part A (which targets are merged, and
+# whether their method exists) is computed.
+# ─────────────────────────────────────────────────────────────────────
+DISCRIMINATORS = {
+    "create_entity": "`type=`",
+    "list_knowledge": "`kind=`",
+    "graph_overview": "`section=`",
+    "refresh_confidence": "`scope=`",
+    "search_knowledge": "`mode=` (full-text / hybrid)",
+    "get_entity": "`type=`",
+    "delete_knowledge": "*(node or link)*",
+    "update_knowledge": "*(which fields — incl. the retract fields)*",
+    "link_entities": "*(relation kind)*",
+    "adjust_relationship": "*(strength)*",
+    "supersede_knowledge": "*(link policy)*",
+    "record_decision": "*(inline question, or a question_id)*",
 }
 
 VALID_DEST = set(TARGET_MCP) | {"REMOVED"}
@@ -220,13 +244,21 @@ def _registry_rows() -> list[dict]:
 
 
 def _sdk_targets() -> dict[str, int]:
-    """Target method -> its `def` line in sdk.py. Absence is a BLOCKER."""
-    src = SDK_SRC.read_text(encoding="utf-8")
+    """Public method -> its `def` line in sdk.py, **on TortoiseSDK only**.
+
+    A plain "is there a `def` anywhere in sdk.py" scan is not the question. It
+    would count nested helpers and helper-class methods as if they were public
+    SDK surface, so a target that happened to exist only as an internal helper
+    would be reported as implemented. Walk the class body instead.
+    """
+    tree = ast.parse(SDK_SRC.read_text(encoding="utf-8"))
     out: dict[str, int] = {}
-    for i, line in enumerate(src.splitlines(), 1):
-        m = re.match(r"\s+def ([A-Za-z_]\w*)\s*\(", line)
-        if m:
-            out.setdefault(m.group(1), i)
+    for node in tree.body:
+        if not (isinstance(node, ast.ClassDef) and node.name == "TortoiseSDK"):
+            continue
+        for sub in node.body:
+            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out[sub.name] = sub.lineno
     return out
 
 
@@ -244,13 +276,16 @@ def _validate(rows: list[dict]) -> list[str]:
     for name, dest in sorted(DESTINATION.items()):
         if dest in VALID_DEST:
             continue
-        if dest.startswith("tenancy:"):
-            # The namespace is validated (a `tenancy:` value must name a METHOD, which
-            # `_blockers` tests for existence and reports). Whether the method exists
-            # yet is a FINDING, not an integrity error -- this generator fails on the
-            # map disagreeing with the registry, never on the target not being built.
+        ns = next((n for n in NAMESPACES if dest.startswith(n)), None)
+        if ns is None:
+            errs.append(f"UNRECOGNISED destination for {name}: {dest!r}")
             continue
-        errs.append(f"UNRECOGNISED destination for {name}: {dest!r}")
+        # A namespaced destination is a claim about a METHOD, so the suffix must at
+        # least be an identifier. Whether the method exists yet is a FINDING (C1),
+        # not an integrity error -- this generator fails on the map disagreeing with
+        # the registry, never on the target not having been built yet.
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", dest[len(ns):]):
+            errs.append(f"NAMESPACED destination is not a method name for {name}: {dest!r}")
     return errs
 
 
@@ -259,12 +294,18 @@ def _blockers(rows: list[dict], sdk_defs: dict[str, int]) -> tuple[list[dict], l
     tenancy_targets = sorted(
         {d.split(":", 1)[1] for d in DESTINATION.values() if d.startswith("tenancy:")}
     )
+    sdk_only_targets = sorted(
+        {d.split(":", 1)[1] for d in DESTINATION.values() if d.startswith("sdk:")}
+    )
     no_method = [
         {"what": m, "scope": "MCP", "why": "no `def` on TortoiseSDK"}
         for m in TARGET_MCP if m not in sdk_defs
     ] + [
         {"what": m, "scope": "tenancy", "why": "no `def` on TortoiseSDK"}
         for m in tenancy_targets if m not in sdk_defs
+    ] + [
+        {"what": m, "scope": "sdk-only", "why": "no `def` on TortoiseSDK"}
+        for m in sdk_only_targets if m not in sdk_defs
     ]
 
     unresolved = [
@@ -286,7 +327,9 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
     total = sum(counts.values())
     removed = counts.get("REMOVED", 0)
     tenancy = sum(v for k, v in counts.items() if k.startswith("tenancy:"))
-    on_mcp = total - removed - tenancy
+    # Four disjoint buckets, computed -- never a subtraction from a moving number.
+    sdk_only = sum(v for k, v in counts.items() if k.startswith("sdk:"))
+    on_mcp = total - removed - tenancy - sdk_only
 
     out = [
         "# Phase 0.1 — the bridge table",
@@ -298,35 +341,48 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
         "below is arithmetic computed against the live registry. The generator **fails the build**",
         "if the map and the registry disagree — a mismatch is a finding, not something to reconcile.",
         "",
-        f"**Registry: {total} tools → {on_mcp} absorbed into MCP destinations · "
+        f"**Registry: {total} tools → {on_mcp} absorbed into the {len(TARGET_MCP)} MCP targets · "
+        f"{sdk_only} absorbed into a builder-only SDK method (not on the MCP) · "
         f"{tenancy} tenancy (SDK/REST only) · {removed} retired.**",
         "",
         f"**These are not the same number.** The MCP has **{len(TARGET_MCP)}** tools; "
-        f"**{removed}** current tools retire and **{on_mcp}** are absorbed into those {len(TARGET_MCP)} — many-to-one. "
+        f"**{removed}** current tools retire, **{tenancy}** are tenancy-only, **{sdk_only}** is absorbed into a "
+        f"builder-only SDK method that is not on the MCP, and **{on_mcp}** are absorbed into those "
+        f"{len(TARGET_MCP)} — many-to-one. "
         f"Writing \"{total} minus {len(TARGET_MCP)} equals {total - len(TARGET_MCP)} retired\" conflates the two, and is wrong.",
         "",
         "---",
         "",
-        "## Part A — the discriminator map",
+        "## Part A — the merged tools",
         "",
-        "The target tools that are *merged* dispatch internally on a discriminator. A discriminator",
-        "value with no method behind it is invisible until someone writes the handler and finds",
-        "nothing to call — which is exactly what this part exists to catch.",
+        "A *merged* target absorbs more than one current tool, so it dispatches internally on a",
+        "discriminator. **Which tools are merged is computed from the map** — not listed by hand — and",
+        "**whether the method exists is read from `sdk_defs`**. A discriminator value with no method",
+        "behind it is invisible until someone writes the handler and finds nothing to call, which is",
+        "what this part exists to catch.",
         "",
-        "| Target tool | Discriminator | SDK method it must call | Exists |",
+        "Only the `Discriminator` column is authored data: it is a design fact about the target, not",
+        "something derivable from today's code.",
+        "",
+        "| Target tool | Sources absorbed | Discriminator | Exists |",
         "|---|---|---|---|",
-        "| `create_entity` | `type=` | `create_entity` | yes |",
-        "| `link_entities` | *(relation kind)* | `link_entities` | no — see Part C |",
-        "| `list_knowledge` | `kind=` | `list_knowledge` | no — see Part C |",
-        "| `update_knowledge` | *(retract fields)* | `update_knowledge` | no — see Part C |",
-        "| `delete_knowledge` | *(node or link)* | `delete_knowledge` | no — see Part C |",
-        "| `graph_overview` | `section=` | `graph_overview` | no — see Part C |",
-        "| `adjust_relationship` | *(strength)* | `adjust_relationship` | no — see Part C |",
-        "| `refresh_confidence` | `scope=` | `refresh_confidence` | no — see Part C |",
-        "| `record_decision` | *(inline question)* | `record_decision` | no — see Part C |",
+    ]
+    merged = {d: v for d, v in by_dest.items() if len(v) > 1 and d != "REMOVED"}
+    for dest in sorted(merged, key=lambda d: (-len(merged[d]), d)):
+        disc = DISCRIMINATORS.get(dest, "*(none — dispatch is by argument)*")
+        # Check the method, and for a namespaced target the method it names.
+        method = dest.split(":", 1)[1] if dest.startswith(NAMESPACES) else dest
+        ok = "yes" if method in sdk_defs else "**no — Part C1**"
+        out.append(f"| `{dest}` | {len(merged[dest])} | {disc} | {ok} |")
+    n_merged = len(merged)
+    n_ok = sum(
+        1 for d in merged
+        if (d.split(":", 1)[1] if d.startswith(NAMESPACES) else d) in sdk_defs
+    )
+    out += [
         "",
-        "**The `Exists` column is the finding.** Of the nine merged tools, only one has a method",
-        "behind it today. The rest are Phase 2 work, not renames.",
+        f"**{n_merged} merged targets. {n_ok} of them have a method behind them today.** The other"
+        f" **{n_merged - n_ok}** are Phase 2 work, not renames.",
         "",
         "## Part B — every current tool and its single destination",
         "",
@@ -356,9 +412,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
     out += [
         f"| **total** | **{total}** |",
         "",
-        f"Destination rows: **{len(counts)}**. Sum of counts: **{total}**. "
-        f"Registry tools: **{len(rows)}**. "
-        f"{'**MATCH**' if total == len(rows) else '**MISMATCH — BUILD FAILURE**'}",
+        f"Destination rows: **{len(counts)}**. Registry tools: **{len(rows)}**.",
         "",
         "## Part C — blockers",
         "",
@@ -432,10 +486,11 @@ def main() -> int:
         return 0
 
     OUT.write_text(doc, encoding="utf-8")
-    no_method = [t for t in TARGET_MCP if t not in sdk_defs]
+    no_method, _ = _blockers(rows, sdk_defs)
     print(f"wrote {OUT}")
     print(f"  registry tools: {len(rows)}")
-    print(f"  target tools with NO SDK method ({len(no_method)}): {', '.join(no_method) or 'none'}")
+    print(f"  target methods with NO def on TortoiseSDK ({len(no_method)}): "
+          f"{', '.join(b['what'] for b in no_method) or 'none'}")
     return 0
 
 

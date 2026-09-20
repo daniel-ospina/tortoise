@@ -63,13 +63,18 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 | | |
 |---|---|
 | Registry tools | **98** |
-| Absorbed into MCP destinations | **71** |
+| Absorbed into the 25 MCP targets | **80** |
+| Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
-| Retired | **25** |
+| Retired | **15** |
 | MCP target tools | **25** |
 
-**`98 − 25 = 73 retired` is wrong** and circulated in earlier drafts: 25 retire and 71 are
-*absorbed* into the 25 targets. Many current tools map onto one target, so the two numbers are
+**The four bucket rows sum to 98.** (The last row is the target *surface*, not a bucket —
+25 targets received those 80 absorbed tools many-to-one, so it is not part of the sum.)
+
+**`98 − 25 = 73 retired` is wrong** and circulated in earlier drafts: 15 retire, 2 are tenancy-only,
+1 is absorbed into a builder-only SDK method that is not on the MCP, and 80 are
+absorbed into the 25 targets. Many current tools map onto one target, so the two numbers are
 not complements.
 
 ## The reconciliation — SDK 150 → 40
@@ -109,7 +114,7 @@ handler twice.
 |---|---|---|
 | **0.1** | **The bridge table.** Every MCP `type=` / `mode=` / `section=` discriminator → the exact SDK method and argument it resolves to. | The merged tools dispatch internally. Until that mapping is written down, nobody knows whether the 23 names can be implemented on the frozen SDK — or whether a `type=` value has no SDK method to call. **This is the check that prevents a rewrite.** |
 | **0.2** | **Name the target.** A short note in both canonical docs stating that **every name is a target, not a description of today.** | The review found the MCP column reads as present tense. A developer following it today calls tools that do not exist. |
-| **0.3** | **The MCP rename table.** old name → new name, per tool. | 24 of the 25 names are not live today. Without this, implementation silently renames the whole MCP surface with no migration note. |
+| **0.3** | **The MCP rename table.** old name → new name, per tool. | **None of the 25 is live verbatim** — every registered MCP tool carries a `tortoise_` prefix, and only 3 (create_entity, get_entity, approve_merge) have a prefixed equivalent. Without this, implementation silently renames the whole MCP surface with no migration note. |
 | **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of 150. The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
 
 ### Phase 1 — the declaration and the gate
@@ -140,7 +145,7 @@ that names its replacement.
 | | Deliverable | Depends on |
 |---|---|---|
 | **3.1** | The 25 tools implemented **on the frozen SDK** | Phase 2 |
-| **3.2** | The **25 retired** tools removed. The other **71 are absorbed** into the 25 targets — many-to-one. Writing "98 − 25 = 73 retired" conflates the two and is wrong. | 3.1 |
+| **3.2** | The **15 retired** tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so **80 are absorbed** into the 25 targets — many-to-one. Writing "98 − 25 = 73 retired" conflates the two and is wrong. | 3.1 |
 | **3.3** | The `co_firstlineno` guard defect fixed — see *Coordination* | — |
 
 ### Phase 4 — verification

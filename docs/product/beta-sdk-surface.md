@@ -27,7 +27,8 @@ The SDK serves **two audiences**:
 **The builder pays for their end-customers.** An end-customer never has an organisation
 account — they are a memory graph inside the builder's account. Verified against
 `tortoise/pricing.py`: `tier_limits()` exposes `max_graphs_per_team`, whose value is
-**`None` = unlimited** on builder and team plans.
+**`None` = unlimited** on the **pro** and **team** plans (the tiers are free, solo,
+pro, team, anon — there is no "builder" plan; a builder buys pro or team).
 
 **The audience labels used below:** *agent* (a model using the MCP surface — it never constructs a
 client and never touches tenancy), *builder* (code integrating the SDK for an app), *admin* (a
@@ -88,7 +89,7 @@ person managing their own account).
 (28–39), `write_knowledge_batch` (builder-only, 13) and the constructor/`close` (1–2).
 
 > **Every name here is a target, not a description of today.** Only five of the 40 exist in the
-> current SDK. The MCP column names the *target* tool; 24 of the 25 are not registered today.
+> current SDK. The MCP column names the *target* tool. None of the 25 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only 3 (`create_entity`, `get_entity`, `approve_merge`) have a prefixed equivalent. So it is **25 of 25 by name**, or **22 of 25** if you normalise the prefix.
 > The old→new mapping is in `docs/product/vision-mcp-sdk-surface.md`.
 
 
