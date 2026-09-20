@@ -8593,9 +8593,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
     # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
     # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
-    # since #3914. It deliberately omits Source/extraction and — until
-    # #4197's backfill decision — the embedding, so it keeps modelling the
-    # un-backfilled / no-embedder store the shipping ask lane still reads.
+    # since #3914. It omits Source/extraction, but since W7A it EMBEDS every
+    # turn BY DEFAULT through the shared store seam (#4194/#4304) and retains
+    # `embed=False` for #4197's un-backfilled backlog.
     # #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).

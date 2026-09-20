@@ -724,6 +724,9 @@ def _assembly_budget(records: list[dict]) -> dict:
     Reported alongside, never a leg. Read from the lane's own
     ``context_tokens`` (post-assembly), so it measures the real assembled
     context the reader saw — not the retrieval pool.
+
+    Both median fields report the UPPER-MIDDLE element (the upper of the two
+    middles for an even n), so they can never disagree.
     """
     from tortoise.retrieval import resolve_ask_retrieval_caps
     cap = resolve_ask_retrieval_caps()["context_token_cap"]
@@ -733,11 +736,14 @@ def _assembly_budget(records: list[dict]) -> dict:
         return {"context_token_cap": cap, "n": 0, "median_tokens": None,
                 "median_filled_pct": None, "min_pct": None, "max_pct": None}
     pcts = sorted(round(100.0 * t / cap, 1) for t in toks)
-    med = pcts[len(pcts) // 2] if len(pcts) % 2 else \
-        round((pcts[len(pcts) // 2 - 1] + pcts[len(pcts) // 2]) / 2, 1)
+    # ONE statistic, two renderings: both median fields read the SAME
+    # upper-middle element, so ``100 * median_tokens / cap`` always equals
+    # ``median_filled_pct``. (Averaging only the percentage made the two
+    # fields disagree for an even n.)
+    med_tokens = sorted(toks)[len(toks) // 2]
     return {"context_token_cap": cap, "n": len(toks),
-            "median_tokens": sorted(toks)[len(toks) // 2],
-            "median_filled_pct": med,
+            "median_tokens": med_tokens,
+            "median_filled_pct": round(100.0 * med_tokens / cap, 1),
             "min_pct": pcts[0], "max_pct": pcts[-1]}
 
 
@@ -1356,11 +1362,15 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
              "seeding mode "
              + ("'embedded': " if SEED_TURNS_EMBEDDED_BY_DEFAULT
                 else "'un-embedded-backlog': ")
-             + "the dense leg was inert for those questions, so their "
-             "answer-shape result is the SPARSE (FTS+RRF) lane's. In "
-             "embedded mode this means the EMBEDDER was unavailable for the "
-             "seed — NOT that the seeder omits a vector (it writes the "
-             "product's own by default, #4194).") if degraded
+             + "the reason names WHICH leg failed and why. `no_embeddings`/"
+             "`no_embedder` means no turn vector was stored; `timeout` means "
+             "the multi-strategy collector deadline fired under load; "
+             "`breaker_open`/`query_failed`/`index_missing` name other leg "
+             "failures. So a degraded read is NOT by itself evidence of a "
+             "missing vector: in embedded mode the seeder writes the "
+             "product's own vector by default (#4194), and a `no_embeddings` "
+             "reason there means the EMBEDDER was unavailable for the seed."
+             ) if degraded
             else "no retrieval_degraded question observed",
             ("The reader is deepseek/deepseek-v4-flash at temperature 0, "
              "max_tokens 500. The historical 0.90 (2026-09-04) used a "

@@ -26,8 +26,11 @@ receipt now carries a `seeding_mode` block derived from the seeder's own default
 
 **Tree:** `fix/w7a-seeder-embeds-turns`, merge-base `f2b3e91b2` (contains #4304 `6355a5bc4`).
 The gold-rank diagnostic measured the seeder at `fb0fe23c9`; the streamed instrument attempt
-pinned `74c9b7997`. **Fixture sha256 unchanged and asserted in every run:**
-`7f4062643323af4e5d0fec0b98bb3e3ca8499362c3f7e07a83c55f07633d15fa`.
+pinned `74c9b7997`. **Fixture sha256 unchanged:**
+`7f4062643323af4e5d0fec0b98bb3e3ca8499362c3f7e07a83c55f07633d15fa` — asserted on every
+`tools/ask_shape_rate.py` instrument run (its `FIXTURE_SHA256` pin); the two W7A
+diagnostics above read the fixture by path and their receipts do not embed the hash, so here
+the hash is verified at this tree, not by the gold-rank run.
 
 ---
 
@@ -81,8 +84,11 @@ Dense-arm seed census (`MATCH (p:Point) WHERE p.embedding IS NOT NULL`): **484, 
 
 **Why this is the dense leg and not noise** — the same runs' vector-leg traces:
 
-* `backlog` (all 5): `vector ran=true degraded=true reason=no_embeddings count=0`
+* `backlog` (4 of 5): `vector ran=true degraded=true reason=no_embeddings count=0`
   — the **exact 21/21 signature** the frozen instrument reported before this change.
+  (`ceb54acb` is the exception: `reason=timeout count=0` — the same 500 ms
+  multi-strategy collector deadline noted for the dense arm below, not a
+  `no_embeddings` state.)
 * `dense` (4 of 5): `vector ran=true degraded=false reason=ok count=120` — the dense leg
   returns a full 120-item leg.
 * `dense` (`1de5cff2`): `vector ran=true degraded=true reason=timeout count=0` — the 500 ms

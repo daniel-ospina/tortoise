@@ -84,6 +84,7 @@ from tortoise.ingest import _PROVIDERS  # noqa: E402
 from tortoise.sdk import (  # noqa: E402
     _SESSION_LLM_PROVIDER_PRIORITY,
     TortoiseSDK,
+    _capture_turn_embeddings,
     _capture_turn_window,
     _content_hash,
     _normalize_turn_role,
@@ -204,51 +205,6 @@ def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
 SEED_TURNS_EMBEDDED_BY_DEFAULT = True
 
 
-def _turn_embeddings(turn_texts: list[str],
-                     expected_dim: int | None,
-                     ) -> list[list[float] | None]:
-    """The turn vectors the PRODUCT's write path stores (#4194, W7A).
-
-    A fixture must model what the product's write path now does, and that path
-    now embeds every episodic turn with the SAME local encoder the query leg
-    uses — so the dense leg is live for captured turns. This routes through the
-    product's OWN store-scoped entry point — ``embeddings.encode_batch_for_store``
-    with ``proj.required_embedding_dim`` — NOT the raw encoder seam. The width
-    constraint belongs to the STORE's vector index (#4280), and calling
-    ``compute_embeddings`` directly would re-create the exact defect #4280
-    carried: a stored vector of the wrong width is a broken leg, while on the
-    index-less brute-force lane any self-consistent width is usable and must
-    NOT be dropped. The store helper applies the width and LOGS every dropped
-    row, so a fixture cannot hand ``vecf32`` a vector the read path cannot use
-    in silence.
-
-    ``expected_dim`` is the caller's own store width
-    (``proj.required_embedding_dim``) — a required argument, never a defaulted
-    copy of ``EMBEDDING_DIM``, because the two lanes answer differently
-    (``EMBEDDING_DIM`` vs ``None``) and the wrong one silently NULLs every
-    vector on the lane it does not describe (#4280 review).
-
-    Fail-soft, exactly as the product's turn write: ``None`` per turn when no
-    embedder is installed (the turn is still stored; the read path declares the
-    vector leg impaired).
-    """
-    if not turn_texts:
-        return []
-    try:
-        from tortoise.embeddings import encode_batch_for_store
-        return encode_batch_for_store(turn_texts, expected_dim)
-    except Exception:  # noqa: BLE001, RUF100 — embedding stays optional
-        # A whole-batch failure must stay audible: silently returning ``None``
-        # per turn is indistinguishable from "the leg ran and found nothing"
-        # — the way #4280 hid (the product's own turn write logs here too).
-        _logger.warning(
-            "ask seeder: turn embedding batch failed — %d turn(s) stored "
-            "with no vector (the dense leg degrades to keyword-only for them).",
-            len(turn_texts), exc_info=True,
-        )
-        return [None] * len(turn_texts)
-
-
 def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
                             conversation: list[dict], *,
                             now: str | _CaptureClock | None = CAPTURE_CLOCK,
@@ -352,8 +308,16 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     # un-backfilled backlog stays measurable; re-embedding that saved backlog
     # is the user-facing choice owned by #4197. A receipt produced in either
     # mode must NAME the mode.
-    embeddings = (_turn_embeddings(turn_texts, proj.required_embedding_dim)
-                  if embed else [None] * len(turn_texts))
+    # The vectors come from the PRODUCT's own store seam via the SHARED
+    # primitive ``tortoise.sdk._capture_turn_embeddings`` — never a local copy
+    # and never the raw encoder. It applies the STORE's width
+    # (``proj.required_embedding_dim``: ``EMBEDDING_DIM`` on an indexed store,
+    # ``None`` on the index-less brute-force lane, where any self-consistent
+    # width is usable and must NOT be dropped — #4280) and fails soft to
+    # ``None`` per turn when no embedder is installed.
+    embeddings = (
+        _capture_turn_embeddings(turn_texts, proj.required_embedding_dim)
+        if embed else [None] * len(turn_texts))
     turn_ids: list[str] = []
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
