@@ -1110,7 +1110,10 @@ def install_capture(
     # (#4314). Best-effort and only after a successful real write: a dry run or
     # a refusal leaves no record to be misread.
     if result.ok and not dry_run:
-        hook_install._record_hook_src_dir(
+        # Best-effort and unable to fail the install: a record-write raise
+        # (``OSError``, ``UnicodeDecodeError``, …) must never turn a landed
+        # install into a traceback (#3999, #4314).
+        hook_install._record_hook_src_dir_best_effort(
             Path(home) if home is not None else None)
     return result
 

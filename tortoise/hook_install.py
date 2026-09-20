@@ -155,12 +155,15 @@ def _atomic_write_text(dst: Path, text: str) -> None:
 def _hook_src_dir_base(home: Path | None) -> Path:
     """The base the ``hook-src-dir`` record is written under.
 
-    ``~/.tortoise`` by default — but FAIL-SAFE IN TESTS, the same guard
-    ``capture_spool.spool_dir`` applies to the spool: a pytest process that did
-    not pass an explicit ``home`` must never write to the developer machine's
-    real ``~/.tortoise``.  Under pytest the base is derived DETERMINISTICALLY
-    from the test id, so every process of one test shares one directory and
-    none of them touches the real home.
+    ``~/.tortoise`` by default.  The base is FAIL-SAFE: a call with no
+    resolved ``home`` that runs under pytest never writes to the developer
+    machine's real ``~/.tortoise`` — under pytest the base is derived
+    DETERMINISTICALLY from the test id, so every process of one test shares
+    one directory and none of them touches the real home.  Whether to RECORD
+    at all is a SEPARATE decision that keys on a HOME-scoped home having been
+    resolved (see ``_record_hook_src_dir`` and ``_is_home_scoped_root``), not
+    on this fail-safe: ``upgrade_install`` at a repo-scoped ``--dir`` resolves
+    no home and records nothing.
 
     This is not hypothetical: the first cut of #4314 used ``Path.home()``
     unconditionally and a single test run created
@@ -197,8 +200,49 @@ def _record_hook_src_dir(home: Path | None = None) -> None:
             return
         target.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(target, text)
-    except OSError:
+    except (OSError, ValueError):
+        # Best-effort: this must NEVER fail an install. A non-UTF-8 record
+        # raises ``UnicodeDecodeError`` (a ``ValueError``) from the read — a
+        # class the old ``except OSError`` guard let escape, so
+        # `tortoise install` / `hooks upgrade` tracebacked AFTER the hooks
+        # were written (#3999, #4314).
         pass
+
+
+def _record_hook_src_dir_best_effort(home: Path | None = None) -> None:
+    """``_record_hook_src_dir`` that can NEVER fail the caller's install.
+
+    ``_record_hook_src_dir`` already swallows the filesystem/decode failures
+    it can name; this wrapper is the belt-and-suspenders boundary the install
+    call sites need so no future raise-set member escapes a completed install
+    (#3999, #4314). ``MemoryError`` is deliberately propagated: resource
+    exhaustion is not a swallowed failure anywhere else in the install.
+    """
+    try:
+        _record_hook_src_dir(home)
+    except MemoryError:
+        raise
+    except Exception:
+        pass
+
+
+def _is_home_scoped_root(layout: HarnessLayout, root: Path,
+                         home: Path) -> bool:
+    """True when ``root`` is the HOME-scoped install root for ``home``.
+
+    The ``hook-src-dir`` record exists for hooks whose ``../..`` is ``$HOME``
+    (Codex's ``~/.codex/hooks``, Cursor's ``~/.cursor/hooks``).  A repo-scoped
+    ``--dir`` — Claude's project install, or a checkout that merely happens to
+    hold ``.codex/hooks`` — is NOT such a root, and an explicit ``--dir`` must
+    never cause a write under HOME (#4110).
+    """
+    if layout.root_env is None and not layout.root_home_default:
+        return False
+    try:
+        return (Path(root).resolve()
+                == default_root(layout, Path(home)).resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def _looks_like_our_script(path: Path) -> bool:
@@ -2000,7 +2044,8 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
 
 
 def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
-                    dry_run: bool = False) -> UpgradeResult:
+                    dry_run: bool = False,
+                    home: Path | None = None) -> UpgradeResult:
     """Install or upgrade the capture hooks at ``root``, in place.
 
     * scripts — re-copied from the shipped repo copy when missing or stale;
@@ -2219,8 +2264,12 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
     # The installed hooks resolve their module dir from $TORTOISE_SRC_DIR, then
     # this record, then `../..` — and `../..` from an installed hook is $HOME.
     # Written last (only after every real write landed) so a refused or
-    # dry-run upgrade leaves no misleading breadcrumb.
-    _record_hook_src_dir()
+    # dry-run upgrade leaves no misleading breadcrumb.  ONLY a HOME-scoped root
+    # with a resolved home records: an explicit `--dir` (a repo install) must
+    # never cause a write under HOME (#4110, #4314).
+    if (result.ok and not dry_run and home is not None
+            and _is_home_scoped_root(layout, root, Path(home))):
+        _record_hook_src_dir_best_effort(home)
 
     result.findings_after = detect_install(root, harness)
     return result

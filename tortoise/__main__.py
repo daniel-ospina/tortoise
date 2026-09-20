@@ -3082,6 +3082,11 @@ def _cmd_hooks(args) -> int:
     # `✅ ... upgraded.` while leaving the real install untouched — the silent
     # no-capture this seam exists to prevent (#3818).
     explicit_dir = getattr(args, "dir", None)
+    # The HOME that `default_root` consumed, when no explicit `--dir` was given.
+    # It is threaded into `upgrade_install` so the `hook-src-dir` record is
+    # written ONLY for a genuinely HOME-scoped root — an explicit `--dir` never
+    # consults HOME (#4110).
+    resolved_home = None
     try:
         # `_P.home()` is INSIDE the boundary because it can RAISE, not merely
         # return a non-absolute path: with `$HOME` set to a literal `~` (or
@@ -3107,8 +3112,11 @@ def _cmd_hooks(args) -> int:
         # irrelevant (`_P(explicit_dir)` never consults it) — evaluating it
         # above the ternary made an unresolvable HOME abort a `--dir` inspect
         # or repair that would otherwise have worked.
-        root = (_P(explicit_dir) if explicit_dir is not None
-                else default_root(layout, _P.home()))
+        if explicit_dir is not None:
+            root = _P(explicit_dir)
+        else:
+            resolved_home = _P.home()
+            root = default_root(layout, resolved_home)
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:
@@ -3199,7 +3207,8 @@ def _cmd_hooks(args) -> int:
     # upgrade (also performs a fresh install when nothing is present)
     try:
         result = upgrade_install(root, args.harness,
-                                 dry_run=getattr(args, "dry_run", False))
+                                 dry_run=getattr(args, "dry_run", False),
+                                 home=resolved_home)
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:

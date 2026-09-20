@@ -1220,6 +1220,10 @@ durations:
   eval/write_path/test_write_path_benchmark.py: 112.3
   test_tortoise_client.py: 110.7
   eval/retrieval/test_run.py: 109.3
+  # #4314: the inert-hooks guard. Measured locally in the carve-out lane
+  # (`uv run pytest tests/test_4314_inert_hooks.py -q`, 82.8s); refresh from a
+  # CI junit run once it has one.
+  test_4314_inert_hooks.py: 83.0
   test_platform_seams.py: 73.3
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
   test_quota.py: 65.3
