@@ -4603,7 +4603,8 @@ def _control_plane_unavailable() -> HTTPException:
     )
 
 
-async def _cp_offload(fn, *, op: str, best_effort: bool = False):
+async def _cp_offload(fn, *, op: str, best_effort: bool = False,
+                      pool: str = "auth", unavailable=None):
     """#3498: run ONE blocking control-plane helper off the event loop.
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
@@ -4624,20 +4625,60 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False):
     an exception from the helper itself (e.g. the strict-mode
     ``UnregisteredTelemetryKey``) still propagates.
 
+    ``pool`` (#3669) selects the worker pool: ``"auth"`` (default),
+    ``"telemetry"`` for best-effort work, or ``"oauth"`` for the
+    attacker-reachable OAuth client-resolution lane.
+
+    ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
+    auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
+    the OAuth endpoints pass a factory raising RFC 6749 §5.2
+    ``temporarily_unavailable`` instead, because their consumers parse the
+    OAuth error body (#2863) and never the FastAPI ``detail`` shape.
+
     The Auth/REST lane is the blast radius the issue names: a regression here
     is a total auth outage, so this seam is deliberately the ONLY new thing
     callers touch, and every routed site is covered by a behavioural test.
     """
+    # Best-effort work routes to the telemetry pool unless the caller named a
+    # pool explicitly (#3498 review P1, preserved by #3669's ``pool`` param).
+    effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
     try:
-        return await run_control_plane_call(
-            fn, op=op, pool="telemetry" if best_effort else "auth")
+        return await run_control_plane_call(fn, op=op, pool=effective_pool)
     except ControlPlaneOffloadError as exc:
         if best_effort:
             logging.getLogger("tortoise.api").warning(
                 "control-plane offload %r failed (best-effort, swallowed): %s",
                 op, exc)
             return None
+        if unavailable is not None:
+            raise unavailable() from None
         raise _control_plane_unavailable() from None
+
+
+async def _oauth_offload(fn, *, op: str):
+    """#3669: run ONE synchronous OAuth resolution off the event loop.
+
+    The OAuth client-resolution lane is synchronous end to end —
+    ``resolve_client`` makes a blocking PostgREST lookup AND, for a CIMD
+    ``client_id``, a blocking ``httpcore`` fetch — and it is reached from FOUR
+    unauthenticated front doors. Offloading the RESOLUTION (not the fetch) puts
+    the whole resolve on a pool dedicated to this lane, so the event loop is
+    never occupied; the fetch's own in-flight cap and per-window wall-clock
+    budget live in ``tortoise.cimd`` and are therefore charged identically at
+    all four doors.
+
+    A dedicated ``"oauth"`` pool (not ``"auth"``) keeps an attacker-driven
+    CIMD fetch flood from parking the auth slots — the same isolation that
+    split ``telemetry`` out (#3498 review P1).
+
+    Failure is the OAuth contract (RFC 6749 §5.2 503 ``temporarily_unavailable``),
+    never the FastAPI ``control_plane_unavailable`` body the auth/REST lane uses.
+    """
+    from tortoise.oauth import OAuthTemporarilyUnavailable
+    return await _cp_offload(
+        fn, op=op, pool="oauth",
+        unavailable=lambda: OAuthTemporarilyUnavailable(
+            "Client resolution is temporarily unavailable — retry."))
 
 
 def _dashboard_key_login_reason(org: dict) -> str | None:
@@ -25639,13 +25680,14 @@ async def oauth_authorize(request: Request):
         "resource": request.query_params.get("resource", ""),
     }
     try:
-        client = validate_authorize_params(
-            cp, client_id=params["client_id"],
-            redirect_uri=params["redirect_uri"] or None,
-            response_type=params["response_type"] or None,
-            code_challenge=params["code_challenge"] or None,
-            code_challenge_method=params["code_challenge_method"] or None,
-        )
+        client = await _oauth_offload(
+            lambda: validate_authorize_params(
+                cp, client_id=params["client_id"],
+                redirect_uri=params["redirect_uri"] or None,
+                response_type=params["response_type"] or None,
+                code_challenge=params["code_challenge"] or None,
+                code_challenge_method=params["code_challenge_method"] or None),
+            op="oauth_authorize_params")
     except OAuthError as exc:
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
         # Open-redirect guard: only redirect when the redirect_uri is
@@ -25659,17 +25701,15 @@ async def oauth_authorize(request: Request):
         # `_redirect_uri_matches` also refuses parse-differential input: this is
         # the one place the raw request param is echoed into a Location header,
         # so relaxing the match without that guard would BE the open redirect.
-        from tortoise.oauth import _redirect_uri_matches, resolve_client
-        client = None
-        if params["client_id"]:
-            try:
-                # #2847: the resolver, not `get_client`, so a CIMD client's
-                # in-document redirect_uri is honoured on this path too.
-                # Best-effort: a refused fetch must not turn an OAuth error
-                # response into a 5xx, so this stays non-fatal.
-                client = resolve_client(cp, params["client_id"])
-            except Exception:
-                client = None
+        #
+        # #3669 finding 2: `validate_authorize_params` STAMPS the client it
+        # resolved (None when unresolved) on the raised OAuthError, so this
+        # handler never re-resolves. Re-resolving here cost a SECOND CIMD
+        # fetch and a second rate-limit charge on the FAILURE path (the success
+        # path paid nothing — the cache absorbed it), halving the effective
+        # failure budget.
+        from tortoise.oauth import _redirect_uri_matches
+        client = getattr(exc, "client", None)
         registered_uris = (client.get("redirect_uris") or []) if client else []
         if not isinstance(registered_uris, (list, tuple)):
             registered_uris = [registered_uris]
@@ -25751,13 +25791,14 @@ async def oauth_consent(request: Request):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     try:
-        client = validate_authorize_params(
-            cp, client_id=body.get("client_id", ""),
-            redirect_uri=body.get("redirect_uri") or None,
-            response_type=body.get("response_type") or None,
-            code_challenge=body.get("code_challenge") or None,
-            code_challenge_method=body.get("code_challenge_method") or "S256",
-        )
+        client = await _oauth_offload(
+            lambda: validate_authorize_params(
+                cp, client_id=body.get("client_id", ""),
+                redirect_uri=body.get("redirect_uri") or None,
+                response_type=body.get("response_type") or None,
+                code_challenge=body.get("code_challenge") or None,
+                code_challenge_method=body.get("code_challenge_method") or "S256"),
+            op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)
     # The browser session JWT — same JWKS/ES256+RS256 verification the session
@@ -25803,11 +25844,22 @@ async def oauth_token(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     grant = body.get("grant_type")
+    base = _oauth_base(request)
     try:
+        # #3669: the token grant is offloaded as a UNIT — `_verify_client_auth`
+        # resolves the client (a CIMD fetch for an https client_id) and the
+        # grant then makes several blocking PostgREST calls. Offloading the
+        # grant puts both off the loop and charges the CIMD bounds at BOTH
+        # token front doors (auth-code and refresh) as well as the two
+        # authorize/consent doors, because all four reach `resolve_client`.
         if grant == "authorization_code":
-            out = exchange_auth_code(cp, body, _oauth_base(request))
+            out = await _oauth_offload(
+                lambda: exchange_auth_code(cp, body, base),
+                op="oauth_token_exchange")
         elif grant == "refresh_token":
-            out = refresh_grant(cp, body, _oauth_base(request))
+            out = await _oauth_offload(
+                lambda: refresh_grant(cp, body, base),
+                op="oauth_token_refresh")
         else:
             raise OAuthError(400, "unsupported_grant_type",
                              "grant_type must be authorization_code or refresh_token")

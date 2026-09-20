@@ -19,6 +19,8 @@ Controls under test
 from __future__ import annotations
 
 import ipaddress
+import threading
+import time
 from typing import ClassVar
 
 import httpcore
@@ -532,6 +534,142 @@ def test_rate_limited_fetch_raises_without_caching(monkeypatch):
     with pytest.raises(cimd.CimdError, match="rate limit"):
         _resolve_direct()
     assert cimd._CACHE == {}
+
+
+# ── Control 7 — total occupancy (in-flight cap + wall-clock budget, #3669) ──
+#
+# The rate limiter bounds fetch COUNT. These bound the PRODUCT (count x
+# duration): concurrent fetches, and total seconds per window. Both are charged
+# in ``resolve_client_metadata`` — the one function all four unauthenticated
+# front doors reach through ``resolve_client``.
+
+def test_fetch_budget_is_charged_and_refuses_a_later_fetch(monkeypatch):
+    """Once the window's wall-clock budget is spent, a further fetch is
+    refused BEFORE it starts (and before it charges the rate limiter)."""
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 0.05)
+    monkeypatch.setattr(cimd, "CACHE_TTL_S", 0)   # force a second fetch
+    calls: list[str] = []
+
+    def _slow(client_id):
+        calls.append(client_id)
+        time.sleep(0.08)
+        return _doc()
+
+    monkeypatch.setattr(cimd, "fetch_client_metadata", _slow)
+    _resolve_direct()                               # spends > the budget
+    assert cimd._BUDGET_SPENT > cimd.FETCH_BUDGET_S
+    with pytest.raises(cimd.CimdError, match="wall-clock budget"):
+        _resolve_direct()
+    assert len(calls) == 1, "the refused fetch must not have been attempted"
+
+
+def test_budget_refusal_does_not_charge_the_rate_limiter(monkeypatch):
+    """A budget-refused request must not consume fetch-count budget: the
+    budget is the OUTER bound and refusing inside it should not make the
+    caller also pay the inner one."""
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", -1.0)
+    monkeypatch.setattr(cimd, "fetch_client_metadata",
+                        lambda _c: pytest.fail("must not fetch"))
+    with pytest.raises(cimd.CimdError, match="wall-clock budget"):
+        _resolve_direct()
+    assert cimd._RATE_AGGREGATE == []
+
+
+def test_budget_window_rolls_over(monkeypatch):
+    """The budget is per RATE_WINDOW_S: once the window elapses the next
+    check starts a fresh one (lazy roll-over, no background timer)."""
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 0.05)
+    monkeypatch.setattr(cimd, "CACHE_TTL_S", 0)
+    calls: list[str] = []
+
+    def _slow_once(client_id):
+        calls.append(client_id)
+        if len(calls) == 1:
+            time.sleep(0.08)      # spend the whole first window
+        return _doc()
+
+    monkeypatch.setattr(cimd, "fetch_client_metadata", _slow_once)
+    _resolve_direct()                              # spends the budget
+    with pytest.raises(cimd.CimdError, match="wall-clock budget"):
+        _resolve_direct()
+    # Age the window past RATE_WINDOW_S by moving its start backwards.
+    with cimd._BUDGET_LOCK:
+        cimd._BUDGET_STARTED -= cimd.RATE_WINDOW_S + 1
+    _resolve_direct()
+    assert len(calls) == 2, "a new window must admit the fetch again"
+    assert cimd._BUDGET_SPENT < cimd.FETCH_BUDGET_S
+
+
+def test_in_flight_cap_refuses_when_all_slots_are_held(monkeypatch):
+    """A saturated in-flight cap refuses after IN_FLIGHT_WAIT_S instead of
+    parking the caller (and, on the offload pool, a worker) forever."""
+    monkeypatch.setattr(cimd, "_IN_FLIGHT", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(cimd, "IN_FLIGHT_WAIT_S", 0.05)
+    monkeypatch.setattr(cimd, "fetch_client_metadata",
+                        lambda _c: pytest.fail("must not fetch"))
+    cimd._IN_FLIGHT.acquire()
+    try:
+        with pytest.raises(cimd.CimdError, match="concurrency limit"):
+            _resolve_direct()
+    finally:
+        cimd._IN_FLIGHT.release()
+
+
+def test_in_flight_slot_is_released_on_success(monkeypatch):
+    monkeypatch.setattr(cimd, "MAX_IN_FLIGHT_FETCHES", 1)
+    monkeypatch.setattr(cimd, "_IN_FLIGHT", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(cimd, "IN_FLIGHT_WAIT_S", 0.05)
+    fetches: list[str] = []
+    _resolve(monkeypatch, _doc(), fetches)
+    # A second, distinct client must still get the (single) slot.
+    def _fetch(client_id):
+        fetches.append(client_id)
+        return _doc(client_id=client_id)
+    monkeypatch.setattr(cimd, "fetch_client_metadata", _fetch)
+    other = "https://claude.ai/other-client-metadata"
+    record = cimd.resolve_client_metadata(
+        other, supported_scopes={"mcp", "offline_access"},
+        supported_grants={"authorization_code", "refresh_token"},
+        default_scope="mcp")
+    assert record["client_id"] == other
+    assert len(fetches) == 2, "the first fetch left its slot held"
+
+
+def test_in_flight_slot_is_released_on_failure(monkeypatch):
+    monkeypatch.setattr(cimd, "MAX_IN_FLIGHT_FETCHES", 1)
+    monkeypatch.setattr(cimd, "_IN_FLIGHT", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(cimd, "IN_FLIGHT_WAIT_S", 0.05)
+    monkeypatch.setattr(cimd, "fetch_client_metadata",
+                        lambda _c: (_ for _ in ()).throw(cimd.CimdError("boom")))
+    with pytest.raises(cimd.CimdError, match="boom"):
+        _resolve_direct()
+    # The slot must be back: a refusal here would be the concurrency limit.
+    monkeypatch.setattr(cimd, "fetch_client_metadata", lambda _c: _doc())
+    assert _resolve_direct()["client_id"] == CLIENT_ID
+
+
+def test_cache_hit_skips_the_occupancy_bounds(monkeypatch):
+    """The cap and the budget bound FETCHES; a cached resolution pays neither
+    (same doctrine as the rate limiter)."""
+    fetches: list[str] = []
+    _resolve(monkeypatch, _doc(), fetches)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", -1.0)   # budget now exhausted
+    monkeypatch.setattr(cimd, "_IN_FLIGHT", threading.BoundedSemaphore(0))
+    monkeypatch.setattr(cimd, "fetch_client_metadata",
+                        lambda _c: pytest.fail("a cache hit must not fetch"))
+    assert _resolve_direct()["client_id"] == CLIENT_ID
+
+
+def test_rate_limit_reset_clears_the_occupancy_bounds(monkeypatch):
+    """One test seam for the whole limiter family, so ordering cannot leak."""
+    monkeypatch.setattr(cimd, "_BUDGET_SPENT", 999.0)
+    monkeypatch.setattr(cimd, "_IN_FLIGHT", threading.BoundedSemaphore(1))
+    cimd._IN_FLIGHT.acquire()
+    cimd._rate_limit_reset()
+    assert cimd._BUDGET_SPENT == 0.0
+    assert cimd._RATE_BUCKETS == {} and cimd._RATE_AGGREGATE == []
+    assert cimd._IN_FLIGHT.acquire(timeout=0.01), (
+        "the reset must hand back a fresh, fully-permitted semaphore")
 
 
 # ── Feature gate ───────────────────────────────────────────────────────────

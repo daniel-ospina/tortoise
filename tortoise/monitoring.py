@@ -702,6 +702,16 @@ CONTROL_PLANE_BACKLOG = 128
 #: refused are simply dropped (never a user-visible failure).
 CONTROL_PLANE_TELEMETRY_BACKLOG = 256
 
+#: #3669: a THIRD pool, for the OAuth client-resolution lane. A CIMD fetch is
+#: attacker-reachable (an unauthenticated ``client_id`` URL), so sharing the
+#: ``auth`` pool would let a fetch flood occupy every auth slot — the same
+#: isolation argument that split ``telemetry`` out (#3498 review P1), applied
+#: to a new attacker class. Deliberately small: ``cimd.MAX_IN_FLIGHT_FETCHES``
+#: bounds the actual fetches, and the pool only bounds threads.
+CONTROL_PLANE_OAUTH_WORKER_NAME = "tortoise-oauth"
+CONTROL_PLANE_OAUTH_WORKERS = 4
+CONTROL_PLANE_OAUTH_BACKLOG = 64
+
 #: Wait bound for ONE offloaded control-plane resolution. Sits ABOVE a normal
 #: round-trip's several phases but below the edge/proxy budget, so a
 #: black-holed PostgREST call fails the ONE request closed instead of holding
@@ -740,12 +750,19 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
 
     ``pool="auth"`` (default) is the AUTH-CRITICAL pool; ``pool="telemetry"``
     is a SEPARATE pool for best-effort work, so telemetry can never park the
-    auth slots (#3498 review P1).
+    auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
+    for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
+    flood cannot park the auth slots either.
 
     An UNKNOWN selector raises rather than falling back to auth: the pool
-    choice is the only thing keeping best-effort work off the auth-critical
-    capacity, so a typo must fail closed, not silently revert the split.
+    choice is the only thing keeping best-effort or attacker-reachable work
+    off the auth-critical capacity, so a typo must fail closed, not silently
+    revert the split.
     """
+    if pool == "oauth":
+        return daemon_worker(CONTROL_PLANE_OAUTH_WORKER_NAME,
+                             workers=CONTROL_PLANE_OAUTH_WORKERS,
+                             max_backlog=CONTROL_PLANE_OAUTH_BACKLOG)
     if pool == "telemetry":
         return daemon_worker(CONTROL_PLANE_TELEMETRY_WORKER_NAME,
                              workers=CONTROL_PLANE_TELEMETRY_WORKERS,
@@ -808,7 +825,8 @@ async def run_control_plane_call(fn, *, op: str,
 
     ``pool`` selects the worker: ``"auth"`` (default) for auth-critical
     resolutions, ``"telemetry"`` for best-effort work that must never consume
-    auth capacity.
+    auth capacity, ``"oauth"`` (#3669) for the attacker-reachable OAuth
+    client-resolution lane.
 
     Fail-closed: a missed bound or a saturated backlog raises
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by

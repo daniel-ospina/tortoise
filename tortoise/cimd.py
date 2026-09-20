@@ -39,6 +39,9 @@ implemented here:
    invalid or malformed").
 6. **Fetch rate limiting** — per-host + aggregate + store cap, mirroring the
    DCR limiter's bucket idiom in ``hosted_api``.
+7. **Total occupancy** (#3669) — a process-wide in-flight cap plus a
+   wall-clock budget per window, so the product (fetches x duration) is bounded
+   and not just the fetch count.
 
 Control (2) is closed against **DNS rebinding** by connecting the TCP socket to
 the *validated* address while TLS SNI and the HTTP ``Host`` header stay on the
@@ -53,7 +56,9 @@ stores are in-process, so the real bound is ``limit × running machines`` and
 resets on restart — the same accepted limitation as ``_OAUTH_DCR_BUCKETS``
 (#2866, whose follow-up filings cover the shared primitive). The fetch is
 synchronous, which matches the existing control-plane call style on this path
-(``cp.query`` is a blocking PostgREST call made from the same async handler).
+(``cp.query`` is a blocking PostgREST call made from the same async handler);
+#3669 runs the WHOLE resolution off the event loop through the bounded
+``monitoring`` offload seam, so the synchronicity no longer occupies the loop.
 """
 
 from __future__ import annotations
@@ -95,6 +100,25 @@ RATE_WINDOW_S = 3600
 PER_HOST_PER_HOUR = 60
 AGGREGATE_PER_HOUR = 600
 STORE_CAP = 256
+
+# ── Control 7 — TOTAL OCCUPANCY (#3669) ─────────────────────────────────────
+# The rate limiter above bounds fetch COUNT. It does not bound the PRODUCT:
+# the cache key is the full ``client_id`` URL, so varying the path/query yields
+# unlimited distinct keys against the shared aggregate, and at the 3 s connect
+# + 3 s read ceiling 600 fetches is up to ~3600 s of work in a 3600 s window —
+# the whole window, on one event loop (`Dockerfile.hosted` runs one uvicorn
+# process with no ``--workers``). These bounds cap the product instead:
+# at most ``MAX_IN_FLIGHT_FETCHES`` fetches run at once, and a window may spend
+# at most ``FETCH_BUDGET_S`` seconds inside fetches. They are charged inside
+# :func:`resolve_client_metadata`, which every unauthenticated front door
+# reaches through ``resolve_client`` (`/oauth/authorize`, `/oauth/consent`, and
+# both `/oauth/token` grants via ``_verify_client_auth``) — so no door can
+# escape the accounting.
+MAX_IN_FLIGHT_FETCHES = 4
+FETCH_BUDGET_S = 120.0
+#: How long a resolution waits for an in-flight slot before refusing. Bounded,
+#: so a saturated cap fails fast instead of parking a caller indefinitely.
+IN_FLIGHT_WAIT_S = 2.0
 
 # Deprecated special-purpose ranges that Python's `is_global` still reports as
 # global (#2847 review P2): 6to4 relay anycast (RFC 7526) and IPv6 site-local
@@ -304,12 +328,67 @@ _RATE_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
 _RATE_AGGREGATE: list[float] = []
 _RATE_LOCK = threading.Lock()
 
+#: Control 7 state (#3669). ``_IN_FLIGHT`` caps concurrent fetches; the budget
+#: accumulates ACTUAL fetch seconds and resets at the window boundary. Both are
+#: reset by :func:`_rate_limit_reset`, the single test seam for the limiter
+#: family, so test ordering cannot leak across either store.
+_IN_FLIGHT = threading.BoundedSemaphore(MAX_IN_FLIGHT_FETCHES)
+_BUDGET_LOCK = threading.Lock()
+_BUDGET_STARTED = time.monotonic()
+_BUDGET_SPENT = 0.0
+
 
 def _rate_limit_reset() -> None:
     """Test seam — the stores are in-process module state."""
+    global _IN_FLIGHT, _BUDGET_STARTED, _BUDGET_SPENT
     with _RATE_LOCK:
         _RATE_BUCKETS.clear()
         _RATE_AGGREGATE.clear()
+    with _BUDGET_LOCK:
+        _BUDGET_STARTED = time.monotonic()
+        _BUDGET_SPENT = 0.0
+    # A FRESH semaphore, not a set of released permits: a test (or a real
+    # wedged fetch) that consumed a slot must not shrink the next window's cap.
+    _IN_FLIGHT = threading.BoundedSemaphore(MAX_IN_FLIGHT_FETCHES)
+
+
+def _budget_remaining_locked(now: float) -> float:
+    """Fetch seconds left in the current window, rolling it over in place.
+
+    Caller holds ``_BUDGET_LOCK``. The roll-over is lazy (on the next check)
+    rather than a timer, so there is no background thread and no clock to
+    reconcile: the first call after the window elapses starts the new one.
+    """
+    global _BUDGET_STARTED, _BUDGET_SPENT
+    if now - _BUDGET_STARTED >= RATE_WINDOW_S:
+        _BUDGET_STARTED = now
+        _BUDGET_SPENT = 0.0
+    return FETCH_BUDGET_S - _BUDGET_SPENT
+
+
+def _budget_admit() -> None:
+    """Refuse a fetch once the window's wall-clock budget is spent.
+
+    Admission is checked BEFORE the fetch and the budget is charged with the
+    ACTUAL elapsed time afterwards (see :func:`_budget_charge`). A concurrent
+    burst admitted just under the line can therefore overshoot by at most
+    ``MAX_IN_FLIGHT_FETCHES`` x the 6 s exchange ceiling (~24 s by default) —
+    bounded, and deliberately NOT reserved up front, because reserving the
+    timeout would refuse honest fetches that finish far inside it.
+    """
+    now = time.monotonic()
+    with _BUDGET_LOCK:
+        if _budget_remaining_locked(now) <= 0:
+            raise CimdError(
+                "CIMD fetch wall-clock budget exhausted for this window.")
+
+
+def _budget_charge(elapsed: float) -> None:
+    """Charge ACTUAL fetch seconds. Called in a ``finally``, so a refused or
+    failed fetch still pays for the time it occupied."""
+    global _BUDGET_SPENT
+    with _BUDGET_LOCK:
+        _BUDGET_SPENT += elapsed
 
 
 def _prune(bucket: list[float], now: float) -> list[float]:
@@ -520,22 +599,41 @@ def validate_document(client_id: str, document: dict,
 def resolve_client_metadata(client_id: str, *, supported_scopes: set[str],
                             supported_grants: set[str],
                             default_scope: str) -> dict:
-    """Full CIMD resolution: validate → cache → rate-limit → fetch → validate.
+    """Full CIMD resolution: validate → cache → bounded fetch → validate.
 
-    A cached hit skips the rate limit (the limit bounds *fetches*, not
-    resolutions). Nothing that raised is ever cached, so a transient failure is
-    retried on the next request instead of being pinned for the TTL.
+    A cached hit skips EVERY bound (the rate limit, the in-flight cap and the
+    wall-clock budget all bound *fetches*, not resolutions). Nothing that
+    raised is ever cached, so a transient failure is retried on the next
+    request instead of being pinned for the TTL.
+
+    #3669 — the fetch is bounded three ways, all charged HERE so that the four
+    unauthenticated front doors (`/oauth/authorize`, `/oauth/consent`, and the
+    auth-code + refresh grants of `/oauth/token`) are counted identically:
+    fetch COUNT (the rate limiter above), CONCURRENT fetches
+    (``MAX_IN_FLIGHT_FETCHES``) and total wall-clock SECONDS per window
+    (``FETCH_BUDGET_S``). The last two exist because count alone does not bound
+    the product, and this function is the one place every door passes through.
     """
     client_id = validate_client_id_url(client_id)
     cached = _cache_get(client_id)
     if cached is not None:
         return cached
-    _charge_rate_limit(urlparse(client_id).hostname or "")
-    document = fetch_client_metadata(client_id)
-    record = validate_document(
-        client_id, document,
-        supported_scopes=supported_scopes,
-        supported_grants=supported_grants,
-        default_scope=default_scope)
-    _cache_put(client_id, record)
-    return record
+    if not _IN_FLIGHT.acquire(timeout=IN_FLIGHT_WAIT_S):
+        raise CimdError("CIMD fetch concurrency limit reached.")
+    try:
+        _budget_admit()
+        _charge_rate_limit(urlparse(client_id).hostname or "")
+        started = time.monotonic()
+        try:
+            document = fetch_client_metadata(client_id)
+        finally:
+            _budget_charge(time.monotonic() - started)
+        record = validate_document(
+            client_id, document,
+            supported_scopes=supported_scopes,
+            supported_grants=supported_grants,
+            default_scope=default_scope)
+        _cache_put(client_id, record)
+        return record
+    finally:
+        _IN_FLIGHT.release()

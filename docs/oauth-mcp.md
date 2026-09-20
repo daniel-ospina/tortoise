@@ -8,7 +8,7 @@ aboutObjects: tortoise-oauth-mcp
 domain: platform
 doc_status: live
 created: 2026-08-15
-updated: 2026-09-11
+updated: 2026-09-20
 ---
 
 # OAuth 2.1 for Remote MCP Auth (hosted)
@@ -149,7 +149,7 @@ authenticated, and — because `resolve_client` is the one resolver shared with
 the token path — also from `/oauth/consent` and from `/oauth/token` (both
 grants) when the presented `client_id` does not resolve in the registry. That
 is a server-side request forgery surface, so the fetch lives in
-`tortoise/cimd.py` behind six controls, each with a test in
+`tortoise/cimd.py` behind seven controls, each with a test in
 `tests/test_cimd_ssrf.py`:
 
 | # | Control | Implementation |
@@ -160,6 +160,7 @@ is a server-side request forgery surface, so the fetch lives in
 | 4 | Size + timeout | 64 KiB body cap, 3 s connect/read |
 | 5 | Cache | successes only, 300 s TTL, LRU cap 128; errors and malformed documents are **never** cached (§4.3) |
 | 6 | Rate limit | per-host 60/hr + aggregate 600/hr + live-store cap 256 |
+| 7 | Total occupancy (#3669) | in-flight fetches capped process-wide (4) + wall-clock budget per 3600 s window (120 s), charged for every fetch |
 
 Control 2 is closed against **DNS rebinding** rather than narrowed: a custom
 `httpcore` `NetworkBackend` resolves the host, refuses the whole resolution if
@@ -201,7 +202,9 @@ which is the whole point of the change, and the property DCR lacks.
 changes the growth *driver* from connections to distinct `client_id` URLs; it
 does not itself cap row growth, because anyone can mint a URL. The reachable
 rate is bounded by the **CIMD fetch** limiter above (600/hr aggregate,
-in-process) — **not** by the DCR limiter, which CIMD never touches. Pruning for
+in-process) — **not** by the DCR limiter, which CIMD never touches — and, since
+#3669, also by a process-wide in-flight cap and a per-window wall-clock budget
+(see "Limitations"). Pruning for
 the pre-existing DCR-generated rows remains owned by **#2853 / #1677 (owner
 @daniel-ospina, dated 2026-10-15)**; CIMD adds one row per client
 implementation in normal operation but does add to that backlog under abuse.
@@ -232,32 +235,32 @@ Before #4097 an empty value silently disabled `TORTOISE_OAUTH_CIMD` (and, worse,
 - The rate-limit and fetch-cache stores are in-process, so the real bound is
   `limit × running machines` and resets on restart — the same accepted
   limitation as `_OAUTH_DCR_BUCKETS` (#2866; the shared primitive is #3124).
-- The fetch is **synchronous**, matching this path's existing control-plane
-  style (`cp.query` is a blocking PostgREST call made from the same async
-  handler). Control 4 bounds ONE fetch (3 s connect/read); it does NOT bound the
-  event-loop time the aggregate can consume, and `Dockerfile.hosted` runs a
-  single `uvicorn` process with no `--workers`. Distinct `client_id` URLs share
-  one aggregate budget (600/hr), so a flood of attacker-authored URLs can
-  occupy up to the whole window and starve a legitimate CIMD client to
-  `invalid_client` once the aggregate is spent. Filed as **#3669**; moving the
-  fetch off the event loop (or bounding total occupancy rather than fetch count)
-  is the fix — it is not an SSRF bypass.
-- The `authorize` error path resolves a CIMD client through the same resolver,
-  so an in-document `redirect_uri` is honoured on error responses too — but a
-  *refused* fetch there degrades to a JSON error rather than a redirect, which
-  is the conservative direction.
+- The fetch is **synchronous** by construction, matching this path's existing
+  control-plane style (`cp.query` is a blocking PostgREST call made from the
+  same async handler). **#3669 moved the whole OAuth client resolution off the
+  event loop** through the bounded `monitoring` offload seam on a dedicated
+  `oauth` pool, so a fetch no longer occupies the loop (`Dockerfile.hosted` runs
+  a single `uvicorn` process with no `--workers`). Total occupancy is bounded by
+  a process-wide **in-flight cap** (`cimd.MAX_IN_FLIGHT_FETCHES`) plus a
+  **wall-clock budget per window** (`cimd.FETCH_BUDGET_S`), charged in
+  `resolve_client_metadata` — the one function all four unauthenticated front
+  doors reach through `resolve_client`. Fetch COUNT alone never bounded the
+  product (distinct `client_id` URLs share one aggregate budget; 600 fetches at
+  the 6 s ceiling is ~the whole window), so the budget is the load-bearing fix
+  and it is not an SSRF bypass.
+- The `authorize` error path uses the client **stamped on the raised
+  `OAuthError`** by `validate_authorize_params`, so an in-document
+  `redirect_uri` is still honoured on error responses without a second
+  resolution. Before #3669 it re-resolved, paying a second CIMD fetch and
+  rate-limit charge on every *failed* request (the success path's cache
+  absorbed it); a refused fetch there degrades to a JSON error rather than a
+  redirect, which is the conservative direction.
 - **Revocation:** the CIMD resolver re-reads through the revoked-filtered
   accessor, so a revoked `client_id` URL is refused at `/oauth/authorize` and
   `/oauth/consent` exactly as a revoked DCR client is (found in review; the
   provisioning insert's duplicate re-read used the raw row and would otherwise
   have resurrected it). Re-adding a revoked CIMD client requires clearing
   `revoked_at`, same as any other client.
-- **Failure cost:** on a *failed* CIMD resolution the `/oauth/authorize` error
-  path resolves a second time (it needs the client's registered
-  `redirect_uris` to decide between a redirect and a JSON error). The success
-  path pays nothing extra — the cache absorbs the re-resolve — but a failing
-  request can cost two fetch attempts and two rate-limit charges. Conservative
-  (the limiter bites sooner) and bounded by the aggregate; tracked with #3669.
 - `oauth_anthropic_creds` (Anthropic-held credentials) remains the ops-side
   alternative and is **not** implemented here: it needs no Tortoise code, only
   an email to `mcp-review@anthropic.com` with a `client_id`/`client_secret`.

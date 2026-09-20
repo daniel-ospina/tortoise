@@ -221,6 +221,55 @@ def test_best_effort_uses_a_separate_pool_from_auth():
     assert telemetry.workers == monitoring.CONTROL_PLANE_TELEMETRY_WORKERS
 
 
+def test_oauth_pool_is_separate_from_auth_and_telemetry():
+    """#3669: a CIMD fetch is attacker-reachable, so its pool must be its OWN —
+    sharing ``auth`` would let a fetch flood park every auth slot (the #3498
+    review P1 argument applied to a new attacker class)."""
+    auth = monitoring.control_plane_worker("auth")
+    oauth = monitoring.control_plane_worker("oauth")
+    telemetry = monitoring.control_plane_worker("telemetry")
+    assert oauth is not auth and oauth is not telemetry
+    assert oauth.workers == monitoring.CONTROL_PLANE_OAUTH_WORKERS
+
+
+def test_oauth_offload_routes_to_the_oauth_pool(monkeypatch):
+    """WIRING guard: reverting ``_oauth_offload`` to the auth pool would keep
+    every behavioural test green, so record what it actually passes."""
+    seen: list[str] = []
+
+    async def _recorder(fn, *, op, pool="auth"):
+        seen.append(pool)
+        return "ok"
+
+    monkeypatch.setattr(ha, "run_control_plane_call", _recorder)
+
+    async def _run():
+        await ha._oauth_offload(lambda: None, op="oauth-probe")
+
+    asyncio.run(_run())
+    assert seen == ["oauth"], (
+        f"_oauth_offload used pool {seen} — the OAuth lane must never share the "
+        "auth pool (#3669)"
+    )
+
+
+def test_oauth_offload_maps_failure_to_the_oauth_503(monkeypatch):
+    """The OAuth lane's fail-closed error is the RFC 6749 §5.2
+    ``temporarily_unavailable`` shape its consumers parse (#2863) — NOT the
+    FastAPI ``control_plane_unavailable`` body the auth/REST lane uses."""
+    from tortoise.oauth import OAuthTemporarilyUnavailable
+
+    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.05)
+
+    async def _run():
+        await ha._oauth_offload(lambda: time.sleep(0.4), op="slow")
+
+    with pytest.raises(OAuthTemporarilyUnavailable) as excinfo:
+        asyncio.run(_run())
+    assert excinfo.value.status == 503
+    assert excinfo.value.error == "temporarily_unavailable"
+
+
 def test_unknown_pool_fails_closed():
     """The pool selector is the only thing keeping best-effort work off auth
     capacity — a typo must raise, not silently fall back to the auth pool."""
