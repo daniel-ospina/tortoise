@@ -436,6 +436,13 @@ def compute_embeddings(
         return [None] * len(texts)
 
 
+#: #4280: width mismatches already warned about, keyed ``(expected_dim, actual)``.
+#: A width misconfiguration drops EVERY row, so an unlatched warning storms a
+#: bulk write (one line per Point); the signal is the first occurrence of each
+#: distinct mismatch.
+_WIDTH_MISMATCH_WARNED: set[tuple[int | None, int]] = set()
+
+
 def _degrade_to_width(
     vectors: list[list[float] | None], expected_dim: int | None,
 ) -> list[list[float] | None]:
@@ -444,27 +451,34 @@ def _degrade_to_width(
     ``None`` means the caller's store has NO width-fixing vector index, so the
     encoder's own width governs and nothing is dropped. A dropped row becomes
     ``None`` (the node is still written; the read path declares the leg
-    impaired) and is LOGGED — a silent drop is indistinguishable from "the leg
-    ran and found nothing", which is exactly how #4280 hid (fail-open).
+    impaired) and is LOGGED once per distinct ``(expected_dim, actual)`` — a
+    silent drop is indistinguishable from "the leg ran and found nothing",
+    which is exactly how #4280 hid (fail-open).
     """
     if expected_dim is None:
         return list(vectors)
     out: list[list[float] | None] = []
     dropped = 0
+    widths: set[int] = set()
     for row in vectors:
         if row is not None and len(row) != expected_dim:
             dropped += 1
+            widths.add(len(row))
             out.append(None)
         else:
             out.append(row)
     if dropped:
-        logger.warning(
-            "embedder returned %d/%d row(s) whose width != the store's "
-            "required %d — those vectors are NOT stored (the dense leg "
-            "degrades to keyword-only for them). Rotating the embedder "
-            "requires re-embedding the store.",
-            dropped, len(vectors), expected_dim,
-        )
+        fresh = {(expected_dim, w) for w in widths} - _WIDTH_MISMATCH_WARNED
+        if fresh:
+            _WIDTH_MISMATCH_WARNED.update(fresh)
+            logger.warning(
+                "embedder returned %d/%d row(s) whose width != the store's "
+                "required %d — those vectors are NOT stored (the dense leg "
+                "degrades to keyword-only for them). Rotating the embedder "
+                "requires re-embedding the store. (Warned once per distinct "
+                "mismatch.)",
+                dropped, len(vectors), expected_dim,
+            )
     return out
 
 
@@ -495,8 +509,21 @@ def encode_for_store(
 def encode_batch_for_store(
     texts: list[str], expected_dim: int | None,
 ) -> list[list[float] | None]:
-    """Batched :func:`encode_for_store` — one model call, same width guard."""
+    """Batched :func:`encode_for_store` — one model call, same width guard.
+
+    The batch length is enforced against the input: the turn writers index the
+    result per windowed turn, so a REPLACEMENT of the seam that returns a short
+    batch would otherwise raise ``IndexError`` inside the capture loop — after
+    the Session write — and leave a partial session. A short batch degrades to
+    no vector per text, which the writers already handle.
+    """
     vecs = compute_embeddings(texts)
+    if len(vecs) != len(texts):
+        logger.warning(
+            "embedder returned %d row(s) for %d text(s) — no vector is "
+            "stored for this batch (#4280).", len(vecs), len(texts),
+        )
+        return [None] * len(texts)
     return _degrade_to_width(vecs, expected_dim)
 
 

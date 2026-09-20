@@ -136,7 +136,8 @@ def test_captured_turn_embedding_matches_the_query_encoder(sdk, embedder,
     """The stored turn vector is the SAME vector the query leg encodes.
 
     Pins model + dimension + normalisation together: the write goes through
-    ``compute_embedding`` (what ``create_point`` uses, so turn and extracted
+    ``embeddings.encode_batch_for_store`` → ``compute_embeddings`` (the seam
+    ``create_point``'s ``compute_embedding`` delegates to, so turn and extracted
     Points can never diverge) and is compared against the EXACT call the read
     path makes (``EmbeddingModel.get().encode([q])[0]``). A dimension mutation
     (wrong-length vector) fails the length assertion; a normalisation mutation
@@ -157,7 +158,8 @@ def test_captured_turn_embedding_matches_the_query_encoder(sdk, embedder,
             f"{tid}: turn stored WITHOUT an embedding — the dense leg is inert")
         assert len(stored) == query_dim, (
             f"{tid}: stored dim {len(stored)} != query-encoder dim {query_dim}")
-        # Write-side: the shared function create_point uses.
+        # Write-side: the seam ``create_point``'s ``compute_embedding``
+        # delegates to (single-vs-batched equality for the same text).
         assert np.allclose(stored, compute_embedding(content), atol=1e-6), tid
         # Query-side: the exact call the read path makes. (For content at or
         # under the 512-word encode cap this is the same string the write
@@ -465,6 +467,37 @@ def test_wrong_width_model_output_degrades_to_no_vector(sdk, monkeypatch, embedd
         assert stored is not None, (
             f"{tid}: the index-less lane must keep the encoder's vector")
         assert len(stored) == EMBEDDING_DIM - 1, tid
+
+
+def test_required_embedding_dim_follows_the_index_not_the_mode(sdk, monkeypatch):
+    """The declared width follows the INDEX, not the deployment flag (#4280).
+
+    Three lanes have NO Point HNSW index and all three read through
+    ``run_vector_query``'s dimension-agnostic brute-force branch: an embedded
+    store (index creation is skipped by design), and a NON-embedded store whose
+    index creation did not succeed (engine older than 4.x, or both creation
+    attempts raised). The store must therefore declare no width on all three —
+    keying this on ``_is_embedded`` instead re-armed the #4280 shape on the
+    last two (review finding, PR #4280). Only a store that HAS the index
+    declares :data:`EMBEDDING_DIM`.
+    """
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    proj = sdk._get_proj()
+    assert proj._is_embedded is True
+    assert proj._vector_index_api is None
+    assert proj.required_embedding_dim is None, (
+        "an embedded store has no vector index — it must not declare a width")
+
+    # A NON-embedded store whose index never got created is still brute-force.
+    monkeypatch.setattr(proj, "_is_embedded", False)
+    assert proj._vector_index_api is None
+    assert proj.required_embedding_dim is None, (
+        "no index exists on this store, so no width is enforceable")
+
+    # Only a store that actually has the index constrains the width.
+    monkeypatch.setattr(proj, "_vector_index_api", "cypher")
+    assert proj.required_embedding_dim == EMBEDDING_DIM
 
 
 # ── 4. The hosted write path is the same write ────────────────────────────

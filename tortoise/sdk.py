@@ -23,10 +23,6 @@ from typing import Any
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
-# #4280: the model's declared width — the fail-closed DEFAULT for a caller that
-# forgets to name its store's constraint (see `_capture_turn_embeddings`). Leaf
-# module (numpy + env_truthy only), so this is not an import cycle.
-from .embeddings import EMBEDDING_DIM as _DEFAULT_EMBEDDING_DIM
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
@@ -487,7 +483,7 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
 
 def _capture_turn_embeddings(
     turn_texts: list[str],
-    expected_dim: int | None = _DEFAULT_EMBEDDING_DIM,
+    expected_dim: int | None,
 ) -> list[list[float] | None]:
     """Embed the stored turn texts with the SAME local embedder the query uses.
 
@@ -509,10 +505,11 @@ def _capture_turn_embeddings(
     model/dimension/normalisation are the shared contract, the cap is not.
 
     ``expected_dim`` is the CALLER's store width (``proj.required_embedding_dim``
-    — :data:`EMBEDDING_DIM` when the store has a Point HNSW index, ``None`` on
-    the index-less embedded brute-force lane, where any self-consistent width
-    is storable). It is threaded through rather than assumed, because the
-    width constraint belongs to the INDEX, not to the encoder (#4280).
+    — :data:`EMBEDDING_DIM` when the store has a Point HNSW index, ``None`` when
+    it has none, where the read path brute-force scans and any self-consistent
+    width is storable). It is a REQUIRED argument, not defaulted: a default
+    would have to pick one of the two answers, and the wrong one silently NULLs
+    every vector on the lane that answer does not describe (#4280 review).
 
     The batch goes through :func:`embeddings.encode_batch_for_store`, which
     applies that width to the rows — the seam itself keeps its narrow shape so
@@ -532,6 +529,14 @@ def _capture_turn_embeddings(
         from .embeddings import encode_batch_for_store
         return encode_batch_for_store(turn_texts, expected_dim)
     except Exception:  # noqa: BLE001, RUF100 — embedding is optional
+        # Embedding is optional, but a WHOLE-BATCH failure must stay audible:
+        # silently returning `None` per turn is indistinguishable from "the
+        # leg ran and found nothing", which is how #4280 hid (review finding).
+        _logger.warning(
+            "turn embedding batch failed — %d turn(s) stored with no vector "
+            "(the dense leg degrades to keyword-only for them).",
+            len(turn_texts), exc_info=True,
+        )
         return [None] * len(turn_texts)
 
 
