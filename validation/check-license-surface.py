@@ -121,13 +121,14 @@ CONSUMER_SURFACES = {
 # appears.
 DECLARATION_WINDOW = 20
 # `busl` / `BUSL-1.1` (the SPDX id, with or without its version) and the
-# versioned short form `BSL 1.1` (how vendored notices and mariadb.com/bsl11
-# abbreviate it). The UNVERSIONED acronym `BSL` is deliberately not a token —
-# the served how-to-use-tortoise skill writes "BSL is OSI-approved" and
-# "BSL+AGPL" in prose, and a version is what separates a claim from a mention.
+# versioned short form `BSL[ ._-][v]1.1` (how vendored notices and
+# mariadb.com/bsl11 abbreviate it — `BSL 1.1`, `BSL-1.1`, `BSL v1.1`). The
+# UNVERSIONED acronym `BSL` is deliberately not a token — the served
+# how-to-use-tortoise skill writes "BSL is OSI-approved" and "BSL+AGPL" in
+# prose, and a version is what separates a claim from a mention.
 BSL_TOKENS = (
     re.compile(r"\bbusl(-1\.1)?\b", re.I),
-    re.compile(r"\bbsl\s*1\.1\b", re.I),
+    re.compile(r"\bbsl[\s._-]*(?:v(?:ersion)?[\s._-]*)?1\.1\b", re.I),
 )
 BSL_NAMES = (re.compile(r"business\s+source\s+license(\s+1\.1)?", re.I),)
 # A file whose whole body IS (or carries) a licence/notice is scanned whole-file
@@ -274,7 +275,7 @@ def check() -> list[str]:
         if not path.exists():
             errors.append(f"{name}: file missing ({path})")
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for needle in spec["required"]:
             if needle not in text:
                 errors.append(f"{name}: missing '{needle}'")
@@ -283,7 +284,7 @@ def check() -> list[str]:
         if not path.exists():
             errors.append(f"{name}: file missing ({path})")
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for needle in spec["required"]:
             if needle not in text:
                 errors.append(f"{name} (#526 client dist): missing '{needle}'")
@@ -293,6 +294,13 @@ def check() -> list[str]:
 
 
 def main() -> int:
+    # The summary glyphs below cannot be encoded by a C/POSIX stdout, which turns
+    # a diagnosis into a traceback; pin the stream the same way the file reads
+    # are pinned (found while closing the review's locale finding).
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):
+        pass
     errors = check()
     if errors:
         print("❌ License surface inconsistent:")

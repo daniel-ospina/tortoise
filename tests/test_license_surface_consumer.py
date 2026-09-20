@@ -26,6 +26,9 @@ change's review history, or a behaviour that must not regress):
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -216,7 +219,10 @@ def test_versioned_short_form_is_a_declaration(tmp_path: Path) -> None:
     module = _load()
     assert module.bsl_declaration("This software is also available under the BSL 1.1.\n") == "BSL 1.1"
     assert module.bsl_declaration("released under BSL1.1\n") == "BSL1.1"
+    for spelling in ("BSL-1.1", "BSL_1.1", "BSL v1.1", "BSL version 1.1", "BSL.V1.1"):
+        assert module.bsl_declaration(f"available under the {spelling}.\n") is not None, spelling
     assert module.bsl_declaration("BSL is OSI-approved\n") is None
+    assert module.bsl_declaration("BSL 1.0 is not the same licence\n") is None
     surface = _make_surface(tmp_path)
     (surface / "LICENSE").write_text(MIT_TEXT)
     (surface / "some-skill" / "SKILL.md").write_text(
@@ -241,21 +247,55 @@ def test_plural_notice_names_are_scanned_whole_file(tmp_path: Path) -> None:
     assert module.is_licence_file(Path("NOTICES") / "terms.txt") is True
 
 
-def test_non_ascii_skill_is_still_scanned(tmp_path: Path, monkeypatch) -> None:
+def test_non_ascii_skill_is_still_scanned(tmp_path: Path) -> None:
     """The reads are UTF-8-pinned, so a C/POSIX locale must not silently skip
-    every non-ASCII file (all four served skills are heavily non-ASCII) — the
-    locale-decoding hole found by the code-review gate."""
+    every non-ASCII file (all four served skills are heavily non-ASCII).
+
+    This runs the assertion in an `LC_ALL=C` SUBPROCESS: `os.environ` mutations
+    after the interpreter has started do not change the locale, so an earlier
+    version of this test passed against the unpinned implementation and proved
+    nothing (found by the code-review gate). The probe prints the locale it
+    actually ran under, and the test refuses to pass unless that locale is
+    genuinely non-UTF-8 — a test that cannot fail is not a test.
+    """
     module = _load()
-    monkeypatch.setenv("LC_ALL", "C")
-    monkeypatch.setenv("PYTHONCOERCECLOCALE", "0")
-    monkeypatch.setenv("PYTHONUTF8", "0")
     surface = _make_surface(tmp_path)
     (surface / "LICENSE").write_text(MIT_TEXT)
     (surface / "some-skill" / "SKILL.md").write_text(
         "# \u2014 em-dash and non-ASCII \u2014\n\nSPDX-License-Identifier: BUSL-1.1\n"
     )
-    errors = module.check_consumer_surface("surface", _spec(module, surface))
-    assert any("declares BSL" in e for e in errors), errors
+    probe = tmp_path / "locale_probe.py"
+    probe.write_text(
+        "import importlib.util, locale, pathlib, sys\n"
+        f"spec = importlib.util.spec_from_file_location('cls', {str(CHECK_PATH)!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "surface = pathlib.Path(sys.argv[1])\n"
+        "errors = mod.check_consumer_surface('probe', {'path': surface,\n"
+        "    'licence': surface / 'LICENSE',\n"
+        "    'required': ['MIT License', 'Copyright (c) 2026 Premise Labs',\n"
+        "                 'Permission is hereby granted, free of charge']})\n"
+        "print('PREFERRED=' + str(locale.getpreferredencoding(False)))\n"
+        "print('VERDICT=' + ('CAUGHT' if errors else 'MISSED'))\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONUTF8": "0",
+        "PYTHONIOENCODING": "utf-8",
+    }
+    result = subprocess.run(
+        [sys.executable, str(probe), str(surface)], env=env, capture_output=True, text=True,
+    )
+    assert "PREFERRED=" in result.stdout, (result.stdout, result.stderr)
+    preferred = result.stdout.split("PREFERRED=", 1)[1].splitlines()[0]
+    assert "utf-8" not in preferred.lower(), (
+        f"the probe did not actually run under a non-UTF-8 locale ({preferred!r}) — "
+        "this test would be vacuous"
+    )
+    assert "VERDICT=CAUGHT" in result.stdout, (preferred, result.stdout, result.stderr)
 
 
 def test_marker_matcher_is_case_and_whitespace_insensitive() -> None:
