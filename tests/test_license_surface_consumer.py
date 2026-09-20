@@ -8,13 +8,16 @@ own prose about licensing — which is how a required check gets taught to be
 ignored. Both directions are pinned here against ``tmp_path`` fixtures: no repo
 file is mutated, and no network/DB/FalkorDB is used.
 
-The load-bearing cases (each verified RED against the pre-fix implementation
-before this change landed):
+The load-bearing cases (each verified RED against the implementation it
+replaced):
 
-* a missing / non-MIT / composite (MIT + appended BSL) licence file;
-* a BSL declaration inside a served file (SPDX header, bare ``BUSL`` token,
-  column-aligned canonical name) — including the ``*.license`` sidecar form that
-  the first implementation claimed in its comment but did not match;
+* a missing / non-MIT / non-UTF-8 / composite (MIT + appended BSL) licence file;
+* a BSL declaration inside a served file or a licence/notice file — SPDX header,
+  bare ``BUSL`` token, column-aligned canonical name — including the name forms
+  a prefix-only pattern missed (``*.license`` sidecars, ``LICENSE-BSL``,
+  ``LICENSE-2.0.txt``, ``third_party_licenses.txt``, ``LICENSES/``);
+* a skill directory SYMLINKED into the surface (``Path.rglob`` does not descend
+  into one, so it used to be served-but-unasserted);
 * prose: the served ``how-to-use-tortoise`` skill discusses BSL, and a skill
   saying "Business Source License" in its body must NOT red the check.
 """
@@ -132,13 +135,51 @@ def test_bsl_spdx_header_in_a_served_file_is_an_error(tmp_path: Path) -> None:
 
 
 def test_licence_sidecar_suffix_is_scanned_whole_file(tmp_path: Path) -> None:
-    """A `*.license` sidecar is a licence/notice file (the suffix form)."""
+    """A `*.license` sidecar is scanned whole-file — the name is the only reason
+    the declaration is found, so the fixture pushes it past the 20-line window
+    (a fixture that lands inside the window would pass either way)."""
     module = _load()
     surface = _make_surface(tmp_path)
     (surface / "LICENSE").write_text(MIT_TEXT)
-    (surface / "MIT.license").write_text(MIT_TEXT + "\n" + BSL_TEXT)
+    (surface / "MIT.license").write_text("filler\n" * 30 + BSL_TEXT)
     errors = module.check_consumer_surface("surface", _spec(module, surface))
     assert any("MIT.license" in e for e in errors), errors
+
+
+def test_dashed_and_suffixed_licence_names_are_scanned_whole_file(tmp_path: Path) -> None:
+    """`LICENSE-BSL` / `LICENSE-2.0.txt` / `third_party_licenses.txt` — the
+    forms a prefix-only pattern missed while the comment claimed `LICENSE*`."""
+    module = _load()
+    for name in ("LICENSE-BSL", "LICENSE-2.0.txt", "third_party_licenses.txt", "COPYING.txt"):
+        assert module.is_licence_file(Path(name)), name
+        surface = tmp_path / name.replace(".", "-")
+        surface.mkdir()
+        (surface / "LICENSE").write_text(MIT_TEXT)
+        (surface / name).write_text("filler\n" * 30 + BSL_TEXT)
+        errors = module.check_consumer_surface("surface", _spec(module, surface))
+        assert any(name in e for e in errors), (name, errors)
+
+
+def test_non_utf8_licence_is_a_named_error_not_a_traceback(tmp_path: Path) -> None:
+    module = _load()
+    surface = _make_surface(tmp_path)
+    (surface / "LICENSE").write_bytes(b"\xff\xfe\x00M\x00I\x00T")
+    errors = module.check_consumer_surface("surface", _spec(module, surface))
+    assert any("not UTF-8" in e for e in errors), errors
+
+
+def test_symlinked_skill_directory_is_scanned(tmp_path: Path) -> None:
+    """`Path.rglob` does not descend into a symlinked dir; the surface scan must
+    (the vite `public/` copy follows links, so such a dir would be served)."""
+    module = _load()
+    surface = _make_surface(tmp_path)
+    (surface / "LICENSE").write_text(MIT_TEXT)
+    outside = tmp_path / "elsewhere" / "linked-skill"
+    outside.mkdir(parents=True)
+    (outside / "LICENSE-BSL").write_text("filler\n" * 30 + BSL_TEXT)
+    (surface / "linked-skill").symlink_to(outside, target_is_directory=True)
+    errors = module.check_consumer_surface("surface", _spec(module, surface))
+    assert any("linked-skill" in e for e in errors), errors
 
 
 def test_licenses_directory_is_scanned_whole_file(tmp_path: Path) -> None:
@@ -168,17 +209,30 @@ def test_canonical_name_in_body_prose_is_not_a_declaration(tmp_path: Path) -> No
 
 
 def test_marker_matcher_is_case_and_whitespace_insensitive() -> None:
+    """Declarations are matched however they are cased/aligned, and the matcher
+    returns the EVIDENCE (the matched text), not the regex."""
     module = _load()
-    assert module.bsl_declaration("<!-- spdx-license-identifier: busl-1.1 -->\n") == r"\bbusl\b"
-    assert module.bsl_declaration("license: BUSL\n") == r"\bbusl\b"
-    assert module.bsl_declaration("Copyright 2026 - Business   Source   License\n")
-    assert module.bsl_declaration("# x\n\nBSL is not OSI-approved\n") is None
+    assert module.bsl_declaration("<!-- spdx-license-identifier: busl-1.1 -->\n") == "busl-1.1"
+    assert module.bsl_declaration("license: BUSL\n") == "BUSL"
+    assert module.bsl_declaration("licensed under the BUSL\n") == "BUSL"
+    assert module.bsl_declaration("busling\n") is None
+    assert module.bsl_declaration("Copyright 2026 - Business   Source   License\n") == (
+        "Business   Source   License"
+    )
+    # a token ANYWHERE counts (prose included): the artifact is claiming BUSL
+    assert module.bsl_declaration("filler\n" * 30 + "This is under BUSL-1.1.\n") == "BUSL-1.1"
+    # ... but the canonical NAME past the window of a content file does not
     assert module.bsl_declaration("filler\n" * 40 + "Business Source License 1.1\n") is None
+    # and the bare acronym the served skills use in prose is not a token
+    assert module.bsl_declaration("# x\n\nBSL is not OSI-approved\n") is None
 
 
 def test_licence_file_name_detection() -> None:
     module = _load()
-    for name in ("LICENSE", "LICENSE.md", "COPYING", "NOTICE", "MIT.license", "COPYING.txt"):
+    for name in ("LICENSE", "LICENSE.md", "COPYING", "NOTICE", "MIT.license", "COPYING.txt",
+                 "LICENSE-BSL", "LICENSE-2.0.txt", "third_party_licenses.txt"):
         assert module.is_licence_file(Path(name)), name
     assert module.is_licence_file(Path("SKILL.md")) is False
+    assert module.is_licence_file(Path("licensee-notes.md")) is False
     assert module.is_licence_file(Path("licenses") / "terms.txt") is True
+    assert module.is_licence_file(Path("licences") / "terms.txt") is True

@@ -598,14 +598,14 @@ surfaces:
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
-  - test_linear_connector.py
-  - test_lint_config.py
-  - test_lint_tripwire.py
-  - test_list_contexts.py
   # #4366: the consumer-skills licence assertion (validation/check-license-surface.py)
   # — DB-free marker/surface unit tests; `core` is the fallback for a validation/
   # -only change, which is the only way that script selects a surface.
   - test_license_surface_consumer.py
+  - test_linear_connector.py
+  - test_lint_config.py
+  - test_lint_tripwire.py
+  - test_list_contexts.py
   - test_lme_m6_evidence.py
   - test_longmem_costing.py
   - test_longmem_errors.py

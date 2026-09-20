@@ -11,7 +11,8 @@ Also asserts the NON-BSL surfaces that must stay permissive, because a
 per-directory licence is otherwise invisible to CI and an artifact can
 silently inherit the repo default — the #526 client dist (Apache-2.0) and,
 since #4366, the served consumer skills surface (MIT). See
-`docs/license-notes.md` §6 and §7.
+`docs/license-notes.md` — the "Client/Server Split" section (#526) and §7
+(#4366).
 
 Repo-local by design: `scripts/` is an agent-infra symlink; this lives in
 `validation/` per AGENTS.md. Wired into `.github/workflows/ci.yml` at T5.3
@@ -21,6 +22,7 @@ path gate, so a consumer-surface regression fails every PR.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -103,52 +105,89 @@ CONSUMER_SURFACES = {
 # Two marker classes, because a licence DECLARATION and a PROSE MENTION look
 # different and only one of them is a regression:
 #   * TOKENS are unambiguous wherever they appear — the SPDX id with or without
-#     its version (`BUSL`, `BUSL-1.1`), scanned across the WHOLE file; the bare
-#     acronym `BSL` is deliberately NOT a token because the served
-#     how-to-use-tortoise skill discusses BSL in prose.
-#   * The human-readable canonical NAME ("Business Source License[ 1.1]") is how
-#     that same skill DISCUSSES licensing, so it counts only in the DECLARATION
-#     WINDOW — the leading lines of the file (frontmatter + a header comment),
-#     which is where a licence header lives and where prose does not.
+#     its version (`BUSL`, `BUSL-1.1`), scanned across the WHOLE file, prose
+#     included (an artifact that names BUSL anywhere is claiming it). The bare
+#     acronym `BSL` is deliberately NOT a token: the served how-to-use-tortoise
+#     skill discusses BSL in prose and must not red a required check.
+#   * The human-readable canonical NAME ("Business Source License[ 1.1]") is
+#     matched only in the DECLARATION WINDOW — the leading lines of the file
+#     (frontmatter + a header comment), which is where a licence header lives —
+#     except in a licence/notice file, which is scanned whole.
 # Both are matched case-insensitively with runs of whitespace collapsed, so a
 # re-imported header cannot slip past on casing or column alignment. LIMIT (by
 # design, documented in docs/license-notes.md §7): a file that is not valid
-# UTF-8 is skipped — the surface is text; a binary asset dropped into it would
-# carry no assertion.
+# UTF-8 carries no assertion, and a canonical NAME buried past the window of an
+# ordinary content file is out of reach — the `BUSL` token is not, wherever it
+# appears.
 DECLARATION_WINDOW = 20
-BSL_TOKENS = (re.compile(r"\bbusl\b", re.I),)
+BSL_TOKENS = (re.compile(r"\bbusl(-1\.1)?\b", re.I),)
 BSL_NAMES = (re.compile(r"business\s+source\s+license(\s+1\.1)?", re.I),)
-# A file whose whole body IS (or carries) a licence/notice — `LICENSE*`,
-# `COPYING*`, `NOTICE*`, `*.license`/`*.licence`/`*.copying`/`*.notice` (REUSE
-# sidecars), or anything under a `LICENSES/` dir — is scanned whole-file for the
-# canonical NAME, not just in its first lines: the real BSL text carries the
-# name at line 2 AND again at line 28 and never carries the `BUSL` token, so a
-# composite file that keeps the MIT markers and appends the BSL terms would slip
-# past a window scan (verified bypasses: a composite `LICENSE`, and — after the
-# first fix — a composite `*.license` sidecar, both caught in review).
-LICENCE_FILE_RE = re.compile(
-    r"^(licen[cs]e|copying|notice)(\..+)?$|\.(licen[cs]e|copying|notice)$", re.I
-)
+# A file whose whole body IS (or carries) a licence/notice is scanned whole-file
+# for the canonical NAME, not just in its first lines: the real BSL text carries
+# the name at line 2 AND again at line 28 and never carries the `BUSL` token, so
+# a composite file that keeps the MIT markers and appends the BSL terms slips
+# past a window scan. Covered name forms (verified bypasses, each closed in
+# review): a composite `LICENSE`; a `*.license` sidecar; and — found by the
+# code-review gate — the dashed/suffixed forms `LICENSE-BSL`, `LICENSE-2.0.txt`
+# and `third_party_licenses.txt`, which a prefix-only pattern missed while the
+# comment (and §7) claimed the `LICENSE*` glob.
+LICENCE_FILE_RE = re.compile(r"(^|[._-])(licen[cs]es?|copying|notice)([._-].*)?$", re.I)
+LICENCE_DIRS = ("LICENSES", "LICENCES")
 
 
 def is_licence_file(path: Path) -> bool:
-    # search(), not match(): the `*.license` sidecar form anchors on the
-    # SUFFIX, so a name like `MIT.license` can only be found by searching.
+    # search(), not match(): the sidecar form (`MIT.license`) and the suffixed
+    # form (`third_party_licenses.txt`) anchor mid-string, so only a search finds
+    # them — `match()` here is what let `MIT.license` bypass the check.
     return bool(LICENCE_FILE_RE.search(path.name)) or any(
-        part.upper() == "LICENSES" for part in path.parts
+        part.upper() in LICENCE_DIRS for part in path.parts
     )
 
 
 def bsl_declaration(text: str, *, whole_file_names: bool = False) -> str | None:
-    """The first BSL DECLARATION in `text`, or None. Never matches body prose."""
+    """The first BSL DECLARATION in `text`, or None.
+
+    Returns the MATCHED TEXT — the evidence a maintainer needs — not the regex.
+    A `BUSL` token counts anywhere, prose included; the canonical NAME counts
+    only in the declaration window unless `whole_file_names` (a licence/notice
+    file), which is what keeps the served skills' licensing prose from reding a
+    required check.
+    """
     for pattern in BSL_TOKENS:
-        if pattern.search(text):
-            return pattern.pattern
+        hit = pattern.search(text)
+        if hit is not None:
+            return hit.group(0)
     scope = text if whole_file_names else "\n".join(text.splitlines()[:DECLARATION_WINDOW])
     for pattern in BSL_NAMES:
-        if pattern.search(scope):
-            return pattern.pattern
+        hit = pattern.search(scope)
+        if hit is not None:
+            return hit.group(0)
     return None
+
+
+def _surface_files(root: Path) -> list[Path]:
+    """Every regular file under `root`, following DIRECTORY symlinks.
+
+    `Path.rglob` does not descend into a symlinked directory, so a skill dir
+    symlinked into the surface would be served (the vite `public/` copy follows
+    links) while carrying no assertion — a latent fail-open in the guard (found
+    by the code-review gate). Directory cycles are pruned by (device, inode).
+    """
+    seen: set[tuple[int, int]] = set()
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        try:
+            stat = os.stat(dirpath)
+        except OSError:
+            dirnames[:] = []
+            continue
+        key = (stat.st_dev, stat.st_ino)
+        if key in seen:
+            dirnames[:] = []
+            continue
+        seen.add(key)
+        found.extend(Path(dirpath) / name for name in filenames)
+    return sorted(found)
 
 
 def _display(path: Path) -> Path:
@@ -167,24 +206,37 @@ def check_consumer_surface(name: str, spec: dict) -> list[str]:
     """MIT licence present + no BSL declaration anywhere under the surface."""
     errors: list[str] = []
     licence = spec["licence"]
+    licence_text: str | None = None
     if not licence.exists():
         errors.append(
             f"{name}: no per-directory licence at {_display(licence)} — the "
             "surface inherits the repo's BSL 1.1 by default (#4366)"
         )
+    elif not licence.is_file():
+        errors.append(f"{name}: {_display(licence)} is not a file")
     else:
-        text = licence.read_text()
+        # The licence is the one file the assertion is centred on: an
+        # undecodable one must be a NAMED error, not a traceback (the same
+        # "not UTF-8 → no assertion" limit applies to it as to the rest of the
+        # surface, so it cannot fail open silently either).
+        try:
+            licence_text = licence.read_text()
+        except UnicodeDecodeError:
+            errors.append(f"{name}: {_display(licence)} is not UTF-8 text — cannot assert its licence")
+    if licence_text is not None:
         for needle in spec["required"]:
-            if needle not in text:
+            if needle not in licence_text:
                 errors.append(f"{name}: {licence.name} is not a valid MIT licence — missing '{needle}'")
 
-    # Recursive: a file added anywhere in the surface (a new skill dir, a new
-    # asset) is covered by the directory licence above, so the only way it can
-    # re-import BSL is by declaring it in the file itself. The licence file is
-    # scanned too — NO exemption: a composite LICENSE that keeps the MIT
-    # markers and appends BSL terms is the same copy-paste accident class, and
-    # a presence-only MIT check would pass it (verified bypass, cycle-2 review).
-    for path in sorted(p for p in spec["path"].rglob("*") if p.is_file()):
+    # Every file under the surface (symlinked dirs included) is covered by the
+    # directory licence above, so the only way it can re-import BSL is by
+    # declaring it in the file itself. The licence file is scanned too — NO
+    # exemption: a composite LICENSE that keeps the MIT markers and appends BSL
+    # terms is the same copy-paste accident class, and a presence-only MIT check
+    # would pass it (verified bypass, review cycle 2).
+    for path in _surface_files(spec["path"]):
+        if not path.is_file():
+            continue
         rel = _display(path)
         try:
             body = path.read_text()
@@ -193,7 +245,7 @@ def check_consumer_surface(name: str, spec: dict) -> list[str]:
         declared = bsl_declaration(body, whole_file_names=is_licence_file(path))
         if declared is not None:
             errors.append(
-                f"{name}: {rel} declares BSL 1.1 ('{declared}') — a consumer-consumed "
+                f"{name}: {rel} declares BSL 1.1 (matched {declared!r}) — a consumer-consumed "
                 "artifact must not carry the engine's licence (#4366)"
             )
     return errors
