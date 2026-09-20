@@ -964,13 +964,20 @@ function wizardWorkflowsText(key, mode) {
 // carry it. Before this, a create-key 402 advanced the modal to a broken 'done'
 // stage (an empty `.key-value` box, and a clipboard write of the literal
 // "null") while the notice sat on the tab BEHIND the modal, invisible.
-function CapNotice({ text, team, checkoutPending, onUpgrade }) {
+function CapNotice({ text, team, checkoutPending, billingPending, portalManaged, onUpgrade }) {
   return (
     <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
       <span className="dim small">{text}</span>
       {team?.checkout_price_id ? (
-        <button className="ghost small" onClick={onUpgrade} disabled={checkoutPending}>
-          {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+        // #4331: the button models the branch `upgrade()` will actually take
+        // — an active subscriber lands on the portal, so it must not sit on
+        // an enabled "Upgrade"/'Opening checkout…' state while the portal
+        // fetch is in flight.
+        <button className="ghost small" onClick={onUpgrade}
+                disabled={portalManaged ? billingPending : checkoutPending}>
+          {portalManaged
+            ? (billingPending ? 'Opening portal…' : 'Manage subscription')
+            : (checkoutPending ? 'Opening checkout…' : 'Upgrade')}
         </button>
       ) : (
         <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
@@ -2656,11 +2663,12 @@ function claimIntentInFlight() {
   }
 
   async function upgrade() {
-    // #4331/#4382: an existing Stripe customer cannot start a NEW checkout —
-    // POST /v1/billing/checkout 409s on an active subscription — so route
-    // them to the portal, matching the header / Billing nudge / plan-grid
-    // remedy routing. Everyone else starts a checkout.
-    if (canManageSubscription) { await manageBilling(); return }
+    // #4331/#4382: checkout 409s on an ACTIVE subscription (active/trialing/
+    // past_due) — route those to the portal, matching the header / Billing
+    // nudge / plan-grid remedy routing. Canceled/unpaid keep checkout so a
+    // lapsed customer can re-subscribe (#1623), and a free team still starts
+    // its first checkout.
+    if (hasActiveSubscription) { await manageBilling(); return }
     await upgradeToPrice(team?.checkout_price_id)
   }
 
@@ -8194,7 +8202,7 @@ function claimIntentInFlight() {
                     cap 402 puts its message on `capNotice` (not `error`), and
                     the tab-level notice sits behind this dialog — so without
                     this the user saw a silent form → empty reveal. */}
-                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
+                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} checkoutPending={checkoutPending} billingPending={billingPending} portalManaged={hasActiveSubscription} onUpgrade={upgrade} />}
                 {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
               </>
             )}
@@ -8860,7 +8868,7 @@ function claimIntentInFlight() {
             )}
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {/* #4330: the SAME notice component the create-key modal renders. */}
-            {capNotice && <CapNotice text={capNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
+            {capNotice && <CapNotice text={capNotice} team={team} checkoutPending={checkoutPending} billingPending={billingPending} portalManaged={hasActiveSubscription} onUpgrade={upgrade} />}
 
             {/* #2735: rotate's replacement reveal. #2667 moved create-key
                 into the Create API key modal and DELETED the standalone

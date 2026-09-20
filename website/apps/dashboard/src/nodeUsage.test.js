@@ -263,8 +263,18 @@ test('#4331: the cap-banner Upgrade CTA routes Stripe customers to the portal to
   const start = flat.indexOf('async function upgrade()')
   assert.notEqual(start, -1, 'upgrade() must exist')
   const fn = flat.slice(start, flat.indexOf('async function manageBilling()', start))
-  assert.match(fn, /if \(canManageSubscription\) \{ await manageBilling\(\); return \}/,
-    'upgrade() must route an existing Stripe customer to the portal')
+  assert.match(fn, /if \(hasActiveSubscription\) \{ await manageBilling\(\); return \}/,
+    'upgrade() must route an active subscriber to the portal (the exact 409 set)')
   assert.match(fn, /upgradeToPrice\(team\?\.checkout_price_id\)/,
-    'everyone else still starts a checkout')
+    'free and canceled/unpaid teams still start a checkout (re-subscription, #1623)')
+})
+
+test('#4331: the cap-notice Upgrade button tracks the branch upgrade() takes', () => {
+  const start = flat.indexOf('function CapNotice(')
+  assert.notEqual(start, -1, 'CapNotice must exist')
+  const fn = flat.slice(start, flat.indexOf('function App()', start))
+  assert.match(fn, /disabled=\{portalManaged \? billingPending : checkoutPending\}/,
+    'an active subscriber must see the portal busy state, not the checkout one')
+  assert.match(fn, /portalManaged\s*\?\s*\(billingPending \? 'Opening portal…' : 'Manage subscription'\)/,
+    'the label must name the portal remedy for an active subscriber')
 })
