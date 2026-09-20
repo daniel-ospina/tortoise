@@ -108,11 +108,23 @@ RECOVERY_READY_TIMEOUT = 180.0
 #: so it is gated on a short re-read rather than taken on the first miss.
 RECOVERY_GRACE_TIMEOUT = 6.0
 
+#: Lines requested from `cmux read-screen`. The composer sits at the bottom, but a
+#: long brief wraps across many lines and its HEAD — the only part the fingerprint
+#: matches — would fall outside a shallow window, making a message that IS in the
+#: composer look absent and inviting a duplicate re-send. Recovery therefore reads
+#: much deeper than the readiness probe.
+DEFAULT_SCREEN_LINES = 80
+RECOVERY_SCREEN_LINES = 300
+
 # Recovery actions
 R_NONE = "none"
 R_RELEASE = "release-only"
 R_RESEND = "resend"
 R_DISMISS_RESEND = "dismiss-and-resend"
+
+#: pi's input box is delimited by long horizontal rules; the composer is the
+#: region between the LAST TWO of them.
+RULE_RE = re.compile(r"^\s*[\u2500-]{8,}\s*$")
 
 
 # --------------------------------------------------------------------------- #
@@ -282,13 +294,35 @@ def is_consumed(
     return True, "submitted"
 
 
+def composer_region(screen: str | None) -> str | None:
+    """The text pi's input box currently holds, or None if not identifiable.
+
+    The composer is delimited by the last two horizontal rules on screen. None
+    means "cannot tell" — which must NOT be read as "empty".
+    """
+    rows = (screen or "").splitlines()
+    rules = [i for i, row in enumerate(rows) if RULE_RE.match(row)]
+    if len(rules) < 2:
+        return None
+    return "\n".join(rows[rules[-2] + 1 : rules[-1]])
+
+
+def composer_empty(screen: str | None) -> bool:
+    """True only when the composer is POSITIVELY shown to be empty."""
+    region = composer_region(screen)
+    return region is not None and not region.strip()
+
+
 def recovery_action(screen: str | None, fp: str) -> str:
     """Choose the cheapest safe recovery for an unconsumed send.
 
-    An UNREADABLE screen (`None` — the read-screen call failed) deliberately
-    degrades to `release-only`: a bare Enter cannot duplicate anything, whereas a
-    blind re-send into a composer that already holds the message would submit it
-    twice. Never choose `resend` from a screen we could not read.
+    Re-sending is only SAFE when the composer is positively shown to be empty.
+    Anything less — an unreadable pane, an unidentifiable composer, a screen that
+    merely fails to contain the text — falls back to `release-only`, because a
+    bare Enter can never duplicate while a blind re-send can: the composer would
+    hold the message twice and the next Enter would submit it doubled, which
+    `is_consumed` would then report as success (the head is unchanged). The
+    fail-closed direction costs a re-dispatch; the other corrupts the lane.
     """
     if screen is None:
         return R_RELEASE
@@ -296,7 +330,9 @@ def recovery_action(screen: str | None, fp: str) -> str:
         return R_DISMISS_RESEND
     if text_on_screen(screen, fp):
         return R_RELEASE
-    return R_RESEND
+    if composer_empty(screen):
+        return R_RESEND
+    return R_RELEASE
 
 
 # --------------------------------------------------------------------------- #
@@ -452,14 +488,19 @@ class Dispatcher:
             )
         return workspace_entry(result.out, workspace)
 
-    def screen(self, workspace: str, surface: str | None = None) -> str | None:
+    def screen(
+        self,
+        workspace: str,
+        surface: str | None = None,
+        lines: int = DEFAULT_SCREEN_LINES,
+    ) -> str | None:
         """The pane text, or None when read-screen FAILED.
 
         None is a distinct state from "": an unreadable pane must not be treated
         as one that is simply not ready yet, or the gate would send blind and the
         recovery could pick `resend` from no information at all.
         """
-        result = self.cmux.read_screen(workspace, surface=surface)
+        result = self.cmux.read_screen(workspace, lines=lines, surface=surface)
         return result.out if result.rc == 0 else None
 
     def wait_for_workspace(self, workspace: str, timeout: float) -> dict | None:
@@ -682,7 +723,7 @@ class Dispatcher:
             if attempt > retries:
                 break
 
-            screen = self.screen(workspace, surface)
+            screen = self.screen(workspace, surface, lines=RECOVERY_SCREEN_LINES)
             action = recovery_action(screen, fp)
             result.recoveries.append(action)
             self.log(f"{tag}not consumed ({reason}) — recovery: {action}")
@@ -712,19 +753,24 @@ class Dispatcher:
                 # The text was eaten by the boot-block prompt (possibly its
                 # prefix, leaving a corrupted turn). Dismiss, wait for the TUI,
                 # then send the full text again — but ONLY if the pane actually
-                # became safe. Feeding the prompt a second time would recreate
+                # became safe AND readable. Feeding the prompt a second time, or
+                # writing into a pane whose state we cannot read, would recreate
                 # the very corruption this tool prevents.
-                self.cmux.send_enter(workspace, surface)
-                recovery_ready, recovery_blocked, _ = self.wait_until_safe_to_send(
-                    workspace, RECOVERY_READY_TIMEOUT, surface
+                dismissal = self.cmux.send_enter(workspace, surface)
+                recovery_ready, recovery_blocked, recovery_screen = (
+                    self.wait_until_safe_to_send(
+                        workspace, RECOVERY_READY_TIMEOUT, surface
+                    )
                 )
-                if recovery_blocked:
+                if recovery_blocked or (not recovery_ready and recovery_screen is None):
                     result.ok = False
                     result.status = "never-became-ready"
                     result.detail = (
-                        f"{tag}{workspace} still on the boot-block prompt after "
-                        f"{RECOVERY_READY_TIMEOUT:g}s — the message was eaten and "
-                        f"the re-send was REFUSED rather than fed to the prompt. "
+                        f"{tag}{workspace} could not be recovered into a safe, "
+                        f"READABLE state (blocked={recovery_blocked}, "
+                        f"readable={recovery_screen is not None}, dismissal "
+                        f"rc={dismissal.rc}) — the message was eaten and the "
+                        f"re-send was REFUSED rather than written blind. "
                         f"Re-dispatch once the pane is idle."
                     )
                     return result

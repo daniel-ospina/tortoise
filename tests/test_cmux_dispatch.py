@@ -331,9 +331,46 @@ class TestRecoveryDecision(unittest.TestCase):
             cd.recovery_action(SCREEN_COMPOSING_UNSENT, fp), cd.R_RELEASE
         )
 
-    def test_text_invisible_means_re_send(self):
+    def test_text_invisible_with_a_provably_empty_composer_means_re_send(self):
         fp = cd.fingerprint(PROBE)
+        self.assertTrue(cd.composer_empty(SCREEN_IDLE_READY))
         self.assertEqual(cd.recovery_action(SCREEN_IDLE_READY, fp), cd.R_RESEND)
+
+    def test_unidentifiable_composer_never_re_sends(self):
+        """Re-sending requires POSITIVE evidence the composer is empty. A screen
+        that merely fails to contain the text (a stale/partial frame, or a long
+        brief whose head is outside the read window) must degrade to release-only
+        — a blind re-send would leave the message in the composer TWICE and the
+        next Enter would submit it doubled, which `is_consumed` then reports as
+        success because the head is unchanged."""
+        fp = cd.fingerprint(PROBE)
+        partial = "\u2500" * 40 + "\n" + "... tail of a long brief ...\n"   # one rule only
+        self.assertIsNone(cd.composer_region(partial))
+        self.assertFalse(cd.composer_empty(partial))
+        self.assertEqual(cd.recovery_action(partial, fp), cd.R_RELEASE)
+
+    def test_non_empty_composer_without_a_visible_fingerprint_never_re_sends(self):
+        """THE T4 PROPERTY, independent of read depth: the text may be in the
+        composer but outside the capture (a long brief, a partial frame). The
+        composer is then non-blank, so re-sending is refused regardless of whether
+        the fingerprint was found."""
+        fp = cd.fingerprint(PROBE)
+        rule = "\u2500" * 40
+        screen = (
+            "some transcript text\n"
+            + rule + "\n"
+            + "a long brief whose HEAD is outside the captured window\n"
+            + "\u2026\n"
+            + rule + "\n"
+            + "/private/tmp\n"
+            + "0.0%/700k (auto)  (deepseek) deepseek-flash \u2022 high\n"
+        )
+        self.assertFalse(cd.text_on_screen(screen, fp), "fingerprint not visible")
+        self.assertFalse(cd.composer_empty(screen), "but the composer is NOT blank")
+        self.assertEqual(cd.recovery_action(screen, fp), cd.R_RELEASE)
+
+    def test_composer_holding_the_text_is_not_empty(self):
+        self.assertFalse(cd.composer_empty(SCREEN_COMPOSING_UNSENT))
 
 
 #: A REAL, unedited `cmux list-workspaces --json --id-format both` capture
@@ -647,6 +684,19 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertIn("grace window", result.detail)
         self.assertEqual(fake.submitted, [PROBE], "must not duplicate on lag")
 
+    def test_grace_window_covers_a_full_consume_budget(self):
+        """A submission that is real but slow to appear must never be mistaken for
+        a lost one. With `consume_timeout > RECOVERY_GRACE_TIMEOUT`, the grace must
+        scale, or a lag longer than the fixed 6s window produces a duplicate."""
+        # 15 polls: longer than the FIRST 20s confirmation window (~10 polls at
+        # poll=2s), so only a grace that scales with the consume budget reaches it.
+        # A fixed 6s grace (3 polls) would fall short and duplicate the message.
+        fake = FakeCmux(submit_lag_polls=15)
+        result = self._send(fake, consume_timeout=20.0)
+        self.assertTrue(result.ok, result.detail)
+        self.assertIn("grace window", result.detail)
+        self.assertEqual(fake.submitted, [PROBE], "must not duplicate on lag")
+
     def test_never_consumed_fails_closed(self):
         fake = FakeCmux(never_consumes=True)
         result = self._send(fake, consume_timeout=0.0, retries=2)
@@ -697,6 +747,45 @@ class TestDispatcherRecovery(unittest.TestCase):
         self.assertEqual(result.status, "never-became-ready")
         self.assertEqual(
             fake.sent_log.count(PROBE), 1, "the brief must never be re-sent"
+        )
+
+    def test_recovery_refuses_when_the_pane_goes_unreadable(self):
+        """T1 on the RECOVERY path: the unreadable-pane refusal must apply to the
+        dismiss-and-resend recovery too, not only to the first send. Otherwise an
+        unreadable pane gets the brief written into it blind — which can be a live
+        prompt, or a composer that already holds the message."""
+
+        class GoesUnreadableAfterSend(FakeCmux):
+            def __init__(self):
+                super().__init__()
+                self.phase = 0
+                self.enters = 0
+
+            def read_screen(self, workspace, lines=80, surface=None):
+                if self.phase == 0:
+                    return cd.CmuxResult(0, SCREEN_IDLE_READY)   # gate: ready
+                if self.phase == 1:
+                    self.phase = 2
+                    return cd.CmuxResult(0, SCREEN_BOOT_BLOCK)   # recovery: prompt
+                return cd.CmuxResult(1, "", "cmux read-screen: command timed out")
+
+            def send_text(self, workspace, text, surface=None):
+                if text != "\\n" and self.phase == 0:
+                    self.phase = 1
+                return super().send_text(workspace, text, surface)
+
+            def send_enter(self, workspace, surface=None):
+                # The submit never takes, so the confirmation has to fail.
+                self.sent_log.append("\\n")
+                self.enters += 1
+                return cd.CmuxResult(0, "OK")
+
+        fake = GoesUnreadableAfterSend()
+        result = self._send(fake, consume_timeout=0.0, retries=2)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "never-became-ready")
+        self.assertEqual(
+            fake.sent_log.count(PROBE), 1, "the brief must never be written blind"
         )
 
     def test_unreadable_screen_degrades_recovery_to_release_only(self):
