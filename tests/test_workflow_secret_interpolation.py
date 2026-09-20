@@ -20,8 +20,9 @@ step in any ``.github/workflows/*.{yml,yaml}`` may interpolate a secret into its
 ``env:``, referenced quoted) so a partial revert fails loudly. The carriers the
 sweep resolves into run text are the ``secrets`` context, secret-bound ``env``
 keys (workflow-root, job and step scope, transitively), and job outputs defined
-from a secret; arbitrary data flow through a step's own output
-(``steps.<id>.outputs.<name>``) is out of its bounded scope. The only steps it
+from a secret; out of its bounded scope are arbitrary data flow through a step's
+own output (``steps.<id>.outputs.<name>``) and dynamic index contexts
+(``env[matrix.k]``, ``needs[matrix.j].outputs[...]``). The only steps it
 does not report are the two ``deploy-hosted.yml`` steps whose run bodies still
 carry a pre-fix interpolation, pinned by (job, step) in ``_PENDING_FIX``.
 """
@@ -48,14 +49,20 @@ _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows
 _SECRET_CONTEXT = re.compile(r"\bsecrets\b", re.IGNORECASE)
 # `env` context references — dot and index form, both case-insensitive like the
 # runner's context lookup: `env.KEY`, `env['KEY']`, `env["KEY"]`.
-_ENV_DOT_REF = re.compile(r"\benv\.([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
-_ENV_INDEX_REF = re.compile(r"\benv\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
+_ENV_DOT_REF = re.compile(r"\benv\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+_ENV_INDEX_REF = re.compile(r"\benv\s*\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
 # `needs.<job>.outputs.<name>` — a job output consumed downstream, dot and index
-# form (`needs['job'].outputs['name']`), case-insensitive like the runner.
-_NEEDS_JOB_DOT_REF = re.compile(r"\bneeds\.([A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
-_NEEDS_JOB_INDEX_REF = re.compile(r"\bneeds\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
-_OUTPUTS_DOT_REF = re.compile(r"\.outputs\.([A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
-_OUTPUTS_INDEX_REF = re.compile(r"\.outputs\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
+# form (`needs['job'].outputs['name']`), case-insensitive like the runner. The
+# accessors tolerate whitespace: the Actions lexer skips whitespace between
+# tokens, so `env . TOKEN` / `needs [ 'j' ] . outputs [ 'o' ]` are valid reads.
+_NEEDS_JOB_DOT_REF = re.compile(r"\bneeds\s*\.\s*([A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
+_NEEDS_JOB_INDEX_REF = re.compile(r"\bneeds\s*\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
+_OUTPUTS_DOT_REF = re.compile(r"\boutputs\b\s*['\"]?\s*\]?\s*\.\s*([A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
+# The name extractor is deliberately position-independent (`\boutputs`, no leading
+# `.`) and tolerates the closing quote/bracket of a quoted key, so every accessor
+# chaining of dot/index resolves: `needs.j.outputs.o`, `needs['j'].outputs['o']`,
+# `needs.j['outputs']['o']`, `needs.j['outputs'].o`, `needs['j']['outputs']['o']`, …
+_OUTPUTS_INDEX_REF = re.compile(r"\boutputs\b\s*['\"]?\s*\]?\s*\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
 # A step env binding to a single secret: `KEY: ${{ secrets.KEY }}`.
 _ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}", re.IGNORECASE)
 
@@ -246,7 +253,8 @@ def _references_outside_double_quotes(run: str, var: str) -> list[str]:
 
 
 # Two ``deploy-hosted.yml`` steps still carry a pre-fix interpolation; the sweep
-# defers them so an unreviewed file cannot be rewritten here. The deferral is
+# defers them so the pre-fix offenders are not re-reported while that file is
+# owned by another change. The deferral is
 # exact: it applies only while that file's offenders are these two (job, step)
 # identities — exact set AND count. A new interpolating step there, a duplicate
 # reusing a pinned name, or a pinned name in another job changes the identity
@@ -512,6 +520,93 @@ def test_offender_scan_follows_a_secret_through_job_outputs():
     assert _offending_steps(doc) == ["leak", "leak index form", "leak env-derived output"]
 
 
+def test_offender_scan_is_whitespace_insensitive_on_accessors():
+    """The Actions lexer skips whitespace between tokens, so `env . TOKEN`,
+    `env [ 'TOKEN' ]` and `needs [ 'prep' ] . outputs [ 'token' ]` are valid
+    reads — an accessor regex that requires adjacency misses them."""
+
+    def env_doc(ref: str) -> dict:
+        return {
+            "jobs": {
+                "j": {
+                    "steps": [
+                        {
+                            "name": "leak",
+                            "env": {"TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
+                            "run": f'curl -H "Bearer ${{{{ {ref} }}}}" https://x',
+                        }
+                    ]
+                }
+            }
+        }
+
+    for ref in ("env.TOKEN", "env .TOKEN", "env . TOKEN", "env  .  TOKEN", "env[ 'TOKEN' ]"):
+        assert _offending_steps(env_doc(ref)) == ["leak"], ref
+
+    outputs_doc = {
+        "jobs": {
+            "prep": {
+                "outputs": {"token": "${{ secrets.X }}"},
+                "steps": [{"run": "echo ok"}],
+            },
+            "use": {
+                "steps": [
+                    {
+                        "name": "leak",
+                        "run": "curl -H \"Bearer ${{ needs [ 'prep' ] . outputs [ 'token' ] }}\" https://x",
+                    },
+                    {
+                        "name": "leak spaced dot",
+                        "run": 'curl -H "Bearer ${{ needs.prep . outputs . token }}" https://x',
+                    },
+                    {
+                        "name": "leak all-index",
+                        "run": "curl -H \"Bearer ${{ needs['prep']['outputs']['token'] }}\" https://x",
+                    },
+                    {
+                        "name": "leak mixed index",
+                        "run": "curl -H \"Bearer ${{ needs.prep['outputs']['token'] }}\" https://x",
+                    },
+                    {
+                        "name": "leak indexed key dotted name",
+                        "run": "curl -H \"Bearer ${{ needs.prep['outputs'].token }}\" https://x",
+                    },
+                    {
+                        "name": "leak indexed job and key dotted name",
+                        "run": "curl -H \"Bearer ${{ needs['prep']['outputs'].token }}\" https://x",
+                    },
+                ]
+            },
+        }
+    }
+    assert _offending_steps(outputs_doc) == [
+        "leak",
+        "leak spaced dot",
+        "leak all-index",
+        "leak mixed index",
+        "leak indexed key dotted name",
+        "leak indexed job and key dotted name",
+    ]
+
+    # A secret-bound env read spelled with whitespace in the OUTPUT DEFINITION
+    # must also resolve (the second layer of carrier 3).
+    defined_via_env = {
+        "env": {"T": "${{ secrets.X }}"},
+        "jobs": {
+            "prep": {"outputs": {"token": "${{ env . T }}"}, "steps": [{"run": "echo ok"}]},
+            "use": {
+                "steps": [
+                    {
+                        "name": "leak",
+                        "run": 'x="${{ needs.prep.outputs.token }}"',
+                    }
+                ]
+            },
+        },
+    }
+    assert _offending_steps(defined_via_env) == ["leak"]
+
+
 def test_sweep_enumerates_both_workflow_extensions(tmp_path):
     """GitHub executes `.yaml` too; globbing only `.yml` is an unscanned file."""
     (tmp_path / "a.yml").write_text("jobs: {}\n", encoding="utf-8")
@@ -533,7 +628,7 @@ def test_pending_fix_defers_only_the_exact_pinned_steps():
 
     pinned = _PENDING_FIX["deploy-hosted.yml"]
     exact = sorted(n for _job, n in pinned)
-    assert len(exact) == len(pinned)
+    assert len(set(exact)) == len(exact)
     good = _offending_identities(doc("deploy-api", exact))
     assert len(good) == len(pinned) and set(good) == pinned
     # A NEW offending step, a duplicate reusing a pinned name, and a pinned name
