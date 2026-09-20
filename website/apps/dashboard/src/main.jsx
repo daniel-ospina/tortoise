@@ -5577,9 +5577,11 @@ function claimIntentInFlight() {
     // (a zero-key session whose selected team ≠ first membership rendered
     // the first membership's backups: /v1/backups is ungated server-side, so
     // _session_user_org resolves memberships[0] without the param).
-    // Key-mode (authMode 'apikey' — no session JWT exists there) keeps the
-    // key header as its authenticator.
     // #1842 P1-2: /v1/backups is session-dual-auth (get_current_org_session_ungated).
+    // Only the SESSION lane reaches this route: the BFF proxy requires the
+    // `__Host-session` cookie, strips any client-built `authorization` header and
+    // attaches its own Bearer, so key-mode (authMode 'apikey') cannot authenticate
+    // here at all — it does not render the backups surface.
     // #4144: the `/v1/` prefix is REQUIRED, not cosmetic. `api()` targets the
     // same-origin BFF proxy, whose TypeScript route is `functions/api/v1/[[path]].ts`
     // and which rebuilds the upstream URL as `${API_ORIGIN}/v1/${rest}`. This call
