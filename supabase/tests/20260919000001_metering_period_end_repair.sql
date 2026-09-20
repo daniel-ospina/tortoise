@@ -57,7 +57,12 @@ VALUES
     -- subscription (calendar month, cap enforceable), so the repair must not
     -- derive or report it.
     ('4216-blank-sub', '4216-blank-sub', 'org_4216-blank-sub', '   ',
-     NULL, NULL);
+     NULL, NULL),
+    -- ...and one carrying a bound, so the UPDATE branches' btrim guard is
+    -- exercised too (without it branch 2 would derive an end).
+    ('4216-blank-sub-bound', '4216-blank-sub-bound',
+     'org_4216-blank-sub-bound', '   ',
+     '2026-06-01T00:00:00+00:00', NULL);
 
 -- 1) The repair RETURNS exactly the unusable orgs (loud, not silent).
 --    Mutation caught: dropping either reported class (both-NULL / inverted /
@@ -176,6 +181,12 @@ BEGIN
     IF f_s IS NOT NULL OR f_e IS NOT NULL THEN
         RAISE EXCEPTION 'a blank-subscription org must be untouched (% %)', f_s, f_e;
     END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-blank-sub-bound';
+    IF f_s IS DISTINCT FROM '2026-06-01T00:00:00+00:00'::timestamptz
+       OR f_e IS NOT NULL THEN
+        RAISE EXCEPTION 'a blank-subscription org must not be derived (% %)', f_s, f_e;
+    END IF;
 END $$;
 
 -- 5) IDEMPOTENT: a second run derives nothing further and still reports the
@@ -212,13 +223,12 @@ END $$;
 
 -- 6) ACL — the harness's default privileges grant EXECUTE on a new public
 --    function to anon/authenticated, so the migration's REVOKE is the ONLY
---    thing separating an all-tenant repair from those roles; and the harness
---    ALSO grants service_role, so has_function_privilege alone cannot prove
---    the migration's explicit GRANT. Pin BOTH: the negative privileges AND the
---    function's stored ACL (which lists only postgres + service_role).
---    Mutation caught: dropping the REVOKE (anon/authenticated could repair) or
---    the explicit GRANT (service_role would then rely on a default, not the
---    artifact).
+--    thing separating an all-tenant repair from those roles. That REVOKE is
+--    the load-bearing, testable half: dropping it fails here. (The explicit
+--    GRANT to service_role is NOT distinguishable from the harness/Supabase
+--    default privilege — both produce service_role=X in proacl — so the
+--    proacl assertion below is an invariant pin, not a mutation catcher.)
+--    Mutation caught: dropping the REVOKE (anon/authenticated could repair).
 DO $$
 DECLARE acl text;
 BEGIN
@@ -248,4 +258,5 @@ SET TIME ZONE 'UTC';
 DELETE FROM public.organizations
  WHERE id IN ('4216-end-null', '4216-start-null', '4216-dst',
               '4216-dst-start', '4216-both-null', '4216-inverted',
-              '4216-empty', '4216-free-one-bound', '4216-blank-sub');
+              '4216-empty', '4216-free-one-bound', '4216-blank-sub',
+              '4216-blank-sub-bound');
