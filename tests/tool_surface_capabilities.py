@@ -914,26 +914,28 @@ def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[s
         recorded = DECLARED_BINDING_DIVERGENCES.get(e.name)
         if recorded is None and (not e.sdk_method or e.sdk_method not in methods):
             continue
-        # the ledger records PUBLIC destinations — a private helper call
-        # (`_get_proj`) is not a binding claim.  The filter is load-bearing for
-        # `tortoise_traverse` (raw `{_get_proj}` vs public `{}`), and a no-op for
-        # `tortoise_operator_action`.
-        public_reached = frozenset(
-            x for x in handler_operations(e.name, mcp_src).operations
-            if not x.startswith("_"))
+        # TWO sets, deliberately.  PRESENCE of the declared method is asked of the
+        # RAW reach set (a declared private SDK method is still a real binding —
+        # filtering first would report it unreached and could never clear its
+        # ledger entry).  The ledger's DESTINATION comparison uses the PUBLIC set,
+        # because a private helper call (`_get_proj`) is not a binding claim: the
+        # filter is load-bearing for `tortoise_traverse` (raw `{_get_proj}` vs
+        # public `{}`) and a no-op for `tortoise_operator_action`.
+        reached = frozenset(handler_operations(e.name, mcp_src).operations)
+        public_reached = frozenset(x for x in reached if not x.startswith("_"))
         if e.name not in funcs:
             # no handler at all — the first arm reports that; asserting a missing
             # handler "never reaches" its declaration is noise, not a finding.
             continue
         if recorded is None:
-            if e.sdk_method in public_reached:
+            if e.sdk_method in reached:
                 continue
             out.append(
                 f"{e.name}: declares sdk_method {e.sdk_method!r} that its handler never "
                 f"reaches (reaches: {sorted(public_reached) or 'nothing public'}) — #4337")
             continue
         # Ledgered: the ledger must still describe THIS divergence exactly.
-        if e.sdk_method in public_reached:
+        if e.sdk_method in reached:
             out.append(
                 f"{e.name}: listed in DECLARED_BINDING_DIVERGENCES but its handler "
                 f"now reaches {e.sdk_method!r} — delete the ledger entry")
@@ -1020,12 +1022,16 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
     # DECLARED_BINDING_DIVERGENCES liveness (#4337).  The divergence arm iterates
     # the ENTRIES, so a ledger key whose registry entry was removed or renamed is
     # never visited and would persist unexamined.  This function is the home for
-    # declared-set liveness — and, like every other declared set checked here, it
-    # is a FULL-REGISTRY predicate: every arm below reports an entry that has no
-    # tool binding in whatever `entries` it is handed, so a caller passing a
-    # filtered registry gets the same subset semantics for all of them.  (The
-    # divergence arm cannot host this check: it is also called on probe SUBSETS,
-    # where the real ledger keys are legitimately absent.)
+    # declared-set liveness, and the ledger arm follows the SAME subset semantics
+    # the binding arms here already have: the ledger is compared against whatever
+    # `entries` it is handed, so a caller passing a filtered registry sees the
+    # same treatment for the ledger as for any other declared set.  (Not every arm
+    # below is subset-sensitive — `READ_THROUGH_WRITE_METHODS` and
+    # `INTERNAL_PATH_READERS` check only resolution and bound-entry properties —
+    # but the ones that ask for a tool binding are, and a filtered caller is
+    # expected to know it passed a filtered set.)  The divergence arm cannot host
+    # this check: it is also called on probe SUBSETS, where the real ledger keys
+    # are legitimately absent.
     known = {e.name for e in entries}
     for name in sorted(set(DECLARED_BINDING_DIVERGENCES) - known):
         out.append(

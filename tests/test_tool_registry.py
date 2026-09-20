@@ -756,6 +756,19 @@ class TestCapabilityModel:
             [drifted], _ledger_src(_LEDGER_OTHER))
         assert any("update the entry" in v for v in violations), violations
 
+    def test_T3_declared_private_method_counts_as_reached(self, monkeypatch):
+        """Presence of the declared method is asked of the RAW reach set.  A
+        declared PRIVATE SDK method is a real binding: filtering it out first would
+        report it unreached, and a ledgered one could never clear its entry."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        private = _probe(_LEDGER_TOOL, "_get_proj",
+                         annotations=_ro(), http_policy=True)
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {})
+        assert not any("never" in v for v in tsc.binding_resolution_violations(
+            [private], _ledger_src("_get_proj")))
+
     def test_T3_divergence_ledger_records_the_reached_set(self, monkeypatch):
         """The REACHED half of the recorded divergence, on its own.  Without this
         the reached comparison is dead weight — the declared-drift test exercises
