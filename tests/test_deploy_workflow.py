@@ -281,15 +281,18 @@ def test_every_env_bound_secret_reaches_fly(workflow_text):
     """#4334 — bidirectional coverage for the secrets-set step.
 
     Every secret bound in the step's ``env:`` must be appended to the flyctl
-    array (else it is wired to nothing), every array element must read an
-    env-bound secret (else it sends a stale/empty value), and every fly-side
-    argv key must be the env name the app reads (or a declared `_FLY_RENAMES`
-    rename — a fly-side typo ships the secret under a name nothing reads while
-    the gate passes). ``FLY_API_TOKEN`` is the one exemption: flyctl consumes it
-    from the environment, never as argv."""
+    array (else it is wired to nothing), every argv element sourced from a
+    secret must read an env-bound secret (else it sends a stale/empty value),
+    and every secret-bearing fly-side argv key must be the env name the app
+    reads — or a declared `_FLY_RENAMES` rename, whose presence is asserted too,
+    since a de-renamed key would otherwise ship the secret under a name nothing
+    reads while the gate passes. ``FLY_API_TOKEN`` (flyctl consumes it from the
+    environment, never as argv) and the `TORTOISE_GIT_SHA="${GITHUB_SHA}"`
+    built-in pair (`_NON_SECRET_PAIRS`) are the two exemptions."""
     step = _steps()[_SET_STEP]
+    run = step.get("run", "")
     bindings = set(_env_bindings(step))
-    shell_vars = set(_secret_array_pairs(step.get("run", "")).values())
+    shell_vars = set(_secret_array_pairs(run).values())
     assert shell_vars == bindings - _NON_SYNCED, (
         "the secrets-set step's env: bindings and its flyctl array diverge — "
         f"bound-but-not-sent: {sorted(bindings - _NON_SYNCED - shell_vars)}; "
@@ -298,12 +301,24 @@ def test_every_env_bound_secret_reaches_fly(workflow_text):
     # The FLY-side argv name is what the app resolves config by. Pin it to the
     # env name it reads (or a declared rename); a fly-side typo/swap otherwise
     # passes every value-based guard above.
-    for fly_name, shell_var in _secret_array_pairs(step.get("run", "")).items():
+    for fly_name, shell_var in _secret_array_pairs(run).items():
         expected = _FLY_RENAMES.get(fly_name, fly_name)
         assert expected == shell_var, (
             f"fly argv key {fly_name} reads ${shell_var}, but the expected env "
             f"name is {expected} — a fly-side typo/undeclared rename would ship "
             f"the secret under a name nothing reads while the gate passes (#4334)"
+        )
+    # The forward check above accepts the IDENTITY spelling for a renamed pair,
+    # so a declared rename must ALSO be present: de-renaming
+    # `GITHUB_CLIENT_ID="$GH_CLIENT_ID"` to `GH_CLIENT_ID="$GH_CLIENT_ID"`
+    # otherwise passes every guard while the app (which reads GITHUB_CLIENT_ID)
+    # is silently disabled.
+    raw_pairs = _array_pairs(run)
+    for fly_name, env_name in _FLY_RENAMES.items():
+        assert raw_pairs.get(fly_name) == env_name, (
+            f"declared rename {fly_name}=\"${env_name}\" is missing from the "
+            f"flyctl array — the Fly key was de-renamed to the identity name, so "
+            f"the app reads nothing and the feature is silently disabled (#4334)"
         )
 
 
