@@ -44,7 +44,6 @@ import json
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -556,8 +555,9 @@ def _manifest_receipt(files: list[str], marker: str, out_dir: Path) -> dict:
                 + "--- child stdout (tail) ---\n" + (p.stdout or "")[-2000:]
             )
             print(
-                "emit-manifest: collect-only failed rc=%d — child stderr:\n%s"
-                % (p.returncode, (p.stderr or "(empty stderr)").strip()),
+                f"emit-manifest: collect-only failed rc={p.returncode}"
+                + " — child stderr:\n"
+                + (p.stderr or "(empty stderr)").strip(),
                 file=sys.stderr,
             )
         return p.returncode, p.stdout

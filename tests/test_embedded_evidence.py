@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import ClassVar
 
 from tools import embedded_evidence as ee
 
@@ -686,7 +687,7 @@ class TestPersistedObservationRoundTrips:
     a live gate.
     """
 
-    FILES = ["tests/a.py", "tests/b.py"]
+    FILES: ClassVar[list[str]] = ["tests/a.py", "tests/b.py"]
 
     def _record(self):
         return {
