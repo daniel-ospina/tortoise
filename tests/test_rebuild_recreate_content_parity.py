@@ -35,7 +35,11 @@ Run (unique graph — a shared DB lets a concurrent lane wipe ours, #4026):
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+import sys
+import textwrap
 from unittest import mock
 
 import pytest
@@ -104,6 +108,11 @@ def _added(sdk: TortoiseSDK, pid: str, content: str) -> dict:
 
 def _revised(sdk: TortoiseSDK, pid: str, **fields) -> dict:
     return _mutated(sdk, type_="PointRevised", id=pid, **fields)
+
+
+def _promoted(sdk: TortoiseSDK, pid: str, content: str) -> dict:
+    return _mutated(sdk, type_="PointPromoted",
+                    point={"id": pid, "content": content, "status": "live"})
 
 
 def _deleted(sdk: TortoiseSDK, pid: str) -> dict:
@@ -526,3 +535,171 @@ def test_pre_first_creation_keeps_derived_when_created_elsewhere(
     _assert_parity(post, applied)
     assert post.get("content_hash") == content_hash("CHANGED"), (
         "a revision live-valid via a cross-file creation was over-suppressed")
+
+
+def test_pre_first_creation_promote_is_a_creation_anchor(sup, tmp_path):
+    """#4260 review P2 — a point whose ONLY creating record is a PROMOTE.
+
+    ``PointPromoted`` (like ``OperatorPromoted``) reaches
+    ``_upsert_point_props`` from pass-1b and MERGEs a node exactly as
+    ``PointAdded`` does. When the promote is the id's FIRST creation, the
+    pre-first-creation predicate must count it: the revision that follows
+    bound a live node, so its ``content_hash``/``embedding`` are live-valid
+    and the later falsy re-emit preserves them (``coalesce``/``CASE``). An
+    add-only creation anchor declares the revision a pre-creation no-op and
+    suppresses BOTH — the reviewer's repro, single file, no delete.
+    """
+    events, sdk = sup
+    pid = sdk.ulid()
+    promote = _promoted(sdk, pid, "")
+    revise = _revised(sdk, pid, new_content="R")
+    falsy_reemit = _added(sdk, pid, "")
+    _write_files(events, {"events.jsonl": [promote, revise, falsy_reemit]})
+
+    with mock.patch("tortoise.embeddings.compute_embedding",
+                    return_value=[0.1] * 384):
+        applied = _oracle(tmp_path, "oracle_promote",
+                          [promote, revise, falsy_reemit], pid)
+        assert applied["content"] == ""
+        assert applied.get("content_hash") == content_hash("R")
+        assert applied.get("embedding") is not None
+        _rebuild(sdk, events)
+        post = sdk.get_point(pid)
+    assert post["content"] == ""
+    _assert_parity(post, applied)
+    assert post.get("content_hash") == content_hash("R"), (
+        "the promote-created node's live-valid revision hash was suppressed "
+        "— a promote IS a node-creating record")
+    assert post.get("embedding") is not None, (
+        "the promote-created node's live-valid revision embedding was "
+        "suppressed — a promote IS a node-creating record")
+
+
+def test_pre_first_creation_promote_created_elsewhere_keeps_derived(
+        sup, tmp_path):
+    """#4260 review P2 — cross-source PROMOTE twin of the ``..._elsewhere``
+    guard.
+
+    The id's only creation THIS file sees is a later falsy re-emit, but an
+    EARLIER-SORTED file created it with a PROMOTE. File position is not
+    chronology (#21), so live the revision bound that node and its
+    ``content_hash``/``embedding`` are live-valid: counting the promote's
+    source (this fix) keeps them, while an add-only source map declares the
+    revision a pre-creation no-op and suppresses them. This pins the deliberate
+    cross-source consequence of adding promotes to ``create_sources_by_id``.
+
+    CONTENT PARITY IS DELIBERATELY NOT ASSERTED: this shape's ``content``
+    diverges from the file-order oracle on BOTH the pre-fix and post-fix
+    source (the pass-1a hoist applies the falsy re-emit before the pass-1b
+    promote clobbers it) — the pre-existing cross-file #4252 residual, which
+    this fix neither introduces nor is expected to close.
+    """
+    events, sdk = sup
+    pid = sdk.ulid()
+    promote_elsewhere = _promoted(sdk, pid, "X")
+    revise = _revised(sdk, pid, new_content="CHANGED")
+    falsy_reemit = _added(sdk, pid, "")
+    _write_files(events, {"a.jsonl": [promote_elsewhere],
+                          "b.jsonl": [revise, falsy_reemit]})
+
+    with mock.patch("tortoise.embeddings.compute_embedding",
+                    return_value=[0.1] * 384):
+        applied = _oracle(tmp_path, "oracle_pf_promote_x",
+                          [promote_elsewhere, revise, falsy_reemit], pid)
+        assert applied["content"] == ""
+        assert applied.get("content_hash") == content_hash("CHANGED")
+        _rebuild(sdk, events)
+        post = sdk.get_point(pid)
+    assert post.get("content_hash") == content_hash("CHANGED"), (
+        "a revision live-valid via a cross-file PROMOTE creation was "
+        "over-suppressed — a promote is a creation source")
+    assert (post.get("embedding") is None) == (applied.get("embedding") is None)
+    if applied.get("embedding") is not None:
+        assert post.get("embedding") == applied.get("embedding")
+
+
+def test_journal_creating_event_types_is_complete_against_dispatch(sup):
+    """#4260 review P2 — the node-creating set is enumerated from the
+    dispatcher in CODE, never a hand-picked pair.
+
+    ``rebuild_all``'s chronology anchors and the pre-wipe re-creation proof
+    both read creation membership from ``_JOURNAL_CREATING_EVENT_TYPES``. This
+    harvests candidate event-type names from the dispatcher source itself (the
+    single source of fold semantics) and asserts that the types whose replay
+    actually reaches ``_upsert_point_props`` — a node MERGE — are EXACTLY that
+    constant. A future event type that creates a node but is not added to the
+    constant fails HERE, rather than re-opening the add-only anchor gap
+    (a promote-shaped creation invisible to a hand-listed pair of ADD types).
+
+    The candidate set is FORM-AGNOSTIC: EVERY string literal in ``apply()``'s
+    source (so a type named inside a union ``_A | {"X"}``, a dict, or a
+    ``frozenset({...})`` call is a candidate) plus every string in a
+    module-level collection (the ``t in _SOME_SET`` idiom). Parsing the
+    comparison SHAPE instead was found to pass vacuously twice — a regex
+    missed ``t in _SOME_SET`` (review round 1) and an AST walk of
+    ``t ==`` / ``t in <Name>`` missed a union operand ``_A | {"X"}`` (review
+    round 2). Harvesting literals removes the form dependency.
+    """
+    from tortoise.projection import (_JOURNAL_CREATING_EVENT_TYPES,
+                                     FalkorProjection)
+
+    _, sdk = sup
+    proj = sdk._get_proj()
+    module = sys.modules[FalkorProjection.__module__]
+
+    vocab: set[str] = set()
+    for node in ast.walk(ast.parse(
+            textwrap.dedent(inspect.getsource(FalkorProjection.apply)))):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            vocab.add(node.value)
+
+    def _strings_from(obj, depth: int = 0) -> set[str]:
+        if isinstance(obj, str):
+            return {obj}
+        if depth > 3:
+            return set()
+        if isinstance(obj, dict):
+            out: set[str] = set()
+            for key, value in obj.items():
+                out |= _strings_from(key, depth + 1)
+                out |= _strings_from(value, depth + 1)
+            return out
+        if isinstance(obj, (frozenset, set, tuple, list)):
+            out = set()
+            for item in obj:
+                out |= _strings_from(item, depth + 1)
+            return out
+        return set()
+
+    for name, value in vars(module).items():
+        if name.startswith("__"):
+            continue
+        vocab |= _strings_from(value)
+    assert len(vocab) >= 15, (
+        "apply() dispatch introspection found too few event types — the "
+        "extraction is stale, not the vocabulary: %r" % (sorted(vocab),))
+
+    created: set[str] = set()
+    current: dict[str, str] = {}
+    real = FalkorProjection._upsert_point_props
+
+    def _spy(self, p):
+        created.add(current["type"])
+        return real(self, p)
+
+    with mock.patch.object(FalkorProjection, "_upsert_point_props", _spy):
+        for type_ in sorted(vocab):
+            pid = f"complete-{type_}"
+            current["type"] = type_
+            proj.apply({
+                "type": type_, "id": pid,
+                "point": {"id": pid, "content": "x", "status": "live"},
+                "new_content": "y", "merge_ids": [], "op": "delete",
+                "projection_version": 2,
+            })
+
+    assert created == set(_JOURNAL_CREATING_EVENT_TYPES), (
+        "_JOURNAL_CREATING_EVENT_TYPES no longer matches the node-creating "
+        "records in apply()'s dispatch — a creating type was added or removed "
+        "without updating the chronology anchors: dispatcher=%r constant=%r"
+        % (sorted(created), sorted(_JOURNAL_CREATING_EVENT_TYPES)))

@@ -1561,9 +1561,37 @@ class RebuildDroppedEpisodicPoints(RuntimeError):
 # so the pre-wipe proof and `apply()`'s branches are read together — omitting a
 # type here makes the proof REFUSE a rebuild the replay would have completed
 # (a false block on a healthy store).
+# #4260 review P2: this set is ALSO the single source of truth for
+# `rebuild_all`'s pass-1b chronology anchors (`first_create_seq_by_source` /
+# `create_sources_by_id`) — an add-only seed treated a `PointPromoted` that was
+# the id's ONLY creating record as if no creation had happened and suppressed
+# live-valid derived fields. Because both consumers derive from THIS set via
+# `_journal_creating_point_id`, a new node-creating event type is covered here
+# once and can never be added to one consumer and missed by the other.
 _JOURNAL_CREATING_EVENT_TYPES = frozenset({
     "PointAdded", "OperatorAdded", "PointPromoted", "OperatorPromoted",
 })
+
+
+def _journal_creating_point_id(ev) -> str | None:
+    """The Point/Operator id a journal record CREATES, or ``None``.
+
+    The ONE "does this record create a node" predicate. A record creates a
+    node iff its ``type`` is in ``_JOURNAL_CREATING_EVENT_TYPES`` AND it
+    carries a ``point`` snapshot with a str id — ``OperatorPromoted``'s
+    id-only fallback is a MATCH-SET that UPSERTs nothing, so it must not
+    count. Both the pre-wipe recreation proof (``_journal_recreated_ids``)
+    and ``rebuild_all``'s pass-1b chronology anchors read creation membership
+    from here, so the set is enumerated exactly once.
+    """
+    if not isinstance(ev, dict):
+        return None
+    if ev.get("type") not in _JOURNAL_CREATING_EVENT_TYPES:
+        return None
+    p = ev.get("point")
+    if isinstance(p, dict) and isinstance(p.get("id"), str):
+        return p["id"]
+    return None
 
 
 class FalkorProjection(
@@ -2314,9 +2342,10 @@ class FalkorProjection(
     def _journal_recreated_ids(events) -> set[str]:
         """Ids the journal will CREATE when it is replayed.
 
-        Derived from ``_JOURNAL_CREATING_EVENT_TYPES`` — the event types whose
-        replay reaches a node MERGE (``PointAdded``/``OperatorAdded`` via
-        ``_upsert`` in ``apply``, plus the ``PointPromoted``/``OperatorPromoted``
+        Derived from ``_JOURNAL_CREATING_EVENT_TYPES`` via
+        ``_journal_creating_point_id`` — the event types whose replay reaches
+        a node MERGE (``PointAdded``/``OperatorAdded`` via ``_upsert`` in
+        ``apply``, plus the ``PointPromoted``/``OperatorPromoted``
         full-snapshot branches, which also UPSERT — #785/#2256; an
         ``OperatorPromoted`` is the capture path's only durable record for some
         operators). This is the pre-wipe counterpart of `_episodic_point_ids`:
@@ -2325,12 +2354,9 @@ class FalkorProjection(
         """
         ids: set[str] = set()
         for ev in events:
-            if not isinstance(ev, dict):
-                continue
-            if ev.get("type") in _JOURNAL_CREATING_EVENT_TYPES:
-                p = ev.get("point")
-                if isinstance(p, dict) and isinstance(p.get("id"), str):
-                    ids.add(p["id"])
+            pid = _journal_creating_point_id(ev)
+            if pid is not None:
+                ids.add(pid)
         return ids
 
     @staticmethod
@@ -2894,26 +2920,32 @@ class FalkorProjection(
         # boundary. Keyed ``(id, source-file ordinal)`` because within one
         # append-only JSONL position IS chronology, while across files it is
         # not (#21 pins that a revision in an earlier-sorted file must still
-        # fold onto a creation in a later file). All four are filled in the
-        # pass-1a creation branch below.
+        # fold onto a creation in a later file).
         #   ``last_create_seq_by_source``      — the id's last creation
         #     (``n.content``/``n.updatedAt`` are written unconditionally, so
-        #     any later creation supersedes a revision's content).
+        #     any later creation supersedes a revision's content). Filled in
+        #     the pass-1a creation branch below (the hoisted additions).
         #   ``last_recreate_seq_by_source``    — the id's last creation that
         #     followed a hard delete; live that node was FRESH, so both
-        #     conditional derived fields were cleared.
+        #     conditional derived fields were cleared. Filled in pass 1a.
         #   ``last_embed_write_by_source`` / ``last_hash_write_by_source`` —
         #     the last creation that actually WROTE each conditional derived
-        #     field (from ``_upsert_point_props``'s reported outcome).
+        #     field (from ``_upsert_point_props``'s reported outcome). Filled
+        #     in pass 1a.
         last_create_seq_by_source: dict[tuple[str, int], int] = {}
         # #4260: the id's FIRST same-source creation — a revision before it
-        # did not bind a node *within that file's chronology*.
+        # did not bind a node *within that file's chronology*. Seeded by the
+        # creating-event pre-pass below, NOT pass 1a: a pass-1b
+        # ``PointPromoted``/``OperatorPromoted`` ALSO creates a node, so an
+        # add-only seed would miss the promote-as-first-creation shape.
         first_create_seq_by_source: dict[tuple[str, int], int] = {}
         # #4260: every source ordinal that created the id (``None`` = a
         # synthetic/pre-wipe-snapshot creation). A creation in ANY other
         # source means the revision is NOT provably a live no-op — file order
         # across sources is not chronology (#21), so live the revision may
-        # have bound that node and its derived are live-valid.
+        # have bound that node and its derived are live-valid. Seeded by the
+        # creating-event pre-pass below (GLOBAL over the whole list, never in
+        # journal order — a later creation in another file still counts).
         create_sources_by_id: dict[str, set[int | None]] = {}
         last_recreate_seq_by_source: dict[tuple[str, int], int] = {}
         last_embed_write_by_source: dict[tuple[str, int], int] = {}
@@ -2921,6 +2953,26 @@ class FalkorProjection(
         # ids hard-deleted since their last creation — a following creation is
         # a RE-creation (new incarnation), not a bare upsert.
         pending_deleted: set[str] = set()
+        # #4260 review P2: seed the pre-first-creation anchors from EVERY
+        # node-creating record — NOT just the pass-1a additions. A
+        # ``PointPromoted``/``OperatorPromoted`` MERGEs a node too
+        # (``_upsert_point_props`` from pass-1b), so an add-only seed made a
+        # revision whose only earlier creation was a promote look like it
+        # preceded ALL creation: it suppressed ``content_hash``/``embedding``
+        # the live node legitimately had (the reviewer's single-file repro).
+        # Membership comes from ``_JOURNAL_CREATING_EVENT_TYPES`` via the
+        # shared ``_journal_creating_point_id`` predicate — the same
+        # enumeration the pre-wipe proof reads — so this is not a third
+        # special case and a new node-creating event type is covered by
+        # construction. ``event_source`` shares pass 1a's seq space.
+        for seq, ev in enumerate(events):
+            cid = _journal_creating_point_id(ev)
+            if cid is None:
+                continue
+            src = event_source[seq]
+            create_sources_by_id.setdefault(cid, set()).add(src)
+            if src is not None:
+                first_create_seq_by_source.setdefault((cid, src), seq)
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
             t = ev.get("type")
@@ -3002,16 +3054,15 @@ class FalkorProjection(
                     self._upsert_point_props(p))
                 # #4042: record this creation's per-source-file chronology
                 # anchors (see their declaration above). A synthetic event
-                # has `src is None` and never forms a boundary.
+                # has `src is None` and never forms a boundary. NOTE
+                # ``first_create_seq_by_source``/``create_sources_by_id`` are
+                # NOT filled here — they are seeded by the creating-event
+                # pre-pass above so a pass-1b promote counts as a creation
+                # too (#4260 review P2).
                 src = event_source[seq]
-                # #4260: record the id's creation SOURCES — see the maps'
-                # declaration. Synthetic (``None``) counts: a graph-only node
-                # existed live, so a JSONL revision for it bound that node.
-                create_sources_by_id.setdefault(p["id"], set()).add(src)
                 if src is not None:
                     key = (p["id"], src)
                     last_create_seq_by_source[key] = seq
-                    first_create_seq_by_source.setdefault(key, seq)
                     if is_recreate:
                         last_recreate_seq_by_source[key] = seq
                     if wrote_embedding:
@@ -3206,10 +3257,15 @@ class FalkorProjection(
                         # so NOTHING it carried (content, embedding,
                         # content_hash) may be written. The per-field rule
                         # below is valid only when the revision applied to an
-                        # EXISTING node; that premise is false here. A creation
-                        # in another source leaves the premise standing (that
-                        # file may have preceded the revision — #21), so the
-                        # no-op proof is CROSS-SOURCE, never merely same-file.
+                        # EXISTING node; that premise is false here. "First
+                        # creation" is the FIRST node-creating record of ANY
+                        # type — an add OR a promote (both seeded from
+                        # `_JOURNAL_CREATING_EVENT_TYPES` by the pre-pass): a
+                        # `PointPromoted` that was the only creation still
+                        # created the node the revision revised. A creation in
+                        # another source leaves the premise standing (that file
+                        # may have preceded the revision — #21), so the no-op
+                        # proof is CROSS-SOURCE, never merely same-file.
                         pre_first_creation = (
                             first_create_seq_by_source.get(key, seq) > seq
                             and create_sources_by_id.get(rid, set()) == {src})
