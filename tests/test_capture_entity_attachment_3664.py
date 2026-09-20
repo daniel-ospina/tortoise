@@ -74,11 +74,29 @@ def _object_id(g, name: str) -> str:
 
 
 # The FULL Session property set the capture path writes — the durability
-# invariant is "live == replay" for the whole node, not just the two fields
-# one earlier revision happened to assert (review P2).
+# invariant is "live == replay" for the whole node. Every prop the live
+# capture MERGE / SET writes is listed: the unconditional session-MERGE three
+# (turn_count/is_episodic/created_at), the conditional harness/actor_user_id,
+# the entity-link outcome counters, and the attempt-outcome pair
+# (capture_ok/capture_extractor). `_session_props` returns them BY NAME so a
+# column reorder can never silently make a comparison vacuous.
 _SESSION_PROPS_SQL = (
     "MATCH (s:Session {id:$sid}) RETURN s.turn_count, s.is_episodic, "
-    "s.created_at, s.entity_links_attempted, s.entity_links_created")
+    "s.created_at, s.harness, s.actor_user_id, s.capture_ok, "
+    "s.capture_extractor, s.entity_links_attempted, "
+    "s.entity_links_created")
+_SESSION_PROP_NAMES = (
+    "turn_count", "is_episodic", "created_at", "harness", "actor_user_id",
+    "capture_ok", "capture_extractor", "entity_links_attempted",
+    "entity_links_created")
+
+
+def _session_props(g, sid: str) -> dict:
+    """The live/replay Session property set, keyed by name (never by index)."""
+    rows = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
+    if not rows:
+        return {}
+    return dict(zip(_SESSION_PROP_NAMES, rows[0], strict=True))
 
 
 # ── SCOPE: the SDK capture writes the attachment at all ───────────────────
@@ -134,7 +152,7 @@ def test_capture_about_edges_and_session_survive_rebuild(journal_sdk):
     g = sdk._get_proj().g
     sid = _capture(sdk, "s-3664-rebuild")
     live_edges = _about_edges(g)
-    live_session = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
+    live_session = _session_props(g, sid)
     assert live_edges, "capture wrote no aboutObject edge to begin with"
 
     sdk._get_proj().rebuild_all(str(events))
@@ -142,9 +160,9 @@ def test_capture_about_edges_and_session_survive_rebuild(journal_sdk):
     assert _about_edges(g) == live_edges, (
         f"about-edge drift across rebuild\n live={live_edges}\n "
         f"post={_about_edges(g)}")
-    post_session = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
+    post_session = _session_props(g, sid)
     assert post_session, "Session node lost on rebuild"
-    assert tuple(post_session[0]) == tuple(live_session[0])
+    assert post_session == live_session, (live_session, post_session)
 
 
 def test_session_outcome_counters_survive_recover_from_log(journal_sdk):
@@ -165,15 +183,16 @@ def test_session_outcome_counters_survive_recover_from_log(journal_sdk):
     proj = sdk._get_proj()
     g = proj.g
     sid = _capture(sdk, "s-3664-counters")
-    live = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
-    assert live and live[0][3] is not None and live[0][4] is not None, (
+    live = _session_props(g, sid)
+    assert live and live["entity_links_attempted"] is not None \
+        and live["entity_links_created"] is not None, (
         "capture did not record the entity-link outcome counters", live)
 
     g.query("MATCH (n) DETACH DELETE n")
     r = recover_from_log(str(events), proj)
     assert r["recovered"] is True, r
-    post = g.query(_SESSION_PROPS_SQL, params={"sid": sid}).result_set
-    assert post and tuple(post[0]) == tuple(live[0]), (live, post)
+    post = _session_props(g, sid)
+    assert post == live, (live, post)
 
 
 def test_capture_about_edges_survive_recover_from_log(journal_sdk, tmp_path):
@@ -210,6 +229,223 @@ def test_capture_about_edges_survive_recover_from_log(journal_sdk, tmp_path):
     assert (("Session",), sid, oid) in post, post
     assert (("Point",), f"{sid}_t0", oid) in post, post
     assert live_claim <= post, (live_claim, post)
+
+
+# ── DURABILITY: the attempt outcome is journaled, not live-only ───────────
+
+def test_capture_ok_and_extractor_survive_journal_only_replay(journal_sdk):
+    """``capture_ok`` / ``capture_extractor`` are written LIVE by
+    ``capture_session``'s attempt-outcome SET; they must be JOURNALED so the
+    apply()-based engines restore them.
+
+    A null ``capture_ok`` is consumed by the #2335 WI-2b TRUE-retry gate as the
+    legacy "presumed captured" case, so a session whose capture FAILED would
+    silently stop retrying — no warning. Reached through both apply()-based
+    engines: a journal-only ``rebuild()`` and ``recover_from_log``.
+
+    MUTATION: drop the trailing ``SessionRecorded`` emission in
+    ``sdk.capture_session`` (or the two props from
+    ``_fold_session_recorded``'s loop) → the wiped+replayed Session comes back
+    with both fields null and this REDs.
+    """
+    import json
+
+    from tortoise.consistency import recover_from_log
+
+    sdk, events = journal_sdk
+    proj = sdk._get_proj()
+    g = proj.g
+    sid = _capture(sdk, "s-3664-outcome")
+    live = _session_props(g, sid)
+    assert live["capture_ok"] is True, (
+        "capture did not record its outcome", live)
+    assert live["capture_extractor"] == "v2", live
+
+    class _Log:
+        def read_all(self):
+            with open(events / "events.jsonl", encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+
+    # (1) journal-only rebuild().
+    proj.rebuild(_Log())
+    post = _session_props(g, sid)
+    assert post.get("capture_ok") is True, (live, post)
+    assert post.get("capture_extractor") == "v2", (live, post)
+
+    # (2) recover_from_log (apply-based).
+    g.query("MATCH (n) DETACH DELETE n")
+    r = recover_from_log(str(events), proj)
+    assert r["recovered"] is True, r
+    post2 = _session_props(g, sid)
+    assert post2.get("capture_ok") is True, (live, post2)
+    assert post2.get("capture_extractor") == "v2", (live, post2)
+
+
+# ── HARD-DELETE awareness: a deleted link is not resurrected on replay ────
+
+def _live_link_count(g, pid: str, oid: str) -> int:
+    return g.query(
+        "MATCH (:Point {id:$p})-[:aboutObject]->(:Object {id:$o}) "
+        "RETURN count(*)", params={"p": pid, "o": oid}).result_set[0][0]
+
+
+def test_entity_linked_not_resurrected_by_same_id_recreate(journal_sdk):
+    """A journaled ``EntityLinked`` whose endpoint is HARD-DELETED and then
+    re-created under the SAME id must NOT be folded back on replay.
+
+    ``_fold_entity_linked`` is an unconditional MATCH…MERGE and ids are reused
+    routinely (``_entity_name_id`` is name-deterministic for Object/Subject;
+    Point ids are content-addressed ``pt_<sha>``), so without a hard-delete
+    boundary the deleted link RESURRECTED on replay while live had no such
+    edge (live != rebuild). Reached through the public surface:
+    ``sdk.delete_entity`` journals ``EntityMutated op=delete``.
+
+    MUTATION: drop the ``hard_delete_seqs`` staleness check from
+    ``fold_deferred_entity_links`` → the edge returns after ``rebuild_all`` and
+    this REDs.
+    """
+    from tortoise.session_link import link_entity
+
+    sdk, events = journal_sdk
+    proj = sdk._get_proj()
+    g = proj.g
+    oid = sdk.create_object("X")["id"]
+    pid = sdk.create_point("statement", "attached")["id"]
+    assert link_entity(proj, "Point", pid, oid, sdk=sdk) == 1
+    assert _live_link_count(g, pid, oid) == 1, "link was not written live"
+
+    assert sdk.delete_entity(oid) is True
+    assert _live_link_count(g, pid, oid) == 0, "delete left the live link"
+    oid2 = sdk.create_object("X")["id"]
+    assert oid2 == oid, "id is not name-deterministic — test premise broken"
+    assert _live_link_count(g, pid, oid) == 0, (
+        "re-creating the endpoint resurrected the live link")
+
+    proj.rebuild_all(str(events))
+    assert _live_link_count(g, pid, oid) == 0, (
+        "replay resurrected a link the live graph had deleted")
+
+
+def test_entity_linked_not_resurrected_in_apply_engines(journal_sdk):
+    """The hard-delete staleness rule must hold in the apply()-based engines
+    too (``rebuild`` / ``recover_from_log``), not only ``rebuild_all``.
+
+    MUTATION: pass no ``hard_delete_seqs`` (or ignore it) in the apply-based
+    sweeps → both replayed graphs gain the stale edge and this REDs.
+    """
+    import json
+
+    from tortoise.consistency import recover_from_log
+    from tortoise.session_link import link_entity
+
+    sdk, events = journal_sdk
+    proj = sdk._get_proj()
+    g = proj.g
+    oid = sdk.create_object("Y")["id"]
+    pid = sdk.create_point("statement", "attached")["id"]
+    link_entity(proj, "Point", pid, oid, sdk=sdk)
+    sdk.delete_entity(oid)
+    assert sdk.create_object("Y")["id"] == oid
+
+    class _Log:
+        def read_all(self):
+            with open(events / "events.jsonl", encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+
+    proj.rebuild(_Log())
+    assert _live_link_count(g, pid, oid) == 0, "rebuild() resurrected the link"
+
+    g.query("MATCH (n) DETACH DELETE n")
+    r = recover_from_log(str(events), proj)
+    assert r["recovered"] is True, r
+    assert _live_link_count(g, pid, oid) == 0, (
+        "recover_from_log resurrected the link")
+
+
+# ── OBSERVABILITY: a dropped link is visible and not counted as applied ───
+
+def test_fold_deferred_entity_links_counts_only_applied_links(
+        journal_sdk, caplog):
+    """``fold_deferred_entity_links`` must return the number of links actually
+    APPLIED, warn on a MALFORMED record, and stay quiet for an honestly ABSENT
+    endpoint.
+
+    MUTATION: return ``len(events)`` (the pre-fix accounting) and drop the
+    malformed warning → the count is 3 and the warning assertion REDs.
+    """
+    import logging
+
+    sdk, _ = journal_sdk
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "src")["id"]
+    oid = sdk.create_object("tgt")["id"]
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection.entities"):
+        applied = proj.fold_deferred_entity_links([
+            (0, {"type": "EntityLinked", "id": pid, "source_id": pid,
+                 "source_label": "Point", "target_label": "Object",
+                 "target_id": oid, "edge_type": "aboutObject"}),
+            (1, {"type": "EntityLinked", "id": pid, "source_id": pid,
+                 "source_label": "Point", "target_label": "Object",
+                 "target_id": "no-such-object",
+                 "edge_type": "aboutObject"}),
+            (2, {"type": "EntityLinked", "id": pid, "source_id": pid,
+                 "source_label": "Point", "target_label": "Object",
+                 "target_id": oid, "edge_type": "window"}),
+        ])
+    assert applied == 1, applied
+    malformed = [r for r in caplog.records if "MALFORMED" in r.getMessage()]
+    assert len(malformed) == 1, [r.getMessage() for r in caplog.records]
+    assert "window" in malformed[0].getMessage()
+
+
+def test_recover_from_log_does_not_count_dropped_links_as_applied(tmp_path):
+    """``recover_from_log`` must not count an EntityLinked record it DROPPED
+    (malformed or absent endpoint) as a replayed event.
+
+    MUTATION: restore ``applied += len(entity_link_events)`` → the reason
+    reports 5 applied instead of 3 and this REDs.
+    """
+    import json
+
+    from tortoise.consistency import recover_from_log
+
+    sdk = TortoiseSDK(str(tmp_path / "dropped.db"))
+    try:
+        proj = sdk._get_proj()
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        events = [
+            {"type": "PointAdded",
+             "point": {"id": "pt-drop", "content": "c",
+                       "pointKind": "statement"}},
+            {"type": "ObjectRegistered", "id": "obj-drop", "name": "o"},
+            # malformed: unknown rel (dropped, must warn)
+            {"type": "EntityLinked", "id": "pt-drop", "source_id": "pt-drop",
+             "source_label": "Point", "target_label": "Object",
+             "target_id": "obj-drop", "edge_type": "window"},
+            # absent endpoint (dropped, no warning)
+            {"type": "EntityLinked", "id": "pt-drop", "source_id": "pt-drop",
+             "source_label": "Point", "target_label": "Object",
+             "target_id": "nope", "edge_type": "aboutObject"},
+            # the one real link (applied)
+            {"type": "EntityLinked", "id": "pt-drop", "source_id": "pt-drop",
+             "source_label": "Point", "target_label": "Object",
+             "target_id": "obj-drop", "edge_type": "aboutObject"},
+        ]
+        with open(events_dir / "events.jsonl", "w", encoding="utf-8") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        r = recover_from_log(str(events_dir), proj)
+        assert r["recovered"] is True, r
+        # 2 non-link events + exactly 1 applied link = 3 (not 5).
+        assert "replayed 3 events" in r["reason"], r
+        assert proj.g.query(
+            "MATCH (:Point {id:'pt-drop'})-[:aboutObject]->"
+            "(:Object {id:'obj-drop'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+    finally:
+        sdk.close()
 
 
 # ── SCOPE: the replay fold refuses a tampered journal ─────────────────────
@@ -584,6 +820,56 @@ def test_backup_jsonl_restore_replays_forward_reference_entity_link(tmp_path):
 
 # ── VOCABULARY: writer / fold / security sets must not drift ──────────────
 
+def test_link_entity_rejects_ontology_invalid_triple(journal_sdk):
+    """The allowlists must validate the ``(edge_type, source_label,
+    target_label)`` TRIPLE, not each field alone.
+
+    ``(Session)-[:aboutSubject]->(Subject)`` and
+    ``(Point)-[:aboutPoint]->(Point)`` are field-wise well-formed — every part
+    is in the frozensets — yet ONTOLOGY §3.2 forbids both (``aboutSubject`` is
+    Point/Document/Event→Subject; ``aboutPoint`` is Event-only). A field-alone
+    check admits them and the fold faithfully replays an edge the ontology does
+    not have.
+
+    MUTATION: drop the ``ENTITY_LINKED_TRIPLES`` checks (in ``link_entity`` and
+    ``_fold_entity_linked_reason``) → ``link_entity`` stops raising and the
+    fold returns 1, so this REDs.
+    """
+    import pytest
+
+    from tortoise.session_link import link_entity
+
+    sdk, _ = journal_sdk
+    proj = sdk._get_proj()
+    g = proj.g
+    pid = sdk.create_point("statement", "p")["id"]
+    proj.apply({"type": "SessionRecorded", "id": "s-triple"})
+
+    # (Session)-[:aboutSubject]->(Subject): each field valid, table forbids.
+    with pytest.raises(ValueError, match="ONTOLOGY"):
+        link_entity(proj, "Session", "s-triple", "sub-x",
+                    edge_type="aboutSubject", target_label="Subject")
+    # (Point)-[:aboutPoint]->(Point): aboutPoint is Event-only.
+    with pytest.raises(ValueError, match="ONTOLOGY"):
+        link_entity(proj, "Point", pid, pid,
+                    edge_type="aboutPoint", target_label="Point")
+
+    # The fold mirrors the gate: the same triples are a NO-OP...
+    assert proj._fold_entity_linked({
+        "type": "EntityLinked", "id": pid, "source_id": pid,
+        "source_label": "Point", "target_label": "Point",
+        "target_id": pid, "edge_type": "aboutPoint"}) == 0
+    # ...while a PERMITTED triple still folds (the gate is not over-broad).
+    oid = sdk.create_object("tgt2")["id"]
+    assert proj._fold_entity_linked({
+        "type": "EntityLinked", "id": pid, "source_id": pid,
+        "source_label": "Point", "target_label": "Object",
+        "target_id": oid, "edge_type": "aboutObject"}) == 1
+    assert g.query(
+        "MATCH (:Point {id:$p})-[:aboutPoint]->(:Point {id:$p}) "
+        "RETURN count(*)", params={"p": pid}).result_set[0][0] == 0
+
+
 def test_entity_linked_vocabulary_drift():
     """The writer's validated vocabulary and the fold's MUST be the same set,
     and every writer rel must be a known ONTOLOGY predicate. A
@@ -594,9 +880,20 @@ def test_entity_linked_vocabulary_drift():
     """
     from tortoise.projection.entities import _EntityHandlers
     from tortoise.security import KNOWN_REL_TYPES
-    from tortoise.session_link import ENTITY_LINKED_LABELS, ENTITY_LINKED_RELS
+    from tortoise.session_link import (
+        ENTITY_LINKED_LABELS,
+        ENTITY_LINKED_RELS,
+        ENTITY_LINKED_TRIPLES,
+    )
 
     assert _EntityHandlers._ENTITY_LINKED_RELS == ENTITY_LINKED_RELS
     assert _EntityHandlers._ENTITY_LINKED_LABELS == ENTITY_LINKED_LABELS
+    assert _EntityHandlers._ENTITY_LINKED_TRIPLES == ENTITY_LINKED_TRIPLES
     assert ENTITY_LINKED_RELS <= KNOWN_REL_TYPES, (
         ENTITY_LINKED_RELS - KNOWN_REL_TYPES)
+    # The field sets are the PROJECTIONS of the §3.2 triples — a triple whose
+    # rel/label is not in the sets would be unreachable, and a set member not
+    # used by any triple is dead vocabulary.
+    assert {t[0] for t in ENTITY_LINKED_TRIPLES} == ENTITY_LINKED_RELS
+    assert {t[1] for t in ENTITY_LINKED_TRIPLES} <= ENTITY_LINKED_LABELS
+    assert {t[2] for t in ENTITY_LINKED_TRIPLES} <= ENTITY_LINKED_LABELS

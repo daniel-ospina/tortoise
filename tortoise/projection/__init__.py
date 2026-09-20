@@ -1575,6 +1575,40 @@ _JOURNAL_CREATING_EVENT_TYPES = frozenset({
 })
 
 
+def journal_hard_delete_seqs(events) -> dict[str, int]:
+    """Per-id journal seq of the LAST hard delete — ``{id: max_seq}``.
+
+    The hard-delete record set is the same one ``_journal_hard_deleted_ids``
+    derives (``EntityMutated`` op=delete, #3299; ``PointsMerged``, whose
+    merged-away ids replay through ``_delete``); retraction is deliberately
+    NOT included — ``_retract`` tombstones and the node survives. The VALUE is
+    the MAXIMUM seq, which is all a "was there a hard delete AFTER seq L?"
+    test needs: ``any(delete_seq > L)`` is exactly ``max(delete_seq) > L``.
+
+    Used by the ``EntityLinked`` fold: the fold is an unconditional
+    MATCH…MERGE, so without this boundary a link whose endpoint was deleted
+    and later re-created under the SAME id came back on replay while live had
+    no such edge (ids are reused routinely). The seq space is the enumerate
+    index over the SAME journal list the replay engines walk, so callers must
+    pass the full events list, un-filtered.
+    """
+    out: dict[str, int] = {}
+    for seq, ev in enumerate(events):
+        if not isinstance(ev, dict):
+            continue
+        t = ev.get("type")
+        if t == "EntityMutated" and ev.get("op") == "delete":
+            rid = ev.get("id")
+            if isinstance(rid, str):
+                out[rid] = seq
+        elif t == "PointsMerged":
+            # #331: `or []` also covers an explicit "merge_ids": null.
+            for mid in ev.get("merge_ids") or []:
+                if isinstance(mid, str):
+                    out[mid] = seq
+    return out
+
+
 class FalkorProjection(
     _EntityHandlers,
     _EdgeHandlers,
@@ -2367,21 +2401,7 @@ class FalkorProjection(
         Retraction is deliberately NOT in this set: ``_retract`` tombstones
         and the node survives, so it can never look like a lost Point.
         """
-        deleted: set[str] = set()
-        for ev in events:
-            if not isinstance(ev, dict):
-                continue
-            t = ev.get("type")
-            if t == "EntityMutated" and ev.get("op") == "delete":
-                rid = ev.get("id")
-                if isinstance(rid, str):
-                    deleted.add(rid)
-            elif t == "PointsMerged":
-                # #331: `or []` also covers an explicit "merge_ids": null.
-                for mid in ev.get("merge_ids") or []:
-                    if isinstance(mid, str):
-                        deleted.add(mid)
-        return deleted
+        return set(journal_hard_delete_seqs(events))
 
     def _assert_episodic_points_recreatable(self, before: set[str], events,
                                             snapshot_ids=()) -> None:
@@ -2456,14 +2476,17 @@ class FalkorProjection(
         # fold to nothing. Defer the type to a trailing sweep — the same
         # forward-reference treatment ``rebuild_all`` gives it — so the replay
         # engines agree. The fold is an idempotent MERGE, order-free by
-        # construction.
-        entity_link_events: list[dict] = []
-        for ev in events:
+        # construction. Records are buffered WITH their journal seq so the
+        # sweep can apply the hard-delete staleness rule (#3722 review P2): a
+        # link whose endpoint was hard-deleted AFTER it must not resurrect.
+        hard_delete_seqs = journal_hard_delete_seqs(events)
+        entity_link_events: list[tuple[int, dict]] = []
+        for seq, ev in enumerate(events):
             if isinstance(ev, dict) and ev.get("type") == "EntityLinked":
-                entity_link_events.append(ev)
+                entity_link_events.append((seq, ev))
                 continue
             self.apply(ev)
-        self.fold_deferred_entity_links(entity_link_events)
+        self.fold_deferred_entity_links(entity_link_events, hard_delete_seqs)
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -2984,8 +3007,10 @@ class FalkorProjection(
         # MATCHed neither endpoint and silently dropped the journaled
         # `(Session)-[:aboutObject]->(Object)` edge whenever the journal had
         # no `SessionRecorded` for it. The fold is an idempotent MERGE, so
-        # running it later changes nothing else.
-        entity_link_events: list = []
+        # running it later changes nothing else. Records are buffered WITH
+        # their journal (enumerate) seq so the sweep can apply the hard-delete
+        # staleness rule (#3722 review P2) in the SAME seq space pass 1a uses.
+        entity_link_events: list[tuple[int, dict]] = []
         # #2488: ONE cross-family deferred list for point re-stamp folds —
         # PointSuperseded (#2423) + PointInvalidated (#2488) — carrying the
         # journal (enumerate) seq: the trailing sweep's survivor rule and
@@ -3257,8 +3282,9 @@ class FalkorProjection(
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
             elif t == "EntityLinked":
-                # #3664: defer to the trailing sweep (see declaration).
-                entity_link_events.append(ev)
+                # #3664: defer to the trailing sweep (see declaration), with
+                # the journal seq the hard-delete staleness rule needs.
+                entity_link_events.append((seq, ev))
             elif t == "SessionRecorded":
                 # #3664: the :Session node must exist before any deferred
                 # EntityLinked fold FROM it runs (the sweep below).
@@ -3462,11 +3488,14 @@ class FalkorProjection(
         # a process death between the wipe and here IS recovered on the next
         # run (and by `recover_from_log`) — the sidecar-recovery test
         # exercises exactly that. The residual applies only to (a) a
-        # journal-only `rebuild()`, which has no sidecar at all (and yields
-        # the `_link_session` stub), and (b) a sidecar written next to a log
+        # journal-only `rebuild()` over a journal that carries NO
+        # `SessionRecorded` (a pre-#3664 journal, or a hosted/journal-less
+        # lane) — the `_link_session` stub is then the only Session state —
+        # and (b) a sidecar written next to a log
         # dir the embedded opener cannot see — see the warning above the
-        # sidecar write. The durable JOURNAL Session carrier remains
-        # #2296/#3722, and is deliberately NOT re-invented here.
+        # sidecar write. For a post-#3664 journal the durable carrier is the
+        # `SessionRecorded` record (folded by `_fold_session_recorded`), so a
+        # journaled capture no longer depends on this snapshot.
         for props in session_snapshot:
             sid = props.get("id")
             if not sid:
@@ -3557,14 +3586,20 @@ class FalkorProjection(
         # source that exists solely because a PointAdded carried
         # `contains_session` was not yet created there, so the journaled
         # `(Session)-[:aboutObject]->(Object)` edge was silently lost.
-        # A 0-row fold now means the target was never re-created by any
+        #
+        # A 0-row fold means EITHER endpoint was never re-created by any
         # journaled event (pre-#2194 journal, unjournaled producer, delete
         # race) — honest: the journal could not reproduce that attachment.
-        # No warning here: unlike a supersession fold-miss (which means a
-        # claim of state was lost), an absent link target is simply an
-        # absent entity.
-        for ev in entity_link_events:
-            self._fold_entity_linked(ev)
+        # It is NOT a target-only condition: `_fold_entity_linked` MATCHes
+        # BOTH endpoints, so a missing SESSION/POINT SOURCE — the exact class
+        # this sweep move exists for — is the same 0-row outcome. No warning
+        # for it: unlike a supersession fold-miss (which means a claim of
+        # state was lost), an absent link endpoint is simply an absent
+        # entity. A MALFORMED record is different and DOES warn (inside the
+        # fold), as does a stale link suppressed by the hard-delete rule
+        # (silent skip, counted as dropped — see `fold_deferred_entity_links`).
+        self.fold_deferred_entity_links(
+            entity_link_events, journal_hard_delete_seqs(events))
 
         # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator

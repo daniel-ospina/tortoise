@@ -242,6 +242,39 @@ ENTITY_LINKED_LABELS = frozenset({
     "Source",
 })
 
+# ONTOLOGY §3.2 — the ``(edge_type, source_label, target_label)`` TRIPLES the
+# cross-entity table permits. Validating the TRIPLE (never each field alone)
+# is the point: ``(Session)-[:aboutSubject]->(Subject)`` and
+# ``(Point)-[:aboutPoint]->(Point)`` are each individually well-formed —
+# every part is in the sets above — yet the table forbids both
+# (``aboutSubject`` is Point/Document/Event→Subject; ``aboutPoint`` is
+# Event-only). A field-alone check admits them and the fold faithfully
+# replays an edge the ontology does not have.
+#
+# The set is the FULL §3.2 table, so ``link_entity`` stays the shared
+# about*-edge writer it advertises: it rejects only combinations the ontology
+# itself rejects. ``aboutAction`` is the legacy Point→Point predicate (§3.2,
+# Action dissolved in v3.0); ``TAGGED`` is excluded — it is a `:Tag` edge, not
+# an about* one. Kept in lockstep with the projection's local mirror by
+# tests/test_capture_entity_attachment_3664.py::test_entity_linked_vocabulary_drift.
+ENTITY_LINKED_TRIPLES = frozenset({
+    ("aboutSubject", "Point", "Subject"),
+    ("aboutSubject", "Document", "Subject"),
+    ("aboutSubject", "Event", "Subject"),
+    ("aboutObject", "Point", "Object"),
+    ("aboutObject", "Document", "Object"),
+    ("aboutObject", "Event", "Object"),
+    ("aboutObject", "Session", "Object"),
+    ("aboutEvent", "Point", "Event"),
+    ("aboutEvent", "Document", "Event"),
+    ("aboutPoint", "Event", "Point"),
+    ("aboutDocument", "Event", "Document"),
+    ("aboutSource", "Point", "Source"),
+    ("aboutSource", "Document", "Source"),
+    ("aboutSource", "Event", "Source"),
+    ("aboutAction", "Point", "Point"),
+})
+
 
 def link_entity(proj, source_label: str, source_id: str, target_id: str,
                 edge_type: str = "aboutObject", target_label: str = "Object",
@@ -254,7 +287,9 @@ def link_entity(proj, source_label: str, source_id: str, target_id: str,
     JSONL record (flat logical identities) so the projection can fold it back
     on replay — live == rebuild. ``edge_type``/labels are validated against
     the module's frozen vocabularies (a fail-closed backstop against Cypher
-    interpolation of untrusted values).
+    interpolation of untrusted values), and the COMBINATION must be a
+    permitted ONTOLOGY §3.2 triple — a field-alone check would admit
+    ``(Session)-[:aboutSubject]->(Subject)``, which the table forbids.
     """
     if edge_type not in ENTITY_LINKED_RELS:
         raise ValueError(
@@ -268,6 +303,11 @@ def link_entity(proj, source_label: str, source_id: str, target_id: str,
         raise ValueError(
             f"link_entity: target_label {target_label!r} is not a known "
             f"entity label ({sorted(ENTITY_LINKED_LABELS)})")
+    if (edge_type, source_label, target_label) not in ENTITY_LINKED_TRIPLES:
+        raise ValueError(
+            f"link_entity: ({source_label})-[:{edge_type}]->({target_label}) "
+            "is not a permitted ONTOLOGY §3.2 combination "
+            f"({sorted(ENTITY_LINKED_TRIPLES)})")
     pre = proj.g.query(
         f"MATCH (s:{source_label} {{id:$sid}})-[:{edge_type}]->"
         f"(t:{target_label} {{id:$tid}}) RETURN count(s)",

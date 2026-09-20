@@ -33,7 +33,7 @@
 The table above documents the `:GraphEvent` **payload**. The JSONL rebuild
 journal that `rebuild_all` replays is a *second*, differently-shaped store:
 `_emit_event` writes the envelope (`event_id`/`ts`/`type`/`initiated_by`/
-`projection_version`) plus the record's own fields. Two folds carry props that
+`projection_version`) plus the record's own fields. Four folds carry props that
 the payload does not name:
 
 - **`OperatorAnnotated`** (#3689) — the JSONL line carries `id` plus the
@@ -56,19 +56,27 @@ the payload does not name:
 - **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
   live capture MERGE is a raw write). Fields: `id`, `created_at`,
   `turn_count`, `harness`, `actor_user_id`, and (on the follow-up emission)
-  `entity_links_attempted` / `entity_links_created`. Folded by
+  `entity_links_attempted` / `entity_links_created`, and (on a third, TRAILING
+  emission written right after the live `SET s.capture_ok /
+  s.capture_extractor`) `capture_ok` / `capture_extractor`. Folded by
   `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
   `id` (with `is_episodic=true`), coalesce-preserving `created_at` /
-  `actor_user_id` and taking `turn_count` from the latest record. The capture
-  emits a **second** `SessionRecorded` after the entity-linking pass carrying
-  the two outcome counters, so those fields are durable on the
-  `apply()`-based engines too (the first record is emitted before the link
-  result is known and cannot carry them).
+  `actor_user_id` and taking `turn_count`, `capture_ok` and
+  `capture_extractor` from the latest record. The capture emits a **second**
+  `SessionRecorded` after the entity-linking pass carrying the two outcome
+  counters, and a **third** after the attempt-outcome write carrying
+  `capture_ok` / `capture_extractor`, so all of those fields are durable on
+  the `apply()`-based engines too (the first record is emitted before either
+  result is known and cannot carry them; a null `capture_ok` would otherwise
+  read as the legacy "presumed captured" case at the #2335 retry gate).
 
-**Replay ordering.** `EntityLinked` is deferred to a trailing sweep by every
-replay engine (`rebuild_all`, and the `apply()`-based `rebuild` /
-`recover_from_log` / `backup.restore`'s JSONL fallback), so a link whose
-endpoint is created LATER in the journal still folds. On `rebuild_all` the
+**Replay ordering.** `EntityLinked` is deferred to a trailing sweep by all
+four whole-journal replay engines (`rebuild_all`, and the `apply()`-based
+`rebuild` / `recover_from_log` / `backup.restore`'s JSONL fallback), so a link
+whose endpoint is created LATER in the journal still folds. A link whose
+endpoint was HARD-DELETED after it is skipped instead (the record carries its
+journal seq and each engine supplies the hard-delete boundary), so a
+same-id re-creation does not resurrect the deleted link. On `rebuild_all` the
 sweep runs AFTER pass 2, so a `:Session` source recreated from a
 `contains_session` turn link exists before the fold.
 

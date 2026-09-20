@@ -3857,6 +3857,25 @@ class TortoiseSDK:
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
+            else:
+                # #3664 review P2: the raw SET above has no journal carrier —
+                # the FIRST SessionRecorded is emitted BEFORE extraction, and
+                # the counter emission carries only the link counters — so a
+                # journal-only ``rebuild()`` / ``recover_from_log`` restored
+                # ``capture_ok = capture_extractor = null``. That null is
+                # CONSUMED by the #2335 WI-2b TRUE-retry gate above ("null"
+                # reads as the legacy presumed-captured case), so a session
+                # whose capture FAILED silently stopped retrying. Emit a
+                # TRAILING SessionRecorded with the values just written so
+                # ``_fold_session_recorded`` replays them. Under the SAME
+                # ``_record_session_state`` gate (and only after the live SET
+                # succeeded) so live and replay stay in lockstep; a
+                # journal-less SDK no-ops in ``_emit_event``, exactly as it
+                # does for the first record.
+                self._emit_event(
+                    "SessionRecorded", id=session_id,
+                    capture_ok=_capture_ok_record,
+                    capture_extractor=_capture_extractor_record)
         if not ok and meta.get("mode") == "empty":
             effective_mode = "empty"
         elif not ok:
