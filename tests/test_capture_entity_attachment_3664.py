@@ -644,6 +644,152 @@ def test_nested_entity_mutated_delete_suppresses_entity_link(tmp_path):
         sdk.close()
 
 
+def _replay_all_four_engines(proj, tmp_path, events_dir, queries):
+    """Run ALL FOUR whole-journal replay engines over one journal.
+
+    The three ``_replay_every_engine`` covers PLUS ``backup.restore``'s JSONL
+    fallback — the fourth engine that performs the deferred ``EntityLinked``
+    sweep. Returns ``{engine: [scalar, ...]}`` in ``queries`` order.
+
+    The restore engine runs into its OWN embedded DB in a directory holding no
+    ``.jsonl``: opening a projection with an adjacent event log auto-replays
+    it (``_auto_health_recover``), which would mask this engine's own sweep.
+    """
+    import json
+
+    from tortoise.backup import restore
+    from tortoise.consistency import recover_from_log
+    from tortoise.projection import FalkorProjection
+
+    class _Log:
+        def read_all(self):
+            with open(events_dir / "events.jsonl", encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+
+    def _read(p):
+        return [p.g.query(q).result_set[0][0] for q in queries]
+
+    out = {}
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(events_dir))
+    out["rebuild_all"] = _read(proj)
+
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild(_Log())
+    out["rebuild"] = _read(proj)
+
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    r = recover_from_log(str(events_dir), proj)
+    assert r["recovered"] is True, r
+    out["recover_from_log"] = _read(proj)
+
+    (events_dir / "manifest.json").write_text(
+        json.dumps({"db": "tortoise.db"}), encoding="utf-8")
+    db_dir = tmp_path / "restored-four"
+    db_dir.mkdir()
+    ev_dir = tmp_path / "restored-four-ev"
+    ev_dir.mkdir()
+    r = restore(str(events_dir), str(db_dir / "restored.db"),
+                events_path=str(ev_dir / "restored-events.jsonl"),
+                into_falkor=True)
+    assert r["status"] == "ok", r
+    bproj = FalkorProjection(str(db_dir / "restored.db"))
+    try:
+        out["backup_restore"] = _read(bproj)
+    finally:
+        bproj.close()
+    return out
+
+
+def test_hard_delete_boundary_is_per_id_and_label(tmp_path):
+    """The hard-delete boundary must be per-``(id, label)``: a delete AFTER a
+    link suppresses it only when THAT delete can remove the link endpoint's
+    OWN label.
+
+    ``journal_hard_delete_seqs`` paired the MAX delete seq for an id with a
+    label set UNIONED across ALL of that id's deletes. The suppression test
+    then asked "could SOME delete of this id remove this label?" while
+    comparing against the LATEST delete's seq — unsound whenever the latest
+    delete is a ``PointsMerged`` (Points only) while the label came from an
+    EARLIER ``EntityMutated op=delete`` (all six labels).
+
+    Reachable: an id is hard-deleted, an Object is RE-CREATED under it, an
+    ``EntityLinked`` records the attachment, a Point reuses the same id, and a
+    trailing ``PointsMerged`` merges that Point. The union key saw ``Object``
+    from the FIRST delete and the MAX seq from the merge, so it suppressed the
+    Object-side link — a LIVE edge silently DROPPED on replay (over-
+    suppression, not the conservative direction the old docstring implied).
+
+    MUTATION: restore the ``{id: (max_seq, union(labels))}`` shape in
+    ``journal_hard_delete_seqs``/``_hard_delete_suppresses`` → the seq-4
+    Object-side link is suppressed in all four engines and this REDs
+    (observed ``[0, 0]`` per engine against ``[1, 0]``).
+    """
+    object_link = (
+        "MATCH (:Point {id:'pt-src'})-[:aboutObject]->"
+        "(:Object {id:'dup'}) RETURN count(*)")
+    point_link = (
+        "MATCH (:Point {id:'dup'})-[:aboutObject]->"
+        "(:Object {id:'obj-z'}) RETURN count(*)")
+    events = [
+        {"type": "PointAdded",
+         "point": {"id": "pt-src", "content": "src",
+                   "pointKind": "statement"}},
+        {"type": "ObjectRegistered", "id": "obj-z", "name": "obj-z"},
+        # An EARLIER hard delete of "dup" — removes all six canonical labels.
+        {"type": "EntityMutated", "id": "dup", "op": "delete",
+         "label": "Object"},
+        # The Object is RE-CREATED under the same id.
+        {"type": "ObjectRegistered", "id": "dup", "name": "dup"},
+        # The Object-side link (seq 4). Its only LATER same-id delete is the
+        # PointsMerged below, which removes the POINT only ⇒ it must SURVIVE.
+        {"type": "EntityLinked", "id": "pt-src", "source_id": "pt-src",
+         "source_label": "Point", "target_label": "Object",
+         "target_id": "dup", "edge_type": "aboutObject"},
+        # A POINT reusing the same id "dup"...
+        {"type": "PointAdded",
+         "point": {"id": "dup", "content": "p1",
+                   "pointKind": "statement"}},
+        # ...with its own link, created at seq 6.
+        {"type": "EntityLinked", "id": "dup", "source_id": "dup",
+         "source_label": "Point", "target_label": "Object",
+         "target_id": "obj-z", "edge_type": "aboutObject"},
+        # The trailing delete removes the POINT "dup" ONLY — it cannot touch
+        # the Object "dup", so it must not suppress the seq-4 Object-side
+        # link. It DOES suppress the Point-side link at seq 6.
+        {"type": "PointsMerged", "merge_ids": ["dup"]},
+        # Re-create the POINT under the same id: the endpoint exists again, so
+        # the seq-6 link's absence is SUPPRESSION, not a missing node.
+        {"type": "PointAdded",
+         "point": {"id": "dup", "content": "p2",
+                   "pointKind": "statement"}},
+    ]
+    sdk = TortoiseSDK(str(tmp_path / "per-id-and-label.db"))
+    try:
+        proj = sdk._get_proj()
+        events_dir = tmp_path / "events"
+        _write_journal(events_dir, events)
+        got = _replay_all_four_engines(
+            proj, tmp_path, events_dir, [object_link, point_link])
+        assert got == {
+            "rebuild_all": [1, 0],
+            "rebuild": [1, 0],
+            "recover_from_log": [1, 0],
+            "backup_restore": [1, 0],
+        }, got
+        # Non-vacuous in BOTH directions: the Object endpoint is alive (so the
+        # surviving edge is real) and the re-created Point endpoint is alive
+        # (so the suppressed edge is stale, not endpoint-less).
+        assert proj.g.query(
+            "MATCH (:Object {id:'dup'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+        assert proj.g.query(
+            "MATCH (:Point {id:'dup'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+    finally:
+        sdk.close()
+
+
 # ── OBSERVABILITY: a dropped link is visible and not counted as applied ───
 
 def test_fold_deferred_entity_links_counts_only_applied_links(

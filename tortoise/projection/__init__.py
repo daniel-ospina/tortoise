@@ -1584,26 +1584,54 @@ _JOURNAL_CREATING_EVENT_TYPES = frozenset({
 # ``PointsMerged`` deletes Points only. So a journaled hard delete can NEVER
 # remove a ``:Session`` node, and the staleness rule must not suppress a
 # Session-source link just because an unrelated Point/Object with the same id
-# was deleted later.
+# was deleted later. #3722 review (cycle 6) P2: the reader keys these sets
+# PER LABEL under the id (``{id: {label: max_seq}}``), so a delete that cannot
+# remove a label never supplies that label's boundary seq either — unioning
+# them across deletes conflated an ``EntityMutated`` delete with a later
+# ``PointsMerged`` and over-suppressed a live link.
 _HARD_DELETE_LABELS = frozenset({
     "Point", "Subject", "Object", "Document", "Source", "Event",
 })
 _POINTS_MERGED_LABELS = frozenset({"Point"})
 
 
-def journal_hard_delete_seqs(
-        events) -> dict[str, tuple[int, frozenset[str]]]:
-    """Per-id journal seq of the LAST hard delete — ``{id: (max_seq, labels)}``.
+def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
+    """Per-``(id, label)`` journal seq of the LAST hard delete that can remove
+    that label — ``{id: {label: max_delete_seq}}``.
+
+    EXACT, not conservative: the inner map records, per label the delete can
+    actually REMOVE, the latest seq of such a delete, so
+    ``_hard_delete_suppresses`` is literally "is there a hard delete AFTER seq
+    L that can remove THIS label?" — ``entry.get(label) > L``.
 
     The hard-delete record set is the same one ``_journal_hard_deleted_ids``
     derives (``EntityMutated`` op=delete, #3299; ``PointsMerged``, whose
     merged-away ids replay through ``_delete``); retraction is deliberately
-    NOT included — ``_retract`` tombstones and the node survives. The VALUE is
-    ``(max_seq, labels)``: ``max_seq`` is the MAXIMUM delete seq — all a "was
-    there a hard delete AFTER seq L?" test needs, since ``any(delete_seq >
-    L)`` is exactly ``max(delete_seq) > L`` — and ``labels`` is the set of
-    node labels that delete can remove (see ``_HARD_DELETE_LABELS`` above),
-    UNIONED per id across records.
+    NOT included — ``_retract`` tombstones and the node survives. The OUTER
+    key is the id; the INNER keys are the labels that delete removes:
+
+    * ``EntityMutated`` op=delete replays ``_delete_entity_by_id`` — id-wide
+      across exactly ``_HARD_DELETE_LABELS`` (all six get the seq), whatever
+      the record's own ``label`` field says (the emitter writes one record per
+      MATCHED label, but the fold is id-wide).
+    * ``PointsMerged`` replays ``_delete`` — a ``:Point`` only
+      (``_POINTS_MERGED_LABELS``), so only ``Point`` gets the seq.
+
+    A ``:Session`` source is therefore never suppressed — no journaled hard
+    delete can remove it — so a same-id delete of another label cannot drop a
+    live ``(Session)-[:aboutObject]->(Object)`` edge (live != replay).
+
+    #3722 review (cycle 6) P2 — the SHAPE must be per-``(id, label)``. An
+    earlier revision paired the MAX delete seq for an id with a label set
+    UNIONED across ALL of that id's deletes, so the boundary asked "could SOME
+    delete of this id remove this label?" while comparing against the LATEST
+    delete's seq. That is unsound whenever the latest delete is a
+    ``PointsMerged`` (removes Points only) while the label came from an
+    EARLIER ``EntityMutated`` (removes all six): it OVER-suppressed, silently
+    DROPPING a live edge on replay (an Object re-created under a
+    deleted-then-merged id lost its ``(Point)-[:aboutObject]->(Object)`` link
+    in every engine). Per-label max seq removes the cross-delete conflation
+    entirely — there is no residual over-approximation to document here.
 
     Used by the ``EntityLinked`` fold: the fold is an unconditional
     MATCH…MERGE, so without this boundary a link whose endpoint was deleted
@@ -1612,30 +1640,20 @@ def journal_hard_delete_seqs(
     index over the SAME journal list the replay engines walk, so callers must
     pass the full events list, un-filtered.
 
-    #3722 review (cycle 5) P2 — this reader is keyed correctly on BOTH axes it
-    previously got wrong:
-
-    * **SHAPE.** The payload is read from the NORMALIZED record (``_norm``),
-      not the raw envelope. ``_norm`` splices ``ev["point"]`` over the
-      envelope, and THAT is the shape ``apply()``'s ``PointsMerged`` branch
-      and ``rebuild_all``'s pass-1b branch delete through. The nested shape is
-      a SUPPORTED journal shape, pinned by
-      ``tests/test_projection.py::test_falkor_apply_points_merged_nested_format``
-      (#325) — ``{"type":"PointsMerged","point":{"keep_id":k,
-      "merge_ids":[x]}}``. Reading the RAW record missed the delete entirely
-      (returned ``{}``), so the staleness rule never suppressed a link whose
-      endpoint was merged away, and the deleted link resurrected on the
-      re-created point. A nested ``EntityMutated`` op=delete was hidden the
-      same way.
-    * **KEY.** ``labels`` makes the suppression label-aware: a caller must
-      require that the endpoint's label is actually REMOVABLE by the recorded
-      delete. ``EntityMutated`` removes the six canonical labels;
-      ``PointsMerged`` removes Points only. A ``:Session`` source is therefore
-      never suppressed — no journaled hard delete can remove it — while the
-      id-only rule dropped a live Session's edge whenever any other-label
-      entity with the same id was hard-deleted later (live != replay).
+    The payload is read from the NORMALIZED record (``_norm``), not the raw
+    envelope. ``_norm`` splices ``ev["point"]`` over the envelope, and THAT
+    is the shape ``apply()``'s ``PointsMerged`` branch and ``rebuild_all``'s
+    pass-1b branch delete through. The nested shape is a SUPPORTED journal
+    shape, pinned by
+    ``tests/test_projection.py::test_falkor_apply_points_merged_nested_format``
+    (#325) — ``{"type":"PointsMerged","point":{"keep_id":k,
+    "merge_ids":[x]}}``. Reading the RAW record missed the delete entirely
+    (returned ``{}``), so the staleness rule never suppressed a link whose
+    endpoint was merged away, and the deleted link resurrected on the
+    re-created point. A nested ``EntityMutated`` op=delete was hidden the
+    same way.
     """
-    out: dict[str, tuple[int, frozenset[str]]] = {}
+    out: dict[str, dict[str, int]] = {}
     for seq, ev in enumerate(events):
         if not isinstance(ev, dict):
             continue
@@ -1656,37 +1674,51 @@ def journal_hard_delete_seqs(
 
 
 def _merge_hard_delete(out, rid, seq, labels) -> None:
-    """Record a hard delete of ``rid`` at ``seq``: max seq, union of labels."""
-    prev = out.get(rid)
-    out[rid] = ((seq, labels) if prev is None
-                else (max(prev[0], seq), prev[1] | labels))
+    """Record a hard delete of ``rid`` at ``seq``: per-label MAX seq.
+
+    ``labels`` is the set of labels THIS delete can remove, so each label's
+    slot is advanced INDEPENDENTLY — never unioned across deletes (#3722
+    review cycle 6: unioning is what conflated an ``EntityMutated`` delete
+    with a later ``PointsMerged``).
+    """
+    by_label = out.get(rid)
+    if by_label is None:
+        by_label = {}
+        out[rid] = by_label
+    for label in labels:
+        prev = by_label.get(label)
+        if prev is None or seq > prev:
+            by_label[label] = seq
 
 
 def _hard_delete_suppresses(hard_delete_seqs, endpoint_id, label,
                             seq) -> bool:
     """True when a recorded hard delete of ``(label, endpoint_id)`` lands AFTER
-    ``seq`` (#3722 review cycle 5 P2).
+    ``seq`` — exactly "a delete after L that can remove THIS label" (#3722
+    review cycle 6 P2; see ``journal_hard_delete_seqs``).
 
-    Label-aware on purpose: the record stores the set of labels the delete can
-    remove, so a ``:Session`` endpoint — or any other node outside the six
-    canonical labels — is never suppressed by an unrelated same-id delete
-    (see ``journal_hard_delete_seqs``). ``endpoint_id``/``label`` come from a
-    journal FILE, so BOTH are type-gated: a list/dict label would raise
-    ``TypeError: unhashable`` on the membership test, and a non-string id
-    could never have been written (``_writable_id``) so it cannot be stale.
+    ``endpoint_id``/``label`` come from a journal FILE, so BOTH are type-gated:
+    a list/dict label would raise ``TypeError: unhashable`` on the membership
+    test, and a non-string id could never have been written (``_writable_id``)
+    so it cannot be stale.
     """
     if not isinstance(endpoint_id, str) or not isinstance(label, str):
         return False
     entry = hard_delete_seqs.get(endpoint_id)
     if not entry:
         return False
+    if isinstance(entry, dict):
+        del_seq = entry.get(label)
+        return del_seq is not None and del_seq > seq
     if isinstance(entry, tuple):
+        # Cycle-5 ``{id: (max_seq, labels)}``: no in-repo producer emits this
+        # any more; the union it carries OVER-suppresses (cycle 6), so it is
+        # tolerated only for an external caller holding the old shape.
         del_seq, labels = entry
-    else:
-        # Tolerate the pre-cycle-5 ``{id: seq}`` shape (no labels): fall back
-        # to the id-only test over the removable-label set.
-        del_seq, labels = entry, _HARD_DELETE_LABELS
-    return del_seq > seq and label in labels
+        return del_seq > seq and label in labels
+    # Pre-cycle-5 ``{id: int}`` (no labels): fall back to the id-only test over
+    # the removable-label set.
+    return entry > seq and label in _HARD_DELETE_LABELS
 
 
 class FalkorProjection(
@@ -2480,6 +2512,11 @@ class FalkorProjection(
         them journaled the destruction — so the #3947 invariant exempts them.
         Retraction is deliberately NOT in this set: ``_retract`` tombstones
         and the node survives, so it can never look like a lost Point.
+
+        ``journal_hard_delete_seqs`` returns ``{id: {label: max_seq}}``, so
+        ``set(...)`` takes its OUTER keys and this set is IDENTICAL under the
+        #3722 review cycle-6 per-label keying — the invariant depends on WHICH
+        IDS the journal deletes, never on which labels a delete removes.
         """
         return set(journal_hard_delete_seqs(events))
 

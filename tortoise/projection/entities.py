@@ -704,7 +704,7 @@ class _EntityHandlers:
         record is also accepted (its list index is its seq) so a caller with
         no envelope still works.
 
-        ``hard_delete_seqs`` (``{id: (max_hard_delete_seq, labels)}``, built
+        ``hard_delete_seqs`` (``{id: {label: max_hard_delete_seq}}``, built
         by ``projection.journal_hard_delete_seqs``) makes the fold HARD-DELETE
         aware. ``_fold_entity_linked`` is an unconditional MATCH…MERGE, and
         ids are reused routinely (name-deterministic for Object/Subject,
@@ -719,6 +719,10 @@ class _EntityHandlers:
         hard delete can NEVER remove a ``:Session`` node — an id-only test
         wrongly suppressed a live ``(Session)-[:aboutObject]->(Object)`` edge
         whenever any other-label entity with the same id was deleted later.
+        The boundary is EXACT per ``(id, label)`` (#3722 review cycle 6 P2):
+        each label carries the max seq of a delete that can remove IT, so a
+        later ``PointsMerged`` never suppresses an ``Object``-side link whose
+        same-id ``Object`` was re-created after an earlier delete.
         A later re-link (its own seq > the delete) is judged on its own seq
         and survives, so the rule needs no extra state.
 
