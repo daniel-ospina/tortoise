@@ -3214,7 +3214,7 @@ def test_mark_orphan_confirmation_no_confirmation_while_suite_active(
     assert rec.get("_orphan_confirmed") is not True
 
 
-def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch):
+def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch, tmp_path):
     """#1642 FIX 3: only_safe kills a live-pid candidate ONLY when it is
     orphan-confirmed (persisted 0-client + no live suite markers) — the
     cron mode's discriminator that #1557's blanket live-pid protection
@@ -3230,14 +3230,19 @@ def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch):
                         lambda _s: 0)
     # redislite servers daemonize to ppid=1 — every candidate is detached.
     monkeypatch.setattr("tortoise.embedded_reaper._is_detached", lambda p: True)
+    # #4136: a kill is only authorized by a candidate dir owned by our euid.
+    owned = tmp_path / "redislite_owned"
+    owned.mkdir()
     confirmed = {"classification": "candidate", "dir_missing": False,
                  "socket_path": "/tmp/s-confirmed", "pid": os.getpid(),
+                 "dbdir": str(owned),
                  "path_based": False, "_orphan_confirmed": True}
     acted = reap([confirmed], dry_run=False, only_safe=True)
     assert killed == [os.getpid()]
     assert acted  # killed
     unconfirmed = {"classification": "candidate", "dir_missing": False,
                    "socket_path": "/tmp/s-unconfirmed", "pid": os.getpid(),
+                   "dbdir": str(owned),
                    "path_based": False}
     killed.clear()
     acted = reap([unconfirmed], dry_run=False, only_safe=True)
@@ -3245,7 +3250,7 @@ def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch):
     assert acted == []
 
 
-def test_reap_path_based_requires_confirmation(monkeypatch):
+def test_reap_path_based_requires_confirmation(monkeypatch, tmp_path):
     """#1642 FIX 3: a path_based (user-data) candidate is killed in the
     FULL sweep only when orphan-confirmed; without confirmation it is
     protected even at 0 clients (its data outlives the test tree)."""
@@ -3258,20 +3263,24 @@ def test_reap_path_based_requires_confirmation(monkeypatch):
     monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
     monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
                         lambda _s: 0)
+    owned = tmp_path / "redislite_owned"
+    owned.mkdir()
     unconfirmed = {"classification": "candidate", "dir_missing": False,
                    "socket_path": "/tmp/pb-unconfirmed", "pid": os.getpid(),
+                   "dbdir": str(owned),
                    "path_based": True}
     acted = reap([unconfirmed], dry_run=False, only_safe=False)
     assert killed == [], "unconfirmed path-based server killed in full sweep"
     assert acted == []
     confirmed = {"classification": "candidate", "dir_missing": False,
                  "socket_path": "/tmp/pb-confirmed", "pid": os.getpid(),
+                 "dbdir": str(owned),
                  "path_based": True, "_orphan_confirmed": True}
     acted = reap([confirmed], dry_run=False, only_safe=False)
     assert killed == [os.getpid()]
 
 
-def test_reap_ephemeral_full_sweep_kills_without_confirmation(monkeypatch):
+def test_reap_ephemeral_full_sweep_kills_without_confirmation(monkeypatch, tmp_path):
     """#1642 FIX 3: ephemeral test-tree candidates keep the existing FULL
     sweep contract — 0-client (double-checked) candidates are killed on
     first pass (the 445-kill wave behavior); only_safe still requires
@@ -3285,8 +3294,11 @@ def test_reap_ephemeral_full_sweep_kills_without_confirmation(monkeypatch):
     monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
     monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
                         lambda _s: 0)
+    owned = tmp_path / "redislite_owned"
+    owned.mkdir()
     rec = {"classification": "candidate", "dir_missing": False,
            "socket_path": "/tmp/eph", "pid": os.getpid(),
+           "dbdir": str(owned),
            "path_based": False}
     acted = reap([rec], dry_run=False, only_safe=False)  # noqa: F841
     assert killed == [os.getpid()]
@@ -3364,8 +3376,13 @@ def test_reap_kills_confirmed_socketless_orphan(monkeypatch):
     monkeypatch.setattr("tortoise.embedded_reaper._kill",
                         lambda pid, timeout: killed.append(pid))
     monkeypatch.setattr("tortoise.embedded_reaper._is_detached", lambda p: True)
+    # #4136: the socket-less kill is authorized by the pid's OWN argv naming
+    # the dir (the unforgeable pass-1 binding) — simulated here.
+    monkeypatch.setattr("tortoise.embedded_reaper._socket_dir_from_cmdline",
+                        lambda p: "/nonexistent/1642")
     confirmed = {"classification": "candidate", "dir_missing": False,
                  "socket_path": "/nonexistent/1642/redis.socket",
+                 "dbdir": "/nonexistent/1642",
                  "pid": os.getpid(), "path_based": False,
                  "_orphan_confirmed": True}
     acted = reap([confirmed], dry_run=False, only_safe=True)
@@ -3373,6 +3390,7 @@ def test_reap_kills_confirmed_socketless_orphan(monkeypatch):
     assert acted
     unconfirmed = {"classification": "candidate", "dir_missing": False,
                    "socket_path": "/nonexistent/1642b/redis.socket",
+                   "dbdir": "/nonexistent/1642b",
                    "pid": os.getpid(), "path_based": False}
     killed.clear()
     acted = reap([unconfirmed], dry_run=False, only_safe=True)
@@ -4272,3 +4290,285 @@ def test_reap_only_safe_refuses_unconfirmed_live_candidate(monkeypatch):
     acted = reap([rec], dry_run=False, only_safe=True)
     assert killed == [], "an unconfirmed live candidate must not be killed"
     assert not acted
+
+
+# ── #4136: PROVENANCE GUARD (T2/T3/T4) ──────────────────────────────────────
+# Declared adversarial surface (the escalated set of #4098; implementation
+# issue #4136):
+#   IN SCOPE — T2 (an attacker-authored candidate dir, owned by a DIFFERENT
+#   local uid, authorizes a SIGTERM), T3 (the kill path rmtrees a
+#   registry-supplied `dir=` pointing at a bystander), T4 (discovery↔action
+#   TOCTOU: the ownership verdict is re-read at the action), and the added
+#   class T3b (the quarantine sweep rmtrees a foreign-owned
+#   `*.reaper-stale-*` dir).
+#   OUT OF SCOPE — same-uid co-tenants (already inside the trust boundary),
+#   and an INTERMEDIATE path-component swap (`O_NOFOLLOW` protects the final
+#   component; final-component refusal + the action-time ownership read are
+#   what is covered here). No override/allowlist for cross-uid reaping exists
+#   BY DECISION (#4136).
+# A second local uid cannot be created from a test process without root, so
+# the foreign-uid precondition is simulated the way the guard READS it: the
+# invoking `os.geteuid()` is made to differ from the directory's real
+# `st_uid`. That is the exact inequality the guard tests, asserted against a
+# real st_uid — the guard itself is never mocked (except where a per-path
+# ownership split is required to isolate T3 while the kill is admitted).
+
+def _owned_dir(base: Path, name: str) -> str:
+    d = base / name
+    d.mkdir()
+    return str(d)
+
+
+def _foreign_euid_of(path: str):
+    """A geteuid value that differs from `path`'s real owner (the cross-uid
+    inequality the provenance guard reads)."""
+    return os.stat(path).st_uid + 1
+
+
+def test_provenance_guard_reads_real_ownership(monkeypatch, tmp_path):
+    """`_dir_owned_by_euid` is the boundary: same-uid dir -> True; a foreign
+    owner, a missing path, a non-directory, a symlink, and None all fail
+    closed."""
+    from tortoise import embedded_reaper as R
+    owned = _owned_dir(tmp_path, "tmp_owned")
+    assert R._dir_owned_by_euid(owned) is True
+    monkeypatch.setattr(os, "geteuid", lambda: _foreign_euid_of(owned))
+    assert R._dir_owned_by_euid(owned) is False
+    monkeypatch.undo()
+    assert R._dir_owned_by_euid(str(tmp_path / "does-not-exist")) is False
+    plain = tmp_path / "plain-file"
+    plain.write_text("x")
+    assert R._dir_owned_by_euid(str(plain)) is False
+    link = tmp_path / "link-to-owned"
+    link.symlink_to(owned, target_is_directory=True)
+    assert R._dir_owned_by_euid(str(link)) is False
+    assert R._dir_owned_by_euid(None) is False
+
+
+def test_reap_refuses_to_kill_from_a_foreign_owned_candidate_dir(
+        monkeypatch, tmp_path):
+    """T2 (#4136): a candidate dir owned by a DIFFERENT local uid cannot
+    authorize a SIGTERM, however complete the evidence inside it (the
+    decoy's fake RESP server, pidfile and owner records are all the
+    attacker's)."""
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+    monkeypatch.setattr(R, "_is_detached", lambda p: True)
+    decoy = _owned_dir(tmp_path, "tmpEVIL")  # this process owns it...
+    monkeypatch.setattr(os, "geteuid", lambda: _foreign_euid_of(decoy))
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": os.path.join(decoy, "redis.socket"),
+           "dbdir": decoy, "pid": os.getpid(), "path_based": False,
+           "settings": {"dir": decoy, "dbfilename": "redis.db"},
+           "_orphan_confirmed": True}
+    acted = R.reap([rec], dry_run=False, only_safe=True)
+    assert killed == [], "a foreign-owned candidate dir authorized a SIGTERM"
+    assert acted == []
+    assert os.path.isdir(decoy), "kill-path cleanup ran on a foreign dir"
+
+
+def test_reap_kills_from_a_same_uid_candidate_dir(monkeypatch, tmp_path):
+    """Control for T2: the legitimate same-uid population is unaffected."""
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+    monkeypatch.setattr(R, "_is_detached", lambda p: True)
+    owned = _owned_dir(tmp_path, "redislite_owned")
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": os.path.join(owned, "redis.socket"),
+           "dbdir": owned, "pid": os.getpid(), "path_based": False,
+           "settings": {"dir": owned, "dbfilename": "redis.db"},
+           "_orphan_confirmed": True}
+    acted = R.reap([rec], dry_run=False, only_safe=True)
+    assert killed == [os.getpid()]
+    assert acted
+
+
+def test_reap_refuses_socketless_kill_without_a_pid_binding(
+        monkeypatch, tmp_path):
+    """T2/T4 socket-less arm (#4136): when the candidate dir is gone, the
+    kill is authorized ONLY by the pid's own argv naming that dir — an
+    attacker's decoy whose dir vanished mid-sweep is refused (fail closed)."""
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+    monkeypatch.setattr(R, "_is_detached", lambda p: True)
+    monkeypatch.setattr(R, "_socket_dir_from_cmdline", lambda p: None)
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": "/nonexistent/4136/redis.socket",
+           "dbdir": "/nonexistent/4136", "pid": os.getpid(),
+           "path_based": False, "_orphan_confirmed": True}
+    acted = R.reap([rec], dry_run=False, only_safe=True)
+    assert killed == [], "an unbound socket-less record authorized a kill"
+    assert acted == []
+
+
+def test_reap_kill_path_refuses_to_rmtree_a_foreign_owned_reg_dir(
+        monkeypatch, tmp_path):
+    """T3 (#4136): `reap()`'s post-kill cleanup must not rmtree a
+    registry-supplied `dir=` that is foreign-owned. The kill IS admitted
+    (the candidate dir is ours), so this isolates the CLEANUP guard from the
+    kill-admission guard — the per-path ownership split is how a second uid
+    is simulated without root."""
+    from tortoise import embedded_reaper as R
+    killed = []
+    monkeypatch.setattr(R, "_kill", lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+    sock_dir = _owned_dir(tmp_path, "redislite_owned")
+    bystander = _owned_dir(tmp_path, "tortoise_bystander")
+    (Path(bystander) / "important.txt").write_text("keep\n")
+    real_guard = R._dir_owned_by_euid
+    monkeypatch.setattr(
+        R, "_dir_owned_by_euid",
+        lambda p: (False if os.path.realpath(p) == os.path.realpath(bystander)
+                   else real_guard(p)))
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": os.path.join(sock_dir, "redis.socket"),
+           "dbdir": sock_dir, "pid": os.getpid(), "path_based": False,
+           "settings": {"dir": bystander, "dbfilename": "redis.db"}}
+    R.reap([rec], dry_run=False, only_safe=False)
+    assert killed == [os.getpid()], "test setup: the kill must be admitted"
+    assert not os.path.exists(sock_dir), \
+        "the candidate's OWN dir must still be cleaned after a kill"
+    assert os.path.exists(bystander), \
+        "kill-path cleanup rmtree'd a foreign-owned reg_dir (T3)"
+    assert (Path(bystander) / "important.txt").exists()
+
+
+def test_cleanup_tempdir_refuses_a_foreign_owned_dir(monkeypatch, tmp_path):
+    """T3 choke point (#4136): EVERY rmtree goes through `_cleanup_tempdir`,
+    which refuses a foreign-owned target."""
+    from tortoise import embedded_reaper as R
+    victim = _owned_dir(tmp_path, "tortoise_bystander")
+    (Path(victim) / "data.txt").write_text("keep\n")
+    monkeypatch.setattr(os, "geteuid", lambda: _foreign_euid_of(victim))
+    assert R._cleanup_tempdir(victim) is False
+    assert os.path.isdir(victim), "a foreign-owned dir was rmtree'd"
+    assert (Path(victim) / "data.txt").read_text() == "keep\n"
+
+
+def test_cleanup_tempdir_still_removes_a_same_uid_dir(monkeypatch, tmp_path):
+    """Control for the choke point: same-uid removal is unchanged."""
+    from tortoise import embedded_reaper as R
+    owned = _owned_dir(tmp_path, "tortoise_owned")
+    result = R._cleanup_tempdir(owned)
+    assert result is not False, "same-uid removal must never be refused"
+    assert not os.path.exists(owned)
+
+
+def test_stale_action_refuses_a_foreign_owned_dir(monkeypatch):
+    """T4/T3 stale path (#4136): the rename-aside + rmtree action refuses a
+    directory not owned by the invoking euid."""
+    from tortoise import embedded_reaper as R
+    with _stale_dir_env() as (dbdir, sock):
+        _backdate_dir(dbdir)
+        monkeypatch.setattr(os, "geteuid",
+                            lambda: _foreign_euid_of(str(dbdir)))
+        acted = R._remove_stale_socket_dir(_stale_record(dbdir, sock),
+                                           dry_run=False)
+        assert acted is None, "stale action acted on a foreign-owned dir"
+        assert os.path.exists(dbdir)
+
+
+def test_stale_action_rechecks_ownership_at_action_time(monkeypatch):
+    """T4 (#4136): the ownership verdict is re-read at the ACTION, not
+    trusted from discovery or the guard chain — the world changes mid-chain
+    and the action must still refuse."""
+    from tortoise import embedded_reaper as R
+    with _stale_dir_env() as (dbdir, sock):
+        _backdate_dir(dbdir)
+        rec = _stale_record(dbdir, sock)
+        real_probe = R._probe_socket_any
+        real_geteuid = os.geteuid
+        flipped = {"done": False}
+
+        def probe_then_flip(path, timeout=R.PROBE_SOCKET_TIMEOUT):
+            out = real_probe(path, timeout=timeout)
+            # T4: ownership state changes AFTER the guard chain has begun.
+            os.geteuid = lambda: real_geteuid() + 1
+            flipped["done"] = True
+            return out
+
+        monkeypatch.setattr(R, "_probe_socket_any", probe_then_flip)
+        try:
+            acted = R._remove_stale_socket_dir(rec, dry_run=False)
+        finally:
+            os.geteuid = real_geteuid
+        assert flipped["done"], "test setup: the guard chain must have run"
+        assert acted is None, \
+            "action trusted a stale verdict instead of re-reading ownership"
+        assert os.path.exists(dbdir), "dir removed despite the mid-chain swap"
+
+
+def test_quarantine_sweep_refuses_a_foreign_owned_dir(monkeypatch):
+    """T3b (#4136): the quarantine sweep's rmtree refuses a
+    `*.reaper-stale-*` dir not owned by our euid — the marker gate is a
+    plain `exists` on attacker-authorable content, so it is not provenance."""
+    from tortoise import embedded_reaper as R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        q = base / "tmpQ.reaper-stale-1"
+        q.mkdir()
+        _mark_quarantine(str(q))
+        sp = q / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # dead socket -> would otherwise be removed
+        monkeypatch.setattr(R, "_real_gettempdir", lambda: str(base))
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(base))
+        monkeypatch.setattr(os, "geteuid", lambda: _foreign_euid_of(str(q)))
+        removed = R._sweep_quarantine_dirs(dry_run=False)
+        assert str(q) not in removed
+        assert q.exists(), "quarantine sweep rmtree'd a foreign-owned dir"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_pid_cmdline_names_dir_binds_without_the_config_file(
+        monkeypatch, tmp_path):
+    """The socket-less provenance arm must not need the config file to still
+    exist: redislite's macOS argv names `<dbdir>/redis.config`, which the
+    dir's deletion removes — argv ALONE must bind, or a genuine socket-less
+    orphan is stranded (a regression on the per-user-$TMPDIR platform)."""
+    from tortoise import embedded_reaper as R
+    dbdir = os.path.realpath(_owned_dir(tmp_path, "redislite_gone"))
+    gone_cfg = os.path.join(dbdir, "redis.config")
+    # Inline form (Linux daemonized re-exec): `--unixsocket <dir>/redis.socket`.
+    monkeypatch.setattr(R, "_socket_dir_from_cmdline", lambda p: dbdir)
+    monkeypatch.setattr(R, "_cmdline", lambda p: "redis-server --unixsocket x")
+    assert R._pid_cmdline_names_dir(os.getpid(), dbdir) is True
+    # Config-file argv form (macOS redislite), config file already gone.
+    monkeypatch.setattr(R, "_socket_dir_from_cmdline", lambda p: None)
+    monkeypatch.setattr(
+        R, "_cmdline",
+        lambda p: f"redis-server {gone_cfg} --loadmodule /x.so")
+    assert R._pid_cmdline_names_dir(os.getpid(), dbdir) is True
+    # A DIFFERENT dir named in argv must never authorize this candidate.
+    assert R._pid_cmdline_names_dir(os.getpid(), str(tmp_path)) is False
+    assert R._pid_cmdline_names_dir(os.getpid(), dbdir + "-other") is False
+
+
+def test_socketless_binding_never_resolves_the_candidate_path(
+        monkeypatch, tmp_path):
+    """Adversarial-review Finding 1 (#4136, fail-open): the socket-less arm
+    must compare the already-canonical `dbdir` TEXTUALLY, never re-resolve it.
+    An attacker who toggles the decoy path from absent to a SYMLINK pointing
+    at a directory the victim's own argv names would otherwise forge the pid
+    binding and be authorized to SIGTERM the victim."""
+    from tortoise import embedded_reaper as R
+    victim_dir = os.path.realpath(_owned_dir(tmp_path, "redislite_victim"))
+    decoy = tmp_path / "tmpEVIL"  # attacker's path, NOT canonical
+    decoy.symlink_to(victim_dir, target_is_directory=True)
+    monkeypatch.setattr(R, "_socket_dir_from_cmdline", lambda p: victim_dir)
+    monkeypatch.setattr(R, "_cmdline", lambda p: "redis-server --unixsocket x")
+    # Resolving the decoy would land on victim_dir and forge the binding.
+    assert R._pid_cmdline_names_dir(os.getpid(), str(decoy)) is False
+    # And the refusal path must refuse the whole record (never authorize).
+    refusal = R._kill_provenance_refusal(
+        {"dbdir": str(decoy), "socket_path": str(decoy / "redis.socket"),
+         "pid": os.getpid()})
+    assert refusal is not None, "planted symlink forged the socket-less binding"
