@@ -77,6 +77,24 @@ false on every tier today). The driver cron (`registry-backup-cron.yml`,
 **Achieved freshness is MEASURED, not assumed** (best-practice gap 6d):
 - per-team/per-graph tri-state archive-age vs `BACKUP_STALE_THRESHOLD_MIN` —
   watcher poll → `GET /v1/internal/backups/status` → `per_team` (+ heartbeat);
+  the per-team census is gated by the SAME eligibility predicate the sweep
+  uses (`enumerate_eligible_orgs`: `tier != 'free' AND backup_enabled`), so an
+  org outside it reads `not_eligible`, not `never` — `never` means a backup
+  was OWED and is missing (#3658). On the watcher census, a non-eligible org
+  opens no DR incident (the driver's direct-R2 leg remains eligibility-blind —
+  it lists every `backups/*/` prefix). This holds while eligibility is
+  CONFIRMED: an unconfirmed eligibility read falls back to the last confirmed
+  set and reports `eligible_degraded` on the watcher heartbeat; a first-contact
+  failure fails OPEN (all orgs treated as targets), so a non-eligible org can
+  read `never` until the read recovers (residual: a persistent eligibility-only
+  read failure can likewise withhold a newly-eligible org's alarm). A SEPARATE
+  residual is shared with the sweep itself: `enumerate_eligible_orgs` is a
+  PostgREST row LIST with no pagination, so a silently SHORT read can classify
+  an org that HAS archives as `not_eligible` and close its live incidents (#4315
+  — self-healing on the next complete poll, but the blip suppresses a real alarm
+  and pushes a false resolution). It is NOT covered by the census's
+  `per_team = census ∪ r2_orgs` invariant, because eligibility is checked before
+  the archive read.
 - per-run sweep roll-up (totals/failures/streaks) — `/status` → `last_sweep`;
 - driver direct-R2 DEFAULT-graph age leg (app-down case) — files STALE with
   the measured age in minutes;
@@ -405,7 +423,7 @@ redaction (DSN/header/prefix/quoted/newline-split shapes and the
 `compatible:`/`patch:`/`author:` false-positive guards, `last_sweep`, the purge
 body), self-heal tiers (incl. `SWEEP_NO_COVERAGE`),
 the dual-key delete, the multi-team tab-separated pool, the enabled+stale and
-enabled+unmeasurable cases, and
+enabled+unmeasurable cases, the empty-prefix measured-empty case (#3659), and
 dedup open/closed/404/blip/backfill. (The driver carries the exec bit so the
 harness invokes it directly — a `$(bash script)` command substitution trips the
 agent worktree guard, #1484.)
@@ -419,7 +437,7 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 | Kind | Meaning | Triage |
 |---|---|---|
 | STALE | a graph's newest archive is older than `BACKUP_STALE_THRESHOLD_MIN` (90) — subject `team` (default) or `team:graph` (custom) | Check sweep logs; run the sweep; R2 connectivity |
-| NEVER_BACKED_UP | an active graph exists with no archive yet (custom-graph incidents carry `team:graph`) | Confirm graph is new/empty; if old, investigate |
+| NEVER_BACKED_UP | an ELIGIBLE active graph exists with no archive yet (custom-graph incidents carry `team:graph`); orgs the sweep does not target (`tier=='free'` or `backup_enabled=false`) are `not_eligible` and open nothing when eligibility is CONFIRMED (an unconfirmed read fails open and is flagged `eligible_degraded`) — #3658 | Confirm graph is new/empty; if old, investigate |
 | METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |

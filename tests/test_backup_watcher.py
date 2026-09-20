@@ -148,13 +148,14 @@ def _seed_state(storage, team: str) -> None:
 
 
 def _watcher(storage, ch, *, grace_min=0, orgs=("team_a",), now_fn=None,
-              graph_provider=None) -> BackupWatcher:
+              graph_provider=None, eligible_provider=None) -> BackupWatcher:
     store = _store(ch)
     return BackupWatcher(
         storage, store,
         org_provider=lambda: list(orgs),
         state_reader=lambda t: {},
         graph_provider=graph_provider,
+        eligible_provider=eligible_provider,
         driver_heartbeat_reader=lambda: {},
         stale_threshold_min=90, driver_down_threshold_min=240,
         grace_min=grace_min, now=now_fn or (lambda: FIXED),
@@ -522,6 +523,454 @@ def test_watcher_legacy_custom_flat_does_not_gate_team_freshness():
     age_min = (FIXED - newest).total_seconds() / 60.0
     assert age_min > 10000, f"custom-era flat masked default staleness ({age_min})"
     assert age_min > 5000
+
+
+# ── #3658: eligibility gate on the per-org NEVER_BACKED_UP census ─────────
+
+def test_status_not_eligible_is_not_never():
+    """An org the sweep does not target is ``not_eligible`` — NOT ``never``.
+
+    The sweep only archives eligible orgs (tier != 'free' AND
+    backup_enabled); keying the watch census on every org made ``never``
+    guaranteed by construction for the non-eligible tail, flooding
+    NEVER_BACKED_UP and hiding a genuine eligible-and-never-backed-up org
+    behind the identical signal.
+    """
+    s = _status(orgs=["team_pro", "team_free"], eligible_orgs={"team_pro"})
+    assert s["per_team"]["team_free"] == "not_eligible"
+    # The eligible org with no archive is still the REAL gap.
+    assert s["per_team"]["team_pro"] == "never"
+
+
+def test_status_no_eligibility_set_is_pre_3658_parity():
+    """``eligible_orgs=None`` (no provider / legacy all-org sweep) keeps the
+    pre-#3658 classification: every census org is a target, so an archive-less
+    one is ``never`` (not ``not_eligible``)."""
+    s = _status(orgs=["team_free"])
+    assert s["per_team"]["team_free"] == "never"
+
+
+def test_status_not_eligible_is_not_backup_set_missing():
+    """No archive is OWED to a non-eligible org, so state-without-archives is
+    not a missing backup set either."""
+    s = _status(state_orgs=["team_free", "team_pro"], r2_orgs=[],
+                eligible_orgs={"team_pro"})
+    assert s["backup_set_missing"] == ["team_pro"]
+
+
+def test_watcher_not_eligible_org_opens_no_incident():
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch, orgs=("team_free",),
+                 eligible_provider=lambda: ["team_pro"])
+    status = w.poll()
+    assert status["per_team"]["team_free"] == "not_eligible"
+    assert ch.issues == {}
+    assert ch.telegram == []
+
+
+def test_watcher_eligible_never_still_fires():
+    """The gate must not SILENCE a real gap: an eligible org with no archive
+    still files NEVER_BACKED_UP."""
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch, orgs=("team_pro",),
+                 eligible_provider=lambda: ["team_pro"])
+    status = w.poll()
+    assert status["per_team"]["team_pro"] == "never"
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_pro"]
+
+
+def test_watcher_org_downgraded_to_free_resolves_never_incident():
+    """An org that STOPS being eligible (downgraded to free) resolves a
+    NEVER_BACKED_UP opened while it was eligible — no stale incident left
+    behind by the gate."""
+    ch = _Channels()
+    eligible = {"team_a"}
+    w = _watcher(MemoryStorage(), ch, orgs=("team_a",),
+                 eligible_provider=lambda: sorted(eligible))
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"]
+    eligible.clear()  # downgraded to free → no longer a sweep target
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "not_eligible"
+    assert ch.issues == {}
+
+
+def test_watcher_eligibility_read_failure_is_gate_off():
+    """A FIRST-CONTACT eligibility read failure fails OPEN toward alerting —
+    with no confirmed set, it must never silence a genuine NEVER_BACKED_UP."""
+    def _boom():
+        raise RuntimeError("control plane down")
+
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch, orgs=("team_a",),
+                 eligible_provider=_boom)
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "never"
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"]
+
+
+def test_watcher_eligibility_blip_uses_last_known_good():
+    """#3658 review: a TRANSIENT eligibility-read failure must not re-open the
+    whole non-eligible census (nor resolve real incidents) — it evaluates from
+    the last CONFIRMED set, like a degraded R2 poll."""
+    ch = _Channels()
+    state = {"fail": False}
+
+    def _prov():
+        if state["fail"]:
+            raise RuntimeError("control-plane blip")
+        return ["team_pro"]
+
+    w = _watcher(MemoryStorage(), ch, orgs=("team_free", "team_pro"),
+                 eligible_provider=_prov)
+    status = w.poll()
+    assert status["per_team"]["team_free"] == "not_eligible"
+    assert status["per_team"]["team_pro"] == "never"
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_pro"]
+    # The eligibility read blips: the last-known set still gates team_free.
+    state["fail"] = True
+    status2 = w.poll()
+    assert status2["per_team"]["team_free"] == "not_eligible"
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_pro"]
+
+
+def test_watcher_non_iterable_eligibility_does_not_kill_the_poll():
+    """#3658 review: a provider returning a non-iterable degrades to gate-off
+    WITHOUT killing the poll (no poll_error, heartbeat still written) — a bad
+    gate value must not manufacture WATCHER_DOWN."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    w = _watcher(storage, ch, orgs=("team_a",), eligible_provider=lambda: 3)
+    status = w.poll()
+    assert "poll_error" not in status
+    assert status["per_team"]["team_a"] == "never"
+    assert status["eligible_degraded"] is False  # first contact, no cache
+    assert any("NEVER_BACKED_UP" in t for t in ch.issues.values())
+    assert HEARTBEAT_KEY in storage.list("ops/")
+
+
+def test_watcher_bare_string_eligibility_does_not_poison_the_census():
+    """#3658 review: a bare str is iterable — without a shape guard,
+    ``set("team_a")`` becomes ``{'t','e','a','m','_'}``, every org reads
+    ``not_eligible`` and the WHOLE census is silenced (the masking #3658
+    removes). It must degrade like any other unconfirmed read."""
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch, orgs=("team_a", "team_b"),
+                 eligible_provider=lambda: "team_a")
+    status = w.poll()
+    assert status["per_team"] == {"team_a": "never", "team_b": "never"}
+    assert sorted(ch.issues.values()) == [
+        "[DR] NEVER_BACKED_UP — team_a", "[DR] NEVER_BACKED_UP — team_b"]
+    assert w._known_eligible is None  # the cache was never poisoned
+
+
+def test_watcher_eligibility_degraded_is_reported():
+    """#3658 review: evaluating from the stale last-known set must be
+    OBSERVABLE (status + heartbeat) so it is not mistaken for confirmed."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    state = {"fail": False}
+
+    def _prov():
+        if state["fail"]:
+            raise RuntimeError("control-plane blip")
+        return ["team_pro"]
+
+    w = _watcher(storage, ch, orgs=("team_free", "team_pro"),
+                 eligible_provider=_prov)
+    s1 = w.poll()
+    assert s1["eligible_degraded"] is False
+    assert json.loads(storage.download(HEARTBEAT_KEY))["eligible_degraded"] is False
+    state["fail"] = True
+    s2 = w.poll()
+    assert s2["eligible_degraded"] is True
+    assert s2["per_team"]["team_free"] == "not_eligible"  # last-known still gates
+    assert json.loads(storage.download(HEARTBEAT_KEY))["eligible_degraded"] is True
+
+
+def test_watcher_cp_flicker_on_build_call_does_not_resolve():
+    """#3658 review: the scan and build loops call the graph provider
+    SEPARATELY, so a provider that answers the scan call and returns None on
+    the build call must NOT let the graph's incident be resolved by
+    universe-shrink off an unconfirmed surface (fabricated recovery)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_state(storage, "team_a")
+    _seed_graph_archive(storage, "team_a", "g_x", 200)  # stale custom graph
+    _seed_graph_state(storage, "team_a", "g_x")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_x"])
+    w.poll()
+    assert any("STALE — team_a:g_x" in t for t in ch.issues.values())
+    calls = {"n": 0}
+
+    def _flicker(t):
+        calls["n"] += 1
+        return ["g_x"] if calls["n"] == 1 else None  # scan ok, build unconfirmed
+
+    w._graphs_for = _flicker
+    status = w.poll()
+    assert status["per_graph"] == {}
+    assert any("STALE — team_a:g_x" in t for t in ch.issues.values())  # survives
+
+
+def test_watcher_universe_shrink_to_empty_resolves_org_incidents():
+    """#3658 review (pre-existing): the no-teams resolution read
+    ``_last_status`` AFTER it was overwritten with this poll's (empty) census,
+    so org incidents could never close on a universe shrink. It must use the
+    PREVIOUS snapshot."""
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch, orgs=("team_a",))
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_a"]
+    w._orgs = lambda: []  # census collapses to empty
+    status = w.poll()
+    assert status["no_teams"] is True
+    assert ch.issues == {}
+
+
+def test_watcher_partial_universe_shrink_resolves_departed_org():
+    """#3658 review: a PARTIAL shrink (one org leaves, others remain — so
+    ``no_teams`` is False) must also close the departed org's incidents, not
+    just the all-empty case."""
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch, orgs=("team_a", "team_b"))
+    w.poll()
+    assert sorted(ch.issues.values()) == [
+        "[DR] NEVER_BACKED_UP — team_a", "[DR] NEVER_BACKED_UP — team_b"]
+    w._orgs = lambda: ["team_b"]
+    status = w.poll()
+    assert status["no_teams"] is False
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_b"]
+
+
+def test_watcher_degraded_poll_does_not_resolve_a_real_never_incident():
+    """#3658 review (P1). A degraded R2 poll evaluates from the last-known-good
+    cache and treats every census org as archived, so a NO-ARCHIVE org lands in
+    the cache-miss ``stale``/``stamp_missing`` arm — a state whose handler
+    resolves the OTHER kinds. Resolving off that inference is a FABRICATED
+    RECOVERY: the org genuinely has no archive, so its NEVER_BACKED_UP must
+    survive the degraded poll, and no false "resolved" push may fire."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_a")  # known org, still no archive
+    w = _watcher(storage, ch)
+    s1 = w.poll()
+    assert s1["per_team"]["team_a"] == "never"
+    assert any("NEVER_BACKED_UP — team_a" in t for t in ch.issues.values())
+
+    class _Boom(MemoryStorage):
+        def list(self, prefix):
+            raise ConnectionError("r2 down")
+
+    w._storage = _Boom()
+    s2 = w.poll()
+    # The degraded poll classifies from the CACHE — team_a is not `never` here,
+    # it is the cache-miss arm. That is exactly why the resolve is unsafe (and
+    # what makes this test discriminate rather than pass trivially).
+    assert s2["per_team"]["team_a"] == "stale"
+    assert any("NEVER_BACKED_UP — team_a" in t for t in ch.issues.values()), \
+        "a degraded poll must not resolve a real NEVER_BACKED_UP"
+    assert not any("resolved" in t.lower() for t in ch.telegram), \
+        "no fabricated recovery push off an unconfirmed archive read"
+
+
+def test_watcher_degraded_poll_does_not_shrink_resolve():
+    """#3658 review (P2). On a degraded poll ``per_team`` is derived from the
+    CACHE (``compute_status`` overwrites ``r2_orgs`` with the census), so it is
+    not a faithful census surface. A census shrink observed on that same
+    degraded poll must therefore NOT resolve the departed org's incidents."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    w = _watcher(storage, ch, orgs=("team_a", "team_b"))
+    w.poll()
+    assert sorted(ch.issues.values()) == [
+        "[DR] NEVER_BACKED_UP — team_a", "[DR] NEVER_BACKED_UP — team_b"]
+
+    class _Boom(MemoryStorage):
+        def list(self, prefix):
+            raise ConnectionError("r2 down")
+
+    w._storage = _Boom()
+    w._orgs = lambda: ["team_b"]  # census shrinks on the SAME degraded poll
+    status = w.poll()
+    assert status["no_teams"] is False
+    assert any("NEVER_BACKED_UP — team_a" in t for t in ch.issues.values()), \
+        "a degraded poll's per_team is cache-derived, not a census"
+
+
+def test_watcher_backup_set_missing_closes_on_restart_when_archives_return():
+    """#3658 review (P2) — restoration of the pre-#3658 positive scan.
+
+    In production the alert store shares the watcher's PERSISTENT storage
+    (``hosted_api._alert_store_from`` → ``_backup_storage()``), so dedup state
+    survives a process RESTART — but the watcher's in-memory
+    ``_last_backup_set_missing`` does NOT. The cross-poll diff alone therefore
+    cannot close a BACKUP_SET_MISSING whose archives came back before the new
+    process's first poll: the incident stays open forever and its dedup state
+    can absorb the next real recurrence. This models exactly that — one
+    persistent store, two watcher processes."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    shared = AlertStore(
+        storage, file_issue=ch.file_issue, close_issue=ch.close_issue,
+        search_open=ch.search_open, push_telegram=ch.push_telegram,
+        repo="daniel-ospina/tortoise", assignee="u", now=lambda: FIXED,
+    )
+    _seed_state(storage, "team_x")  # state present, no archives, not in census
+
+    def _proc() -> BackupWatcher:
+        return BackupWatcher(
+            storage, shared, org_provider=lambda: [], state_reader=lambda t: {},
+            driver_heartbeat_reader=lambda: {}, stale_threshold_min=90,
+            driver_down_threshold_min=240, grace_min=0, now=lambda: FIXED,
+        )
+
+    _proc().poll()
+    assert any("BACKUP_SET_MISSING — team_x" in t for t in ch.issues.values())
+
+    _seed_archive(storage, "team_x", 0.5)  # archives are back
+    status = _proc().poll()  # NEW process: empty cross-poll memory
+    assert status["backup_set_missing"] == []
+    assert ch.issues == {}
+
+
+def test_watcher_universe_shrink_keeps_an_org_that_still_has_archives():
+    """#3658 review (security) — the safety invariant the shrink relies on.
+    ``per_team`` is ``census ∪ r2_orgs``, so an org can leave it only by
+    leaving the census AND having no archive listing. An org that still holds
+    archives must survive a census shrink; that is precisely the property which
+    stops a silently SHORT census read (the documented PostgREST
+    ``db-max-rows`` fail-open class) from resolving a real incident for an org
+    whose data IS present."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)  # stale, but still on R2
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch, orgs=("team_a", "team_b"))
+    w.poll()
+    assert any("STALE — team_a" in t for t in ch.issues.values())
+    w._orgs = lambda: ["team_b"]  # team_a leaves the census
+    status = w.poll()
+    assert "team_a" in status["per_team"]  # still present via the R2 surface
+    assert any("STALE — team_a" in t for t in ch.issues.values())
+
+
+def test_watcher_backup_set_missing_closes_when_the_state_disappears():
+    """#3658 review: a state-only org never appears in ``per_team``, so the old
+    per_team resolve scan could never close its BACKUP_SET_MISSING. It must
+    close when the subject leaves the set across polls."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_state(storage, "team_x")  # state present, no archives, not in census
+    w = _watcher(storage, ch, orgs=())
+    w.poll()
+    assert any("BACKUP_SET_MISSING — team_x" in t for t in ch.issues.values())
+    storage.delete("ops/teams/team_x/state.json")
+    status = w.poll()
+    assert status["backup_set_missing"] == []
+    assert ch.issues == {}
+
+
+def test_watcher_generator_eligibility_is_materialised_once():
+    """#3658 review: validating a one-shot iterator consumes it, so ``set()``
+    would cache an EMPTY confirmed set and silence the whole census. The value
+    must be materialised exactly once."""
+    ch = _Channels()
+
+    def _gen():
+        yield "team_pro"
+
+    w = _watcher(MemoryStorage(), ch, orgs=("team_free", "team_pro"),
+                 eligible_provider=_gen)
+    status = w.poll()
+    assert w._known_eligible == {"team_pro"}
+    assert status["per_team"]["team_free"] == "not_eligible"
+    assert status["per_team"]["team_pro"] == "never"
+    assert list(ch.issues.values()) == ["[DR] NEVER_BACKED_UP — team_pro"]
+
+
+def test_watcher_unconfirmed_census_does_not_resolve_departed_org():
+    """#3658 review: a control-plane census failure must NOT resolve a real
+    incident off a fabricated-empty census (the org surface needs the same
+    guard as `graph_surface_confirmed`); it evaluates from last-known."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_b", 0.5)
+    _seed_state(storage, "team_b")
+    w = _watcher(storage, ch, orgs=("team_a", "team_b"))
+    w.poll()
+    assert any("NEVER_BACKED_UP — team_a" in t for t in ch.issues.values())
+
+    def _boom():
+        raise RuntimeError("control-plane blip")
+
+    w._orgs = _boom
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "never"  # last-known census retained
+    assert any("NEVER_BACKED_UP — team_a" in t for t in ch.issues.values())  # survives
+
+
+def test_watcher_not_eligible_closes_preexisting_backup_set_missing():
+    """#3658 review: after a restart `_last_backup_set_missing` is empty, so
+    the cross-poll diff cannot close a pre-existing BACKUP_SET_MISSING for an
+    org that is now non-eligible — the `not_eligible` branch must."""
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch, orgs=("team_a",),
+                 eligible_provider=lambda: [])
+    w._alerts.open_incident("BACKUP_SET_MISSING", "team_a")
+    assert any("BACKUP_SET_MISSING — team_a" in t for t in ch.issues.values())
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "not_eligible"
+    assert ch.issues == {}
+
+
+def test_watcher_stamp_missing_to_stale_closes_metadata_lost():
+    """#3658 review (pre-existing): the `stale`/`never` branches resolved
+    nothing, so a `stamp_missing`→`stale` transition left METADATA_LOST open
+    beside the new STALE (two concurrent incidents for one org)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)  # archive, NO state → stamp_missing
+    clock = [FIXED]
+    w = _watcher(storage, ch, now_fn=lambda: clock[0])
+    w.poll()
+    assert any("METADATA_LOST — team_a" in t for t in ch.issues.values())
+    _seed_state(storage, "team_a")
+    clock[0] = FIXED + timedelta(hours=5)  # archive now stale (>90 min)
+    status = w.poll()
+    assert status["per_team"]["team_a"] == "stale"
+    assert any("STALE — team_a" in t for t in ch.issues.values())
+    assert not any("METADATA_LOST" in t for t in ch.issues.values())
+
+
+def test_watcher_not_eligible_org_graph_opens_no_incident():
+    """#3658 covers the per-graph surface too: the sweep only archives
+    eligible orgs' graphs, so a non-eligible org's custom graph is not an
+    un-backed-up gap and must open nothing."""
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch, orgs=("team_free",),
+                 graph_provider=lambda t: ["g_x"],
+                 eligible_provider=lambda: ["team_pro"])
+    status = w.poll()
+    assert "team_free:g_x" not in status["per_graph"]
+    assert ch.issues == {}
+
+
+def test_watcher_org_downgrade_resolves_graph_incidents():
+    """An org that stops being eligible drops out of the per-graph surface,
+    resolving the custom-graph incidents opened while it was eligible."""
+    ch = _Channels()
+    eligible = {"team_a"}
+    w = _watcher(MemoryStorage(), ch, orgs=("team_a",),
+                 graph_provider=lambda t: ["g_x"],
+                 eligible_provider=lambda: sorted(eligible))
+    w.poll()
+    assert any("NEVER_BACKED_UP — team_a:g_x" in t for t in ch.issues.values())
+    eligible.clear()
+    status = w.poll()
+    assert "team_a:g_x" not in status["per_graph"]
+    assert ch.issues == {}
 
 
 def test_watcher_custom_per_graph_state_does_not_mask_missing_default_mirror():
