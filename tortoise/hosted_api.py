@@ -24561,12 +24561,13 @@ def _log_checkout_catalog_failure(exc: Exception) -> None:
     try:  # the scrubber must never mask the warning it exists to make safe
         from tortoise.billing import _scrub_secrets
         # Composite scrubber — the repo's established billing-log convention
-        # (_safe_log above): redact_error strips credentials-in-URI / paths and
-        # prefixes the exception class, _scrub_secrets redacts Stripe-shaped
-        # values. PriceCatalog errors quote the offending STRIPE_PRICE_IDS
-        # value, which can be a secret of either shape.
+        # (the Stripe-webhook handler's `_safe_log` below): redact_error strips
+        # credentials-in-URI / paths and prefixes the exception class,
+        # _scrub_secrets redacts Stripe-shaped values. PriceCatalog errors
+        # quote the offending STRIPE_PRICE_IDS value, which can be a secret of
+        # either shape.
         detail = _scrub_secrets(redact_error(exc))
-    except Exception:  # noqa: BLE001
+    except Exception:
         detail = type(exc).__name__
     _logger.warning(
         "checkout price catalog unavailable (%s) — checkout price ids "
@@ -24588,7 +24589,7 @@ def _default_checkout_price_id() -> str | None:
         from tortoise.billing import PriceCatalog
         catalog = PriceCatalog()
         price = catalog.price_for("pro", "monthly") or None
-    except Exception as exc:  # noqa: BLE001 — best-effort, never 5xx /v1/team
+    except Exception as exc:  # best-effort, never 5xx /v1/team
         _log_checkout_catalog_failure(exc)
         return None
     _checkout_catalog_failure_logged = False
@@ -24609,7 +24610,7 @@ def _checkout_price_ids() -> dict[str, str]:
             tier: pid for tier in ("solo", "pro", "team")
             if (pid := catalog.price_for(tier, "monthly")) is not None
         }
-    except Exception as exc:  # noqa: BLE001 — best-effort, never 5xx /v1/team
+    except Exception as exc:  # best-effort, never 5xx /v1/team
         _log_checkout_catalog_failure(exc)
         return {}
     _checkout_catalog_failure_logged = False

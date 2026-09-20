@@ -76,9 +76,24 @@ test('#4335 (wiring backstop): the fallbacks render the disabled CTA, never "See
   // Live site 1 — the API-keys cap notice (tab + create-key modal via CapNotice).
   assert.match(code, /className="ghost small" \/>/,
     'the cap-notice CTA must render through UpgradeCta')
-  // Live site 2 — the Billing tab plan cards.
-  assert.match(code, /className="btn-primary" \/>/,
+  // Live site 2 — the Billing tab plan cards (and the welcome chooser): the
+  // disabled button must fill the card like the enabled one, so both .plan-card
+  // sites pass `block`.
+  assert.match(code, /className="btn-primary" block \/>/,
     'the billing plan-card CTA must render through UpgradeCta')
+  assert.ok((code.match(/ block \/>/g) || []).length >= 2,
+    'both plan-card UpgradeCta sites must pass block')
+  // a11y contract: native disabled, reason associated via aria-describedby,
+  // and NO contradictory aria-disabled.
+  assert.match(code, /disabled title=\{cta\.reason\} aria-describedby=\{reasonId\}/,
+    'the disabled control must carry the honest reason as its title/description')
+  assert.match(code, /id=\{reasonId\}/,
+    'the reason span must be the aria-describedby target')
+  const upgradeBlock = code.slice(code.indexOf('function UpgradeCta'),
+    code.indexOf('function CapNotice'))
+  assert.ok(upgradeBlock.length > 0, 'UpgradeCta must exist')
+  assert.doesNotMatch(upgradeBlock, /aria-disabled/,
+    'a native disabled control must not also claim aria-disabled')
   assert.match(code, /title=\{cta\.reason\}/,
     'the disabled control must carry the honest reason as its title')
   assert.match(code, />Compare plans<\/a>/,

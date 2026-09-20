@@ -963,7 +963,7 @@ function wizardWorkflowsText(key, mode) {
 // never becomes a marketing link. The caller may add the secondary
 // "Compare plans" link. Other CTAs (header badge #4331; the error-banner and
 // Graphs-tab upgrade buttons) are out of scope here.
-function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost' }) {
+function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false }) {
   const reasonId = React.useId()
   const cta = checkoutCtaFor(priceId)
   if (cta.disabled) {
@@ -971,14 +971,15 @@ function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost' }) {
     // aria-disabled would contradict it), and the reason is visible AND tied
     // to the control via aria-describedby. The wrapper stacks button-over-
     // reason so a two-element fragment cannot wedge the reason between the
-    // controls of a single-row flex container (.cap-notice), and no per-site
-    // hardcoded offset is needed.
+    // controls of a single-row flex container (.cap-notice). `block` makes the
+    // disabled button fill a .plan-card exactly like the enabled one (which is
+    // a stretched direct child); the cap-notice stays content-width.
     return (
-      <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+      <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: block ? 'stretch' : 'flex-start', gap: 4, width: block ? '100%' : undefined }}>
         <button className={className} disabled title={cta.reason} aria-describedby={reasonId}>
           {cta.label}
         </button>
-        <span id={reasonId} className="dim small">{cta.reason}</span>
+        <span id={reasonId} className="dim small" style={{ textAlign: 'left' }}>{cta.reason}</span>
       </span>
     )
   }
@@ -8030,7 +8031,7 @@ function claimIntentInFlight() {
                                     </button>
                                   ) : (
                                     <>
-                                      <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} />
+                                      <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} block />
                                       <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
                                     </>
                                   )}
@@ -9626,7 +9627,7 @@ function claimIntentInFlight() {
                       </button>
                     ) : (
                       <>
-                        <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} className="btn-primary" />
+                        <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} className="btn-primary" block />
                         <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
                       </>
                     )}
