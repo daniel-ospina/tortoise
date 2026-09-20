@@ -9397,7 +9397,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # not conflate them. Checked before `route` so an off setting is never
         # reported as an "llm" extraction that did not run. (Unlike the keyless
         # branch this has no SDK counterpart today: sdk.capture_session does
-        # not read the setting — that lane is a deferred follow-up.)
+        # not read the setting — that lane is the deferred follow-up #4288.)
         effective_mode = _CAPTURE_EXTRACTION_DISABLED_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"

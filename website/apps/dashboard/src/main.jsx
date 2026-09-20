@@ -9742,7 +9742,12 @@ function MemorySources(props) {
         />
         <div className="toggle-body">
           <h4>Agent session recording</h4>
-          <p>When on, sessions from tools with capture installed are filed to your graph as a memory source; whether they are also extracted into memory is controlled below.</p>
+          <p>
+            When on, sessions from tools with capture installed are filed to your
+            graph as a memory source{onToggleCaptureExtract
+              ? '; whether they are also extracted into memory is controlled below.'
+              : '.'}
+          </p>
           {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
           <div className="harness-statuses">
             {HARNESS_ORDER.map((h) => {
@@ -9801,11 +9806,11 @@ function MemorySources(props) {
         <div className="toggle-body">
           <h4>Extract sessions into memory</h4>
           <p>
-            When on, each captured session is also extracted into memories
-            (uses your provider key). When off, sessions are stored only — their
-            turns stay searchable, but nothing is extracted, and sessions
-            captured while this is off stay unextracted until they are
-            captured again.
+            When on, each captured session is also extracted into memories once
+            a provider key is configured (uses your provider key). When off,
+            sessions are stored only — their turns stay searchable, but nothing
+            is extracted, and sessions captured while this is off stay
+            unextracted until they are captured again.
           </p>
           {!sessionsOn && (
             <p className="dim small">Turn on agent session recording to change this.</p>

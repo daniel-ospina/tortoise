@@ -720,6 +720,10 @@ def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
     assert "Extraction:" not in _run("replayed")
     # a KEYLESS store: this IS the not-extracted state — must be disclosed.
     assert "Extraction: no-provider" in _run("no-provider")
+    # #4258: an EXTRACTION-DISABLED store — the team's setting, not the key —
+    # is the SAME not-extracted state and must be disclosed under its own mode
+    # (narrowing the store-only tuple back to no-provider only REDs this).
+    assert "Extraction: extraction-disabled" in _run("extraction-disabled")
 
 
 # ── #4258: the per-org "capture also extracts into memory" user setting ──────
@@ -827,6 +831,14 @@ def test_capture_extract_off_stores_without_extracting(monkeypatch, client):
         params={"sid": sid}).result_set[0]
     assert st[0] is False and st[1] == "none", st
 
+    # (4) retrievable through the EXISTING read path while extraction is OFF —
+    # proof (b) says "stored AND retrievable", so assert the REAL search rather
+    # than the warning's own word "searchable".
+    s = client.get("/v1/search", params={"q": marker})
+    assert s.status_code == 200, s.text[:300]
+    assert any(marker in (h.get("content") or "")
+               for h in s.json()["results"]), s.json()
+
 
 @pytest.mark.embedded_only  # mock extractor provides the points (docker lane's real S3 leg yields 0)
 def test_capture_extract_on_extracts(monkeypatch, client):
@@ -857,3 +869,50 @@ def test_capture_extract_is_per_org(monkeypatch, client):
     assert ha_mod._capture_extract_enabled({"org_id": "test-team-722"}) is False
     # a different org, whose stored state lacks the key, still reads ON.
     assert ha_mod._capture_extract_enabled({"org_id": "other-team-4258"}) is True
+
+
+def test_capture_extract_off_with_no_provider_discloses_both(monkeypatch, client):
+    """#4258 + #3892: when extraction is OFF **and** no provider key is present,
+    BOTH reasons are true — the receipt keeps the `no-provider` mode (a missing
+    key is the harder blocker) but must ALSO carry the extraction-disabled
+    warning, so the user's own setting never vanishes from the disclosure.
+
+    Mutation guard: reverting the additive warning to
+    `warnings=[_CAPTURE_NO_PROVIDER_WARNING]` REDs this test. The control
+    (extraction ON, still keyless) proves the warning is NOT emitted when only
+    the key is missing.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_WARNING,
+        _CAPTURE_NO_PROVIDER_WARNING,
+    )
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    assert ha_mod._llm_provider_available() is False
+
+    def _post(marker):
+        r = client.post("/v1/sessions", json={"conversation": [
+            {"role": "user",
+             "content": f"we decided the {marker} capture holds both reasons"}]})
+        assert r.status_code == 200, r.text[:400]
+        return r.json()
+
+    # OFF setting + no key ⇒ both warnings, mode stays no-provider.
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+    body = _post("bothreasonsproofzzq")
+    assert body["extraction_mode"] == "no-provider", body
+    assert _CAPTURE_NO_PROVIDER_WARNING in body["warnings"], body["warnings"]
+    assert _CAPTURE_EXTRACTION_DISABLED_WARNING in body["warnings"], (
+        "the user's OFF setting must be disclosed even when the key is missing")
+
+    # control: extraction ON + still keyless ⇒ ONLY the no-provider reason.
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=True)
+    ctrl = _post("onlykeymissingproofzzq")
+    assert ctrl["extraction_mode"] == "no-provider", ctrl
+    assert _CAPTURE_NO_PROVIDER_WARNING in ctrl["warnings"], ctrl["warnings"]
+    assert _CAPTURE_EXTRACTION_DISABLED_WARNING not in ctrl["warnings"], (
+        "with extraction ON there is one reason — the setting is not off")
