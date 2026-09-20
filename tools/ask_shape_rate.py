@@ -595,6 +595,9 @@ def evaluate_question(sdk, question: dict, *, reader_mode: str,
         "gold_answer_span_words": (len(gold_span.split()) if gold_span else 0),
         "ctx_recall": _gold_sessions_covered(result.get("evidence") or "",
                                              question),
+        # W7A: the assembled context size (tokens of the ~8k ask-lane cap) —
+        # reported alongside, never a leg.
+        "context_tokens": result.get("context_tokens"),
         "retrieval_degraded": result.get("retrieval_degraded"),
         "pass": bool(l1 and l2 and l3),
     }
@@ -712,6 +715,30 @@ def _pn(records: list[dict], key: str) -> dict:
     hits = sum(1 for r in records if r.get(key))
     return {"passed": hits, "n": len(records),
             "rate": (hits / len(records)) if records else 0.0}
+
+
+def _assembly_budget(records: list[dict]) -> dict:
+    """W7A: the assembly budget the lane actually FILLED — median tokens of
+    the ask-lane ``context_token_cap`` (~8000) across the live questions.
+
+    Reported alongside, never a leg. Read from the lane's own
+    ``context_tokens`` (post-assembly), so it measures the real assembled
+    context the reader saw — not the retrieval pool.
+    """
+    from tortoise.retrieval import resolve_ask_retrieval_caps
+    cap = resolve_ask_retrieval_caps()["context_token_cap"]
+    toks = [r.get("context_tokens") for r in records]
+    toks = [t for t in toks if isinstance(t, int)]
+    if not toks:
+        return {"context_token_cap": cap, "n": 0, "median_tokens": None,
+                "median_filled_pct": None, "min_pct": None, "max_pct": None}
+    pcts = sorted(round(100.0 * t / cap, 1) for t in toks)
+    med = pcts[len(pcts) // 2] if len(pcts) % 2 else \
+        round((pcts[len(pcts) // 2 - 1] + pcts[len(pcts) // 2]) / 2, 1)
+    return {"context_token_cap": cap, "n": len(toks),
+            "median_tokens": sorted(toks)[len(toks) // 2],
+            "median_filled_pct": med,
+            "min_pct": pcts[0], "max_pct": pcts[-1]}
 
 
 def _leg_map(records: list[dict]) -> dict:
@@ -1279,6 +1306,7 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             "provenance_pn": _pn(live, "l2_provenance"),
             "grounding_pn": _pn(live, "l3_grounding"),
             "ctx_recall_pn": _pn(live, "ctx_recall"),
+            "assembly_budget": _assembly_budget(live),
             "retrieval_degraded_pn": _pn(live, "retrieval_degraded"),
             "_abs_marker_agreement": [
                 {"question_id": r["question_id"],
