@@ -96,6 +96,14 @@ function requestPrefix(call) {
 function methodFor(src, index, kind) {
   const text = stripComments(callArgs(src, index))
   const want = kind === 'url:' ? 1 : 2
+  // The method is only statically knowable when the options value is an object LITERAL
+  // with no top-level spread. A variable, a call result or a spread can carry `method`
+  // invisibly, and defaulting that to GET is a SILENT false pass — `api('/v1/x', opts)`
+  // with `opts.method = 'DELETE'` was certified by a GET route, while a POST-only route
+  // was reported as missing. `?` means "not statically readable" and fails closed.
+  const shape = kind === 'url:' ? (hasSpreadAt(text, 1) ? 'unreadable' : 'ok') : optionsShape(text)
+  if (kind !== 'url:' && shape === 'none') return 'GET'
+  if (shape === 'unreadable') return '?'
   let depth = 1
   let inString = null
   for (let i = 0; i < text.length; i += 1) {
@@ -114,6 +122,60 @@ function methodFor(src, index, kind) {
     }
   }
   return 'GET'
+}
+
+// What the call's options are, statically: `none` (no options at all — GET is correct),
+// `ok` (an object literal we can read), or `unreadable` (a variable, a call, or a
+// spread: the method may be carried invisibly, so guessing is not allowed).
+function optionsShape(text) {
+  // The text starts AFTER the literal, so for the `api(path, opts)` shape the first
+  // character is the separating comma — split it off before reading the argument, or
+  // every call reads as "no options" (and every POST is graded GET).
+  const rest = text.replace(/^\s*,\s*/, '')
+  const seg = firstTopLevelSegment(rest).trim()
+  if (seg === '') return 'none'
+  if (!seg.startsWith('{')) return 'unreadable'
+  return hasSpreadAt(seg, 2) ? 'unreadable' : 'ok'
+}
+
+// The text up to the first top-level comma (depth 0 relative to the start).
+function firstTopLevelSegment(text) {
+  let depth = 1
+  let inString = null
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (inString) {
+      if (ch === '\\') i += 1
+      else if (ch === inString) inString = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') inString = ch
+    else if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      depth -= 1
+      if (depth === 0) return text.slice(0, i)
+    } else if (ch === ',' && depth === 1) return text.slice(0, i)
+  }
+  return text
+}
+
+// Is there a `...spread` at exactly `level`? A spread can carry `method` invisibly.
+function hasSpreadAt(text, level) {
+  let depth = 1
+  let inString = null
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (inString) {
+      if (ch === '\\') i += 1
+      else if (ch === inString) inString = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') inString = ch
+    else if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
+    else if (depth === level && ch === '.' && text.startsWith('...', i)) return true
+  }
+  return false
 }
 
 // Comments are whitespace as far as this guard is concerned: a `method:` after a
@@ -198,6 +260,9 @@ function callArgs(src, from) {
 // in that shape stayed green while the file claimed to cover every literal.
 function classifyFetchLiteral(raw) {
   if (raw.includes('://')) return { kind: 'external' }
+  // A non-HTTP scheme is not this app's routing either. `unknown` hard-fails, so
+  // without this a legitimate `fetch('data:…')` would red CI for correct code.
+  if (/^(?:data|blob|mailto|tel):/.test(raw)) return { kind: 'external' }
   if (raw.startsWith('${API_BASE}')) {
     const rest = raw.slice('${API_BASE}'.length)
     if (!rest.startsWith('/')) return { kind: 'computed', rest }
@@ -230,7 +295,11 @@ function literalCallPaths(rawSrc) {
     // A literal followed by `+` is only PART of the path: the scan would certify the
     // literal and silently drop the added tail. Whitespace is skipped — `'/v1/x' + y`
     // puts a space between them, and comparing the immediate next character missed it.
-    if (/^\s*\+/.test(after(mm))) concat.push(src.slice(mm.index, mm.index + 48).split('\n')[0])
+    // `.concat(tail)` builds the path the same way `+ tail` does, and the scan would
+    // otherwise certify the bare literal and drop the appended tail.
+    if (/^\s*(?:\+|,\s*)?\s*(?:\+|\.concat\s*\()/.test(after(mm))) {
+      concat.push(src.slice(mm.index, mm.index + 48).split('\n')[0])
+    }
   }
   let m
   const scan = (re, call, classify) => {
@@ -292,7 +361,12 @@ function literalCallPaths(rawSrc) {
   // an expression the regexes above cannot read. Report it instead of missing it.
   const urlObjects = [...src.matchAll(/\b(?:api|fetch)\(\s*new URL\(/g)]
     .map((mm) => src.slice(mm.index, mm.index + 40).split('\n')[0])
-  return { paths, concat, unrooted, urlObjects }
+  // A method that could not be read statically is NOT graded GET — it is reported. The
+  // resolver must not certify a call whose verb it guessed.
+  const unreadable = paths
+    .filter(({ method }) => method === '?')
+    .map(({ call, raw }) => `${call}('${raw}')`)
+  return { paths, concat, unrooted, urlObjects, unreadable }
 }
 
 // One matcher per segment: a literal segment must equal the route's, a segment
@@ -307,7 +381,12 @@ function clientPathPattern(pathPart) {
     .map((seg) => {
       if (!/\$\{[^}]*\}/.test(seg)) return { literal: seg }
       const body = seg.split(/\$\{[^}]*\}/).map(escapeRe).join('.*')
-      return { re: new RegExp(`^${body}$`), hole: body === '.*' }
+      // A segment that is ONLY holes — `${a}` AND `${a}${b}` — must require a route
+      // PARAMETER. Testing `body === '.*'` recognised only the single-hole spelling, so
+      // two adjacent holes fell through to the regex branch and matched any literal
+      // server segment, reopening the false pass cycle 4 closed (live shapes:
+      // `/v1/graphs/${id}${q}`, `/v1/sessions/${id}${q}`, `/v1/team/keys/${id}${q}`).
+      return { re: new RegExp(`^${body}$`), hole: body.replace(/\.\*/g, '') === '' }
     })
 }
 
@@ -324,7 +403,7 @@ function clientPathPattern(pathPart) {
 const ROUTE_VERBS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'api_route']
 // Decorators that are NOT routes. A form outside ROUTE_VERBS + this list makes the
 // tests fail LOUDLY, instead of silently degrading into "the server lost a route".
-const NON_ROUTE_DECORATORS = ['exception_handler']
+const NON_ROUTE_DECORATORS = ['exception_handler', 'middleware', 'on_event', 'websocket']
 
 function serverRoutes() {
   const src = serverSource()
@@ -387,9 +466,12 @@ function blankTripleQuoted(text) {
   while (i < text.length) {
     const ch = text[i]
     if (ch === '#') {
+      // BLANK the comment rather than copying it: keeping the text made the
+      // `add_api_route(` guard fire on an explanatory comment, and made a decorator
+      // spelled inside a comment readable as a route.
       const nl = text.indexOf('\n', i)
       const end = nl === -1 ? text.length : nl
-      out += text.slice(i, end)
+      out += ' '.repeat(end - i)
       i = end
       continue
     }
@@ -449,22 +531,38 @@ function matchesServerRoute(pattern, method, routes, wantTrailing = false) {
 // so a same-origin fetch of one is not a 404 — and the repo's own routing surface
 // defines the Stripe-return pathnames that way (`/team / 200`). Read once, cache.
 let redirectCache = null
+const rewritePatterns = []
 function rewrittenPaths() {
   if (redirectCache) return redirectCache
   const set = new Set()
+  const patterns = rewritePatterns
   const file = join(PUBLIC_DIR, '_redirects')
   if (existsSync(file)) {
     for (const line of readFileSync(file, 'utf8').split('\n')) {
       const t = line.trim()
       if (!t || t.startsWith('#')) continue
       const [from, , status] = t.split(/\s+/)
-      // Only internal 200 rewrites: a 301/302 sends the browser elsewhere, and a
-      // wildcard or a `:placeholder` source is not a literal path to compare against.
-      if (status === '200' && from && !from.includes('*') && !from.includes(':')) set.add(from)
+      // Only internal 200 rewrites: a 301/302 sends the browser elsewhere.
+      if (status !== '200' || !from) continue
+      // A `:placeholder` (or `*`) source is a PATTERN, not a literal — matching it as a
+      // literal string silently reds a path Pages really serves.
+      if (from.includes(':') || from.includes('*')) patterns.push(segments(from))
+      else set.add(from)
     }
   }
   redirectCache = set
   return set
+}
+
+// A `:placeholder`/`*` 200-rewrite source, matched the way the server matcher matches a
+// `{param}` route segment: same segment count, literal segments equal, dynamic segments
+// accept anything. (No such rule exists in _redirects today — this keeps a future one
+// from reading as "unserved".)
+function matchesRewritePattern(path) {
+  const segs = segments(path)
+  return rewritePatterns.some(
+    (pat) => pat.length === segs.length && pat.every((p, i) => p === '*' || p.startsWith(':') || p === segs[i]),
+  )
 }
 
 // The Pages side: a path is served when a Function file exists at it, a directory
@@ -477,6 +575,7 @@ function rewrittenPaths() {
 // function forwards an EMPTY remainder to `${API_ORIGIN}/v1/` and the API 404s.
 function pagesRouteExists(path) {
   if (rewrittenPaths().has(path) || rewrittenPaths().has(path.replace(/\/$/, ''))) return true
+  if (matchesRewritePattern(path)) return true
   const segs = segments(path)
   const asset = join(PUBLIC_DIR, ...segs)
   // A DIRECTORY is not served by itself: Pages needs an index document. `existsSync`
@@ -533,6 +632,17 @@ test('the server-route matcher is not vacuous (it rejects what must not resolve)
     apiRouteEntries().decorators,
     forms.get('api_route') ?? 0,
     'an api_route decorator was not parsed',
+  )
+  // A route registered inside an indented block (`if FLAG:` …) is read as live by any
+  // regex, and a client call to it would be certified while the server 404s. Every route
+  // decorator in this file is at column 0; if that stops being true, the guard must be
+  // taught to reason about conditionality rather than silently trusting the scan.
+  const indented = [...serverSource().matchAll(/^[ \t]+@app\.(?!exception_handler|middleware|on_event|websocket)/gm)]
+  assert.deepEqual(
+    indented.map((m) => m[0].trim()),
+    [],
+    'a route decorator is indented under a conditional/block — this guard cannot tell whether it '
+    + 'executes, so it must not certify calls to it',
   )
   const asPattern = (p) => clientPathPattern(p)
 
@@ -592,17 +702,20 @@ test('every literal call path resolves — client route AND upstream server rout
   const concats = []
   const unrooted = []
   const urlObjects = []
+  const unreadable = []
   for (const file of SOURCES) {
     const scanned = literalCallPaths(readFileSync(join(HERE, file), 'utf8'))
     concats.push(...scanned.concat.map((c) => `${file}: ${c}`))
     unrooted.push(...scanned.unrooted.map((p) => `${file}: ${p}`))
     urlObjects.push(...scanned.urlObjects.map((u) => `${file}: ${u}`))
+    unreadable.push(...scanned.unreadable.map((u) => `${file}: ${u}`))
     for (const { call, path, requestPath, method, pattern, trailingSlash } of scanned.paths) {
       total += 1
       // ONLY the proxy prefix is forwarded. Keying this branch on the STRIPPED path let
       // a bare `fetch('/v1/...')` be certified by the API route it could never reach:
       // the browser asks Pages for /v1/..., which does not exist — #4144's own species
       // (a path the server serves and the browser cannot request).
+      if (method === '?') continue // reported below — never certified on a guessed verb
       if (requestPath.startsWith(`${PROXY_PREFIX}/`)) {
         // Forwarded by the proxy — so the SERVER must serve it, with that METHOD.
         // The proxy route `functions/api/v1/[[path]].ts` strips its own prefix and
@@ -653,10 +766,38 @@ test('every literal call path resolves — client route AND upstream server rout
     `call paths that are not rooted cannot be checked — start them with '/':\n  ${unrooted.join('\n  ')}`,
   )
   assert.deepEqual(
+    unreadable,
+    [],
+    `the HTTP method of these calls cannot be read statically (a variable, a call, or a spread `
+    + `hides it), so the guard must not guess GET:\n  ${unreadable.join('\n  ')}`,
+  )
+  assert.deepEqual(
     urlObjects,
     [],
     `a call path built with \`new URL(…)\` is a literal this origin resolves — write it as a plain `
     + `string so it can be checked:\n  ${urlObjects.join('\n  ')}`,
+  )
+})
+
+test('the prefix this guard models matches the client constant and the proxy route', () => {
+  // The guard models `api()` as requesting `${API_BASE}${path}` and requires the proxy
+  // prefix to be PROXY_PREFIX. Nothing read either from the source, so changing
+  // `const API_BASE = '/api'` — the same prefix mismatch this PR exists to catch — left
+  // every scanned path unchanged and the guard green while EVERY call 404s.
+  const client = readFileSync(join(HERE, 'main.jsx'), 'utf8')
+  const m = /const\s+API_BASE\s*=\s*['"]([^'"]+)['"]/.exec(client)
+  assert.ok(m, 'main.jsx must define `const API_BASE = …` — the guard models the prefix it sets')
+  assert.equal(
+    `${m[1]}/v1`,
+    PROXY_PREFIX,
+    `API_BASE is ${m[1]}, so api() requests ${m[1]}…, not ${PROXY_PREFIX}… — the guard's whole `
+    + 'model of what the browser asks for is then wrong',
+  )
+  const proxy = readFileSync(join(FUNCTIONS_DIR, 'api', 'v1', '[[path]].ts'), 'utf8')
+  assert.ok(
+    /\/v1\/\$\{/.test(proxy) && proxy.includes('API_ORIGIN'),
+    'the proxy route must rebuild the upstream path under /v1/ from API_ORIGIN — the guard '
+    + 'server-checks the path the proxy forwards, so that prefix is load-bearing',
   )
 })
 
