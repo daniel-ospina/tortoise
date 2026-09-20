@@ -51,7 +51,7 @@
 // `/v1` directory.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -216,15 +216,14 @@ function classifyFetchLiteral(raw) {
 // turned into a per-segment pattern, because a literal that FOLLOWS a `${…}` hole
 // (`/v1/invites/pending/${id}/accept`) is just as load-bearing as one before it —
 // cutting the string at the first `$` made the guard blind to a renamed suffix.
-function literalCallPaths(src) {
+function literalCallPaths(rawSrc) {
+  // Only LIVE code is scanned: a commented-out call is not a call. The server half was
+  // made comment-aware first; leaving the client half raw meant commenting a call out
+  // for a moment reddened CI with a message that said routing was broken.
+  const src = stripComments(rawSrc)
   const out = []
   const push = (call, raw, index, prefix = requestPrefix(call)) =>
     out.push({ call, raw, index, prefix })
-  const apiRe = /\bapi\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
-  const fetchRe = /fetch\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
-  const urlRe = /\burl:\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
-  const authRe = /\bauthAction\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
-  let m
   const after = (mm) => src.slice(mm.index + mm[0].length)
   const concat = []
   const checkConcat = (mm) => {
@@ -233,41 +232,67 @@ function literalCallPaths(src) {
     // puts a space between them, and comparing the immediate next character missed it.
     if (/^\s*\+/.test(after(mm))) concat.push(src.slice(mm.index, mm.index + 48).split('\n')[0])
   }
-  while ((m = apiRe.exec(src)) !== null) {
-    checkConcat(m)
-    push('api', m[1] ?? m[2] ?? m[3], m.index + m[0].length)
+  let m
+  const scan = (re, call, classify) => {
+    re.lastIndex = 0
+    while ((m = re.exec(src)) !== null) {
+      checkConcat(m)
+      const raw = m[1] ?? m[2] ?? m[3]
+      const c = classify ? classify(raw) : { kind: 'scanned', path: raw, prefix: requestPrefix(call) }
+      if (c.kind === 'scanned') push(call, c.path, m.index + m[0].length, c.prefix)
+    }
   }
-  while ((m = fetchRe.exec(src)) !== null) {
-    checkConcat(m)
-    const c = classifyFetchLiteral(m[1] ?? m[2] ?? m[3])
-    if (c.kind === 'scanned') push('fetch', c.path, m.index + m[0].length, c.prefix)
+  scan(/\bapi\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g, 'api')
+  scan(/fetch\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g, 'fetch', classifyFetchLiteral)
+  scan(/\bauthAction\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g, 'authAction')
+  // `url:` is the bounded-poll descriptor's field, consumed as `api(url)`. Matching it
+  // ANYWHERE in the file made an unrelated object field (`{ url: '/uploads/x.png' }`)
+  // look like an API call — a false red on correct code. Scope it to the call that
+  // consumes it.
+  const pollRe = /\bstartBoundedPoll\(/g
+  while ((m = pollRe.exec(src)) !== null) {
+    const base = m.index + m[0].length
+    const args = callArgs(src, base)
+    const urlRe = /\burl:\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
+    let u
+    while ((u = urlRe.exec(args)) !== null) {
+      const mm = { index: base + u.index, 0: u[0] }
+      checkConcat(mm)
+      push('url:', u[1] ?? u[2] ?? u[3], base + u.index + u[0].length)
+    }
   }
-  while ((m = urlRe.exec(src)) !== null) {
-    checkConcat(m)
-    push('url:', m[1] ?? m[2] ?? m[3], m.index + m[0].length)
-  }
-  while ((m = authRe.exec(src)) !== null) {
-    checkConcat(m)
-    push('authAction', m[1] ?? m[2] ?? m[3], m.index + m[0].length)
-  }
-  return {
-    paths: out
-      .map(({ call, raw, index, prefix, method: _m }) => {
-        // A literal `?` starts the query string; a `${…}` before it is a path hole.
-        const pathPart = raw.split('?')[0]
-        return {
-          call,
-          method: methodFor(src, index, call),
-          raw,
-          path: pathPart,
-          // What the browser actually requests from this origin (prefix applied).
-          requestPath: `${prefix}${pathPart}`,
-          pattern: clientPathPattern(pathPart),
-        }
-      })
-      .filter(({ path }) => path.startsWith('/')),
-    concat,
-  }
+  const unrooted = []
+  const paths = out
+    .map(({ call, raw, index, prefix }) => {
+      // A literal `?` starts the query string; a `${…}` before it is a path hole.
+      const pathPart = raw.split('?')[0]
+      return {
+        call,
+        method: methodFor(src, index, call),
+        raw,
+        path: pathPart,
+        // A trailing slash is NOT cosmetic: FastAPI answers a slash mismatch with a
+        // 307, and the proxy fetches with `redirect: 'manual'`, so the browser is sent
+        // to `api.premiselabs.co` — outside the BFF (#4144's species).
+        trailingSlash: pathPart.length > 1 && pathPart.endsWith('/'),
+        // What the browser actually requests from this origin (prefix applied).
+        requestPath: `${prefix}${pathPart}`,
+        pattern: clientPathPattern(pathPart),
+      }
+    })
+    .filter(({ path }) => {
+      if (path.startsWith('/')) return true
+      // A literal that is not rooted cannot be checked, and dropping it silently is how
+      // a path stops being covered at all. An absolute URL is another origin's, and is
+      // declared out of scope rather than unnoticed.
+      if (!path.includes('://')) unrooted.push(path)
+      return false
+    })
+  // `api(new URL('/v1/x', origin))` is a literal this origin resolves, reached through
+  // an expression the regexes above cannot read. Report it instead of missing it.
+  const urlObjects = [...src.matchAll(/\b(?:api|fetch)\(\s*new URL\(/g)]
+    .map((mm) => src.slice(mm.index, mm.index + 40).split('\n')[0])
+  return { paths, concat, unrooted, urlObjects }
 }
 
 // One matcher per segment: a literal segment must equal the route's, a segment
@@ -296,61 +321,101 @@ function clientPathPattern(pathPart) {
 // version stripped `"""…"""` anywhere in the file, so a stray `"""` inside a COMMENT
 // re-paired the delimiters and deleted real route lines: a mutation turned the
 // billing routes into "missing routes" and reddened the guard on a correct tree.
+const ROUTE_VERBS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'api_route']
+// Decorators that are NOT routes. A form outside ROUTE_VERBS + this list makes the
+// tests fail LOUDLY, instead of silently degrading into "the server lost a route".
+const NON_ROUTE_DECORATORS = ['exception_handler']
+
 function serverRoutes() {
+  const src = serverSource()
   const routes = []
   // Whole-text, anchored at line start, so a decorator whose arguments wrap onto the
   // next line is still read (a line-by-line regex reported it as a MISSING route — a
   // false red on a correct tree), and so a decorator parked on a `#` line is excluded.
-  const re = /^[ \t]*@app\.(get|post|put|patch|delete)\(\s*['"]([^'"]+)['"]/gm
+  const re = /^[ \t]*@app\.(get|post|put|patch|delete|head|options)\(\s*['"]([^'"]+)['"]/gm
   let m
-  while ((m = re.exec(serverSource())) !== null) routes.push({ method: m[1].toUpperCase(), path: m[2] })
+  while ((m = re.exec(src)) !== null) routes.push({ method: m[1].toUpperCase(), path: m[2] })
+  for (const entry of apiRouteEntries(src).entries) routes.push(entry)
   return routes
 }
 
-// The server source with standalone string literals removed. Exposed so the tests can
-// check the route EXTRACTION against the source it came from.
-function serverSource() {
-  return stripStandaloneStrings(readFileSync(SERVER, 'utf8'))
-}
-
-// How many decorators the file LOOKS like it declares, by a loose pattern. The tests
-// compare this with what `serverRoutes()` parsed: an equal count is what proves the
-// extraction did not silently skip a form it does not understand. Otherwise a missed
-// decorator surfaces as a "missing route" — a false red blamed on the server.
-function declaredDecorators() {
-  return [...serverSource().matchAll(/^[ \t]*@app\.(?:get|post|put|patch|delete)\s*\(/gm)].length
-}
-
-// Remove triple-quoted blocks whose opening delimiter is the first non-space text of
-// its line — a real string statement. A `"""` inside a comment is not a delimiter in
-// python, and must not be treated as one here.
-function stripStandaloneStrings(text) {
-  const lines = text.split('\n')
-  const out = []
-  let open = null
-  for (const line of lines) {
-    if (open) {
-      const close = line.indexOf(open)
-      if (close === -1) continue
-      out.push(line.slice(close + open.length))
-      open = null
-      continue
-    }
-    const m = /^(\s*)("""|''')/.exec(line)
-    if (!m) {
-      out.push(line)
-      continue
-    }
-    const rest = line.slice(m[1].length + m[2].length)
-    const close = rest.indexOf(m[2])
-    if (close === -1) {
-      open = m[2]
-      out.push(m[1])
-    } else {
-      out.push(m[1] + rest.slice(close + m[2].length))
+// `@app.api_route("/x", methods=["GET", "POST"])` is a first-class FastAPI form: not
+// reading it made a legitimate route look like one the server lost. Returned with the
+// DECORATOR count as well, so the completeness check can tell an api_route-derived route
+// from a verb-decorated one (otherwise a correct tree fails the per-verb comparison).
+function apiRouteEntries(src = serverSource()) {
+  const entries = []
+  const re = /^[ \t]*@app\.api_route\(\s*['"]([^'"]+)['"][\s\S]*?methods\s*=\s*\[([^\]]*)\]/gm
+  let m
+  while ((m = re.exec(src)) !== null) {
+    for (const verb of m[2].matchAll(/['"]([A-Za-z]+)['"]/g)) {
+      entries.push({ method: verb[1].toUpperCase(), path: m[1] })
     }
   }
-  return out.join('\n')
+  const decorators = [...src.matchAll(/^[ \t]*@app\.api_route\s*\(/gm)].length
+  return { entries, decorators }
+}
+
+// Every `@app.<form>(` decorator in the file, whether or not `serverRoutes()` knows how
+// to read it. The tests compare the two, so a form the parser does not understand fails
+// as a PARSER gap rather than as a missing route.
+function declaredDecoratorForms() {
+  const forms = new Map()
+  for (const m of serverSource().matchAll(/^[ \t]*@app\.([A-Za-z_]+)\s*\(/gm)) {
+    forms.set(m[1], (forms.get(m[1]) ?? 0) + 1)
+  }
+  return forms
+}
+
+// The server source with the CONTENTS of triple-quoted strings blanked. Exposed so the
+// tests can check the route EXTRACTION against the source it came from.
+function serverSource() {
+  return blankTripleQuoted(readFileSync(SERVER, 'utf8'))
+}
+
+// Blank the CONTENTS of triple-quoted strings, keeping every newline and position.
+// A decorator parked in a docstring is then not a route, and — because the real
+// delimiters are honoured rather than re-paired by a pattern — nothing else is lost.
+// The earlier regex paired `"""` from ANYWHERE in the file, so a stray `"""` in a
+// COMMENT (or a closing `"""` at column 0 after `X = """`) re-anchored the pair and
+// swallowed real route lines: that surfaced as "the server lost a route" — a false red
+// on a correct tree. Comments and ordinary strings are skipped as units, so a `#` or a
+// `"""` inside one is not a delimiter.
+function blankTripleQuoted(text) {
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (ch === '#') {
+      const nl = text.indexOf('\n', i)
+      const end = nl === -1 ? text.length : nl
+      out += text.slice(i, end)
+      i = end
+      continue
+    }
+    const tri = text.startsWith('"""', i) ? '"""' : (text.startsWith("'''", i) ? "'''" : null)
+    if (tri) {
+      const close = text.indexOf(tri, i + 3)
+      const stop = close === -1 ? text.length : close + 3
+      out += text.slice(i, stop).replace(/[^\n]/g, ' ')
+      i = stop
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      let j = i + 1
+      while (j < text.length && text[j] !== ch && text[j] !== '\n') {
+        if (text[j] === '\\') j += 1
+        j += 1
+      }
+      const stop = Math.min(j + 1, text.length)
+      out += text.slice(i, stop)
+      i = stop
+      continue
+    }
+    out += ch
+    i += 1
+  }
+  return out
 }
 
 const segments = (p) => p.split('/').filter(Boolean)
@@ -361,10 +426,13 @@ const segments = (p) => p.split('/').filter(Boolean)
 // client's literal, and a client segment carrying a hole must match its literal
 // parts. Exact count is what stops a static `/v1/x` from being certified by a route
 // that only serves `/v1/x/{id}`.
-function matchesServerRoute(pattern, method, routes) {
+function matchesServerRoute(pattern, method, routes, wantTrailing = false) {
   if (pattern.length === 0) return false
   return routes.some((route) => {
     if (route.method !== method) return false
+    // `/v1/x` and `/v1/x/` are different routes to FastAPI, which answers the mismatch
+    // with a 307 the proxy will not follow.
+    if ((route.path.length > 1 && route.path.endsWith('/')) !== wantTrailing) return false
     const r = segments(route.path)
     if (r.length !== pattern.length) return false
     return pattern.every((p, i) => {
@@ -377,6 +445,28 @@ function matchesServerRoute(pattern, method, routes) {
   })
 }
 
+// The app pathnames `public/_redirects` rewrites to `/` with a 200. Pages serves them,
+// so a same-origin fetch of one is not a 404 — and the repo's own routing surface
+// defines the Stripe-return pathnames that way (`/team / 200`). Read once, cache.
+let redirectCache = null
+function rewrittenPaths() {
+  if (redirectCache) return redirectCache
+  const set = new Set()
+  const file = join(PUBLIC_DIR, '_redirects')
+  if (existsSync(file)) {
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      const t = line.trim()
+      if (!t || t.startsWith('#')) continue
+      const [from, , status] = t.split(/\s+/)
+      // Only internal 200 rewrites: a 301/302 sends the browser elsewhere, and a
+      // wildcard or a `:placeholder` source is not a literal path to compare against.
+      if (status === '200' && from && !from.includes('*') && !from.includes(':')) set.add(from)
+    }
+  }
+  redirectCache = set
+  return set
+}
+
 // The Pages side: a path is served when a Function file exists at it, a directory
 // index exists at it, a static asset in `public/` is served from it, or a `[[path]]`
 // wildcard exists at it or at an ancestor of it. An own-depth wildcard DOES count:
@@ -386,8 +476,13 @@ function matchesServerRoute(pattern, method, routes) {
 // call site: the proxy prefix itself (`/api/v1`) is refused there, because that
 // function forwards an EMPTY remainder to `${API_ORIGIN}/v1/` and the API 404s.
 function pagesRouteExists(path) {
+  if (rewrittenPaths().has(path) || rewrittenPaths().has(path.replace(/\/$/, ''))) return true
   const segs = segments(path)
-  if (existsSync(join(PUBLIC_DIR, ...segs))) return true
+  const asset = join(PUBLIC_DIR, ...segs)
+  // A DIRECTORY is not served by itself: Pages needs an index document. `existsSync`
+  // alone counted `public/skills/` (a directory of skill folders, no index.html) as a
+  // served asset, so a `fetch('/skills')` that 404s stayed green.
+  if (existsSync(asset) && (statSync(asset).isFile() || existsSync(join(asset, 'index.html')))) return true
   for (let i = segs.length; i >= 1; i -= 1) {
     const dir = segs.slice(0, i).join('/')
     const atFullPath = i === segs.length
@@ -401,20 +496,43 @@ function pagesRouteExists(path) {
 test('the server-route matcher is not vacuous (it rejects what must not resolve)', () => {
   const routes = serverRoutes()
   assert.ok(routes.length > 50, `expected to read many routes from hosted_api.py, got ${routes.length}`)
-  // The extraction must be COMPLETE: every decorator the file declares was parsed, and
-  // no route is registered by a form this guard cannot read. Without this, a decorator
-  // form the regex misses looks like a route the SERVER lost.
-  assert.equal(
-    routes.length,
-    declaredDecorators(),
-    'serverRoutes() parsed a different number of routes than the file declares — a decorator form it '
-    + 'does not understand (multi-line, f-string, or a different registration API)',
-  )
+  // The extraction must be COMPLETE — see the per-verb and unknown-form checks below.
   assert.equal(
     serverSource().includes('add_api_route('),
     false,
     'this file registers routes via add_api_route(), which serverRoutes() cannot read — teach it that '
     + 'form (or use the decorator) before trusting this guard',
+  )
+  // …and the same for every OTHER decorator form. Counting only the verbs the parser
+  // already knows made this net blind to exactly the forms it exists to catch:
+  // `@app.head(...)` and `@app.api_route(..., methods=[...])` were invisible to BOTH the
+  // parser and the count, so a legitimate route read as a route the server lost.
+  const forms = declaredDecoratorForms()
+  const unreadable = [...forms.keys()].filter(
+    (v) => !ROUTE_VERBS.includes(v) && !NON_ROUTE_DECORATORS.includes(v),
+  )
+  assert.deepEqual(
+    unreadable,
+    [],
+    `serverRoutes() does not understand these decorator forms — teach it before trusting this guard: `
+    + `${unreadable.join(', ')}`,
+  )
+  const viaApiRoute = apiRouteEntries().entries.map((e) => `${e.method} ${e.path}`)
+  for (const verb of ROUTE_VERBS.filter((v) => v !== 'api_route')) {
+    const declared = forms.get(verb) ?? 0
+    const parsed = routes.filter((r) => r.method === verb.toUpperCase()).length
+      - viaApiRoute.filter((p) => p.startsWith(`${verb.toUpperCase()} `)).length
+    assert.equal(
+      parsed,
+      declared,
+      `serverRoutes() read ${parsed} ${verb.toUpperCase()} routes but the file declares ${declared} — `
+      + 'a decorator form it does not understand',
+    )
+  }
+  assert.equal(
+    apiRouteEntries().decorators,
+    forms.get('api_route') ?? 0,
+    'an api_route decorator was not parsed',
   )
   const asPattern = (p) => clientPathPattern(p)
 
@@ -472,10 +590,14 @@ test('every literal call path resolves — client route AND upstream server rout
   const bad = []
   let total = 0
   const concats = []
+  const unrooted = []
+  const urlObjects = []
   for (const file of SOURCES) {
     const scanned = literalCallPaths(readFileSync(join(HERE, file), 'utf8'))
     concats.push(...scanned.concat.map((c) => `${file}: ${c}`))
-    for (const { call, path, requestPath, method, pattern } of scanned.paths) {
+    unrooted.push(...scanned.unrooted.map((p) => `${file}: ${p}`))
+    urlObjects.push(...scanned.urlObjects.map((u) => `${file}: ${u}`))
+    for (const { call, path, requestPath, method, pattern, trailingSlash } of scanned.paths) {
       total += 1
       // ONLY the proxy prefix is forwarded. Keying this branch on the STRIPPED path let
       // a bare `fetch('/v1/...')` be certified by the API route it could never reach:
@@ -485,7 +607,7 @@ test('every literal call path resolves — client route AND upstream server rout
         // Forwarded by the proxy — so the SERVER must serve it, with that METHOD.
         // The proxy route `functions/api/v1/[[path]].ts` strips its own prefix and
         // rebuilds `${API_ORIGIN}/v1/${rest}`, so the upstream path is `path`.
-        if (!matchesServerRoute(pattern, method, routes)) {
+        if (!matchesServerRoute(pattern, method, routes, trailingSlash)) {
           bad.push(
             `${file}: ${call}('${path}') [${method}] (requests ${requestPath}) → the BFF proxy would forward to `
             + `${path} on the API, but tortoise/hosted_api.py has no route of that method whose segments match `
@@ -523,10 +645,23 @@ test('every literal call path resolves — client route AND upstream server rout
     [],
     `call paths built by string concatenation cannot be checked — write one literal:\n  ${concats.join('\n  ')}`,
   )
+  // A literal path that is not rooted cannot be matched against anything, so dropping it
+  // silently is how a path stops being covered at all.
+  assert.deepEqual(
+    unrooted,
+    [],
+    `call paths that are not rooted cannot be checked — start them with '/':\n  ${unrooted.join('\n  ')}`,
+  )
+  assert.deepEqual(
+    urlObjects,
+    [],
+    `a call path built with \`new URL(…)\` is a literal this origin resolves — write it as a plain `
+    + `string so it can be checked:\n  ${urlObjects.join('\n  ')}`,
+  )
 })
 
 test('the guard still finds the shapes it exists to cover (scanned counts cannot silently vanish)', () => {
-  const src = readFileSync(join(HERE, 'main.jsx'), 'utf8')
+  const src = stripComments(readFileSync(join(HERE, 'main.jsx'), 'utf8'))
   const calls = literalCallPaths(src).paths
   const count = (kind) => calls.filter((c) => c.call === kind).length
   assert.ok(count('api') >= 30, `api() call sites dropped to ${count('api')} — did the regex or the source move?`)
