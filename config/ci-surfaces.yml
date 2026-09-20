@@ -32,6 +32,11 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py, which
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
+  # #3498: the control-plane auth/session HTTP must not run on the event loop.
+  # Same dual registration as the three loop-responsiveness guards above, for
+  # the same reason: the file it guards is tortoise/hosted_api.py (and
+  # tortoise/monitoring.py), which selects the `api` surface.
+  - test_control_plane_offload_3498.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
@@ -411,6 +416,7 @@ surfaces:
   - test_collision_preflight.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
+  - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
@@ -1354,6 +1360,7 @@ durations:
   test_battery_corpus_v11.py: 3.2
   test_tenancy_spine.py: 3.2
   test_collision_preflight.py: 3.0
+  test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
   test_free_team_entitlement.py: 3.0
   test_integration_search.py: 3.0
   test_kind_classifier.py: 3.0
