@@ -71,11 +71,12 @@ VALUES
      NULL, NULL, '2026-07-01T00:00:00+00:00');
 
 -- 0b) EVERY code point the predicate claims to treat as blank, GENERATED from
---     the set itself, so the parity claim is mutation-tested across the whole
---     set rather than spot-checked (a dropped OR added code point REDs the
---     suite). ``cp`` list = ``str.isspace()``: ASCII whitespace, U+001C–U+001F,
+--     the declared set, so the DROP direction is structural rather than a spot
+--     check. ``cp`` list = ``str.isspace()``: ASCII whitespace, U+001C–U+001F,
 --     U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F, U+205F,
---     U+3000.
+--     U+3000. Three shapes per code point, so BOTH derivation branches' blank
+--     guards are exercised across the whole set: no bounds, end only (branch
+--     1), and start only (branch 2).
 INSERT INTO public.organizations
     (id, name, graph_name, subscription_id,
      current_period_start, current_period_end)
@@ -85,8 +86,7 @@ SELECT '4216-blank-cp-' || cp, '4216-blank-cp-' || cp,
                     8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,
                     8287,12288]) AS t(cp);
 
--- ...and the same set again carrying ONLY an end, so BOTH derivation guards
--- (start-from-end and end-from-start) are exercised for every code point.
+-- ...carrying ONLY an end (branch 1's shape: end known, start missing)...
 INSERT INTO public.organizations
     (id, name, graph_name, subscription_id,
      current_period_start, current_period_end)
@@ -97,11 +97,31 @@ SELECT '4216-blank-cpe-' || cp, '4216-blank-cpe-' || cp,
                     8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,
                     8287,12288]) AS t(cp);
 
+-- ...and ONLY a start (branch 2's shape: start known, end missing). Both are
+-- needed: each guards on the blank predicate in its OWN UPDATE, so covering
+-- one direction leaves the other's guard blind to non-ASCII blanks.
+INSERT INTO public.organizations
+    (id, name, graph_name, subscription_id,
+     current_period_start, current_period_end)
+SELECT '4216-blank-cps-' || cp, '4216-blank-cps-' || cp,
+       'org_4216-blank-cps-' || cp, chr(cp),
+       '2026-06-01T00:00:00+00:00', NULL
+  FROM unnest(ARRAY[9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,
+                    8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,
+                    8287,12288]) AS t(cp);
+
 -- NEGATIVE controls: code points that share an encoding prefix with a blank one
 -- (or are otherwise easy to mistake for whitespace) but are NOT whitespace.
 -- They must STILL be treated as real subscription ids — a wrongly WIDENED
 -- predicate would leave them unrepaired, the #4216 defect in the other
 -- direction. (U+0080, U+180E, U+200B, U+FEFF.)
+--
+-- COVERAGE, stated precisely. The DROP direction is EXHAUSTIVE: the generated
+-- rows above are one per declared code point, so dropping any one of them REDs
+-- the suite. The ADD direction is an adversarial SAMPLE, not exhaustive — an
+-- exhaustive sweep of the code-point space belongs in a property test, not
+-- here; U+180E is the specific trap (it was Unicode whitespace until
+-- Unicode 6.3 and is the classic over-broad-strip bug).
 INSERT INTO public.organizations
     (id, name, graph_name, subscription_id,
      current_period_start, current_period_end)
@@ -240,24 +260,22 @@ BEGIN
         RAISE EXCEPTION 'a blank-subscription org must not derive a start (% %)',
             f_s, f_e;
     END IF;
-    -- EVERY member of the blank set, not a spot check: the both-NULL rows must
-    -- stay both-NULL and the end-only rows must NOT gain a start. Mutation
-    -- caught: dropping ANY code point from ``blank_chars`` (there is one
-    -- generated row per code point), or narrowing the set to the "obvious"
-    -- ASCII ones.
-    SELECT count(*) INTO n_cp
-      FROM public.organizations
-     WHERE id LIKE '4216-blank-cp-%'
-       AND (current_period_start IS NOT NULL OR current_period_end IS NOT NULL);
-    IF n_cp <> 0 THEN
-        RAISE EXCEPTION '% blank-cp org(s) filtered — the predicate is not the '
-                        'full str.strip() set', n_cp;
-    END IF;
+    -- EVERY member of the blank set, not a spot check. A code point DROPPED
+    -- from ``blank_chars`` makes its generated row a REAL subscription, which
+    -- REDs here: an end-only row would gain a start, a start-only row would
+    -- gain an end. (A both-NULL row has no derivable bound, so a dropped code
+    -- point surfaces for that shape in test 1's returned set instead.)
     SELECT count(*) INTO n_cp
       FROM public.organizations
      WHERE id LIKE '4216-blank-cpe-%' AND current_period_start IS NOT NULL;
     IF n_cp <> 0 THEN
         RAISE EXCEPTION '% blank-cpe org(s) derived a start from a blank id', n_cp;
+    END IF;
+    SELECT count(*) INTO n_cp
+      FROM public.organizations
+     WHERE id LIKE '4216-blank-cps-%' AND current_period_end IS NOT NULL;
+    IF n_cp <> 0 THEN
+        RAISE EXCEPTION '% blank-cps org(s) derived an end from a blank id', n_cp;
     END IF;
     -- NEGATIVE controls: a code point that is NOT blank must still be repaired
     -- as a real subscription (a wrongly WIDENED predicate would skip it).
@@ -354,4 +372,5 @@ DELETE FROM public.organizations
               '4216-free-no-sub-end')
     OR id LIKE '4216-blank-cp-%'
     OR id LIKE '4216-blank-cpe-%'
+    OR id LIKE '4216-blank-cps-%'
     OR id LIKE '4216-ctrl-%';
