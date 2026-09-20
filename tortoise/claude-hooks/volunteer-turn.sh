@@ -126,7 +126,14 @@ if [ -z "$TORTOISE_BIN" ]; then
   else
     PYTHON_BIN="$(command -v python3 || true)"
   fi
-  [ -z "$PYTHON_BIN" ] && exit 0
+  if [ -z "$PYTHON_BIN" ]; then
+    # The module dir resolved but there is no interpreter to run it: record
+    # the breadcrumb (evidence, not silence) and exit 0 (#4314).
+    _record_breadcrumb "$HARNESS" \
+      "the installed volunteer hook resolved a tortoise module dir but found no python3 interpreter, and injected nothing" \
+      || true
+    exit 0
+  fi
 fi
 
 # python3 (hook-input JSON parsing + per-harness output assembly) is a hard
@@ -153,11 +160,15 @@ BLOCK=""
 if [ -n "$TORTOISE_BIN" ]; then
   BLOCK="$(printf '%s' "$PROMPT" | "$TORTOISE_BIN" volunteer 2>"$REFLEX_ERR" || true)"
 else
-  # Module fallback: run the resolved checkout as `python -m tortoise`. The
-  # path travels via PYTHONPATH, never string-interpolated into source — a
-  # quote in the path must not inject code.
-  BLOCK="$(printf '%s' "$PROMPT" | PYTHONPATH="$TORTOISE_MODULE" \
-    "$PYTHON_BIN" -m tortoise volunteer 2>"$REFLEX_ERR" || true)"
+  # Module fallback: run the resolved checkout via ``-c``. The path travels
+  # via ENV and is prepended INSIDE the ``-c`` source — never via ``-m``
+  # (CPython prepends the process CWD ahead of PYTHONPATH for ``-m``, so a
+  # planted ``tortoise/`` package in the agent's workspace would execute as
+  # the user and its stdout is injected into the model context, CWE-427)
+  # and never string-interpolated into the source (a quote in the path must
+  # not inject code).
+  BLOCK="$(printf '%s' "$PROMPT" | TORTOISE_MODULE_DIR="$TORTOISE_MODULE" \
+    "$PYTHON_BIN" -c 'import os,sys; sys.path.insert(0, os.environ["TORTOISE_MODULE_DIR"]); from tortoise.__main__ import main; raise SystemExit(main(sys.argv[1:]))' volunteer 2>"$REFLEX_ERR" || true)"
 fi
 # Relay the #2369 endpoint-mode note (marker-filtered; only emitted on
 # hosted-against-file runs) to the hook's stderr for the harness log.

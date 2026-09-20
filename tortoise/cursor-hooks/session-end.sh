@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 1
+# tortoise-hook-version: 2
 # Tortoise session capture for Cursor — sessionEnd hook (#3819).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -230,7 +230,13 @@ for pattern in cands:
     else
       PYTHON_BIN="$(command -v python3 || true)"
     fi
-    [ -z "$PYTHON_BIN" ] && exit 0
+    if [ -z "$PYTHON_BIN" ]; then
+      # The module dir resolved but there is no interpreter to run it: record
+      # the breadcrumb (evidence, not silence) and exit 0 (#4314).
+      _record_breadcrumb cursor \
+        "the installed Cursor hook resolved a tortoise module dir but found no python3 interpreter, and captured nothing"
+      exit 0
+    fi
   fi
 
   # `sessions import --harness cursor` is the canonical Cursor capture step:
@@ -246,8 +252,14 @@ for pattern in cands:
   else
     ARGS=(sessions import --file "$TRANSCRIPT_PATH" --harness cursor)
     [ -n "$SESSION_ID" ] && ARGS+=(--session-id "$SESSION_ID")
-    PYTHONPATH="$TORTOISE_MODULE" "$PYTHON_BIN" -m tortoise "${ARGS[@]}" \
-      >/dev/null 2>&1 || true
+    # The resolved module dir travels via ENV and is prepended INSIDE ``-c``
+    # — never string-interpolated into the source (a quote in the path must
+    # not inject code) and never via ``-m``: CPython prepends the process CWD
+    # ahead of PYTHONPATH for ``-m``, so a planted ``tortoise/`` package in
+    # the agent's workspace would execute as the user (CWE-427, #4314).
+    TORTOISE_MODULE_DIR="$TORTOISE_MODULE" "$PYTHON_BIN" -c \
+      'import os,sys; sys.path.insert(0, os.environ["TORTOISE_MODULE_DIR"]); from tortoise.__main__ import main; raise SystemExit(main(sys.argv[1:]))' \
+      "${ARGS[@]}" >/dev/null 2>&1 || true
   fi
   exit 0
 fi
