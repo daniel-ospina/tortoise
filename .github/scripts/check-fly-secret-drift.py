@@ -69,10 +69,15 @@ DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 
 # `NAME=…` tokens on a line that builds the secrets payload.
 _ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=")
+# The shell accumulator that builds the payload is not itself a Fly secret.
+_PAYLOAD_VARS = frozenset({"ARGS"})
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 # A propagation line that only fires when the GitHub secret is non-empty:
 #   [ -n "${{ secrets.X }}" ] && ARGS="$ARGS Y=…"
 _CONDITIONAL_RE = re.compile(r'\[\s*-n\s+"\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"\s*\]\s*&&')
+# The same guard opened as a multi-line block:
+#   if [ -n "${{ secrets.X }}" ] && [ -n "${{ secrets.Y }}" ]; then
+_BLOCK_GUARD_RE = re.compile(r'^if\s+\[\s*-n\s+"\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"')
 
 
 def _err(msg: str) -> None:
@@ -144,20 +149,29 @@ def workflow_assignments(text: str) -> tuple[set[str], set[str]]:
     """``(unconditional, conditional)`` Fly names the workflow assigns.
 
     Only lines that build the Fly secrets payload count — a name mentioned in a
-    comment or a gate is not propagation. A line guarded by
-    ``[ -n "${{ secrets.X }}" ] &&`` is *conditional*: the Fly value is only
-    overwritten while that GitHub secret exists.
+    comment or a gate is not propagation. A name is CONDITIONAL when the line
+    that assigns it is either guarded inline (``[ -n "${{ secrets.X }}" ] &&
+    ARGS=…``) or sits inside an ``if [ -n "${{ secrets.X }}" ] …; then`` block:
+    the Fly value is only overwritten while those GitHub secrets exist.
     """
     unconditional: set[str] = set()
     conditional: set[str] = set()
+    # Depth of enclosing `if [ -n "${{ secrets.… }}" …]` blocks. A multi-line
+    # guard is the real shape in deploy-hosted.yml (BACKUP_SWEEP_ENABLED), and a
+    # same-line-only detector read it as managed.
+    guarded_depth = 0
     for line in text.splitlines():
-        if "ARGS" not in line:
-            continue
-        names = set(_ASSIGN_RE.findall(line))
-        if _CONDITIONAL_RE.search(line):
-            conditional |= names
-        else:
-            unconditional |= names
+        stripped = line.strip()
+        if _BLOCK_GUARD_RE.match(stripped):
+            guarded_depth += 1
+        if "ARGS" in line:
+            names = set(_ASSIGN_RE.findall(line)) - _PAYLOAD_VARS
+            if guarded_depth or _CONDITIONAL_RE.search(line):
+                conditional |= names
+            else:
+                unconditional |= names
+        if stripped == "fi":
+            guarded_depth = max(0, guarded_depth - 1)
     return unconditional, conditional
 
 
@@ -225,10 +239,18 @@ def main() -> int:
     violations: list[str] = []
     conditional: list[str] = []
 
-    # (1) An undeclared name is NEW drift: a var that exists only on Fly.
+    # (1) An undeclared name is NEW drift — from either side of the contract.
+    # Towards Fly: a var that exists only on Fly. Towards the workflow: a Fly
+    # var the deploy can set that no declaration covers (it would otherwise pass
+    # the run that sets it and hard-fail every run after).
     for name in sorted(set(fly_names) - set(declared)):
         violations.append(
             f"UNDECLARED — {name!r} is on Fly but declared nowhere in {manifest_path.name}"
+        )
+    for name in sorted((assigned | assigned_conditionally) - set(declared)):
+        violations.append(
+            f"UNDECLARED — {name!r} is assigned by {workflow_path.name} but declared "
+            f"nowhere in {manifest_path.name}"
         )
 
     # (2) A declaration the deploy does not honour is stale intent. A source
@@ -254,11 +276,14 @@ def main() -> int:
                 # assignment wins over an unguarded one, so a line-split guard
                 # cannot be read as managed.
                 conditional.append(name)
-        elif kind == "workflow" and name not in assigned:
-            violations.append(
-                f"STALE DECLARATION — {name!r} is declared workflow-set but "
-                "deploy-hosted.yml never unconditionally assigns it"
-            )
+        elif kind == "workflow":
+            if name not in assigned and name not in assigned_conditionally:
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared workflow-set but "
+                    "deploy-hosted.yml never assigns it"
+                )
+            elif name in assigned_conditionally:
+                conditional.append(name)
         elif kind == "fly-toml-env" and name not in env_keys:
             violations.append(
                 f"STALE DECLARATION — {name!r} is declared fly-toml-env but is not an "
@@ -271,19 +296,26 @@ def main() -> int:
             )
 
     unmanaged = sorted(n for n, s in declared.items() if s == "unmanaged")
-    if conditional:
+    # The lists describe the FLY app's state, so a declared-but-not-yet-present
+    # name is not debt — the reverse-completeness rule above already covers it.
+    fly_conditional = [n for n in fly_names if n in set(conditional)]
+    fly_unmanaged = [n for n in fly_names if n in set(unmanaged)]
+    if fly_conditional:
         print(
-            f"CONDITIONAL PROPAGATION — {len(conditional)} secret(s) are only assigned when "
+            f"CONDITIONAL PROPAGATION — {len(fly_conditional)} secret(s) are only assigned when "
             "the GitHub secret exists. The guard cannot read GitHub secret existence, so "
             "while it is absent the Fly value is untouched — hand-managed, the #4126 case:"
         )
-        for name in conditional:
+        for name in sorted(fly_conditional):
             print(f"  - {name}")
-    if unmanaged:
-        print(f"RECORDED DEBT — {len(unmanaged)} secret(s) on Fly have no managing source (#4126):")
-        for name in unmanaged:
+    if fly_unmanaged:
+        print(
+            f"RECORDED DEBT — {len(fly_unmanaged)} secret(s) on Fly have no managing source "
+            "(#4126):"
+        )
+        for name in fly_unmanaged:
             print(f"  - {name}")
-    if conditional or unmanaged:
+    if fly_conditional or fly_unmanaged:
         print(
             "  Neither list fails the gate yet: retiring them (create the GitHub secret / "
             "declare a managing source) is an owner decision escalating under #4126. They "
@@ -302,11 +334,11 @@ def main() -> int:
         )
         return 1
 
-    managed = len(declared) - len(unmanaged) - len(conditional)
+    managed = [n for n in fly_names if n not in set(conditional) and n not in set(unmanaged)]
     print(
         f"OK: all {len(fly_names)} Fly secret(s) are declared "
-        f"({managed} managed, {len(conditional)} conditionally propagated, "
-        f"{len(unmanaged)} recorded unmanaged)"
+        f"({len(managed)} managed, {len(fly_conditional)} conditionally propagated, "
+        f"{len(fly_unmanaged)} recorded unmanaged)"
     )
     return 0
 

@@ -60,6 +60,10 @@ jobs:
           ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
           [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
           ARGS="$ARGS GIT_SHA=${GITHUB_SHA} GITHUB_CLIENT_ID=${{ secrets.GH_CLIENT_ID }}"
+          ARGS="$ARGS LITERALLY_SET=1"
+          if [ -n "${{ secrets.A_KEY }}" ] && [ -n "${{ secrets.B_KEY }}" ]; then
+            ARGS="$ARGS MULTILINE_FLAG=true"
+          fi
           flyctl secrets set --stage $ARGS
 """
 
@@ -71,6 +75,8 @@ GIT_SHA               workflow
 GITHUB_CLIENT_ID      gh-secret:GH_CLIENT_ID
 DECLARED_ENV          fly-toml-env
 HAND_SET_FLAG         unmanaged
+LITERALLY_SET         workflow
+MULTILINE_FLAG        workflow
 """
 
 _TMP = Path(tempfile.mkdtemp(prefix="fly-secret-drift-"))
@@ -123,16 +129,19 @@ _ALL_DECLARED = [
     "GITHUB_CLIENT_ID",
     "DECLARED_ENV",
     "HAND_SET_FLAG",
+    "LITERALLY_SET",
+    "MULTILINE_FLAG",
 ]
 
 
 def test_clean_when_every_fly_secret_is_declared():
     r = _run(_secrets_file(_ALL_DECLARED, "clean.json"))
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "OK: all 6 Fly secret(s) are declared" in r.stdout
-    # STRIPE_PRICE_IDS is assigned behind a `[ -n … ] &&` guard → conditional, not managed.
-    assert "1 conditionally propagated" in r.stdout
-    assert "STRIPE_PRICE_IDS" in r.stdout
+    assert "OK: all 8 Fly secret(s) are declared" in r.stdout
+    # STRIPE_PRICE_IDS (inline guard) and MULTILINE_FLAG (multi-line `if`) are
+    # conditional, not managed.
+    assert "2 conditionally propagated" in r.stdout
+    assert "STRIPE_PRICE_IDS" in r.stdout and "MULTILINE_FLAG" in r.stdout
 
 
 def test_undeclared_fly_secret_fails_and_names_it():
@@ -239,6 +248,79 @@ def test_fly_toml_comment_does_not_satisfy_a_declaration():
     assert "STALE DECLARATION" in r.stdout and "NOT_AN_ASSIGNMENT" in r.stdout
 
 
+def test_workflow_assigned_name_not_declared_is_undeclared():
+    """The reverse half: a Fly variable the deploy can assign must be declared.
+
+    Undeclared on this side, the run that first sets it passes (the guard runs
+    before the propagation step) and every run after hard-fails.
+    """
+    manifest = _fixture(
+        "missing-workflow-name.txt", "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "missing-workflow-name.json"), manifest=manifest
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNDECLARED" in r.stdout
+    assert "LITERALLY_SET" in r.stdout and "MULTILINE_FLAG" in r.stdout
+
+
+def test_multiline_if_guard_is_conditional():
+    """A multi-line `if [ -n "${{ secrets.X }}" ]; then` block is a guard too.
+
+    deploy-hosted.yml assigns BACKUP_SWEEP_ENABLED that way; a same-line-only
+    detector counted it as managed.
+    """
+    r = _run(_secrets_file(_ALL_DECLARED, "multiline.json"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    conditional_block = r.stdout.split("CONDITIONAL PROPAGATION")[1].split("OK:")[0]
+    assert "MULTILINE_FLAG" in conditional_block
+    assert "LITERALLY_SET" not in conditional_block
+
+
+def test_gh_secret_never_referenced_is_stale_even_when_assigned():
+    """A declaration cannot borrow another name's propagation.
+
+    The Fly variable is assigned unconditionally, but the declared GitHub secret
+    name appears nowhere — the declaration has rotted.
+    """
+    manifest = _fixture(
+        "gh-name-absent.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nGIT_SHA  gh-secret:NO_SUCH_GH_SECRET\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "gh-name-absent.json"), manifest=manifest
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "STALE DECLARATION" in r.stdout and "NO_SUCH_GH_SECRET" in r.stdout
+
+
+def test_assignment_outside_env_table_does_not_satisfy_fly_toml_env():
+    """Only an assigned key INSIDE `[env]` counts.
+
+    The real fly.toml has `app = "tortoise-y4mjjq"` and a `[build]` table, so a
+    whole-file search would accept a `fly-toml-env` declaration for `app`.
+    """
+    manifest = _fixture(
+        "outside-env.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\napp  fly-toml-env\n",
+    )
+    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "outside-env.json"), manifest=manifest)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "STALE DECLARATION" in r.stdout and "'app'" in r.stdout
+
+
+def test_duplicate_declaration_is_exit_2():
+    """Two conflicting sources for one name must not silently last-win."""
+    manifest = _fixture(
+        "duplicate.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nFASTAPI_INTERNAL_KEY  unmanaged\n",
+    )
+    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "duplicate.json"), manifest=manifest)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "duplicate declaration" in r.stderr
+
+
 def test_malformed_manifest_is_exit_2_not_clean():
     """Fail-closed: an unreadable state is never reported as clean."""
     manifest = _fixture("malformed.txt", "FASTAPI_INTERNAL_KEY\n")
@@ -274,9 +356,14 @@ def test_shipped_manifest_is_accepted_by_the_guard_against_the_real_deploy():
 
     Seeds the secret list from the real manifest's own names and runs the guard
     against the real workflow + real fly.toml. A typo in the shipped manifest
-    (a `github-secret` whose GH name does not exist, a declared name the
-    workflow no longer assigns, a `fly-toml-env` that is not an [env] key) fails
-    HERE — in review — instead of hard-blocking the deploy in CI.
+    (a `gh-secret` whose GH name does not exist, a declared name the workflow no
+    longer assigns, a `fly-toml-env` that is not an [env] key, a Fly variable the
+    workflow can assign but nothing declares) fails HERE — in review — instead
+    of hard-blocking the deploy in CI.
+
+    The assertions pin DETECTION, not the transient state #4126 was filed in: a
+    fix that creates the GitHub secret (or moves the override to fly.toml) must
+    not have to edit this test.
     """
     sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
     import importlib.util
@@ -287,19 +374,19 @@ def test_shipped_manifest_is_accepted_by_the_guard_against_the_real_deploy():
     spec.loader.exec_module(module)
 
     declared = module.read_manifest(REAL_MANIFEST)
-    # #4126 must stay represented: the model override's declaration and the nine
-    # hand-set names are the evidence this file exists for.
-    assert declared["TORTOISE_SESSION_LLM_MODEL"] == "gh-secret:TORTOISE_SESSION_LLM_MODEL"
-    unmanaged = sorted(n for n, s in declared.items() if s == "unmanaged")
-    assert "SUPABASE_URL" in unmanaged
-    assert len(unmanaged) >= 9, f"#4126 debt shrank without a decision: {unmanaged}"
+    # #4126 must stay represented: the model override is declared under SOME
+    # managing source (which one is the open decision, not this test's business),
+    # and the hand-set names are recorded rather than silently dropped.
+    assert "TORTOISE_SESSION_LLM_MODEL" in declared
+    assert declared["SUPABASE_URL"] == "unmanaged"
 
     real_secrets = _fixture(
         "real-manifest-names.json",
-        json.dumps([{"name": n} for n in sorted(declared)] + [{"name": n} for n in unmanaged]),
+        json.dumps([{"name": n} for n in sorted(declared)]),
     )
     r = _run(real_secrets, manifest=REAL_MANIFEST, workflow=REAL_WORKFLOW, toml=REAL_FLY_TOML)
     assert r.returncode == 0, r.stdout + r.stderr
-    # The #4126 filing case must NOT be counted as managed.
+    # The classification is reported for the filing case, whatever its current
+    # home: it is either conditional propagation (today) or managed (once the
+    # GitHub secret exists).
     assert "TORTOISE_SESSION_LLM_MODEL" in r.stdout
-    assert "conditionally propagated" in r.stdout
