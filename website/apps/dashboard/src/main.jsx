@@ -5572,17 +5572,25 @@ function claimIntentInFlight() {
 
   async function loadBackups(key) {
     const _teamAtCall = orgIdRef.current // Round-10: staleness guard
-    // #2167 (rule 2): session-mode /backups pins ?org_id=<selected> and
+    // #2167 (rule 2): session-mode /v1/backups pins ?org_id=<selected> and
     // sends NO key header — the old shape team-scoped by the KEY header
     // (a zero-key session whose selected team ≠ first membership rendered
-    // the first membership's backups: /backups is ungated server-side, so
+    // the first membership's backups: /v1/backups is ungated server-side, so
     // _session_user_org resolves memberships[0] without the param).
     // Key-mode (authMode 'apikey' — no session JWT exists there) keeps the
     // key header as its authenticator.
-    // #1842 P1-2: /backups is session-dual-auth (get_current_org_session_ungated).
+    // #1842 P1-2: /v1/backups is session-dual-auth (get_current_org_session_ungated).
+    // #4144: the `/v1/` prefix is REQUIRED, not cosmetic. `api()` targets the
+    // same-origin BFF proxy, whose TypeScript route is `functions/api/v1/[[path]].ts`
+    // and which rebuilds the upstream URL as `${API_ORIGIN}/v1/${rest}`. This call
+    // predates the #3501/#4054 migration to the proxy and was the one call site left
+    // without the prefix, so it asked `/api/backups` — a path with no Pages Function
+    // — and the Backups card silently read as empty (404 in the console). Every other
+    // call site in this file passes `/v1/…`; a guard test now enforces that for all of
+    // them (src/apiPathResolvesToARoute.test.js).
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
-      const b = await api(`/backups${q}`, { useSession: true })
+      const b = await api(`/v1/backups${q}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       // #2784: retain the whole array — the Graphs tab derives a per-graph
