@@ -1093,14 +1093,6 @@ tier1:
 - test_weights.py
 - test_writer_inventory.py
 slow_files:
-- test_embedded_evidence.py  # #3827: runs the embedded-lane evidence harness. The file is
-                             # classified in `core` (it must be in a surface) but its cost is
-                             # session-fixture bound (`_redislite_hygiene` → `_reclaim_session_tmpdirs`,
-                             # `_assert_backend_identity`, `_server_graph_hygiene`), so it varies by an
-                             # order of magnitude with the host's /tmp state. Declaring a fast-pool
-                             # `durations` value would be a fabricated number that also breaks the LPT
-                             # split; the slow lane is where that cost belongs. Measured here at 257s
-                             # and 627s on a host at load 64-136 — not usable as a CI estimate.
 - test_about_edges.py
 - test_backfill_sources.py
 - test_billing.py
@@ -1206,6 +1198,12 @@ durations:
 # instead of silently dropping the six back to the default anyway, and cannot
 # mis-balance the LPT pack. Refresh these six from the first post-merge main
 # run that includes them.
+  # #3827: new file in this pool — no CI junit measurement exists yet, so it takes
+  # the flat 2.0s default under the #3400 policy above rather than the local timings
+  # measured on this host (257s/627s at load 64-136, ~81s of which is the autouse
+  # session-fixture baseline every lane pays — local values are not the input here).
+  # Refresh from the first post-merge main run that includes it.
+  test_embedded_evidence.py: 2.0
   test_shared_state_concurrency.py: 2.0
   test_shared_state_events.py: 2.0
   test_shared_state_events_claim.py: 2.0
