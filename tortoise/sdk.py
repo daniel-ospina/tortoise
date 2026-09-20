@@ -186,6 +186,27 @@ _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING = (
     "or capture the session under a convergent lane, to extract"
 )
 
+#: #4258 (owner ruling on #3892, comment 5737715963): the truthful
+#: ``extraction_mode`` for a capture whose org turned extraction OFF
+#: (onboarding_state.capture_extract = false). A member of the SAME
+#: ``extraction_mode`` vocabulary as ``_CAPTURE_NO_PROVIDER_MODE`` — a
+#: distinct name because the reason differs (the USER chose it; a provider may
+#: well be configured), so it must be folded into neither "no-provider"
+#: (false) nor "llm" (would claim an extraction that did not run).
+_CAPTURE_EXTRACTION_DISABLED_MODE = "extraction-disabled"
+
+#: #4258: the canonical additive warning for the extraction-disabled capture.
+#: Mirrors ``_CAPTURE_NO_PROVIDER_WARNING``'s "STORED … searchable" shape so
+#: the "stored, not extracted" state reads the same in every surface's words,
+#: and names the remedy (turn it back on, re-capture).
+_CAPTURE_EXTRACTION_DISABLED_WARNING = (
+    "extraction into memory is turned OFF for this team "
+    "('capture_extract'); the session's turns were STORED and remain "
+    "searchable, but LLM extraction into memory points was skipped — turn "
+    "extraction back on (dashboard: Memory sources > Agent session "
+    "recording > Extract into memory) and re-capture the session to extract"
+)
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider

@@ -3201,6 +3201,25 @@ function claimIntentInFlight() {
     }
   }
 
+  async function toggleCaptureExtract(next) {
+    if (memoryBusy) return
+    setMemoryBusy('extract')
+    setRowError('extract', '')
+    try {
+      // #4258: extraction into memory is a per-org USER setting (default ON,
+      // #3892 owner ruling). Off = the capture stores its turns but skips the
+      // LLM extraction into memory points. PATCH MERGE: no read-modify-write,
+      // no stale reads — the SAME endpoint the recording toggle uses.
+      await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+        body: JSON.stringify({ capture_extract: next }) })
+      await refreshOnboarding()
+    } catch (e) {
+      setRowError('extract', (e && e.message) || 'Could not update extraction — try again.')
+    } finally {
+      setMemoryBusy('')
+    }
+  }
+
   async function toggleIssues(next) {
     if (memoryBusy) return
     if (!next) {
@@ -8474,6 +8493,7 @@ function claimIntentInFlight() {
               onToggleIssues: toggleIssues,
               onToggleDocs: toggleDocs,
               onToggleSessions: toggleSessionRecording,
+              onToggleCaptureExtract: toggleCaptureExtract,
               onConnectGithub: wizardConnectGithub,
               onIndexDocs: indexDocs,
               onReindexGithub: reindexGithub,
@@ -9448,6 +9468,10 @@ function MemorySources(props) {
     memoryBusy, memoryErrors,
     reposList, reposLoaded, reposLoadFailed, docsScope, issuesScope, branchLists,
     onToggleIssues, onToggleDocs, onToggleSessions,
+    // #4258: optional — the byte-pinned ARCHIVED wizard block (#2361 rollback)
+    // shares this component and must stay untouched, so its call site omits the
+    // prop; the LIVE Settings surface always passes it.
+    onToggleCaptureExtract = () => {},
     onConnectGithub, onIndexDocs, onReindexGithub,
     onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
   } = props
@@ -9474,6 +9498,9 @@ function MemorySources(props) {
 
   const githubConnected = !!state.github_connected
   const sessionsOn = !!state.session_recording
+  // #4258: per-org extraction setting — absence reads ON (matches the server's
+  // `.get("capture_extract", True)`), so an older stored state is never OFF.
+  const extractOn = state.capture_extract !== false
   const docsIndexed = !!state.github_docs_indexed
   // issues state machine: off → on-but-not-connected (inline Connect CTA) →
   // connected+indexing. The switch reads connected OR the user's intent.
@@ -9749,6 +9776,34 @@ function MemorySources(props) {
               )
             })}
           </div>
+        </div>
+      </div>
+
+      {/* ── Extraction toggle (#4258) — when recording is on, decide whether a
+          captured session is ALSO extracted into memory points (default ON;
+          #3892 owner ruling). Off = store the turns, skip extraction. ── */}
+      <div className="toggle-row">
+        <button
+          type="button"
+          className="switch"
+          role="switch"
+          aria-checked={extractOn}
+          data-on={extractOn ? 'true' : 'false'}
+          aria-label="Extract captured sessions into memory"
+          onClick={() => onToggleCaptureExtract(!extractOn)}
+          disabled={memoryBusy === 'extract' || !sessionsOn}
+        />
+        <div className="toggle-body">
+          <h4>Extract sessions into memory</h4>
+          <p>
+            When on, each captured session is also extracted into memories
+            (uses your provider key). When off, sessions are stored only — their
+            turns stay searchable, but nothing is extracted.
+          </p>
+          {!sessionsOn && (
+            <p className="dim small">Turn on agent session recording to change this.</p>
+          )}
+          {memoryErrors.extract && <p className="error" role="alert">{memoryErrors.extract}</p>}
         </div>
       </div>
     </div>

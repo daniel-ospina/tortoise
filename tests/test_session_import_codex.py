@@ -312,3 +312,56 @@ def test_sessions_import_window_is_a_noop_at_or_below_the_limit(tmp_path, monkey
     assert len(captured["conversation"]) == MAX_TURNS
     assert captured["conversation"][0]["content"] == "turn 0"
     assert "truncat" not in capsys.readouterr().err.lower()
+
+
+def test_sessions_import_defers_on_extraction_disabled(tmp_path, monkeypatch, capsys):
+    """#4258: a store-only 2xx from the team's `capture_extract` OFF setting must
+    NOT write a local "imported" receipt — the SAME DEFERRED contract #4188
+    established for the keyless mode. A receipt would make every later
+    re-import skip the POST (`receipt.exists()` → 0), so the session could never
+    gain memory points after extraction is turned back on — even though the
+    server left it retry-eligible (capture_ok=False, lane "none").
+
+    The control (a keyed `llm:*` 2xx) DOES write the receipt, so the assertion
+    discriminates rather than merely observing an empty dir.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    def _run(path, mode):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "session_id": "s-" + mode,
+                    "extraction_mode": mode,
+                    "warnings": [],
+                }).encode()
+
+        args = SimpleNamespace(file=str(path), harness="pi", session_id=None)
+        with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+            return _cmd_sessions_import(args)
+
+    # store-only (extraction turned OFF): deferred → NO local receipt
+    assert _run(_pi_turns_file(tmp_path, 3), "extraction-disabled") == 0
+    assert list((tmp_path / "receipts").glob("*.json")) == [], (
+        "a deferred (store-only) import must not write a receipt — it would "
+        "make every later re-import a no-op")
+    err = capsys.readouterr().err.lower()
+    assert "deferred" in err and "turned off" in err
+
+    # control: a keyed extraction 2xx DOES write the receipt
+    assert _run(_pi_turns_file(tmp_path, 2), "llm:mock") == 0
+    assert len(list((tmp_path / "receipts").glob("*.json"))) == 1, (
+        "the keyed control must write a receipt — otherwise the empty dir "
+        "above proves nothing")

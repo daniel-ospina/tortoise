@@ -718,3 +718,139 @@ def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
     assert "Extraction:" not in _run("replayed")
     # a KEYLESS store: this IS the not-extracted state — must be disclosed.
     assert "Extraction: no-provider" in _run("no-provider")
+
+
+# ── #4258: the per-org "capture also extracts into memory" user setting ──────
+# Owner ruling on #3892 (comment 5737715963): extraction into memory is a USER
+# SETTING, default ON; the non-default is "store but don't extract". The setting
+# is read per-org from onboarding_state.capture_extract, with absence reading ON
+# (an older stored state must never silently mean OFF).
+
+
+def test_capture_extract_absence_reads_on(monkeypatch):
+    """#4258 (proof a + the mutation guard for proof d): the per-org setting is
+    read with an EXPLICIT ``True`` default — an older stored onboarding state
+    (key absent) resolves ON, never OFF.
+
+    MUTATION: changing the read to ``.get("capture_extract")`` (no default) or
+    inverting its polarity makes THIS test RED.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    # an OLD stored state — no `capture_extract` key at all.
+    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
+                        lambda org_id: {"session_recording": True})
+    assert ha_mod._capture_extract_enabled({"org_id": "old-team"}) is True
+
+    # an explicit OFF is honoured …
+    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
+                        lambda org_id: {"capture_extract": False})
+    assert ha_mod._capture_extract_enabled({"org_id": "off-team"}) is False
+
+    # … and an explicit ON too.
+    monkeypatch.setattr(ha_mod, "_get_onboarding_state",
+                        lambda org_id: {"capture_extract": True})
+    assert ha_mod._capture_extract_enabled({"org_id": "on-team"}) is True
+
+
+def test_capture_extract_defaults_on_and_registered():
+    """#4258: the key is registered in BOTH live default-state dicts (so a NEW
+    org is default ON and the allowlist writer stops dropping it) and the PATCH
+    model carries the field."""
+    from tortoise.hosted_api import (
+        _ALLOWED_STATE_KEYS,
+        _ONBOARDING_DEFAULT_STATE,
+        DEFAULT_ONBOARDING_STATE,
+        OnboardingStatePatchRequest,
+    )
+
+    assert DEFAULT_ONBOARDING_STATE["capture_extract"] is True
+    assert _ONBOARDING_DEFAULT_STATE["capture_extract"] is True
+    assert "capture_extract" in _ALLOWED_STATE_KEYS
+    assert "capture_extract" in OnboardingStatePatchRequest.model_fields
+
+
+@pytest.mark.embedded_only  # mock extractor provides the points (docker lane's real S3 leg yields 0)
+def test_capture_extract_off_stores_without_extracting(monkeypatch, client):
+    """#4258 (proof b): with the setting OFF a capture still STORES the session
+    and its turns (retrievable), runs NO extraction, and the receipt says so
+    visibly under its OWN extraction_mode — never folded into "llm" (a false
+    claim) or "no-provider" (a false reason).
+
+    The provider IS available (the fixture's mock seam), so the setting is the
+    ONLY reason extraction is skipped — this is the guard against routing the
+    OFF state through the keyless "no-provider" branch.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    assert ha_mod._llm_provider_available() is True
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+
+    marker = "extractoffproofzzq"
+    conv = [{"role": "user",
+             "content": f"we decided the {marker} capture stores but never extracts"}]
+    r = client.post("/v1/sessions", json={"conversation": conv})
+    assert r.status_code == 200, r.text[:400]
+    body = r.json()
+    sid = body["session_id"]
+
+    # (1) visible, truthful receipt under its OWN mode.
+    assert body["extraction_mode"] == "extraction-disabled", body
+    assert body["extracted"] == 0, body
+    assert body["turns"] == 1, body
+    assert body["errors"] == [], body
+    warnings = " ".join(body["warnings"])
+    assert "STORED" in warnings and "searchable" in warnings, warnings
+    assert "capture_extract" in warnings, warnings
+
+    # (2) it LANDED — the Session + its turn Point exist and are wired …
+    sdk = ha_mod._make_sdk(namespace="test-team-722")
+    proj = sdk._get_proj()
+    wired = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) RETURN count(t)",
+        params={"sid": sid}).result_set
+    assert wired[0][0] == 1, "the store-only capture must store its turn Point"
+    # … and NO extracted (non-episodic) point was minted.
+    extracted_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.is_episodic IS NULL OR p.is_episodic = false RETURN count(p)",
+        params={"sid": sid}).result_set
+    assert extracted_rows[0][0] == 0, "OFF must mint no extracted points"
+
+    # (3) the record is retry-eligible: capture_ok False + lane "none", so a
+    # LATER re-capture with extraction back ON re-attempts (#2335 TRUE retry).
+    st = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": sid}).result_set[0]
+    assert st[0] is False and st[1] == "none", st
+
+
+@pytest.mark.embedded_only  # mock extractor provides the points (docker lane's real S3 leg yields 0)
+def test_capture_extract_on_extracts(monkeypatch, client):
+    """#4258 (proof c): with the setting ON the capture ATTEMPTS extraction —
+    the offline mock extractor runs (zero network, zero LLM spend) and mints at
+    least one memory point.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=True)
+    r = client.post("/v1/sessions", json={"conversation": [
+        {"role": "user", "content": "we decided to ship serve --http first"},
+        {"role": "assistant",
+         "content": "agreed, the website config is the root cause"},
+    ]})
+    assert r.status_code == 200, r.text[:400]
+    body = r.json()
+    assert body["extraction_mode"] == "llm:mock", body
+    assert body["extracted"] >= 1, body
+
+
+def test_capture_extract_is_per_org(monkeypatch, client):
+    """#4258: the setting is PER-ORG — turning extraction off for one team must
+    leave another team's default ON (never a per-graph or global flag)."""
+    import tortoise.hosted_api as ha_mod
+
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+    assert ha_mod._capture_extract_enabled({"org_id": "test-team-722"}) is False
+    # a different org, whose stored state lacks the key, still reads ON.
+    assert ha_mod._capture_extract_enabled({"org_id": "other-team-4258"}) is True
