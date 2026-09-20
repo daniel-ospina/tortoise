@@ -1,6 +1,7 @@
 """Projection — fold the event log into the current graph.
 
-The log is the source of truth; a projection is a derived, rebuildable view.
+This is the reconstruction path: the log is folded into a derived, rebuildable
+view and is NOT the durability authority (see docs/durability-posture.md).
 `_apply_one` is the single source of fold semantics, shared by the pure `fold`
 (batch) and every incremental backend, so an incrementally-updated projection and
 `fold(read_all())` can never diverge.
@@ -2046,8 +2047,9 @@ class FalkorProjection(
     def _auto_health_recover(self) -> None:
         """Health check on open + transparent JSONL recovery (embedded only).
 
-        The event log is the source of truth; the projection a derived view.
-        Two corruption modes are caught:
+        The projection is a derived view folded from the domain event log (the
+        reconstruction source — not the durability authority; see
+        docs/durability-posture.md). Two corruption modes are caught:
           1. Unresponsive graph (open succeeded, queries fail).
           2. Lost graph — 0 nodes while the adjacent JSONL log has events
              (redislite starts fresh when its RDB is corrupt, interrupted

@@ -478,6 +478,12 @@ surfaces:
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
+  # #2881: the durability authority's anti-scatter gate — only
+  # docs/durability-posture.md may bind a journal/event log to "source of truth".
+  # Registered under `core` (the fallback surface for a tortoise/*.py claim site)
+  # AND `tier1` (below), so a docs-only ONTOLOGY.md wording edit cannot
+  # reintroduce the claim without the gate running.
+  - test_durability_posture.py
   - test_e2e9_point_in_time.py
   - test_e2e_journey.py
   - test_embedded_concurrency.py
@@ -1014,6 +1020,7 @@ tier1:
 - test_config.py
 - test_crypto.py
 - test_decide.py
+- test_durability_posture.py  # #2881: durability authority + scoped source-of-truth gate
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
