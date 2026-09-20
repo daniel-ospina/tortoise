@@ -459,26 +459,70 @@ def test_delete_recreate_still_drops_annotator_dim(sup, tmp_path):
     _assert_parity(post, applied)
 
 
-@pytest.mark.xfail(
-    reason="pre-first-creation derived fold: a same-file PointRevised that "
-           "precedes the id's first creation is a no-op live, but its "
-           "embedding/content_hash still fold when that creation writes "
-           "none — #4260 (content half fixed by #4042; derived half is "
-           "entangled with the cross-file chronology decision, #4252)",
-    strict=False)
-def test_pre_first_creation_derived_half_open(sup, tmp_path):
-    """Pins a KNOWN-OPEN residual (#4260), the content/derived sibling of
-    #4253. The content half is fixed (#4042); the derived half is not."""
+def test_pre_first_creation_revision_writes_no_derived(sup, tmp_path):
+    """#4260 — a same-file ``PointRevised`` that precedes the id's FIRST
+    creation is a live no-op (its ``MATCH`` binds no node), so rebuild must
+    write NONE of what it carried: ``content``, ``content_hash`` and
+    ``embedding`` all stay as the creation left them.
+
+    The embedder is pinned to a fixed vector so the ``embedding`` half is
+    exercised even in a keyword-only environment; ``content_hash`` would
+    otherwise carry the whole test on its own. REDS on the pre-#4260 code:
+    the creation wrote no hash, so the per-field rule left ``skip_hash``
+    False and the no-op revision's hash (and embedding) leaked.
+    """
     events, sdk = sup
     pid = sdk.ulid()
     revise = _revised(sdk, pid, new_content="b")
     create = _added(sdk, pid, "")
     _write_files(events, {"events.jsonl": [revise, create]})
 
-    applied = _oracle(tmp_path, "oracle_pf", [revise, create], pid)
-    assert applied["content"] == ""
-    assert applied.get("content_hash") is None
-    _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    with mock.patch("tortoise.embeddings.compute_embedding",
+                    return_value=[0.1] * 384):
+        applied = _oracle(tmp_path, "oracle_pf", [revise, create], pid)
+        assert applied["content"] == ""
+        assert applied.get("content_hash") is None
+        assert applied.get("embedding") is None
+        _rebuild(sdk, events)
+        post = sdk.get_point(pid)
     assert post["content"] == ""
     _assert_parity(post, applied)
+    assert post.get("content_hash") is None, (
+        "the no-op revision's content_hash leaked onto the first creation")
+    assert post.get("embedding") is None, (
+        "the no-op revision's embedding leaked onto the first creation")
+
+
+def test_pre_first_creation_keeps_derived_when_created_elsewhere(
+        sup, tmp_path):
+    """#4260 fix-direction guard — the no-op proof is CROSS-SOURCE, not
+    merely same-file.
+
+    Here the revision precedes its own file's first creation, but the id was
+    created in an EARLIER-SORTED file. File position is not chronology (#21),
+    so live the revision DID bind that node: its ``content_hash`` is
+    live-valid (the later falsy re-emit preserves it via ``coalesce``) and
+    must survive. A naive "no same-file creation precedes => suppress"
+    predicate over-suppresses this shape and reds here.
+    """
+    events, sdk = sup
+    pid = sdk.ulid()
+    create_elsewhere = _added(sdk, pid, "X")
+    revise = _revised(sdk, pid, new_content="CHANGED")
+    falsy_reemit = _added(sdk, pid, "")
+    _write_files(events, {"a.jsonl": [create_elsewhere],
+                          "b.jsonl": [revise, falsy_reemit]})
+
+    with mock.patch("tortoise.embeddings.compute_embedding",
+                    return_value=[0.1] * 384):
+        # True chronology: the revision DID bind the created node.
+        applied = _oracle(tmp_path, "oracle_pf_x",
+                          [create_elsewhere, revise, falsy_reemit], pid)
+        assert applied["content"] == ""
+        assert applied.get("content_hash") == content_hash("CHANGED")
+        _rebuild(sdk, events)
+        post = sdk.get_point(pid)
+    assert post["content"] == ""
+    _assert_parity(post, applied)
+    assert post.get("content_hash") == content_hash("CHANGED"), (
+        "a revision live-valid via a cross-file creation was over-suppressed")

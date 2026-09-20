@@ -2906,6 +2906,15 @@ class FalkorProjection(
         #     the last creation that actually WROTE each conditional derived
         #     field (from ``_upsert_point_props``'s reported outcome).
         last_create_seq_by_source: dict[tuple[str, int], int] = {}
+        # #4260: the id's FIRST same-source creation — a revision before it
+        # did not bind a node *within that file's chronology*.
+        first_create_seq_by_source: dict[tuple[str, int], int] = {}
+        # #4260: every source ordinal that created the id (``None`` = a
+        # synthetic/pre-wipe-snapshot creation). A creation in ANY other
+        # source means the revision is NOT provably a live no-op — file order
+        # across sources is not chronology (#21), so live the revision may
+        # have bound that node and its derived are live-valid.
+        create_sources_by_id: dict[str, set[int | None]] = {}
         last_recreate_seq_by_source: dict[tuple[str, int], int] = {}
         last_embed_write_by_source: dict[tuple[str, int], int] = {}
         last_hash_write_by_source: dict[tuple[str, int], int] = {}
@@ -2995,9 +3004,14 @@ class FalkorProjection(
                 # anchors (see their declaration above). A synthetic event
                 # has `src is None` and never forms a boundary.
                 src = event_source[seq]
+                # #4260: record the id's creation SOURCES — see the maps'
+                # declaration. Synthetic (``None``) counts: a graph-only node
+                # existed live, so a JSONL revision for it bound that node.
+                create_sources_by_id.setdefault(p["id"], set()).add(src)
                 if src is not None:
                     key = (p["id"], src)
                     last_create_seq_by_source[key] = seq
+                    first_create_seq_by_source.setdefault(key, seq)
                     if is_recreate:
                         last_recreate_seq_by_source[key] = seq
                     if wrote_embedding:
@@ -3186,12 +3200,29 @@ class FalkorProjection(
                     create_seq = last_create_seq_by_source.get(key)
                     superseded = create_seq is not None and create_seq > seq
                     if superseded:
-                        skip_embedding = (
-                            last_recreate_seq_by_source.get(key, -1) > seq
-                            or last_embed_write_by_source.get(key, -1) > seq)
-                        skip_hash = (
-                            last_recreate_seq_by_source.get(key, -1) > seq
-                            or last_hash_write_by_source.get(key, -1) > seq)
+                        # #4260: a revision that precedes the id's FIRST
+                        # creation IN THIS FILE — with no creation in any other
+                        # source — was a live no-op: its `MATCH` bound no node,
+                        # so NOTHING it carried (content, embedding,
+                        # content_hash) may be written. The per-field rule
+                        # below is valid only when the revision applied to an
+                        # EXISTING node; that premise is false here. A creation
+                        # in another source leaves the premise standing (that
+                        # file may have preceded the revision — #21), so the
+                        # no-op proof is CROSS-SOURCE, never merely same-file.
+                        pre_first_creation = (
+                            first_create_seq_by_source.get(key, seq) > seq
+                            and create_sources_by_id.get(rid, set()) == {src})
+                        if pre_first_creation:
+                            skip_embedding = True
+                            skip_hash = True
+                        else:
+                            skip_embedding = (
+                                last_recreate_seq_by_source.get(key, -1) > seq
+                                or last_embed_write_by_source.get(key, -1) > seq)
+                            skip_hash = (
+                                last_recreate_seq_by_source.get(key, -1) > seq
+                                or last_hash_write_by_source.get(key, -1) > seq)
                 self._revise_point(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
