@@ -958,8 +958,9 @@ class TestBootReconcile:
 
 class TestLifespanStartup:
     def test_lifespan_startup_returns_without_blocking(self, monkeypatch, tmp_path):
-        """The lifespan's startup half must RETURN promptly — a startup that
-        blocks would hold uvicorn's bind.
+        """The lifespan's startup half is cheap and synchronous, so it must
+        RETURN well inside the join window — a startup that blocks would hold
+        uvicorn's bind.
 
         NOTE(#4262): this replaces `test_boot_reconcile_hanging_stripe_never_
         blocks_boot`, which asserted a boot billing-reconcile daemon thread that
@@ -973,6 +974,7 @@ class TestLifespanStartup:
         """
         import asyncio
         import threading
+        import time
         from types import SimpleNamespace
 
         from tortoise.hosted_api import _lifespan
@@ -981,6 +983,7 @@ class TestLifespanStartup:
         monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "lifespan.db"))
         monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
 
+        app = SimpleNamespace(state=SimpleNamespace())
         thread_error: list[BaseException] = []
 
         def _run():
@@ -989,7 +992,6 @@ class TestLifespanStartup:
             # as a successful return.
             try:
                 async def _quick():
-                    app = SimpleNamespace(state=SimpleNamespace())
                     async with _lifespan(app):
                         return
 
@@ -999,11 +1001,28 @@ class TestLifespanStartup:
 
         # daemon=True: a regression that BLOCKS startup must fail the assertion
         # below, not pin interpreter shutdown.
+        started = time.monotonic()
         t = threading.Thread(target=_run, daemon=True)
         t.start()
         t.join(timeout=10)
-        assert not t.is_alive(), "lifespan startup did not return within 10s"
-        assert not thread_error, f"lifespan raised in its thread: {thread_error!r}"
+        elapsed = time.monotonic() - started
+        try:
+            # `join` only bounds the WAIT — assert the startup half itself is
+            # prompt, not merely "under the timeout".
+            assert elapsed < 5, f"lifespan startup took {elapsed:.1f}s"
+            assert not t.is_alive(), "lifespan startup did not return within 10s"
+            assert not thread_error, f"lifespan raised in its thread: {thread_error!r}"
+        finally:
+            # `_lifespan` arms the process-lifetime /healthz listener and
+            # `_stop_liveness` deliberately does not tear it down — release it so
+            # this test leaves no bound socket (repo convention:
+            # tests/test_monitoring.py::_clean_heartbeat_and_listeners,
+            # tests/test_hosted_api.py::TestBootOrder).
+            import tortoise.monitoring as monitoring
+
+            server = getattr(app.state, "_healthz_server", None)
+            if server is not None:
+                monitoring.stop_health_listener(server)
 
 
 class TestTeamInfoBillingSurface:

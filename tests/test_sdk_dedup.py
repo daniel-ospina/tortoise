@@ -41,16 +41,20 @@ class TestDedupAlwaysPersistsHash:
     def test_dedup_with_extra_props(self, sdk):
         """A later dedup call with different props must not overwrite the original."""
         content = "Gold baseline claim"
-        p1 = sdk.create_point("hypothesis", content, dedup=True)
-        # Later dedup attempt with different credibility — must not clobber
+        p1 = sdk.create_point("hypothesis", content, dedup=True,
+                              credibility="gold")
+        # A real baseline landed (gold ⇒ ep_alpha 10) so the dedup hit below has
+        # something to clobber. `credibility` is never stored as a node property;
+        # it lands as this calibrated prior.
+        assert p1.get("ep_alpha") == 10.0
+        assert p1.get("baseline_source") == "set-by-author"
+        # Later dedup attempt with a DIFFERENT credibility (T1 ⇒ ep_alpha 5) —
+        # must not overwrite the existing baseline.
         p2 = sdk.create_point("hypothesis", content, dedup=True,
                               credibility="T1")
         assert p1["id"] == p2["id"]
-        # Baseline preserved: `credibility` is never stored as a node property —
-        # it lands as a calibrated prior (a fresh credibility="T1" write gets
-        # ep_alpha=5.0 / baseline_source="set-by-author"). The dedup hit must
-        # NOT apply the late prior to the existing point.
-        assert p2.get("ep_alpha") == p1.get("ep_alpha")
+        assert p2.get("ep_alpha") == p1.get("ep_alpha") == 10.0
+        assert p2.get("ep_beta") == p1.get("ep_beta") == 1.0
         assert p2.get("baseline_source") == p1.get("baseline_source")
 
 

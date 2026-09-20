@@ -48,8 +48,8 @@ class TestSearchNameError:
 
     def test_malformed_relationship_filter_no_nameerror(self, sdk, caplog):
         """relationship_filter without ':' should warn, not raise NameError."""
-        # badformat has no colon — should trigger the "Invalid format" warning
-        # but NOT a NameError
+        # badformat has no colon — should trigger the "must be
+        # 'predicate:target_id'" warning but NOT a NameError
         _seed_matching_point(sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             try:
@@ -64,7 +64,7 @@ class TestSearchNameError:
         assert "relationship_filter must be 'predicate:target_id'" in caplog.text
 
     def test_relationship_filter_no_predicate_no_nameerror(self, sdk, caplog):
-        """relationship_filter with colon but empty predicate should not crash."""
+        """Empty predicate should log "Invalid relationship_filter format" and not crash."""
         _seed_matching_point(sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             try:
@@ -79,7 +79,7 @@ class TestSearchNameError:
         assert "Invalid relationship_filter format: :target" in caplog.text
 
     def test_relationship_filter_no_target_no_nameerror(self, sdk, caplog):
-        """relationship_filter with colon but empty target should not crash."""
+        """Empty target should log "Invalid relationship_filter format" and not crash."""
         _seed_matching_point(sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             try:
@@ -111,6 +111,9 @@ class TestSearchNameError:
     def test_traversal_path_no_nameerror(self, sdk):
         """Unicode 'Product→Feature' traversal_path must not raise NameError."""
         _seed_matching_point(sdk)
+        # The traversal branch is gated on a non-empty result set — assert the
+        # seeded point is retrievable so the branch under test is reachable.
+        assert sdk.tortoise_fts_query(query="test")
         try:
             sdk.tortoise_fts_query(
                 query="test",

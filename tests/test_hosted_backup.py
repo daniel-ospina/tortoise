@@ -673,6 +673,11 @@ def test_restore_verify_count_mismatch_swaps_live_graph(monkeypatch):
         live_dump = dump_graph(live, graph_name="tortoise")
         assert _norm_nodes(live_dump["nodes"]) == _norm_nodes(source_dump["nodes"]), (
             "restored node set differs from the backed-up payload")
+        # Edge-endpoint preservation — a count-preserving rewire would otherwise
+        # pass the node-set check above (matches the sibling
+        # test_create_backup_list_and_restore_swap).
+        assert _norm_edges(live_dump["edges"], live_dump["nodes"]) == _norm_edges(
+            source_dump["edges"], source_dump["nodes"])
         proj.close()
 
 
