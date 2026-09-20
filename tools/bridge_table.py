@@ -287,7 +287,6 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
     removed = counts.get("REMOVED", 0)
     tenancy = sum(v for k, v in counts.items() if k.startswith("tenancy:"))
     on_mcp = total - removed - tenancy
-    m = "\n".join
 
     out = [
         "# Phase 0.1 — the bridge table",
