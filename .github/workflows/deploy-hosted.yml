@@ -217,10 +217,12 @@ jobs:
             echo "::error::STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be set in GitHub secrets"
             exit 1
           fi
-          # Session capture LLM provider (#1197, #1346): POST /v1/sessions
-          # fails closed (503) with no provider key — the regex extraction loop
-          # was removed (#822). Session capture is an OPTIONAL feature that
-          # degrades gracefully server-side (explicit 503, API boots fine):
+          # Session capture LLM provider (#1197, #1346): with no provider key
+          # POST /v1/sessions still STORES each capture, but never extracts it
+          # into memory points — the regex extraction loop was removed (#822)
+          # and #3892 made storage unconditional. Extraction is an OPTIONAL
+          # feature that degrades gracefully server-side (the API boots fine
+          # and the receipt says "no-provider"):
           # missing keys must NOT block deploys of the rest of the API (a
           # fail-closed gate here held ALL deploys for 2+ days, shipping stale
           # code to prod). Warn-only, matching the STRIPE_PRICE_IDS / Resend /
@@ -231,7 +233,7 @@ jobs:
              [ -z "${{ secrets.DEEPSEEK_API_KEY }}" ] && \
              [ -z "${{ secrets.OPENAI_API_KEY }}" ] && \
              [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
-            echo "::warning::No LLM provider key set — POST /v1/sessions fails closed (503) until configured. Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
+            echo "::warning::No LLM provider key set — POST /v1/sessions stores captures but skips LLM extraction into memory until configured. Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
           fi
           if [ -z "${{ secrets.STRIPE_PRICE_IDS }}" ]; then
             echo "::warning::STRIPE_PRICE_IDS not set — checkout/webhook tier resolution disabled until configured"
@@ -252,7 +254,7 @@ jobs:
             echo "::warning::R2_* secrets not fully set — backup storage disabled until configured"
           fi
           # Session-capture LLM test seam (#1197): TORTOISE_SESSION_LLM_MOCK=1
-          # COUNTS as 'configured' for the 503 gate, but it lives on Fly's env
+          # COUNTS as 'configured' for the extraction gate, but it lives on Fly's env
           # (not GitHub secrets) so this gate CANNOT check it. A deploy with
           # MOCK set passes every gate here while captures write offline
           # MockModel points. Operator checklist: verify it is ABSENT on Fly
@@ -328,8 +330,9 @@ jobs:
           [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && ARGS="$ARGS BILLING_CANCEL_URL=${{ secrets.BILLING_CANCEL_URL }}"
           # Session-capture LLM provider (#1197): propagate the four provider
           # keys so the verify-secrets gate above and the shipped app AGREE —
-          # a key present in GH secrets never reaches Fly otherwise (and the
-          # app would 503 every capture even though the gate passed).
+          # a key present in GH secrets never reaches Fly otherwise (and every
+          # capture would store turns but never extract them, even though the
+          # gate passed).
           [ -n "${{ secrets.OPENROUTER_API_KEY }}" ] && ARGS="$ARGS OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}"
           [ -n "${{ secrets.DEEPSEEK_API_KEY }}" ] && ARGS="$ARGS DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
           [ -n "${{ secrets.OPENAI_API_KEY }}" ] && ARGS="$ARGS OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
