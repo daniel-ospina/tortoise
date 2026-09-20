@@ -549,6 +549,16 @@ TOOL_CARVEOUTS = (
     # tier-1 smoke) and its own wiring/behaviour tests would never run on the
     # PR that edits it.
     "tools/embedder_provision.py",
+    # #4290: the finding-provenance gate (tools/finding_provenance.py) owns
+    # tests/test_finding_provenance.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows the path, `changed` comes back empty, and
+    # select() takes the docs-only return — so the gate's own falsification
+    # suite would never run on the PR that changes the gate. No SOURCE_PATTERNS
+    # entry matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed). Pinned by
+    # test_ci_selection.test_finding_provenance_tool_change_fails_closed_to_full.
+    "tools/finding_provenance.py",
 )
 
 

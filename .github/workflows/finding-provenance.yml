@@ -1,0 +1,159 @@
+# finding-provenance CI gate (#4290)
+#
+# Three lanes once reported a defect that was already fixed on origin/main —
+# each measured against a stale worktree. A finding is TRUE OF THE TREE IT WAS
+# MEASURED ON and may be FALSE OF THE PRODUCT, and nothing in the report said
+# which tree that was.
+#
+# This gate runs tools/finding_provenance.py against an issue body. It fails
+# when the finding carries no provenance ("unknown provenance is not a pass")
+# or when the tree it names does NOT contain the current origin/main — i.e. the
+# defect it reports may already be fixed. The test is ANCESTRY
+# (git merge-base --is-ancestor), never SHA equality, so a finding measured on
+# a branch that merely CONTAINS main is current, not stale.
+#
+# TRIGGER SCOPE — `opened` only (plus workflow_dispatch). This is a
+# forward-looking rule: firing on `edited`/`labeled` would retroactively redden
+# and stamp `provenance-stale` on the ~175 pre-existing `bug` issues that
+# predate the convention, spending the gate on reports it was never written
+# about. Re-check an existing finding by hand:
+#     gh workflow run finding-provenance.yml -f issue_number=<N>
+#
+# ISSUE SCOPE — a `Measured at:` line is gated FIRST, whatever the labels: an
+# issue that claims a measurement never escapes validation. An issue with NO
+# line is then a finding only if it is `bug`-labeled. `beta-feedback` reports
+# (external, about a released version, no checkout to emit from) are exempt
+# from the REQUIRED case; features, epics and process issues are untouched.
+#
+# EXIT CODES ARE HONORED. The tool separates exit 1 (STALE / UNKNOWN /
+# AMBIGUOUS / PREDATES_FIX — the finding is at fault) from exit 2 (could not
+# measure — an environment fault). Only exit 1 annotates the finding; exit 2
+# says so and leaves the label alone. The verdict is captured via an explicit
+# `rc=$?`, never piped: a pipeline's status is `tee`'s, which is how a previous
+# revision of this file made the whole gate a no-op.
+name: finding-provenance
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to audit
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  provenance:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0: the base-ancestry test needs full history.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the issue body + labels
+        id: issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ github.event.issue.number }}
+          INPUT: ${{ github.event.inputs.issue_number }}
+        run: |
+          N="${ISSUE:-$INPUT}"
+          [ -n "$N" ] || { echo "no issue number resolved"; exit 2; }
+          echo "number=$N" >> "$GITHUB_OUTPUT"
+          gh issue view "$N" --json body -q .body > "$RUNNER_TEMP/body.md"
+          gh issue view "$N" --json labels -q '.labels[].name' > "$RUNNER_TEMP/labels.txt"
+
+      - name: Decide whether this issue is a finding
+        id: decide
+        run: |
+          if grep -qE '^Measured at:' "$RUNNER_TEMP/body.md"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif grep -qx 'beta-feedback' "$RUNNER_TEMP/labels.txt"; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "beta-feedback report with no measured commit — skipping"
+          elif grep -qx 'bug' "$RUNNER_TEMP/labels.txt"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "not a finding (no provenance line, not an internal bug) — skipping"
+          fi
+
+      - name: Gate the finding's provenance
+        id: gate
+        if: steps.decide.outputs.run == 'true'
+        # Explicit rc capture, NOT a pipe: `cmd | tee` returns tee's status, so
+        # a piped gate can never fail and the workflow becomes a no-op. The
+        # tool's exit code is the gate; it is propagated here and branched on
+        # below (1 = the finding is stale/undated, 2 = could not measure).
+        shell: bash
+        run: |
+          rc=0
+          python3 tools/finding_provenance.py --validate "$RUNNER_TEMP/body.md" \
+            > "$RUNNER_TEMP/verdict.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/verdict.txt"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Annotate a stale / undated finding
+        # `always()` is REQUIRED: GitHub Actions wraps a bare `if:` in an
+        # implicit `success()`, and the gate step above deliberately exits
+        # non-zero — so without it this step would be skipped exactly when it
+        # must fire, turning the whole gate into a silent no-op. Same trap and
+        # same fix as e2e-live-reconcile.yml:79 (#2189). The rc compare still
+        # gates: only the tool's exit 1 (the finding is at fault) annotates.
+        if: always() && steps.gate.outputs.rc == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          N: ${{ steps.issue.outputs.number }}
+        run: |
+          gh label create provenance-stale --color B60205 \
+            --description "Finding measured against a tree that may not contain the fix (#4290)" \
+            2>/dev/null || true
+          gh issue edit "$N" --add-label provenance-stale
+          {
+            echo "⚠️ **finding-provenance: this finding's measurement is stale or undated (#4290).**"
+            echo
+            # 4-space INDENT, not a fence: the verdict echoes an untrusted ref
+            # label out of the issue body, and a fence can be closed by it.
+            sed 's/^/    /' "$RUNNER_TEMP/verdict.txt"
+            echo
+            echo "A finding is true of the tree it was measured on and may be false of the product."
+            echo "Re-verify against \`origin/main\` — or a tree that contains the claimed fix — then replace the provenance line:"
+            echo
+            echo '```'
+            echo '$ python3 tools/finding_provenance.py --emit'
+            echo '```'
+            echo
+            echo "_Re-run this gate after fixing it:_ \`gh workflow run finding-provenance.yml -f issue_number=$N\`"
+          } > "$RUNNER_TEMP/comment.md"
+          gh issue comment "$N" --body-file "$RUNNER_TEMP/comment.md"
+
+      - name: Report an unmeasurable run (environment fault, not a stale finding)
+        if: always() && steps.gate.outputs.rc == '2'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          N: ${{ steps.issue.outputs.number }}
+        run: |
+          {
+            echo "⚠️ **finding-provenance: could not measure this finding (#4290).**"
+            echo
+            echo "This is an infrastructure fault (exit 2), NOT a verdict on the finding — no label was applied."
+            echo
+            sed 's/^/    /' "$RUNNER_TEMP/verdict.txt"
+          } > "$RUNNER_TEMP/comment.md"
+          gh issue comment "$N" --body-file "$RUNNER_TEMP/comment.md"
+
+      - name: Clear a stale annotation on a clean re-run
+        if: always() && steps.gate.outputs.rc == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          N: ${{ steps.issue.outputs.number }}
+        run: |
+          # The label must be a LIVE state, not a scar: a re-run that passes
+          # after the reporter fixed the line removes it.
+          gh issue edit "$N" --remove-label provenance-stale 2>/dev/null || true

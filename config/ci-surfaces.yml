@@ -409,6 +409,14 @@ surfaces:
   - test_bfs_audit.py
   - test_boot_regressions.py
   - test_collision_preflight.py
+  # #4290: the finding-provenance gate — a finding must name the tree it was
+  # measured against, and a stale measurement fails (ancestry, not equality).
+  # Hermetic (temp git repo; no DB), so it pins no api/engine surface: `core`
+  # runs it on engine-wide changes. A tools/finding_provenance.py-ONLY change
+  # is carved out of NON_PYTHON_PREFIXES in TOOL_CARVEOUTS and fails closed to
+  # the FULL matrix (no SOURCE_PATTERNS entry matches tools/), so this suite
+  # runs on the PR that edits the gate — pinned by test_ci_selection.py.
+  - test_finding_provenance.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_build_window_transcript.py
@@ -1231,6 +1239,11 @@ durations:
   test_doctor.py: 44.8
   test_onboarding_w6_capture_disclosure.py: 43.2
   test_onboarding_w4_settings.py: 38.8
+  # #4290: 25 hermetic cases (temp git repo; subprocess git + the tool's own
+  # CLI). Measured locally 2026-09-20: ~24-40s standalone for the full file; the
+  # per-file pytest wall adds the shared conftest import (~18s) once. Refresh
+  # from the CI junit artifact on the next durations sweep (#3400).
+  test_finding_provenance.py: 30.0
   test_onboarding_false_completion_repair.py: 42.1  # #3912: 48 docker-lane tests (SDK round-trips per org)
   test_graph_diagnostics.py: 37.3
   eval/write_path/test_write_path_runner.py: 36.0
