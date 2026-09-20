@@ -688,7 +688,7 @@
       const labels = { free: 'Free', solo: 'Solo', pro: 'Builder', team: 'Team' };
       grid.innerHTML = names.map((name) => {
         const t = PRICING.tiers[name];
-        const label = labels[name];
+        const label = labels[name] || (name.charAt(0).toUpperCase() + name.slice(1));
         const popular = t.popular ? '<span class="popular-tag">Most popular</span>' : '';
         const features = t.features.map((f) => `<div class="feature">${checkSvg()} <span>${f}</span></div>`).join('');
         const excluded = t.excluded.map((f) => `<div class="feature"><span class="x">✕</span> <span class="muted">${f}</span></div>`).join('');

@@ -252,6 +252,8 @@ def test_account_menu_identity_block_single_team(page: Page):
     # #2494: tier badge is on the Organization block, NOT the identity block
     expect(page.locator(".account-identity .tier-badge")).to_have_count(0)
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
+    # #4336: the badge renders the DISPLAY label, never the raw tier key.
+    expect(page.locator(".account-menu .tier-badge")).to_have_text("Free")
     expect(page.locator(".account-menu").get_by_role("button", name="Profile")).to_be_visible()
     expect(page.locator(".account-menu").get_by_role("button", name="Log out")).to_be_visible()
     expect(page.locator(".account-menu").get_by_text("Switch organization")).to_have_count(0)
@@ -670,6 +672,8 @@ def test_account_menu_two_sections(page: Page):
     # tier badge NOT in identity block, IS in org section
     expect(page.locator(".account-identity .tier-badge")).to_have_count(0)
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
+    # #4336: the badge renders the DISPLAY label, never the raw tier key.
+    expect(page.locator(".account-menu .tier-badge")).to_have_text("Free")
 
 
 def test_account_menu_org_block_single_team(page: Page):

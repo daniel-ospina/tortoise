@@ -8253,7 +8253,7 @@ function claimIntentInFlight() {
                     {(currentOrgName || 'O').charAt(0).toUpperCase()}
                   </span>
                   <span className="account-org-name">{currentOrgName || 'No organization'}</span>
-                  {team?.tier && <span className="tier-badge">{team.tier}</span>}
+                  {team?.tier && <span className="tier-badge">{TIER_LABELS[team.tier] || team.tier}</span>}
                 </div>
                 {teams.length > 1 && (
                   <>
@@ -8424,7 +8424,7 @@ function claimIntentInFlight() {
         )}
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {team.tier || 'free'} tier · Upgrade
+            {(TIER_LABELS[team.tier] || team.tier || 'free').toLowerCase()} tier · Upgrade
           </a>
         )}
         {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
