@@ -4,6 +4,18 @@
 //                               status='published' only when the owner explicitly
 //                               asked for direct publishing — audited).
 // PATCH /blog/api/posts/:slug — UPDATE own posts (created_by = calling agent).
+// DELETE /blog/api/posts/:slug — DELETE own posts (#4220; created_by = calling
+//                               agent, same ownership contract as PATCH). Added
+//                               because the API had no way to remove a row: the
+//                               E2E suite that creates posts had no cleanup path,
+//                               so every deploy deposited drafts in the review
+//                               queue forever (#4220).
+//                               `archived` is terminal — DELETE refuses it (409),
+//                               exactly as PATCH does. DRAFT-ONLY: the recorded
+//                               lifecycle (plan W4) is draft → published →
+//                               archived (terminal) with no published→deleted
+//                               transition, so a published post must be
+//                               unpublished first (409 otherwise).
 //
 // Auth: X-Agent-Key header → sha256 vs blog_agent_keys (service_role read).
 // Writes: service-role key (env SUPABASE_SERVICE_ROLE_KEY — server-side only).
@@ -12,7 +24,8 @@
 // Semantics (plan §6 contract):
 //   - INSERT-only create: slug exists → 409 (no slug theft; updates via PATCH).
 //   - PATCH scoped to created_by = calling agent_name → 403 otherwise.
-//   - slug immutable; archived posts reject all PATCHes (409/400 terminal).
+//   - DELETE scoped to created_by = calling agent_name → 403 otherwise (#4220).
+//   - slug immutable; archived posts reject all PATCHes AND DELETEs (409/400 terminal).
 //   - Rate limit: 120 req/min + 2,000 req/day per key (in-memory counter —
 //     per-isolate; unit-tested at lowered thresholds).
 
@@ -463,11 +476,14 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
     patch.review_note = null;
   }
 
-  // status=not.eq.archived guards the TOCTOU window (post archived between GET and PATCH)
+  // created_by + status=not.eq.archived make ownership and the terminal state
+  // predicates on the write itself, not a read-then-trust gate: a row that
+  // changed hands or was archived between GET and PATCH is left untouched.
   let res: Response;
   try {
     res = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/blog_posts?slug=eq.${encodeURIComponent(slug)}&status=not.eq.archived`,
+      `${env.SUPABASE_URL}/rest/v1/blog_posts?slug=eq.${encodeURIComponent(slug)}` +
+        `&created_by=eq.${encodeURIComponent(agent.agentName)}&status=not.eq.archived`,
       {
         method: "PATCH",
         headers: serviceHeaders(env),
@@ -510,10 +526,103 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   return json({ id: post.id, slug, url: `${SITE_URL}/blog/${slug}` }, 200);
 };
 
+// DELETE /blog/api/posts/:slug — remove a post the calling agent created (#4220).
+//
+// Owner-only destructive path. The e2e suite that writes to prod needs this: with
+// no delete surface, its only "cleanup" was to leave the row as a draft, so every
+// deploy added rows to the editorial review queue forever (#4220).
+//
+// Contract (mirrors PATCH):
+//   - 401 no/invalid/inactive key; 429 rate-limited; 400 invalid slug.
+//   - 404 unknown slug; 403 slug owned by a different agent.
+//   - 409 archived — the terminal state is preserved; an archived record is not
+//     deletable through the agent API (an operator can, via SQL).
+//   - 409 published (any non-draft) — the recorded lifecycle (plan W4) is
+//     draft → published → archived (terminal) and has NO published→deleted
+//     transition, so this path never destroys a live article: a published post
+//     must be unpublished (status→draft) first. created_by is the CREATOR, not
+//     the publisher — an operator publishes with published_by while created_by
+//     stays the creating agent — so without this guard the agent key could
+//     irreversibly delete an operator-approved, already-published article.
+//   - 200 {deleted:true, slug}.
+// Both predicates are repeated IN the DELETE (created_by=eq.<agent> AND
+// status=eq.draft) so a row that changed hands — or was published — between the
+// ownership read and the delete cannot be removed: the checks are predicates on
+// the destructive statement, not a read-then-trust gate.
+export const onRequestDelete: PagesFunction<Env> = async ({ request, env, params, waitUntil }) => {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    return err(503, "not_configured", "agent API not configured");
+  }
+  const auth = await authenticate(env, request);
+  if (!auth.ok) return err(auth.code, auth.code === 404 ? "inactive_agent" : "unauthorized", "invalid or missing X-Agent-Key");
+  const agent = auth.identity;
+  if (rateLimited(agent.agentName)) return err(429, "rate_limited", "rate limit exceeded");
+
+  const slug = ((params.path as string[] | undefined) ?? [])[0] ?? "";
+  if (!SLUG_RE.test(slug)) return err(400, "validation", "invalid slug");
+
+  // Ownership + terminal-state read (same shape as PATCH).
+  let getRes: Response;
+  try {
+    getRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/blog_posts?select=id,status,created_by&slug=eq.${encodeURIComponent(slug)}&limit=1`,
+      { headers: serviceHeaders(env) },
+    );
+  } catch {
+    return err(503, "upstream", "supabase unreachable");
+  }
+  if (!getRes.ok) return err(503, "upstream", `supabase ${getRes.status}`);
+  const rows = (await getRes.json()) as Array<{ id: string; status: string; created_by: string | null }>;
+  const post = rows[0];
+  if (!post) return err(404, "not_found", "post not found");
+  if (post.status === "archived") return err(409, "archived", "archived is terminal");
+  if (post.created_by !== agent.agentName) return err(403, "forbidden", "you can only delete posts you created");
+  // DRAFT-ONLY guard (P1): the lifecycle has no published→deleted transition.
+  if (post.status !== "draft") {
+    return err(409, "published", "published posts must be unpublished before deletion");
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/blog_posts?slug=eq.${encodeURIComponent(slug)}` +
+        `&created_by=eq.${encodeURIComponent(agent.agentName)}&status=eq.draft`,
+      { method: "DELETE", headers: serviceHeaders(env) },
+    );
+  } catch {
+    return err(503, "upstream", "supabase unreachable");
+  }
+  if (!res.ok) {
+    if (res.status >= 400 && res.status < 500) return err(res.status, "upstream_4xx", `supabase ${res.status}`);
+    return err(503, "upstream", `supabase ${res.status}`);
+  }
+
+  // Prefer: return=representation → the deleted row(s). Empty means the row
+  // vanished, was published, or was archived between the read and the delete:
+  // report 404 rather than claiming a delete that did not happen.
+  let deleted: Array<{ id: string; slug: string }> = [];
+  try {
+    deleted = (await res.json()) as Array<{ id: string; slug: string }>;
+  } catch {
+    deleted = [];
+  }
+  if (deleted.length === 0) return err(404, "not_found", "post not found");
+
+  // A previously-published post can still be served from the edge cache after the
+  // row is gone — purge it, exactly as the unpublish path does (#1865).
+  waitUntil(
+    purgeUrl(`${SITE_URL}/blog/${slug}`, env).then((purged) => {
+      if (!purged) console.warn(`[purge] agent-api delete failed: /blog/${slug}`);
+    }),
+  );
+
+  return json({ deleted: true, slug }, 200);
+};
+
 export const onRequestOptions: PagesFunction<Env> = async () => {
   return new Response(null, {
     status: 204,
-    headers: { Allow: "POST, PATCH, OPTIONS", ...HSTS },
+    headers: { Allow: "POST, PATCH, DELETE, OPTIONS", ...HSTS },
   });
 };
 

@@ -2985,7 +2985,9 @@ def _maybe_onboarding_auto_complete() -> None:
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
 # gate order: admission 429 (#3060) → session_recording opt-out 409 → empty
-# 422 → provider 503 → quota 402. Stdio/self-host returns an honest "requires
+# 422 → quota 402. A missing provider key is NOT a gate (#3892): the capture
+# is STORED and only the LLM extraction is skipped, reported as
+# `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
 # hosted mode" error —
 # there is deliberately NO local fallback that bypasses the capture pipeline
 # (a prompt-injection exfiltration surface must not exist).

@@ -37,6 +37,7 @@ __all__ = [  # noqa: RUF022
     "BillingError", "BillingConfigError", "StripeAPIError",
     "PriceCatalog", "StripeClient",
     "effective_tier", "apply_limits", "subscription_plan",
+    "subscription_period_bounds",
     "mirror_subscription", "reconcile_org",
 ]
 
@@ -500,6 +501,59 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
     )
 
 
+def _subscription_items(sub: dict) -> list:
+    """A Stripe subscription's item rows, for either payload shape.
+
+    Stripe returns ``items`` as a ``{'data': [...]}`` envelope; fixtures and
+    older payloads use a flat list. Anything else (a scalar, a missing key,
+    ``None``) yields ``[]`` — NEVER an ``AttributeError``: this helper runs on
+    webhook payloads, so a malformed shape must not raise. (#4216 review: the
+    first version called ``.get`` on any truthy non-dict and 500'd the
+    checkout route, before the metadata-tier fallback could run.)
+    """
+    # Guard the SUBJECT as well as the value: a non-dict ``sub`` must yield
+    # ``[]`` too (``hosted_api._price_id_from`` passes the raw payload in).
+    items = sub.get("items") if isinstance(sub, dict) else None
+    if isinstance(items, list):
+        rows = items
+    elif isinstance(items, dict):
+        rows = items.get("data") or []
+    else:
+        rows = []
+    return rows if isinstance(rows, list) else []
+
+
+def subscription_period_bounds(sub: dict) -> tuple:
+    """The subscription's billing period bounds — ``(start, end)`` — or
+    ``(None, None)`` when the payload carries neither.
+
+    #4216: Stripe API ``2025-03-31.basil`` moved ``current_period_start`` /
+    ``current_period_end`` OFF the top-level Subscription resource and onto its
+    subscription ITEMS. Read the top level first (pre-Basil, and the shape the
+    registry twin has always stored), then fall back to ``items[0]``. WITHOUT
+    the fallback a Basil-or-later account silently writes NO window and the
+    paying org stays unmeterable — the defect this fixes.
+
+    Values are returned AS-IS (whatever the API version emitted: a Unix epoch
+    int pre-Basil, an ISO-8601 string on newer versions, or ``None``); each
+    caller's own truthiness/None guard decides whether to write. A non-dict
+    ``sub`` yields ``(None, None)``.
+    """
+    if not isinstance(sub, dict):
+        return None, None
+    start = sub.get("current_period_start")
+    end = sub.get("current_period_end")
+    if start is None or end is None:
+        item = next(iter(_subscription_items(sub)), {})
+        if not isinstance(item, dict):
+            item = {}
+        if start is None:
+            start = item.get("current_period_start")
+        if end is None:
+            end = item.get("current_period_end")
+    return start, end
+
+
 def subscription_plan(sub: dict) -> tuple[str, str]:
     """Resolve (tier, interval) from a Stripe subscription's items[0].price.id.
 
@@ -541,26 +595,35 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     params: dict = {
         "id": org_id,
         "status": status,
-        "period_end": sub.get("current_period_end"),
         "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
     }
     set_fields = (
-        "SET t.subscription_status=$status, t.current_period_end=$period_end, "
-        "t.cancel_at_period_end=$cancel_at_period_end"
+        "SET t.subscription_status=$status, t.cancel_at_period_end=$cancel_at_period_end"
     )
     if sub.get("id"):
         set_fields += ", t.subscription_id=$subscription_id"
         params["subscription_id"] = sub["id"]
-    # #3825 (D10): the METER WINDOW ANCHOR — the registry twin of
-    # ``organizations.current_period_start``. Written only when the payload
-    # carries it, so a subscription object that omits the field cannot NULL
-    # out an anchor the meter depends on (``metering._current_period`` RAISES
-    # on a half-known anchor rather than metering on a month bucket — a SIGNAL,
-    # not enforcement: every production caller absorbs it and alerts the
-    # operator, #3981).
-    if sub.get("current_period_start"):
+    # #4216: read the bounds through the top-level-then-item helper, so a
+    # Basil-or-later Stripe account (period fields on the subscription ITEMS)
+    # still writes a window. Each bound is written ONLY when the payload
+    # carries it, so a partial subscription object can never NULL OUT a bound
+    # already stored.
+    #
+    # A payload that carries ONE bound and not the other leaves a half-known
+    # REGISTRY anchor here (this writer owns the ``:Team`` graph twin). That is
+    # NOT repaired by ``20260919000001`` — that migration updates the Supabase
+    # ``organizations`` row, a different lane this writer never touches. The
+    # half-known twin is REPORTED, not silent (the meter refuses it and
+    # ``cohort_cost`` raises the #3981 alert) and is COMPLETED by the next
+    # authoritative push — a later ``mirror_subscription`` or
+    # ``customer.subscription.updated`` payload carrying the missing bound.
+    period_start, period_end = subscription_period_bounds(sub)
+    if period_start:
         set_fields += ", t.current_period_start=$period_start"
-        params["period_start"] = sub["current_period_start"]
+        params["period_start"] = period_start
+    if period_end:
+        set_fields += ", t.current_period_end=$period_end"
+        params["period_end"] = period_end
     if customer_email:
         set_fields += ", t.customer_email=$customer_email"
         params["customer_email"] = customer_email

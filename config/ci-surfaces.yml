@@ -151,6 +151,12 @@ surfaces:
   # #3154 note in tools/ci_selection.py). A hosted_backup.py-only change now
   # selects this file (docker-lane; dump/restore round-trips).
   - test_dump_edge_asymmetry_3895.py
+  # #3902: the per-graph event-log counter (:GraphEventMeta.last_seq) must
+  # survive the backup boundary. Registered under `api` because
+  # tortoise/hosted_backup.py owns that surface (see the #3154 note in
+  # tools/ci_selection.py) — a hosted_backup.py-only change selects this file
+  # (docker-lane; dump → create_backup → restore_backup swap).
+  - test_restore_seq_3902.py
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
@@ -357,8 +363,13 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
+  # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
+  # write/read marker split. No DB, no network — default `core` surface is correct.
+  - test_4220_blog_residue_cleanup.py
   - test_ask_eval_only.py
   - test_capture_cost_measurement.py
+  - test_capture_entity_attachment_3664.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -408,6 +419,12 @@ surfaces:
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
   - test_ci_selection.py
+  - test_shared_state_concurrency.py
+  - test_shared_state_events.py
+  - test_shared_state_events_claim.py
+  - test_shared_state_imports.py
+  - test_shared_state_monitoring.py
+  - test_shared_state_recovery.py
   - test_tmpdir_hygiene_4096.py  # #4096: AST guard — no pytest fixture may mkdtemp a tree without reclaiming it (meta test; reads tests/**, no DB)
   # #3755: session-start.sh must fire the install-probe beacon even when
   # `tortoise context` fails (the digest was `|| exit 0`, which skipped the
@@ -473,6 +490,12 @@ surfaces:
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
+  # #2881: the durability authority's anti-scatter gate — only
+  # docs/durability-posture.md may bind a journal/event log to "source of truth".
+  # Registered under `core` (the fallback surface for a tortoise/*.py claim site)
+  # AND `tier1` (below), so a docs-only ONTOLOGY.md wording edit cannot
+  # reintroduce the claim without the gate running.
+  - test_durability_posture.py
   - test_e2e9_point_in_time.py
   - test_e2e_journey.py
   - test_embedded_concurrency.py
@@ -804,6 +827,12 @@ surfaces:
   # website/functions/_middleware.ts under Node) and the console's move to the
   # app origin. Pure/harness — no wrangler, no network.
   - test_admin_origin_redirect.py
+  # #4316: the agent DELETE surface's P1 draft-only guard + ownership/status
+  # predicates, executed against website/functions/blog/api/posts/[[path]].ts
+  # under Node with a stubbed fetch (no wrangler, no network, no DB). The E2E
+  # environment cannot express the cross-agent 403 (one key) or archived→409
+  # (the agent API cannot archive) — those cases live here.
+  - test_blog_agent_delete_guard.py
   - test_dashboard_unknown_address.py
   - test_github_connect.py
   - test_github_connector.py
@@ -1009,6 +1038,7 @@ tier1:
 - test_config.py
 - test_crypto.py
 - test_decide.py
+- test_durability_posture.py  # #2881: durability authority + scoped source-of-truth gate
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
@@ -1128,6 +1158,24 @@ durations:
 # must model (hand values are stale local timings, off by up to 37x).
 # duration_coverage_issues() floors coverage at 90% (#3400).
 # Regenerate from tools/ci_timing.py / the run's junit artifacts.
+#
+# #4221: the six `test_shared_state_*.py` files (moved out of
+# tortoise/shared_state/tests/, where no CI lane collected them) enter the fast
+# pool for the first time here. They have NO CI junit measurement — a file that
+# never ran cannot appear in an artifact — and this map's own #3400 policy is
+# that measured CI wall time is taken over local timings (local values on the
+# #4221 verification host were inflated by a concurrent e2e lane to 0.1-37s for
+# the same file). They are therefore entered at the flat 2.0s default, which is
+# the conservative floor rather than a measurement: it keeps coverage at 100%
+# instead of silently dropping the six back to the default anyway, and cannot
+# mis-balance the LPT pack. Refresh these six from the first post-merge main
+# run that includes them.
+  test_shared_state_concurrency.py: 2.0
+  test_shared_state_events.py: 2.0
+  test_shared_state_events_claim.py: 2.0
+  test_shared_state_imports.py: 2.0
+  test_shared_state_monitoring.py: 2.0
+  test_shared_state_recovery.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3

@@ -172,6 +172,20 @@ _CAPTURE_NO_PROVIDER_WARNING = (
 #: zero-extraction states ("empty", "error", "replayed").
 _CAPTURE_NO_PROVIDER_MODE = "no-provider"
 
+#: #3892: a keyless session re-captured WITH a key while the deployment is on
+#: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
+#: mint duplicate claims), so the re-capture replays — said OUT LOUD, because
+#: "already captured" would be a false statement of this state and the remedy
+#: is one env var away. Shared by ``sdk.capture_session`` and the hosted
+#: capture lane so the two surfaces disclose the SAME state in the SAME words.
+_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING = (
+    "this session's turns were stored WITHOUT a provider key and no "
+    "extraction has ever run for it; extraction was NOT re-attempted "
+    "because TORTOISE_SESSION_EXTRACTOR=m2 selects a non-convergent lane "
+    "(re-running it could mint duplicate claims) — unset it and re-capture, "
+    "or capture the session under a convergent lane, to extract"
+)
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider
@@ -3138,14 +3152,13 @@ class TortoiseSDK:
         ``_CAPTURE_NO_PROVIDER_WARNING``). The key gates extraction, not
         storage: the stored turns are searchable with no key at all (FTS is
         DB-side; the dense leg is a local sentence-transformers model).
-        With a provider key present, behaviour is UNCHANGED. This is a
-        DELIBERATE divergence from the hosted lane — ``hosted_api.
-        _capture_session_impl`` keeps its 503-first refusal, because a hosted
-        deploy must never store a session its org did not ask to pay to
-        extract. A keyless capture records ``capture_ok=False`` +
-        ``capture_extractor="none"`` (no extraction lane ran), so a LATER
-        capture of the same session WITH a key re-attempts extraction through
-        the existing #2335 TRUE-retry path instead of silently replaying.
+        With a provider key present, behaviour is UNCHANGED. BOTH lanes share
+        this keyless contract — the hosted lane stores-and-skips too (#4188;
+        it no longer keeps a 503-first refusal). A keyless capture records
+        ``capture_ok=False`` + ``capture_extractor="none"`` (no extraction
+        lane ran), so a LATER capture of the same session WITH a key
+        re-attempts extraction through the existing #2335 TRUE-retry path
+        instead of silently replaying.
         """
         import uuid
         from datetime import datetime, timezone
@@ -3275,17 +3288,18 @@ class TortoiseSDK:
         # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
         # None (legacy sessions, pre-#2335) replays — backward compat with
         # the #1727 invariant (a legacy session is presumed captured).
-        # Review (PR #2473): TRUE retry is gated to the v2 lane — the ONLY
-        # convergent lane. v2 point ids are content-addressed (pt_<sha>) and
+        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or
+        # the keyless "none" lane, #3892). v2 point ids are content-addressed
+        # (pt_<sha>) and
         # its dedup resolves against the GRAPH (content_hash MATCH), so a
         # re-attempt folds the failed attempt's partial claims onto the same
         # nodes (0 duplicates). The M2 lane mints non-deterministic time-ULID
         # ids with IN-CAPTURE-ONLY dedup, and _extract_session_llm folds
         # partial emissions live even on raise — a failed M2 attempt leaves
         # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
-        # #1727 hole the replay skip closed). Retry fires only when BOTH the
-        # prior attempt ran v2 (capture_extractor recorded) AND this request
-        # runs v2 (env != m2) — otherwise replay (safe no-op).
+        # #1727 hole the replay skip closed). Retry fires only when the prior
+        # attempt ran a CONVERGENT lane (v2, or the keyless "none" lane —
+        # #3892) AND this request runs v2 (env != m2) — otherwise replay.
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
         # #3892: a keyless capture records lane "none" (no lane ran), and a
@@ -3316,6 +3330,24 @@ class TortoiseSDK:
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
             params=_merge_params,
         )
+        # #3664: journal the :Session node. The MERGE above is a raw graph
+        # write — with no Session in the journal a rebuild lost the node
+        # itself, which in turn made any EntityLinked edge FROM it
+        # unreplayable (a session stayed an unattached island after rebuild
+        # even when the Object side replayed). Idempotent fold: MERGE by id +
+        # coalesce-preserve created_at/actor_user_id, mirroring the live SET
+        # clauses. Emitted on every capture (the Session MERGE is itself
+        # unconditional) so the journaled turn_count tracks the live value on
+        # the #1727 longer-replay-payload path.
+        _session_record = {
+            "id": session_id, "created_at": now,
+            "turn_count": len(conversation), "is_episodic": True,
+        }
+        if harness:
+            _session_record["harness"] = harness
+        if _mirror_actor:
+            _session_record["actor_user_id"] = _mirror_actor
+        self._emit_event("SessionRecorded", **_session_record)
 
         # NOTE: this per-turn loop (episodic turn Points) is duplicated from
         # tortoise/hosted_api.py POST /v1/sessions — the shared primitives
@@ -3488,14 +3520,10 @@ class TortoiseSDK:
                 # refused only because this process is configured to the
                 # NON-convergent M2 lane (see the retry gate above). Said OUT
                 # LOUD: "already captured" would be a false statement of this
-                # state, and the user's remedy is one env var away.
+                # state, and the user's remedy is one env var away. Shared
+                # constant so the hosted lane discloses the SAME state.
                 _replay_warnings.append(
-                    "this session's turns were stored WITHOUT a provider key "
-                    "and no extraction has ever run for it; extraction was "
-                    "NOT re-attempted because TORTOISE_SESSION_EXTRACTOR=m2 "
-                    "selects a non-convergent lane (re-running it could mint "
-                    "duplicate claims) — unset it and re-capture, or capture "
-                    "the session under a convergent lane, to extract")
+                    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
             meta = {
                 "provider": None, "route": None, "failover_used": False,
                 "errors": [], "warnings": _replay_warnings, "mode": "replayed",
@@ -3718,6 +3746,63 @@ class TortoiseSDK:
                     f"session Source materialization failed: "
                     f"{type(e).__name__}: {e}")
 
+        # #3664 / #1727 Slice 2 (Task 12) — SDK-parity entity-linking pass.
+        # The hosted capture (`_capture_session_impl`) has always run this
+        # after capture; the SDK mirror did not, so a self-hosted capture
+        # landed as an unattached island (no Session/turn aboutObject edge).
+        # It resolves EXISTING WorkItem Objects from GitHub refs in the
+        # stored window and wires (Session)-[:aboutObject]->(Object) +
+        # (turn Point)-[:aboutObject]->(Object). With an ``event_log_path``
+        # configured every NEW edge is journaled (``sdk=self`` → the
+        # ``EntityLinked`` record) so the attachment survives rebuild_all —
+        # the pre-#3664 raw MERGE was live-only (the #2296 hazard). Without a
+        # journal the record is a no-op and the edges stay live-only.
+        # Best-effort/non-fatal, exactly like hosted: a resolution
+        # or write hiccup must never fail a committed capture. Runs on
+        # replays too (idempotent probe → 0 new edges; re-resolves entities
+        # that materialized after the first capture, the T1-P15 contract).
+        try:
+            from .session_link import link_session_entities
+            link_texts = []
+            for turn in windowed:
+                role = _normalize_turn_role(turn.get("role"))
+                raw_content = turn.get("content")
+                content = raw_content if isinstance(raw_content, str) else (
+                    "" if raw_content is None else str(raw_content))
+                link_texts.append(f"[{role}] {content[:5000]}")
+            link_result = link_session_entities(
+                proj, session_id, link_texts,
+                turn_ids=[f"{session_id}_t{i}"
+                          for i in range(len(link_texts))],
+                sdk=self)
+            if link_result["attempted"]:
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}) SET "
+                    "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                    params={"sid": session_id,
+                            "a": link_result["attempted"],
+                            "c": link_result["created"]})
+                # #3664 review P2: the raw SET above is a LIVE write with no
+                # journal carrier — the first SessionRecorded is emitted
+                # BEFORE the link pass, so its payload cannot carry the
+                # counters, and the apply()-based engines
+                # (``recover_from_log`` / a journal-only ``rebuild()``)
+                # restored the :Session node with both fields null (a
+                # live != rebuild divergence). Emit the counters as a
+                # SECOND SessionRecorded AFTER the result is known, under
+                # the SAME ``if attempted`` guard as the live write, so the
+                # durable fold (``_fold_session_recorded``) replays them.
+                self._emit_event(
+                    "SessionRecorded", id=session_id,
+                    entity_links_attempted=link_result["attempted"],
+                    entity_links_created=link_result["created"])
+        except Exception as e:  # noqa: BLE001, RUF100 — non-fatal, mirror hosted
+            _logger.warning(
+                "capture_session: session entity-linking failed (non-fatal) "
+                "for session %s: %s", session_id, e, exc_info=True)
+            extraction_warnings.append(
+                f"session entity-linking failed: {type(e).__name__}: {e}")
+
         # P1 #1529 (D2): truthful extraction_mode + ok/errors/warnings on every
         # response. "empty" always co-occurs with an error entry; belt-and-
         # braces: map mode=="empty" → ok=False regardless of the error list.
@@ -3764,7 +3849,8 @@ class TortoiseSDK:
             # (zero-write no-op; the stored value — True or legacy None —
             # stays untouched, matching the replay posture).
             # Review (PR #2473): the SET also records the extractor lane that
-            # RAN (v2/m2) so the retry gate (above) can require a v2 prior —
+            # RAN (v2/m2/none) so the retry gate (above) can require a
+            # convergent prior —
             # the M2 lane's partial emissions are non-convergent ULID claims,
             # never retried.
             # Non-fatal bookkeeping (codebase posture: receipt/last-error/
@@ -3784,6 +3870,25 @@ class TortoiseSDK:
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
+            else:
+                # #3664 review P2: the raw SET above has no journal carrier —
+                # the FIRST SessionRecorded is emitted BEFORE extraction, and
+                # the counter emission carries only the link counters — so a
+                # journal-only ``rebuild()`` / ``recover_from_log`` restored
+                # ``capture_ok = capture_extractor = null``. That null is
+                # CONSUMED by the #2335 WI-2b TRUE-retry gate above ("null"
+                # reads as the legacy presumed-captured case), so a session
+                # whose capture FAILED silently stopped retrying. Emit a
+                # TRAILING SessionRecorded with the values just written so
+                # ``_fold_session_recorded`` replays them. Under the SAME
+                # ``_record_session_state`` gate (and only after the live SET
+                # succeeded) so live and replay stay in lockstep; a
+                # journal-less SDK no-ops in ``_emit_event``, exactly as it
+                # does for the first record.
+                self._emit_event(
+                    "SessionRecorded", id=session_id,
+                    capture_ok=_capture_ok_record,
+                    capture_extractor=_capture_extractor_record)
         if not ok and meta.get("mode") == "empty":
             effective_mode = "empty"
         elif not ok:
@@ -4162,14 +4267,31 @@ class TortoiseSDK:
 
         # ── entities ──
         entity_failures: list[str] = []
+        # #3664: the extractor is the RESOLVE-OR-CREATE half for the session's
+        # entity spine — each create_entity("object", …) journals an
+        # ObjectRegistered (durable node) ONLY on the FIRST canonical
+        # registration (the existence-probe gate in `_create_entity`; a
+        # re-mention never re-journals) AND only when the SDK is built with an
+        # `event_log_path` (a journal-less SDK's `_emit_event` is a no-op).
+        # The claim → Object edges below are routed through the shared
+        # journaled writer, so they survive rebuild_all when such a journal is
+        # configured — without one they stay live-only (the hosted lane's
+        # `_make_sdk`/`_data_sdk` set no `event_log_path`). The SESSION-level
+        # attachment is owned by the
+        # conversation-reference link pass (session_link.link_session_entities,
+        # WorkItem Objects) — deliberately NOT the extractor's per-claim
+        # topical entities (the pinned Session-link contract: the Session's
+        # aboutObject set is the resolved reference targets, nothing else).
+        from .session_link import link_entity
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
             try:
-                self.create_entity("object", name,
-                                   objectKind=str(e.get("kind", "core:other")),
-                                   is_episodic=False)
+                self.create_entity(
+                    "object", name,
+                    objectKind=str(e.get("kind", "core:other")),
+                    is_episodic=False)
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
                 # create_entity failure silently stranding an Object a
@@ -4277,11 +4399,48 @@ class TortoiseSDK:
                     canonical_by_hash[_content_hash(content)] = pid
                     for name in (pt.get("about_entities") or []):
                         if isinstance(name, str) and name.strip():
-                            proj.g.query(
-                                "MATCH (p:Point {id:$pid}), "
-                                "(o:Object {name:$n}) "
-                                "MERGE (p)-[:aboutObject]->(o)",
-                                params={"pid": pid, "n": name.strip()})
+                            # #3664: the claim -> Object attachment was a raw
+                            # live-only MERGE (lost on rebuild — the #2296
+                            # hazard). Route each edge through the shared
+                            # journaled writer so it replays (EntityLinked)
+                            # when the SDK has an `event_log_path`; a
+                            # journal-less SDK emits nothing and the edge
+                            # stays live-only.
+                            #
+                            # Coverage is NOT narrowed: main attached the edge
+                            # to EVERY name-matching Object, and an id-less
+                            # name stub is still covered below. Two silent
+                            # drops are explicitly avoided: (a) `LIMIT 1` with
+                            # no ORDER BY collapsed all matches to one
+                            # arbitrary node; (b) a NULL/absent `id` yielded
+                            # `[None]` and no edge at all.
+                            _n = name.strip()
+                            _oid_rows = proj.g.query(
+                                "MATCH (o:Object {name:$n}) "
+                                "RETURN o.id",
+                                params={"n": _n}).result_set
+                            _idless = False
+                            for _row in _oid_rows:
+                                _oid = _row[0] if _row else None
+                                if isinstance(_oid, str) and _oid:
+                                    link_entity(proj, "Point", pid,
+                                                _oid, sdk=self)
+                                else:
+                                    _idless = True
+                            if _idless:
+                                # An id-less name stub (hosted_api.py mints
+                                # these with `MERGE (o:Object {name:$name})`)
+                                # cannot be addressed by link_entity, which
+                                # MERGEs on {id:...} and would mint a
+                                # DIFFERENT node. Fall back to main's
+                                # name-based MERGE so the edge is not silently
+                                # dropped — live-only, honestly unjournaled.
+                                proj.g.query(
+                                    "MATCH (p:Point {id:$pid}), "
+                                    "(o:Object {name:$n}) "
+                                    "WHERE o.id IS NULL OR o.id = '' "
+                                    "MERGE (p)-[:aboutObject]->(o)",
+                                    params={"pid": pid, "n": _n})
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
@@ -9099,7 +9258,11 @@ class TortoiseSDK:
         """
         proj = getattr(self, "_proj", None)
         db = getattr(proj, "db", None) if proj is not None else None
-        if db is not None and atexit_fast_close(getattr(db, "client", db)):
+        # #4214: `at_exit=True` — this seam is reached only from the
+        # `atexit` registration, so a spent exit budget stops the cascade
+        # instead of letting it block `Py_FinalizeEx`.
+        if db is not None and atexit_fast_close(getattr(db, "client", db),
+                                                at_exit=True):
             self._t_closed = True
             return
         self._t_close()
@@ -16745,9 +16908,12 @@ class TortoiseSDK:
         # NOTE (issue #327): deletion covers only canonical entity labels —
         # Session/APIKey/Org/Tag nodes are intentionally NOT deleted (legacy
         # matched them by id/eventId; no caller relies on it).
+        # #3860: the ONE label→id-property table, shared with the replay fold
+        # (``projection._delete_entity_by_id``) so the producer and the fold
+        # cannot drift.
+        from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
         total = 0
-        for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
-                            ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
+        for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             r = proj.g.query(
                 f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
                 params={"id": id_val},

@@ -56,6 +56,10 @@ from tortoise.capture_receipts import (
     capture_receipt_key as _capture_receipt_key,
 )
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+from tortoise.file_indexer import (  # #4005 shared identity primitives
+    derive_session_source_url,
+    provenance_basename,
+)
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -90,6 +94,9 @@ from tortoise.projection import (
 )
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
+    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
+    _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
+    _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
@@ -279,7 +286,7 @@ class _CaptureSlot:
       while its worker still occupies a pool thread (the shape of
       `quota.run_ask_bounded`, quota.py:791-816); or
     * the request's own teardown (`release()`) — for a replay / opt-out /
-      quota / provider-503 path that never extracts. Without that release the
+      quota / no-provider path that never extracts. Without that release the
       reservation would leak and permanently burn capacity.
 
     #3129: the same slot also owns the request's in-flight SESSION key, but on a
@@ -7990,10 +7997,12 @@ def _llm_provider_keys() -> tuple[str, ...]:
 
 # Provider env keys the hosted deployment can use for LLM-grade extraction.
 # The provider/model choice is a product decision (deploy-time) — this module
-# only reports availability so capture fails closed when no key is configured.
+# only reports availability, which now decides one thing: whether a capture
+# runs LLM extraction or skips it with a visible "no-provider" receipt (#3892).
 # The regex extraction loop was REMOVED as a product path (#822): LLM
-# extraction is the default (and only) capture extraction, and the no-key
-# case fails closed with 503.
+# extraction is the default (and only) capture extraction. A missing key no
+# longer refuses the capture — the Session + its turn Points are still stored
+# and stay searchable; only the extraction into memory points is skipped.
 _LLM_PROVIDER_KEYS: tuple[str, ...] = _llm_provider_keys()
 
 
@@ -8001,8 +8010,8 @@ def _llm_provider_available() -> bool:
     """True when an LLM provider key is configured (or the TORTOISE_SESSION_
     LLM_MOCK=1 test seam is on — precedent: TORTOISE_BACKUP_STORAGE=memory /
     RATE_LIMIT_DISABLED). Must agree with tortoise.sdk._build_session_llm_extractor
-    (which consumes the same key set); a mismatch would fail the 503 gate open
-    or closed wrongly."""
+    (which consumes the same key set); a mismatch would extract when no
+    extractor can be built, or skip extraction when one can."""
     if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
         return True
     return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
@@ -8013,7 +8022,7 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     """Capture an agent session and extract turns as episodic Points.
 
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
-    the provider 503 / quota 402) so disabled orgs do no quota work at all; any
+    the quota 402) so disabled orgs do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
     dashboard failure sub-line reads this, NOT client state) — except the #3060
     capacity 429 and the #3129 in-flight 409, which are server conditions — and
@@ -8144,12 +8153,12 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
 
-    SCOPE — the retry is closed on the **v2 lane only**, and only for IN-PROCESS
-    cancellation:
+    SCOPE — the retry is closed to the CONVERGENT lanes (v2, and the keyless
+    "none" lane, #3892), and only for IN-PROCESS cancellation:
 
-    * the TRUE-retry gate requires BOTH the prior lane AND the retrying request
-      to be v2 (`prior_capture_extractor == "v2"` **and** the request's
-      `TORTOISE_SESSION_EXTRACTOR != "m2"`, #2473), so an abandoned **m2**
+    * the TRUE-retry gate requires the prior lane to be convergent — v2, or the
+      keyless "none" lane (#3892) — AND the retrying request's
+      `TORTOISE_SESSION_EXTRACTOR != "m2"` (#2473), so an abandoned **m2**
       capture re-POSTed still replays, and so does an abandoned v2 capture
       re-POSTed after the deployment's lane was switched to m2. Both are the
       documented, deliberate consequence of #2473: re-running m2 over a failed
@@ -8194,18 +8203,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
 
-    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old
-    "403 → 422 → 503 → 402" was stale, pre-#1927):
+    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
+    list was stale, pre-#1927):
       1. boundary 422 — invalid harness / conversation shape (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed
          payload;
       2. 409 — session_recording disabled (state-conflict);
-      3. 503 — no LLM provider;
-      4. 400 — turn cap > MAX_SESSION_TURNS;
-      5. 422 — empty/blank stored-window transcript (handler-level);
-      6. 402 — quota (skipped when session_existed).
+      3. 400 — turn cap > MAX_SESSION_TURNS;
+      4. 422 — empty/blank stored-window transcript (handler-level);
+      5. 402 — quota (skipped when session_existed).
+    #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
+    the capture is stored for every request and ONLY the LLM extraction is
+    skipped, reported truthfully as receipt mode "no-provider".
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -8252,18 +8263,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                       "sessions.")
         raise HTTPException(status_code=409, detail=detail)
 
-    # #822: LLM extraction is the default (and only) capture extraction —
-    # the regex loop was removed as a product path. No provider key →
-    # fail-closed 503 (matching today's `required` semantics; the
-    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured).
-    if not _llm_provider_available():
-        raise HTTPException(
-            status_code=503,
-            detail="Session extraction requires an LLM provider key (set "
-                   f"{' / '.join(_LLM_PROVIDER_KEYS)}). The regex extraction "
-                   "loop was removed as a product path (#822) — capture is "
-                   "disabled until a provider is configured.",
-        )
+    # #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL — a missing
+    # provider key does NOT refuse the capture. The Session MERGE and the
+    # mechanical turn Points run UNCHANGED below; ONLY the LLM extraction into
+    # memory points is skipped, and the receipt says so truthfully
+    # (`extraction_mode` "no-provider" + the additive warning). The key gates
+    # EXTRACTION, not STORAGE: the stored turns are searchable with no key at
+    # all (FTS is DB-side; the dense leg is a local model). The
+    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured. Mirrors
+    # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
+    # pre-#3892 503-first refusal.
+    no_provider = not _llm_provider_available()
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         # #2335 WI-1c: the turn-cap refusal is a structured record (the
@@ -8338,19 +8348,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to the v2 lane (the ONLY
-    # convergent lane — content-addressed pt_<sha> ids + graph content_hash
-    # resolution fold a re-attempt's partial claims onto the same nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
+    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
+    # content_hash resolution fold a re-attempt's partial claims onto the same
+    # nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
-    # replay skip closed). Retry fires only when the prior ran v2 AND this
-    # request runs v2 (env != m2) — otherwise replay (safe no-op).
+    # replay skip closed). Retry fires only when the prior ran a CONVERGENT
+    # lane (v2, or the keyless "none" lane, #3892) AND this request runs v2
+    # (env != m2) — otherwise replay (safe no-op).
+    # #3892 / #4007: a keyless capture records lane "none" (no lane ran), and
+    # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
+    # captured without a key gets its memory points once a key appears, on an
+    # EXPLICIT re-capture (never automatically). "none" is retry-eligible for
+    # the same reason "v2" is: it minted no claims of its own, and its turn ids
+    # are deterministic, so the re-attempt converges. The m2 exclusion is
+    # UNCHANGED and deliberate (see tortoise/sdk.py's retry gate).
     prior_capture_ok = session_row[1]
     prior_capture_extractor = session_row[2]
     retry_failed_capture = (
         session_existed and prior_capture_ok is False
-        and prior_capture_extractor == "v2"
+        and prior_capture_extractor in ("v2", "none")
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -8371,7 +8390,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #2335 WI-2b: a TRUE-retry re-POST (capture_ok False) re-runs
     # extraction and mints NEW non-episodic points — it is NOT a zero-node
     # replay, so the estimate gate must fire for it too (a retry can 402).
-    if not session_existed or retry_failed_capture:
+    # #3892: a keyless capture mints ZERO non-episodic points (only the
+    # episodic turn Points, which the points quota excludes), so the
+    # extraction estimate must not 402-block it — same rationale as the
+    # replay skip above. `_check_org_limit(org, "sessions")` still runs, but
+    # sessions are unlimited since #4010, so it is vacuous in practice.
+    if (not session_existed or retry_failed_capture) and not no_provider:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
         sdk_org = _data_sdk(org)
@@ -8548,6 +8572,35 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # since #3914. #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    #
+    # #3892: metering truth. The turn loop below runs for EVERY request, so a
+    # re-capture of a GROWN transcript writes NEW turn Points even when the
+    # branch taken extracts nothing (a keyless re-capture, or a keyless retry
+    # on the M2 lane). The write-op/abuse meter keys on the ACTUAL write — the
+    # prior stored-turn count — not on which branch ran (see the meter below).
+    prior_turn_count = 0
+    if session_existed:
+        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
+        # meter, and it sits AFTER the Session MERGE that already committed —
+        # a transient graph error here must never 500 a committed capture
+        # (the file's posture, and every sibling bookkeeping read in this
+        # function). On failure 0 makes the meter OVER-count
+        # (`len(windowed) > 0`), the documented conservative posture, never a
+        # blind spot. It also must not abort the keyless→keyed upgrade this
+        # PR exists to enable.
+        try:
+            _prior_turns = proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true RETURN count(t)",
+                params={"sid": session_id}).result_set
+            prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "prior_turn_count read failed (non-fatal, metering over-counts)",
+                exc_info=True)
+            prior_turn_count = 0
+
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         # P1 #1529 (D10, #721 parity): isinstance-first content coercion — a
@@ -8642,19 +8695,54 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # warning below — the default vocabulary produces no minted kinds to
     # flag, so a log line alone would leave the degradation invisible).
     tenant_vocab_warning: str | None = None
-    if session_existed and not retry_failed_capture:
+    if no_provider:
+        # #3892 (owner ruling 2026-09-18): no provider key — the capture is
+        # still a capture. The Session MERGE + the mechanical turn loop above
+        # ran UNCHANGED, so the turns are STORED and searchable; only the LLM
+        # extraction into memory points is skipped, with the truthful mode +
+        # additive warning the assembly below reports. Placed BEFORE the
+        # #1727 replay branch ON PURPOSE: a keyless call must ALWAYS be
+        # reported as keyless, never as a silent "replayed" that hides the
+        # missing provider. Byte-parity with sdk.capture_session (#4014) — for
+        # keyless calls this branch defines the behaviour, and keyed behaviour
+        # is byte-identical (no_provider is False for a keyed call).
+        if state is not None and not session_existed:
+            # #3129: arm the abandoned-capture marker for a genuine FRESH
+            # attempt only — a keyless RE-capture of an existing session is
+            # replay-shaped (it records nothing below) and must not arm a write
+            # that could downgrade a succeeded prior to capture_ok=False.
+            state["attempted"] = True
+            state["proj"] = proj
+            state["lane"] = "none"
+        meta = {
+            "provider": None, "route": None, "failover_used": False,
+            "errors": [],
+            "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+            "mode": _CAPTURE_NO_PROVIDER_MODE,
+            # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+            # (additive meta contract), empty here (not fabricated).
+            "stats": {},
+        }
+    elif session_existed and not retry_failed_capture:
         # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
         # (capture_ok True) or the session predates capture_ok (legacy None —
         # presumed captured). A prior FAILED capture falls through to
         # extraction — retry is TRUE.
-        meta = {"errors": [], "warnings": [], "mode": "replayed",
+        _replay_warnings = [
+            "session already captured (same session_id) — no new extraction"]
+        if prior_capture_ok is False and prior_capture_extractor == "none":
+            # #3892 / #4007: the prior was a KEYLESS store — extraction has
+            # NEVER run for it. When this deployment is on the non-convergent
+            # M2 lane the re-attempt is refused, so a bare "already captured"
+            # would be a FALSE statement of this state and would hide the
+            # remedy. Disclose it, in the SAME words as sdk.capture_session.
+            _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        meta = {"errors": [], "warnings": _replay_warnings,
+                "mode": "replayed",
                 "route": None, "provider": None,
                 # #2335 WI-1a: hosted replayed carries no extractor_v2
                 # telemetry — stats always-present, empty on replay.
                 "stats": {}}
-        extraction_errors: list = []
-        extraction_warnings = [
-            "session already captured (same session_id) — no new extraction"]
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         if state is not None:
             state["attempted"] = True
@@ -8671,8 +8759,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 slot, sdk._extract_session_llm,
                 windowed, session_id, now)
         except ValueError as e:
-            # no-key fail-closed (outer 503 gate normally catches this first;
-            # belt-and-braces so an inner/outer drift never 500s, #1468).
+            # inner provider-gate drift on the M2 lane → a clean fail-closed
+            # 503 (mirrors the v2 branch below; belt-and-braces so an
+            # inner/outer drift never 500s, #1468). A keyless request never
+            # reaches here — it skips extraction entirely (#3892).
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
         if state is not None:
@@ -8745,11 +8835,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extraction failure keeps 200 + additive errors (the mutation already
     # happened — turn points landed — and E2E-8 permits "non-200 OR additive
     # warnings"; a non-200 would hide the partial write).
+    # #3892: the receipt reads the meta of WHICHEVER branch ran — including
+    # the keyless "no-provider" branch and a keyless RE-capture of an EXISTING
+    # session (which the replay-meta block below would otherwise leave with
+    # unset warnings). Mirrors sdk.capture_session's unconditional read.
+    extraction_errors = list(meta.get("errors") or [])
+    extraction_warnings = list(meta.get("warnings") or [])
     if not session_existed or retry_failed_capture:
-        # #2335 WI-2b: a retry's meta errors/warnings must surface (the
-        # re-attempted extraction's outcome, not the failed first attempt's).
-        extraction_errors = list(meta.get("errors") or [])
-        extraction_warnings = list(meta.get("warnings") or [])
         # #2444: partial-extraction failures are the product's live error surface —
         # surface them to Sentry (when enabled) with org/session context so an
         # agent (or the inbound intake) can act on recurring signatures.
@@ -8799,12 +8891,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent
     # writer's create is an idempotent no-op).
-    if not session_existed or retry_failed_capture:
+    if not session_existed or (retry_failed_capture and not no_provider):
         # #2335 WI-2b: a retry re-runs the mint — the deterministic Event id
         # (_session_capture_event_id) converges on the SAME node (MERGE), and
         # the retry-minted points get the provenance stamp + typed-Source
         # upgrade they need. (Refresh of startedAt/endedAt on the retry is
         # CORRECT — the successful retry is the real capture.)
+        # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
+        # materialization — a keyless attempt extracts nothing, so there is
+        # nothing to stamp, while re-minting re-journals EventRecorded and
+        # refreshes startedAt on every call. Byte-parity with
+        # sdk.capture_session.
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
@@ -8946,11 +9043,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         logging.getLogger("tortoise.api").exception(
             "session capture audit write failed (non-fatal)")
     # Metering (#681): best-effort write-op count for overage billing. A
-    # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
-    # not inflate metering/abuse with phantom writes (review PR #1827).
-    if not session_existed or retry_failed_capture:
+    # replay (session_existed) with an UNCHANGED transcript writes ZERO nodes —
+    # an idempotent re-POST must not inflate metering/abuse with phantom writes
+    # (review PR #1827). #3892: a re-capture of a GROWN transcript writes new
+    # turn Points even when the branch extracts nothing (keyless re-capture, or
+    # an M2-lane keyless retry), so the meter keys on the ACTUAL write
+    # (`prior_turn_count`), not on which branch ran — otherwise those paths are
+    # a billing/abuse blind spot. The conservative over-count for the abuse leg
+    # is the documented posture.
+    # #3892 (review cycle 1, P2): a KEYLESS re-capture of an UNCHANGED
+    # transcript writes nothing — its turn ids are deterministic, so the loop
+    # MERGEs onto the same Points — yet `retry_failed_capture` is True for it
+    # (prior lane "none"), which would meter a phantom write-op and charge the
+    # full transcript length on the abuse leg. The retry arm therefore applies
+    # only when the retry can EXTRACT (a keyed retry mints points); the
+    # grown-transcript arm still covers the keyless case that really writes.
+    if (not session_existed or (retry_failed_capture and not no_provider)
+            or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
-        # replay) — metering + abuse records fire for the re-attempt.
+        # replay) — metering + abuse records fire for the re-attempt. A keyless
+        # retry is metered too: see the #3892 lead-in above.
         _record_write_op(org)
         # #3359/#3665: one measured-cost ledger + analytics row per capture
         # ATTEMPT that ran an extraction (successful or errored — a failed
@@ -9012,7 +9124,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"
-                      for i in range(len(link_texts))])
+                      for i in range(len(link_texts))],
+            sdk=sdk)
         if link_result["attempted"]:
             proj.g.query(
                 "MATCH (s:Session {id:$sid}) SET "
@@ -9228,6 +9341,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     mode = meta.get("mode")
     if extraction_errors:
         effective_mode = "error" if mode != "empty" else "empty"
+    elif mode == _CAPTURE_NO_PROVIDER_MODE:
+        # #3892: the keyless capture — turns stored, extraction skipped.
+        # Reported under its OWN name, never folded into "llm" (which would
+        # claim an extraction that did not happen) nor "replayed". Checked
+        # before `route` for parity with sdk.capture_session.
+        effective_mode = _CAPTURE_NO_PROVIDER_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
     elif mode == "replayed":
@@ -9349,11 +9468,31 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # before the Session MERGE — nothing to record there.
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
-    if not session_existed or retry_failed_capture:
+    # #3892: what THIS attempt RECORDS on the Session. A keyed attempt records
+    # its real outcome + lane, exactly as before. A KEYLESS attempt records
+    # capture_ok=False + lane "none" (no extraction lane ran) — recording
+    # ok=True / lane "v2" instead would make a LATER capture WITH a key take
+    # the #1727 replay branch, silently extracting nothing and leaving the
+    # stored session permanently points-less. False + "none" is what the #2335
+    # TRUE-retry gate consumes, so the later keyed capture re-attempts and the
+    # deterministic turn ids converge. Byte-parity with sdk.capture_session
+    # (#4014). A keyless attempt records this ONLY when it CREATES the session:
+    # a keyless RE-capture must not rewrite a prior attempt's record (a prior
+    # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
+    _capture_ok_record = False if no_provider else _capture_ok
+    _capture_extractor_record = (
+        "none" if no_provider
+        else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
+              else "v2"))
+    _record_session_state = (
+        (not session_existed) if no_provider
+        else (not session_existed or retry_failed_capture))
+    if _record_session_state:
         # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
         # retry) — a replay performs NO Session write (zero-write no-op).
         # Review (PR #2473): the SET records the extractor lane that RAN so
-        # the retry gate can require a v2 prior (M2 partials never retried).
+        # the retry gate can require a convergent prior (M2 partials never
+        # retried).
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
@@ -9371,10 +9510,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "MATCH (s:Session {id:$sid}) "
                 "SET s.capture_ok=$ok, "
                 "    s.capture_extractor=$extractor",
-                params={"sid": session_id, "ok": _capture_ok,
-                        "extractor": "m2" if os.environ.get(
-                            "TORTOISE_SESSION_EXTRACTOR") == "m2"
-                        else "v2"})
+                params={"sid": session_id, "ok": _capture_ok_record,
+                        "extractor": _capture_extractor_record})
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")
@@ -9552,16 +9689,22 @@ async def session_install_probe(body: InstallProbeRequest,
 # judge_summary dropped from v1).
 
 # Privacy helpers (W-7 / §6.1): provenance paths are BASENAME only — the full
-# local path never leaves the machine; the session Source url derives from the
-# basename (+ contentHash), never the full path.
+# local path never leaves the machine. The session Source's IDENTITY is the
+# canonical ``session:<session_id>`` (ONTOLOGY §4.6, #4005) — the same url the
+# capture path materializes and ``delete_session`` deletes; the W-7 basename
+# rides as a PROPERTY (``sourcePath`` on the Source/Document), never in the url.
 
 
-def _session_source_basename(payload: CommitPayload) -> str:  # noqa: F821
-    """The session Source identity = the FIRST provenance basename (privacy,
-    W-7). Empty when the payload has no provenance_refs (valid empty commit)."""
+def _document_source_basename(payload: CommitPayload) -> str:  # noqa: F821
+    """The payload's W-7 basename (FIRST provenance_ref) — the value written
+    to ``Document.sourcePath``. NOT the session Source identity (that is the
+    canonical ``session:<session_id>``, #4005). Empty when the payload has no
+    provenance_refs (valid empty commit). Derived through the ONE shared
+    ``file_indexer.provenance_basename`` primitive — the same one Layer-1 uses
+    — so Layer-1's accepted set and this value can never disagree."""
     if not payload.provenance_refs:
         return ""
-    return os.path.basename(payload.provenance_refs[0].path.rstrip("/"))
+    return provenance_basename(payload.provenance_refs[0].path)
 
 
 def _commit_response(
@@ -9723,7 +9866,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     reconcile = plan.reconcile
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
-    session_basename = _session_source_basename(payload)
+    document_basename = _document_source_basename(payload)
 
     # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
     # the value-chain container is episodic; the VALUE Points below are the
@@ -9753,7 +9896,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         params={"did": doc_id, "title": payload.summary or session_id,
                 "summary": payload.summary, "arc": payload.story_arc,
                 "sid": session_id, "eid": event_id,
-                "srcpath": session_basename, "now": now},
+                "srcpath": document_basename, "now": now},
     )
 
     # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
@@ -9812,19 +9955,50 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 params={"eid": ev.id, "name": name},
             )
 
-    # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
-    # + external artifacts from sources[]; the session Source references the
-    # Document AND the external artifacts (DE2E-5 chain). ──
+    # ── 4. Source bridge: the session Source (#4005 — the canonical
+    # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
+    # the capture path materializes (sdk._materialize_session_source), the
+    # projection stub mints (_mint_source_stub) and delete_session / the
+    # capture orphan sweep delete — so capture, commit and delete converge on
+    # ONE Source, with an alias rule for pre-fix basename nodes tracked in
+    # #4125) + external artifacts from sources[]; the session Source
+    # references the Document AND the external artifacts (DE2E-5 chain). The
+    # contentHash is the client-supplied raw anchor and NEVER hash(url): an
+    # absent anchor is passed through as NULL so _upsert_source's conditional
+    # write PRESERVES the stored hash/version (an anchored re-commit followed
+    # by an anchorless one must not wipe the anchor — see #3998). The raw's
+    # W-7 basename rides as a PROPERTY (Source.sourcePath / Document.sourcePath),
+    # never in the identity. ──
     session_urls: list[str] = []
-    for ref in payload.provenance_refs:
-        url = os.path.basename(ref.path.rstrip("/"))
-        if url not in session_urls:
-            session_urls.append(url)
+    # The payload's point/event source_refs use the W-7 basename; the graph
+    # Source identity is the canonical session url. This maps one to the other
+    # so extractedFrom still resolves. Both sides derive the basename through
+    # the ONE shared file_indexer primitive (Layer-1 uses the same one), so
+    # Layer-1 can never accept a source_ref this map does not know. The stored
+    # point/event `source_ref` PROPERTY keeps the W-7 basename by design — the
+    # provenance resolution surface is the `extractedFrom` edge (J-4), which
+    # this map re-points; no in-repo reader resolves a Source via `source_ref`
+    # (#4005 review, sub-threshold #40).
+    session_ref_urls: dict[str, str] = {}
+    if payload.provenance_refs:
+        session_url = derive_session_source_url(session_id)
+        session_urls.append(session_url)
+        session_spans: list[str] = []
+        for ref in payload.provenance_refs:
+            session_spans.extend(ref.spans)
+            base = provenance_basename(ref.path)
+            if base:
+                session_ref_urls.setdefault(base, session_url)
+        # An absent anchor stays absent: NULL (not "") so the conditional
+        # MERGE preserves a previously stored contentHash/version/title.
+        anchor = next((ref.contentHash for ref in payload.provenance_refs
+                       if ref.contentHash), None)
         sdk.create_source(
-            url, "agentSession",
-            contentHash=content_hash(url) if url else "",
-            provenance_spans=list(ref.spans), is_episodic=True,
+            session_url, "agentSession",
+            contentHash=anchor,
+            provenance_spans=session_spans, is_episodic=True,
             sourceDate=payload.captured_at,
+            source_path=document_basename or None,
         )
     external_urls: list[str] = []
     for src in payload.sources:
@@ -9875,7 +10049,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): the commit-receiver points were
                 # written WITHOUT session_id — the source-session attribution
                 # evidence mark needs the point's session on both capture
@@ -9897,7 +10073,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): see above — session_id on the
                 # committed points so both capture paths (SDK + hosted) carry
                 # the same source-session attribution surface.
@@ -21971,7 +22149,15 @@ def _relink_sessions_after_index(org_id: str) -> None:
     """
     try:
         from .session_link import link_session_entities
-        proj = _make_sdk(namespace=org_id)._get_proj()
+        # #3664: pass the SDK so the re-linked edges CAN be journaled — but on
+        # this lane _make_sdk/_data_sdk set no `event_log_path` and
+        # `EntityLinked` is JSONL-only (absent from _GRAPH_EVENT_TYPES), so
+        # `sdk._emit_event` is a no-op here (the same lane limit the turn
+        # record's note in _capture_session_impl documents). The re-linked
+        # edges are therefore live-only on the hosted lane; the JSONL-journal
+        # gap is filed as #4240. Do NOT read the `sdk=` argument as journaling.
+        _link_sdk = _make_sdk(namespace=org_id)
+        proj = _link_sdk._get_proj()
         rows = proj.g.query(
             "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
             "WHERE t.pointKind='event' "
@@ -21982,7 +22168,8 @@ def _relink_sessions_after_index(org_id: str) -> None:
             by_session[sid][0].append(str(content or ""))
             by_session[sid][1].append(tid)
         for sid, (texts, tids) in by_session.items():
-            result = link_session_entities(proj, sid, texts, turn_ids=tids)
+            result = link_session_entities(proj, sid, texts, turn_ids=tids,
+                                           sdk=_link_sdk)
             if result["attempted"]:
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}) SET "
@@ -24501,7 +24688,13 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
     """
     import json as _json
 
-    from tortoise.billing import PriceCatalog, StripeClient, apply_limits
+    from tortoise.billing import (
+        PriceCatalog,
+        StripeClient,
+        _subscription_items,
+        apply_limits,
+        subscription_period_bounds,
+    )
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -24525,10 +24718,21 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
 
     def _price_id_from(sub: dict) -> str | None:
         """Extract items[0].price.id handling BOTH Stripe shapes: items may be
-        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter)."""
-        items = sub.get("items") or {}
-        rows = items if isinstance(items, list) else items.get("data") or []
-        return (rows[0].get("price", {}) or {}).get("id") if rows else None
+        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter).
+
+        EVERY unknown-shape access is guarded so a malformed payload cannot
+        raise here — the checkout call site is outside any try, so a raise
+        would 500 the route and make Stripe redeliver the same bad event
+        forever. Reads ``items`` through ``_subscription_items`` and the
+        ``price`` value through an ``isinstance(..., dict)`` check (the sibling
+        access in ``billing.subscription_plan`` guards the same shapes) —
+        #4216 review.
+        """
+        rows = _subscription_items(sub)
+        if not rows or not isinstance(rows[0], dict):
+            return None
+        price = rows[0].get("price")
+        return price.get("id") if isinstance(price, dict) else None
 
     def _resolve_tier_from_price(price_id: str | None) -> str | None:
         """price → tier; unknown price → None + ops-notify signal."""
@@ -24551,7 +24755,13 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         # client_reference_id; the registry lane returns its own id, so the
         # effective id is adopted for every later write AND reported back to
         # the caller for the dedup marker / tier read / audit.
-        meta = data.get("metadata") or {}
+        # Guard the nested VALUES read out of ``data`` (``metadata`` /
+        # ``customer_details``): a non-dict value would raise AttributeError at
+        # ``.get(...)``, before any try, and the route's handler would 500 →
+        # Stripe redelivers the same bad event forever — the class this PR
+        # hardens for ``items``/``price``.
+        meta = data.get("metadata")
+        meta = meta if isinstance(meta, dict) else {}
         is_new_org = str(meta.get("new_org") or "") == "1"
         if is_new_org:
             # Sync call: _webhook_apply_event itself already runs in a worker
@@ -24559,7 +24769,10 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             # blocking control-plane + graph writes — stays on that thread.
             org_id = _provision_new_org_from_checkout(sdk, org_id, meta)
         cust = data.get("customer")
-        email = (data.get("customer_details") or {}).get("email")
+        customer_details = data.get("customer_details")
+        customer_details = (
+            customer_details if isinstance(customer_details, dict) else {})
+        email = customer_details.get("email")
         sub_id = data.get("subscription")
         updates = {"subscription_status": "active", "stripe_customer_id": cust}
         if email:
@@ -24568,17 +24781,65 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             updates["subscription_id"] = sub_id
         _set(updates)
         resolved_tier = None
+        window_error = None
         if sub_id:
             try:
                 sub = StripeClient().get_subscription(sub_id)
+            except Exception as e:
+                sub = None
+                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
+            if sub is not None:
+                # #4216: checkout is an AUTHORING path for the subscription —
+                # it must persist the METER WINDOW ANCHOR, not only
+                # ``subscription_id``. ``metering._current_period`` needs a
+                # COMPLETE half-open interval
+                # ``[current_period_start, current_period_end)``; without it a
+                # just-checked-out PAYING org is permanently
+                # window-unresolvable — its increments are dropped and the cohort
+                # cost cap cannot be enforced for it (absorbed + alerted per
+                # #3981, but unenforceable, which is the defect this issue
+                # removes). Both bounds come from the SAME authoritative Stripe
+                # subscription object the tier is resolved from. Only the bounds
+                # the payload CARRIES are written; a bound it omits is left
+                # alone (never NULLed).
+                #
+                # FAILURE ORDER (#4216 review): a window-write failure must not
+                # SUPPRESS the tier upgrade (a taken payment must not sit on
+                # free limits, #2789) — but it must also not be SWALLOWED as a
+                # 200, or the org stays window-unresolvable until the next
+                # renewal webhook, which for a checkout-only org may never
+                # arrive. So record the failure and carry on: the tier is
+                # applied, the new-org metadata fallback below still runs, and
+                # the failure is re-raised at the END of this branch. The route
+                # then 500s, Stripe redelivers, and every write is idempotent,
+                # so the window write is retried.
+                #
+                # NOTE (#4216 review): a failure of ``apply_limits`` /
+                # ``_set({"tier": ...})`` now PROPAGATES (the route 500s and
+                # Stripe redelivers) instead of being swallowed as a
+                # "subscription fetch failed" 200 — deliberate and consistent
+                # with #2789: a taken payment must never sit unretried on free
+                # limits. The previous outer except covered the whole block.
+                period_start, period_end = subscription_period_bounds(sub)
+                window = {k: v for k, v in (
+                    ("current_period_start", period_start),
+                    ("current_period_end", period_end),
+                ) if v}
+                window_error = None
+                if window:
+                    try:
+                        _set(window)
+                    except Exception as e:
+                        window_error = e
+                        _logger.warning(
+                            "webhook: period window write failed: %s",
+                            redact_error(e))
                 tier = _resolve_tier_from_price(_price_id_from(sub))
                 if tier:
                     apply_limits(sdk, org_id, tier)
                     _set({"tier": tier})
                     notify_kind = "billing_upgrade"
                     resolved_tier = tier
-            except Exception as e:
-                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
         if is_new_org and resolved_tier is None:
             # The metadata tier was server-resolved from the price at checkout
             # time and provision_org already wrote the matching quotas, so a
@@ -24604,6 +24865,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                     f"new-org checkout for team {org_id} has no resolvable "
                     f"paid tier (metadata tier={meta_tier!r}, subscription "
                     "tier unresolved) — refusing to ack")
+        if window_error is not None:
+            # The tier upgrade (or the #2789 metadata fallback) above has been
+            # applied — every write is idempotent — so surface the window
+            # failure LAST: the route 500s and Stripe redelivers, retrying the
+            # window write, instead of acking an org left unmeterable.
+            raise window_error
         return notify_kind, org_id
 
     if etype == "invoice.payment_failed":
@@ -24625,8 +24892,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         updates: dict = {}
         if data.get("id"):
             updates["subscription_id"] = data["id"]
-        if data.get("current_period_end"):
-            updates["current_period_end"] = data["current_period_end"]
+        # #4216: read the period through the top-level-then-item helper — a
+        # Basil-or-later Stripe account carries the bounds on the subscription
+        # ITEMS, and reading only the top level would drop the anchor entirely.
+        period_start, period_end = subscription_period_bounds(data)
+        if period_end:
+            updates["current_period_end"] = period_end
         # #3825 / D10: the METER WINDOW ANCHOR. The cost meter totals usage
         # over the subscription's OWN billing period so it reconciles with the
         # invoice line, and only the period END was persisted — leaving the
@@ -24635,8 +24906,8 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         # changes, and a calendar-month fallback would put a paying org's
         # spend on a row the cap's window read never looks at). This event
         # carries the authoritative start next to the end already written here.
-        if data.get("current_period_start"):
-            updates["current_period_start"] = data["current_period_start"]
+        if period_start:
+            updates["current_period_start"] = period_start
         if status:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be

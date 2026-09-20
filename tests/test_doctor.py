@@ -615,12 +615,13 @@ class TestDoctorImportHygiene:
 
 
 class TestDoctorSessionExtraction:
-    """#1197: doctor surfaces the /v1/sessions LLM-provider gate (#822).
+    """#1197: doctor surfaces the /v1/sessions LLM-provider state (#822).
 
-    Capture fails closed (503) when no provider key is configured — the beta
-    testers' most-critical feature. Doctor must report the provider/model
-    when configured, and FAIL in hosted mode (FLY_APP_NAME) when the key is
-    missing or the test seam is left on, so ops catch it before testers do.
+    Captures are STORED but the LLM extraction is skipped when no provider key
+    is configured (#3892) — extraction is the beta testers' most-critical
+    feature. Doctor must report the provider/model when configured, and FAIL
+    in hosted mode (FLY_APP_NAME) when the key is missing or the test seam is
+    left on, so ops catch it before testers do.
     """
 
     _LLM_ENV = (
@@ -640,15 +641,16 @@ class TestDoctorSessionExtraction:
         return next(line for line in out.splitlines() if "Session extraction" in line)
 
     def test_no_provider_local_warns(self, clean_llm_env, capsys):
-        """No key + not hosted → ⚠️ warning (capture fails closed; rc not
-        driven by this check). Embedded DB so the only possible ❌ is mine."""
+        """No key + not hosted → ⚠️ warning (captures are stored, extraction
+        skipped; rc not driven by this check). Embedded DB so the only
+        possible ❌ is mine."""
         monkeypatch, db_path = clean_llm_env  # noqa: RUF059
         rc = _run_doctor(["--path", db_path])
         out = capsys.readouterr().out
 
         line = self._extraction_line(out)
         assert "⚠️" in line
-        assert "503" in line and "no LLM provider key" in line
+        assert "STORED" in line and "no LLM provider key" in line
         assert rc in (0, 1)
 
     def test_provider_key_reports_provider(self, clean_llm_env, capsys):
@@ -679,7 +681,8 @@ class TestDoctorSessionExtraction:
 
     def test_hosted_no_provider_fails(self, clean_llm_env, capsys):
         """Hosted mode (FLY_APP_NAME) + no provider key → ❌ + rc 1 — the
-        flagship beta feature cannot work; ops must not ship this."""
+        flagship extraction feature cannot work; ops must not ship this. The
+        copy is truthful: captures are STORED, extraction is skipped."""
         monkeypatch, db_path = clean_llm_env
         monkeypatch.setenv("FLY_APP_NAME", "tortoise-api")
         rc = _run_doctor(["--path", db_path])
@@ -687,7 +690,7 @@ class TestDoctorSessionExtraction:
 
         line = self._extraction_line(out)
         assert "❌" in line
-        assert "503" in line
+        assert "STORED" in line and "skipped" in line
         assert rc == 1
 
     def test_hosted_mock_seam_fails(self, clean_llm_env, capsys):

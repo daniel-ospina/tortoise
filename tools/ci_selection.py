@@ -303,6 +303,18 @@ SOURCE_PATTERNS = {
                    # derivation's own inputs rather than to its output.
                    "website/_redirects",
                    "website/functions/blog/[[path]].ts",
+                   # #4316: the agent API Function (create / edit / DELETE) owns
+                   # the guard in tests/test_blog_agent_delete_guard.py, which
+                   # executes it under Node. Without this entry a PR touching
+                   # ONLY the DELETE guard (posts/[[path]].ts) selects NO surface
+                   # (surfaces=[], full=False) and the guard never runs on the
+                   # very PR that owns it — the #1349/#3332/#3616 silent-drop
+                   # class the entries above exist to close, one level down.
+                   # Directory granularity, deliberately: the sibling Functions
+                   # (generate-seo/-cover, purge) share the API's auth + env
+                   # reads, and naming single files is what left every other
+                   # moved Function unselectable in #4171.
+                   "website/functions/blog/api/",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that

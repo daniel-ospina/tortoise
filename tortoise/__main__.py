@@ -3436,6 +3436,21 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             file=_sys.stderr,
         )
         return 1
+    # #4188: never report an unqualified success for a DEFERRED capture — a
+    # keyless store is a 2xx with extraction skipped. Surface the receipt's
+    # no-provider mode + additive warnings (stderr), mirroring
+    # _cmd_session_import. Only the no-provider mode means "not extracted":
+    # "replayed" means a PRIOR capture SUCCEEDED, so its memory points DO
+    # exist — printing "memory points were not extracted" for it would be a
+    # false statement about the session.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    _capture_mode = result.get("extraction_mode")
+    if _capture_mode == _CAPTURE_NO_PROVIDER_MODE:
+        print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
+              "memory points were extracted", file=_sys.stderr)
+    if result.get("warnings"):
+        print("capture warnings: " + "; ".join(
+            str(w) for w in result["warnings"]), file=_sys.stderr)
     print(f"Captured session: {session_id}")
     print(f"  Turns: {len(turns)}")
     print(f"  Source: {transcript_path.stem}")
@@ -3537,11 +3552,16 @@ def _cmd_sessions_import(args) -> int:
 
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
-    or a content-hash-derived one), and a LOCAL receipt is written ONLY on a
-    2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
-    same content is a no-op (receipt exists ⇒ already imported) — and even a
-    re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi parses its own record shape (#3667 — it no longer
+    or a content-hash-derived one), and a LOCAL receipt is written on a 2xx
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) — EXCEPT a deferred keyless
+    2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
+    receipt so an explicit re-import can re-attempt extraction once a key is
+    configured. Re-import of the
+    same content is a no-op (receipt exists ⇒ already imported). A re-POST of
+    an already-extracted session converges server-side (same session_id ⇒ no
+    new Session or turn Points); a re-POST of a DEFERRED keyless session
+    re-attempts extraction and mints its memory Points (#4188). pi parses its
+    own record shape (#3667 — it no longer
     aliases the codex parser, which returned 0 turns for real Pi sessions).
     The parsed conversation is windowed to the hosted turn cap
     (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
@@ -3662,10 +3682,24 @@ def _cmd_sessions_import(args) -> int:
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
 
-    # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
-    # state key; this LOCAL marker makes re-import a cheap no-op) and the
-    # local failure breadcrumb is cleared.
+    # A keyed 2xx ⇒ the receipt lands (the server also wrote the per-harness
+    # receipt state key; this LOCAL marker makes re-import a cheap no-op) and
+    # the local failure breadcrumb is cleared.
+    # #4188: a keyless capture STORES the turns and SKIPS extraction. Writing
+    # the local "imported" receipt would make every later explicit re-import
+    # skip the POST, so the session could never gain memory points once a key
+    # appears — and the owner ruling requires an EXPLICIT re-capture to
+    # extract (nothing here spends automatically). Deferred ⇒ NO local
+    # receipt: the server keeps the graph state truthful (capture_ok=False,
+    # lane "none") and re-running this import after the key is set re-attempts
+    # extraction on the #2335 TRUE-retry lane.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
     _clear_capture_error(harness)
+    if result.get("extraction_mode") == _CAPTURE_NO_PROVIDER_MODE:
+        print("import deferred: no LLM provider key — turns stored, "
+              "extraction skipped; re-run this import once a key is "
+              "configured.", file=_sys.stderr)
+        return 0
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),
@@ -5331,15 +5365,15 @@ def _cmd_doctor(args):
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
     # 5.5 Session extraction — LLM provider (#1197)
-    # POST /v1/sessions (capture) fails closed with 503 when no LLM provider
-    # key is configured (#822 — regex extraction removed as a product path;
-    # this is the beta testers' most-critical feature). Doctor surfaces the
-    # configured provider/model BEFORE testers hit a silent 503. Hosted mode
-    # (FLY_APP_NAME — precedent: hosted_api.py, sdk.py) treats
-    # provider-missing as a HARD failure: the flagship feature cannot work at
-    # all. Local/selfhosted is a warning — capture still fails closed, but
-    # there is no hosted SLA at stake. Mirrors hosted_api._llm_provider_available
-    # + sdk._build_session_llm_extractor exactly (the seam they must agree on).
+    # A missing LLM provider key no longer refuses a capture (#3892 owner
+    # ruling): the Session + its turn Points are still STORED and searchable,
+    # and only the LLM extraction into memory points is skipped. Doctor
+    # surfaces the missing provider BEFORE testers wonder why nothing reaches
+    # memory. Hosted mode (FLY_APP_NAME — precedent: hosted_api.py, sdk.py)
+    # still treats provider-missing as a HARD failure: the flagship extraction
+    # feature cannot work at all, so ops must not ship it. Local/selfhosted is
+    # a warning. Mirrors hosted_api._llm_provider_available +
+    # sdk._build_session_llm_extractor exactly (the seam they must agree on).
     import os as _os
     hosted = bool(_os.environ.get("FLY_APP_NAME"))
     mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
@@ -5399,7 +5433,8 @@ def _cmd_doctor(args):
                         results.append(("OpenRouter model", "⚠️", warning))
         else:
             detail = (
-                "no LLM provider key — POST /v1/sessions fails closed (503). "
+                "no LLM provider key — captures are STORED (turns only), but "
+                "LLM extraction into memory is skipped. "
                 f"Set one of: {' / '.join(_LLM_PROVIDER_KEYS)} "
                 "(docs/infra-runbook.md §4.6)."
             )

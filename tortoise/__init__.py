@@ -179,7 +179,11 @@ if _OriginalFalkorDB is not None:
             apply (non-ephemeral path, flag unset, other clients connected,
             or the socket is unreachable).
             """
-            if atexit_fast_close(getattr(self, "client", self)):
+            # #4214: `at_exit=True` — this registration is the `atexit`
+            # seam only, so a spent exit budget stops the cascade instead of
+            # letting it block `Py_FinalizeEx`.
+            if atexit_fast_close(getattr(self, "client", self),
+                                 at_exit=True):
                 self._t_closed = True
                 # #3599: the fast path bypasses close()/_t_close — release
                 # the owner record here so a normal exit never leaves a

@@ -48,6 +48,28 @@ Probing is read-only and fail-closed: CLIENT LIST goes over a plain unix
 socket (redis-cli or raw RESP) and never kills or mutates the probed
 server (#849); if the client state cannot be determined the server is
 skipped, never killed.
+
+PROVENANCE GUARD (#4136, the T2/T3/T4 residual of #4098). `_is_ephemeral_dir`
+is a SCOPE predicate (stay in our namespace) and never proved PROVENANCE:
+on a shared world-writable tempdir (Linux `/tmp`, mode 1777) a different
+local uid can author every piece of evidence the destruction predicates
+read (the `tmp…` name, a dead socket, the mtime, the owner records, the
+`redis.pid`). That made the reaper's SIGTERM and rmtree authority an
+unprivileged attacker's: an attacker-authored `redis.config` `pidfile`
+named a live victim pid (SIGTERM), and its `dir=` named a bystander dir
+(rmtree). Every destruction path therefore now requires the candidate
+directory to be OWNED BY THE INVOKING EFFECTIVE UID, re-checked at the
+POINT OF ACTION (`_dir_owned_by_euid`, `O_NOFOLLOW`+`fstat`) so a path
+swapped between discovery and the action is refused too (T4). Ownership is
+the one property a foreign uid cannot forge. A kill whose candidate dir has
+already vanished is authorized only by the live pid's OWN argv naming that
+dir (the pass-1 binding — no foreign uid can edit another process's
+command line). The policy is STRICT-ONLY:
+there is deliberately no environment override, config flag, or allowlist
+to act on another uid's directory — a root-run scheduled sweep therefore
+reaps nothing (not the documented deployment; see
+docs/infra/embedded-reaper-cron.md). Fail closed: when ownership cannot be
+determined the destruction is skipped, never attempted.
 """
 from __future__ import annotations
 
@@ -212,6 +234,144 @@ def _is_ephemeral_dir(dbdir_real: str, tmpdir_real: str) -> bool:
     return any(part.startswith(EPHEMERAL_PREFIXES) for part in rel.parts)
 
 
+def _dir_owned_by_euid(path: str | None) -> bool:
+    """PROVENANCE guard (#4136): True only when `path` is a directory owned
+    by the invoking effective uid.
+
+    This is the boundary `_is_ephemeral_dir` never was. The reaper's
+    destruction predicates are all authorized by files read out of the
+    candidate directory; on a shared, world-writable tempdir (Linux `/tmp`,
+    mode 1777) a different local uid can author every one of them. Inode
+    ownership is the one property a foreign uid cannot forge (DAC plus the
+    sticky bit make the entry theirs, not ours), so it is what every
+    destruction path requires.
+
+    Evaluated at the POINT OF ACTION, never cached from discovery: the dir
+    is re-opened here with `O_NOFOLLOW`/`O_DIRECTORY` and the ownership read
+    from the resulting fd (`fstat`), so the verdict belongs to the inode the
+    action is about to touch and a path swapped for a symlink in the
+    discovery↔action window is refused (T4 of #4098's threat model).
+
+    Fail closed: a missing path, a non-directory, an unopenable dir, or an
+    unreadable owner returns False. No override exists by decision (#4136).
+    """
+    if not path:
+        return False
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    return st.st_uid == os.geteuid()
+
+
+def _dir_owner_of(path: str | None) -> int | None:
+    """Owning uid of `path` (no-follow), or None when unreadable — for
+    log lines only; never an authorization decision (use
+    `_dir_owned_by_euid`)."""
+    if not path:
+        return None
+    try:
+        return os.lstat(path).st_uid
+    except OSError:
+        return None
+
+
+def _pid_cmdline_names_dir(pid: int, dbdir: str) -> bool:
+    """True when the LIVE process `pid`'s own argv names `dbdir`.
+
+    #4136: the unforgeable provenance binding for the socket-less kill arm.
+    A foreign uid cannot edit another process's command line, so "this live
+    pid's argv names this directory" cannot be authored by reading files out
+    of the candidate dir. Two forms are matched:
+      - `_socket_dir_from_cmdline` (the pass-1 binding: an inline
+        `unixsocket:`/`--unixsocket` argv, or the config file's own directive);
+      - the config-file argv form redislite uses on macOS
+        (`redis-server <dbdir>/redis.config …`) — matched on the ARGV path
+        alone, because the config file itself is often already gone with the
+        directory, which would otherwise strand a genuine socket-less orphan.
+
+    `dbdir` is compared as ALREADY-CANONICAL text (it is `os.path.realpath`'d
+    at discovery, as is `_socket_dir_from_cmdline`'s result) and is NEVER
+    re-resolved here: `os.path.realpath(dbdir)` would follow a symlink the
+    attacker can plant at the very path this arm has just observed absent,
+    forging the binding (the caller's T0-absent race). Only the argv-derived
+    side is resolved, and that side is the victim's own argv.
+    """
+    if not pid or not dbdir:
+        return False
+    try:
+        named = _socket_dir_from_cmdline(pid)
+        if named and named == dbdir:
+            return True
+        m = re.search(r"(\S+/redis\.config)\b", _cmdline(pid))
+        if not m:
+            return False
+        argv_dir = os.path.realpath(os.path.dirname(m.group(1)))
+    except OSError:
+        # A path that vanishes/loops mid-resolution (an attacker toggling it)
+        # must fail closed, never abort the sweep.
+        return False
+    return argv_dir == dbdir
+
+
+def _kill_provenance_refusal(record: dict) -> str | None:
+    """Return a refusal reason when a kill is not provenance-authorized.
+
+    #4136: a SIGTERM is authorized EITHER by the candidate directory (the
+    home of every piece of evidence that admitted the record) being owned
+    by our euid, OR — when that directory is gone — by the live pid's OWN
+    argv naming that directory (`_pid_cmdline_names_dir`, the pass-1
+    binding).
+
+    The second arm preserves the legitimate socket-less orphan class
+    (#1642 FIX 3): such a record can only ever be discovered from the live
+    server's own command line, so the binding cannot be forged by a foreign
+    uid — it cannot edit another process's argv — while a decoy whose dir is
+    deleted in the discovery↔action window (T4) is refused.
+
+    Presence is a SINGLE `lstat` snapshot and the absent arm never resolves
+    `dbdir`, so an attacker who toggles the path (absent → symlink to a dir
+    the victim's argv names) cannot forge the binding.
+
+    None means "authorized". Fail closed: an unreadable/absent dir with no
+    pid binding is refused.
+    """
+    dbdir = record.get("dbdir") or ""
+    if not dbdir:
+        socket_path = record.get("socket_path") or ""
+        dbdir = os.path.dirname(socket_path) if socket_path else ""
+    if not dbdir:
+        return "candidate carries no directory to authorize its kill"
+    try:
+        os.lstat(dbdir)
+        present = True
+    except FileNotFoundError:
+        present = False
+    except OSError:
+        # unreadable / ELOOP / etc — cannot prove provenance, fail closed
+        return f"candidate dir {dbdir!r} cannot be inspected"
+    if present:
+        if _dir_owned_by_euid(dbdir):
+            return None
+        return (f"candidate dir {dbdir!r} is not owned by euid "
+                f"{os.geteuid()} (owner {_dir_owner_of(dbdir)})")
+    pid = record.get("pid")
+    if pid and _pid_cmdline_names_dir(pid, dbdir):
+        return None
+    return (f"candidate dir {dbdir!r} is gone and no live process names it "
+            f"(pid {pid})")
+
+
 def active_suite_tokens() -> list[str]:
     """List active pytest-suite marker tokens (filenames in ACTIVE_SUITES_DIR).
 
@@ -317,8 +477,25 @@ def _parse_min_uptime() -> int:
     return val
 
 
+#: #4214: `os.path.realpath(tempfile.gettempdir())` memoized once per process.
+#: The reaper calls this from its per-record classification loop, and the
+#: realpath walk re-stats the temp root itself — on a leak-degraded box that
+#: is the single most expensive syscall in the sweep (0.4–3.4 s measured at
+#: nlink 55 k). The value is a process constant, BUT `tempfile.tempdir` is
+#: assignable (tests redirect it), so the memo is keyed on the raw value and
+#: is recomputed whenever that changes — a pure memo with no invalidation
+#: would pin the first root forever and silently defeat every redirect.
+_REAL_TEMPDIR: str | None = None
+_REAL_TEMPDIR_RAW: str | None = None
+
+
 def _real_gettempdir() -> str:
-    return os.path.realpath(tempfile.gettempdir())
+    global _REAL_TEMPDIR, _REAL_TEMPDIR_RAW
+    raw = tempfile.gettempdir()
+    if _REAL_TEMPDIR is None or raw != _REAL_TEMPDIR_RAW:
+        _REAL_TEMPDIR = os.path.realpath(raw)
+        _REAL_TEMPDIR_RAW = raw
+    return _REAL_TEMPDIR
 
 
 def _registry_for(socket_dir: str) -> dict | None:
@@ -1730,6 +1907,19 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                 owners_now[0], record["socket_path"])
             continue
 
+        # #4136 provenance guard — the SIGTERM authority is exercised HERE,
+        # so the check lives here (not at discovery): a foreign-authored
+        # candidate dir cannot authorize a kill (T2), and a dir swapped
+        # since discovery is refused (T4). A vanished dir must be bound to
+        # the live process that names it (socket-less orphans, #1642 FIX 3).
+        refusal = _kill_provenance_refusal(record)
+        if refusal is not None:
+            logger.warning(
+                "refusing to kill PID %s: %s — provenance guard (#4136); "
+                "skipping %s", record.get("pid"), refusal,
+                record["socket_path"])
+            continue
+
         if dry_run:
             logger.warning("[DRY-RUN] would kill PID %s (%s)",
                            record["pid"], record["socket_path"])
@@ -1865,6 +2055,20 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
             return None
     except OSError:
         return None
+    # Guard 5.5 (#4136): PROVENANCE. Every guard above is satisfied by
+    # evidence the candidate dir's owner authored; ownership of the
+    # directory is the one property a foreign uid cannot forge. Checked on
+    # the RAW record path with no-follow (NOT the realpath'd `dbdir_real`),
+    # so a path swapped for a symlink since discovery is refused (T4)
+    # rather than resolved onto whatever it now points at. Placed at the
+    # action — immediately before the first mutation (the marker write) and
+    # before the dry-run branch, so the reported set equals the acted set.
+    if not _dir_owned_by_euid(dbdir):
+        logger.warning(
+            "stale dir %r is not a directory owned by euid %d (owner %s) — "
+            "provenance guard (#4136), skipping", dbdir, os.geteuid(),
+            _dir_owner_of(dbdir))
+        return None
     if dry_run:
         logger.warning("[DRY-RUN] would remove stale socket dir %s", dbdir_real)
         return record
@@ -1949,7 +2153,10 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
         logger.warning("quarantined pidfile now a live redis-server (%s), "
                        "leaving dir: %s", moved_pid, renamed)
         return None
-    _cleanup_tempdir(renamed)
+    if not _cleanup_tempdir(renamed):
+        logger.warning("provenance guard refused quarantine cleanup, "
+                       "leaving dir: %s", renamed)
+        return None
     if os.path.exists(renamed):
         logger.warning("partial rmtree leftover, will re-probe next sweep: %s",
                        renamed)
@@ -2044,13 +2251,29 @@ def _kill(pid: int, sigterm_timeout: float) -> None:
         pass
 
 
-def _cleanup_tempdir(dbdir: str | None) -> None:
+def _cleanup_tempdir(dbdir: str | None) -> bool:
+    """Guarded rmtree of a candidate tempdir.
+
+    #4136: this is the single choke point for every rmtree the reaper
+    performs, so the PROVENANCE ownership guard lives here as well as at
+    each caller — a foreign-owned path, or one swapped for a symlink, is
+    refused LOUDLY and never handed to `shutil.rmtree`. Returns True when
+    the path was handed to rmtree (removal may still have partially
+    failed — that converges next sweep), False when the guard refused it.
+    """
     if not dbdir:
-        return
+        return False
+    if not _dir_owned_by_euid(dbdir):
+        logger.warning(
+            "refusing to remove %r: not a directory owned by euid %d "
+            "(owner %s) — provenance guard (#4136)", dbdir, os.geteuid(),
+            _dir_owner_of(dbdir))
+        return False
     try:
         shutil.rmtree(dbdir, ignore_errors=True)
     except OSError:
         logger.warning("could not remove tempdir %s", dbdir)
+    return True
 
 
 # ── CLI + singleton lock + timeout (plan Task 3) ────────────────────
@@ -2362,6 +2585,17 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
         # temp naming, a planted decoy) must never be touched. The marker
         # is written at rename-aside time in the stale action.
         if not os.path.exists(os.path.join(q, REAPER_OWNED_MARKER)):
+            continue
+        # #4136 provenance guard: the quarantine sweep's rmtree may only
+        # touch a directory owned by our euid. A foreign uid can plant a
+        # same-suffix dir plus a marker (the marker test is a plain
+        # `exists`, which follows a symlink), so `_is_ephemeral_dir`'s name
+        # scope is not provenance. Checked at the action, no-follow.
+        if not _dir_owned_by_euid(q):
+            logger.warning(
+                "quarantined dir %r is not owned by euid %d (owner %s) — "
+                "provenance guard (#4136), leaving", q, os.geteuid(),
+                _dir_owner_of(q))
             continue
         if not _is_ephemeral_dir(os.path.realpath(q),
                                  os.path.realpath(tempfile.gettempdir())):

@@ -34,6 +34,19 @@ so orphans are cleaned within 2-3 spawn cycles).
 > `TORTOISE_REAPER_FULL_SCAN=1`) restores the pre-#4068 **un-scoped**
 > enumeration for operator forensics; it can reach nothing an earlier release
 > could not, and the scheduled sweep stays scoped.
+>
+> **Provenance guard (#4136) — strict-only.** Every destruction path (the
+> SIGTERM admission, the stale-dir rename/rmtree, the quarantine sweep, and
+> the kill path's tempdir cleanup) acts only on a candidate directory owned
+> by the **invoking effective uid**, re-checked at the point of action. This
+> closes the T2/T3/T4 primitives of #4098's threat model on a shared
+> world-writable tempdir: evidence authored by another local uid can no
+> longer authorize a kill or an rmtree. The schedule above is documented as,
+> and installed as, a **user** cron/launchd job — unaffected. A **root-run**
+> sweep now reaps nothing (a non-root user's tempdir entries are not
+> root-owned): there is deliberately **no override, config flag, or
+> allowlist** to act on another uid's directory. Run the schedule as the
+> user whose orphans you want reaped.
 
 ## Cron (Linux / macOS with cron)
 

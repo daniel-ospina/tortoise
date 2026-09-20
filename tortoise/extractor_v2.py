@@ -4075,6 +4075,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     # ── payload assembly (mirrors _summary_to_payload / _stream_to_payload) ─
     from datetime import datetime, timezone
+
+    from tortoise.file_indexer import derive_source_content_hash
+    # #4005: the session Source's integrity anchor is the RAW conversation
+    # hash (a hash is not the raw — W-7 stays intact), NOT a hash of the
+    # identity url. The hosted commit path stores it verbatim.
+    raw_content_hash = derive_source_content_hash(
+        _edus_to_text(edus) if edus else "")
     payload = {
         "schema_version": "1", "session_id": session_id,
         "client_commit_id": "",
@@ -4083,7 +4090,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                       "calibration_version": "v2"},
         "summary": (summary or "")[:2000],
         "story_arc": (story_arc or "")[:4000],
-        "provenance_refs": [{"path": "session.md", "spans": []}],
+        "provenance_refs": [{"path": "session.md", "spans": [],
+                             "contentHash": raw_content_hash}],
         "sources": [],
         "entities": payload_entities, "points": payload_points,
         "events": payload_events, "operators": payload_operators,
