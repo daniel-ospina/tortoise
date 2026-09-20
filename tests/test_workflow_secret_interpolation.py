@@ -49,8 +49,15 @@ _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows
 _SECRET_CONTEXT = re.compile(r"\bsecrets\b", re.IGNORECASE)
 # `env` context references — dot and index form, both case-insensitive like the
 # runner's context lookup: `env.KEY`, `env['KEY']`, `env["KEY"]`.
-_ENV_DOT_REF = re.compile(r"\benv\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+_ENV_DOT_REF = re.compile(r"\benv\s*\.\s*([A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
 _ENV_INDEX_REF = re.compile(r"\benv\s*\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
+# Bare-context references: `${{ env }}` / `${{ toJSON(env) }}` dump every env
+# value, and `toJSON(needs)` / `${{ needs.j.outputs }}` dump job outputs — so a
+# bare `env` is a hazard whenever any visible key is secret-bound, and a bare
+# `needs`/`outputs` is one when a referenced job has a secret-derived output.
+_ENV_BARE_REF = re.compile(r"\benv\b(?!\s*[.\[])", re.IGNORECASE)
+_NEEDS_BARE_REF = re.compile(r"\bneeds\b(?!\s*[.\[])", re.IGNORECASE)
+_OUTPUTS_BARE_REF = re.compile(r"\boutputs\b(?!\s*['\"]?\s*\]?\s*[.\[])", re.IGNORECASE)
 # `needs.<job>.outputs.<name>` — a job output consumed downstream, dot and index
 # form (`needs['job'].outputs['name']`), case-insensitive like the runner. The
 # accessors tolerate whitespace: the Actions lexer skips whitespace between
@@ -105,20 +112,26 @@ def _env_refs(text: str) -> list[str]:
     return _ENV_DOT_REF.findall(text) + [m[1] for m in _ENV_INDEX_REF.findall(text)]
 
 
-def _resolve_secret_env_keys(*envs: dict | None) -> set[str]:
+def _resolve_secret_env_keys(
+    *envs: dict | None, secret_outputs: frozenset[tuple[str, str]] = frozenset()
+) -> set[str]:
     """Env keys bound, directly or transitively, to a secret in the given maps.
 
-    A key is secret-bound when its value contains a ``secrets`` context, or
-    ``${{ env.OTHER }}`` where OTHER is itself secret-bound (a fixpoint, so
-    chains of any length resolve). ``envs`` should carry every scope visible to
-    the step — workflow root, job, and step — since the ``env`` context unions
-    all three.
+    A key is secret-bound when its value contains a ``secrets`` context,
+    ``${{ env.OTHER }}`` where OTHER is itself secret-bound, or
+    ``${{ needs.<job>.outputs.<name> }}`` naming a secret-derived output — a
+    fixpoint, so chains of any length resolve. ``envs`` should carry every scope
+    visible to the step (workflow root, job, step): the ``env`` context unions
+    them. Scopes are unioned conservatively (fail-closed): a narrower scope that
+    shadows a secret-bound key with a plain value is still treated as
+    secret-bound.
     """
     keys: set[str] = set()
     for env in envs:
         for name, value in (env or {}).items():
             if _SECRET_CONTEXT.search(str(value)):
                 keys.add(str(name))
+    lowered_out = {(job.lower(), name.lower()) for job, name in secret_outputs}
     changed = True
     while changed:
         changed = False
@@ -127,7 +140,10 @@ def _resolve_secret_env_keys(*envs: dict | None) -> set[str]:
             for name, value in (env or {}).items():
                 if str(name) in keys:
                     continue
-                if any(r.lower() in lowered for r in _env_refs(str(value))):
+                text = str(value)
+                via_env = any(r.lower() in lowered for r in _env_refs(text))
+                via_out = bool(_needs_output_refs(text) & lowered_out)
+                if via_env or via_out:
                     keys.add(str(name))
                     changed = True
     return keys
@@ -136,22 +152,42 @@ def _resolve_secret_env_keys(*envs: dict | None) -> set[str]:
 def _secret_output_keys(doc: dict) -> set[tuple[str, str]]:
     """``(job, output_name)`` whose job-output definition reads a secret.
 
-    A definition reads a secret directly (``secrets`` context) or through a
-    secret-bound ``env`` key visible to the job (workflow-root + job scope,
-    transitively). Deeper flow — a ``steps.<id>.outputs`` chain — is outside the
-    guard's scope.
+    A definition reads a secret directly (``secrets`` context), through a
+    secret-bound ``env`` key visible to the job (workflow-root + job scope), or
+    through another secret-derived job output. Env keys and outputs are MUTUALLY
+    recursive (an output defined from an env key that is itself bound to an
+    output), so they are resolved in one joint fixpoint. A ``steps.<id>.outputs``
+    chain is outside the guard's scope.
     """
-    found: set[tuple[str, str]] = set()
     root_env = doc.get("env")
-    for job_name, job in (doc.get("jobs") or {}).items():
-        job = job or {}
-        keys = {k.lower() for k in _resolve_secret_env_keys(root_env, job.get("env"))}
-        for name, value in (job.get("outputs") or {}).items():
-            text = str(value)
-            via_env = any(r.lower() in keys for r in _env_refs(text))
-            if _SECRET_CONTEXT.search(text) or via_env:
-                found.add((str(job_name), str(name)))
-    return found
+    jobs = {str(n): (j or {}) for n, j in (doc.get("jobs") or {}).items()}
+    outputs: set[tuple[str, str]] = set()
+    job_keys: dict[str, set[str]] = {name: set() for name in jobs}
+    changed = True
+    while changed:
+        changed = False
+        lowered_out = frozenset((j.lower(), n.lower()) for j, n in outputs)
+        for job_name, job in jobs.items():
+            keys = _resolve_secret_env_keys(
+                root_env, job.get("env"), secret_outputs=lowered_out
+            )
+            if keys != job_keys[job_name]:
+                job_keys[job_name] = keys
+                changed = True
+            env_lower = {k.lower() for k in keys}
+            for name, value in (job.get("outputs") or {}).items():
+                if (job_name, str(name)) in outputs:
+                    continue
+                text = str(value)
+                via_env = any(r.lower() in env_lower for r in _env_refs(text))
+                if (
+                    _SECRET_CONTEXT.search(text)
+                    or via_env
+                    or bool(_needs_output_refs(text) & lowered_out)
+                ):
+                    outputs.add((job_name, str(name)))
+                    changed = True
+    return outputs
 
 
 def _needs_output_refs(span: str) -> set[tuple[str, str]]:
@@ -180,10 +216,21 @@ def _run_secret_uses(
     uses = _secret_interpolations(run)
     lowered_env = {k.lower() for k in secret_env_keys}
     lowered_out = {(job.lower(), name.lower()) for job, name in secret_outputs}
+    jobs_with_secret_outputs = {job for job, _name in lowered_out}
     for span in _expression_spans(run):
-        refs_env = any(r.lower() in lowered_env for r in _env_refs(span))
-        refs_out = bool(_needs_output_refs(span) & lowered_out)
-        if (refs_env or refs_out) and span not in uses:
+        via_env = any(r.lower() in lowered_env for r in _env_refs(span))
+        via_out = bool(_needs_output_refs(span) & lowered_out)
+        # Whole-context / bare dumps of a carrier that holds a secret.
+        if _ENV_BARE_REF.search(span) and secret_env_keys:
+            via_env = True
+        if _NEEDS_BARE_REF.search(span) and secret_outputs:
+            via_out = True
+        if _OUTPUTS_BARE_REF.search(span):
+            job_refs = {j.lower() for j in _NEEDS_JOB_DOT_REF.findall(span)}
+            job_refs |= {m[1].lower() for m in _NEEDS_JOB_INDEX_REF.findall(span)}
+            if job_refs & jobs_with_secret_outputs:
+                via_out = True
+        if (via_env or via_out) and span not in uses:
             uses.append(span)
     return uses
 
@@ -253,8 +300,8 @@ def _references_outside_double_quotes(run: str, var: str) -> list[str]:
 
 
 # Two ``deploy-hosted.yml`` steps still carry a pre-fix interpolation; the sweep
-# defers them so the pre-fix offenders are not re-reported while that file is
-# owned by another change. The deferral is
+# defers exactly those two ``(job, step)`` identities so they are not reported as
+# fresh regressions. The deferral is
 # exact: it applies only while that file's offenders are these two (job, step)
 # identities — exact set AND count. A new interpolating step there, a duplicate
 # reusing a pinned name, or a pinned name in another job changes the identity
@@ -327,13 +374,16 @@ def _offending_identities(doc: dict) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     root_env = doc.get("env")
     secret_outputs = _secret_output_keys(doc)
+    lowered_out = frozenset((j.lower(), n.lower()) for j, n in secret_outputs)
     for job_name, job in (doc.get("jobs") or {}).items():
         job = job or {}
         for step in job.get("steps", []):
             run = step.get("run")
             if not isinstance(run, str):
                 continue
-            keys = _resolve_secret_env_keys(root_env, job.get("env"), step.get("env"))
+            keys = _resolve_secret_env_keys(
+                root_env, job.get("env"), step.get("env"), secret_outputs=lowered_out
+            )
             if _run_secret_uses(run, keys, secret_outputs):
                 found.append((job_name, step.get("name") or "<unnamed>"))
     return found
@@ -605,6 +655,110 @@ def test_offender_scan_is_whitespace_insensitive_on_accessors():
         },
     }
     assert _offending_steps(defined_via_env) == ["leak"]
+
+
+def test_offender_scan_follows_a_secret_output_into_env_and_output_chains():
+    """A secret-derived job output used as the source of an `env` key, or of
+    another job output, must still resolve — the carriers compose."""
+    doc = {
+        "jobs": {
+            "prep": {
+                "outputs": {"token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
+                "steps": [{"run": "echo ok"}],
+            },
+            "relay": {
+                "needs": "prep",
+                "outputs": {"forwarded": "${{ needs.prep.outputs.token }}"},
+                "steps": [{"run": "echo ok"}],
+            },
+            "use": {
+                "needs": "relay",
+                "env": {"TOKEN": "${{ needs.prep.outputs.token }}"},
+                "steps": [
+                    {"name": "env from output", "run": 'curl "${{ env.TOKEN }}"'},
+                    {"name": "chain output", "run": 'curl "${{ needs.relay.outputs.forwarded }}"'},
+                ],
+            },
+        }
+    }
+    assert _offending_steps(doc) == ["env from output", "chain output"]
+
+
+def test_offender_scan_resolves_output_env_output_recursion():
+    """An output defined from an env key that is itself bound to a secret output
+    must resolve — env keys and outputs are mutually recursive."""
+    doc = {
+        "jobs": {
+            "prep": {
+                "outputs": {"token": "${{ secrets.DEPLOY_TOKEN }}"},
+                "steps": [{"run": "echo ok"}],
+            },
+            "mid": {
+                "needs": "prep",
+                "env": {"E": "${{ needs.prep.outputs.token }}"},
+                "outputs": {"forwarded": "${{ env.E }}"},
+                "steps": [{"run": "echo ok"}],
+            },
+            "use": {
+                "needs": "mid",
+                "steps": [
+                    {
+                        "name": "leak",
+                        "run": 'curl -H "Authorization: Bearer ${{ needs.mid.outputs.forwarded }}" https://x',
+                    }
+                ],
+            },
+        }
+    }
+    assert ("mid", "forwarded") in _secret_output_keys(doc)
+    assert _offending_steps(doc) == ["leak"]
+
+
+def test_offender_scan_covers_hyphenated_env_keys_and_whole_context_dumps():
+    """A hyphenated env key is a valid read (`env.MY-TOKEN`), and a whole-context
+    dump (`env`, `toJSON(needs)`, `needs.j.outputs`) leaks every secret it holds."""
+    hyphen = {
+        "jobs": {
+            "j": {
+                "env": {"MY-TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
+                "steps": [{"name": "leak", "run": 'curl "${{ env.MY-TOKEN }}"'},
+                          {"name": "plain", "run": 'curl "${{ env.OTHER }}"'},
+                ],
+            }
+        }
+    }
+    assert _offending_steps(hyphen) == ["leak"]
+
+    dumps = {
+        "jobs": {
+            "prep": {
+                "outputs": {"token": "${{ secrets.DEPLOY_TOKEN }}"},
+                "steps": [{"run": "echo ok"}],
+            },
+            "use": {
+                "needs": "prep",
+                "env": {"K": "${{ secrets.DEPLOY_TOKEN }}"},
+                "steps": [
+                    {"name": "dump env", "run": 'echo "${{ toJSON(env) }}"'},
+                    {"name": "dump needs", "run": 'echo "${{ toJSON(needs) }}"'},
+                    {"name": "dump outputs", "run": 'echo "${{ needs.prep.outputs }}"'},
+                ],
+            },
+        }
+    }
+    assert _offending_steps(dumps) == ["dump env", "dump needs", "dump outputs"]
+    # A non-secret env key read as a normal reference is not a dump and not flagged.
+    plain = {
+        "jobs": {
+            "j": {
+                "env": {"K": "value"},
+                "steps": [{"name": "plain", "run": 'echo "${{ env.K }}"'},
+                          {"name": "plain outputs", "run": 'echo "${{ toJSON(needs) }}"'},
+                ],
+            }
+        }
+    }
+    assert _offending_steps(plain) == []
 
 
 def test_sweep_enumerates_both_workflow_extensions(tmp_path):
