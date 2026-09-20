@@ -23043,7 +23043,7 @@ async def _org_restore_lock(org_id: str) -> asyncio.Lock:
 
 @app.post("/backups", status_code=201)
 async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """Trigger an on-demand backup of the org graph (Pro tier)."""
+    """Trigger an on-demand backup of the org graph (Builder plan, tier `pro`)."""
     org_id = org.get("org_id")
     if not org_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -23182,7 +23182,7 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
 
 @app.post("/backups/restore")
 async def backups_restore(body: BackupRestoreRequest, request: Request, org: dict = Depends(get_current_org_session)):  # noqa: B008
-    """Restore the org graph from a backup (Pro tier; confirm=true required).
+    """Restore the org graph from a backup (Builder plan, tier `pro`; confirm=true required).
 
     Restores into a temp graph, verifies node/edge counts against the payload,
     then swaps (pre-restore safety copy → delete live → copy temp). The live
