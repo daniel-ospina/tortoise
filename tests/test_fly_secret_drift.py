@@ -574,10 +574,16 @@ jobs:
     assert "empty when every GitHub secret is present" in r.stderr
 
 
-def test_step_level_if_makes_every_name_conditional():
-    """A YAML `if:` on the payload step gates the whole payload.
+def test_step_level_if_is_exit_2_not_certified():
+    """A YAML `if:` on the payload step is an UNVERIFIABLE state → exit 2.
 
-    It is not part of the `run:` shell, so execution cannot see it.
+    It is not part of the `run:` shell, so execution cannot see it — and the
+    checker cannot evaluate it either. Certifying the names anyway (as merely
+    CONDITIONAL, exit 0) is the #4126 state: on a run where the condition is
+    false nothing propagates and every Fly value is hand-managed, while the gate
+    is green. `skip-fly-secret-provenance` cannot bypass exit 2, which is the
+    point: the workflow must move the condition inside the shell, where the
+    execution-based classifier sees the guard.
     """
     wf = _fixture(
         "step-if.yml",
@@ -599,9 +605,73 @@ jobs:
         ),
         workflow=wf,
     )
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "1 conditionally propagated" in r.stdout
-    assert "0 managed" in r.stdout
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "step-level `if:`" in r.stderr
+
+
+def test_assignment_visible_only_in_the_run_sample_is_undeclared():
+    """A name assigned only under a composite guard the samples do not model.
+
+    `[ -n A ] && [ -z B ]` reproduces in NEITHER the all-present nor the
+    none-present payload, so the name is visible only in the payload the RUN
+    builds — and the deploy assigns it exactly as much as any other. The reverse
+    checks unioned only the synthetic samples, so it was invisible (#4259
+    review).
+    """
+    wf = _fixture(
+        "hidden.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="BASE=${{ secrets.BASE }}"
+          [ -n "${{ secrets.A }}" ] && [ -z "${{ secrets.B }}" ] && ARGS="$ARGS HIDDEN_NAME=1"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture("hidden-manifest.txt", "BASE  gh-secret:BASE\n")
+    r = _run(
+        _secrets_file(["BASE"], "hidden.json"),
+        manifest=manifest,
+        workflow=wf,
+        present={"BASE", "A"},
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNDECLARED" in r.stdout and "HIDDEN_NAME" in r.stdout
+
+
+def test_fly_toml_env_name_assigned_only_in_the_run_sample_is_stale():
+    """The fly-toml-env reverse check reads the run sample too.
+
+    Same composite-guard shape: the deploy creates the Fly secret that shadows
+    the versioned `[env]` value, so the declaration is wrong — and the synthetic
+    samples cannot see it (#4259 review).
+    """
+    wf = _fixture(
+        "hidden-env.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="BASE=${{ secrets.BASE }}"
+          [ -n "${{ secrets.A }}" ] && [ -z "${{ secrets.B }}" ] && ARGS="$ARGS ENV_ONLY_KEY=1"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "hidden-env-manifest.txt",
+        "BASE  gh-secret:BASE\nENV_ONLY_KEY  fly-toml-env\n",
+    )
+    r = _run(
+        _secrets_file(["BASE"], "hidden-env.json"),
+        manifest=manifest,
+        workflow=wf,
+        present={"BASE", "A"},
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ENV_ONLY_KEY" in r.stdout and "shadows [env]" in r.stdout
 
 
 def test_fly_toml_env_boundary_is_the_env_table_only():

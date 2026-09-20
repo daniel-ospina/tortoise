@@ -135,27 +135,28 @@ _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 _SECRET_TMPL_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
 
 
-def extract_propagation_blocks(text: str) -> list[tuple[str, bool]]:
-    """Every `run:` block that builds a Fly secrets payload, plus its step `if:`.
+def extract_propagation_blocks(text: str) -> list[str]:
+    """Every `run:` block that builds a Fly secrets payload, as shell text.
 
     ALL of them, not just the first: the contract is bidirectional — a Fly
     variable the deploy can assign must be declared — and a second propagation
     step is exactly as much a managing source as the first. Reading only the
     first left a name assigned by a later step undeclared and invisible.
 
-    Each entry is ``(shell, step_conditional)``. ``step_conditional`` is a YAML
-    ``if:`` on the step, which is not part of the `run:` shell, so executing the
-    block cannot see it: a gated step means every name it assigns is only
-    propagated when the condition holds, which is the fail-safe direction.
-
-    Raises ValueError when a payload step cannot be located — fail-closed,
-    because a guard that cannot read the payload would silently certify any fleet.
+    Raises ValueError when a payload step cannot be located (fail-closed: a guard
+    that cannot read the payload would silently certify any fleet), and when a
+    payload step carries a YAML step-level `if:`. That `if:` is not part of the
+    `run:` shell, so executing the block cannot see it, and the checker cannot
+    evaluate it either — it would then certify names from a step that may never
+    run, which is the #4126 state (a propagation that silently does nothing while
+    the gate goes green). The remedy is to move the condition INSIDE the `run:`
+    shell, where the execution-based classifier sees the guard.
     """
     lines = text.splitlines()
     cmd_indices = [i for i, ln in enumerate(lines) if _PAYLOAD_CMD_RE.search(ln)]
     if not cmd_indices:
         raise ValueError("no `flyctl secrets set` invocation found in the deploy workflow")
-    blocks: list[tuple[str, bool]] = []
+    blocks: list[str] = []
     seen: set[int] = set()
     for cmd_index in cmd_indices:
         run_index = None
@@ -170,6 +171,13 @@ def extract_propagation_blocks(text: str) -> list[tuple[str, bool]]:
             # of its argv is what the deploy assigns.
             continue
         seen.add(run_index)
+        if _step_is_conditional(lines, run_index):
+            raise ValueError(
+                "a `run:` block that sets the Fly secrets carries a step-level `if:` — "
+                "the checker cannot evaluate YAML conditions, so it cannot certify that "
+                "the payload runs. Move the condition inside the `run:` shell (where the "
+                "execution-based classifier can see the guard) or drop it"
+            )
         indent = len(lines[run_index]) - len(lines[run_index].lstrip())
         body: list[str] = []
         for line in lines[run_index + 1 :]:
@@ -182,12 +190,7 @@ def extract_propagation_blocks(text: str) -> list[tuple[str, bool]]:
         if not body:
             raise ValueError("the secrets-payload `run:` block is empty")
         block_indent = min((len(ln) - len(ln.lstrip()) for ln in body if ln.strip()), default=0)
-        blocks.append(
-            (
-                "\n".join(ln[block_indent:] for ln in body),
-                _step_is_conditional(lines, run_index),
-            )
-        )
+        blocks.append("\n".join(ln[block_indent:] for ln in body))
     if not blocks:
         raise ValueError("no usable `run:` block holds the secrets payload")
     return blocks
@@ -314,7 +317,7 @@ def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
 
 
 def payload_partition(
-    blocks: list[tuple[str, bool]], gh_present: set[str]
+    scripts: list[str], gh_present: set[str]
 ) -> tuple[set[str], set[str], set[str], dict[str, set[str]]]:
     """``(assigned, unconditional, live, sources)`` over EVERY payload block.
 
@@ -346,14 +349,14 @@ def payload_partition(
     live: set[str] = set()
     guarded: set[str] = set()
     sources: dict[str, set[str]] = {}
-    for script, step_conditional in blocks:
+    for script in scripts:
         secret_names = sorted(set(_SECRET_REF_RE.findall(script)))
         all_present = _capture_payload(script, {name: name for name in secret_names})
         # The payload THIS run builds — markers only for the secrets the runner
         # actually carries. One more execution of the same shell.
         in_run = _capture_payload(script, {name: name for name in gh_present})
         block_assigned = set(all_present)
-        block_unconditional = set() if step_conditional else set(_capture_payload(script, {}))
+        block_unconditional = set(_capture_payload(script, {}))
         guarded |= block_assigned - block_unconditional
         unconditional |= block_unconditional
         assigned |= block_assigned
@@ -552,11 +555,15 @@ def main() -> int:
     # no-secret run, and that assignment happens on EVERY deploy while X is
     # absent — the name is deploy-managed, so it must be declared. Sampling
     # `assigned` alone left it undetectable in either direction (#4126 review).
+    # BOTH samples, plus the one the RUN builds: a name the deploy assigns only
+    # under a guard NEITHER synthetic sample reproduces (e.g. `A present AND B
+    # absent`) is visible only in the run sample, and it is deployed just as much
+    # as any other (#4259 review).
     for name in sorted(set(fly_names) - set(declared)):
         violations.append(
             f"UNDECLARED — {name!r} is on Fly but declared nowhere in {manifest_path.name}"
         )
-    for name in sorted((assigned | unconditional) - set(declared)):
+    for name in sorted((assigned | unconditional | live) - set(declared)):
         violations.append(
             f"UNDECLARED — {name!r} is assigned by {workflow_path.name} but declared "
             f"nowhere in {manifest_path.name}"
@@ -616,7 +623,7 @@ def main() -> int:
                     "Fly secret, which shadows [env] (declare the real source "
                     "instead)"
                 )
-            elif name in assigned or name in unconditional:
+            elif name in assigned or name in unconditional or name in live:
                 # The reverse of the check above: [env] is only the source while
                 # no Fly secret shadows it, and the deploy assigns this name — so
                 # a deploy CREATES the secret that kills the versioned value. Check
