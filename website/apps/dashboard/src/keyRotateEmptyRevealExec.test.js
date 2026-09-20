@@ -106,7 +106,7 @@ function build(deps, decls) {
 }
 
 // ── regenerateKey ───────────────────────────────────────────────────────────
-function rotateEnv({ mintKey } = {}) {
+function rotateEnv({ mintKey, loadAll } = {}) {
   const calls = { rotatedKey: [], error: [], capNotice: [], loadAll: 0, revoke: [], order: [] }
   const rows = [
     { id: 'k-old', key_id: 'k-old', name: 'residue row', key_prefix: 'tt_live_re',
@@ -135,7 +135,7 @@ function rotateEnv({ mintKey } = {}) {
       calls.order.push('delete')
       calls.revoke.push([id, opts])
     },
-    loadAll: async () => { calls.loadAll++ },
+    loadAll: async () => { calls.loadAll++; if (loadAll) await loadAll(calls) },
     setCapNotice: (v) => calls.capNotice.push(v),
     setError: (v) => calls.error.push(v),
     setBusy: () => {},
@@ -186,6 +186,24 @@ test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused
     assert.match(msg, /cannot be shown/,
       `the failure must be surfaced for ${JSON.stringify(value)}`)
   }
+})
+
+test('#4342: a failing refresh cannot overwrite the already-revoked message', async () => {
+  // `loadAll` owns the same `error` slot and overwrites it from its own catch
+  // (main.jsx). If the refusal message were set FIRST, a compound failure (the
+  // rotate legs succeeded, the follow-up read did not) would replace the one
+  // message that tells the user their old key is gone. The refusal must be
+  // surfaced AFTER the refresh — pinned here behaviourally.
+  const { calls, regenerateKey } = rotateEnv({
+    mintKey: async () => ({ id: 'k-new', key_prefix: 'tt_rot_new' }),
+    loadAll: (c) => { c.error.push('Failed to fetch') },
+  })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.rotatedKey, [], 'still no reveal')
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /has already been revoked/,
+    'the rotate truth must survive a refresh failure, not be replaced by the network error')
+  assert.doesNotMatch(msg, /Failed to fetch/)
 })
 
 test('#4342: a successful rotate still latches the plaintext and its expiry echo', async () => {

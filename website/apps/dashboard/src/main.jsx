@@ -6003,8 +6003,16 @@ function claimIntentInFlight() {
       // has.
       const plaintext = revealablePlaintext(mk && (mk.key || mk.api_key))
       if (!plaintext) {
-        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
+        // Refresh FIRST, then surface the reason: `loadAll` owns the same
+        // `error` slot and overwrites it from its own catch, so a compound
+        // failure (the rotate legs succeeded, the refresh did not) would
+        // otherwise replace the one message that tells the user their old key
+        // is gone and which row to clean up. The identity guard mirrors the
+        // stale-response rule — a switch during the refresh must not carry this
+        // team's error under the new team's header.
         await loadAll('')
+        if (orgIdRef.current !== _teamAtCall) return
+        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
         return
       }
       // #2246: no held install — the replacement is shown once and managed
