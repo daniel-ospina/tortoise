@@ -184,7 +184,9 @@ def link_session_entities(proj, session_id: str,
 
     Returns {"attempted", "created", "links": [session/point-target pairs]}
     — attempted = number of link operations attempted (Session + points that
-    had ≥1 match), created = number of NEW aboutObject edges minted.
+    had ≥1 match), created = number of aboutObject edges ACTUALLY CREATED
+    (``link_entity`` reports 0 for an already-existing edge AND for a no-op
+    MERGE whose endpoint is absent, so the counter never over-reports).
     """
     attempted = 0
     created = 0
@@ -279,17 +281,26 @@ ENTITY_LINKED_TRIPLES = frozenset({
 def link_entity(proj, source_label: str, source_id: str, target_id: str,
                 edge_type: str = "aboutObject", target_label: str = "Object",
                 sdk=None) -> int:
-    """Mint ONE ``about*`` edge from (source) to (target); returns 1 when the
-    edge was NEW (0 when it already existed). Probe BEFORE the MERGE so the
-    created counter stays honest.
+    """Mint ONE ``about*`` edge from (source) to (target); returns 1 when an
+    edge was CREATED (0 when it already existed OR when an endpoint is
+    absent, so nothing was created).
 
-    #3664: when ``sdk`` is given, a NEW edge also emits an ``EntityLinked``
-    JSONL record (flat logical identities) so the projection can fold it back
-    on replay — live == rebuild. ``edge_type``/labels are validated against
-    the module's frozen vocabularies (a fail-closed backstop against Cypher
-    interpolation of untrusted values), and the COMBINATION must be a
-    permitted ONTOLOGY §3.2 triple — a field-alone check would admit
-    ``(Session)-[:aboutSubject]->(Subject)``, which the table forbids.
+    The MERGE is read back (``RETURN count(s)``) and the result decides the
+    return value and the journal write: a MERGE whose MATCH found no endpoint
+    pair creates NO edge, and reporting 1 + journaling an ``EntityLinked``
+    for it would make the journal claim an attachment the live graph never
+    had — replay would then RESURRECT that edge (delete → no-op link →
+    same-id re-create), and ``entity_links_created`` would over-report. The
+    pre-probe still short-circuits the already-exists case.
+
+    #3664: when ``sdk`` is given, a CREATED edge also emits an
+    ``EntityLinked`` JSONL record (flat logical identities) so the projection
+    can fold it back on replay — live == rebuild. ``edge_type``/labels are
+    validated against the module's frozen vocabularies (a fail-closed
+    backstop against Cypher interpolation of untrusted values), and the
+    COMBINATION must be a permitted ONTOLOGY §3.2 triple — a field-alone
+    check would admit ``(Session)-[:aboutSubject]->(Subject)``, which the
+    table forbids.
     """
     if edge_type not in ENTITY_LINKED_RELS:
         raise ValueError(
@@ -315,12 +326,17 @@ def link_entity(proj, source_label: str, source_id: str, target_id: str,
     ).result_set
     if pre and pre[0][0]:
         return 0
-    proj.g.query(
+    created = proj.g.query(
         f"MATCH (s:{source_label} {{id:$sid}}), "
         f"(t:{target_label} {{id:$tid}}) "
-        f"MERGE (s)-[:{edge_type}]->(t)",
+        f"MERGE (s)-[:{edge_type}]->(t) RETURN count(s)",
         params={"sid": source_id, "tid": target_id},
-    )
+    ).result_set
+    if not created or not created[0][0]:
+        # The MATCH found no endpoint pair, so the MERGE created nothing.
+        # Return 0 and journal nothing: an edge that does not exist must
+        # neither be reported nor replayed.
+        return 0
     if sdk is not None:
         # JSONL-only (not in _GRAPH_EVENT_TYPES) — the durable carrier the
         # rebuild fold consumes. Best-effort: _emit_event never raises, and a

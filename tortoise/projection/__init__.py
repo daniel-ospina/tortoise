@@ -3596,8 +3596,9 @@ class FalkorProjection(
         # for it: unlike a supersession fold-miss (which means a claim of
         # state was lost), an absent link endpoint is simply an absent
         # entity. A MALFORMED record is different and DOES warn (inside the
-        # fold), as does a stale link suppressed by the hard-delete rule
-        # (silent skip, counted as dropped — see `fold_deferred_entity_links`).
+        # fold). A stale link suppressed by the hard-delete rule is a silent
+        # skip, counted as dropped and never applied (see
+        # `fold_deferred_entity_links`).
         self.fold_deferred_entity_links(
             entity_link_events, journal_hard_delete_seqs(events))
 

@@ -55,28 +55,34 @@ the payload does not name:
   is a 0-row NO-OP, never interpolated into Cypher).
 - **`SessionRecorded`** (#3664) — the `:Session` node's journal carrier (the
   live capture MERGE is a raw write). Fields: `id`, `created_at`,
-  `turn_count`, `harness`, `actor_user_id`, and (on the follow-up emission)
-  `entity_links_attempted` / `entity_links_created`, and (on a third, TRAILING
-  emission written right after the live `SET s.capture_ok /
-  s.capture_extractor`) `capture_ok` / `capture_extractor`. Folded by
+  `turn_count`, `is_episodic`, `harness`, `actor_user_id`, and (on the
+  follow-up emission) `entity_links_attempted` / `entity_links_created`, and
+  (on a third, TRAILING emission written right after the live `SET
+  s.capture_ok / s.capture_extractor`) `capture_ok` / `capture_extractor`.
+  The first emission's payload is `{id, created_at, turn_count, is_episodic}`
+  plus `harness` / `actor_user_id` when set. Folded by
   `FalkorProjection._fold_session_recorded` as an idempotent MERGE keyed on
-  `id` (with `is_episodic=true`), coalesce-preserving `created_at` /
-  `actor_user_id` and taking `turn_count`, `capture_ok` and
-  `capture_extractor` from the latest record. The capture emits a **second**
-  `SessionRecorded` after the entity-linking pass carrying the two outcome
-  counters, and a **third** after the attempt-outcome write carrying
-  `capture_ok` / `capture_extractor`, so all of those fields are durable on
-  the `apply()`-based engines too (the first record is emitted before either
-  result is known and cannot carry them; a null `capture_ok` would otherwise
-  read as the legacy "presumed captured" case at the #2335 retry gate).
+  `id` that always sets `is_episodic=true`, coalesce-preserving `created_at` /
+  `actor_user_id` (first writer wins) and taking `turn_count`, `harness`,
+  `entity_links_attempted`, `entity_links_created`, `capture_ok` and
+  `capture_extractor` from the latest record (last writer wins). The capture
+  then emits a **second** `SessionRecorded` after the entity-linking pass
+  carrying the two outcome counters, and a **third** after the
+  attempt-outcome write carrying `capture_ok` / `capture_extractor`, so all
+  of those fields are durable on the `apply()`-based engines too (the first
+  record is emitted before either result is known and cannot carry them; a
+  null `capture_ok` would otherwise read as the legacy "presumed captured"
+  case at the #2335 retry gate).
 
 **Replay ordering.** `EntityLinked` is deferred to a trailing sweep by all
 four whole-journal replay engines (`rebuild_all`, and the `apply()`-based
 `rebuild` / `recover_from_log` / `backup.restore`'s JSONL fallback), so a link
 whose endpoint is created LATER in the journal still folds. A link whose
-endpoint was HARD-DELETED after it is skipped instead (the record carries its
-journal seq and each engine supplies the hard-delete boundary), so a
-same-id re-creation does not resurrect the deleted link. On `rebuild_all` the
+endpoint was HARD-DELETED after it is skipped instead (the record itself
+carries no `seq`; each engine pairs it with its journal position — the
+`(journal_seq, record)` index over its events list — and the hard-delete
+boundary is compared against that position), so a same-id re-creation does
+not resurrect the deleted link. On `rebuild_all` the
 sweep runs AFTER pass 2, so a `:Session` source recreated from a
 `contains_session` turn link exists before the fold.
 

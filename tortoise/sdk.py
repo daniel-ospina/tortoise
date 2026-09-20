@@ -4256,9 +4256,15 @@ class TortoiseSDK:
         entity_failures: list[str] = []
         # #3664: the extractor is the RESOLVE-OR-CREATE half for the session's
         # entity spine — each create_entity("object", …) journals an
-        # ObjectRegistered (durable node), and the claim → Object edges below
-        # are routed through the shared journaled writer so they survive
-        # rebuild_all. The SESSION-level attachment is owned by the
+        # ObjectRegistered (durable node) ONLY on the FIRST canonical
+        # registration (the existence-probe gate in `_create_entity`; a
+        # re-mention never re-journals) AND only when the SDK is built with an
+        # `event_log_path` (a journal-less SDK's `_emit_event` is a no-op).
+        # The claim → Object edges below are routed through the shared
+        # journaled writer, so they survive rebuild_all when such a journal is
+        # configured — without one they stay live-only (the hosted lane's
+        # `_make_sdk`/`_data_sdk` set no `event_log_path`). The SESSION-level
+        # attachment is owned by the
         # conversation-reference link pass (session_link.link_session_entities,
         # WorkItem Objects) — deliberately NOT the extractor's per-claim
         # topical entities (the pinned Session-link contract: the Session's
@@ -4383,7 +4389,10 @@ class TortoiseSDK:
                             # #3664: the claim -> Object attachment was a raw
                             # live-only MERGE (lost on rebuild — the #2296
                             # hazard). Route each edge through the shared
-                            # journaled writer so it replays (EntityLinked).
+                            # journaled writer so it replays (EntityLinked)
+                            # when the SDK has an `event_log_path`; a
+                            # journal-less SDK emits nothing and the edge
+                            # stays live-only.
                             #
                             # Coverage is NOT narrowed: main attached the edge
                             # to EVERY name-matching Object, and an id-less

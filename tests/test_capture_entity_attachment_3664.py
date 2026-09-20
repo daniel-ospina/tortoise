@@ -362,6 +362,96 @@ def test_entity_linked_not_resurrected_in_apply_engines(journal_sdk):
         "recover_from_log resurrected the link")
 
 
+def test_link_entity_absent_endpoint_reports_and_journals_nothing(
+        journal_sdk):
+    """``link_entity`` must report/journal ONLY an edge it actually CREATED.
+
+    An absent endpoint makes the MERGE a no-op, so the call returns 0 and
+    appends NO ``EntityLinked`` record. Journalling one would make the journal
+    claim an attachment the live graph never had (and over-report
+    ``entity_links_created``, the counter added to expose exactly this
+    "match-that-fails-to-link" class).
+
+    MUTATION: drop the ``RETURN count(s)`` read-back in ``link_entity``
+    (report + journal unconditionally, the pre-fix code) → both calls return
+    1 and two ``EntityLinked`` lines land → this REDs.
+    """
+    import json
+
+    from tortoise.session_link import link_entity
+
+    sdk, events = journal_sdk
+    proj = sdk._get_proj()
+    g = proj.g
+    pid = sdk.create_point("statement", "absent-probe")["id"]
+    oid = sdk.create_object("absent-probe-obj")["id"]
+
+    # target absent → no edge
+    assert link_entity(proj, "Point", pid, "no-such-object", sdk=sdk) == 0
+    # source absent → no edge
+    assert link_entity(proj, "Point", "no-such-point", oid, sdk=sdk) == 0
+    assert _live_link_count(g, pid, oid) == 0, "absent probes minted an edge"
+
+    lines = [json.loads(ln) for ln in
+             (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
+             if ln.strip()]
+    links = [e for e in lines if e.get("type") == "EntityLinked"]
+    assert links == [], links
+
+
+def test_noop_link_after_hard_delete_does_not_resurrect(journal_sdk):
+    """The delete → NO-OP link → same-id re-create journal must not resurrect
+    the edge on ANY replay engine.
+
+    ``link_entity`` used to journal unconditionally, so linking AFTER the
+    endpoint was hard-deleted wrote an ``EntityLinked`` whose seq is AFTER
+    the delete. The fold's staleness rule only suppresses a link deleted
+    AFTER it, so it cannot tell that no-op record from an honest link: the
+    re-created endpoint brought back an edge the live graph never had —
+    falsifying docs/ONTOLOGY.md §3.2's same-id re-creation guarantee.
+
+    MUTATION: drop the ``RETURN count(s)`` read-back in ``link_entity``
+    (report + journal unconditionally) → the no-op link is journaled and every
+    engine here resurrects the edge → this REDs.
+    """
+    import json
+
+    from tortoise.consistency import recover_from_log
+    from tortoise.session_link import link_entity
+
+    sdk, events = journal_sdk
+    proj = sdk._get_proj()
+    g = proj.g
+    pid = sdk.create_point("statement", "noop-src")["id"]
+    oid = sdk.create_object("Z-noop")["id"]
+    assert sdk.delete_entity(oid) is True
+    assert _live_link_count(g, pid, oid) == 0, "delete left the live link"
+    # Endpoint absent → the link is a NO-OP: 0 and no journal record.
+    assert link_entity(proj, "Point", pid, oid, sdk=sdk) == 0
+    assert sdk.create_object("Z-noop")["id"] == oid, (
+        "id is not name-deterministic — test premise broken")
+    assert _live_link_count(g, pid, oid) == 0, (
+        "re-creating the endpoint resurrected the live link")
+
+    class _Log:
+        def read_all(self):
+            with open(events / "events.jsonl", encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+
+    proj.rebuild(_Log())
+    assert _live_link_count(g, pid, oid) == 0, "rebuild() resurrected the link"
+
+    proj.rebuild_all(str(events))
+    assert _live_link_count(g, pid, oid) == 0, (
+        "rebuild_all resurrected a link the live graph never had")
+
+    g.query("MATCH (n) DETACH DELETE n")
+    r = recover_from_log(str(events), proj)
+    assert r["recovered"] is True, r
+    assert _live_link_count(g, pid, oid) == 0, (
+        "recover_from_log resurrected the link")
+
+
 # ── OBSERVABILITY: a dropped link is visible and not counted as applied ───
 
 def test_fold_deferred_entity_links_counts_only_applied_links(
