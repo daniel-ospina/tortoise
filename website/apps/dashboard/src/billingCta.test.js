@@ -96,6 +96,8 @@ test('#4335 (wiring backstop): the fallbacks render the disabled CTA, never "See
     'a native disabled control must not also claim aria-disabled')
   assert.match(code, /title=\{cta\.reason\}/,
     'the disabled control must carry the honest reason as its title')
+  assert.match(code, /Free — no card needed/,
+    'the $0 plan card must not render the outage CTA')
   assert.match(code, />Compare plans<\/a>/,
     'the secondary pricing link must be explicitly labelled "Compare plans"')
 })

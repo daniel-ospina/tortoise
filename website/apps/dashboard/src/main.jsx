@@ -995,11 +995,11 @@ function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = 
 // carry it. Before this, a create-key 402 advanced the modal to a broken 'done'
 // stage (an empty `.key-value` box, and a clipboard write of the literal
 // "null") while the notice sat on the tab BEHIND the modal, invisible.
-function CapNotice({ text, team, checkoutPending, onUpgrade }) {
+function CapNotice({ text, priceId, checkoutPending, onUpgrade }) {
   return (
     <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
       <span className="dim small">{text}</span>
-      <UpgradeCta priceId={team?.checkout_price_id} onUpgrade={onUpgrade} pending={checkoutPending} className="ghost small" />
+      <UpgradeCta priceId={priceId} onUpgrade={() => onUpgrade(priceId)} pending={checkoutPending} className="ghost small" />
       <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
     </div>
   )
@@ -8206,7 +8206,7 @@ function claimIntentInFlight() {
                     cap 402 puts its message on `capNotice` (not `error`), and
                     the tab-level notice sits behind this dialog — so without
                     this the user saw a silent form → empty reveal. */}
-                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
+                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} priceId={team?.checkout_price_id || newOrgDefaultPrice(team)} checkoutPending={checkoutPending} onUpgrade={upgradeToPrice} />}
                 {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
               </>
             )}
@@ -8847,7 +8847,7 @@ function claimIntentInFlight() {
             )}
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {/* #4330: the SAME notice component the create-key modal renders. */}
-            {capNotice && <CapNotice text={capNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
+            {capNotice && <CapNotice text={capNotice} priceId={team?.checkout_price_id || newOrgDefaultPrice(team)} checkoutPending={checkoutPending} onUpgrade={upgradeToPrice} />}
 
             {/* #2735: rotate's replacement reveal. #2667 moved create-key
                 into the Create API key modal and DELETED the standalone
@@ -9625,6 +9625,10 @@ function claimIntentInFlight() {
                       <button className="ghost" onClick={manageBilling} disabled={billingPending}>
                         {billingPending ? 'Opening portal…' : 'Manage subscription'}
                       </button>
+                    ) : p.tier === 'free' ? (
+                      // The $0 plan has no checkout by design — never render the
+                      // "temporarily unavailable" outage claim for it.
+                      <button className="ghost" disabled title="The free plan needs no checkout">Free — no card needed</button>
                     ) : (
                       <>
                         <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} className="btn-primary" block />
