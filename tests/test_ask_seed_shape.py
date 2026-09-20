@@ -257,6 +257,7 @@ def test_seeder_turn_vectors_go_through_the_store_width_guard(
     not depend on the ambient lane or the real encoder's width.
     """
     import numpy as np
+
     from tortoise.embeddings import EMBEDDING_DIM, EmbeddingModel
     from tortoise.projection import FalkorProjection
 
