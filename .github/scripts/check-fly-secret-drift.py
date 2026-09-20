@@ -134,8 +134,11 @@ _MARK_CLOSE = "\x02"
 # the invocation terminated by RECORD_SEP.
 _STUB_ARG_SEP = "\x1e"
 _STUB_RECORD_SEP = "\x1d"
-# The propagation step's shell is located by its `flyctl secrets set` call.
-_PAYLOAD_CMD_RE = re.compile(r"\bflyctl\s+secrets\s+set\b")
+# The propagation step's shell is located by its `fly secrets set` call. Both the
+# `flyctl` spelling and the `fly` alias are matched: the stub binaries install
+# both, so a payload written with the alias must not be invisible to detection
+# (an unseen block escapes the reverse-completeness half entirely).
+_PAYLOAD_CMD_RE = re.compile(r"\bfly(?:ctl)?\s+secrets\s+set\b")
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 # The Actions template reference substituted before the shell runs.
 _SECRET_TMPL_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
@@ -244,17 +247,29 @@ def extract_propagation_blocks(text: str) -> list[tuple[str, dict[str, str]]]:
                     "execution-based classifier can see the guard), run the gate in "
                     "that job, or drop it"
                 )
-            # The step's and job's `env:` are inherited by the payload shell, so a
-            # guard may read them (`[ -z "$VAR" ]`). They are modelled — with
-            # secrets substituted exactly like the script — because a value the
-            # stub env lacks would make the run sample disagree with the deploy.
+            # A `needs:` dependency can skip the propagation exactly as an `if:`
+            # can, and the gate stays green while it does — the same fail-open
+            # shape, so the same rule: only a payload in the gate's OWN job is
+            # safe (there the gate is skipped too, so nothing is certified).
+            if job.get("needs") and str(job_name) != gate_job:
+                raise ValueError(
+                    f"the job {job_name!r} that sets the Fly secrets has a `needs:` "
+                    "dependency, and it is NOT the job this gate runs in — a skipped "
+                    "or failed dependency skips the propagation while the gate stays "
+                    "green. Run the gate in that job, or drop the dependency"
+                )
+            # The workflow's, the job's and the step's `env:` are all inherited by
+            # the payload shell, so a guard may read them (`[ -z "$VAR" ]`). They
+            # are modelled — with secrets substituted exactly like the script —
+            # because a value the stub env lacks would make the run sample disagree
+            # with the deploy. Narrowest wins: step over job over workflow root.
             step_env: dict[str, str] = {}
-            for source in (job.get("env"), step.get("env")):
+            for source in (doc.get("env"), job.get("env"), step.get("env")):
                 if isinstance(source, dict):
                     step_env.update({str(k): str(v) for k, v in source.items()})
             blocks.append((run, step_env))
     if not blocks:
-        raise ValueError("no `flyctl secrets set` invocation found in the deploy workflow")
+        raise ValueError("no `fly secrets set` invocation found in the deploy workflow")
     return blocks
 
 
@@ -341,10 +356,16 @@ def _capture_payload(
         for key, value in (step_env or {}).items():
             env.setdefault(key, _SECRET_TMPL_RE.sub(substitute, value))
         # fd 3 is opened by the wrapper and inherited across `exec`, so the stub
-        # has somewhere private to write. `bash -e` mirrors GitHub's default
-        # shell for a `run:` block; it is exec'd after the harness is set up so
-        # the narrowed PATH cannot hide it.
-        command = f"exec 3>{shlex.quote(str(argv_log))}; exec {shlex.quote(bash)} -e"
+        # has somewhere private to write. `bash -e -u` mirrors GitHub's default
+        # shell for a `run:` block, plus NOUNSET: a payload that reads a variable
+        # the harness does not model (a `$GITHUB_ENV` value written by an earlier
+        # step, a runner-provided variable) would otherwise be classified against
+        # an empty value the real run may not have — a guard could flip and the
+        # gate certify an assignment the deploy skips, or the reverse. `-u` turns
+        # that unmodellable read into a non-zero exit, i.e. the fail-closed
+        # could-not-determine state, never a green certificate. It is exec'd after
+        # the harness is set up so the narrowed PATH cannot hide it.
+        command = f"exec 3>{shlex.quote(str(argv_log))}; exec {shlex.quote(bash)} -e -u"
         # A payload that hangs is an unreadable state: it must fail closed, never
         # escape as an uncaught TimeoutExpired (Python exits 1 — the BYPASSABLE
         # drift code). The seam keeps the hermetic test fast.
@@ -369,8 +390,13 @@ def _capture_payload(
             raise ValueError(f"the propagation shell could not be run: {exc}") from exc
     if proc.returncode != 0:
         raise ValueError(
-            f"the propagation shell failed under the stub (rc={proc.returncode}): "
-            f"{proc.stderr.strip()[:300]}"
+            "the propagation shell failed under the stub (rc=%d): the payload "
+            "reads a variable this harness does not model (workflow/job/step "
+            "`env:`, GITHUB_SHA) — a value written by an earlier step to "
+            "$GITHUB_ENV, or a runner-provided variable — so whether it assigns "
+            "the Fly secret cannot be determined. Put the value in an `env:` key, "
+            "or assign the secret unconditionally. stderr: %s"
+            % (proc.returncode, proc.stderr.strip()[:300])
         )
     return _payload_assignments(records)
 

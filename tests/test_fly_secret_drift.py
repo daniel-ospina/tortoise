@@ -1263,11 +1263,14 @@ jobs:
 
 
 def test_step_env_is_modelled_in_the_run_sample():
-    """A step `env:` value is inherited by the payload shell.
+    """The payload shell inherits an `env:` value, and an UNMODELLED read fails closed.
 
     The stub env used to carry only PATH/HOME/GITHUB_SHA, so a `[ -z "$VAR" ]`
     guard read differently than in the deploy and the run sample disagreed with
-    reality — certifying a name the deploy skips (#4259 review).
+    reality (#4259 review). A step `env:` is now modelled; a variable that is NOT
+    modelled (a `$GITHUB_ENV` value from an earlier step, a runner-provided one)
+    makes the assignment unclassifiable, so it is exit 2 — never a green
+    certificate guessed from an empty value.
     """
     body = (
         '          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"\n'
@@ -1281,20 +1284,33 @@ def test_step_env_is_modelled_in_the_run_sample():
     without = _fixture(
         "step-env-none.yml", f"name: w\njobs:\n  j:\n    steps:\n      - run: |\n{body}"
     )
+    empty = _fixture(
+        "step-env-empty.yml",
+        f'name: w\njobs:\n  j:\n    steps:\n      - env:\n          VAR: ""\n'
+        f"        run: |\n{body}",
+    )
     with_env = _fixture(
         "step-env-set.yml",
         f'name: w\njobs:\n  j:\n    steps:\n      - env:\n          VAR: "1"\n'
         f"        run: |\n{body}",
     )
-    # No env → the guard is TRUE → the deploy assigns ENV_ONLY_KEY, creating the
-    # Fly secret that shadows the versioned [env] value.
+    # No env → `$VAR` is unmodelled → the assignment cannot be determined.
     r_none = _run(
         _secrets_file(["FASTAPI_INTERNAL_KEY"], "step-env-none.json"),
         manifest=manifest,
         workflow=without,
     )
-    assert r_none.returncode == 1, r_none.stdout + r_none.stderr
-    assert "shadows [env]" in r_none.stdout
+    assert r_none.returncode == 2, r_none.stdout + r_none.stderr
+    assert "cannot determine" in r_none.stderr
+    # env VAR="" → the guard is TRUE → the deploy assigns ENV_ONLY_KEY, creating
+    # the Fly secret that shadows the versioned [env] value.
+    r_empty = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "step-env-empty.json"),
+        manifest=manifest,
+        workflow=empty,
+    )
+    assert r_empty.returncode == 1, r_empty.stdout + r_empty.stderr
+    assert "shadows [env]" in r_empty.stdout
     # env VAR=1 → the guard is FALSE → not assigned → no drift.
     r_set = _run(
         _secrets_file(["FASTAPI_INTERNAL_KEY"], "step-env-set.json"),
@@ -1302,6 +1318,166 @@ def test_step_env_is_modelled_in_the_run_sample():
         workflow=with_env,
     )
     assert r_set.returncode == 0, r_set.stdout + r_set.stderr
+
+
+def test_workflow_level_env_is_modelled_in_the_run_sample():
+    """A workflow-root `env:` value reaches the payload shell, as it does in Actions.
+
+    Only job/step `env:` was modelled, so a guard reading a workflow-level value
+    read it as empty and the run sample could certify an assignment the deploy
+    skips (#4259 review).
+    """
+    body = (
+        '          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"\n'
+        '          if [ -z "$WF_FLAG" ]; then ARGS="$ARGS ENV_ONLY_KEY=1"; fi\n'
+        "          flyctl secrets set --stage $ARGS\n"
+    )
+    manifest = _fixture(
+        "wf-env-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nENV_ONLY_KEY  fly-toml-env\n",
+    )
+    wf = _fixture(
+        "wf-env.yml",
+        f'name: w\nenv:\n  WF_FLAG: "1"\njobs:\n  j:\n    steps:\n      - run: |\n{body}',
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "wf-env.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    # WF_FLAG=1 → the guard is FALSE → ENV_ONLY_KEY is NOT assigned, so the
+    # versioned [env] value is not shadowed.
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_github_env_written_by_an_earlier_step_fails_closed():
+    """A value an earlier step wrote to `$GITHUB_ENV` is unmodellable → exit 2.
+
+    The payload's control flow then depends on a value the gate cannot see, so
+    the assignment is unclassifiable — never a green certificate guessed from an
+    empty value (#4259 review).
+    """
+    wf = _fixture(
+        "github-env.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: echo "GH_FLAG=1" >> "$GITHUB_ENV"
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          if [ -z "$GH_FLAG" ]; then ARGS="$ARGS ENV_ONLY_KEY=1"; fi
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "github-env-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nENV_ONLY_KEY  fly-toml-env\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "github-env.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 2, r.stdout + r.stderr
+
+
+def test_fly_alias_is_scanned_as_a_payload():
+    """`fly secrets set` is the same command as `flyctl secrets set` and must be seen.
+
+    Detection matched only `flyctl`, so a block written with the alias was
+    invisible: its names never entered the partition, and a declaration it
+    satisfies was reported STALE (#4259 review).
+    """
+    wf = _fixture(
+        "fly-alias.yml",
+        "name: w\njobs:\n  j:\n    steps:\n      - run: |\n"
+        '          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"\n'
+        "          fly secrets set --stage $ARGS\n",
+    )
+    manifest = _fixture(
+        "fly-alias-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "fly-alias.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_payload_job_needs_dependency_in_another_job_is_exit_2():
+    """A `needs:` on a payload job in ANOTHER job can skip it while the gate is green.
+
+    The same fail-open shape as a job-level `if:`: a skipped or failed dependency
+    skips the propagation, but the gate ran in its own job (#4259 review).
+    """
+    wf = _fixture(
+        "needs-other.yml",
+        """name: w
+jobs:
+  gate:
+    steps:
+      - run: python3 .github/scripts/check-fly-secret-drift.py
+  dep:
+    steps:
+      - run: echo build
+  secrets:
+    needs: [dep]
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "needs-other-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "needs-other.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "needs:" in r.stderr
+
+
+def test_payload_job_needs_in_the_gates_own_job_is_accepted():
+    """The SHIPPED shape: the gate and the payload share one job that has `needs:`.
+
+    `deploy-api` carries `needs: [packaging-smoke]`; because the gate runs in that
+    same job, a skipped dependency skips the gate too and certifies nothing, so
+    the dependency is not a fail-open (#4259 review).
+    """
+    wf = _fixture(
+        "needs-same.yml",
+        """name: w
+jobs:
+  dep:
+    steps:
+      - run: echo build
+  deploy:
+    needs: [dep]
+    steps:
+      - run: python3 .github/scripts/check-fly-secret-drift.py
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "needs-same-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "needs-same.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
 
 
 def test_step_marker_on_its_own_line_does_not_false_positive():
