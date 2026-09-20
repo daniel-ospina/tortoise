@@ -32,19 +32,31 @@ def _manifest() -> dict:
     return cpb.load_manifest(MANIFEST_PATH)
 
 
-def _complete_configs(manifest: dict | None = None) -> dict:
+def _project(name: str) -> dict:
+    """One project's manifest entry (`{"project": ..., "bindings": [...]}`)."""
+    return next(p for p in _manifest()["projects"] if p["project"] == name)
+
+
+def _complete_configs(project: dict | str | None = None) -> dict:
     """Build a Pages `deployment_configs` where EVERY declared binding exists.
 
     Derived from the manifest rather than hand-written, so adding a binding to
     the manifest cannot silently leave these fixtures incomplete (which is
     exactly what happened when SUPABASE_SERVICE_ROLE_KEY and
     OPENROUTER_API_KEY were added: three tests went red for the right reason).
+
+    Multiple projects share binding names (both need SESSIONS and SUPABASE_URL),
+    so this is now per-project: `_complete_configs("tortoise-dashboard")` returns
+    exactly what THAT project's manifest entry requires.
     """
-    manifest = manifest or _manifest()
+    if project is None:
+        project = _project("premise-labs")
+    elif isinstance(project, str):
+        project = _project(project)
     configs: dict = {}
     for envname in ("production", "preview"):
         buckets: dict = {}
-        for spec in manifest["bindings"]:
+        for spec in project["bindings"]:
             if envname not in spec.get("envs", ["production"]):
                 continue
             buckets.setdefault(spec["type"], {})[spec["name"]] = {"id": "x"}
@@ -62,69 +74,79 @@ def _without(configs: dict, env: str, btype: str, name: str) -> dict:
 
 
 def test_the_repo_manifest_parses_and_declares_sessions() -> None:
-    """`SESSIONS` is the binding whose absence caused the #3616 outage."""
-    m = _manifest()
-    names = {b["name"] for b in m["bindings"]}
-    assert "SESSIONS" in names
-    sessions = next(b for b in m["bindings"] if b["name"] == "SESSIONS")
-    assert sessions["kind"] == "required", (
-        "SESSIONS must be `required` — without it /auth/* answers 503"
-    )
-    assert sessions["type"] == "d1_databases"
-    assert "production" in sessions["envs"]
+    """`SESSIONS` is the binding whose absence caused the #3616 outage — for
+    BOTH projects, because the BFF moved onto `tortoise-dashboard` (#4054) and
+    the D1 store has to follow it."""
+    for project in _manifest()["projects"]:
+        names = {b["name"] for b in project["bindings"]}
+        assert "SESSIONS" in names, f"{project['project']} declares no SESSIONS"
+        sessions = next(b for b in project["bindings"] if b["name"] == "SESSIONS")
+        assert sessions["kind"] == "required", (
+            f"{project['project']}: SESSIONS must be `required` — without it "
+            "/auth/* answers 503"
+        )
+        assert sessions["type"] == "d1_databases"
+        assert "production" in sessions["envs"]
 
 
 def test_a_complete_configuration_passes() -> None:
-    configs = _complete_configs()
-    missing_required, _ = cpb.evaluate(_manifest(), configs)
-    assert missing_required == []
+    for project in _manifest()["projects"]:
+        missing_required, _ = cpb.evaluate(project, _complete_configs(project))
+        assert missing_required == [], project["project"]
 
 
 def test_absent_sessions_is_reported_as_missing_required() -> None:
     """The exact production state at the #3616 outage: env vars present, no D1.
 
-    This is the assertion that would have blocked the deploy.
+    This is the assertion that would have blocked the deploy — and it must hold
+    for `tortoise-dashboard` too, whose 0 bindings at the #4054 move would have
+    503'd every /auth/* request on a green deploy.
     """
-    configs = _complete_configs()
-    # Reproduce the real outage shape: everything else present, no D1 at all.
-    for envname in ("production", "preview"):
-        configs[envname].pop("d1_databases", None)
+    for project in _manifest()["projects"]:
+        configs = _complete_configs(project)
+        # Reproduce the real outage shape: everything else present, no D1 at all.
+        for envname in ("production", "preview"):
+            configs[envname].pop("d1_databases", None)
 
-    missing_required, _ = cpb.evaluate(_manifest(), configs)
-    assert "production:d1_databases:SESSIONS" in missing_required
-    assert "preview:d1_databases:SESSIONS" in missing_required
+        missing_required, _ = cpb.evaluate(project, configs)
+        pname = project["project"]
+        assert f"{pname}:production:d1_databases:SESSIONS" in missing_required
+        assert f"{pname}:preview:d1_databases:SESSIONS" in missing_required
 
 
 def test_required_env_var_absence_is_reported() -> None:
-    configs = _without(_complete_configs(), "production", "env_vars", "SUPABASE_URL")
-    missing_required, _ = cpb.evaluate(_manifest(), configs)
-    assert "production:env_vars:SUPABASE_URL" in missing_required
+    project = _project("premise-labs")
+    configs = _without(
+        _complete_configs(project), "production", "env_vars", "SUPABASE_URL"
+    )
+    missing_required, _ = cpb.evaluate(project, configs)
+    assert "premise-labs:production:env_vars:SUPABASE_URL" in missing_required
 
 
 def test_every_required_binding_is_individually_load_bearing() -> None:
-    """Each required binding must red the gate ON ITS OWN when removed.
+    """Each required binding, in EACH project, must red the gate ON ITS OWN.
 
     A blanket "the required list is non-empty" check passes even if one entry is
-    dead weight. This parameterises over the manifest so a newly added required
-    binding is proven to be enforced rather than assumed to be.
+    dead weight. This parameterizes over both projects so a newly added required
+    binding (or a new project) is proven to be enforced rather than assumed to be.
     """
-    manifest = _manifest()
-    complete = _complete_configs(manifest)
-    cases = [
-        (spec, env)
-        for spec in manifest["bindings"]
-        if spec.get("kind", "required") == "required"
-        for env in spec.get("envs", ["production"])
-    ]
+    cases = 0
+    for project in _manifest()["projects"]:
+        complete = _complete_configs(project)
+        for spec in project["bindings"]:
+            if spec.get("kind", "required") != "required":
+                continue
+            for env in spec.get("envs", ["production"]):
+                cases += 1
+                broken = _without(complete, env, spec["type"], spec["name"])
+                missing, _ = cpb.evaluate(project, broken)
+                label = f"{project['project']}:{env}:{spec['type']}:{spec['name']}"
+                assert label in missing, (
+                    f"removing {spec['name']} from {env} in {project['project']} "
+                    "did not red the gate — it is declared `required` but is not "
+                    "enforced"
+                )
     assert cases, "no required bindings — the gate asserts nothing"
-
-    for spec, env in cases:
-        broken = _without(complete, env, spec["type"], spec["name"])
-        missing, _ = cpb.evaluate(manifest, broken)
-        assert f"{env}:{spec['type']}:{spec['name']}" in missing, (
-            f"removing {spec['name']} from {env} did not red the gate — "
-            "it is declared `required` but is not enforced"
-        )
 
 
 def test_recommended_absence_warns_but_does_not_block() -> None:
@@ -132,36 +154,42 @@ def test_recommended_absence_warns_but_does_not_block() -> None:
 
     A gate that failed the deploy over these would be a gate people disable.
     """
-    manifest = _manifest()
-    configs = _complete_configs(manifest)
-    recommended = [
-        spec for spec in manifest["bindings"]
-        if spec.get("kind", "required") == "recommended"
-    ]
-    assert recommended, "no recommended bindings — this test would be vacuous"
-    for spec in recommended:
-        for env in spec.get("envs", ["production"]):
-            configs = _without(configs, env, spec["type"], spec["name"])
+    for project in _manifest()["projects"]:
+        configs = _complete_configs(project)
+        recommended = [
+            spec
+            for spec in project["bindings"]
+            if spec.get("kind", "required") == "recommended"
+        ]
+        assert recommended, (
+            f"{project['project']}: no recommended bindings — this test would be "
+            "vacuous"
+        )
+        for spec in recommended:
+            for env in spec.get("envs", ["production"]):
+                configs = _without(configs, env, spec["type"], spec["name"])
 
-    missing_required, missing_recommended = cpb.evaluate(manifest, configs)
-    assert missing_required == [], "recommended absence must not block the deploy"
-    for spec in recommended:
-        for env in spec.get("envs", ["production"]):
-            assert f"{env}:{spec['type']}:{spec['name']}" in missing_recommended
+        missing_required, missing_recommended = cpb.evaluate(project, configs)
+        assert missing_required == [], "recommended absence must not block the deploy"
+        pname = project["project"]
+        for spec in recommended:
+            for env in spec.get("envs", ["production"]):
+                assert f"{pname}:{env}:{spec['type']}:{spec['name']}" in missing_recommended
 
 
 def test_a_binding_of_the_wrong_TYPE_does_not_count() -> None:
     """A KV namespace named SESSIONS is not the D1 database the code expects.
 
     Presence-by-name alone would pass this — which is why the check is keyed on
-    (env, type, name), not name alone.
+    (project, env, type, name), not name alone.
     """
-    configs = _complete_configs()
+    project = _project("premise-labs")
+    configs = _complete_configs(project)
     for envname in ("production", "preview"):
         configs[envname]["kv_namespaces"] = {"SESSIONS": {"id": "x"}}
         configs[envname].pop("d1_databases", None)
-    missing_required, _ = cpb.evaluate(_manifest(), configs)
-    assert "production:d1_databases:SESSIONS" in missing_required
+    missing_required, _ = cpb.evaluate(project, configs)
+    assert "premise-labs:production:d1_databases:SESSIONS" in missing_required
 
 
 # ---------------------------------------------------------------------------
@@ -240,8 +268,8 @@ def test_envs_is_optional_and_defaults_to_production(tmp_path) -> None:
         encoding="utf-8",
     )
     m = cpb.load_manifest(p)
-    missing, _ = cpb.evaluate(m, {})
-    assert "production:d1_databases:SESSIONS" in missing
+    missing, _ = cpb.evaluate(m["projects"][0], {})
+    assert "p:production:d1_databases:SESSIONS" in missing
 
 
 def test_a_null_valued_binding_does_not_count_as_present() -> None:
@@ -249,11 +277,12 @@ def test_a_null_valued_binding_does_not_count_as_present() -> None:
 
     Key-membership alone counted it as present; truthiness is the correct test.
     """
-    configs = _complete_configs()
+    project = _project("premise-labs")
+    configs = _complete_configs(project)
     for envname in ("production", "preview"):
         configs[envname]["d1_databases"] = {"SESSIONS": None}
-    missing_required, _ = cpb.evaluate(_manifest(), configs)
-    assert "production:d1_databases:SESSIONS" in missing_required
+    missing_required, _ = cpb.evaluate(project, configs)
+    assert "premise-labs:production:d1_databases:SESSIONS" in missing_required
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +300,12 @@ def test_a_null_valued_binding_does_not_count_as_present() -> None:
 
 WF_PATH = REPO / ".github" / "workflows" / "deploy-pages.yml"
 
+#: #3616 — the gate's preflight in the `deploy` job (scoped to premise-labs).
 PREFLIGHT = "Preflight — required Pages bindings exist"
+#: #4054 — the dashboard job's counterpart. The BFF moved onto
+#: `tortoise-dashboard`, so the same gate is wired with a different project.
+DASHBOARD_PREFLIGHT = "Preflight — required Pages bindings exist (tortoise-dashboard)"
+DASHBOARD_DEPLOY = "Deploy to Cloudflare Pages (tortoise-dashboard project)"
 PROBE = "Post-deploy — sign-in is actually reachable"
 DEPLOY = "Deploy to Cloudflare Pages (premise-labs project)"
 #: #3620 — the pre-upload gate that every tracked top-level entry under
@@ -326,6 +360,11 @@ def _strip_bash_comments(script: str) -> str:
 def _deploy_steps() -> list[dict]:
     wf = cpb.yaml.safe_load(WF_PATH.read_text(encoding="utf-8"))
     return wf["jobs"]["deploy"]["steps"]
+
+
+def _dashboard_steps() -> list[dict]:
+    wf = cpb.yaml.safe_load(WF_PATH.read_text(encoding="utf-8"))
+    return wf["jobs"]["deploy-dashboard"]["steps"]
 
 
 def _step_code(name: str) -> str:
@@ -452,14 +491,18 @@ def test_the_gate_files_select_a_surface_so_their_test_runs() -> None:
 
 
 def test_evaluate_is_not_vacuous_over_the_real_manifest() -> None:
-    """Non-vacuity: the manifest must declare at least one required binding with
+    """Non-vacuity: EVERY project must declare at least one required binding with
     at least one env, so an empty config cannot silently pass."""
-    m = _manifest()
-    required = [b for b in m["bindings"] if b.get("kind", "required") == "required"]
-    assert required, "no required bindings declared — the gate asserts nothing"
-    assert all(b.get("envs") for b in required), "a required binding has no envs"
-    missing, _ = cpb.evaluate(m, {})
-    assert missing, "an EMPTY config must report missing required bindings"
+    for project in _manifest()["projects"]:
+        required = [
+            b for b in project["bindings"] if b.get("kind", "required") == "required"
+        ]
+        assert required, (
+            f"{project['project']}: no required bindings — the gate asserts nothing"
+        )
+        assert all(b.get("envs") for b in required), "a required binding has no envs"
+        missing, _ = cpb.evaluate(project, {})
+        assert missing, "an EMPTY config must report missing required bindings"
 
 
 def test_cli_fails_closed_when_the_api_is_unreachable(monkeypatch) -> None:
@@ -478,9 +521,82 @@ def test_cli_returns_1_when_required_binding_is_missing(monkeypatch) -> None:
     assert rc == 1
 
 
-def test_cli_returns_0_when_everything_is_present(monkeypatch) -> None:
-    monkeypatch.setattr(cpb, "fetch_configs", lambda *a, **k: _complete_configs())
+def test_cli_returns_1_when_only_the_SECOND_project_is_missing_bindings(monkeypatch) -> None:
+    """`main` must not stop at the first project nor report the first project's
+    result as the whole verdict.
+
+    A loop that fetched only `premise-labs`, or that returned as soon as the
+    first project was clean, would deploy a broken `tortoise-dashboard` on a
+    green gate — the multi-project #3616 shape.
+    """
+
+    def fake(_account, project, _token):
+        if project == "tortoise-dashboard":
+            return {}
+        return _complete_configs("premise-labs")
+
+    monkeypatch.setattr(cpb, "fetch_configs", fake)
     rc = cpb.main(["--manifest", str(MANIFEST_PATH), "--account-id", "a", "--api-token", "t"])
+    assert rc == 1
+
+
+def test_cli_returns_0_when_everything_is_present(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cpb, "fetch_configs", lambda _account, project, _token: _complete_configs(project)
+    )
+    rc = cpb.main(["--manifest", str(MANIFEST_PATH), "--account-id", "a", "--api-token", "t"])
+    assert rc == 0
+
+
+def test_cli_rejects_an_unknown_project_instead_of_passing_vacuously(monkeypatch) -> None:
+    """`--project typo` must exit 2, not 0.
+
+    With no matching project the loop body would not run and the gate would
+    report success having checked NOTHING — the #3616 vacuous gate, one flag
+    away.
+    """
+    monkeypatch.setattr(cpb, "fetch_configs", lambda *a, **k: {})
+    rc = cpb.main(
+        [
+            "--manifest",
+            str(MANIFEST_PATH),
+            "--project",
+            "tortoise-dashbord",
+            "--account-id",
+            "a",
+            "--api-token",
+            "t",
+        ]
+    )
+    assert rc == 2
+
+
+def test_cli_scopes_to_a_single_project_when_asked(monkeypatch) -> None:
+    """`--project premise-labs` must NOT be blocked by a broken dashboard.
+
+    The two deploy jobs are independent surfaces: the marketing deploy passes
+    `--project premise-labs` precisely so the not-yet-configured dashboard
+    cannot block it (#4054).
+    """
+
+    def fake(_account, project, _token):
+        if project == "tortoise-dashboard":
+            return {}
+        return _complete_configs("premise-labs")
+
+    monkeypatch.setattr(cpb, "fetch_configs", fake)
+    rc = cpb.main(
+        [
+            "--manifest",
+            str(MANIFEST_PATH),
+            "--project",
+            "premise-labs",
+            "--account-id",
+            "a",
+            "--api-token",
+            "t",
+        ]
+    )
     assert rc == 0
 
 
@@ -727,42 +843,85 @@ def test_the_probe_does_not_treat_a_landing_page_as_sign_in(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 EXPECTED_CLASSIFICATION = {
-    # name: (kind, envs)
-    "SESSIONS": ("required", ["production", "preview"]),
-    "SUPABASE_URL": ("required", ["production"]),
-    "SUPABASE_ANON_KEY": ("required", ["production"]),
-    "SUPABASE_SERVICE_ROLE_KEY": ("required", ["production"]),
-    "OPENROUTER_API_KEY": ("required", ["production"]),
-    # recommended: correct in-source default
-    "APP_ORIGIN": ("recommended", ["production"]),
-    "AUTH_CALLBACK_URL": ("recommended", ["production"]),
-    # required: SET in production+preview, and website/functions/api/v1/[[path]].ts
-    # answers `503 proxy_not_configured` without it (verified live: after it was
-    # set, /api/v1/teams returns 401 not_signed_in instead). The old
-    # `recommended` note said "the moment a client calls it" — that is now.
-    "API_ORIGIN": ("required", ["production"]),
-    # recommended: cloudflare-purge.ts is best-effort and fail-open by design
-    "CF_API_TOKEN": ("recommended", ["production"]),
-    "CF_ZONE_ID": ("recommended", ["production"]),
+    # project: {name: (kind, envs)}
+    "premise-labs": {
+        "SESSIONS": ("required", ["production", "preview"]),
+        "SUPABASE_URL": ("required", ["production"]),
+        "SUPABASE_ANON_KEY": ("required", ["production"]),
+        "SUPABASE_SERVICE_ROLE_KEY": ("required", ["production"]),
+        "OPENROUTER_API_KEY": ("required", ["production"]),
+        # recommended: correct in-source default
+        "APP_ORIGIN": ("recommended", ["production"]),
+        "AUTH_CALLBACK_URL": ("recommended", ["production"]),
+        # required: SET in production, and website/apps/dashboard/functions/api/v1/[[path]].ts
+        # answers `503 proxy_not_configured` without it (verified live: after it was
+        # set, /api/v1/teams returns 401 not_signed_in instead). The old
+        # `recommended` note said "the moment a client calls it" — that is now.
+        "API_ORIGIN": ("required", ["production"]),
+        # recommended: cloudflare-purge.ts is best-effort and fail-open by design
+        "CF_API_TOKEN": ("recommended", ["production"]),
+        "CF_ZONE_ID": ("recommended", ["production"]),
+    },
+    # #4054: the BFF appended a second project. SESSIONS points at the SAME
+    # account-level tortoise-sessions database; the env vars are what the moved
+    # Functions read (verified with `rg -n 'env\.[A-Z_]+'`).
+    "tortoise-dashboard": {
+        "SESSIONS": ("required", ["production", "preview"]),
+        "SUPABASE_URL": ("required", ["production"]),
+        "SUPABASE_ANON_KEY": ("required", ["production"]),
+        # Deliberately ABSENT: SUPABASE_SERVICE_ROLE_KEY. No Function under
+        # website/apps/dashboard/functions/ reads it, and the one flow needing a
+        # privileged admin call (#801 email signup) does not make it in the BFF —
+        # /auth/signup proxies POST {API_ORIGIN}/v1/signup/email, so the key stays
+        # on the API. Declaring it would put a privileged secret on the public app
+        # origin. Pinned by this table so re-adding it fails loudly.
+        # recommended: correct in-source default, same as premise-labs
+        "APP_ORIGIN": ("recommended", ["production"]),
+        "AUTH_CALLBACK_URL": ("recommended", ["production"]),
+        # #4171: the /blog/api/* Token Handler proxy. ``recommended`` because the
+        # proxy falls back to https://tortoise.premiselabs.co in code.
+        "BLOG_ORIGIN": ("recommended", ["production"]),
+        # required: api/v1/[[path]].ts answers `503 proxy_not_configured` without it
+        "API_ORIGIN": ("required", ["production"]),
+    },
 }
 
 
 def test_the_manifest_classification_matches_the_reviewed_table() -> None:
     """Flipping OPENROUTER_API_KEY to `recommended`, or dropping `preview` from
     SESSIONS, previously left the whole suite green — the fixtures derive from
-    whatever the manifest currently says."""
+    whatever the manifest currently says. Now the table is pinned PER PROJECT,
+    so a kind change on the new project cannot hide behind the old one."""
     actual = {
-        spec["name"]: (spec.get("kind", "required"), spec.get("envs", ["production"]))
-        for spec in _manifest()["bindings"]
+        project["project"]: {
+            spec["name"]: (
+                spec.get("kind", "required"),
+                spec.get("envs", ["production"]),
+            )
+            for spec in project["bindings"]
+        }
+        for project in _manifest()["projects"]
     }
     assert actual == EXPECTED_CLASSIFICATION
 
 
 def test_the_classification_table_covers_every_binding() -> None:
-    """Non-vacuity: the table above must not silently miss a new binding."""
-    names = {spec["name"] for spec in _manifest()["bindings"]}
-    assert names == set(EXPECTED_CLASSIFICATION), (
-        "a binding was added or removed without updating EXPECTED_CLASSIFICATION"
+    """Non-vacuity: the table above must not silently miss a new binding OR a
+    new project — the whole point of the multi-project extension (#4054)."""
+    manifest = _manifest()
+    for project in manifest["projects"]:
+        names = {spec["name"] for spec in project["bindings"]}
+        expected = EXPECTED_CLASSIFICATION.get(project["project"])
+        assert expected is not None, (
+            f"project {project['project']!r} is not in EXPECTED_CLASSIFICATION — a "
+            "new project was added without reviewing its bindings"
+        )
+        assert names == set(expected), (
+            "a binding was added or removed without updating "
+            f"EXPECTED_CLASSIFICATION[{project['project']!r}]"
+        )
+    assert {p["project"] for p in manifest["projects"]} == set(EXPECTED_CLASSIFICATION), (
+        "a project was added or removed without updating EXPECTED_CLASSIFICATION"
     )
 
 
@@ -790,7 +949,9 @@ def test_json_output_is_a_single_parseable_document(monkeypatch, capsys) -> None
     on stdout, so `json.loads(stdout)` failed with "Extra data: line 12 column
     1" — i.e. the flag was not machine-readable. Diagnostics go to stderr.
     """
-    monkeypatch.setattr(cpb, "fetch_configs", lambda *a, **k: _complete_configs())
+    monkeypatch.setattr(
+        cpb, "fetch_configs", lambda _account, project, _token: _complete_configs(project)
+    )
     rc = cpb.main(
         ["--manifest", str(MANIFEST_PATH), "--account-id", "a",
          "--api-token", "t", "--json"]
@@ -798,7 +959,11 @@ def test_json_output_is_a_single_parseable_document(monkeypatch, capsys) -> None
     captured = capsys.readouterr()
     payload = json.loads(captured.out)  # must not raise
     assert payload["missing_required"] == []
-    assert payload["project"] == "premise-labs"
+    # BOTH projects are reported per-project, not collapsed to one.
+    assert [p["project"] for p in payload["projects"]] == [
+        "premise-labs",
+        "tortoise-dashboard",
+    ]
     assert rc == 0
 
 
@@ -811,6 +976,11 @@ def test_json_output_still_reports_missing_required_and_exits_1(monkeypatch, cap
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["missing_required"], "a missing binding must appear in the JSON"
+    # The failure names BOTH projects: neither can hide behind the other.
+    assert {label.split(":", 1)[0] for label in payload["missing_required"]} == {
+        "premise-labs",
+        "tortoise-dashboard",
+    }
     assert rc == 1
 
 
@@ -930,10 +1100,17 @@ def _preflight_script(tmp_path: Path) -> Path:
     return p
 
 
-def _run_preflight(tmp_path: Path, exits: str) -> tuple[int, str, int]:
+def _run_checker_script(
+    tmp_path: Path, script_path: Path, exits: str
+) -> tuple[int, str, int]:
+    """Run a shipped preflight block under `bash -e` with `check_stub` on PATH.
+
+    Shared by the premise-labs preflight and the #4054 tortoise-dashboard
+    preflight, so both are proven to invoke the checker and to propagate its
+    exit code.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    (tmp_path / "bin" / "check_stub").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
     stem = tmp_path / "check_stub_impl"
     stem.write_text(STUB_CHECKER, encoding="utf-8")
     stem.chmod(0o755)
@@ -949,7 +1126,7 @@ def _run_preflight(tmp_path: Path, exits: str) -> tuple[int, str, int]:
         "STUB_EXITS": exits,
     }
     r = subprocess.run(
-        ["bash", "-e", str(_preflight_script(tmp_path))],
+        ["bash", "-e", str(script_path)],
         capture_output=True,
         text=True,
         env=env,
@@ -957,6 +1134,10 @@ def _run_preflight(tmp_path: Path, exits: str) -> tuple[int, str, int]:
     calls_file = tmp_path / "checker_calls"
     calls = int(calls_file.read_text()) if calls_file.exists() else 0
     return r.returncode, r.stdout + r.stderr, calls
+
+
+def _run_preflight(tmp_path: Path, exits: str) -> tuple[int, str, int]:
+    return _run_checker_script(tmp_path, _preflight_script(tmp_path), exits)
 
 
 @pytest.mark.parametrize(
@@ -1048,9 +1229,12 @@ def test_the_manifest_is_not_inside_the_pages_upload_root() -> None:
 # ---------------------------------------------------------------------------
 
 #: The entries under `website/` at the time of #3620 — the public surface, the
-#: internal paths that were leaking, the generated `admin/` (produced into the
-#: upload root by the blog-admin build step above the deploy), and a committed
-#: `node_modules` tree (as `website/apps/dashboard/node_modules` really is).
+#: internal paths that were leaking, and a committed `node_modules` tree (as
+#: `website/apps/dashboard/node_modules` really is).
+#:
+#: #4171: the generated `admin/` tree is GONE from this project — the console
+#: moved to the app origin and is staged by the `deploy-dashboard` job into
+#: `website/apps/dashboard/dist/admin/`.
 _WEBSITE_FIXTURE = (
     "_redirects",
     "_headers",
@@ -1059,7 +1243,11 @@ _WEBSITE_FIXTURE = (
     "product.html",
     "privacy.html",
     "tos.html",
-    "welcome.html",
+    # #4054: `welcome.html` (plus `signup.html` / `invite-accept.html`) moved to
+    # the `tortoise-dashboard` project (`website/apps/dashboard/public/`) and is
+    # no longer staged by the `premise-labs` upload — the classification table
+    # below reflects that. It is deliberately NOT in this fixture: a fixture that
+    # still emits it would stage a file the reviewed table says is excluded.
     "robots.txt",
     "logo.png",
     "consent.js",
@@ -1069,8 +1257,6 @@ _WEBSITE_FIXTURE = (
     "functions/_middleware.ts",
     "functions/auth/start.ts",
     "functions/api/session.ts",
-    "admin/index.html",
-    "admin/assets/index-abc.js",
     "apps/dashboard/src/main.jsx",
     "apps/dashboard/deploy.sh",
     "apps/dashboard/package.json",
@@ -1115,16 +1301,11 @@ def _expected_public(rels) -> set[str]:
 def _assert_stage_matches(actual: set[str], expected: set[str], out: str) -> None:
     """Assert the stage is EXACTLY the classified public set, both directions.
 
-    `admin/` is generated into the upload root by the blog-admin build step and is
-    not tracked, so it is absent from the classified tree; its PRESENCE is
-    required and it is never counted as an extra.
+    #4171: the generated `admin/` tree (once a special case here) is gone — it
+    is staged into the app-origin project's `dist/` now, not into this upload.
     """
-    assert any(a == "admin" or a.startswith("admin/") for a in actual), (
-        "the generated admin/ tree is missing from the stage"
-    )
-    actual_tracked = {a for a in actual if not a.startswith("admin/")}
-    missing = sorted(expected - actual_tracked)
-    added = sorted(actual_tracked - expected)
+    missing = sorted(expected - actual)
+    added = sorted(actual - expected)
     assert not missing, (
         "PUBLIC files were dropped by the denylist staging — the leak probe "
         f"asserts 404s only, so it can never notice this (#3620): {missing}\n{out}"
@@ -1310,17 +1491,22 @@ def _tracked_website_files() -> list[str]:
 def _copy_tracked_website(root: Path) -> None:
     """Reproduce the CI checkout for the staging step: every TRACKED file under
     `website/` (copying the `git ls-files` list, so untracked local artifacts stay
-    out of the comparison) plus the generated `admin/` tree the blog-admin build
-    step creates just before the deploy."""
+    out of the comparison).
+
+    #4171: no generated `admin/` tree is added — the console is built and staged
+    by the `deploy-dashboard` job into the app-origin project's `dist/`.
+    """
     for rel in _tracked_website_files():
         src = REPO / "website" / rel
+        # A tracked path can be absent from the WORKING TREE mid-change (the
+        # #4054 move deleted several tracked files before committing). CI checks
+        # out the committed tree, where `git ls-files` no longer lists them, so
+        # skipping a missing path reproduces the checkout instead of crashing.
+        if not src.exists():
+            continue
         dst = root / "website" / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-    admin = root / "website" / "admin"
-    (admin / "assets").mkdir(parents=True, exist_ok=True)
-    (admin / "index.html").write_text("x\n", encoding="utf-8")
-    (admin / "assets" / "index-abc.js").write_text("x\n", encoding="utf-8")
 
 
 def test_the_staged_upload_root_equals_the_classified_public_tree(tmp_path) -> None:
@@ -1407,10 +1593,9 @@ def test_the_deploy_uploads_the_staged_directory_not_website(tmp_path) -> None:
         # also match the `_middleware.ts` guard's message, so deleting the
         # directory guard would still look "caught".
         ("functions", "compiles Functions from the cwd"),
-        ("functions/_middleware.ts", "host routing and the admin gate"),
+        ("functions/_middleware.ts", "host routing and the /admin"),
         ("_redirects", "the redirect contract is gone"),
         ("_headers", "the security-header contract is gone"),
-        ("admin", "did not stage it"),
     ],
 )
 def test_the_deploy_refuses_to_upload_when_a_load_bearing_entry_is_missing(
@@ -1419,9 +1604,10 @@ def test_the_deploy_refuses_to_upload_when_a_load_bearing_entry_is_missing(
     """The denylist is only safe because these guards fail LOUD, and BEFORE the
     upload.
 
-    A denylist was chosen over an allowlist precisely because these five are easy
-    to forget. If a guard is removed — or moved after the `npx` call — the
-    failure returns to its silent form: a green deploy with dead auth.
+    A denylist was chosen over an allowlist precisely because these are easy to
+    forget. If a guard is removed — or moved after the `npx` call — the failure
+    returns to its silent form: a green deploy with dead auth. #4171 removed the
+    `admin/` guard along with the console: the tree is no longer staged here.
     """
     rc, out, _stage, _site = _run_deploy(tmp_path, omit=omitted)
     assert rc != 0, f"staging {omitted} away did not fail the step:\n{out}"
@@ -1620,10 +1806,10 @@ def test_the_leak_probe_harness_exercises_the_retry_bound() -> None:
 #: the deploy job's pre-upload preflight reads (`tools/check_pages_upload_root.py`)
 #: — so the test's expectations and the deploy gate cannot drift.
 #:
-#: `admin/` is deliberately absent: it is generated into `website/` by the
-#: blog-admin build step and is not tracked, so it never appears in
-#: `git ls-files website`; its presence in the stage is asserted by
-#: `_assert_stage_matches`.
+#: `admin/` is deliberately absent: it used to be generated into `website/` by
+#: the blog-admin build step and was never tracked. #4171 moved the console to
+#: the app-origin project, which stages it into `website/apps/dashboard/dist/admin/`
+#: — so this upload never sees an `admin/` tree at all now.
 _WEBSITE_TOP_LEVEL_STAGED = cpur.load_classification(UPLOAD_CLASSIFICATION_PATH)
 
 
@@ -1853,3 +2039,273 @@ def test_the_inert_wranglerignore_is_gone() -> None:
         "website/.wranglerignore is back — wrangler never reads it, so it claims "
         "a protection that does not exist (#3620)"
     )
+
+
+# ---------------------------------------------------------------------------
+# #4054: the BFF moved onto the `tortoise-dashboard` Pages project, so the
+# binding gate now covers TWO projects.
+#
+# The dashboard had 0 env vars and 0 D1 bindings when the move landed. Without
+# these assertions the gate would still report green for `premise-labs` while
+# the app's every /auth/* request 503'd — the #3616 outage with a different
+# project name in it.
+# ---------------------------------------------------------------------------
+
+#: The env vars the dashboard Functions actually READ, recovered from source by
+#: `rg -n 'env\.[A-Z_]+' website/apps/dashboard/functions/`.
+_BFF_ENV_RE = re.compile(r"\benv\.([A-Z][A-Z0-9_]*)")
+
+
+def _env_names_read_by_the_bff() -> set[str]:
+    root = REPO / "website" / "apps" / "dashboard" / "functions"
+    names: set[str] = set()
+    for path in sorted(root.rglob("*.ts")):
+        names |= set(_BFF_ENV_RE.findall(path.read_text(encoding="utf-8")))
+    return names
+
+
+def test_the_manifest_declares_both_projects() -> None:
+    """Well-formedness for BOTH projects (task requirement (c)).
+
+    Each project must carry a name, a non-empty binding list and at least one
+    required binding — otherwise `evaluate` would be vacuous for that project
+    and the gate would report success without asserting anything.
+    """
+    projects = _manifest()["projects"]
+    assert [p["project"] for p in projects] == ["premise-labs", "tortoise-dashboard"]
+    for project in projects:
+        assert project["bindings"], project["project"]
+        assert any(
+            b.get("kind", "required") == "required" for b in project["bindings"]
+        ), f"{project['project']} declares no required binding"
+
+
+def test_tortoise_dashboard_declares_every_env_var_the_moved_bff_reads() -> None:
+    """The manifest must be derived from the CODE, not from a guess.
+
+    `website/apps/dashboard/functions/` moved off `premise-labs`; the manifest
+    has to name every env var those Functions read, or a 503 ships green. This
+    scans the source and fails if the code reads a var the manifest omits.
+    """
+    project = _project("tortoise-dashboard")
+    declared = {b["name"] for b in project["bindings"]}
+    read = _env_names_read_by_the_bff()
+    # ASSETS is a Pages built-in (the static-asset fetcher); it is never a
+    # user-configured binding and must not be demanded in the manifest.
+    read -= {"ASSETS"}
+    assert read, "no env vars found in the dashboard Functions — the scan is broken"
+    assert read <= declared, (
+        "the dashboard Functions read env vars the manifest does not declare: "
+        f"{sorted(read - declared)}"
+    )
+    # The moved BFF is useless without the D1 store, and it must be a D1 binding
+    # (a same-named KV namespace is not the session store the code opens).
+    assert "SESSIONS" in declared
+    sessions = next(b for b in project["bindings"] if b["name"] == "SESSIONS")
+    assert sessions["type"] == "d1_databases"
+    assert sessions["kind"] == "required"
+
+
+def test_tortoise_dashboard_missing_sessions_is_reported_as_a_failure() -> None:
+    """Task requirement (a): a missing required binding on the NEW project fails.
+
+    This is the project's own #3616 shape — it had ZERO D1 bindings when the
+    BFF moved onto it.
+    """
+    project = _project("tortoise-dashboard")
+    configs = _complete_configs(project)
+    for envname in ("production", "preview"):
+        configs[envname].pop("d1_databases", None)
+    missing_required, _ = cpb.evaluate(project, configs)
+    assert "tortoise-dashboard:production:d1_databases:SESSIONS" in missing_required
+    assert "tortoise-dashboard:preview:d1_databases:SESSIONS" in missing_required
+
+
+def test_tortoise_dashboard_missing_bff_env_var_fails_the_gate() -> None:
+    """Every required env var on the new project reds it on its own.
+
+    `API_ORIGIN` is the proxy's configuration; without it /api/v1/* answers
+    `503 proxy_not_configured` on a green deploy.
+    """
+    project = _project("tortoise-dashboard")
+    for name in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "API_ORIGIN"):
+        configs = _without(_complete_configs(project), "production", "env_vars", name)
+        missing_required, _ = cpb.evaluate(project, configs)
+        assert f"tortoise-dashboard:production:env_vars:{name}" in missing_required
+
+
+def test_tortoise_dashboard_present_bindings_pass() -> None:
+    """Task requirement (b): a fully-bound NEW project passes."""
+    project = _project("tortoise-dashboard")
+    missing_required, _ = cpb.evaluate(project, _complete_configs(project))
+    assert missing_required == []
+
+
+def test_the_dashboard_job_has_a_binding_preflight_that_gates_the_deploy() -> None:
+    """Wiring: the dashboard job must RUN the check, with the right project, and
+    BEFORE the upload.
+
+    A check defined in another job (or after the deploy) is a reader's comfort,
+    not a gate. `--project tortoise-dashboard` is asserted so a copy-paste of the
+    premise-labs step — which would report green for the wrong project — fails
+    here.
+    """
+    steps = _dashboard_steps()
+    names = [s.get("name", "") for s in steps]
+    assert DASHBOARD_PREFLIGHT in names, "the dashboard binding preflight is gone"
+    assert DASHBOARD_DEPLOY in names
+    assert names.index(DASHBOARD_PREFLIGHT) < names.index(DASHBOARD_DEPLOY), (
+        "the dashboard binding check must run BEFORE the upload"
+    )
+    step = next(s for s in steps if s.get("name") == DASHBOARD_PREFLIGHT)
+    code = _strip_bash_comments(step["run"])
+    assert "tools/check_pages_bindings.py" in code
+    assert "config/required-bindings.yml" in code
+    assert "--project tortoise-dashboard" in code
+    # A gate that cannot fail is worthless: no `|| true`, no continue-on-error.
+    assert step.get("continue-on-error") is not True
+    assert "|| true" not in code
+    env = step.get("env") or {}
+    assert "CLOUDFLARE_API_TOKEN" in env
+    assert env.get("CLOUDFLARE_ACCOUNT_ID")
+
+
+def test_the_marketing_preflight_is_scoped_to_premise_labs() -> None:
+    """The two surfaces stay independent: the not-yet-configured dashboard must
+    not block the marketing deploy (#4054)."""
+    code = _step_code(PREFLIGHT)
+    assert "--project premise-labs" in code
+
+
+def test_the_blog_admin_console_is_built_and_staged_by_the_dashboard_job() -> None:
+    """#4171: the console ships with the app-origin project, staged into dist/admin/.
+
+    The gate Function reads `/admin/index.html` from ASSETS, and ASSETS for the
+    `tortoise-dashboard` project is `website/apps/dashboard/dist/` — so the build
+    output must land there, and it must land BEFORE the deploy step.
+    """
+    steps = _dashboard_steps()
+    names = [s.get("name", "") for s in steps]
+    build = "Build blog admin SPA (vite) → stage into dist/admin/ (#4171)"
+    assert build in names, "the dashboard job no longer builds the blog admin SPA"
+    assert names.index(build) < names.index(DASHBOARD_DEPLOY), (
+        "the console must be staged BEFORE the dashboard deploy"
+    )
+    code = _strip_bash_comments(next(s for s in steps if s.get("name") == build)["run"])
+    assert "website/apps/blog-admin" in code
+    assert "../dashboard/dist/admin" in code, (
+        "the console is not staged into the app project's dist/ — the gate's ASSETS read would 404"
+    )
+    assert "npm run build" in code
+
+
+def test_the_marketing_job_no_longer_builds_the_blog_admin_console() -> None:
+    """#4171: the console left the marketing origin — its build must not linger.
+
+    Two producers staging the same SPA into different projects is how the old
+    tortoise.*/admin copy silently came back, and the staging denylist test above
+    would still pass (the file simply would not be in this upload).
+    """
+    names = [s.get("name", "") for s in _deploy_steps()]
+    assert not any("blog admin SPA" in n for n in names), (
+        "the marketing deploy job still builds the blog admin SPA"
+    )
+
+
+def _dashboard_preflight_script(tmp_path: Path) -> Path:
+    """The shipped dashboard preflight with the same benign rewrites as the
+    premise-labs one: checker -> stub, pip -> no-op, sleep -> 0."""
+    step = next(s for s in _dashboard_steps() if s.get("name") == DASHBOARD_PREFLIGHT)
+    rewritten = (
+        step["run"]
+        .replace("python3 tools/check_pages_bindings.py", "check_stub")
+        .replace("python3 -m pip install --quiet 'pyyaml==6.0.3'", ":")
+        .replace("sleep 10", "sleep 0")
+    )
+    assert "check_stub" in rewritten, "the checker invocation was not substituted"
+    assert "exit $rc" in rewritten, "the preflight no longer propagates its exit code"
+    p = tmp_path / "dashboard_preflight.sh"
+    p.write_text(rewritten, encoding="utf-8")
+    return p
+
+
+@pytest.mark.parametrize(
+    ("exits", "want_rc", "want_calls"),
+    [
+        ("0 0 0", 0, 1),   # configured dashboard: one call, passes
+        ("1 1 1", 1, 3),   # a REQUIRED binding is absent -> the deploy is blocked
+        ("2 2 0", 0, 3),   # transient API failure -> retry saves the deploy
+        ("2 2 2", 2, 3),   # API down -> fail closed with the right code
+    ],
+)
+def test_the_dashboard_preflight_shell_behaves_correctly(
+    tmp_path, exits: str, want_rc: int, want_calls: int
+) -> None:
+    """Anti-neutering, execution-based: the dashboard gate must ACTUALLY invoke
+    the checker and propagate its non-zero exit.
+
+    Replacing the invocation with `echo`, or appending `|| true`, leaves every
+    source-level string in place. Only executing the shipped block catches it —
+    and the step's ONLY job is to fail the deploy.
+    """
+    rc, out, calls = _run_checker_script(
+        tmp_path, _dashboard_preflight_script(tmp_path), exits
+    )
+    assert calls == want_calls, f"exits={exits!r} calls={calls} want={want_calls}\n{out}"
+    assert "STUB_CHECKER_INVOKED:1" in out
+    assert rc == want_rc, f"exits={exits!r} rc={rc} want={want_rc}\n{out}"
+
+
+def test_a_duplicate_project_is_rejected(tmp_path) -> None:
+    """Two entries for one project would check the same Cloudflare project twice
+    and silently drop the second's bindings."""
+    p = tmp_path / "m.yml"
+    p.write_text(
+        "projects:\n"
+        "  - project: a\n    bindings:\n"
+        "      - name: X\n        kind: required\n        type: env_vars\n"
+        "        envs: [production]\n"
+        "  - project: a\n    bindings:\n"
+        "      - name: Y\n        kind: required\n        type: env_vars\n"
+        "        envs: [production]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate project"):
+        cpb.load_manifest(p)
+
+
+def test_a_project_without_a_name_is_rejected(tmp_path) -> None:
+    p = tmp_path / "m.yml"
+    p.write_text(
+        "projects:\n  - bindings:\n"
+        "      - name: X\n        kind: required\n        type: env_vars\n"
+        "        envs: [production]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing a `project` name"):
+        cpb.load_manifest(p)
+
+
+def test_an_empty_projects_list_is_rejected(tmp_path) -> None:
+    p = tmp_path / "m.yml"
+    p.write_text("projects: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="non-empty list of projects"):
+        cpb.load_manifest(p)
+
+
+def test_a_second_project_with_no_required_binding_is_rejected(tmp_path) -> None:
+    """Per-project validation: a project whose bindings are all `recommended`
+    would exit 0 forever — a gate that cannot fail, scoped to one project."""
+    p = tmp_path / "m.yml"
+    p.write_text(
+        "projects:\n"
+        "  - project: a\n    bindings:\n"
+        "      - name: X\n        kind: required\n        type: env_vars\n"
+        "        envs: [production]\n"
+        "  - project: b\n    bindings:\n"
+        "      - name: Y\n        kind: recommended\n        type: env_vars\n"
+        "        envs: [production]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no binding is marked"):
+        cpb.load_manifest(p)

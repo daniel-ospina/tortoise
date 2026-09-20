@@ -46,8 +46,10 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
     Each seed is ONE TURN of its own session, written through
     ``tools.ask_spotcheck.seed_capture_turn_store`` — the single
     capture-shaped seeder — so this fixture cannot emit a graph the capture
-    path cannot produce. ``session_date`` is carried by a date-only
-    ``:Event`` marker (retained for fixture compatibility), and
+    path cannot produce. ``session_date`` is carried BOTH by a date-only
+    ``:Event`` marker (retained for fixture compatibility) and, since
+    #4106, by the SESSION's own recorded time (``:Session.created_at``, the
+    ``now`` capture writes for a session and all its turns);
     ``supersedes_into`` (a label) creates a real CORRECTS supersession so the
     D8 markers render.
 
@@ -56,8 +58,12 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
     shipping read reports therefore comes from the
     ``(:Session)-[:CONTAINS]->(:Point)`` edge ALONE — which is what makes the
     committed transcripts a real guard on that read — and the ``:Event`` date
-    join reaches NO turn, so the rendered blocks carry ``[session <sid>]``
-    with no ``(session date …)`` marker.
+    join still reaches NO turn. #4106: the rendered blocks now carry the
+    session's own date as ``(session date YYYY-MM-DD)``. Carrying
+    ``session_date`` as the session's recorded time is what makes that date
+    TRUE — leaving the session on the run's wall clock would have rendered a
+    FABRICATED date (a wrong date is worse than no date), and would have made
+    the committed goldens change every day.
 
     Seed keys ``kind`` / ``tags`` are NO LONGER honored: capture's turn store
     takes neither, and a ``kind`` knob would let a seed silently opt out of
@@ -68,16 +74,29 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
     ids: dict[str, str] = {}
     for i, seed in enumerate(seeds):
         sid = seed.get("sessionId") or f"sess-{i}"
+        # #4106: no placeholder — a seed without a date records NO time.
+        sdate = seed.get("session_date") or ""
+        # #4106: ONE ``now`` for the session and its turns — capture's own
+        # shape — and it is the fixture's session date, so the rendered
+        # ``(session date …)`` is TRUE and the committed goldens are stable.
+        # An absent date passes ``now=None``, which since #4156 means "record
+        # NO time" rather than "use the run clock", so the read path reports
+        # UNKNOWN with nothing to erase afterwards.
         turn_ids = seed_capture_turn_store(
             sdk, sid,
             [{"role": seed.get("role") or "user",
-              "content": seed["content"]}])
+              "content": seed["content"]}],
+            now=f"{sdate}T10:00:00Z" if sdate else None)
         if not turn_ids:
             # Capture's pre-mutation blank gate — nothing was written.
             continue
         ids[seed.get("label", f"s{i}")] = turn_ids[0]
+        if not sdate:
+            # The fixture records no date for this session, so the seeder was
+            # told exactly that and wrote no recorded time — the read path
+            # reports UNKNOWN rather than the run date.
+            continue
         event_id = seed.get("eventId") or f"ev-{i}"
-        sdate = seed.get("session_date") or "2026-08-20"
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
             params={"eid": event_id, "st": f"{sdate}T10:00:00Z"},

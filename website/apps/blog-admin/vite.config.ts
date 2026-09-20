@@ -5,9 +5,11 @@ import path from 'node:path';
 // Tortoise blog admin SPA.
 //
 // base '/admin/' — ABSOLUTE asset paths, because the public base path IS known:
-// CI stages the built app into website/admin/ (deploy-pages.yml), so the bundle
-// always lives at /admin/assets/… and is served by the admin gate Function
-// (website/functions/admin/[[path]].ts).
+// the deploy-dashboard job stages the built app into
+// website/apps/dashboard/dist/admin/ (deploy-pages.yml), so the bundle always
+// lives at /admin/assets/… and is served on the app origin by the admin gate
+// Function (website/apps/dashboard/functions/admin/[[path]].ts) — same-origin
+// with the `__Host-session` cookie (#4171).
 //
 // #3952: this was `'./'`. A relative base resolves against the DOCUMENT URL
 // (RFC 3986 §5.2.3 "Merge Paths"), so whether it worked depended on the

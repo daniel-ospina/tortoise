@@ -307,10 +307,14 @@ test('#3575: capture support is derived from the seam, and every supported harne
     if (!HARNESS_CAPTURE_SUPPORT[h]) continue
     const artifact = HARNESS_CAPTURE_SEAM[h]
     assert.match(artifact, /^tortoise\//, `${h}: seam artifact must be in-repo`)
-    const install = HARNESS_INSTALL[h](KEY)
+    // The install step may live in the MCP-setup copy (Pi/Codex embed it) or
+    // in the capture-install surface (Cursor's copy is a JSON file, so its
+    // capture step is a connect-wizard step + the Memory-sources row).  Either
+    // surface must name the declared artifact — capability is not a claim.
+    const surface = `${HARNESS_INSTALL[h](KEY)}\n${HARNESS_CAPTURE_INSTALL[h] || ''}`
     assert.ok(
-      install.includes(artifact),
-      `HARNESS_INSTALL.${h} must install its declared seam ${artifact}`,
+      surface.includes(artifact),
+      `HARNESS_INSTALL/${h} capture-install surface must install its declared seam ${artifact}`,
     )
   }
 })
@@ -322,6 +326,59 @@ test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () =
   // the Memory-sources inline row installs the SAME seam (one shared constant)
   assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
   assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+})
+
+// #3818 (P2-4): the copy-paste Codex capture install must honour the SAME
+// `$CODEX_HOME` override the installer does. A hardcoded `~/.codex` command
+// writes the hook into a file Codex never reads on a non-default setup — the
+// silent no-capture the seam exists to prevent, on the surface most likely to
+// be read.
+test('#3818: the Codex capture install copy honours $CODEX_HOME', () => {
+  const codex = HARNESS_CAPTURE_INSTALL.codex
+  assert.ok(codex, 'HARNESS_CAPTURE_INSTALL.codex present')
+  assert.match(codex, /\$\{CODEX_HOME:-\$HOME\/\.codex\}/,
+    'the copy must use the ${CODEX_HOME:-$HOME/.codex} default the installer honours')
+  // Pin the COMMANDS, not just the prose: a comment naming $CODEX_HOME left
+  // the actual mkdir/cp/chmod lines hardcoded to ~/.codex.
+  const commandLines = codex.split('\n').filter((l) => /^(mkdir|cp|chmod)\b/.test(l))
+  assert.ok(commandLines.length >= 3, commandLines)
+  for (const line of commandLines) {
+    assert.ok(line.includes('CODEX_HOME'),
+      `command ignores $CODEX_HOME: ${line}`)
+    assert.ok(!line.includes('~/.codex'),
+      `command hardcodes ~/.codex: ${line}`)
+  }
+})
+
+// #3819: the Cursor capture install. Cursor's MCP copy is a JSON file (so the
+// capture step lives in HARNESS_CAPTURE_INSTALL + HARNESS_STEPS.cursor), the
+// registration is HOME-scoped at `~/.cursor` (Cursor has no config-dir env
+// var), and the IDE-ONLY limitation is disclosed — Cursor's own docs say
+// cloud agents have no editor-lifetime session boundary, and the disclosure
+// must sit where the user chooses Cursor, not in a footnote.
+test('#3819: the Cursor capture install is home-scoped, flat, and discloses the IDE-only limit', () => {
+  const cursor = HARNESS_CAPTURE_INSTALL.cursor
+  assert.ok(cursor, 'HARNESS_CAPTURE_INSTALL.cursor present')
+  assert.match(cursor, /tortoise\/cursor-hooks\/session-end\.sh/,
+    'the capture step must name the declared seam artifact')
+  assert.match(cursor, /~\/\.cursor\/hooks\.json/,
+    'the copy must name ~/.cursor/hooks.json, the one path Cursor reads')
+  assert.doesNotMatch(cursor, /CURSOR_HOME:-/,
+    'Cursor has NO config-dir env var — do not teach a ${CURSOR_HOME:-…} default')
+  assert.match(cursor, /sessionEnd/, 'the copy must name the sessionEnd event')
+  // the flat entry shape is load-bearing — a nested matcher group invalidates
+  // Cursor's WHOLE hooks.json (its validator rejects a non-string command)
+  assert.match(cursor, /FLAT/,
+    'the copy must warn that the entry is flat (a nested entry disables all Cursor hooks)')
+  // Cursor's validator also requires a document `version`
+  assert.match(cursor, /version/,
+    'the copy must warn that hooks.json needs a numeric version')
+  // the IDE-only limitation is disclosed on the install surface
+  assert.match(cursor, /IDE-ONLY/)
+  assert.match(cursor, /[Cc]loud [Aa]gent/,
+    'the disclosure must name cloud agents explicitly')
+  assert.match(cursor, /no editor-lifetime session boundary/,
+    'the disclosure quotes the constraint that makes the gap real')
 })
 
 // #3713 P2-3 (review of #3721): Pi loads a top-level `tortoise-capture.ts` AND

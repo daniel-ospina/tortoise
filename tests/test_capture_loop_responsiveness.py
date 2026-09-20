@@ -66,6 +66,13 @@ LOOP_BUDGET_S = 3.0
 # loop yields 0 (the next tick can only happen once the freeze releases); a
 # free loop yields ~STALL_S/0.05 ≈ 80.
 MIN_TICKS_IN_STALL = 10
+# Bound on the wait for the fake to report that the capture entered its stall,
+# before the /health probe is issued (the liveness test below). Generous and
+# only reached on the failure path: the endpoint's pre-stall synchronous setup
+# is legitimately slow on a loaded runner (measured ~4.75s for a max-size
+# 500-turn capture, #3086), and a capture that never starts must fail on the
+# `"entered" in state` assertion rather than hang the suite.
+STALL_START_WAIT_S = 60.0
 # NOTE: this endpoint ALSO does bounded synchronous graph work on the event
 # loop (turn upserts, session MERGE, tenant-vocab build). That is a SEPARATE,
 # tracked defect — measured at ~4.75s for a max-size 500-turn capture (#3086)
@@ -179,7 +186,14 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
       stall still shows up here as one long interval.
     * the ``/health`` request completes BEFORE the stall ends AND AFTER the
       extraction entered it, i.e. the API answered DURING the freeze window
-      rather than queued behind it (or served before it began).
+      rather than queued behind it (or served before it began). The probe is
+      issued only once the fake reports the stall has STARTED: the endpoint's
+      pre-stall synchronous setup can run for seconds on a loaded runner (and
+      #4304 lengthens it), so issuing the probe concurrently made the two
+      assertions race the setup — on a slow runner the probe was answered
+      before the stall began and the run proved nothing (harness race, not a
+      regression). Waiting on the fake's own ``entered`` marker puts the probe
+      inside the freeze window by construction.
 
     Mutation check (must stay true): calling the extraction inline
     (`return fn(*args, **kwargs)` instead of dispatching to the pool) makes the
@@ -220,7 +234,24 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             await asyncio.sleep(0.05)
             capture = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
-            await asyncio.sleep(0.05)  # let the capture reach the extraction
+            # Issue the probe only once the capture is INSIDE its stall. The
+            # endpoint does bounded synchronous setup BEFORE the extraction
+            # starts (seconds on a loaded runner — the very interval the
+            # tick-interval check above excludes). Probing concurrently races
+            # that setup: on a slow runner the probe is already answered before
+            # the stall begins, so `health_done > entered` fails while proving
+            # nothing about liveness (#3060). Waiting on the fake's own
+            # `entered` marker makes the probe land inside the freeze window by
+            # construction, so both assertions measure what they claim to.
+            # Bounded, and it also stops as soon as the capture has SETTLED
+            # without reaching the extraction (a fast endpoint error), so a
+            # failure here stays fast instead of burning the whole bound before
+            # the `"entered" in state` assertion reports it.
+            _stall_deadline = time.perf_counter() + STALL_START_WAIT_S
+            while ("entered" not in state
+                   and not capture.done()
+                   and time.perf_counter() < _stall_deadline):
+                await asyncio.sleep(0.05)
             health = await ac.get("/health")
             health_done = time.perf_counter()
             cap = await capture
@@ -835,7 +866,8 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
                     _current_legacy_full_access]
         toks = [v.set(val) for v, val in zip(
             ctx_vars,
-            [TEST_ORG_ID, {}, None, None, ["graphs:read", "graphs:write"],
+            [TEST_ORG_ID, {"max_points": 100000, "max_sessions": None},
+             None, None, ["graphs:read", "graphs:write"],
              False],
             strict=True)]
         try:

@@ -41,8 +41,11 @@ jobs:
         # scripts. The ONE live script is the tortoise-onboarding
         # SKILL.md, mirrored byte-identically into
         # website/apps/dashboard/public/skills/tortoise-onboarding/ (parity
-        # test) and served at app.premiselabs.co/skills/tortoise-onboarding/
-        # by the deploy-dashboard job below (dist build copies public/).
+        # test) and served at
+        # app.premiselabs.co/skills/tortoise-onboarding/SKILL.md by the
+        # deploy-dashboard job below (dist build copies public/).
+        # (The trailing-slash DIRECTORY URL is not a route — since #3523 an
+        # unknown path on the app host is an honest 404, not the dashboard.)
         run: |
           test -s tortoise/onboarding/SKILL.md
           cmp tortoise/onboarding/SKILL.md \
@@ -77,25 +80,6 @@ jobs:
           else
             echo "CNAME already correct"
           fi
-      - name: Build blog admin SPA (vite) → stage into website/admin/ (#1800)
-        # The admin gate Function serves /admin/index.html from ASSETS; the
-        # built app must land at website/admin/ before the Pages deploy. Env
-        # comes from repo secrets (VITE_* are public-safe — anon key). The
-        # app's env guard throws at RUNTIME (browser), so missing secrets
-        # would silently ship a white-screen SPA — fail fast instead.
-        run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
-            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
-            exit 1
-          fi
-          cd website/apps/blog-admin
-          npm ci
-          VITE_SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-          VITE_SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
-            npm run build
-          mkdir -p ../../admin
-          cp -r dist/* ../../admin/
-          test -s ../../admin/index.html
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -105,6 +89,12 @@ jobs:
       # requirement lived in a PR body, which cannot fail — so it now lives in
       # config/required-bindings.yml and this step reads it. Fails BEFORE the
       # deploy, because the failure mode is "deploy succeeds, runtime 503s".
+      #
+      # `--project premise-labs` scopes the check to THIS deploy's project. Since
+      # #4054 the manifest also covers `tortoise-dashboard` (gated by the
+      # `deploy-dashboard` job below, `--project tortoise-dashboard`); without
+      # this scope the not-yet-configured dashboard would block the marketing
+      # deploy. Both projects are still checked — by the job that deploys them.
       - name: Preflight — required Pages bindings exist
         run: |
           python3 -m pip install --quiet 'pyyaml==6.0.3'
@@ -115,7 +105,7 @@ jobs:
           # ignore a required check).
           rc=1
           for attempt in $(seq 1 3); do
-            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml && rc=0 && break
+            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml --project premise-labs && rc=0 && break
             rc=$?
             echo "::warning::binding preflight attempt $attempt failed (exit $rc)"
             # No sleep after the FINAL attempt: it delays the failure by 10s for
@@ -168,8 +158,13 @@ jobs:
       #     `functions/` — the tree wrangler will actually compile now.
       #   * _redirects / _headers — consumed from the upload root; dropping them
       #     silently discards the redirect + security-header contracts.
-      #   * admin/ — generated into the upload root by the blog-admin build step
-      #     above; dropping it breaks the admin gate's ASSETS read.
+      # #4171: `admin/` is no longer staged here. The blog admin console moved
+      # to the app origin (the `tortoise-dashboard` project) so it is
+      # same-origin with its `__Host-session` cookie; it is now built and staged
+      # into `website/apps/dashboard/dist/admin/` by the `deploy-dashboard` job.
+      # This project keeps only the single-hop `/admin` → app origin 301 in
+      # `functions/_middleware.ts`. An `admin/` tree reappearing here would be
+      # dead weight (the middleware redirects before any asset is read).
       # A denylist fails LOUD: an over-eager exclusion 404s a page that the
       # verify-legal job already covers. An allowlist fails SILENT: dead auth.
       # The five survival guards below are what keep the denylist honest.
@@ -206,13 +201,11 @@ jobs:
           test -d "$STAGE/functions" \
             || { echo '::error::functions/ did not survive staging — Pages compiles Functions from the cwd (`cd "$STAGE"` below), so every /auth/*, /api/*, /blog/* and /admin/* route would 404 (#3620)'; exit 1; }
           test -f "$STAGE/functions/_middleware.ts" \
-            || { echo '::error::functions/_middleware.ts is missing — host routing and the admin gate would be gone (#3620)'; exit 1; }
+            || { echo '::error::functions/_middleware.ts is missing — host routing and the /admin → app-origin redirect would be gone (#3620/#4171)'; exit 1; }
           test -f "$STAGE/_redirects" \
             || { echo '::error::_redirects did not survive staging — the redirect contract is gone (#3620)'; exit 1; }
           test -f "$STAGE/_headers" \
             || { echo '::error::_headers did not survive staging — the security-header contract is gone (#3620)'; exit 1; }
-          test -d "$STAGE/admin" \
-            || { echo '::error::admin/ did not survive staging — the blog-admin build step above did not stage it (#3620)'; exit 1; }
           # wrangler resolves `functions/` against the PROCESS CWD, not against
           # the directory argument, so the cwd must be the upload root. Without
           # this `cd`, wrangler looks for `<repo root>/functions` (absent), omits
@@ -407,6 +400,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # #4054: the BFF moved onto `tortoise-dashboard`, which when the move
+      # landed had 0 env vars and 0 D1 bindings — every /auth/* and /api/*
+      # request would have 503'd on a green deploy. The same #3616 gate that
+      # guards `premise-labs` now guards this project. `--project
+      # tortoise-dashboard` reads config/required-bindings.yml; a missing
+      # REQUIRED binding exits 1, which aborts THIS step and therefore the job
+      # BEFORE the upload — the whole point is that it gates, not warns. It runs
+      # before the build so a misconfigured project fails fast.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Preflight — required Pages bindings exist (tortoise-dashboard)
+        run: |
+          python3 -m pip install --quiet 'pyyaml==6.0.3'
+          rc=1
+          for attempt in $(seq 1 3); do
+            python3 tools/check_pages_bindings.py --manifest config/required-bindings.yml --project tortoise-dashboard && rc=0 && break
+            rc=$?
+            echo "::warning::binding preflight attempt $attempt failed (exit $rc)"
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          if [ "$rc" = "1" ]; then
+            echo '::error::A REQUIRED binding is absent on the tortoise-dashboard project.'
+            echo '::error::Bind the SESSIONS D1 database + the BFF env vars before deploying. See #4054.'
+          fi
+          exit $rc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -417,6 +439,27 @@ jobs:
           cd website/apps/dashboard
           npm ci
           npm run build
+      - name: Build blog admin SPA (vite) → stage into dist/admin/ (#4171)
+        # The blog admin console moved to the session origin (#4171). Its shell
+        # and assets must land at `dist/admin/` so the gate Function
+        # (functions/admin/[[path]].ts) can serve them from ASSETS — and so the
+        # whole console ships with THIS project, same-origin with the
+        # `__Host-session` cookie. VITE_* are public-safe (anon key). The app's
+        # env guard throws at RUNTIME (browser), so missing secrets would
+        # silently ship a white-screen SPA — fail fast instead.
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
+            exit 1
+          fi
+          cd website/apps/blog-admin
+          npm ci
+          VITE_SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+          VITE_SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+            npm run build
+          mkdir -p ../dashboard/dist/admin
+          cp -r dist/* ../dashboard/dist/admin/
+          test -s ../dashboard/dist/admin/index.html
       - name: Pre-flight — token can see tortoise-dashboard project (P2-1)
         # The CLOUDFLARE_API_TOKEN may be scoped per-project; assert the
         # dashboard project is visible BEFORE deploying so a 403-scoped
@@ -582,6 +625,11 @@ jobs:
           # full crawl.
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL: '1'
           BASE_URL: https://premiselabs.co
+          # #4054: the auth surface is served by the app origin, and the
+          # marketing origin only 301s to it. The suite's app-surface tests must
+          # target the app origin — following that 301 would assert against
+          # whatever production last shipped instead of this deploy.
+          APP_BASE_URL: https://app.premiselabs.co
           TORTISE_HOST: https://tortoise.premiselabs.co
 
       # Step 4: Warn-only effective-date comparison — served
@@ -611,9 +659,11 @@ jobs:
   #   CF_API_TOKEN + CF_ZONE_ID (edge-cache purge #1865)
   # (no SUPABASE_JWT_SECRET — the admin gate validates sessions via
   # Supabase /auth/v1/user; ops step documented in the epic README).
-  # The lifecycle/meta E2E tests need BLOG_E2E_AGENT_KEY (a valid agent key
-  # provisioned in blog_agent_keys as agent_name='blog-e2e') — without it
-  # those tests SKIP. Set it as a GitHub Actions secret.
+  # The lifecycle/meta E2E tests (the only tests needing BLOG_E2E_AGENT_KEY, a
+  # valid agent key provisioned in blog_agent_keys as agent_name='blog-e2e') do
+  # NOT run here: this job holds no write-capable key. Run them on demand via
+  # the `Blog write E2E (manual, #4220)` workflow
+  # (.github/workflows/blog-write-e2e.yml).
   # continue-on-error: warn-only — the deploy is already live.
   verify-blog:
     runs-on: ubuntu-latest
@@ -633,7 +683,16 @@ jobs:
         run: |
           pip install pytest requests playwright pytest-playwright
           pip install -e .
-      - name: Run blog E2E suite against production
+      - name: Run blog E2E suite against production (read-only)
+        # #4220: `-m "not blog_write"` excludes the two tests that CREATE rows
+        # (create/publish/unpublish). A deploy must not mutate production
+        # content, and a write test that fails mid-run leaves residue. Those two
+        # now run on demand — see .github/workflows/blog-write-e2e.yml.
+        #
+        # BLOG_E2E_AGENT_KEY is deliberately NOT in this job any more: the
+        # read-only assertions need no credential, so a deploy no longer holds a
+        # production write-capable key at all (defence in depth — even if the
+        # marker were dropped, the write tests skip without a key).
         env:
           RUN_BLOG_E2E: '1'
           ALLOW_PROD: '1'
@@ -642,6 +701,5 @@ jobs:
           TORTOISE_TEST_CARVE_OUT: '1'
           BASE_URL: https://premiselabs.co
           TORTISE_HOST: https://tortoise.premiselabs.co
-          BLOG_E2E_AGENT_KEY: ${{ secrets.BLOG_E2E_AGENT_KEY }}
         run: |
-          python3 -m pytest tests/e2e/test_blog.py -v
+          python3 -m pytest tests/e2e/test_blog.py -v -m "not blog_write"

@@ -3619,6 +3619,9 @@ _CONSENT_TEAM = {
     # C5 #2114: C2 owner class (legacy tt_ key) — scope-less key_id dicts
     # 403 the capture gates otherwise.
     "legacy_full_access": True, "max_points": 100000,
+    # #4010: the resolved-limits contract carries EVERY resource — sessions is
+    # unlimited (explicit None), and a MISSING key is fail-closed.
+    "max_sessions": None,
 }
 
 
@@ -3827,26 +3830,24 @@ def test_receipt_requires_durable_data(consent_client):
         "bare receipt written on the converged 2xx (harness-less retry)"
 
 
-def test_receipt_2xx_only_and_last_error_lifecycle(consent_client, monkeypatch):
+def test_receipt_2xx_only_and_last_error_lifecycle(consent_client):
     """Task 11 (T1-P12 + cycle-4 P1-2): receipt set ONLY on 2xx; per-harness
-    last-error set on non-2xx and CLEARED on 2xx."""
+    last-error set on non-2xx and CLEARED on 2xx.
+
+    #4188: the non-2xx trigger is the empty-conversation 422 — the old
+    no-provider trigger is now a 2xx (the capture is STORED and only
+    extraction is skipped)."""
     _opt_in()
-    # non-2xx: no provider (mock seam off AND no real keys) → 503 →
-    # last_error set, no receipt
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    # non-2xx: empty conversation → 422 → last_error set, no receipt
     r = consent_client.post("/v1/sessions",
-                            json={"conversation": _CONV, "harness": "claude"})
-    assert r.status_code == 503, r.text
+                            json={"conversation": [], "harness": "claude"})
+    assert r.status_code == 422, r.text
     st = _state()
     assert st.get("session_capture_last_error_claude"), \
-        "503 must set session_capture_last_error_claude"
+        "non-2xx must set session_capture_last_error_claude"
     assert st.get("session_capture_receipt_claude") is None, \
         "no receipt on a non-2xx"
-    # 2xx: mock seam back on → receipt set, last_error cleared
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # 2xx: a real conversation → receipt set, last_error cleared
     r2 = consent_client.post("/v1/sessions",
                              json={"conversation": _CONV, "harness": "claude"})
     assert r2.status_code == 200, r2.text
@@ -3881,7 +3882,8 @@ def test_off_switch_keeps_existing_sessions(consent_client):
 
 def test_off_switch_409_first_before_provider_gate(consent_client, monkeypatch):
     """#1927 (review P2): the 409 opt-out check is FIRST in the gate stack —
-    a disabled team with NO provider key gets 409, not the provider 503."""
+    a disabled team with NO provider key gets 409, never the stored keyless
+    capture path."""
     _opt_in(enabled=False)
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
@@ -4104,7 +4106,8 @@ def _mcp_team_context(tmp_path, monkeypatch, *, org_id="team-1727-mcp",
                 _ha._update_onboarding_state(org_id, session_recording=True)
             tok_t = _current_org_id.set(org_id)
             tok_l = _current_org_limits.set(
-                {"org_id": org_id, "tier": "free", "max_points": 100000})
+                {"org_id": org_id, "tier": "free", "max_points": 100000,
+                 "max_sessions": None})
             tok_m = _transport_mode.set("http")
             try:
                 yield org_id
@@ -4169,7 +4172,7 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
         tok_t = _current_org_id.set("team-1727-mcp-opt")
         tok_l = _current_org_limits.set(
             {"org_id": "team-1727-mcp-opt", "tier": "free",
-             "max_points": 100000})
+             "max_points": 100000, "max_sessions": None})
         try:
             result = tortoise_session_capture(conversation=_CONV, harness="pi")
             st = _ha._get_onboarding_state("team-1727-mcp-opt")
@@ -4181,6 +4184,38 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     assert st.get("session_capture_last_error_pi"), \
         "off-switch MCP attempt must record the per-harness last error"
     assert st.get("session_capture_receipt_pi") is None
+
+
+def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):
+    """#4010: the capture bridge carries `max_sessions` only when it is
+    actually PRESENT, so a keyless limits dict reaches the sessions gate and
+    fails closed (#310 GAP-B) rather than being normalized to unlimited.
+
+    This is the degraded `mcp_auth` shape — `{"org_id": ...}` after a
+    registry resolution failure. Mutation this REDs:
+    `org["max_sessions"] = limits.get("max_sessions")`, which would turn a
+    failed resolution into a SUCCESSFUL unlimited capture — the exact
+    fail-open class #4010 removes, and it would make MCP succeed where REST
+    returns 500 for the same dict.
+    """
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
+    from tortoise.mcp_server import tortoise_session_capture
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with patched_tortoise_sdk(str(tmp_path / "mcp-keyshape.db")):
+        _provision_team("team-1727-keyshape")
+        tok_t = _current_org_id.set("team-1727-keyshape")
+        # `max_sessions` deliberately ABSENT — not set to None.
+        tok_l = _current_org_limits.set(
+            {"org_id": "team-1727-keyshape", "tier": "free",
+             "max_points": 100000})
+        try:
+            result = tortoise_session_capture(
+                conversation=_CONV, harness="pi", session_id="s-keyshape")
+        finally:
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
+    assert result.get("status") == 500, result
+    assert "max_sessions" in str(result.get("error", "")), result
 
 
 def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
@@ -4485,11 +4520,13 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
         _provision_team(org_id)
         _opt_in(org_id, enabled=False)  # OFF first
         team = {"org_id": org_id, "tier": "free", "key_id": "k-1727",
-                "legacy_full_access": True, "max_points": 100000}
+                "legacy_full_access": True, "max_points": 100000,
+                "max_sessions": None}
         app.dependency_overrides[_get_current_team] = lambda: dict(team)
         tok_t = _current_org_id.set(org_id)
         tok_l = _current_org_limits.set(
-            {"org_id": org_id, "tier": "free", "max_points": 100000})
+            {"org_id": org_id, "tier": "free", "max_points": 100000,
+             "max_sessions": None})
         tok_m = _transport_mode.set("http")
         try:
             with TestClient(app) as tc:

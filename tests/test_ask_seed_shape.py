@@ -143,6 +143,19 @@ def test_seed_capture_turn_store_is_capture_exact(sdk):
     assert is_episodic is True, sessions[0]
     assert [list(r) for r in edges] == [["sess-x", i] for i in ids]
 
+    # #4194 — the ONE deliberate seeder/capture divergence: the seeder does NOT
+    # embed its turns. The real capture path now DOES (both turn-write paths),
+    # but the ask lane must keep exercising the un-backfilled / no-embedder
+    # store its consumers actually read until #4197's backfill decision. Pin
+    # the ABSENCE so a future "restore seeder/capture parity" edit cannot
+    # silently erase that coverage (the #3914 drift class this file owns).
+    embedded = sdk._get_proj().g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-x_t' "
+        "AND t.embedding IS NOT NULL RETURN count(t)").result_set
+    assert embedded[0][0] == 0, (
+        "seed_capture_turn_store must not embed turns until #4197 — see its "
+        "#4194 comment")
+
     # Pre-mutation blank gate: nothing at all is written for a blank session.
     assert seed_capture_turn_store(
         sdk, "sess-blank", [{"role": "user", "content": ""}]) == []
@@ -220,3 +233,149 @@ def test_transcript_golden_pins_identity_from_the_contains_edge(sdk):
     assert mutated_msg != tx["user_message"], (
         "the committed golden renders identically with the CONTAINS edge gone "
         "— it is NOT bound to the identity read")
+
+
+# ── 4. #4106: a seed with NO session_date records NO time ────────────────
+
+def test_transcript_seed_without_a_date_records_no_time(sdk):
+    """#4106: ``_seed``'s date default must not become a session's recorded
+    time. The shared seeder is told ``now=None`` for a seed with no
+    ``session_date``, which since #4156 records NO time (session AND turns)
+    rather than the run clock, so the reader's context carries no date marker
+    and no value has to be erased afterwards."""
+    from tools.gen_ask_transcripts import _seed
+    from tortoise.retrieval import render_context
+
+    _seed(sdk, [{"content": "I bought a smoker today"}])  # no session_date
+    proj = sdk._get_proj()
+    sessions = proj.g.query(
+        "MATCH (s:Session) RETURN s.id, s.created_at").result_set
+    assert sessions and all(r[1] is None for r in sessions), sessions
+    turns = proj.g.query("MATCH (t:Point) RETURN t.createdAt").result_set
+    assert turns and all(r[0] is None for r in turns), turns
+    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    assert ann and all(not h.get("session_date") for h in ann), ann
+    assert "(session date" not in render_context(ann)
+
+
+# ── 5. #4156: ``now=None`` records NO time, the default models a capture ──
+
+def test_now_none_records_no_time_while_the_default_models_a_capture(sdk):
+    """#4156: "no recorded time" and "the capture simulation's clock" must be
+    two distinguishable values, not one.
+
+    ``now`` used to default to ``None`` and be substituted with
+    ``datetime.now()``, so a caller that wanted to record NO time got a
+    fabricated date instead and had to erase it afterwards
+    (``_clear_recorded_time``). The default is now the ``CAPTURE_CLOCK``
+    sentinel — a capture always has a time — and an explicit ``now=None``
+    means the session and its turns record NO time, REMOVING any time already
+    on them.
+    """
+    from tools.ask_spotcheck import (
+        CAPTURE_CLOCK,
+        merge_capture_session,
+    )
+
+    proj = sdk._get_proj()
+
+    # The default models a capture: it resolves the sentinel to the run clock
+    # and WRITES it.
+    resolved = merge_capture_session(sdk, "sess-clock", 2)
+    assert resolved not in (None, CAPTURE_CLOCK), resolved
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-clock'}) RETURN s.created_at",
+    ).result_set == [[resolved]]
+
+    # An explicit None records NO time — and no later call may resurrect one
+    # (the write is a clear, never a coalesce of a fabricated default).
+    assert merge_capture_session(sdk, "sess-notime", 2, now=None) is None
+    assert merge_capture_session(sdk, "sess-notime", 2, now=None) is None
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-notime'}) RETURN s.created_at",
+    ).result_set == [[None]]
+
+    # The turn side obeys the SAME contract.
+    seed_capture_turn_store(
+        sdk, "sess-turns-notime", [{"role": "user", "content": "undated"}],
+        now=None)
+    assert proj.g.query(
+        "MATCH (t:Point {id:'sess-turns-notime_t0'}) "
+        "RETURN t.createdAt, t.updatedAt",
+    ).result_set == [[None, None]]
+
+    # …and a session seeded with the default (no ``now``) still records its
+    # capture time on both the session and its turns — a capture always has
+    # one — so the fix cannot have turned the default into "no time".
+    seed_capture_turn_store(
+        sdk, "sess-turns-clock", [{"role": "user", "content": "dated"}])
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-turns-clock'}) RETURN s.created_at",
+    ).result_set[0][0]
+    assert proj.g.query(
+        "MATCH (t:Point {id:'sess-turns-clock_t0'}) RETURN t.createdAt",
+    ).result_set[0][0]
+
+
+def test_now_none_clears_a_time_already_on_the_node(sdk):
+    """#4156: ``now=None`` must REMOVE a recorded time, not merely skip a write.
+
+    ``_clear_recorded_time`` — the helper this change deletes — actively
+    ``SET … = null`` on the session AND its turns. A "skip the write" reading
+    would pass on a FRESH node and fail on a re-seed: the node keeps the
+    previous call's (possibly fabricated, run-clock) date, which is the exact
+    trap #4156 exists to remove. The contract is therefore enforced against
+    the node, not against this call's write.
+    """
+    proj = sdk._get_proj()
+    two_turns = [{"role": "user", "content": "dated one"},
+                 {"role": "assistant", "content": "dated two"}]
+
+    # First seeded WITH a time (the capture-clock default) and TWO turns.
+    seed_capture_turn_store(sdk, "sess-reseed", two_turns)
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-reseed'}) RETURN s.created_at",
+    ).result_set[0][0]
+    assert proj.g.query(
+        "MATCH (:Session {id:'sess-reseed'})-[:CONTAINS]->(t:Point) "
+        "RETURN count(t.createdAt)",
+    ).result_set == [[2]]
+
+    # Re-seeded as an UNDATED session, with a SHORTER conversation — the
+    # recorded time must be GONE from the session and from EVERY stored turn,
+    # including the one this call does not rewrite.
+    seed_capture_turn_store(
+        sdk, "sess-reseed", two_turns[:1], now=None)
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-reseed'}) RETURN s.created_at",
+    ).result_set == [[None]]
+    assert proj.g.query(
+        "MATCH (:Session {id:'sess-reseed'})-[:CONTAINS]->(t:Point) "
+        "RETURN t.id, t.createdAt, t.updatedAt ORDER BY t.id",
+    ).result_set == [
+        ["sess-reseed_t0", None, None],
+        ["sess-reseed_t1", None, None],
+    ]
+
+
+def test_non_none_now_is_recorded_verbatim(sdk):
+    """#4156: only ``None`` means "no recorded time" — the fix must not swap
+    one silent coercion for another.
+
+    The pre-fix ``now = now or datetime.now()`` turned a FALSY string into the
+    run clock; under the new contract the sentinel is the only "use the
+    capture clock" spelling, so any ``str`` is recorded as given (the read
+    path renders a non-date as UNKNOWN, `_iso_date10`).
+    """
+    from tools.ask_spotcheck import merge_capture_session
+
+    assert merge_capture_session(sdk, "sess-empty", 1, now="") == ""
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Session {id:'sess-empty'}) RETURN s.created_at",
+    ).result_set == [[""]]
+    assert merge_capture_session(
+        sdk, "sess-word", 1, now="not-a-date") == "not-a-date"
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Session {id:'sess-word'}) RETURN s.created_at",
+    ).result_set == [["not-a-date"]]

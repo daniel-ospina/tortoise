@@ -56,12 +56,16 @@ def _tmp_corpus(tmp_path) -> object:
 def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
     fixture = corpus.load_fixture(session_id)
     conversation = fixture["conversation"]
-    parsed = runner.parse_roundtrip(
+    runner.parse_roundtrip(
         session_id, conversation, fixture["harness"], workdir=tmp_path
     )
-    assert parsed == conversation
-    assert [t["role"] for t in parsed] == ["user", "assistant"] or True  # roles kept
-    assert all(t["content"] for t in parsed)
+    # The round-trip guard is `parse_roundtrip`'s RunError on any drift — it
+    # never returns a drifted list, so a deep-equality/role/content assert
+    # here would be dead (the drift case is covered by
+    # test_parse_roundtrip_drift_raises). What this test CAN still fail on is
+    # the fixture SHAPE: a turn growing a key the round-trip contract does not
+    # cover would slip past parse_roundtrip undetected.
+    assert {k for t in conversation for k in t} == {"role", "content"}
 
 
 def test_parse_roundtrip_drift_raises(tmp_path):

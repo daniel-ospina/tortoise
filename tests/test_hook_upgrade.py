@@ -1357,6 +1357,37 @@ class TestUpgrade:
         assert "Refusing" in r.stderr
         assert (root / ".claude" / "settings.json").read_text() == before
 
+    def test_hooks_status_and_upgrade_never_traceback_on_a_deep_settings_file(
+            self, tmp_path):
+        """``tortoise hooks status|upgrade`` reads and parses the settings
+        file, and the parser's raise-set is open-ended: ``json.loads`` on a
+        deeply nested document raises ``RecursionError`` — a ``RuntimeError``,
+        NOT an ``OSError`` — which the old enumerated ``except OSError``
+        boundary let escape as a raw traceback (#4024 P2-2; the same shape that
+        let ``TypeError`` #3987 and ``UnicodeDecodeError`` #3988 escape
+        ``capture_install``).  The CLI must surface a populated message and a
+        non-zero exit, never a traceback, because the fail-closed install path
+        tells the user to run exactly this command to repair.
+
+        MUTATION: enumerate the boundary (``except OSError as e:``) — the
+        traceback escapes, no populated ``Cannot inspect`` / ``Upgrade failed``
+        line is printed, and this REDs."""
+        root = tmp_path / "cursor-root"
+        root.mkdir()
+        deep = "[" * 200000 + "]" * 200000
+        (root / "hooks.json").write_text('{"hooks": ' + deep + "}")
+
+        for argv, prefix in (
+            (("hooks", "status", "--harness", "cursor"), "Cannot inspect"),
+            (("hooks", "upgrade", "--harness", "cursor"), "Upgrade failed"),
+        ):
+            r = _run(list(argv), root, tmp_path)
+            assert r.returncode == 1, r
+            assert prefix in r.stderr, r.stderr
+            assert "RecursionError" in r.stderr, r.stderr
+            assert "Traceback (most recent call last)" not in r.stderr, r.stderr
+            assert "RecursionError" not in r.stdout, r.stdout
+
     def test_installed_ahead_of_source_is_not_downgraded(self, tmp_path):
         """An install whose marker is NEWER than this CLI's is reported but
         not overwritten.
@@ -1384,6 +1415,10 @@ class TestDoctorIntegration:
         for k in _DB_ENV_VARS:
             monkeypatch.delenv(k, raising=False)
         monkeypatch.setenv("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+        # Hermetic HOME: doctor resolves the Codex root through `Path.home()`
+        # (`$CODEX_HOME` is scrubbed by the autouse conftest fixture), so the
+        # real HOME would let doctor read the developer's own ~/.codex.
+        monkeypatch.setenv("HOME", str(tmp_path))
         from tortoise import config as _config
         monkeypatch.setattr(
             _config, "DEFAULT_DB_PATH",
@@ -1475,8 +1510,67 @@ class TestDoctorIntegration:
         lines = self._doctor_lines(capsys)
         assert lines and "❌" in lines[0]
 
+    def test_doctor_reports_a_codex_install_at_codex_home(self, doctor_env, capsys):
+        """Doctor checks the Codex seam at `$CODEX_HOME`, the only path Codex
+        reads — not the cwd.
 
-# ── 5. harness-agnosticism (the mechanism must not be Claude-shaped) ─────
+        MUTATION: check only the `claude` layout (anchor the root at cwd) → no
+        codex row → RED.
+        """
+        from tortoise.capture_install import install_capture
+        assert install_capture("codex", home=doctor_env).ok
+
+        lines = self._doctor_lines(capsys)
+        assert any("codex" in ln and "✅" in ln for ln in lines), lines
+        # ...and nothing was read from the dead project-local path.
+        assert not (doctor_env / "hooks.json").exists()
+
+    def test_doctor_fails_on_a_stale_codex_install(self, doctor_env, capsys):
+        """A stale Codex install is a FAIL, same as Claude's — doctor's
+        freshness row must not be Claude-only (#3818).
+
+        MUTATION: add the codex row but never mark its drift → RED.
+        """
+        from tortoise.capture_install import install_capture
+        assert install_capture("codex", home=doctor_env).ok
+        stale = (doctor_env / ".codex" / "hooks" / "tortoise-session-end.sh")
+        stale.write_text("#!/usr/bin/env bash\n# tortoise session capture\nexit 0\n")
+
+        lines = self._doctor_lines(capsys)
+        assert any("codex" in ln and "❌" in ln for ln in lines), lines
+        assert any("hooks status --harness codex" in ln for ln in lines), lines
+
+    def test_doctor_reports_a_cursor_install_at_cursor_home(self, doctor_env, capsys):
+        """Doctor checks the Cursor seam at ``~/.cursor``, the only path Cursor
+        reads — not the cwd (#3819).
+
+        MUTATION: check only claude+codex layouts → no cursor row → RED.
+        """
+        from tortoise.capture_install import install_capture
+        assert install_capture("cursor", home=doctor_env).ok
+
+        lines = self._doctor_lines(capsys)
+        assert any("cursor" in ln and "✅" in ln for ln in lines), lines
+        # ...and nothing was read from the untrusted project-local path.
+        assert not (doctor_env / "hooks.json").exists()
+
+    def test_doctor_fails_on_a_stale_cursor_install(self, doctor_env, capsys):
+        """A stale Cursor install is a FAIL, same as Claude's/Codex's —
+        doctor's freshness row must not be Claude-only (#3819).
+
+        MUTATION: add the cursor row but never mark its drift → RED.
+        """
+        from tortoise.capture_install import install_capture
+        assert install_capture("cursor", home=doctor_env).ok
+        stale = (doctor_env / ".cursor" / "hooks" / "tortoise-session-end.sh")
+        stale.write_text("#!/usr/bin/env bash\n# tortoise session capture\nexit 0\n")
+
+        lines = self._doctor_lines(capsys)
+        assert any("cursor" in ln and "❌" in ln for ln in lines), lines
+        assert any("hooks status --harness cursor" in ln for ln in lines), lines
+
+
+# ── 5. harness-agnosticism (the mechanism must not be Claude-shaped) ────
 
 
 class TestHarnessAgnostic:

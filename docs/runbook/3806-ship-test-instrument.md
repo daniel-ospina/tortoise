@@ -1,6 +1,6 @@
 ---
 title: "Ship-test instrument — per-deploy onboarding walk (#3806)"
-type: runbook
+type: operations
 domain: operations
 doc_status: live
 created: 2026-09-18
@@ -45,13 +45,57 @@ python tools/ship_test_onboarding.py \
   --allow-prod --out review-artifacts/ship-test
 ```
 
-* Exit `0` — every assertion passed. Exit `1` — a failure or an incomplete walk.
+* Exit `0` — every assertion passed. Exit `1` — the product was measured and
+  found wanting (a failed assertion, or the server never observed the write).
   Exit `2` — usage/refusal (a non-loopback target without `--allow-prod`).
+  **Exit `3` — the run could not exercise the product** (no signed-in session, a
+  failed agent write, or an unreadable server projection).
+* Exit `3` is the #4291 loud-failure guard: an instrument/infra fault says
+  nothing about the product, and must never read as a product finding. The
+  same split is on the record as `reason` (`instrument_error` vs
+  `server_did_not_observe`), so a deploy job can branch without parsing prose.
+  Each exit-3 cause is named in the verdict — e.g. `not_signed_in`,
+  `agent_write_failed`, `projection_unreadable`.
 * A loopback target (a local or self-hosted deployment) needs no `--allow-prod`.
-* `--headed` to watch it; `--skip-agent-write` to run only the negative half.
+* `--headed` to watch it; `--skip-agent-write` to run only the negative half
+  (which is recorded as `positive_not_attempted`, never as a server-side
+  no-observation); `--agent-key tt_…` to supply the **agent write** credential
+  (CLI-only, deliberately not env-settable) instead of minting one through the
+  session. It does **not** carry the projection read.
+* A degraded session store answers 503 on `/api/v1` while `/api/session` still
+  answers 200, and a bad or graph-bound `--agent-key` fails the MCP write: both
+  are instrument faults (exit 3), and both used to be graded as product
+  findings. (A key for a DIFFERENT org is a separate, documented limitation —
+  see Open gaps.)
+
+### How the walk authenticates (#3501 / #4054)
+
+The instrument holds **no session credential**. After the session seam, the
+browser's
+session is an opaque **HttpOnly `__Host-session`** cookie — unreadable from JS
+by design, and host-only, so it can never be replayed at the API origin. The
+walk therefore authenticates the way the app does: the **browser's own cookie
+jar** (`ctx.request`) against the app origin's own `GET /api/session`, then
+reads the server's truth through the same-origin `/api/v1` BFF proxy, which
+mints the credential server-side. It does obtain an **agent** key (the
+credential under test) for the MCP write — minted through that same proxy.
+
+The server's truth is **always** read through the walked session, with no
+key-based alternative: if `--agent-key` could carry the read, a key for org B
+while the browser walks org A would let a lying org-A UI be judged against
+org-B's projection and report `passed` — a false pass in the instrument's core
+function. One identity, one read.
+
+The retired `sb-*-auth-token` read (cookie or `localStorage`) is **gone**, and
+a test fails if it returns: it is what made the positive direction
+unexercisable while the run still reported a product-facing `incomplete`
+(#4291). `GET /api/session`'s own 401/503 split is preserved — 401 is "not
+signed in", 503 is "the session store is unreachable" — and either is an
+instrument error (exit 3), never a product finding.
 
 The walk is stub-free. It signs up a fresh account (rate limit: 3/hr/IP),
-walks the wizard, reads the server's own `/v1/onboarding/state`, makes a **real
+walks the wizard, reads the server's own onboarding projection through the
+app origin's `/api/v1` BFF proxy, makes a **real
 MCP `tortoise_create_point` write** (the server's
 `mcp_server.py::_maybe_onboarding_auto_complete` files `harness-connected` from
 it), then reloads and reads Overview again. It never writes the onboarding
@@ -70,23 +114,41 @@ checkpoint itself — that edge is the server's observation, not the client's.
 | `sha` | The instrument's own git revision (which revision of this tool produced the record) |
 | `steps[]` | Per step: name, URL, resolved `ui` state, `observed`, `ok`, detail, screenshot |
 | `assertions` | `front_door_reachable`, `walk_completed`, `no_claim_before_observation`, `shown_when_observed` |
-| `verdict` | `passed` / `failed: …` / `incomplete: …` |
+| `session` | How the run authenticated: `state` (one of `signed_in` / `not_signed_in` / `store_unavailable` / `unreachable`), `detail`, `mechanism` |
+| `reason` | The failure CLASS — empty iff `verdict == "passed"`. `instrument_error` (exit 3, says nothing about the product) vs `server_did_not_observe` / `positive_not_shown` / `positive_not_attempted` / `walk_incomplete` / `walk_failed` (exit 1) |
+| `verdict` | `passed` / `failed: …` / `incomplete: …` / `instrument-error: …` |
 
 `verdict` is `passed` only when **both** directions are proven: nothing was
 claimed before the server observed the write, the server *did* observe it
 (`harness-connected` filed), and the screen *showed* it. A hidden connection is
 `failed`; a positive read that never resolved is `incomplete` — never `passed`.
+A run that could not exercise the product — no session, a failed agent write,
+an unreadable server projection, no browser driver — is `instrument-error` with
+`reason` `instrument_error`: it never claims `passed`, and never blames the
+product (#4291). The reason defaults to `instrument_error` (fail-closed) and is
+narrowed to a product class only where a path has proven it measured the
+product.
 
 ## The guard's own tests (what keeps the probe honest)
 
 | Where | What | Count |
 | --- | --- | --- |
-| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the per-surface verdict seam, the verdict assembly, the CLI safety contract, and RED/GREEN mutation evidence | 68 |
+| `tests/test_ship_test_onboarding.py` | Fast pure-Python: the classifier, the page-wide claim sweep, the DOM reader, the server-observation reader, the MCP write-result reader (JSON **and** SSE framing, both tool-error shapes, notification frames), the per-surface verdict seam, the verdict assembly, the session seam (`/api/session` + BFF), the loud-failure guard (session, write, projection, driver) — plus **the real `run_walk` executed against a fake browser**, which pins the call site (which read it uses, with what credential, in what order) rather than grepping for it | 100 |
 | `tests/e2e/test_ship_test_onboarding.py` | Real-browser, opt-in (`RUN_DASHBOARD_E2E=1`): the three assertions against the deployment's own built bundle, the wire observation that the client issues no `harness-connected` write, and RED/GREEN evidence against a mutated COPY of the real bundle | 8 |
 
-Both execute the instrument's **real decision code** — never a source-text scan.
-The RED/GREEN property is the core requirement: a behaviour-identical reformat
-must not move the verdict, and a UI that lies must go RED.
+Both suites execute the instrument's **real decision code** (`judge`, the
+verdict assembly, the classifier, the readers) — never a source-text scan of it.
+The strongest pin in the fast lane is the **fake-browser `run_walk` suite**: it
+executes the real walk end to end — no session, a failed write, an unreadable
+projection at each of the three read sites (step 5, the poll, step 7), the happy
+path, `--skip-agent-write`, and an explicit `--agent-key` — so the call site is
+behaviourally fixed, not greped. A few *structural* `inspect.getsource`
+assertions remain for ORDERING that the harness does not aim at (that the
+session gate precedes the agent write, that the write-failure check precedes the
+projection check); they complement the behavioural tests, they do not replace
+them. The RED/GREEN property is the core
+requirement: a behaviour-identical reformat must not move the verdict, and a UI
+that lies must go RED.
 
 Guard self-check, no browser needed:
 
@@ -126,6 +188,22 @@ and adds no new job).
 * **The walk is heuristic.** It advances the wizard by clicking a set of known
   button labels; a wizard copy change makes it report `incomplete` (the safe
   failure) rather than a false PASS.
+* **`--agent-key` is for the walked org, and nothing verifies that.** The flag
+  supplies the MCP write credential while the server's truth is always read
+  through the walked session. A key belonging to a DIFFERENT org therefore makes
+  the write land elsewhere and the walked session observes nothing, which is
+  reported as `server_did_not_observe` (a product-class verdict) rather than an
+  instrument fault — there is no key-scoped read to compare against, precisely
+  because letting a key carry the projection read is the false pass that was
+  fixed. Pass a key only for the org the walk signs up, or omit the flag and let
+  the instrument mint one through the session.
+* **Each run creates a production user + org.** The run signs up a fresh
+  disposable identity (`ship-test-<ts>-<hex>@premiselabs.co`) and creates the
+  org `Ship Test <epoch>` (`--org-name` overrides the label only). The residue
+  is a real org row per run: the instrument has **no cleanup surface** (there is
+  no org-delete API for it to call), so the honest options are a disposable
+  identity to run against, or an explicit cleanup path that does not yet exist.
+  The side effect is on the record in #4291 rather than silently absorbed.
 * **The two shipped derivations differ, and the guard must pick per surface.**
   The Overview accepts the server's wire-complete forms
   (`overview.js::overviewConnection`); the wizard is edge-only

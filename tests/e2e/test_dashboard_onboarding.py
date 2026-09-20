@@ -42,13 +42,11 @@ actually made, the clipboard assert compares against the card's own text, the
 build fork's FOURTH key row, and the catalog check is backed by a registry-only
 mock name (not the offline fallback).
 
-**CI lane (known gap — issue filed):** this spec is opt-in (`RUN_DASHBOARD_E2E`)
-and is NOT wired into `.github/workflows/ci.yml` — its `dashboard-e2e` step runs
-only `test_keys_table_mixed.py` + `test_graphs_management.py`. On CI the only
-automated guard for these four fixes is the static source-scan tripwire
-(`website/apps/dashboard/src/wizardConnectTripwire.test.js`), which cannot
-observe a runtime stray modal or a clipboard overwrite. Run this spec locally
-against a fresh `dist/` whenever the connect step changes.
+**CI lane:** this spec is opt-in (`RUN_DASHBOARD_E2E`) and, since #4221, IS
+wired into `.github/workflows/ci.yml` — the `dashboard-e2e` job's step runs it
+alongside `test_keys_table_mixed.py` / `test_graphs_management.py` /
+`test_ship_test_onboarding.py`, against the same two-origin harness. Run it
+locally against a fresh `dist/` whenever the connect step changes.
 """
 from __future__ import annotations
 
@@ -67,7 +65,9 @@ from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _bff_path,
     _goto_local_dashboard,
+    _is_bff_api,
     _preflight_local_servers,
     _proxy_body,
     _seed_local_session_cookie,
@@ -158,8 +158,8 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
         method = route.request.method
         # #1828: loadAll pins ?org_id= on overview reads — match on the
         # query-stripped path so /v1/team/keys?org_id=… still resolves.
-        path = url.split("?", 1)[0]
-        if "api.premiselabs.co" in url:
+        path = _bff_path(url)
+        if _is_bff_api(url):
             if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([org_row]))

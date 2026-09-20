@@ -57,8 +57,7 @@ def _count_redis_servers() -> int:
 # test can construct embedded. New files must be added here deliberately —
 # the source-scan test below fails otherwise (issue #1005 leak-rate
 # regression guard). Generated from the 2026-08-12 audit (31 files); #1012
-# conversion shrank it to 29; epic #1647 P4 shrank it to the 28 embedded-
-# surface entries below: 11 of the plan's 13 "migrate out" files left for
+# conversion shrank it to 29; epic #1647 P4 shrank it to the embedded-surface entries below: 11 of the plan's 13 "migrate out" files left for
 # docker (test_export_cli and test_import_endpoint came back as embedded-
 # file-contract files), plus test_search_engine and
 # test_backfill_embeddings_force left (server-mode constructions / fixed
@@ -82,6 +81,13 @@ RAW_EMBEDDED_ALLOWLIST = {
     "e2e/hosted/test_12_selfhost_migration.py",  # embedded by design (Task 10 Step 2 carve-out decision): the parity journey's source graph is a LOCAL file the `tortoise export` CLI subprocess reads — a redirect would silently flip it to the server and void the parity assertions; runs only in the URI-less hosted-e2e lane
     "test_embedded_lifecycle_fast_close.py",  # #1371 lifecycle-seam tests
     "test_flip_gate.py",
+    # #4047: the two #3845 fork-guard modules are carve-out by their own
+    # module-level `embedded_only` marker, and both construct raw embedded
+    # clients as the under-test input (the embedded daemon's fork children /
+    # its socket path) — so they belong in both this allowlist and the
+    # carve-out stem list.
+    "test_fork_safety_3845.py",
+    "test_fork_slot_wedge_3845.py",
     "test_guard.py",
     "test_hard_reject.py",
     "test_hosted_backup.py",
@@ -1412,12 +1418,23 @@ def test_fast_close_reclaims_the_ephemeral_socket_dir(tmp_path, monkeypatch):
     NOSAVEd server's dir leaked forever (measured: 10,711 orphaned dirs vs
     123 live). The fast path must reclaim it.
 
+    #4214: this MUST hold on the exit seam too, not just mid-run — after a
+    clean NOSAVE shutdown redislite has unlinked both ``redis.socket`` and
+    ``redis.pid``, and the #4068 reaper's discovery requires one of those
+    markers, so a deferred dir is invisible to the reaper and leaks forever.
+
     RED mutation: drop the ``_remove_ephemeral_socket_dir`` call from the
     fast path's SHUTDOWN-NOSAVE branch — the dir survives the close.
     """
     from tortoise.projection import FalkorProjection
 
     monkeypatch.setenv("TORTOISE_FAST_ATEXIT", "1")
+    # #4214: the exit budget is process-global, and an earlier test in this
+    # session may have consumed it by driving a seam directly. This test is
+    # about RECLAMATION, so give the seam an unspent budget (monkeypatch
+    # restores the module state afterwards).
+    from tortoise import embedded_lifecycle as _el
+    monkeypatch.setattr(_el, "_atexit_deadline", None)
     db_path = str(tmp_path / "f3_reclaim.db")
     proj = FalkorProjection(db_path, graph_name="test")
     inner = getattr(proj.db, "client", proj.db)
