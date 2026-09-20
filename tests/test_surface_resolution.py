@@ -1,4 +1,4 @@
-"""Node A scoreboard (#3863, objectives 5+9) — every registered surface entry resolves.
+"""Node A scoreboard (#4282, objectives 5+9) — every registered surface entry resolves.
 
 The requirement (directive §8): **execute the resolution and assert the RESOLVED
 behaviour**. Do NOT pin source text. A guard pinned to source text is a false
@@ -16,17 +16,17 @@ The LIVE registered surface (``mcp._list_tools()`` — the tools an agent is
 actually served) is resolved a second, independent way, so "resolves to a live
 method" is asserted on the surface an agent calls, not only on the declaration.
 
-RED BY DESIGN for the five known-dead entries (#3863): their ``sdk_method``
+RED BY DESIGN for the five known-dead entries (#4282): their ``sdk_method``
 names an attribute ``TortoiseSDK`` does not have. The dead thing is the DECLARED
 SDK BINDING, not the capability — this is registry drift, not a missing feature:
 the behaviour already exists one import away (``pack_state.get_tenant_packs``,
 ``pack_manifest_store.upsert_tenant_manifest``, ``navigation.entityProfile``,
 ``monitoring.metrics``, ``analyze.analyze``) and the MCP handlers already call it.
-Do NOT fix, stub, rename or delete them here — the registry surface is FROZEN
-until the owner approves the
-curated list, and this test is the instrument that keeps the surface measurable
-meanwhile. #3835 and #3838 were superseded by #3863 and are closed; #3863 is the
-binding, and it stays open until the list is approved.
+Do NOT fix, stub, rename or delete them here — the owner-approved canonical list
+(``docs/product/canonical-mcp-tools.md``, merged ``8375c7921``) names this surface,
+and #4282 is the implementation epic that repairs these declarations. Until #4282
+lands, this test is the instrument that keeps the surface measurable. #3835 and
+#3838 were superseded by #3863, which is now CLOSED.
 
 Those five carry ``xfail(strict=True)``, and that marker is what closes the gate
 in BOTH directions:
@@ -43,7 +43,7 @@ no invocation can hide a shrunken or orphaned case set), and
 declared cases must actually EXECUTE, not merely be declared or collected.
 
 So this file is red evidence by construction: it is green only while the dead set
-is exactly the five recorded in ``_DEAD_LINKS_AWAITING_3863``. Do NOT add a name
+is exactly the five recorded in ``_DEAD_LINKS_AWAITING_4282``. Do NOT add a name
 to that ledger to silence a failure, and do NOT remove a name to accommodate a
 repair — the ledger is the pending-decision record, not a suppression list.
 """
@@ -70,13 +70,14 @@ def _resolve(entry):
     return getattr(mcp_server, entry.name, None), f"mcp_server.{entry.name}"
 
 
-# --- the pending ledger (#3863) --------------------------------------------
+# --- the pending ledger (#4282) --------------------------------------------
 # The five entries whose declared ``sdk_method`` names an attribute TortoiseSDK
-# does not have. #3835 and #3838 were SUPERSEDED by #3863 and are CLOSED; the
-# binding belongs to #3863, the owner's curation issue, which stays open until the
-# curated list is approved. See the module docstring for the two-directional
-# fail-closed property these markers implement.
-_DEAD_LINKS_AWAITING_3863 = frozenset({
+# does not have. #3835 and #3838 were SUPERSEDED by #3863 and are CLOSED; #3863's
+# curation decision landed as the approved list in
+# ``docs/product/canonical-mcp-tools.md`` (merged 8375c7921), and the binding for
+# repairing these five is now #4282, the implementation epic. See the module
+# docstring for the two-directional fail-closed property these markers implement.
+_DEAD_LINKS_AWAITING_4282 = frozenset({
     "tortoise_packs_list",
     "tortoise_pack_install",
     "tortoise_entity_profile",
@@ -91,15 +92,16 @@ def _marks(entry):
     Returning NO mark for an unlisted entry is the fail-closed half: a sixth dead
     entry reaches the assertion unmarked and FAILS the build.
     """
-    if entry.name not in _DEAD_LINKS_AWAITING_3863:
+    if entry.name not in _DEAD_LINKS_AWAITING_4282:
         return ()
     return (
         pytest.mark.xfail(
             strict=True,
             reason=(
-                f"#3863: {entry.name} declares sdk_method={entry.sdk_method!r}, which "
-                f"TortoiseSDK does not have. Build-vs-delete is the owner's call on the "
-                f"curated list (#3863). Repairing it XPASSes this case, which "
+                f"#4282: {entry.name} declares sdk_method={entry.sdk_method!r}, which "
+                f"TortoiseSDK does not have. Repairing it is #4282's work on the "
+                f"owner-approved canonical list (docs/product/canonical-mcp-tools.md). "
+                f"Repairing it XPASSes this case, which "
                 f"strict=True reds; a sixth dead entry is not listed here and fails."
             ),
         ),
@@ -125,7 +127,7 @@ def test_every_registered_entry_resolves_to_a_live_method(entry, target, where):
 
     Mutation that REDs this assertion: rename/delete the target it names (e.g.
     rename ``TortoiseSDK.create_point`` in ``tortoise/sdk.py``) — the getattr
-    then returns ``None`` and this case fails. The five ``#3863`` entries below
+    then returns ``None`` and this case fails. The five ``#4282`` entries below
     are the first red cases — carried as ``xfail(strict=True)``, so repairing one
     reds the build and a sixth dead entry fails it.
     """
@@ -133,7 +135,7 @@ def test_every_registered_entry_resolves_to_a_live_method(entry, target, where):
     assert callable(target), (
         f"{entry.name} does not resolve: the registry names {where!r}, which is "
         f"{'absent' if target is None else type(target).__name__!r}. The dead thing is the "
-        f"DECLARED SDK BINDING — registry drift, not a missing capability. For the #3863 "
+        f"DECLARED SDK BINDING — registry drift, not a missing capability. For the #4282 "
         f"entries the behaviour already exists one import away "
         f"(pack_state.get_tenant_packs, pack_manifest_store.upsert_tenant_manifest, "
         f"navigation.entityProfile, monitoring.metrics, analyze.analyze) and the MCP "
@@ -171,9 +173,9 @@ assert [e.name for e in TOOL_REGISTRY] == _CASES, (
     f"the scoreboard PARAMETRISED {len(_CASES)} cases for {len(TOOL_REGISTRY)} registry "
     f"entries — a sample (or a truncated decorator list) is not a scoreboard"
 )
-_ORPHANS = sorted(_DEAD_LINKS_AWAITING_3863 - set(_CASES))
+_ORPHANS = sorted(_DEAD_LINKS_AWAITING_4282 - set(_CASES))
 assert not _ORPHANS, (
-    f"orphaned ledger entries — recorded dead in _DEAD_LINKS_AWAITING_3863 but "
+    f"orphaned ledger entries — recorded dead in _DEAD_LINKS_AWAITING_4282 but "
     f"consumed by no case: {_ORPHANS}"
 )
 

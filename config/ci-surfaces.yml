@@ -531,13 +531,14 @@ surfaces:
   - test_suspension_parity.py
   - test_taxonomy.py
   - test_tool_registry.py
-  # #3863 (Node A scoreboard): every registered tool + SDK binding must RESOLVE to a
+  # #4282 (Node A scoreboard): every registered tool + SDK binding must RESOLVE to a
   # live callable. The test executes the resolution (getattr / mcp._list_tools), never
   # greps source. The five known-dead entries are carried as xfail(strict=True) bound
-  # to #3863 (#3835/#3838 were superseded by it and are closed): a SIXTH dead entry is
-  # not in that ledger and fails the build, and repairing one XPASSes to red. RED BY
-  # DESIGN — it is the instrument that keeps the surface measurable until the owner
-  # approves the curated list.
+  # to #4282, the implementation epic for the owner-approved canonical list
+  # (docs/product/canonical-mcp-tools.md, merged 8375c7921): a SIXTH dead entry is not
+  # in that ledger and fails the build, and repairing one XPASSes to red. RED BY
+  # DESIGN — it is the instrument that keeps the surface measurable until #4282
+  # repairs these declarations.
   - test_surface_resolution.py
   - test_topic_summarization.py
   - test_tortoise_search.py
