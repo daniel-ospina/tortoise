@@ -644,6 +644,48 @@ def test_nested_entity_mutated_delete_suppresses_entity_link(tmp_path):
         sdk.close()
 
 
+def test_nested_entity_mutated_delete_is_exempt_from_recreatable_guard(tmp_path):
+    """The #3947 pre-wipe exemption roster must read the NORMALIZED record, so
+    a NESTED ``EntityMutated`` op=delete (``id``/``op``/``label`` inside
+    ``point`` — the supported shape pinned by
+    ``test_nested_entity_mutated_delete_suppresses_entity_link`` and
+    ``test_projection.py::test_falkor_apply_points_merged_nested_format``)
+    exempts its id exactly like the FLAT record does.
+
+    ``_journal_hard_deleted_ids`` replaced its body with a RAW-envelope read
+    (``ev.get("id")`` / ``ev.get("op")`` / ``ev.get("type")``), so the nested
+    delete was invisible to the roster. ``_assert_episodic_points_recreatable``
+    then could not subtract that id from ``missing`` and REFUSED a rebuild the
+    replay (which normalizes) would have completed — a false block on a
+    healthy store.
+
+    MUTATION: remove the ``ev = _norm(ev)`` line in
+    ``FalkorProjection._journal_hard_deleted_ids`` → the nested record yields
+    the empty set while the flat record still yields ``{'p1'}``, so the equality
+    and the pre-wipe proof both RED.
+    """
+    from tortoise.projection import FalkorProjection
+
+    nested = {"type": "EntityMutated",
+              "point": {"id": "p1", "op": "delete", "label": "Point"}}
+    flat = {"type": "EntityMutated", "id": "p1", "op": "delete",
+            "label": "Point"}
+
+    nested_ids = FalkorProjection._journal_hard_deleted_ids([nested])
+    flat_ids = FalkorProjection._journal_hard_deleted_ids([flat])
+    # Non-vacuous: both shapes are read, agree, and are NOT empty.
+    assert nested_ids == flat_ids == {"p1"}, (nested_ids, flat_ids)
+
+    # The real pre-wipe proof must NOT false-block: the id IS exempt, so a
+    # ``before`` roster holding only it is recreatable-or-exempted.
+    sdk = TortoiseSDK(str(tmp_path / "nested-delete-guard.db"))
+    try:
+        proj = sdk._get_proj()
+        proj._assert_episodic_points_recreatable({"p1"}, [nested])
+    finally:
+        sdk.close()
+
+
 def _replay_all_four_engines(proj, tmp_path, events_dir, queries):
     """Run ALL FOUR whole-journal replay engines over one journal.
 

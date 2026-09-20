@@ -1641,9 +1641,11 @@ def journal_hard_delete_seqs(events) -> dict[str, dict[str, int]]:
 
     The hard-delete EVENT TYPES are the same ones ``_journal_hard_deleted_ids``
     derives (``EntityMutated`` op=delete, #3299; ``PointsMerged``, whose
-    merged-away ids replay through ``_delete``) — but the ID SETS now differ:
-    that helper additionally gates each id by ``_owns_point`` (#3860), dropping
-    an id whose record names a known non-Point kind. Retraction is deliberately
+    merged-away ids replay through ``_delete``) — but the ID SETS can differ:
+    that helper gates each id by ``_owns_point`` (#3860), dropping an id whose
+    record names a known non-Point kind. (Envelope shape is NOT a difference:
+    both readers normalize, so a nested payload is seen either way — #3722.)
+    Retraction is deliberately
     NOT included — ``_retract`` tombstones and the node survives. The OUTER
     key is the id; the INNER keys are the labels that delete removes:
 
@@ -2564,11 +2566,25 @@ class FalkorProjection(
         Identity is ``(kind, id)``, not bare id (#3860): only a deleted record
         that is (or may be) a Point exempts its id, so a foreign-kind delete
         can never hide an unrecreatable episodic Point and fail this guard OPEN.
+
+        Each event is read in its NORMALIZED form (``_norm``), mirroring
+        ``journal_hard_delete_seqs``: in a NESTED record the ``EntityMutated``
+        payload (``id``/``op``/``label``) rides inside ``point`` while ``type``
+        stays on the envelope, so reading the raw envelope sees no ``op`` and
+        the delete is missed entirely — its id would then never be exempted
+        (#3722).
         """
         deleted: set[str] = set()
         for ev in events:
             if not isinstance(ev, dict):
                 continue
+            # #3722: read the NORMALIZED record — the shape the replay folds
+            # actually delete through (``_norm`` splices ``ev["point"]`` over
+            # the envelope). Reading the raw envelope missed a NESTED
+            # ``EntityMutated`` op=delete entirely, so its id was never
+            # exempted and the pre-wipe proof REFUSED a rebuild the replay
+            # would have completed (false block on a healthy store).
+            ev = _norm(ev)
             t = ev.get("type")
             if t == "EntityMutated" and ev.get("op") == "delete":
                 # #3860: identity is (kind, id) — only a POINT-kind delete (or
