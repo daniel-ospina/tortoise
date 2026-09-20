@@ -372,6 +372,17 @@ jobs:
           # embeds (supabase-js createClient). Was never synced to Fly, so the
           # page rendered with an empty key ('supabaseKey is required').
           [ -n "${{ secrets.SUPABASE_ANON_KEY }}" ] && ARGS="$ARGS SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+          # #4126: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY were hand-set on Fly
+          # with no managing source (both showed `Deployed`, i.e. never touched by
+          # a staged deploy). Both already exist as GitHub Actions secrets, so
+          # declaring the deploy as their source is the truthful fix: the value on
+          # Fly stops being hand-set and a rotation from GitHub is the only step
+          # needed for it to take effect. The GitHub secret keeps its legacy name
+          # SUPABASE_SERVICE_KEY; the FLY variable keeps the name the app reads
+          # (`SUPABASE_SERVICE_ROLE_KEY` — tools/capture_cost_report.py accepts
+          # either, tortoise/ reads the *_ROLE_* one).
+          [ -n "${{ secrets.SUPABASE_URL }}" ] && ARGS="$ARGS SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
+          [ -n "${{ secrets.SUPABASE_SERVICE_KEY }}" ] && ARGS="$ARGS SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
           # Stripe billing (#310): pass all billing secrets when present.
           ARGS="$ARGS STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }} STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
           [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
@@ -392,11 +403,20 @@ jobs:
           [ -n "${{ secrets.DEEPSEEK_API_KEY }}" ] && ARGS="$ARGS DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
           [ -n "${{ secrets.OPENAI_API_KEY }}" ] && ARGS="$ARGS OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
           [ -n "${{ secrets.GEMINI_API_KEY }}" ] && ARGS="$ARGS GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
-          # Session-capture extraction model (#1197/#1358): propagate the
-          # model override when set (e.g. openrouter:google/gemini-2.0-flash —
-          # the flash-class default the epic-909 gate validated). Unset → the
-          # per-provider default (deepseek-chat) applies at runtime.
-          [ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ] && ARGS="$ARGS TORTOISE_SESSION_LLM_MODEL=${{ secrets.TORTOISE_SESSION_LLM_MODEL }}"
+          # Session-capture extraction model (#1197/#1358, #4126): the model id
+          # is NOT a credential, so the default lives HERE — in version control,
+          # where a reviewer can see it — and is assigned UNCONDITIONALLY. Before
+          # #4126 this was a guarded no-op: with the GitHub secret absent the
+          # deploy passed nothing, Fly's hand-set value survived every deploy, and
+          # "the secret is absent" was indistinguishable from "deliberately using
+          # the default". A GitHub secret still overrides the default when one
+          # exists. Unset on both → the per-provider default (deepseek-chat)
+          # applies at runtime.
+          if [ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ]; then
+            ARGS="$ARGS TORTOISE_SESSION_LLM_MODEL=${{ secrets.TORTOISE_SESSION_LLM_MODEL }}"
+          else
+            ARGS="$ARGS TORTOISE_SESSION_LLM_MODEL=openrouter:google/gemini-2.5-flash"
+          fi
           # Optional (env-gated at runtime): only pass when set, so unconfigured
           # backups / GitHub OAuth never fail the deploy.
           [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"

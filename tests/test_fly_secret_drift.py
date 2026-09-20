@@ -74,7 +74,6 @@ STRIPE_PRICE_IDS      gh-secret:STRIPE_PRICE_IDS
 GIT_SHA               workflow
 GITHUB_CLIENT_ID      gh-secret:GH_CLIENT_ID
 ENV_ONLY_KEY          fly-toml-env
-HAND_SET_FLAG         unmanaged
 LITERALLY_SET         workflow
 MULTILINE_FLAG        workflow
 """
@@ -129,7 +128,6 @@ _ALL_DECLARED = [
     "STRIPE_PRICE_IDS",
     "GIT_SHA",
     "GITHUB_CLIENT_ID",
-    "HAND_SET_FLAG",
     "LITERALLY_SET",
     "MULTILINE_FLAG",
 ]
@@ -138,7 +136,7 @@ _ALL_DECLARED = [
 def test_clean_when_every_fly_secret_is_declared():
     r = _run(_secrets_file(_ALL_DECLARED, "clean.json"))
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "OK: all 7 Fly secret(s) are declared" in r.stdout
+    assert "OK: all 6 Fly secret(s) are declared" in r.stdout
     # STRIPE_PRICE_IDS (inline guard) and MULTILINE_FLAG (multi-line `if`) are
     # conditional, not managed.
     assert "2 conditionally propagated" in r.stdout
@@ -153,11 +151,24 @@ def test_undeclared_fly_secret_fails_and_names_it():
     assert "TORTOISE_SESSION_LLM_MODEL" in r.stdout
 
 
-def test_unmanaged_is_reported_but_does_not_fail():
-    r = _run(_secrets_file(_ALL_DECLARED, "debt.json"))
-    assert r.returncode == 0
-    assert "RECORDED DEBT — 1 secret(s)" in r.stdout
-    assert "HAND_SET_FLAG" in r.stdout
+def test_unmanaged_is_a_failure_not_recorded_debt():
+    """#4126 acceptance: a Fly secret with NO managing source must FAIL the gate.
+
+    The gate used to print the debt and exit 0 — i.e. it passed on the exact state
+    #4126 was filed for (TORTOISE_SESSION_LLM_MODEL + the hand-set names existed
+    only on Fly, and nothing failed). This is the mutation anchor for that fix:
+    make `unmanaged` benign again and this test goes red.
+    """
+    manifest = _fixture(
+        "debt-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nHAND_SET_FLAG  unmanaged\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY", "HAND_SET_FLAG"], "debt.json"),
+        manifest=manifest,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNSOURCED" in r.stdout and "HAND_SET_FLAG" in r.stdout
 
 
 def test_empty_secret_list_is_exit_2_not_clean():
@@ -584,6 +595,209 @@ def test_malformed_manifest_is_exit_2_not_clean():
     assert "manifest unusable" in r.stderr
 
 
+def test_bare_gh_secret_source_is_exit_2_not_exit_1():
+    """A `gh-secret` with no `:NAME` must be EXIT 2, never the bypassable 1.
+
+    It used to reach `source.split(":", 1)[1]` → IndexError → an uncaught crash,
+    and Python's crash exit code is 1 — the very code the deploy step translates
+    into a `::warning::` bypass when `skip-fly-secret-provenance` is set. A
+    malformed declaration could therefore disarm the gate silently (#4126 review).
+    """
+    manifest = _fixture("bare-gh.txt", "FASTAPI_INTERNAL_KEY  gh-secret\n")
+    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "bare-gh.json"), manifest=manifest)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "gh-secret needs the GitHub secret name" in r.stderr
+
+
+def test_gh_secret_argument_on_a_non_gh_source_is_exit_2():
+    manifest = _fixture("workflow-arg.txt", "FASTAPI_INTERNAL_KEY  workflow:typo\n")
+    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "workflow-arg.json"), manifest=manifest)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "takes no ':' argument" in r.stderr
+
+
+def test_echo_on_the_step_stdout_is_not_an_assignment():
+    """The stub reports argv on fd 3; the block's own stdout is never parsed.
+
+    The stub used to print the flyctl argv to STDOUT — the same stream the step's
+    `echo` notices use — so a payload could certify an assignment it never made
+    (`echo "LEAKED_KEY=1"`, or a `::notice::` line carrying `NAME=`) and the gate
+    would treat the name as deploy-propagated (#4126 review).
+    """
+    wf = _fixture(
+        "echo-forge.yml",
+        _WORKFLOW.replace(
+            "          flyctl secrets set --stage $ARGS",
+            '          echo "LEAKED_KEY=1"\n          flyctl secrets set --stage $ARGS',
+        ),
+    )
+    r = _run(_secrets_file(_ALL_DECLARED, "echo-forge.json"), workflow=wf)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "LEAKED_KEY" not in r.stdout
+
+
+def test_secret_marker_does_not_collide_with_a_longer_secret_name():
+    """`__SEC_FOO__` matched inside `__SEC_FOO__BAR__` — a marker may not collide.
+
+    The old substitution produced `__SEC_FOO__`, which IS a substring of
+    `__SEC_FOO__BAR__`, so a declaration for FOO was "fed by" a value that only
+    ever contained BAR. The delimiters are now control characters that no secret
+    name can contain (#4126 review).
+    """
+    wf = _fixture(
+        "collide.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="BAR_VAL=${{ secrets.FOO__BAR }}"
+          [ -n "${{ secrets.FOO }}" ] && true
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    # BAR_VAL is declared as fed by the GH secret `FOO` — which is referenced in
+    # the block but feeds BAR_VAL nothing; only `FOO__BAR` does. With the old
+    # `__SEC_FOO__` marker this declaration PASSED (the marker is a substring of
+    # `__SEC_FOO__BAR__`); the delimited marker makes the linkage check catch it.
+    manifest = _fixture("collide-manifest.txt", "BAR_VAL  gh-secret:FOO\n")
+    r = _run(_secrets_file(["BAR_VAL"], "collide.json"), manifest=manifest, workflow=wf)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "does not feed the assignment" in r.stdout
+    assert "'BAR_VAL'" in r.stdout
+
+
+def _load_gate_module():
+    """Import the gate as a module (for partition-level unit pins)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_fly_secret_drift", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_partition_classification_is_the_symmetric_difference():
+    """Only the INTERSECTION of the two samples is unconditionally propagated.
+
+    `assigned` is the payload with every GitHub secret present, `unconditional`
+    the payload with none. A `-z`-guarded name is in the second and not the
+    first; the old `assigned - unconditional` partition dropped it from BOTH the
+    managed and the conditional side, so the report called a guarded name
+    managed (#4126 review).
+    """
+    module = _load_gate_module()
+    assigned = {"ALWAYS", "GUARDED"}
+    unconditional = {"ALWAYS", "ABSENT_ONLY"}
+    assert module.conditional_names(assigned, unconditional) == {"GUARDED", "ABSENT_ONLY"}
+    assert module.conditional_names({"ALWAYS"}, {"ALWAYS"}) == set()
+
+
+def test_absent_only_assignment_must_be_declared():
+    """A `-z`-guarded assignment happens on EVERY deploy, so it must be declared.
+
+    `assigned` — the payload with every GitHub secret PRESENT — was the only
+    sample feeding the reverse-completeness rule, so a name assigned by a
+    `[ -z "${{ secrets.X }}" ]` branch was invisible to it: the deploy sets the Fly
+    variable on every run while X is absent, and no rule ever asks for a
+    declaration. Both samples are now consulted (#4126 review — the non-monotone
+    read of the payload).
+    """
+    wf = _fixture(
+        "absent-undeclared.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          if [ -z "${{ secrets.A_KEY }}" ]; then ARGS="$ARGS ABSENT_ONLY_KEY=1"; fi
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "absent-undeclared-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "absent-undeclared.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNDECLARED" in r.stdout and "ABSENT_ONLY_KEY" in r.stdout
+
+
+def test_fly_toml_env_name_assigned_only_without_the_secret_is_stale():
+    """The fly-toml-env reverse check reads BOTH samples, not just `assigned`.
+
+    The deploy may assign the name only in its no-secret run (`-z` guard) — that
+    still creates the Fly secret that shadows [env] on every such deploy, so the
+    declaration is already wrong. Checking `assigned` alone left the case green:
+    the name fell out of `assigned`, never entered `conditional`, and was counted
+    as managed (#4126 review).
+    """
+    wf = _fixture(
+        "absent-only.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          if [ -z "${{ secrets.A_KEY }}" ]; then ARGS="$ARGS ENV_ONLY_KEY=1"; fi
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    # ENV_ONLY_KEY is declared fly-toml-env and is NOT on Fly — so only the
+    # assignment check can catch that the deploy still sets it as a Fly secret.
+    manifest = _fixture(
+        "absent-only-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nENV_ONLY_KEY  fly-toml-env\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "absent-only.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ENV_ONLY_KEY" in r.stdout
+    assert "shadows [env]" in r.stdout
+
+
+def test_fly_toml_env_name_assigned_by_the_deploy_is_stale():
+    """The reverse check on the fly-toml-env branch.
+
+    [env] is the source only while no Fly secret shadows it — and the deploy
+    assigning the name CREATES that secret, so the declaration is wrong from the
+    first run even before the secret exists. Only the forward check existed
+    (is an [env] key, not currently a Fly secret), so this passed (#4126 review).
+    """
+    wf = _fixture(
+        "toml-env-assigned.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} ENV_ONLY_KEY=1"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "toml-env-assigned-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nENV_ONLY_KEY  fly-toml-env\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "toml-env-assigned.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "STALE DECLARATION" in r.stdout and "ENV_ONLY_KEY" in r.stdout
+
+
 def test_unknown_source_is_exit_2():
     manifest = _fixture("unknown-source.txt", "FASTAPI_INTERNAL_KEY  magic\n")
     r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "unknown-source.json"), manifest=manifest)
@@ -606,7 +820,7 @@ def test_secret_entry_without_a_name_is_exit_2():
     assert "has no name" in r.stderr
 
 
-def test_shipped_manifest_is_accepted_by_the_guard_against_the_real_deploy():
+def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     """End-to-end over the SHIPPED artifacts, not fixtures.
 
     Seeds the secret list from the real manifest's own names and runs the guard
@@ -616,9 +830,11 @@ def test_shipped_manifest_is_accepted_by_the_guard_against_the_real_deploy():
     workflow can assign but nothing declares) fails HERE — in review — instead
     of hard-blocking the deploy in CI.
 
-    The assertions pin DETECTION, not the transient state #4126 was filed in: a
-    fix that creates the GitHub secret (or moves the override to fly.toml) must
-    not have to edit this test.
+    The exit code is derived from the manifest, not pinned: `unmanaged` names NO
+    managing source, so the gate FAILS while any remains and the same test goes
+    green the moment the last one is retired — without an edit here. What IS
+    pinned is that the recorded debt is the ONLY problem: any STALE/UNDECLARED
+    violation on the shipped artifacts is a real defect.
     """
     sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
     import importlib.util
@@ -629,19 +845,28 @@ def test_shipped_manifest_is_accepted_by_the_guard_against_the_real_deploy():
     spec.loader.exec_module(module)
 
     declared = module.read_manifest(REAL_MANIFEST)
-    # #4126 must stay represented: the model override is declared under SOME
-    # managing source (which one is the open decision, not this test's business),
-    # and the hand-set names are recorded rather than silently dropped.
-    assert "TORTOISE_SESSION_LLM_MODEL" in declared
-    assert declared["SUPABASE_URL"] == "unmanaged"
+    # #4126: the model override is now MANAGED — the deploy assigns it
+    # unconditionally from the versioned default, so "the GitHub secret is
+    # absent" and "deliberately using the default" are no longer
+    # indistinguishable, and Fly's hand-set value is overwritten on the next
+    # deploy.
+    assert declared["TORTOISE_SESSION_LLM_MODEL"] == "workflow"
+    # The two names the deploy ADOPTED — their GitHub Actions secrets already
+    # existed, so declaring the deploy the source makes them rotatable from
+    # version control.
+    assert declared["SUPABASE_URL"] == "gh-secret:SUPABASE_URL"
+    assert declared["SUPABASE_SERVICE_ROLE_KEY"] == "gh-secret:SUPABASE_SERVICE_KEY"
 
+    debt = {n for n, s in declared.items() if s == "unmanaged"}
     real_secrets = _fixture(
         "real-manifest-names.json",
         json.dumps([{"name": n} for n in sorted(declared)]),
     )
     r = _run(real_secrets, manifest=REAL_MANIFEST, workflow=REAL_WORKFLOW, toml=REAL_FLY_TOML)
-    assert r.returncode == 0, r.stdout + r.stderr
-    # The classification is reported for the filing case, whatever its current
-    # home: it is either conditional propagation (today) or managed (once the
-    # GitHub secret exists).
-    assert "TORTOISE_SESSION_LLM_MODEL" in r.stdout
+    assert "STALE DECLARATION" not in r.stdout, r.stdout
+    assert "UNDECLARED" not in r.stdout, r.stdout
+    assert r.returncode == (1 if debt else 0), r.stdout + r.stderr
+    if debt:
+        assert f"{len(debt)} violation(s)" in r.stdout, r.stdout
+        for name in sorted(debt):
+            assert f"UNSOURCED — '{name}'" in r.stdout, r.stdout

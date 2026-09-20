@@ -30,15 +30,24 @@ Sources (see the manifest header for the full rationale):
                          CONDITIONAL — while that GitHub secret is absent, the
                          Fly value is unmanaged, which is exactly the #4126 case.
 ``workflow``             the workflow sets it from non-secret context
-                         (``${GITHUB_SHA}``, a composed flag, …).
-``fly-toml-env``         an assigned key in ``fly.toml``'s ``[env]`` table.
-``unmanaged``            present on Fly with NO managing source — recorded debt,
-                         reported on every run, escalated under #4126.
+                         (``${GITHUB_SHA}``, a composed flag, a deliberately
+                         versioned default that is always assigned).
+``fly-toml-env``         an assigned key in ``fly.toml``'s ``[env]`` table — and
+                         NOT assigned by the deploy (a Fly secret shadows
+                         ``[env]``, so a workflow assignment would make the
+                         versioned value dead).
+``unmanaged``            present on Fly with NO managing source. **This is the
+                         #4126 defect, so it FAILS the gate.** The token is kept
+                         because it names the state precisely: an operator must
+                         declare the real source (``gh-secret:…`` / ``workflow`` /
+                         ``fly-toml-env``) or remove the Fly secret. A gate that
+                         passes on a Fly-only variable is the fail-open #4126 was
+                         filed to close.
 
 Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
   0 — every Fly secret is declared and every declaration is honoured
-  1 — drift found (undeclared Fly secret, or a declaration the deploy does not
-      honour)
+  1 — drift found (undeclared Fly secret, a declaration the deploy does not
+      honour, or a name whose declaration names NO managing source at all)
   2 — could not determine state (missing/unparsable manifest, unreadable or
       EMPTY secret list, malformed entry). Fail-closed: an unreadable state —
       including a payload that reads as "no secrets" — is never clean.
@@ -71,6 +80,17 @@ DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 
 # `NAME=…` tokens in a captured `flyctl secrets set` payload.
 _ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=([^\s]*)")
+# Substituted for `${{ secrets.X }}` when X is treated as present. The delimiters
+# are control characters that cannot occur in a GitHub/secret NAME, so a marker is
+# never a substring of another marker: `\x01SEC:FOO\x02` does NOT match inside
+# `\x01SEC:FOO___BAR\x02`, which the `__SEC_FOO__` spelling did (#4126 review —
+# the collision attributed FOO's declaration to a different secret's value).
+_MARK_OPEN = "\x01SEC:"
+_MARK_CLOSE = "\x02"
+# The stub records one argv per invocation on fd 3: args separated by ARG_SEP,
+# the invocation terminated by RECORD_SEP.
+_STUB_ARG_SEP = "\x1e"
+_STUB_RECORD_SEP = "\x1d"
 # The propagation step's shell is located by its `flyctl secrets set` call.
 _PAYLOAD_CMD_RE = re.compile(r"\bflyctl\s+secrets\s+set\b")
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
@@ -132,6 +152,36 @@ def payload_step_is_conditional(text: str) -> bool:
     return False
 
 
+def _stub_records(raw: str) -> list[list[str]]:
+    """Parse the stub's argv records (args SEP-joined, record RECORD_SEP-terminated)."""
+    groups: list[list[str]] = []
+    for record in raw.split(_STUB_RECORD_SEP):
+        record = record.strip("\n")
+        if not record:
+            continue
+        groups.append(record.split(_STUB_ARG_SEP))
+    return groups
+
+
+def _payload_assignments(groups: list[list[str]]) -> dict[str, str]:
+    """The ``NAME=VALUE`` arguments of every ``flyctl secrets set`` invocation.
+
+    Read from the STUB's own argv records (fd 3) — never from the block's stdout.
+    The step's `run:` body is comment-dense and carries ``echo`` notices, and an
+    ``echo "NAME=value"`` on the same stream used to be certified as a real Fly
+    assignment (#4126 review: a payload could forge an assignment with an echo).
+    """
+    captured: dict[str, str] = {}
+    for argv in groups:
+        if len(argv) < 2 or argv[0] != "secrets" or argv[1] != "set":
+            continue
+        for token in argv[2:]:
+            match = _ASSIGN_RE.fullmatch(token)
+            if match:
+                captured[match.group(1)] = match.group(2)
+    return captured
+
+
 def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
     """Run the propagation shell with a stubbed flyctl; return ``NAME -> value``.
 
@@ -144,42 +194,58 @@ def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
     Hermetic and value-blind: ``flyctl``/``fly`` are shell stubs on a PATH that
     contains nothing else, so no real Fly call can happen, and the GitHub secret
     placeholders are replaced by dummy markers — the guard never touches a
-    credential. ``secrets.X`` is the marker ``__SEC_X__`` when the caller says X
-    is present, else empty.
+    credential. ``secrets.X`` is the marker ``\x01SEC:X\x02`` when the caller says
+    X is present, else empty.
+
+    The stub reports its argv on **fd 3**, a dedicated file descriptor opened by
+    the wrapper shell and never mentioned to the block. The block's stdout is not
+    read at all, so a payload cannot certify itself with an ``echo``.
     """
 
     def substitute(match: re.Match[str]) -> str:
         name = match.group(1)
-        return f"__SEC_{name}__" if name in present else ""
+        return f"{_MARK_OPEN}{name}{_MARK_CLOSE}" if name in present else ""
 
     rendered = _SECRET_TMPL_RE.sub(substitute, script)
     # Resolve the interpreter BEFORE the child's PATH is narrowed to the stubs.
     bash = shutil.which("bash") or "/bin/bash"
     with tempfile.TemporaryDirectory(prefix="fly-secret-stub-") as stub_dir:
+        argv_log = Path(stub_dir) / "argv.records"
+        argv_log.touch()
         for binary in ("flyctl", "fly"):
             path = Path(stub_dir) / binary
-            path.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            path.write_text(
+                "#!/bin/sh\n"
+                'for _arg in "$@"; do printf \'%s\\036\' "$_arg" >&3; done\n'
+                "printf '\\035' >&3\n"
+            )
             path.chmod(0o755)
         env = {
             "PATH": stub_dir,
             "HOME": stub_dir,
             "GITHUB_SHA": "fixture-sha",
         }
-        # `bash -e` mirrors GitHub's default shell for a `run:` block.
+        # fd 3 is opened by the wrapper and inherited across `exec`, so the stub
+        # has somewhere private to write. `bash -e` mirrors GitHub's default
+        # shell for a `run:` block; it is exec'd after the harness is set up so
+        # the narrowed PATH cannot hide it.
+        command = f"exec 3>{shlex.quote(str(argv_log))}; exec {shlex.quote(bash)} -e"
         proc = subprocess.run(
-            [bash, "-e"], input=rendered, capture_output=True, text=True, env=env, timeout=30
+            [bash, "-c", command],
+            input=rendered,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
         )
+        # Read the stub's records BEFORE the temporary directory is torn down.
+        records = _stub_records(argv_log.read_text())
     if proc.returncode != 0:
         raise ValueError(
             f"the propagation shell failed under the stub (rc={proc.returncode}): "
             f"{proc.stderr.strip()[:300]}"
         )
-    captured: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
-        match = _ASSIGN_RE.fullmatch(line.strip())
-        if match:
-            captured[match.group(1)] = match.group(2)
-    return captured
+    return _payload_assignments(records)
 
 
 def payload_partition(
@@ -194,6 +260,14 @@ def payload_partition(
                       declaration must name the secret that actually feeds THAT
                       variable, not merely one referenced anywhere.
 
+    The two samples are the only two the guard can take cheaply, and the payload
+    need not be monotone in the secret set — a ``[ -z "${{ secrets.X }}" ]`` guard
+    assigns when X is ABSENT, so a name can sit in ``unconditional`` and not in
+    ``assigned``. A MANAGED name is therefore the INTERSECTION (present with every
+    secret AND with none); anything in the symmetric difference is guarded, i.e.
+    propagation that depends on a secret. Sampling ``assigned`` alone classified a
+    `-z`-guarded name as managed (#4126 review).
+
     ``step_conditional`` forces ``unconditional`` empty: a step-level ``if:``
     gates the whole payload, which the shell cannot show.
     """
@@ -203,8 +277,19 @@ def payload_partition(
     unconditional = set() if step_conditional else set(_capture_payload(script, {}))
     sources: dict[str, set[str]] = {name: set() for name in assigned}
     for name, value in all_present.items():
-        sources[name] = {s for s in secret_names if f"__SEC_{s}__" in value}
+        sources[name] = {s for s in secret_names if f"{_MARK_OPEN}{s}{_MARK_CLOSE}" in value}
     return assigned, unconditional, sources
+
+
+def conditional_names(assigned: set[str], unconditional: set[str]) -> set[str]:
+    """Names whose assignment depends on a secret — the symmetric difference.
+
+    Anything present in only ONE of the two samples is guarded in some direction;
+    only the intersection is unconditionally propagated. A `-z`-guarded name is in
+    ``unconditional`` but not ``assigned``, and used to fall out of both lists
+    (counted as managed, #4126 review).
+    """
+    return (assigned | unconditional) - (assigned & unconditional)
 
 
 def _err(msg: str) -> None:
@@ -212,7 +297,13 @@ def _err(msg: str) -> None:
 
 
 def read_manifest(path: Path) -> dict[str, str]:
-    """Parse ``<NAME> <source>`` lines. Raises ValueError on a malformed entry."""
+    """Parse ``<NAME> <source>`` lines. Raises ValueError on a malformed entry.
+
+    The source SHAPE is validated before anything is indexed out of it. A bare
+    ``gh-secret`` (no ``:``) used to reach ``source.split(":", 1)[1]`` and raise
+    IndexError — an uncaught crash, so the process exited **1**, the *bypassable*
+    drift code, instead of the fail-closed **2** (#4126 review).
+    """
     entries: dict[str, str] = {}
     for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -222,14 +313,16 @@ def read_manifest(path: Path) -> dict[str, str]:
         if len(parts) != 2:
             raise ValueError(f"{path.name}:{lineno}: expected '<NAME> <source>', got {raw!r}")
         name, source = parts
-        kind = source.split(":", 1)[0]
+        kind, sep, argument = source.partition(":")
         if kind not in ("gh-secret", "workflow", "fly-toml-env", "unmanaged"):
             raise ValueError(
                 f"{path.name}:{lineno}: unknown source {source!r} "
                 "(expected gh-secret:<GH_NAME> | workflow | fly-toml-env | unmanaged)"
             )
-        if kind == "gh-secret" and not source.split(":", 1)[1]:
+        if kind == "gh-secret" and not argument:
             raise ValueError(f"{path.name}:{lineno}: gh-secret needs the GitHub secret name")
+        if kind != "gh-secret" and sep:
+            raise ValueError(f"{path.name}:{lineno}: {kind} takes no ':' argument (got {source!r})")
         if name in entries:
             raise ValueError(f"{path.name}:{lineno}: duplicate declaration for {name}")
         entries[name] = source
@@ -336,8 +429,9 @@ def main() -> int:
         return 2
     # Everything the payload carries that is NOT there with every GitHub secret
     # absent is conditionally propagated. Executing the block computes that
-    # exactly, so no shell spelling can hide it.
-    assigned_conditionally = assigned - unconditional
+    # exactly, so no shell spelling can hide it — including the `-z` direction,
+    # where the name appears ONLY in the no-secret sample.
+    assigned_conditionally = conditional_names(assigned, unconditional)
     if not assigned:
         _err(
             "cannot determine secret provenance: the flyctl secrets set payload is "
@@ -357,11 +451,16 @@ def main() -> int:
     # Towards Fly: a var that exists only on Fly. Towards the workflow: a Fly
     # var the deploy can set that no declaration covers (it would otherwise pass
     # the run that sets it and hard-fail every run after).
+    #
+    # BOTH samples: a `[ -z "${{ secrets.X }}" ]` guard assigns only in the
+    # no-secret run, and that assignment happens on EVERY deploy while X is
+    # absent — the name is deploy-managed, so it must be declared. Sampling
+    # `assigned` alone left it undetectable in either direction (#4126 review).
     for name in sorted(set(fly_names) - set(declared)):
         violations.append(
             f"UNDECLARED — {name!r} is on Fly but declared nowhere in {manifest_path.name}"
         )
-    for name in sorted(assigned - set(declared)):
+    for name in sorted((assigned | unconditional) - set(declared)):
         violations.append(
             f"UNDECLARED — {name!r} is assigned by {workflow_path.name} but declared "
             f"nowhere in {manifest_path.name}"
@@ -419,17 +518,46 @@ def main() -> int:
                     "Fly secret, which shadows [env] (declare the real source "
                     "instead)"
                 )
-        elif kind == "unmanaged" and name in assigned:
-            violations.append(
-                f"STALE DECLARATION — {name!r} is declared unmanaged but "
-                "deploy-hosted.yml propagates it (declare it gh-secret:…)"
-            )
+            elif name in assigned or name in unconditional:
+                # The reverse of the check above: [env] is only the source while
+                # no Fly secret shadows it, and the deploy assigns this name — so
+                # a deploy CREATES the secret that kills the versioned value. Check
+                # BOTH samples: a `-z`-guarded assignment appears only in the
+                # no-secret run, and sampling `assigned` alone missed it (#4126
+                # review).
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared fly-toml-env but "
+                    f"deploy-hosted.yml assigns the Fly variable {name}, which would "
+                    "create the secret that shadows [env] (remove the assignment, or "
+                    "declare the real source)"
+                )
+        elif kind == "unmanaged":
+            # #4126: `unmanaged` names NO managing source, so it is the defect the
+            # issue was filed for — not a benign recorded debt. Pass it and the
+            # gate exits 0 on exactly the state that took extraction down.
+            if name in assigned:
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared unmanaged, which declares "
+                    "no managing source, but deploy-hosted.yml propagates it "
+                    "(declare it gh-secret:…)"
+                )
+            elif name in fly_names:
+                violations.append(
+                    f"UNSOURCED — {name!r} exists on Fly and its declaration names NO "
+                    "managing source. Declare the real source (gh-secret:<GH_NAME> / "
+                    "workflow / fly-toml-env), or drop the Fly secret after recording "
+                    "the value in version control"
+                )
+            else:
+                violations.append(
+                    f"UNSOURCED — {name!r} is declared with no managing source and "
+                    "exists on neither Fly nor the deploy payload (remove the entry, "
+                    "or declare its real source)"
+                )
 
-    unmanaged = sorted(n for n, s in declared.items() if s == "unmanaged")
-    # The lists describe the FLY app's state, so a declared-but-not-yet-present
+    # The list describes the FLY app's state, so a declared-but-not-yet-present
     # name is not debt — the reverse-completeness rule above already covers it.
     fly_conditional = [n for n in fly_names if n in set(conditional)]
-    fly_unmanaged = [n for n in fly_names if n in set(unmanaged)]
     if fly_conditional:
         print(
             f"CONDITIONAL PROPAGATION — {len(fly_conditional)} secret(s) are only assigned when "
@@ -438,18 +566,11 @@ def main() -> int:
         )
         for name in sorted(fly_conditional):
             print(f"  - {name}")
-    if fly_unmanaged:
         print(
-            f"RECORDED DEBT — {len(fly_unmanaged)} secret(s) on Fly have no managing source "
-            "(#4126):"
-        )
-        for name in fly_unmanaged:
-            print(f"  - {name}")
-    if fly_conditional or fly_unmanaged:
-        print(
-            "  Neither list fails the gate yet: retiring them (create the GitHub secret / "
-            "declare a managing source) is an owner decision escalating under #4126. They "
-            "are printed on every run so the debt cannot be forgotten."
+            "  Every declared source above is honoured by the deploy, but a GitHub secret "
+            "that never exists keeps the Fly value hand-set. A declaration whose GitHub "
+            "secret is absent is the #4126 defect — make the assignment unconditional, or "
+            "record the value in version control."
         )
 
     if violations:
@@ -464,11 +585,14 @@ def main() -> int:
         )
         return 1
 
-    managed = [n for n in fly_names if n not in set(conditional) and n not in set(unmanaged)]
+    # Anything still standing is unconditionally propagated (or gated only by a
+    # declaration the rules above accepted). No `unmanaged` subtraction is needed
+    # here: a declared `unmanaged` name is a violation above, so reaching this
+    # line proves none survives on Fly.
+    managed = [n for n in fly_names if n not in set(conditional)]
     print(
         f"OK: all {len(fly_names)} Fly secret(s) are declared "
-        f"({len(managed)} managed, {len(fly_conditional)} conditionally propagated, "
-        f"{len(fly_unmanaged)} recorded unmanaged)"
+        f"({len(managed)} managed, {len(fly_conditional)} conditionally propagated)"
     )
     return 0
 

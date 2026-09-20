@@ -568,6 +568,13 @@ surfaces:
   # SOURCE_PATTERNS surface, so a change to either falls through to core.
   - test_fork_safety_3845.py
   - test_fly_machines_guard.py
+  # #4126: the Fly secret *provenance* guard (check-fly-secret-drift.py). It
+  # exists because a Fly secret with no managing source is invisible — including
+  # the #4126 incident (a hand-set TORTOISE_SESSION_LLM_MODEL + a stale
+  # OPENROUTER_API_KEY inside Fly-only env produced a total extraction outage that
+  # the API reported as 200/partial). Registered in `core` alongside its sibling
+  # deploy-time guards (test_fly_machines_guard.py, test_deploy_workflow.py).
+  - test_fly_secret_drift.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_diagnostics.py
@@ -1273,6 +1280,7 @@ durations:
   test_relationships_bounded.py: 12.7
   test_extractor_v2.py: 12.1
   test_fly_machines_guard.py: 12.0
+  test_fly_secret_drift.py: 0.0
   test_ask_sdk.py: 11.8
   test_battery_seed_ingest.py: 11.8
   test_delivery_tenancy.py: 11.4
