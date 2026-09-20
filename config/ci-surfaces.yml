@@ -69,6 +69,7 @@ surfaces:
   - test_billing.py
   - test_body_cap_sweep.py
   - test_bridge_mcp.py
+  - test_bridge_table.py  # #4282: Phase 0.1 bridge table must not drift from tool_registry.py/sdk.py
   - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
@@ -1479,6 +1480,7 @@ durations:
   test_attribution_actor.py: 1.6
   test_battery_cli.py: 1.5
   test_bridge_mcp.py: 1.5
+  test_bridge_table.py: 21.5   # 3 tests; ~21s measured, dominated by the generator importing tortoise.sdk
   test_connector_sources.py: 1.5
   test_e2e9_point_in_time.py: 1.5
   test_file_human_approval.py: 1.5
