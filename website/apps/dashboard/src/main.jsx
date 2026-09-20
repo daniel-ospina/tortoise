@@ -5903,6 +5903,24 @@ function claimIntentInFlight() {
   // `navigator.clipboard.writeText` (which stringifies `null` to "null").
   const newKeyReveal = (keyModalStage === 'done' && typeof newKey === 'string' && newKey) || ''
 
+  // #4342: the ONE authority for "is this a revealable plaintext?" — a
+  // non-empty, non-blank STRING. `regenerateKey` must refuse anything else: a
+  // 2xx can carry a number, an object, or padding, and every one of those is
+  // non-falsy, so a bare `!plaintext` check latched a box the user could not
+  // copy. The render gate and the copy control read the same predicate, so no
+  // falsy/blank value can reach either seam.
+  function revealablePlaintext(value) {
+    return (typeof value === 'string' && value.trim()) ? value : ''
+  }
+
+  // #4342: the rotate replacement's key, derived ONCE for the same reason as
+  // `newKeyReveal` above — the reveal renders iff this is a non-empty string,
+  // so a falsy `rotatedKey.plaintext` can never produce the empty `.key-value`
+  // box and is never handed to `navigator.clipboard.writeText`. `regenerateKey`
+  // already refuses to latch a plaintext-less mint (the old key is revoked by
+  // then); this is the render-side half of that same guard.
+  const rotatedKeyReveal = (rotatedKey && revealablePlaintext(rotatedKey.plaintext)) || ''
+
   // #4330: Done dismisses the reveal — the key is already live and listed; this
   // only drops the browser's last copy of the plaintext. Guarded so a click
   // cannot silently destroy a shown-once secret the user never copied. The
@@ -5974,12 +5992,35 @@ function claimIntentInFlight() {
       if (orgIdRef.current !== _teamAtCall) return
       await revokeKey(keyId, { skipConfirm: true })
       if (orgIdRef.current !== _teamAtCall) return
+      // #4342: a 2xx mint that carries no revealable plaintext is NOT a
+      // reveal. The secret is unrecoverable at this point AND the OLD key was
+      // revoked on the line above, so the only honest outcome is to say so —
+      // never to latch `rotatedKey` with a falsy (or non-string, or blank)
+      // plaintext, which rendered an empty `.key-value` box whose copy wrote
+      // the empty string (the #4330 class on the rotate surface; `mintGraphKey`
+      // and `createKey` already refuse the falsy case). The remedy is
+      // rotate-specific: create cannot lose a live credential, rotate already
+      // has.
+      const plaintext = revealablePlaintext(mk && (mk.key || mk.api_key))
+      if (!plaintext) {
+        // Refresh FIRST, then surface the reason: `loadAll` owns the same
+        // `error` slot and overwrites it from its own catch, so a compound
+        // failure (the rotate legs succeeded, the refresh did not) would
+        // otherwise replace the one message that tells the user their old key
+        // is gone and which row to clean up. The identity guard mirrors the
+        // stale-response rule — a switch during the refresh must not carry this
+        // team's error under the new team's header.
+        await loadAll('')
+        if (orgIdRef.current !== _teamAtCall) return
+        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
+        return
+      }
       // #2246: no held install — the replacement is shown once and managed
       // from the table like any other durable. #2735: its OWN reveal state
       // (rotatedKey), never the create modal's newKey — the create modal's
       // dismiss paths clear newKey, which would destroy this unread
       // replacement (the old key is already revoked by this point).
-      setRotatedKey({ plaintext: (mk && (mk.key || mk.api_key)) || '', expiresAt: (mk && mk.expires_at) || null })
+      setRotatedKey({ plaintext: plaintext, expiresAt: (mk && mk.expires_at) || null })
       await loadAll('')
     } catch (e) {
       if (orgIdRef.current === currentOrgId) {
@@ -5993,6 +6034,34 @@ function claimIntentInFlight() {
       }
     } finally {
       setBusy(false)
+    }
+  }
+
+  // #4342: rotate's replacement Copy — the seam that lost the create path's
+  // key to `writeText('')` (a silent no-op that then cleared the only copy of a
+  // live replacement, #2392 class). It never hands a non-string to the
+  // clipboard: the plaintext is read through the same type guard the reveal
+  // gate uses, and a falsy read returns before the clipboard is touched.
+  async function copyRotatedKey() {
+    const plaintext = rotatedKey ? revealablePlaintext(rotatedKey.plaintext) : ''
+    if (!plaintext) return
+    try {
+      // #2735: clear the one-time plaintext ONLY after the clipboard write
+      // resolves. The old key is already revoked, so a failed write that still
+      // cleared the reveal would destroy the only copy of the live replacement.
+      await navigator.clipboard.writeText(plaintext)
+      setRotatedKey(null)
+    } catch {
+      // Keep it visible + select it for a manual copy (mirrors revealKey's
+      // fallback and copyNewKey's).
+      const el = document.querySelector('.new-key .key-value')
+      if (el) {
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        const sel = window.getSelection()
+        sel.removeAllRanges()
+        sel.addRange(range)
+      }
     }
   }
 
@@ -8752,36 +8821,19 @@ function claimIntentInFlight() {
                 Restored inline from its OWN state (rotatedKey), so the create
                 modal's dismiss paths (which clear newKey) can never destroy
                 this already-revoked-old-key replacement. */}
-            {rotatedKey && (
+            {rotatedKeyReveal && (
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>
-                <code className="key-value">{rotatedKey.plaintext}</code>
+                <code className="key-value">{rotatedKeyReveal}</code>
                 {rotatedKey.expiresAt ? (
                   <span className="dim">expires {fmtExpiryDate(rotatedKey.expiresAt)}</span>
                 ) : (
                   <span className="dim">never expires</span>
                 )}
-                <button className="ghost small" onClick={async () => {
-                  // #2735: clear the one-time plaintext ONLY after the clipboard
-                  // write resolves. The old key is already revoked, so a failed
-                  // write that still cleared the reveal would destroy the only
-                  // copy of the live replacement (#2392 class). On failure keep
-                  // the key visible + select it for a manual copy — mirrors
-                  // revealKey's fallback.
-                  try {
-                    await navigator.clipboard.writeText(rotatedKey.plaintext)
-                    setRotatedKey(null)
-                  } catch {
-                    const el = document.querySelector('.new-key .key-value')
-                    if (el) {
-                      const range = document.createRange()
-                      range.selectNodeContents(el)
-                      const sel = window.getSelection()
-                      sel.removeAllRanges()
-                      sel.addRange(range)
-                    }
-                  }
-                }}>Copy &amp; done</button>
+                {/* #4342: the copy rides `copyRotatedKey`, whose plaintext read
+                    is type-guarded the same way as the gate above — the raw
+                    state is never handed to the clipboard. */}
+                <button className="ghost small" onClick={copyRotatedKey}>Copy &amp; done</button>
               </div>
             )}
             {/* #2246 (ADR-010): the keys table is uniform — every durable row
