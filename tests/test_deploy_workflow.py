@@ -4,17 +4,19 @@ The provider gate and Fly secrets-propagation in
 ``.github/workflows/deploy-hosted.yml`` hardcode the LLM provider key names
 (``OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY``). The runtime registry
 (``hosted_api._LLM_PROVIDER_KEYS``, derived from ``ingest._PROVIDERS`` /
-``analyze._LLM_PROVIDERS``) is the source of truth the 503 gate actually
-consumes. A rename in the registry that is not mirrored in the workflow drifts
-SILENTLY: the deploy gate keeps passing (the GH secret name still matches) but
-the key never propagates to Fly — every capture 503s with zero failing tests.
+``analyze._LLM_PROVIDERS``) is the source of truth the provider check
+actually consumes. A rename in the registry that is not mirrored in the
+workflow drifts SILENTLY: the deploy gate keeps passing (the GH secret name
+still matches) but the key never propagates to Fly — every capture STORES its
+turns and extracts nothing into memory, with zero failing tests.
 
 These tests read the workflow file and assert BOTH the verify-secrets gate and
 the secrets-set propagation use EXACTLY the runtime registry key set (both
 directions: no missing key, no extra key), AND that each key is actually
-fail-closed in the gate and actually appended to the Fly secrets ARGS — a key
-merely *referenced* (echoed, commented, gated on with wrong semantics) passes
-name parity but still ships a 503-on-every-capture deploy. Anchored to the
+checked in the gate (warn-only since #1346) and actually appended to the Fly
+secrets ARGS — a key merely *referenced* (echoed, commented, gated on with
+wrong semantics) passes name parity but still ships a deploy whose captures
+never extract. Anchored to the
 #1197 marker comments so a moved block fails loudly instead of silently
 passing.
 """
@@ -67,7 +69,7 @@ def workflow_text() -> str:
 
 # #1358: TORTOISE_SESSION_LLM_MODEL is a MODEL OVERRIDE knob (selects the
 # flash-class model when a provider key is present), NOT a provider key — it
-# has no 503-gate requirement and does not belong in _LLM_PROVIDER_KEYS, but
+# has no provider-gate requirement and does not belong in _LLM_PROVIDER_KEYS, but
 # it IS propagated to Fly. The provider-parity tests must allow it as the
 # known non-provider extra in the propagation block.
 _PROP_EXTRA_KEYS = {"TORTOISE_SESSION_LLM_MODEL"}
@@ -80,23 +82,25 @@ def _prop_region(text: str) -> str:
 def test_verify_secrets_gate_matches_runtime_registry(workflow_text, registry_keys):
     """The deploy gate's key set == _LLM_PROVIDER_KEYS, with the
     warn-only shape (::warning::, no exit 1) intact — the #1346 decision:
-    session capture is optional and degrades to a loud 503 server-side, so
+    session capture is optional and, with no key, stores turns without
+    extracting them (#3892), so
     a missing key must warn, NOT block the whole API deploy.
 
     A rename in the registry must force an update here, else the gate checks
-    a stale name while the app 503s (gate passes, key never consumed)."""
+    a stale name while the app never extracts from a stored capture (gate
+    passes, key never consumed)."""
     gate = _region(workflow_text, _GATE_START, _GATE_END)
     gate_keys = _key_names(gate)
     assert gate_keys, "no secrets.<KEY> found in the verify-secrets provider block — marker drift"
     assert gate_keys == set(registry_keys), (
         f"deploy gate keys {sorted(gate_keys)} != runtime registry "
         f"{sorted(registry_keys)} — a registry rename not mirrored here lets "
-        f"the deploy gate pass while the app 503s every capture "
+        f"the deploy gate pass while the app never extracts a stored capture "
         f"(docs/infra-runbook.md §4.6)"
     )
     # Semantics (#1346/#1347): the LLM provider gate is WARN-ONLY — a missing
-    # key must NOT block the API deploy (session capture is optional, degrades
-    # to a loud 503 server-side). Assert the ::warning:: shape, not the old
+    # key must NOT block the API deploy (session capture is optional; with no
+    # key the turns are stored and extraction is skipped, #3892). Assert the ::warning:: shape, not the old
     # fail-closed exit-1 shape.
     assert "::warning::" in gate and "::error::" not in gate, (
         "verify-secrets LLM gate must be warn-only (::warning::, no ::error::) "
@@ -109,7 +113,7 @@ def test_secrets_set_propagation_matches_runtime_registry(workflow_text, registr
     the #1358 model-override extra, which is a non-provider knob).
 
     The gate and propagation must agree with the registry — a key gated on but
-    never propagated ships a deploy that 503s despite a passing gate."""
+    never propagated ships a deploy that extracts nothing despite a passing gate."""
     prop = _region(workflow_text, _PROP_START, _PROP_END)
     prop_keys = _key_names(prop)
     assert prop_keys, "no secrets.<KEY> found in the secrets-set provider block — marker drift"
@@ -117,7 +121,7 @@ def test_secrets_set_propagation_matches_runtime_registry(workflow_text, registr
         f"Fly secrets propagation keys {sorted(prop_keys)} != runtime registry "
         f"{sorted(registry_keys)} (+ {sorted(_PROP_EXTRA_KEYS)} extra) — a "
         f"registry rename not mirrored here ships the gate passing while the "
-        f"key never reaches Fly (503-on-every-capture)"
+        f"key never reaches Fly (a stored capture that never extracts)"
     )
     # Semantics: each registry key must be APPENDED to the flyctl ARGS — a key
     # merely referenced (echoed or commented) passes name parity but still never
@@ -127,14 +131,15 @@ def test_secrets_set_propagation_matches_runtime_registry(workflow_text, registr
         assert re.search(rf"ARGS=\"\$ARGS\s+{re.escape(key)}=", prop), (
             f"{key} is referenced in the secrets-set block but never appended to "
             f"the flyctl ARGS — the key would stay on GitHub secrets and never "
-            f"reach Fly (503-on-every-capture with a passing deploy)"
+            f"reach Fly (a stored capture that never extracts, with a passing "
+            f"deploy)"
         )
 
 
 def test_gate_and_propagation_agree_with_each_other(workflow_text, registry_keys):
     """Gate ⊆ propagation ⊆ gate — the two blocks can never diverge
     (modulo the #1358 model-override extra, which is propagated but not
-    gated: it is a tuning knob, not a 503-gate requirement)."""
+    gated: it is a tuning knob, not a provider-gate requirement)."""
     gate = _region(workflow_text, _GATE_START, _GATE_END)
     prop = _region(workflow_text, _PROP_START, _PROP_END)
     assert _key_names(gate) == set(registry_keys), (

@@ -11,6 +11,7 @@ Runnable with:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -29,6 +30,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _make_point(sdk: TortoiseSDK, content: str = "test content", **kw):
@@ -43,6 +45,26 @@ def _props(sdk: TortoiseSDK, pid: str) -> dict:
         params={"id": pid}).result_set
     assert row, f"point {pid} missing"
     return dict(row[0][0])
+
+
+# ── #4096: fixture hygiene — the temp tree is reclaimed on teardown ───────
+
+def test_sdk_fixture_reclaims_its_temp_tree():
+    """The ``sdk`` fixture must remove the tree it mkdtemp's (#4096).
+
+    Drives the fixture's own generator the way pytest does — one ``next()`` for
+    setup, a second for teardown — so the assertion is deterministic and needs no
+    cross-test ordering. Fails on the pre-#4096 fixture, whose finalizer only
+    closed the SDK and left ``tortoise_validity_test_*`` behind (5,725 of them
+    were live on the dev box).
+    """
+    gen = sdk.__wrapped__()
+    live = next(gen)
+    tree = os.path.dirname(live._db_path)
+    assert os.path.isdir(tree), "fixture did not create its temp tree"
+    with pytest.raises(StopIteration):
+        next(gen)  # run the fixture's teardown
+    assert not os.path.exists(tree), f"fixture left its temp tree behind: {tree}"
 
 
 # ── T1: supersede_point stamps the window (contiguity + fallback matrix) ──

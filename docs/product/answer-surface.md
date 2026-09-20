@@ -229,6 +229,17 @@ measurement justifies a change.
   "selfhost" check (a hosted team literally named "selfhost" was
   record-and-budget-charged before #3849; no product caller meters today).
 
+  ⚠️ **The window-resolution raise is a SIGNAL, not a refusal** (#3825/#3981).
+  `record_ask_usage` RAISES `QuotaCheckError` when an org's metering window is
+  unresolvable (it will not key the row to a calendar month). That raise does
+  NOT reach the user as a refusal: the answer has already been produced, the
+  caller absorbs the raise, **serves the answer anyway**, and reports the
+  dropped increment to the operator (ERROR, `lane=ask_ledger`). A bookkeeping
+  fault of ours never becomes a user-facing 500. The user-facing refusal —
+  where one exists — is the pre-spend admission gate (the armed cohort cost
+  cap), which runs *before* any spend; a raise downstream of a completed
+  operation cannot refuse it. Do not read "raises" here as "enforced".
+
 ## Error vocabulary
 
 The canonical codes below are the ask vocabulary, defined in

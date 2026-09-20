@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest  # noqa: F401
+import pytest
 from fastmcp import FastMCP
 from fastmcp.tools import FunctionTool
 from mcp.types import ToolAnnotations
@@ -57,28 +57,22 @@ class TestRegistryEquivalence:
     """Gate 1: Derived HTTP_ALLOWED == literal HTTP_ALLOWED."""
 
     def test_derived_http_allowed_equals_literal(self):
-        """HTTP_ALLOWED is derived from the registry with correct size + exclusions.
+        """HTTP_ALLOWED stays derived from the registry (#454).
 
-        (Falsifiable after the literal was replaced by the derived set in #454 —
-        the old literal-vs-derived comparison became tautological.)
+        This is the explicit "HTTP_ALLOWED is registry-derived" pin — it only
+        catches a future regression to a hand-maintained literal. The
+        *operator-only exclusion* property lives in TestCapabilityModel
+        (#4113), keyed on the operation, not on a tool-name string.
         """
         from tortoise.tool_registry import TOOL_REGISTRY  # noqa: I001
         from tortoise.mcp_auth import HTTP_ALLOWED
 
         derived = frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
-        # Derived == literal (no manual sync — #454), and the documented
-        # exclusions hold: team_create, backfill_v25, ingest_corpus,
-        # index_sessions (privilege/schema/path-traversal) and tortoise_dream
-        # (#329 whole-graph EP is CPU-heavy — tenant HTTP excluded).
         assert derived == HTTP_ALLOWED, (
             f"Derived HTTP_ALLOWED mismatch:\n"
             f"  In derived but not set: {derived - HTTP_ALLOWED}\n"
             f"  In set but not derived: {HTTP_ALLOWED - derived}"
         )
-        for excluded in ("tortoise_org_create", "tortoise_backfill_v25",
-                         "tortoise_ingest_corpus", "tortoise_index_sessions",
-                         "tortoise_dream"):
-            assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
         """98 tools = the merged census (99 − the eval-only ask tool removed in
@@ -126,15 +120,26 @@ class TestRegistryEquivalence:
         assert len(names) == len(set(names)), f"Duplicates: {[n for n in names if names.count(n) > 1]}"
 
     def test_http_policy_exclusions(self):
-        """Known exclusions are http_policy=False."""
-        from tortoise.tool_registry import TOOL_REGISTRY
-        by_name = {t.name: t for t in TOOL_REGISTRY}
-        excluded = {"tortoise_org_create", "tortoise_backfill_v25",
-                     "tortoise_ingest_corpus", "tortoise_index_sessions",
-                     "tortoise_index_files"}
-        for name in excluded:
-            assert name in by_name, f"Missing tool: {name}"
-            assert by_name[name].http_policy is False, f"{name} should be excluded"
+        """Operator-only/FS operation bindings are http_policy=False (#4113).
+
+        Keyed on the operation (sdk_method), not a tool-name string — a rename
+        or merge keeps the binding resolvable.
+        """
+        from tool_surface_capabilities import (  # noqa: I001
+            HTTP_EXCLUDED_SDK_METHODS, registry_entries_by_method,
+            sdk_filesystem_methods, sdk_operator_only_mutators,
+        )
+
+        by_method = registry_entries_by_method()
+        operator_only = (sdk_filesystem_methods() | sdk_operator_only_mutators()
+                         | set(HTTP_EXCLUDED_SDK_METHODS))
+        # Non-vacuity sentinel: the derived set really matched something.
+        assert {"ingest_corpus", "index_directory", "org_create"} <= operator_only
+        for method in sorted(operator_only):
+            for entry in by_method.get(method, []):
+                assert entry.http_policy is False, (
+                    f"{entry.name} binds operator-only/filesystem operation "
+                    f"{method!r} but is HTTP-exposed")
 
 
 class TestCurationGroups:
@@ -297,6 +302,17 @@ class TestFastMCPAdapter:
         async def _check():
             from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter  # noqa: I001
             from fastmcp import FastMCP
+            from tool_surface_capabilities import (
+                HTTP_EXCLUDED_SDK_METHODS, registry_entries_by_method,
+                sdk_filesystem_methods, sdk_operator_only_mutators,
+            )
+
+            # Derive the excluded names BY CAPABILITY — no literal tool name.
+            by_method = registry_entries_by_method()
+            operator_only = (sdk_filesystem_methods() | sdk_operator_only_mutators()
+                             | set(HTTP_EXCLUDED_SDK_METHODS))
+            excluded = {e.name for m in operator_only for e in by_method.get(m, [])}
+            assert "tortoise_org_create" in excluded  # non-vacuity sentinel
 
             mcp = FastMCP("test_excluded")
             adapter = FastMCPAdapter(mcp)
@@ -313,10 +329,8 @@ class TestFastMCPAdapter:
             tools = await mcp._list_tools()
             registered = {t.name for t in tools}
             # Excluded tools should still be registered (HTTP filter handles hiding them)
-            assert "tortoise_org_create" in registered
-            assert "tortoise_backfill_v25" in registered
-            assert "tortoise_ingest_corpus" in registered
-            assert "tortoise_index_sessions" in registered
+            missing = excluded - registered
+            assert not missing, f"excluded tools not registered: {missing}"
 
         asyncio.run(_check())
 
@@ -350,3 +364,609 @@ class TestFastAPIRouterAdapter:
         assert ("GET", "/v1/context") in route_paths
         # raw-Cypher ops NOT registered (no rest_spec) — drift documented
         assert ("GET", "/v1/sessions") not in route_paths
+
+
+# ── #4113: capability-not-name guards ───────────────────────────────────────
+#
+# The guards above/below this class used to assert safety properties with
+# hardcoded tool-name strings; a rename or merge in the #3863/#3994 surface
+# cutover made them vacuous. These guards key on the OPERATION and carry a
+# falsifiability test per declared threat class (T1–T4), so they cannot
+# silently pass.
+
+_PROBE_SRC = '''
+def _get_org_sdk():
+    ...
+
+def _safe(fn, *a, **k):
+    ...
+
+def _quota_gated(fn, *a, **k):
+    ...
+
+def _http_excluded_error():
+    ...
+
+def tortoise_probe_reader():
+    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+
+def tortoise_probe_alias():
+    sdk = _get_org_sdk()
+    return _safe(_quota_gated(sdk.create_point, "points"))
+
+def tortoise_probe_fs():
+    return _safe(_get_org_sdk().ingest_corpus, "/tmp")
+
+def tortoise_probe_org():
+    return _safe(_get_org_sdk().org_create, "team")
+
+def tortoise_probe_guarded_excluded():
+    if _transport_is_http():
+        return _http_excluded_error()
+    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+
+def tortoise_probe_unguarded_excluded():
+    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+
+def tortoise_probe_dynamic_table():
+    handlers = {}
+    return handlers["create_point"]()
+
+def tortoise_probe_wrap_dynamic():
+    return _safe(_quota_gated(dispatch["x"], "points"))
+
+def tortoise_probe_resolve_then_call():
+    h = _TABLE["create_point"]
+    return h()
+
+def tortoise_probe_getattr_then_call():
+    fn = getattr(_get_org_sdk(), "create_point")
+    return fn()
+
+def tortoise_probe_conditional_guard(n):
+    if n == 0:
+        return _http_excluded_error()
+    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+
+def tortoise_probe_dead_guard():
+    if False:
+        return _http_excluded_error()
+    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+
+def _transport_is_http():
+    ...
+
+def _require_stdio():
+    return _http_excluded_error()
+
+def tortoise_probe_helper_guard():
+    if _transport_is_http():
+        return _require_stdio()
+    return _safe(_get_org_sdk().ingest_corpus, "/tmp")
+
+def tortoise_probe_get_dispatch():
+    h = _HANDLERS.get("create_point")
+    return h()
+
+def _probe_helper():
+    return _get_org_sdk().create_point
+
+_probe_alias = _probe_helper
+
+def tortoise_probe_alias_helper():
+    return _probe_alias()
+
+def _passed_handle_do(client):
+    return client.create_point
+
+def tortoise_probe_passed_handle():
+    return _passed_handle_do(_get_org_sdk())
+
+def tortoise_probe_inverted_guard():
+    if not _transport_is_http():
+        return _http_excluded_error()
+    return _safe(_get_org_sdk().create_point, "x")
+'''
+
+_BARE_IMPORT_SRC = '''
+from tortoise.sdk import create_point
+import tortoise.sdk as sdk
+
+def _get_org_sdk():
+    ...
+
+def tortoise_probe_bare_import():
+    return create_point("x")
+
+def tortoise_probe_module_alias():
+    return sdk.create_point("x")
+'''
+
+_SDK_HELPER_DELEGATION_SRC = '''
+def _mod_mut():
+    conn.query("CREATE (n:X)")
+
+def _mod_mut_2():
+    return _mod_mut()
+
+class TortoiseSDK:
+    def via_mod_mut(self):
+        return _mod_mut()
+
+    def chain(self):
+        return _mod_mut_2()
+'''
+
+
+def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool, writes: bool = False):
+    from tortoise.tool_registry import ToolDefinition
+    return ToolDefinition(
+        name=name, id=f"surface.probe.{name.removeprefix('tortoise_')}",
+        description="probe", annotations=annotations,
+        http_policy=http_policy, sdk_method=sdk_method, writes=writes,
+    )
+
+
+class TestCapabilityModel:
+    """#4113 — guards derived from operation capability, not tool names."""
+
+    def test_derived_sets_are_non_vacuous(self):
+        """Sentinels: the derivations really matched (and did not over-match)."""
+        from tool_surface_capabilities import (  # noqa: I001
+            sdk_filesystem_methods, sdk_graph_mutators, sdk_operator_only_mutators,
+        )
+        mutators = sdk_graph_mutators()
+        assert {"create_point", "delete", "update"} <= mutators
+        assert not ({"query", "get_point", "list_pointkinds"} & mutators)
+        # over-inclusion sentinel: control-plane READS are not mutators
+        assert not ({"org_list", "graph_list", "apikey_list", "org_get"} & mutators)
+        fs = sdk_filesystem_methods()
+        assert {"ingest_corpus", "index_directory"} <= fs
+        assert not ({"_probe_embedded_busy", "session_index_health"} & fs)
+        op = sdk_operator_only_mutators()
+        assert {"org_create", "membership_create", "apikey_revoke",
+                "invitation_create"} <= op
+        assert not ({"org_list", "graph_list", "apikey_list"} & op)
+
+    def test_handler_operations_reads_value_passed_and_alias_forms(self):
+        """`_get_org_sdk().<m>` as a passed value and via an alias are both seen."""
+        from tool_surface_capabilities import handler_operations
+        assert "create_point" in handler_operations("tortoise_create_point").operations
+        assert "compute_confidence" in handler_operations("tortoise_compute_confidence").operations
+
+    def test_operator_only_and_filesystem_capabilities_are_http_excluded(self):
+        from tool_surface_capabilities import privileged_exposure_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        assert privileged_exposure_violations(TOOL_REGISTRY) == []
+
+    def test_write_capability_is_classified(self):
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        assert write_classification_violations(TOOL_REGISTRY) == []
+
+    def test_bindings_resolve(self):
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        assert binding_resolution_violations(TOOL_REGISTRY) == []
+
+    def test_declared_sets_are_live(self):
+        """Every declared set entry resolves — a rename fails loudly, it does
+        not silently drop out of its check."""
+        from tool_surface_capabilities import declared_set_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        assert declared_set_violations(TOOL_REGISTRY) == []
+
+    # ── falsifiability — each declared threat class must be able to fail ──
+
+    def test_T1_inverted_self_guard_fails(self):
+        """A guard whose transport test is NEGATED lets HTTP through — it must
+        not count as a self-guard."""
+        from tool_surface_capabilities import (
+            handler_self_guards,
+            write_classification_violations,
+        )
+
+        from tortoise.tool_registry import _rw
+        entry = _probe("tortoise_probe_inverted_guard", "create_point",
+                       annotations=_rw(), http_policy=False)
+        assert not handler_self_guards("tortoise_probe_inverted_guard", _PROBE_SRC)
+        assert write_classification_violations([entry], _PROBE_SRC)
+
+    def test_T1_bare_import_and_module_alias_fail(self):
+        """`from tortoise.sdk import create_point` and `import tortoise.sdk as s;
+        s.create_point` are both statically resolvable writes."""
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import _ro
+        for probe in ("tortoise_probe_bare_import", "tortoise_probe_module_alias"):
+            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            assert write_classification_violations([entry], _BARE_IMPORT_SRC), probe
+
+    def test_T4_per_site_duplicate_weight_fails(self):
+        """T4: a per-METHOD model would collapse this; per-site must catch one
+        weighted and one unweighted site for the same method."""
+        from tool_surface_capabilities import wrap_site_violations
+        src = (
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def _quota_gated(fn, *a, **k): ...\n"
+            "def a(): return _quota_gated(_get_org_sdk().create_point, abuse_weight=1)\n"
+            "def b(): return _quota_gated(_get_org_sdk().create_point)\n"
+        )
+        assert wrap_site_violations(src)
+
+    def test_T1_read_labelled_tool_reaching_a_write_fails(self):
+        """T1: a merged tool labelled read-only whose handler writes."""
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import _ro
+        for probe in ("tortoise_probe_reader", "tortoise_probe_alias"):
+            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            assert write_classification_violations([entry], _PROBE_SRC), probe
+
+    def test_T1_exempted_tool_without_self_guard_fails(self):
+        """T1 variant: HTTP-excluded is NOT enough — the handler must self-guard."""
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import _rw
+        unguarded = _probe("tortoise_probe_unguarded_excluded", "create_point",
+                           annotations=_rw(), http_policy=False)
+        guarded = _probe("tortoise_probe_guarded_excluded", "create_point",
+                         annotations=_rw(), http_policy=False)
+        assert write_classification_violations([unguarded], _PROBE_SRC)
+        assert not write_classification_violations([guarded], _PROBE_SRC)
+
+    def test_T2_http_tool_reaching_privileged_capability_fails(self):
+        """T2: filesystem and control-plane legs."""
+        from tool_surface_capabilities import privileged_exposure_violations
+
+        from tortoise.tool_registry import _ro
+        for probe in ("tortoise_probe_fs", "tortoise_probe_org"):
+            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            assert privileged_exposure_violations([entry], _PROBE_SRC), probe
+
+    def test_T3_stale_binding_and_missing_handler_fail(self):
+        """T3: a renamed/removed operation or handler must fail, not vanish."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        stale = _probe("tortoise_create_point", "no_such_method_xyz",
+                       annotations=_ro(), http_policy=True)
+        assert any("does not resolve" in v
+                   for v in binding_resolution_violations([stale]))
+        handlerless = _probe("tortoise_no_handler_at_all", "query",
+                             annotations=_ro(), http_policy=True)
+        assert any("no module-level handler" in v
+                   for v in binding_resolution_violations([handlerless]))
+        dynamic = _probe("tortoise_probe_dynamic_table", "query",
+                         annotations=_ro(), http_policy=True)
+        assert any("dispatch" in v
+                   for v in binding_resolution_violations([dynamic], _PROBE_SRC))
+
+    def test_T1_resolve_then_call_dispatch_fails_closed(self):
+        """T1: a name-keyed dispatch table bound then called (`h = _TABLE[k]; h()`)
+        must fail closed, not silently yield no operations."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        for probe in ("tortoise_probe_resolve_then_call",
+                      "tortoise_probe_getattr_then_call"):
+            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            violations = binding_resolution_violations([entry], _PROBE_SRC)
+            assert any("dispatch" in v for v in violations), (probe, violations)
+
+    def test_T1_partial_or_dead_self_guard_fails(self):
+        """T1: presence of `_http_excluded_error` is not enough — a conditional
+        or dead guard does not dominate the write, so it must fail."""
+        from tool_surface_capabilities import (
+            handler_self_guards,
+            write_classification_violations,
+        )
+
+        from tortoise.tool_registry import _rw
+        for probe in ("tortoise_probe_conditional_guard",
+                      "tortoise_probe_dead_guard"):
+            entry = _probe(probe, "create_point", annotations=_rw(), http_policy=False)
+            assert not handler_self_guards(probe, _PROBE_SRC), probe
+            assert write_classification_violations([entry], _PROBE_SRC), probe
+        # a helper-delegated guard DOES count (no false-red)
+        assert handler_self_guards("tortoise_probe_helper_guard", _PROBE_SRC)
+
+    def test_exemption_set_is_exact(self):
+        """2b: the non-HTTP writer exemption set is exactly NON_HTTP_WRITER_TOOLS."""
+        from tool_surface_capabilities import exemption_set_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY, _rw
+        assert exemption_set_violations(TOOL_REGISTRY) == []
+        rogue = _probe("tortoise_rogue_writer", "query", annotations=_rw(),
+                       http_policy=False)
+        assert exemption_set_violations([rogue])
+
+    def test_guard4_rename_simulation_fails_loudly(self):
+        """A stale write-surface map (renamed/removed tool, or a declared write
+        whose wrap site vanished) must fail — never silently pass."""
+        from tool_surface_capabilities import (
+            DECLARED_WRITE_SURFACE_MAP,
+            write_surface_map_violations,
+        )
+        # a renamed tool name is no longer live → dead-name violation
+        renamed = dict(DECLARED_WRITE_SURFACE_MAP)
+        renamed["create_point"] = "tortoise_create_point_RENAMED"
+        assert any("non-existent" in v
+                   for v in write_surface_map_violations(renamed))
+        # a declared method whose wrap site is gone → inverse violation
+        dropped = dict(DECLARED_WRITE_SURFACE_MAP)
+        dropped["no_such_wrapped_method"] = "tortoise_create_point"
+        assert any("stale map" in v
+                   for v in write_surface_map_violations(dropped))
+        # FORWARD: a wrap site with no map entry is reported (no KeyError)
+        omitted = {k: v for k, v in DECLARED_WRITE_SURFACE_MAP.items()
+                   if k != "update_point"}
+        assert any("unmapped" in v
+                   for v in write_surface_map_violations(omitted))
+
+    def test_T1_dict_get_dispatch_fails_closed(self):
+        """T1: `h = _HANDLERS.get(k); h()` (the idiomatic dispatch table) must
+        fail closed, not silently yield no operations."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        entry = _probe("tortoise_probe_get_dispatch", "query",
+                       annotations=_ro(), http_policy=True)
+        violations = binding_resolution_violations([entry], _PROBE_SRC)
+        assert any("dispatch" in v for v in violations), violations
+
+    def test_T1_alias_helper_and_passed_handle_fail(self):
+        """T1: a module-level function alias and an SDK handle passed to a
+        helper are both statically resolvable and must be caught."""
+        from tool_surface_capabilities import (
+            handler_operations,
+            write_classification_violations,
+        )
+
+        from tortoise.tool_registry import _ro
+        for probe in ("tortoise_probe_alias_helper", "tortoise_probe_passed_handle"):
+            assert "create_point" in handler_operations(probe, _PROBE_SRC).operations
+            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            assert write_classification_violations([entry], _PROBE_SRC), probe
+
+    def test_sdk_mutator_closure_follows_module_helpers(self):
+        """sdk_graph_mutators() must propagate through a module-level helper."""
+        from tool_surface_capabilities import sdk_graph_mutators
+        mutators = sdk_graph_mutators(_SDK_HELPER_DELEGATION_SRC)
+        assert {"mod:_mod_mut", "via_mod_mut", "chain"} <= mutators
+
+    def test_leading_benign_statement_does_not_false_red_self_guard(self):
+        """A benign assignment before the HTTP guard is still a valid guard."""
+        from tool_surface_capabilities import handler_self_guards
+        src = (
+            "def _transport_is_http(): ...\n"
+            "def _http_excluded_error(): ...\n"
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def tortoise_probe_benign():\n"
+            "    x = 1\n"
+            "    if _transport_is_http():\n"
+            "        return _http_excluded_error()\n"
+            "    return _safe(_get_org_sdk().create_point, 'x')\n"
+        )
+        assert handler_self_guards("tortoise_probe_benign", src)
+
+    def test_T4_dynamic_wrap_site_fails(self):
+        """T4: a wrap site whose target cannot be resolved statically fails."""
+        from tool_surface_capabilities import quota_gated_wrap_sites
+        unresolved = quota_gated_wrap_sites(_PROBE_SRC).unresolved
+        assert unresolved, "dynamic wrap site not detected"
+        assert any("unresolvable" in u for u in unresolved)
+
+    def test_declared_set_violations_can_fail(self):
+        """The declared-set liveness predicate is itself falsifiable."""
+        from tool_surface_capabilities import declared_set_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        without_dream = [e for e in TOOL_REGISTRY if e.sdk_method != "dream"]
+        assert any("no tool binding" in v or "does not resolve" in v
+                   for v in declared_set_violations(without_dream))
+        # a synthetic SDK lacking a declared method fails resolution
+        assert any("does not resolve" in v
+                   for v in declared_set_violations(TOOL_REGISTRY,
+                                                   sdk_src="class TortoiseSDK:\n    pass\n"))
+
+    def test_guard1_declared_and_unguarded_branches_fail(self):
+        """Guard 1 must fire on the declared-binding leg and on an HTTP-excluded
+        tool that reaches a privileged op without self-guarding."""
+        from tool_surface_capabilities import privileged_exposure_violations
+
+        from tortoise.tool_registry import _ro, _rw
+        declared = _probe("tortoise_probe_fs", "ingest_corpus",
+                          annotations=_ro(), http_policy=True)
+        assert privileged_exposure_violations([declared], _PROBE_SRC)
+        unguarded = _probe("tortoise_probe_unguarded_excluded", "ingest_corpus",
+                           annotations=_rw(), http_policy=False)
+        assert privileged_exposure_violations([unguarded], _PROBE_SRC)
+
+    def test_guard2_undeclared_and_nonsdk_branches_fail(self):
+        """Guard 2's 2c (empty sdk_method) and non-SDK-writer branches fail."""
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import _ro
+        undeclared = _probe("tortoise_undeclared_empty", "", annotations=_ro(),
+                            http_policy=True)
+        assert any("empty sdk_method" in v
+                   for v in write_classification_violations([undeclared], _PROBE_SRC))
+        non_sdk = _probe("tortoise_pack_install", "upsert_tenant_manifest",
+                         annotations=_ro(), http_policy=True)
+        assert any("non-SDK writer" in v
+                   for v in write_classification_violations([non_sdk], _PROBE_SRC))
+
+    def test_read_through_write_is_not_flagged(self):
+        """The read-through subtraction: a read-only HTTP tool reaching
+        `compute_confidence` is deliberately NOT a violation."""
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import _ro
+        src = (
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def tortoise_probe_readthrough():\n"
+            "    return _safe(_get_org_sdk().compute_confidence)\n"
+        )
+        entry = _probe("tortoise_probe_readthrough", "compute_confidence",
+                       annotations=_ro(), http_policy=True)
+        assert write_classification_violations([entry], src) == []
+
+    def test_T1_nested_stub_guard_and_wrapper_dispatch_fail(self):
+        """A nested stub named like the HTTP check is not a guard; a wrapped
+        dynamic lookup (`h = TABLE.get(k) or DEFAULT; h()`) fails closed."""
+        from tool_surface_capabilities import (
+            binding_resolution_violations,
+            handler_self_guards,
+            write_classification_violations,
+        )
+
+        from tortoise.tool_registry import _ro, _rw
+        stub_src = (
+            "def _http_excluded_error(): ...\n"
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def tortoise_excl_writer():\n"
+            "    def _transport_http_stub():\n"
+            "        return False\n"
+            "    if _transport_http_stub():\n"
+            "        return _http_excluded_error()\n"
+            "    return _safe(_get_org_sdk().create_point, 'x')\n"
+        )
+        assert not handler_self_guards("tortoise_excl_writer", stub_src)
+        excl = _probe("tortoise_excl_writer", "create_point", annotations=_rw(),
+                      http_policy=False)
+        assert write_classification_violations([excl], stub_src)
+
+        wrapper_src = (
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def tortoise_merged_read():\n"
+            "    h = _TABLE.get('cp') or _get_org_sdk().update_point\n"
+            "    return h()\n"
+        )
+        merged = _probe("tortoise_merged_read", "query", annotations=_ro(),
+                        http_policy=True)
+        assert binding_resolution_violations([merged], wrapper_src)
+
+    def test_synthetic_source_drives_filesystem_and_operator_only(self):
+        """Every derivation reflects an injected source, not just real data."""
+        from tool_surface_capabilities import (
+            sdk_filesystem_methods,
+            sdk_operator_only_mutators,
+        )
+        fs_src = (
+            "class TortoiseSDK:\n"
+            "    def walker(self, directory):\n"
+            "        from pathlib import Path\n"
+            "        return list(Path(directory).rglob('*.md'))\n"
+        )
+        assert "walker" in sdk_filesystem_methods(fs_src)
+        op_src = (
+            "class TortoiseSDK:\n"
+            "    def tenant_write(self):\n"
+            "        self._get_registry().query('MERGE (t:Graph {id:$i})')\n"
+            "    def control_write(self):\n"
+            "        self._get_registry().query('MERGE (t:Team {id:$i})')\n"
+        )
+        op = sdk_operator_only_mutators(op_src)
+        assert "control_write" in op and "tenant_write" not in op
+
+    def test_module_level_cypher_constant_is_a_mutator(self):
+        """Cypher held in a module-level constant is still a graph mutation."""
+        from tool_surface_capabilities import sdk_graph_mutators
+        src = (
+            "CREATE_X = 'CREATE (n:Point {id: $id})'\n"
+            "class TortoiseSDK:\n"
+            "    def create_via_const(self):\n"
+            "        return self._graph_query(CREATE_X)\n"
+        )
+        assert "create_via_const" in sdk_graph_mutators(src)
+
+
+class TestToolIdentity:
+    """#4170: the write permission lives on the entry, on a stable `id`.
+
+    The parallel name list `WRITE_TOOL_NAMES` is now DERIVED from the entries,
+    so a rename or a merge cannot leave the permission behind. These are
+    tripwires, not an analyser.
+    """
+
+    def test_ids_are_non_empty_and_unique(self):
+        """Every entry carries an immutable, unique id (the rename-free key)."""
+        import dataclasses
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        ids = [t.id for t in TOOL_REGISTRY]
+        assert all(ids), f"entry with empty id: {[t.name for t in TOOL_REGISTRY if not t.id]}"
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        assert not dupes, f"duplicate ids: {dupes}"
+        # the permission and the id are FIELDS on the entry: a rename keeps both
+        writer = next(t for t in TOOL_REGISTRY if t.writes)
+        renamed = dataclasses.replace(writer, name="tortoise_renamed_probe")
+        assert renamed.writes is True and renamed.id == writer.id
+
+    def test_write_names_are_derived_from_the_entries(self):
+        """WRITE_TOOL_NAMES is the derivation, not a parallel list."""
+        from tortoise.mcp_server import WRITE_TOOL_NAMES
+        from tortoise.tool_registry import TOOL_REGISTRY
+        derived = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
+        assert derived == WRITE_TOOL_NAMES
+        # 42 is today's declared write census (#4170) — a change here is a
+        # permission change and needs the owner's eye, not a test edit.
+        assert len(WRITE_TOOL_NAMES) == 42, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+
+    def test_quota_gated_tools_are_declared_writers(self):
+        """Every _quota_gated wrap site's bound tool declares writes=True."""
+        from tool_surface_capabilities import (  # noqa: I001
+            quota_gated_wrap_sites, registry_entries_by_method,
+        )
+        sites = quota_gated_wrap_sites()
+        assert sites.sites, "wrap-site scan is vacuous"
+        by_method = registry_entries_by_method()
+        for method, lineno, _weight in sites.sites:
+            for entry in by_method.get(method, []):
+                assert entry.writes, (
+                    f"{entry.name} bound to _quota_gated({method})@{lineno} "
+                    f"but declared writes=False")
+
+    def test_gate_reads_the_entry_writes_flag(self):
+        """The gate's decision IS the entry's `writes` flag: a writer needs
+        graphs:write, a read tool is satisfied by graphs:read."""
+        from fastmcp.exceptions import AuthorizationError
+
+        from tortoise.mcp_auth import _current_legacy_full_access, _current_scopes
+        from tortoise.mcp_server import _enforce_mcp_tool_scope
+
+        scopes_tok = _current_scopes.set(["graphs:read"])
+        legacy_tok = _current_legacy_full_access.set(False)
+        try:
+            with pytest.raises(AuthorizationError):
+                _enforce_mcp_tool_scope("tortoise_create_point")  # writes=True
+            _enforce_mcp_tool_scope("tortoise_query")             # writes=False
+        finally:
+            _current_scopes.reset(scopes_tok)
+            _current_legacy_full_access.reset(legacy_tok)
+
+    def test_unknown_tool_is_denied_not_served_as_read(self):
+        """An unresolvable name is fail-closed — never served as a read."""
+        from fastmcp.exceptions import AuthorizationError
+
+        from tortoise.mcp_auth import _current_legacy_full_access, _current_scopes
+        from tortoise.mcp_server import _enforce_mcp_tool_scope
+
+        scopes_tok = _current_scopes.set(["graphs:read", "graphs:write"])
+        legacy_tok = _current_legacy_full_access.set(False)
+        try:
+            with pytest.raises(AuthorizationError):
+                _enforce_mcp_tool_scope("tortoise_definitely_not_a_tool")
+        finally:
+            _current_scopes.reset(scopes_tok)
+            _current_legacy_full_access.reset(legacy_tok)

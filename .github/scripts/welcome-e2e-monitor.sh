@@ -114,7 +114,9 @@ body_text() { # <run_url>
   cat <<EOF
 Monitor failure — run: $1
 
-This is the #801 live signup funnel monitor (schedule + on-merge). The smoke asserts POST /v1/signup/email → 200 and the auto sign-in (auth/v1/token?grant_type=password) → 200; failures are typically a real signup-funnel regression, an API 429 (over_email_send_rate_limit / over_request_rate_limit / over_request_rate_limit_ip), or a stale test vs the deployed page. Investigate or re-run; it is NOT a PR regression gate.
+This is the #801 live signup funnel monitor (schedule + on-merge). The smoke drives a real signup through the app origin's BFF and asserts `POST /auth/signup` -> 200 and the redirect to the app root; failures are typically a real signup-funnel regression, an API 429 (over_email_send_rate_limit / over_request_rate_limit / over_request_rate_limit_ip), or a stale test vs the deployed page. Investigate or re-run; it is NOT a PR regression gate.
+
+NOTE (#4054): the browser no longer calls Supabase for signup — the BFF does, server-side — so this monitor asserts at the BFF boundary. If you are looking for a `v1/signup/email` or `auth/v1/token?grant_type=password` request in the page trace, there is not one any more.
 
 **One issue per failing streak (#2706):** later failures comment here instead of filing a new issue. The body is not machine-managed; close this issue when the streak ends.
 EOF

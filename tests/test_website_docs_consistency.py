@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -49,6 +50,15 @@ from tests._html_links import (  # noqa: E402
 
 WEBSITE = REPO_ROOT / "website"
 FUNCTIONS = WEBSITE / "functions"
+# #4054: the repo now ships TWO Pages Functions trees. The BFF (auth, session,
+# api/v1) moved to the app project, so `/welcome` and `/auth/*` are served from
+# `website/apps/dashboard/functions/`. #4171 moved the blog admin gate there too
+# (`/admin`), so only `/blog` stays in `website/functions/`. A resolver that only
+# knew one tree would read a correct link as dangling.
+FUNCTION_ROOTS = (
+    FUNCTIONS,
+    WEBSITE / "apps" / "dashboard" / "functions",
+)
 PRODUCT = WEBSITE / "product.html"
 DOCS = WEBSITE / "docs.html"
 FAQ = WEBSITE / "faq.html"
@@ -258,10 +268,12 @@ def _function_serves(path: str) -> bool:
         # satisfied the dangling-link guard it should have failed (review finding,
         # #3962).
         return False
-    targets = [FUNCTIONS.joinpath(*parts)]
-    for depth in range(len(parts), 0, -1):
-        targets.append(FUNCTIONS.joinpath(*parts[:depth], "index"))
-        targets.append(FUNCTIONS.joinpath(*parts[:depth], "[[path]]"))
+    targets = []
+    for root in FUNCTION_ROOTS:
+        targets.append(root.joinpath(*parts))
+        for depth in range(len(parts), 0, -1):
+            targets.append(root.joinpath(*parts[:depth], "index"))
+            targets.append(root.joinpath(*parts[:depth], "[[path]]"))
     return any(t.with_name(t.name + ext).is_file()
                for t in targets for ext in (".ts", ".js"))
 
@@ -458,7 +470,11 @@ def _offers_blog_entry(page: Path) -> bool:
 _IN_SCOPE_AT_3950 = frozenset({
     "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html", "index.html",
     "license.html", "privacy.html", "product.html", "security.html",
-    "self-hosted.html", "signup.html", "tos.html",
+    "self-hosted.html", "tos.html",
+    # ⚠️ `signup.html` LEFT this set in #4054: the page (the `/auth` screen)
+    # moved to the app project at `website/apps/dashboard/public/signup.html`,
+    # so it is no longer a page `website/` serves and no longer this guard's
+    # subject. Its route now lives at https://app.premiselabs.co/auth.
 })
 
 
@@ -977,4 +993,390 @@ def test_product_hero_offers_the_blog() -> None:
         "owner's report was 'cannot find the blog or how to reach it' — a footer "
         "link at the end of the scroll narrative is not a sufficient answer on the "
         "landing page. Keep the hero's secondary-link row entry."
+    )
+
+
+# ── #3436: duplicate element ids across the public site ─────────────────────
+#
+# A duplicate `id` is invalid HTML and makes every lookup ambiguous:
+# `getElementById` returns only the FIRST match (so a script silently binds the
+# wrong element), an in-page anchor lands on an arbitrary one, and
+# `aria-labelledby`/`aria-controls` lose their target. #3436 reported
+# `id="beta-gate"` twice in `website/signup.html`.
+#
+# The real markup never had two such elements. A raw-text scan counted a
+# REMOVAL NOTE that quoted `<section id="beta-gate">` inside an HTML comment
+# (verified across all 55 revisions of that file: 0 revisions ever carried two
+# real `id="beta-gate"` elements). One comment occurrence pinned the whole
+# class and `website/*.html` was the class's only real home, so the guard below
+# is parser-based rather than regex-based, and the comment case is pinned in
+# `test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id` — a regex
+# guard reds on any page that documents its own ids.
+
+
+class _IdCollector(HTMLParser):
+    """The `id` of every element the stdlib tokenizer reports as a start tag.
+
+    `handle_starttag` is the right hook: the tokenizer emits no start tag inside
+    a comment — which is exactly the #3436 false positive, a raw-text scan that
+    counted the removal note quoting `<section id="beta-gate">` as a second
+    element.
+
+    Only the FIRST `id` attribute on a tag is read — the stdlib hands over every
+    one of a duplicate pair, while a browser keeps the first — and an empty value
+    is treated as no id at all, because `getElementById("")` matches nothing and
+    two elements with `id=""` are not a collision a script can observe.
+
+    TWO KNOWN DIVERGENCES from a browser, in opposite directions. Both are
+    inherited from the stdlib tokenizer rather than modelled here, and neither
+    is an exhaustive list — this is a tokenizer's view of a document, not a
+    browser's:
+
+      * OVER-count: an `id` a browser does not expose as a document element.
+        `<template>` content is the pinned case — a browser keeps it in an inert
+        fragment `getElementById` never reaches, while the stdlib parses it as
+        ordinary markup. This direction is fail-loud, the one a duplicate-id
+        guard must err in: a false positive is a red test a human reads, while a
+        false negative ships the defect.
+      * UNDER-count, and SILENT: a construct where the stdlib stops emitting
+        start tags and a browser does not. `<svg><style>…</style></svg>` is the
+        case that has bitten: the stdlib switches to raw text by tag name, with
+        no foreign-content awareness. `tests/_html_links.py` documents the same
+        class of tokenizer divergence for the link extractor and #3970 tracks
+        its limits; #4118 lists the ones found for this collector so far and
+        would remove them by extracting ids through that render-fidelity seam
+        instead of maintaining a second parser.
+
+    `test_no_covered_page_makes_the_id_collectors_declared_limit_live` is the
+    mitigation for the silent direction — the module's idiom for a limit that
+    cannot yet be modelled — and it covers the `<svg>`-raw-text case only.
+    """
+
+    @property
+    def _support_cdata(self) -> bool:
+        """False: a CDATA section is CDATA only INSIDE foreign content.
+
+        `HTMLParser` ships this as unconditional ``True``, and honouring
+        `<![CDATA[ … ]]>` in HTML content makes the tokenizer swallow everything
+        up to `]]>` — where a browser ends a BOGUS COMMENT at the first `>`
+        instead, so the rest of the document is real markup. That is a SILENT
+        miss, the direction that must not happen.
+
+        This collector does not model foreign content, so it has to pick ONE
+        value: `False` errs LOUD there (it counts markup a browser inside
+        `<svg>`/`<math>` does not expose) and matches a browser everywhere else.
+        `tests/_html_links.py` derives the value from its foreign-context depth,
+        which this class does not track.
+        """
+        return False
+
+    @_support_cdata.setter
+    def _support_cdata(self, flag: bool) -> None:
+        # The stdlib assigns this during `reset()`; the derived value above is the
+        # authority, so the write is accepted and ignored.
+        del flag
+
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ids: list[tuple[str, int]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name == "id":
+                # FIRST id wins, empty or not — the stdlib hands over both
+                # attributes of a duplicate pair and a browser keeps the first,
+                # so `id="" id="x"` leaves the element with no id.
+                if value:
+                    self.ids.append((value, self.getpos()[0]))
+                return
+
+
+def _duplicate_element_ids(html: str) -> dict[str, list[int]]:
+    """{id: [line, …]} for every id declared on more than one element."""
+    collector = _IdCollector()
+    collector.feed(html)
+    lines: dict[str, list[int]] = {}
+    for value, line in collector.ids:
+        lines.setdefault(value, []).append(line)
+    return {value: at for value, at in lines.items() if len(at) > 1}
+
+
+def _all_website_pages() -> list[Path]:
+    """Every checked-in top-level page — DERIVED from disk, never listed.
+
+    Wider than `_in_scope_pages()` on purpose. That scope (public + indexable +
+    served) is the blog guard's question — where a link can be followed — but an
+    id collision is a property of the DOCUMENT: `404.html` is served on every
+    miss and `invite-accept.html` on every invite link, and a `noindex` page is
+    still a page whose own script runs. Derivation is what makes this a guard
+    rather than a list that rots; `test_id_guard_covers_every_website_page` pins
+    the result so it cannot silently SHRINK either.
+
+    Scope is the top level plus the app project's AUTHORED page root; a page
+    added with another extension (`.htm`) or nested (`website/legal/x.html`) is
+    NOT covered — an open gap tracked in #4111. `website/apps/blog-admin/dist/`
+    stays out: that is committed build output, regenerated rather than authored.
+    `website/apps/dashboard/public/` is IN — #4054 moved the auth pages there
+    (`welcome.html`, `signup.html`, `invite-accept.html`), and they are authored
+    and served exactly as before, so the id collision they could carry is the
+    same property as any other page's. Leaving them out would have shrunk this
+    guard's coverage as a silent side effect of the move.
+    """
+    return sorted([
+        *WEBSITE.glob("*.html"),
+        *(WEBSITE / "apps" / "dashboard" / "public").glob("*.html"),
+    ])
+
+
+def _assert_no_duplicate_ids(page_name: str, html: str) -> None:
+    """The guard's assertion, shared with the test that exercises IT.
+
+    `test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id` calls this
+    rather than a copy of its body, because no page in the corpus carries a
+    duplicate — so the parametrized guard only ever executes the passing path,
+    and this is the only test that executes the failing one.
+    """
+    duplicates = _duplicate_element_ids(html)
+    assert not duplicates, (
+        f"website/{page_name} declares the same id on more than one element: "
+        f"{duplicates}. Duplicate ids are invalid HTML and make "
+        f"getElementById, in-page anchors and aria references resolve to an "
+        f"arbitrary element. Give one of the elements a distinct id and update "
+        f"whatever references it (#3436)."
+    )
+
+
+@pytest.mark.parametrize("page", _all_website_pages(), ids=lambda p: p.name)
+def test_website_pages_have_no_duplicate_element_ids(page: Path) -> None:
+    """#3436 acceptance: no page declares the same id on two elements."""
+    _assert_no_duplicate_ids(page.name, _read(page))
+
+
+def test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id() -> None:
+    """#3436 acceptance: the guard must red on the defect it names.
+
+    Both directions are pinned, because a guard that cannot fail on a duplicated
+    id is the same as no guard, and a guard that reds on the non-element
+    occurrences would be the false positive that produced #3436 in the first
+    place.
+    """
+    with pytest.raises(AssertionError, match="more than one element"):
+        _assert_no_duplicate_ids(
+            "synthetic.html", '<div id="dup"></div><span id="dup"></span>'
+        )
+    # The guard is SILENT on the #3436 shape: a comment quoting the element is
+    # not a second element, so it must not raise here either.
+    _assert_no_duplicate_ids(
+        "synthetic.html",
+        '<!-- <section id="dup"></section> --><section id="dup"></section>',
+    )
+    _assert_no_duplicate_ids(
+        "synthetic.html", '<div id="a"></div><span id="b"></span>'
+    )
+    # The helper-level cases the guard's silence depends on.
+    assert _duplicate_element_ids(
+        '<script>const h = \'<div id="dup">\';</script><div id="dup"></div>'
+    ) == {}
+    assert _duplicate_element_ids(
+        '<style>/* <div id="dup"> */</style><div id="dup"></div>'
+    ) == {}
+    # A repeated ATTRIBUTE is dropped by the tokenizer before a browser sees it.
+    assert _duplicate_element_ids('<div id="dup" id="dup"></div>') == {}
+    # A CDATA section in HTML content (the `_support_cdata` override, #4118):
+    # honouring it would swallow to `]]>`, where a browser ends the comment at
+    # the first `>` and parses the rest as markup. Pinned because no real page
+    # reaches the construct, so nothing else here would notice a regression.
+    assert _duplicate_element_ids(
+        '<div id="dup"></div><![CDATA[ > <div id="dup"></div> ]]>'
+    ) == {"dup": [1, 1]}
+    # An `id` in `<template>` content IS counted: a browser keeps that content
+    # inert in a fragment `getElementById` never reaches, while the stdlib parses
+    # it as markup. That is the fail-loud direction, pinned so changing it is
+    # deliberate; `<template>` is pinned because it is unaffected by the stdlib's
+    # raw-text set, which varies by interpreter.
+    assert _duplicate_element_ids(
+        '<template><div id="dup"></div></template><div id="dup"></div>'
+    ) == {"dup": [1, 1]}
+
+
+# Foreign-content roots: a browser does not switch to raw text inside these, so
+# the stdlib's tag-name-only switch diverges there (see `_IdCollector`).
+_FOREIGN_ROOTS = frozenset({"svg", "math"})
+
+
+class _ForeignRawtextProbe(_IdCollector):
+    """Raw-text switches the tokenizer makes while foreign content is open.
+
+    `set_cdata_mode` IS the suppression event: it is the tokenizer's own call,
+    made for every tag whose content it then refuses to parse as markup. Hooking
+    it, rather than listing tag names, is what makes this probe complete — an
+    earlier revision checked `HTMLParser.CDATA_CONTENT_ELEMENTS` and was blind to
+    `title`, `textarea` and `plaintext`, which the stdlib suppresses through
+    `RCDATA_CONTENT_ELEMENTS` and its own plaintext rule (review finding). A tag
+    the collector suppresses cannot be missed here, because both read the same
+    call.
+
+    A nesting-insensitive counter is enough for a PRE-CONDITION check: it can
+    over-report (a 13.2.6.5 breakout leaves the browser in HTML content while
+    this counter still counts the root as open), and over-reporting only asks
+    for a hand check.
+
+    It covers the `<svg>`-raw-text case and no more — the tokenizer has other
+    browser divergences (`_IdCollector` says so, and #4118 lists them), so a
+    green run here is evidence about this one path, not a clean bill of health.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth = 0
+        self.hits: list[tuple[str, int]] = []
+
+    def set_cdata_mode(self, elem: str, *args: object, **kwargs: object) -> None:
+        if self.depth:
+            self.hits.append((elem, self.getpos()[0]))
+        super().set_cdata_mode(elem, *args, **kwargs)  # type: ignore[arg-type]
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _FOREIGN_ROOTS:
+            self.depth += 1
+        super().handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _FOREIGN_ROOTS and self.depth:
+            self.depth -= 1
+
+
+@pytest.mark.parametrize("page", _all_website_pages(), ids=lambda p: p.name)
+def test_no_covered_page_makes_the_id_collectors_declared_limit_live(
+    page: Path,
+) -> None:
+    """Guard the guard: the collector's declared SILENT miss must stay unreached.
+
+    `HTMLParser` switches to raw text by tag name with no foreign-content
+    awareness, while a browser inside `<svg>`/`<math>` does not — so markup
+    inside `<svg><style>…</style></svg>` is a real element to the browser and no
+    element to the collector. Unlike the over-count `_IdCollector` documents,
+    this one is a MISS, and it is only safe while no covered page reaches it:
+    the parametrized assertion fails the moment one does. This is ONE divergence,
+    not all of them (#4118).
+    """
+    probe = _ForeignRawtextProbe()
+    probe.feed(_read(page))
+    assert not probe.hits, (
+        f"website/{page.name} opens {probe.hits} inside `<svg>`/`<math>`. The id "
+        f"collector cannot see markup inside such an element while a browser "
+        f"does, so a duplicate id there would be MISSED (silently). Check this "
+        f"page by hand, and fix the collector (#4118) rather than relaxing this "
+        f"assertion."
+    )
+
+
+def test_the_declared_limit_probe_fires_on_the_construct_it_names() -> None:
+    """Guard the guard: pin the probe's UNHIT branch.
+
+    The parametrized test only ever asserts `not probe.hits` over real pages, so
+    a probe that silently stopped detecting anything would leave it green on
+    every page — the vacuous-guard shape this module already pins for
+    `_guard_reachable_for`'s sentinel branch.
+    """
+    live = _ForeignRawtextProbe()
+    live.feed('<svg><textarea><div id="dup"></div></textarea></svg>')
+    assert live.hits == [("textarea", 1)], (
+        f"the probe did not detect a suppressed tag inside `<svg>` (got "
+        f"{live.hits!r}), so `test_no_covered_page_makes_the_id_collectors_"
+        f"declared_limit_live` is vacuously green and the limit could be live on "
+        f"a covered page. `textarea` exercises the RCDATA path, which a "
+        f"CDATA-only probe missed."
+    )
+    for outside in (
+        '<style>.x{}</style><div id="a"></div>',
+        '<svg><div id="a"></div></svg><textarea>t</textarea>',
+    ):
+        quiet = _ForeignRawtextProbe()
+        quiet.feed(outside)
+        assert not quiet.hits, (
+            f"the probe reports {quiet.hits!r} OUTSIDE foreign content in "
+            f"{outside!r}, where the collector and a browser agree — it would "
+            f"fail every page rather than guard one."
+        )
+
+
+# The top-level page set as of #3436 (2026-09-18). This pins the DERIVATION'S
+# OUTPUT (not an allowlist the guard consults): a guard whose page set silently
+# shrinks is a guard that silently stops covering a page, and the scope and its
+# CI ratchet share one derivation, so they would shrink in lockstep unnoticed.
+# `signin.html` was DELETED by #4054 (its route 301'd to /auth and was dead) — a
+# page that is gone, not moved. `welcome.html`, `signup.html` and
+# `invite-accept.html` MOVED to `website/apps/dashboard/public/` and are still
+# covered, because `_all_website_pages()` now derives that root too.
+_ALL_WEBSITE_PAGES_AT_3436 = frozenset({
+    "404.html", "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html",
+    "index.html", "invite-accept.html", "license.html", "privacy.html",
+    "product.html", "security.html", "self-hosted.html",
+    "signup.html", "tos.html", "welcome.html",
+})
+
+
+def test_id_guard_covers_every_website_page() -> None:
+    """Guard the guard: `_all_website_pages()` must not silently shrink.
+
+    A narrow derivation would make the guard pass by covering less, and the
+    ratchet below cannot notice because it reads the SAME derivation. The pin is
+    an EQUALITY, so a page entering or leaving the TOP LEVEL requires this edit
+    in the same PR — the change becomes a decision rather than one that quietly
+    alters what "covered" means.
+
+    The pin sees only what the glob sees; the shapes it cannot (another
+    extension, a nested path) are tracked in #4111, and `_all_website_pages()`
+    says so rather than implying coverage.
+    """
+    got = {page.name for page in _all_website_pages()}
+    assert got == set(_ALL_WEBSITE_PAGES_AT_3436), (
+        f"the id guard's page set changed: "
+        f"missing={sorted(_ALL_WEBSITE_PAGES_AT_3436 - got)} "
+        f"added={sorted(got - _ALL_WEBSITE_PAGES_AT_3436)}. If a page genuinely "
+        f"left the site, update `_ALL_WEBSITE_PAGES_AT_3436` in the same PR and "
+        f"say why; if one was ADDED, add it to the pin. A page that MOVED is not "
+        f"gone — a page moved under `website/apps/` is no longer top-level, so "
+        f"widen `_all_website_pages()` in this PR (see #4111), or the guard "
+        f"stops covering the page this change was filed about."
+    )
+
+
+def test_every_website_page_is_selectable_by_ci() -> None:
+    """Reverse ratchet for the id guard: every page it covers must run this file.
+
+    The guard's scope is DERIVED, so a page added later is covered without
+    editing a list — but if no `SOURCE_PATTERNS['onboarding']` entry matches that
+    page, a PR touching only it selects no surface (`surfaces=[]`, `full=False`)
+    and this file never runs. The guard then silently stops covering the page it
+    was written for — the silent-drop class the other ratchets in this module
+    document. Verified before listing: `select(["website/invite-accept.html"],
+    …)` returned `surfaces=[]` with this file absent from `test_files`.
+
+    The assertion is on `test_files` rather than `surfaces`, for the reason
+    `_guard_reachable_for` documents: a page that selects a DIFFERENT surface
+    keeps `surfaces` non-empty while this file still never executes.
+
+    This subsumes the older `test_every_in_scope_page_is_selectable_by_ci`, whose
+    page set is a strict subset of this one. That test is deliberately kept: it
+    documents the BLOG guard's scope, and deleting a `#3950` ratchet inside an
+    id-uniqueness change would be scope creep, not a simplification.
+    """
+    # NOTE: the path must be the page's REAL location, not `website/{name}`.
+    # That assumption held only while every covered page was top-level; #4054
+    # moved pages to `website/apps/dashboard/public/`, and a name-based path then
+    # checks a file that does not exist (a permanently "unselectable" report that
+    # no entry can satisfy).
+    unselectable = [
+        rel
+        for rel in (p.relative_to(REPO_ROOT).as_posix() for p in _all_website_pages())
+        if not _guard_reachable_for(rel)
+    ]
+    assert not unselectable, (
+        f"page(s) covered by the id guard whose PR does not run this file: "
+        f"{unselectable}. A duplicate id can then land on that page without the "
+        f"guard ever executing. Add them to SOURCE_PATTERNS['onboarding'] in "
+        f"tools/ci_selection.py."
     )

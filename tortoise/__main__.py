@@ -1733,7 +1733,7 @@ def _suspended_info(body: str) -> tuple[str, str | None] | None:
 
 
 def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
-    """MCP config for one harness — mirrors website/welcome.html (#497/#529).
+    """MCP config for one harness — mirrors website/apps/dashboard/public/welcome.html (#497/#529).
 
     Hosted (HTTP) shapes — pinned by tests/test_onboarding_variants.py T3:
     - claude: {"mcpServers": {"tortoise": {"type": "http", ...}}} — a url
@@ -1790,7 +1790,7 @@ def _print_mcp_configs(api_key: str, api_url: str, harness: str | None) -> None:
     """Print per-harness MCP config (hosted HTTP shape, #304/#981).
 
     With --harness, print only that harness; without, print the selector UI.
-    Shapes mirror website/welcome.html Block A (T3-pinned): claude's CLI
+    Shapes mirror website/apps/dashboard/public/welcome.html Block A (T3-pinned): claude's CLI
     one-liner + type:http .mcp.json alternative, env-expansion forms for
     cursor/pi, codex mcp add command.
     """
@@ -2496,6 +2496,17 @@ def _cmd_install_hooks(args) -> int:
               "tortoise-capture.ts) is left in place; delete that file to "
               "uninstall it.")
         return 0
+    # `cursor` has no shell-hook read seam either: routing `--uninstall` to
+    # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
+    # HOME-scoped capture hook stayed live — the opposite of what a user
+    # asking to uninstall capture concluded (#3819).
+    if uninstall and harness == "cursor":
+        print("cursor has no shell-hook read seam — nothing for --uninstall to "
+              "remove. The capture seam is left in place: delete "
+              "~/.cursor/hooks/tortoise-session-end.sh and its "
+              "sessionEnd entry in ~/.cursor/hooks.json to "
+              "uninstall capture.")
+        return 0
     # `--list` / no harness prints the catalogue.
     if listing or uninstall:
         rc = _install_read_hook(args)
@@ -2537,7 +2548,7 @@ def _cmd_install_hooks(args) -> int:
     # shape/symlink checks above, or the capture half's own pre-flight), the
     # command fails with NOTHING written rather than leave a project with a
     # read hook and a silently-absent capture step.
-    if harness in ("claude", "codex", "pi"):
+    if harness in ("claude", "codex", "pi", "cursor"):
         rc = _install_capture_seam(args, install_capture)
         if rc != 0:
             return rc
@@ -2545,6 +2556,13 @@ def _cmd_install_hooks(args) -> int:
         # Pi has no shell-hook read seam — its only seam is the capture
         # extension; `_install_capture_seam` already reported the install,
         # the no-op, and the MCP/restart guidance.
+        return 0
+    if harness == "cursor":
+        # Cursor has no shell-hook read seam either: the sessionEnd capture
+        # hook is its only seam, and `_install_capture_seam` already reported
+        # the install, the no-op, and the IDE-only disclosure.  Falling
+        # through to `_install_read_hook` would inspect (and could rewrite) a
+        # CLINE registration as if it were Cursor's.
         return 0
     return _install_read_hook(args)
 
@@ -2604,6 +2622,20 @@ def _install_capture_seam(args, install_capture) -> int:
             "--dangerously-bypass-hook-trust`). Trusting a project-local "
             ".codex/hooks.json does NOT cover it - Codex reads hook "
             "registrations from $CODEX_HOME/hooks.json.")
+    if args.harness == "cursor" and not getattr(args, "dry_run", False):
+        # #3819 (owner ruling): the IDE-only limitation is DISCLOSED where the
+        # user chooses Cursor — the install surface — not buried. Cursor's own
+        # docs: "Cloud agents have no editor-lifetime session boundary."
+        from tortoise.capture_install import cursor_home
+        cursor_root = cursor_home(_P.home())
+        print(
+            f"Cursor's sessionEnd hook is IDE-ONLY. The capture hook "
+            f"registered in {cursor_root / 'hooks.json'} fires for LOCAL "
+            "desktop-editor sessions (the expected surface). CURSOR CLOUD "
+            "AGENT sessions are NOT captured — Cursor's docs: 'Cloud agents "
+            "have no editor-lifetime session boundary. sessionEnd is tied to "
+            "the IDE session, not a cloud agent chat.' If you use cloud "
+            "agents, their sessions are not filed by this seam.")
     return 0
 
 
@@ -2714,8 +2746,11 @@ def _install_read_hook_impl(args) -> int:
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
               "tortoise-capture.ts (the capture extension; Pi has no "
               "shell-hook read seam)")
+        print("  tortoise install cursor  → ~/.cursor/hooks.json "
+              "(the sessionEnd capture hook; Cursor has no shell-hook read "
+              "seam. IDE-ONLY: Cursor cloud agent sessions are not captured)")
         print("Other seams (docs/matrix only, this wave): "
-              "devin, cursor, gemini, opencode — see "
+              "devin, gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
         return 0
 
@@ -3090,7 +3125,18 @@ def _cmd_hooks(args) -> int:
     if args.hooks_cmd == "status":
         try:
             findings = detect_install(root, args.harness)
-        except OSError as e:
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            # A CATCH-ALL, not an enumeration: `detect_install` reads and
+            # parses `<root>/settings.json` (or `hooks.json`), and the raise-set
+            # is open-ended.  An `except OSError` (the previous form) let
+            # `json.loads`' `RecursionError` — a `RuntimeError` — escape on a
+            # deeply nested document, so `hooks status` died with a raw
+            # traceback (#4024 P2-2).  The next unenumerated member refutes any
+            # tuple, which is how `TypeError` (#3987) and `UnicodeDecodeError`
+            # (#3988) escaped `capture_install`'s old boundary.  Same shape as
+            # the root resolution above and `install_capture`'s catch-all.
             print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
                   file=_sys.stderr)
             return 1
@@ -3123,6 +3169,7 @@ def _cmd_hooks(args) -> int:
                 # recommending a command that will refuse.
                 _manual = frozenset({
                     "unreadable-settings",
+                    "settings-unreadable-entry",
                     "not-a-regular-file",
                     "not-executable-symlink",
                     "not-readable",
@@ -3153,7 +3200,12 @@ def _cmd_hooks(args) -> int:
     try:
         result = upgrade_install(root, args.harness,
                                  dry_run=getattr(args, "dry_run", False))
-    except OSError as e:
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        # The install path is fail-closed and its refusal TEXT tells the user
+        # to run this very command, so the command must never crash: same
+        # catch-all boundary as `status` above (#4024 P2-2).
         print(f"Upgrade failed: {e.__class__.__name__}: {e}",
               file=_sys.stderr)
         return 1
@@ -3202,13 +3254,58 @@ def _cmd_session(args) -> int:
         return _cmd_session_capture(args, api_key, api_url)
     elif args.session_cmd == "probe":
         return _cmd_session_probe(args, api_key, api_url)
+    elif args.session_cmd == "verify":
+        return _cmd_session_verify(args, api_key, api_url)
     elif args.session_cmd == "list":
         return _cmd_session_list(api_key, api_url)
     elif args.session_cmd == "view":
         return _cmd_session_view(args, api_key, api_url)
     else:
-        print("Unknown session command. Try capture, probe, list, or view.", file=sys.stderr)
+        print("Unknown session command. Try capture, probe, verify, list, or "
+              "view.", file=sys.stderr)
         return 1
+
+
+def _cmd_session_verify(args, api_key: str, api_url: str) -> int:
+    """`tortoise session verify` — one-command behavioural install check.
+
+    Thin CLI boundary over :func:`tortoise.session_verify.verify_session_capture`:
+    the whole chain runs inside ONE catch-all, so every failure on the
+    resolve/fire/observe path is a populated message plus a non-zero exit —
+    never an uncaught traceback out of the CLI.  A ``MemoryError`` is
+    re-raised first (resource exhaustion is not a refusal; the handler
+    allocates).  Deliberately NOT an ``except (A, B)`` tuple — the next
+    unenumerated member refutes a finite enumeration (#3987/#3988 class).
+    """
+    from pathlib import Path
+
+    from tortoise.session_verify import (
+        EXIT_BROKEN,
+        render_report,
+        verify_session_capture,
+    )
+
+    try:
+        report = verify_session_capture(
+            args.harness,
+            api_key=api_key,
+            api_url=api_url,
+            home=Path.home(),
+            install_dir=getattr(args, "dir", None),
+            timeout=float(getattr(args, "timeout", 90.0)),
+            keep=bool(getattr(args, "keep", False)),
+        )
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(f"verify failed: {e.__class__.__name__}: {e}", file=sys.stderr)
+        return EXIT_BROKEN
+    if getattr(args, "json", False):
+        import json as _json
+        print(_json.dumps(report, indent=2))
+    else:
+        print(render_report(report))
+    return int(report.get("exit_code", EXIT_BROKEN))
 
 
 def _parse_transcript(text: str) -> list:
@@ -3339,6 +3436,21 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
             file=_sys.stderr,
         )
         return 1
+    # #4188: never report an unqualified success for a DEFERRED capture — a
+    # keyless store is a 2xx with extraction skipped. Surface the receipt's
+    # no-provider mode + additive warnings (stderr), mirroring
+    # _cmd_session_import. Only the no-provider mode means "not extracted":
+    # "replayed" means a PRIOR capture SUCCEEDED, so its memory points DO
+    # exist — printing "memory points were not extracted" for it would be a
+    # false statement about the session.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
+    _capture_mode = result.get("extraction_mode")
+    if _capture_mode == _CAPTURE_NO_PROVIDER_MODE:
+        print(f"  Extraction: {_capture_mode} — the turns were STORED but no "
+              "memory points were extracted", file=_sys.stderr)
+    if result.get("warnings"):
+        print("capture warnings: " + "; ".join(
+            str(w) for w in result["warnings"]), file=_sys.stderr)
     print(f"Captured session: {session_id}")
     print(f"  Turns: {len(turns)}")
     print(f"  Source: {transcript_path.stem}")
@@ -3440,11 +3552,16 @@ def _cmd_sessions_import(args) -> int:
 
     The parsed session is staged LOCALLY (data preservation), POSTed to
     /v1/sessions with a deterministic idempotency key (explicit --session-id
-    or a content-hash-derived one), and a LOCAL receipt is written ONLY on a
-    2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
-    same content is a no-op (receipt exists ⇒ already imported) — and even a
-    re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi parses its own record shape (#3667 — it no longer
+    or a content-hash-derived one), and a LOCAL receipt is written on a 2xx
+    (403/402/503 ⇒ exit 1, honest error, NO receipt) — EXCEPT a deferred keyless
+    2xx (`extraction_mode == "no-provider"`, #4188), which writes NO local
+    receipt so an explicit re-import can re-attempt extraction once a key is
+    configured. Re-import of the
+    same content is a no-op (receipt exists ⇒ already imported). A re-POST of
+    an already-extracted session converges server-side (same session_id ⇒ no
+    new Session or turn Points); a re-POST of a DEFERRED keyless session
+    re-attempts extraction and mints its memory Points (#4188). pi parses its
+    own record shape (#3667 — it no longer
     aliases the codex parser, which returned 0 turns for real Pi sessions).
     The parsed conversation is windowed to the hosted turn cap
     (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
@@ -3565,10 +3682,24 @@ def _cmd_sessions_import(args) -> int:
             result.get("errors") or result.get("warnings")
             or result.get("extraction_mode")), file=_sys.stderr)
 
-    # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
-    # state key; this LOCAL marker makes re-import a cheap no-op) and the
-    # local failure breadcrumb is cleared.
+    # A keyed 2xx ⇒ the receipt lands (the server also wrote the per-harness
+    # receipt state key; this LOCAL marker makes re-import a cheap no-op) and
+    # the local failure breadcrumb is cleared.
+    # #4188: a keyless capture STORES the turns and SKIPS extraction. Writing
+    # the local "imported" receipt would make every later explicit re-import
+    # skip the POST, so the session could never gain memory points once a key
+    # appears — and the owner ruling requires an EXPLICIT re-capture to
+    # extract (nothing here spends automatically). Deferred ⇒ NO local
+    # receipt: the server keeps the graph state truthful (capture_ok=False,
+    # lane "none") and re-running this import after the key is set re-attempts
+    # extraction on the #2335 TRUE-retry lane.
+    from tortoise.sdk import _CAPTURE_NO_PROVIDER_MODE
     _clear_capture_error(harness)
+    if result.get("extraction_mode") == _CAPTURE_NO_PROVIDER_MODE:
+        print("import deferred: no LLM provider key — turns stored, "
+              "extraction skipped; re-run this import once a key is "
+              "configured.", file=_sys.stderr)
+        return 0
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),
@@ -5234,15 +5365,15 @@ def _cmd_doctor(args):
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
     # 5.5 Session extraction — LLM provider (#1197)
-    # POST /v1/sessions (capture) fails closed with 503 when no LLM provider
-    # key is configured (#822 — regex extraction removed as a product path;
-    # this is the beta testers' most-critical feature). Doctor surfaces the
-    # configured provider/model BEFORE testers hit a silent 503. Hosted mode
-    # (FLY_APP_NAME — precedent: hosted_api.py, sdk.py) treats
-    # provider-missing as a HARD failure: the flagship feature cannot work at
-    # all. Local/selfhosted is a warning — capture still fails closed, but
-    # there is no hosted SLA at stake. Mirrors hosted_api._llm_provider_available
-    # + sdk._build_session_llm_extractor exactly (the seam they must agree on).
+    # A missing LLM provider key no longer refuses a capture (#3892 owner
+    # ruling): the Session + its turn Points are still STORED and searchable,
+    # and only the LLM extraction into memory points is skipped. Doctor
+    # surfaces the missing provider BEFORE testers wonder why nothing reaches
+    # memory. Hosted mode (FLY_APP_NAME — precedent: hosted_api.py, sdk.py)
+    # still treats provider-missing as a HARD failure: the flagship extraction
+    # feature cannot work at all, so ops must not ship it. Local/selfhosted is
+    # a warning. Mirrors hosted_api._llm_provider_available +
+    # sdk._build_session_llm_extractor exactly (the seam they must agree on).
     import os as _os
     hosted = bool(_os.environ.get("FLY_APP_NAME"))
     mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
@@ -5302,7 +5433,8 @@ def _cmd_doctor(args):
                         results.append(("OpenRouter model", "⚠️", warning))
         else:
             detail = (
-                "no LLM provider key — POST /v1/sessions fails closed (503). "
+                "no LLM provider key — captures are STORED (turns only), but "
+                "LLM extraction into memory is skipped. "
                 f"Set one of: {' / '.join(_LLM_PROVIDER_KEYS)} "
                 "(docs/infra-runbook.md §4.6)."
             )
@@ -5364,7 +5496,7 @@ def _cmd_doctor(args):
             get_layout,
             is_installed,
         )
-        for _harness in ("claude", "codex"):
+        for _harness in ("claude", "codex", "cursor"):
             _layout = get_layout(_harness)
             # Claude is project-scoped (`root_env is None`) and ignores this
             # argument; a `None` home (step 6 could not resolve it) is given
@@ -6339,6 +6471,11 @@ def _cmd_key_create(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
+    # #3809: the harness choices for `session verify` come from the module's
+    # single HARNESSES tuple, which is itself derived from
+    # capture_install.CAPTURE_SEAM — one definition, never a second list that
+    # could drift.
+    from tortoise.session_verify import HARNESSES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
 
@@ -6604,9 +6741,37 @@ def main(argv: list[str] | None = None) -> int:
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
+    # #3809: one-command behavioural install verification — fire the installed
+    # seam and assert installed -> captured -> in-memory, exiting non-zero on
+    # any broken link. Named `verify` to sit in the existing
+    # `session capture|probe|list|view` grammar (a noun-verb subcommand of the
+    # session surface); NOT a new top-level verb, which would duplicate the
+    # session namespace `capture`/`probe` already own.
+    session_verify = session_sp.add_parser(
+        "verify",
+        help="Verify a harness install end-to-end: installed -> captured -> "
+             "in memory (#3809)")
+    session_verify.add_argument(
+        "--harness", required=True, choices=list(HARNESSES),
+        help="Harness to verify (claude | codex | cursor | pi)")
+    session_verify.add_argument(
+        "--dir", default=None,
+        help="Install root to verify (claude: project dir; codex: $CODEX_HOME; "
+             "cursor: ~/.cursor; pi: ~/.pi/agent/extensions) — default: the "
+             "harness's own root")
+    session_verify.add_argument(
+        "--timeout", type=float, default=90.0,
+        help="Seconds to wait for the fired seam's capture (default: 90)")
+    session_verify.add_argument(
+        "--keep", action="store_true",
+        help="Do NOT delete the probe session after asserting (it is "
+             "reported, never silently left behind)")
+    session_verify.add_argument(
+        "--json", action="store_true",
+        help="Emit the machine-readable report (for CI)")
     # #1727 Slice 2 (Task 15): T2 backfill — `tortoise sessions import`
     # (plural — the plan's pinned CLI shape) ingests historical transcripts
-    # from harness stores (codex / claude-desktop / pi).
+    # from harness stores (codex / claude-desktop / cursor / pi).
     sessions = sp.add_parser(
         "sessions",
         help="Backfill agent sessions from historical transcripts (#1727 Task 15)")
@@ -6617,7 +6782,7 @@ def main(argv: list[str] | None = None) -> int:
                              help="Path to the session transcript (JSONL or text)")
     sess_import.add_argument(
         "--harness", required=True,
-        choices=["codex", "claude-desktop", "desktop", "pi"],
+        choices=["codex", "claude-desktop", "desktop", "cursor", "pi"],
         help="Harness format to parse (each harness has its own record "
              "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(
@@ -6636,8 +6801,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline", "pi"],
-        help="Harness to install (codex | claude | cline | pi)")
+        choices=["codex", "claude", "cline", "cursor", "pi"],
+        help="Harness to install (codex | claude | cline | cursor | pi)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")

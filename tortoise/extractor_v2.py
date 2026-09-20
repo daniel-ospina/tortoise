@@ -66,6 +66,8 @@ import warnings
 import weakref
 from typing import Any
 
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
+
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
 
 SUBJECTS = {
@@ -506,10 +508,8 @@ def _classify_later_enabled() -> bool:
     reflects that run; only the additive ``classify_later`` result key is
     an empty block when the flag is off — see ``extract_session_v2``).
     Value matching is case-insensitive (True/TRUE/ON/yes all enable —
-    review FIX B)."""
-    import os
-    return os.environ.get("TORTOISE_CLASSIFY_LATER", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    review FIX B) and goes through the declared truthy contract (#4097)."""
+    return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))
 
 
 def _default_kind_classifier(model):

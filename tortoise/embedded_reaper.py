@@ -3,7 +3,7 @@
 Epic #1647 P4 (Task 10) DEMOTION: this module is now DEV-MACHINE HYGIENE
 ONLY. CI runs the docker lane — the fast matrix provisions falkordb, and
 migrated files construct via the URI-aware redirect (never spawning a
-redislite server); the 17 carve-out files run embedded in the URI-unset
+redislite server); the carve-out files run embedded in the URI-unset
 carve-out job, whose conftest `_redislite_hygiene` session sweeps own their
 own orphan reclamation. Docker halves produce ~0 embedded orphans by
 construction (E2E-7). The reaper keeps its local-dev role: a dev box's
@@ -51,6 +51,7 @@ skipped, never killed.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import math
@@ -58,6 +59,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -315,8 +317,25 @@ def _parse_min_uptime() -> int:
     return val
 
 
+#: #4214: `os.path.realpath(tempfile.gettempdir())` memoized once per process.
+#: The reaper calls this from its per-record classification loop, and the
+#: realpath walk re-stats the temp root itself — on a leak-degraded box that
+#: is the single most expensive syscall in the sweep (0.4–3.4 s measured at
+#: nlink 55 k). The value is a process constant, BUT `tempfile.tempdir` is
+#: assignable (tests redirect it), so the memo is keyed on the raw value and
+#: is recomputed whenever that changes — a pure memo with no invalidation
+#: would pin the first root forever and silently defeat every redirect.
+_REAL_TEMPDIR: str | None = None
+_REAL_TEMPDIR_RAW: str | None = None
+
+
 def _real_gettempdir() -> str:
-    return os.path.realpath(tempfile.gettempdir())
+    global _REAL_TEMPDIR, _REAL_TEMPDIR_RAW
+    raw = tempfile.gettempdir()
+    if _REAL_TEMPDIR is None or raw != _REAL_TEMPDIR_RAW:
+        _REAL_TEMPDIR = os.path.realpath(raw)
+        _REAL_TEMPDIR_RAW = raw
+    return _REAL_TEMPDIR
 
 
 def _registry_for(socket_dir: str) -> dict | None:
@@ -1877,13 +1896,52 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # the dir intact (retried next sweep); a stray marker on a later rename
     # failure is inert (redis ignores unknown files; the marker is simply
     # re-written on the next successful rename).
+    #
+    # #4098 (CWE-377 / SEI CERT FIO21-C): the candidate dir is discovered
+    # in a SHARED, world-writable tempdir (Linux `/tmp`, mode 1777), so the
+    # marker write must never follow a symlink the dir's owner planted
+    # there — a plain `open(path, "w")` turns "write a marker" into
+    # "truncate any file the reaper's uid can write". O_NOFOLLOW alone
+    # protects only the basename, so the dir is opened O_NOFOLLOW and the
+    # marker is addressed RELATIVE to that fd (the openat pattern;
+    # CVE-2018-6954 is the precedent for skipping it). The dir open needs
+    # READ permission, so a candidate dir that is write+execute but
+    # non-readable (0300) is abandoned rather than reaped — fail-closed, and
+    # unreachable for redislite/mkdtemp dirs (0700).
     try:
-        with open(os.path.join(dbdir_real, REAPER_OWNED_MARKER), "w") as fh:
-            fh.write("reaper-owned\n")
+        dir_fd = os.open(dbdir_real,
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        logger.warning("stale dir unopenable (%s), skipping: %s",
+                       exc, dbdir_real)
+        return None
+    try:
+        marker_fd = _open_marker_no_follow(dir_fd)
+        if marker_fd is None:
+            logger.warning("could not write reaper marker, aborting: %s",
+                           dbdir_real)
+            return None
+        try:
+            if os.write(marker_fd, b"reaper-owned\n") != len(
+                    b"reaper-owned\n"):
+                raise OSError("short marker write")
+        finally:
+            try:  # noqa: SIM105
+                os.close(marker_fd)
+            except OSError:
+                pass
     except OSError:
+        # Pre-#4098 semantics preserved: a marker write/close failure skips
+        # THIS record (the dir is retried next sweep) — it must never abort
+        # the whole sweep, whose remaining records include live orphans.
         logger.warning("could not write reaper marker, aborting: %s",
                        dbdir_real)
         return None
+    finally:
+        try:  # noqa: SIM105
+            os.close(dir_fd)
+        except OSError:
+            pass
     renamed = dbdir_real + STALE_QUARANTINE_SUFFIX + str(time.time_ns())
     try:
         os.rename(dbdir_real, renamed)
@@ -1919,6 +1977,73 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     return {**record, "removed_dir": renamed}
 
 
+def _open_marker_no_follow(dir_fd: int) -> int | None:
+    """Open REAPER_OWNED_MARKER inside ``dir_fd`` for writing, never
+    following a symlink and never truncating through a foreign link (#4098).
+
+    Returns a writable fd for a REGULAR, singly-linked file, or None (fail
+    closed). The open is `O_WRONLY|O_CREAT|O_NOFOLLOW|O_NONBLOCK` and
+    deliberately does NOT carry `O_TRUNC`: truncation happens only AFTER the
+    `fstat` gate, because the truncation itself is the primitive. A hardlink
+    planted at the marker name is a REGULAR file that would pass an
+    `O_TRUNC` open and truncate a file outside the candidate dir; the
+    `st_nlink == 1` gate refuses it (the attacker's link, and only that link,
+    is then removed with a `dir_fd`-anchored `unlink`). A stale marker left by
+    this module is singly-linked and is truncated in place via `ftruncate`.
+
+    A planted symlink is REFUSED (`ELOOP` — `O_NOFOLLOW` protects the
+    basename); a FIFO cannot block (`O_NONBLOCK`); a directory is `EISDIR`.
+    Anything the open lands on that fails the gate is removed with the
+    `dir_fd`-anchored `unlink` (which never follows a trailing symlink) and
+    retried once; a re-plant in that window, or an entry that cannot be
+    unlinked (a directory occupant, an unwritable dir), fails closed.
+
+    The `dir_fd` pins the parent, so the write cannot be redirected by a
+    swapped parent directory either — `O_NOFOLLOW` alone protects only the
+    basename (CVE-2018-6954 is the precedent for skipping `openat`).
+
+    NOTE: this is strictly TIGHTENING, not "no semantic change". A candidate dir
+    whose marker is ABSENT — or whose occupant must be `unlink`ed first — must be
+    writable, so a readable-but-not-writable or unreadable dir now abandons the
+    record instead of writing through it. A STALE REGULAR `nlink == 1` marker in
+    such a dir is still overwritten (`O_CREAT` on an existing owned file needs no
+    write permission on the directory). Fail-closed, and unreachable for
+    redislite/mkdtemp dirs.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    for _attempt in (0, 1):
+        try:
+            fd = os.open(REAPER_OWNED_MARKER, flags, 0o600, dir_fd=dir_fd)
+        except OSError:
+            fd = None
+        if fd is not None:
+            try:
+                st = os.fstat(fd)
+                usable = stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+            except OSError:
+                usable = False
+            if usable:
+                # Truncate only now, through the verified fd. A short write is
+                # impossible for a 14-byte payload on a regular file, but the
+                # return is checked rather than trusted.
+                try:
+                    os.ftruncate(fd, 0)
+                    os.lseek(fd, 0, os.SEEK_SET)
+                except OSError:
+                    os.close(fd)
+                    return None
+                return fd
+            os.close(fd)
+        # Occupied by something this must neither follow nor keep: a symlink
+        # (ELOOP), a FIFO (opened non-blocking above), a directory (EISDIR),
+        # or a HARDLINK (regular but nlink > 1).
+        try:
+            os.unlink(REAPER_OWNED_MARKER, dir_fd=dir_fd)
+        except OSError:
+            return None
+    return None
+
+
 def _kill(pid: int, sigterm_timeout: float) -> None:
     import signal
     try:
@@ -1952,9 +2077,18 @@ _LOCK_PATH = os.path.join(
     # target is tempfile.gettempdir() (machine-global on Linux) — a per-HOME
     # lock means two sweepers with different $HOME (parallel agents/users/
     # containers on a shared box) each flock a DIFFERENT inode and both run
-    # overlapping sweeps, reaping each other's live sockets. Same convention
-    # as ACTIVE_SUITES_DIR above (both under <tempdir>/.tortoise/).
-    os.path.realpath(tempfile.gettempdir()), ".tortoise", ".reaper.lock")
+    # overlapping sweeps, reaping each other's live sockets. Same tempdir root
+    # as ACTIVE_SUITES_DIR above; see the #4098 note below for why the lock DIR
+    # diverges from that sibling's `<tempdir>/.tortoise`.
+    #
+    # #4098: the lock DIR is uid-scoped (`.tortoise-reaper-<euid>`). On a
+    # shared `/tmp` any local uid can pre-create a fixed name, and the
+    # ownership gate below then fails closed forever — a permanent,
+    # zero-privilege denial of the victim's reaper. Because the tmpdir is
+    # ours on macOS and the file is 0700, the pre-existing
+    # `<tempdir>/.tortoise` is left to ACTIVE_SUITES_DIR.
+    os.path.realpath(tempfile.gettempdir()),
+    f".tortoise-reaper-{os.geteuid()}", ".reaper.lock")
 TIMEOUT_DEFAULT = 120
 
 
@@ -1965,21 +2099,150 @@ class _ReaperLock:
         self.path = path
         self._fh = None
 
+    def _close_fh_quietly(self) -> None:
+        # #4098 review: `close()` can itself raise (EINTR/EIO, plausible
+        # right after a failed truncate/flush on a struggling filesystem).
+        # Unguarded, it would REPLACE the in-flight exception and escape
+        # `acquire()` — turning a fail-closed refusal into a startup crash.
+        if self._fh is not None:
+            try:  # noqa: SIM105
+                self._fh.close()
+            except OSError:
+                pass
+        self._fh = None
+
+    def _refuse(self, reason: str, foreign_owned: bool = False) -> bool:
+        # #4098 review: close FIRST — a refusal abandons an open fh (and, on
+        # the write-failure path, a successfully-taken flock), so leaving it
+        # to refcounting is a real fd-lifetime change. `_close_fh_quietly`
+        # is null-safe and idempotent, so the non-regular path's own call
+        # cannot double-close.
+        self._close_fh_quietly()
+        # #4098 review: EVERY refusal must be LOUD. A silent `return False`
+        # is indistinguishable from "another sweeper holds the lock", and on
+        # a shared `/tmp` this path is attacker-triggerable and PERMANENT: a
+        # foreign uid can pre-create our uid-scoped name as a directory, a
+        # symlink to one, or a plain file, and the 1777 sticky bit stops us
+        # removing it — so the reaper would stop sweeping until root
+        # intervenes. Say so, and do not prescribe an action this uid cannot
+        # perform.
+        logger.warning(
+            "reaper lock unavailable (%s) at %s — refusing to lock; %s",
+            reason, self.path,
+            # #4098 review: attribute ownership ONLY where it was established.
+            # "cannot wrap the lock fd" / "not a regular file" are reachable
+            # only AFTER `st_uid == geteuid` passed on a 0700 dir, so those
+            # artifacts can only be ours — blaming a foreign uid there would
+            # be a false diagnosis of our own stale FIFO or fd failure.
+            ("this path is owned by another uid and can only be removed by "
+             "its owner or root, so sweeps are skipped until then")
+            if foreign_owned else
+            ("this uid cannot clear the cause, so sweeps are skipped until "
+             "it is fixed"))
+        self._fh = None
+        return False
+
     def acquire(self) -> bool:
         import fcntl
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        self._fh = open(self.path, "a")  # noqa: SIM115
+        # #4098 (CWE-377): the lock lives in the SHARED tempdir
+        # (`<tempdir>/.tortoise`, 1777 on Linux), so its open is the same
+        # symlink sink as the marker write — a plain `open(path, "a")`
+        # TRUNCATED an attacker-chosen file the reaper's uid can write when
+        # the lock name was planted as a symlink (and a FIFO blocked startup
+        # before the SIGALRM watchdog was armed). Never follow a link and
+        # never open a non-regular file; the sibling `index_lock.py` #280
+        # fix is the pattern (dir 0700, O_NOFOLLOW, truncate through the fd).
+        lock_dir = os.path.dirname(self.path)
+        try:
+            os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+            dir_fd = os.open(lock_dir,
+                             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            return self._refuse("cannot open the lock directory")
+        try:
+            # #4098 review: a PRE-EXISTING dir may have been created by another
+            # local uid (any local uid can `mkdir /tmp/.tortoise-reaper-<uid>`),
+            # and `fchmod` tightens the mode without changing ownership — the
+            # owner can chmod back and unlink/recreate the lock file, which
+            # would break the singleton invariant (two reapers on two inodes).
+            # Require the dir to be OURS; otherwise fail closed LOUDLY — the
+            # uid-scoped name means this needs a deliberate, targeted
+            # pre-creation, not the ordinary shared-`/tmp` case.
+            #
+            # #4098 review: `acquire()`'s contract is "return False on every
+            # failure, never raise" — the invariant `_close_fh_quietly`
+            # exists to preserve. An unguarded `fstat` here was the one
+            # remaining violation (a filesystem-level EIO reaches it).
+            try:
+                dir_uid = os.fstat(dir_fd).st_uid
+            except OSError:
+                return self._refuse("cannot stat the lock directory")
+            if dir_uid != os.geteuid():
+                return self._refuse(
+                    "the lock directory is not owned by this uid",
+                    foreign_owned=True)
+            # Best-effort tighten of a PRE-EXISTING dir. Done through the fd:
+            # chmod(2) FOLLOWS a symlink and Linux has no lchmod, so a path
+            # chmod would run before the O_NOFOLLOW gate and let a planted
+            # `.tortoise` symlink redirect the mode change (#4098 review).
+            try:  # noqa: SIM105
+                os.fchmod(dir_fd, 0o700)
+            except OSError:
+                pass
+            try:
+                fd = os.open(os.path.basename(self.path),
+                             os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
+                             dir_fd=dir_fd)
+            except OSError:
+                return self._refuse("cannot open the lock file")
+            try:
+                self._fh = os.fdopen(fd, "r+")
+            except Exception:
+                # os.fdopen does not take ownership on failure — close the
+                # raw fd itself, or it leaks. Guard the BROAD case (not just
+                # OSError) so a non-OSError from fdopen cannot leak the fd.
+                try:  # noqa: SIM105
+                    os.close(fd)
+                except OSError:
+                    pass
+                return self._refuse("cannot wrap the lock fd")
+        finally:
+            try:  # noqa: SIM105
+                os.close(dir_fd)
+            except OSError:
+                pass
+        try:
+            is_regular = stat.S_ISREG(os.fstat(self._fh.fileno()).st_mode)
+        except OSError:
+            is_regular = False
+        if not is_regular:
+            # A FIFO opens fine O_RDWR without blocking — never treat it as
+            # the lock. Closed exactly once, here; an OSError from close must
+            # not turn a fail-closed refusal into an exception.
+            self._close_fh_quietly()
+            return self._refuse("the lock path is not a regular file")
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            # #4098 review: split CONTENTION from FAILURE. `EWOULDBLOCK` is
+            # the ordinary "another sweeper holds the lock" exit and must
+            # stay SILENT (a warning here would fire on every concurrent
+            # run). Every OTHER errno — EINTR/EIO from flock, or any failure
+            # later in this block — is a real fault that must be LOUD, or it
+            # is indistinguishable from contention.
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                self._close_fh_quietly()
+                return False
+            return self._refuse(f"cannot take the lock: {exc}")
+        try:
             self._fh.seek(0)
             self._fh.truncate()
             self._fh.write(str(os.getpid()))
             self._fh.flush()
-            return True
-        except OSError:
-            self._fh.close()
-            self._fh = None
-            return False
+        except OSError as exc:
+            # A full/read-only tempfs (ENOSPC/EDQUOT/EIO) reaches here.
+            return self._refuse(f"cannot write the lock file: {exc}")
+        return True
 
     def release(self) -> None:
         import fcntl
@@ -1988,8 +2251,11 @@ class _ReaperLock:
                 fcntl.flock(self._fh, fcntl.LOCK_UN)
             except OSError:
                 pass
-            self._fh.close()
-            self._fh = None
+            # #4098 review: guarded, like every other close. `close()` can
+            # raise (EINTR/EIO) and `release()` runs from `main()`'s finally
+            # while `_run_sweep`'s exception may be in flight — a bare close
+            # would replace it and escape main() as an uncaught traceback.
+            self._close_fh_quietly()
 
 
 def _parse_timeout(cli_value: str | None) -> int:
@@ -2634,23 +2900,80 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+# Dependency-free mirror of `tortoise.env_truthy.TRUTHY` (#4097). This module has NO
+# intra-package module-level imports by design (see the module docstring), so it
+# cannot import the shared leaf without dragging in `tortoise/__init__.py` ->
+# redislite. A module-level delegate was measured to break the standalone import
+# purity pinned by
+# tests/test_env_truthy.py::test_reaper_standalone_import_stays_dependency_free;
+# the mirror is held in lockstep with the contract by
+# tests/test_env_truthy.py::test_reaper_mirror_matches_the_contract.
+_ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
 def _env_truthy(raw: str | None) -> bool:
     """Truthy env value: {1,true,yes,on}, case-insensitive.
 
-    #4068: `None` (unset) is False. Mirrors the repo's de-facto truthy
-    convention; the `--full-scan` flag takes precedence over the env var
+    #4068: `None` (unset) is False. Mirrors `tortoise.env_truthy.is_truthy` (see
+    `_ENV_TRUTHY` above); the `--full-scan` flag takes precedence over the env var
     (the `_parse_timeout` CLI > env > default shape).
     """
-    return raw is not None and str(raw).strip().lower() in (
-        "1", "true", "yes", "on")
+    return raw is not None and str(raw).strip().lower() in _ENV_TRUTHY
 
 
 def _lock_holder_pid() -> str:
+    # #4098: never read through a planted symlink at the lock path, and never
+    # BLOCK on one — this runs in main() BEFORE `signal.alarm(timeout)` is
+    # armed, so `open(FIFO, O_RDONLY)` without O_NONBLOCK would hang reaper
+    # startup forever with the watchdog disabled. A non-regular path is
+    # "unknown": it can never be the lock this module wrote.
+    #
+    # #4098 review: `O_NOFOLLOW` alone protects only the BASENAME, so a
+    # planted symlink at the lock DIR would still redirect the read (log
+    # spoofing) and could serve an arbitrarily large file before the
+    # watchdog is armed. Anchor on the dir fd and address the lock RELATIVE
+    # to it, exactly like `_ReaperLock.acquire` — and cap the read, and
+    # require the dir to be ours (a foreign-owned dir's contents are
+    # attacker-authored).
+    lock_dir = os.path.dirname(_LOCK_PATH)
     try:
-        with open(_LOCK_PATH) as fh:
-            return fh.read().strip() or "unknown"
+        dir_fd = os.open(lock_dir,
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return "unknown"
+    try:
+        try:
+            if os.fstat(dir_fd).st_uid != os.geteuid():
+                return "unknown"
+        except OSError:
+            return "unknown"
+        try:
+            fd = os.open(os.path.basename(_LOCK_PATH),
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
+                         dir_fd=dir_fd)
+        except OSError:
+            return "unknown"
+        try:
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return "unknown"
+            except OSError:
+                return "unknown"
+            try:
+                chunk = os.read(fd, 64)   # a pid, not a file
+            except OSError:
+                return "unknown"
+            return chunk.decode("utf-8", "replace").strip() or "unknown"
+        finally:
+            try:  # noqa: SIM105
+                os.close(fd)
+            except OSError:
+                pass
+    finally:
+        try:  # noqa: SIM105
+            os.close(dir_fd)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

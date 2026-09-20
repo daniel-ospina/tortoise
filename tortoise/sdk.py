@@ -23,6 +23,7 @@ from typing import Any
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
+from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
@@ -171,6 +172,20 @@ _CAPTURE_NO_PROVIDER_WARNING = (
 #: zero-extraction states ("empty", "error", "replayed").
 _CAPTURE_NO_PROVIDER_MODE = "no-provider"
 
+#: #3892: a keyless session re-captured WITH a key while the deployment is on
+#: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
+#: mint duplicate claims), so the re-capture replays — said OUT LOUD, because
+#: "already captured" would be a false statement of this state and the remedy
+#: is one env var away. Shared by ``sdk.capture_session`` and the hosted
+#: capture lane so the two surfaces disclose the SAME state in the SAME words.
+_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING = (
+    "this session's turns were stored WITHOUT a provider key and no "
+    "extraction has ever run for it; extraction was NOT re-attempted "
+    "because TORTOISE_SESSION_EXTRACTOR=m2 selects a non-convergent lane "
+    "(re-running it could mint duplicate claims) — unset it and re-capture, "
+    "or capture the session under a convergent lane, to extract"
+)
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider
@@ -197,6 +212,74 @@ def _session_llm_mock_enabled() -> bool:
         "TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
 
 
+class _SessionLLMCallCounter:
+    """#3824: a transparent pass-through that counts model completions.
+
+    The M2 session lane discards its usage block wholesale, so by the time
+    its capture reaches the cost emitter there is no in-hand evidence that a
+    provider call happened — "made billed calls" and "made none" are the
+    same shape (an empty ``stats``). The emitter cannot recover that fact
+    from the roll-up, because the roll-up is exactly what is missing; it has
+    to come from the CALL site. This wrapper is that call site:
+    ``complete()`` is invoked once per provider request by ``_PointStage`` /
+    ``_RelationStage`` / ``_DocumentPointStage``, and the count survives
+    whatever the lane then does with the response.
+
+    Deliberately NOT a second cost/usage accumulator: it holds no tokens, no
+    charge and no per-stage envelope, so it cannot drift from a real
+    roll-up. It answers one question the roll-up cannot answer about
+    itself — "did this capture reach the provider at all?". Every other
+    PUBLIC attribute round-trips to the wrapped model — reads delegate, and
+    so do writes (``id``, ``provider``, ``usage_sink``), so
+    ``LLMExtractor.version`` and the #2185 usage seam are unaffected.
+    """
+
+    def __init__(self, model):
+        self._model = model
+        self.count = 0
+
+    def __getattr__(self, name):
+        # A leading underscore is resolved on THIS object only, so a missing
+        # ``_model`` raises instead of re-entering __getattr__ forever.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._model, name)
+
+    def __setattr__(self, name, value):
+        # Public attribute WRITES must reach the wrapped model too, or the
+        # wrapper silently swallows them: the #2185 usage seam is attached by
+        # assignment (``model.usage_sink = sink``), and a read-only
+        # ``__getattr__`` would leave the UNDERLYING model's sink unset —
+        # dropping every usage block the wrapper exists to keep visible.
+        # ``_model`` and the wrapper-local ``count`` are NOT forwarded.
+        if name.startswith("_") or name == "count":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._model, name, value)
+
+    def complete(self, *args, **kwargs):
+        self.count += 1
+        return self._model.complete(*args, **kwargs)
+
+
+def _session_llm_extractor(point_model, relation_model):
+    """Build the M2 ``LLMExtractor`` with #3824 call-evidence counters.
+
+    The counters ride on the extractor (``_call_counters``) because that is
+    the object ``_extract_session_llm`` holds; a fresh pair is built per
+    call to this helper, so a capture's count can never leak into the next
+    one (the extractor is built inside ``_extract_session_llm``, once per
+    capture).
+    """
+    from tortoise.extractor import LLMExtractor
+
+    counters = [_SessionLLMCallCounter(point_model),
+                _SessionLLMCallCounter(relation_model)]
+    extractor = LLMExtractor(counters[0], counters[1])
+    extractor._call_counters = counters
+    return extractor
+
+
 def _build_session_llm_extractor():
     """Build the M2 LLMExtractor for session capture from the configured
     provider (or None when no provider key is set — the no-key case STORES
@@ -206,14 +289,14 @@ def _build_session_llm_extractor():
     deterministic MockModel so the E2E/unit suites exercise the real LLM
     pipeline shape with zero network."""
     if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
-        from tortoise.extractor import LLMExtractor, MockModel
+        from tortoise.extractor import MockModel
 
-        return LLMExtractor(MockModel("mock-point"), MockModel("mock-relation"))
+        return _session_llm_extractor(
+            MockModel("mock-point"), MockModel("mock-relation"))
     provider = _session_llm_provider()
     if provider is None:
         return None
-    from tortoise.ingest import _PROVIDERS  # noqa: I001
-    from tortoise.extractor import LLMExtractor
+    from tortoise.ingest import _PROVIDERS
     from tortoise.models import OpenAICompatModel
 
     base_url, key_env = _PROVIDERS[provider]
@@ -238,7 +321,7 @@ def _build_session_llm_extractor():
             if not m:
                 raise ValueError(f"bad model spec {spec!r}; expected <model> or <provider>:<model>")
             model_id = m
-    return LLMExtractor(
+    return _session_llm_extractor(
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
     )
@@ -811,6 +894,40 @@ def _is_ulid(s: str) -> bool:
     return bool(_ULID_RE.match(s) or _CROCKFORD_ULID_RE.match(s))
 
 
+# #4106: a recorded session time is only a DATE when it leads with a calendar
+# date in either the ingest producer's real format (``YYYY/MM/DD``, e.g.
+# ``2023/05/20 (Sat) 03:29`` — measured on the frozen dataset: 23,867/23,867
+# values are slash-form, zero are ISO) or ISO 8601 (``YYYY-MM-DD``). Both
+# normalise to ``YYYY-MM-DD``; anything else is ABSENT. Mirrors the canonical
+# ``subgraph_render._parse_date`` rule (its module imports ``tools.*``, which
+# the SDK core must not), and mirrors ``assembly``'s sentinel constant for the
+# same reason.
+_ISO_DATE10_RE = re.compile(r"^(\d{4})[-/](\d{2})[-/](\d{2})")
+#: The v2-lane undated sentinel (``tools/longmem_eval/ingest.UNDATED_SENTINEL``)
+#: — a POSITIVE date value that means "no date". Rendering it would put a
+#: fabricated date in front of a temporal question.
+_UNDATED_SENTINEL = "1970-01-01T00:00:00Z"
+
+
+def _iso_date10(value: object) -> str:
+    """``value``'s ``YYYY-MM-DD`` calendar date, else ``""`` (unknown).
+
+    Accepts ``YYYY/MM/DD…`` and ``YYYY-MM-DD…`` (normalised to the dashed
+    form), and treats the undated sentinel — in every ISO spelling of its
+    ``1970-01-01`` date — as absent. Never returns a truncated non-date: a
+    wrong date is worse than no date (#4106).
+    """
+    s = str(value).strip() if value else ""
+    if not s or s == _UNDATED_SENTINEL:
+        return ""
+    m = _ISO_DATE10_RE.match(s)
+    if not m:
+        return ""
+    date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    # the sentinel's date itself (any offset spelling) is "no date"
+    return "" if date == _UNDATED_SENTINEL[:10] else date
+
+
 # #1516: entity ids minted by _entity_name_id / create_entity are PREFIXED
 # (label[:3] + '-' + sha256[:26], e.g. ``sub-<hex26>`` / ``obj-<hex26>``).
 # These are IDs, not names — a guard that only recognizes bare ULIDs treats
@@ -950,8 +1067,11 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     out-token (recovered-case max semantics per the #2408 Task-4 handoff:
     max(sX_out_tokens, truncation_completion_tokens_sX) — base in the
     truncation key, escalated final list in the out-token key) / error_census.
-    ``meta["stats"]`` is {} on replayed/M2 (no extractor_v2 telemetry) — the
-    line still fires with the mode + turns (a replay/no-op is observable).
+    ``meta["stats"]`` carries no ``llm`` roll-up on replayed/M2 (no
+    extractor_v2 telemetry) — ``{}`` on a replay and on a zero-call M2
+    capture, ``{"unattributed": N}`` on an M2 capture that issued N
+    completions (#3824). The line still fires with the mode + turns (a
+    replay/no-op is observable).
     """
     st = meta.get("stats") or {}
     rec = st.get("recovery") or {}
@@ -1295,10 +1415,11 @@ def _ep_require_calibration_default() -> bool:
     since the #344 flip landed via PR #1212; set "0" to opt out). Draft
     points are excluded from the gate (#780/#1212), so draft-heavy test
     graphs stay passable under the fail-closed default.
+
+    #4097: resolved through the declared truthy contract; `default "1"` is the
+    default VALUE, so garbage still reads OFF.
     """
-    import os
-    raw = os.environ.get("TORTOISE_EP_REQUIRE_CALIBRATION", "1").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get("TORTOISE_EP_REQUIRE_CALIBRATION", "1"))
 
 
 # Per-corpus in-process run locks: the embedded FalkorDBLite's cross-connection
@@ -1620,6 +1741,15 @@ def _resolve_vector_min_similarity() -> float | None:
     if not (0.0 < value <= 1.0):
         return None
     return value
+
+
+def _index_no_network_enabled() -> bool:
+    """`TORTOISE_INDEX_NO_NETWORK` — test-only: `extract_metadata=False` without network.
+
+    #4097: the single resolution point for that knob (``TortoiseSDK._index_no_network``
+    delegates here), so the declared truthy contract has one place to assert.
+    """
+    return env_flag("TORTOISE_INDEX_NO_NETWORK", False)
 
 
 class TortoiseSDK:
@@ -2121,6 +2251,8 @@ class TortoiseSDK:
         try:
             from .event_store import purge_expired, purge_overflow
 
+            # Operational :GraphEvent log retention — NOT user content and NOT
+            # the deletion promise. See docs/retention-and-deletion.md.
             days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
             cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
             purge_expired(proj, retention_days=days)
@@ -3020,14 +3152,13 @@ class TortoiseSDK:
         ``_CAPTURE_NO_PROVIDER_WARNING``). The key gates extraction, not
         storage: the stored turns are searchable with no key at all (FTS is
         DB-side; the dense leg is a local sentence-transformers model).
-        With a provider key present, behaviour is UNCHANGED. This is a
-        DELIBERATE divergence from the hosted lane — ``hosted_api.
-        _capture_session_impl`` keeps its 503-first refusal, because a hosted
-        deploy must never store a session its org did not ask to pay to
-        extract. A keyless capture records ``capture_ok=False`` +
-        ``capture_extractor="none"`` (no extraction lane ran), so a LATER
-        capture of the same session WITH a key re-attempts extraction through
-        the existing #2335 TRUE-retry path instead of silently replaying.
+        With a provider key present, behaviour is UNCHANGED. BOTH lanes share
+        this keyless contract — the hosted lane stores-and-skips too (#4188;
+        it no longer keeps a 503-first refusal). A keyless capture records
+        ``capture_ok=False`` + ``capture_extractor="none"`` (no extraction
+        lane ran), so a LATER capture of the same session WITH a key
+        re-attempts extraction through the existing #2335 TRUE-retry path
+        instead of silently replaying.
         """
         import uuid
         from datetime import datetime, timezone
@@ -3157,17 +3288,18 @@ class TortoiseSDK:
         # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
         # None (legacy sessions, pre-#2335) replays — backward compat with
         # the #1727 invariant (a legacy session is presumed captured).
-        # Review (PR #2473): TRUE retry is gated to the v2 lane — the ONLY
-        # convergent lane. v2 point ids are content-addressed (pt_<sha>) and
+        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or
+        # the keyless "none" lane, #3892). v2 point ids are content-addressed
+        # (pt_<sha>) and
         # its dedup resolves against the GRAPH (content_hash MATCH), so a
         # re-attempt folds the failed attempt's partial claims onto the same
         # nodes (0 duplicates). The M2 lane mints non-deterministic time-ULID
         # ids with IN-CAPTURE-ONLY dedup, and _extract_session_llm folds
         # partial emissions live even on raise — a failed M2 attempt leaves
         # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
-        # #1727 hole the replay skip closed). Retry fires only when BOTH the
-        # prior attempt ran v2 (capture_extractor recorded) AND this request
-        # runs v2 (env != m2) — otherwise replay (safe no-op).
+        # #1727 hole the replay skip closed). Retry fires only when the prior
+        # attempt ran a CONVERGENT lane (v2, or the keyless "none" lane —
+        # #3892) AND this request runs v2 (env != m2) — otherwise replay.
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
         # #3892: a keyless capture records lane "none" (no lane ran), and a
@@ -3370,14 +3502,10 @@ class TortoiseSDK:
                 # refused only because this process is configured to the
                 # NON-convergent M2 lane (see the retry gate above). Said OUT
                 # LOUD: "already captured" would be a false statement of this
-                # state, and the user's remedy is one env var away.
+                # state, and the user's remedy is one env var away. Shared
+                # constant so the hosted lane discloses the SAME state.
                 _replay_warnings.append(
-                    "this session's turns were stored WITHOUT a provider key "
-                    "and no extraction has ever run for it; extraction was "
-                    "NOT re-attempted because TORTOISE_SESSION_EXTRACTOR=m2 "
-                    "selects a non-convergent lane (re-running it could mint "
-                    "duplicate claims) — unset it and re-capture, or capture "
-                    "the session under a convergent lane, to extract")
+                    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
             meta = {
                 "provider": None, "route": None, "failover_used": False,
                 "errors": [], "warnings": _replay_warnings, "mode": "replayed",
@@ -3646,7 +3774,8 @@ class TortoiseSDK:
             # (zero-write no-op; the stored value — True or legacy None —
             # stays untouched, matching the replay posture).
             # Review (PR #2473): the SET also records the extractor lane that
-            # RAN (v2/m2) so the retry gate (above) can require a v2 prior —
+            # RAN (v2/m2/none) so the retry gate (above) can require a
+            # convergent prior —
             # the M2 lane's partial emissions are non-convergent ULID claims,
             # never retried.
             # Non-fatal bookkeeping (codebase posture: receipt/last-error/
@@ -3702,7 +3831,9 @@ class TortoiseSDK:
             # sink decision) — present ONLY when the capture errored.
             **({"report_url": REPORT_HOOK_URL} if extraction_errors else {}),
             # #2335 WI-1a: the receipt carries the extractor telemetry
-            # (meta stats — real on v2, {} on replayed/M2). Additive.
+            # (meta stats — real on v2; {} on a replay or a zero-call M2
+            # capture, {"unattributed": N} on an M2 capture that reached the
+            # provider, #3824). Additive.
             "stats": meta.get("stats") or {},
         }
         # #1530 D8: extraction_provider reports the configured provider when a
@@ -3926,13 +4057,26 @@ class TortoiseSDK:
             # P1 #1529 (D6): completed-but-empty output is an additive
             # warning (nothing extractable ≠ failure), never a silent 0.
             warnings.append("LLM extraction produced no points")
+        # #3824: the call-level evidence — how many model completions this
+        # capture actually issued. Carried OUTSIDE the (empty on this lane)
+        # roll-up so the cost emitter can tell "billed calls, no roll-up"
+        # (F2) from "no calls at all" (F1) instead of collapsing both to
+        # None. Counted at the model boundary above, so it holds even when
+        # ``extractor.run`` raised after the first request.
+        calls_made = sum(
+            int(getattr(c, "count", 0) or 0)
+            for c in getattr(extractor, "_call_counters", ()) or ())
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": errors, "warnings": warnings,
             "mode": "error" if errors else "llm",
-            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats —
-            # stats is ALWAYS present, empty on the M2 branch.
-            "stats": {},
+            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats — the
+            # key is ALWAYS present, but its value is not always empty.
+            # #3824: the ONE extractor fact this lane can state without a
+            # roll-up is that it reached the provider, so ``stats`` is
+            # {"unattributed": N} when N completions were issued and {} when
+            # none were — a genuine zero-call path stays a clean no-row.
+            "stats": ({"unattributed": calls_made} if calls_made else {}),
         }
         return extracted, meta
 
@@ -8966,7 +9110,11 @@ class TortoiseSDK:
         """
         proj = getattr(self, "_proj", None)
         db = getattr(proj, "db", None) if proj is not None else None
-        if db is not None and atexit_fast_close(getattr(db, "client", db)):
+        # #4214: `at_exit=True` — this seam is reached only from the
+        # `atexit` registration, so a spent exit budget stops the cascade
+        # instead of letting it block `Py_FinalizeEx`.
+        if db is not None and atexit_fast_close(getattr(db, "client", db),
+                                                at_exit=True):
             self._t_closed = True
             return
         self._t_close()
@@ -12633,29 +12781,63 @@ class TortoiseSDK:
         temporal/KU fragments function on the ask path (#1987 Task 4).
 
         One BATCH Cypher over the returned hits' ids (never N+1): a join to
-        the ``:Event`` node (``eventId``) for ``startedAt`` and to the source
-        turn ``:Point`` (``source_turn_id``) for ``speaker``. Produces ADDITIVE
-        keys only — undated hits render byte-identical:
+        the point's OWN ``:Event`` node (``eventId`` → ``startedAt``), a join
+        to the session that CONTAINS the point for the session's RECORDED
+        time, and a join to the source turn ``:Point`` (``source_turn_id``)
+        for ``speaker``. Produces ADDITIVE keys only — undated hits render
+        byte-identical:
 
-          * ``session_date`` — ``startedAt[:10]`` from the Event join;
+          * ``session_date`` (#4106) — the point's own capture Event
+            (``startedAt[:10]``) when the ``eventId`` join yields one, ELSE
+            the CONTAINS session's recorded ``created_at[:10]``. When several
+            sessions CONTAIN the point the EARLIEST recorded time is taken —
+            a deterministic pick that never depends on the engine's
+            unspecified row order, and one of the point's own recorded
+            session times rather than an inference. A value that is not a
+            well-formed ``YYYY-MM-DD`` prefix is treated as ABSENT. NO other
+            source is consulted: a date that is not recorded renders as NO
+            date, never as a default (a wrong date is worse than none).
+            Episodic turn Points carry no ``eventId`` — the capture turn
+            store stamps provenance on EXTRACTED points only (see the retry
+            branch below) — so before #4106 the ``eventId`` join was the sole
+            source and every captured turn rendered undated, leaving the
+            reader's temporal/KU fragments to compute elapsed time from
+            nothing. The ``CONTAINS`` edge is the SAME provenance mechanism
+            the point fetch already resolves session IDENTITY from.
           * ``speaker`` — the hit's own ``speaker`` prop, else the source
             turn's ``speaker``, else "" (the ``_render_block`` role-bracket
             guard suppresses double-attribution);
-          * ``session_id`` — the Event's ``sessionId`` when the join yields
-            one (hits lacking ``sessionId`` but sharing an Event join group
-            together for the per-session dedup — P2-20), else the hit's own
-            value unchanged.
+          * ``session_id`` — the Event's ``sessionId`` when the ``eventId``
+            join yields one (hits lacking ``sessionId`` but sharing an Event
+            join group together for the per-session dedup — P2-20), else the
+            hit's own value unchanged. ⛔ The ``created_at`` leg added by
+            #4106 attaches NO ``session_id`` — it is read for the DATE only.
 
-        ⛔ POOL SAFETY (D3 #1540): this method must NOT introduce a NEW
+        ⛔ POOL SAFETY (D3 #1540, #4106): this method must NOT introduce a NEW
         session source. Every ``session_id`` it attaches becomes the ask
-        lane's ``dedup_pool`` bucket key, so widening the join (e.g. adding
-        the ``:Session`` ``CONTAINS`` edge — the eval ingest writes those
-        with INTERNAL ``lme:{qid}:s{si}`` ids) re-buckets the pool and
-        changes which hits fit the 8k/32KiB reader window. D3's session
-        identity is derived downstream by ``retrieval.hit_session_id`` from
-        the hit's own ``sessionId`` (populated by the point fetch from the
-        Point prop / ``:Session`` edge) / ``session_id``. That derivation does
-        NOT re-bucket the pool — but it does widen rendered blocks, so it
+        lane's ``dedup_pool`` bucket key, so widening the identity join (e.g.
+        taking the ``:Session`` ``CONTAINS`` edge id as a ``session_id`` — the
+        eval ingest writes those with INTERNAL ``lme:{qid}:s{si}`` ids)
+        re-buckets the pool and changes which hits fit the 8k/32KiB reader
+        window. #4106 adds ONE source, the session's own recorded
+        ``created_at``, and it is read for ``session_date`` ONLY — the
+        attached ``session_id`` set is byte-identical with and without it
+        (pinned by ``tests/test_ask_sdk.py``).
+
+        The ``session_date`` field is ITSELF a bucket-key fallback (the ask
+        lane's ``session_id or session_date or idx:`` chain and
+        ``retrieval._pkg_session``), so its effect on bucketing is measured,
+        not assumed (``tests/test_ask_sdk.py`` seeds ``session-transcript``
+        raw chunks across two sessions): the key such a hit used to get was
+        ``idx:-1`` — deliberately, because the point fetch emits neither the
+        snake ``session_id`` nor ``lme_session_index``, so EVERY such hit
+        shared one global bucket. Populating the date can therefore never
+        drop a hit the ``idx:-1`` collapse kept, and on sessions with
+        distinct dates it restores hits that collapse was discarding. D3's
+        session identity is derived downstream by ``retrieval.hit_session_id``
+        from the hit's own ``sessionId`` (populated by the point fetch from
+        the Point prop / ``:Session`` edge) / ``session_id``. That derivation
+        does NOT re-bucket the pool — but it does widen rendered blocks, so it
         changes 32 KiB byte-cap admission (see the ``retrieved_session_ids``
         row in ``docs/product/answer-surface.md``), unlike widening THIS join,
         which is what re-buckets the pool.
@@ -12674,12 +12856,17 @@ class TortoiseSDK:
         if not ids:
             return hits
         try:
+            # #4106: the ``CONTAINS`` session leg + ``collect(DISTINCT
+            # s.created_at)`` collapse a point contained by several sessions
+            # into ONE row per id (a scalar ``s.created_at`` return would
+            # multiply rows, and the engine's row order is unspecified).
             rows = proj.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
                 "OPTIONAL MATCH (ev:Event) WHERE ev.eventId = n.eventId "
+                "OPTIONAL MATCH (n)<-[:CONTAINS]-(s:Session) "
                 "OPTIONAL MATCH (t:Point) WHERE t.id = n.source_turn_id "
                 "RETURN n.id, ev.startedAt, n.speaker, t.speaker, "
-                "ev.sessionId, n.sessionId",
+                "ev.sessionId, n.sessionId, collect(DISTINCT s.created_at)",
                 params={"ids": ids},
             ).result_set
         except Exception:
@@ -12695,10 +12882,27 @@ class TortoiseSDK:
             turn_speaker = (row[3] or "") if len(row) > 3 else ""
             ev_session = (row[4] or "") if len(row) > 4 else ""
             n_session = (row[5] or "") if len(row) > 5 else ""
+            # #4106: session's RECORDED time, earliest first (deterministic —
+            # never plan order). Empty list = no recorded date ⇒ unknown.
+            session_times = [
+                str(v) for v in ((row[6] if len(row) > 6 else None) or [])
+                if v]
+            # #4106: only a well-formed YYYY-MM-DD prefix is a date. A
+            # malformed/sentinel recorded time renders as UNKNOWN — never as
+            # a truncated garbage "date". Earliest wins on a multi-session
+            # point (deterministic, never plan order).
+            ev_date = _iso_date10(ev_started)
+            recorded = sorted({d for d in map(_iso_date10, session_times) if d})
+            if ev_date:
+                sdate = ev_date
+            elif recorded:
+                sdate = recorded[0]
+            else:
+                sdate = ""
             joined[pid] = {
-                "session_date": (str(ev_started)[:10]
-                                 if ev_started else ""),
+                "session_date": sdate,
                 "speaker": own_speaker or turn_speaker or "",
+                # UNCHANGED by #4106 — the date leg attaches no session_id.
                 "session_id": ev_session or n_session,
             }
         out = []
@@ -15014,7 +15218,7 @@ class TortoiseSDK:
         404/403). Pre-C1 nodes without status gain it on delete.
 
         #2304: stamps ``deleted_at`` (the trash grace window's start — the
-        purge enforces the 7-day recovery period off it; legacy tombstones
+        purge enforces the _GRAPH_PURGE_GRACE_DAYS recovery period off it; legacy tombstones
         (deleted_at absent) predate the prop and are treated as past-grace).
         """
         reg = self._get_registry()
@@ -17356,9 +17560,7 @@ class TortoiseSDK:
         return 24.0
 
     def _index_no_network(self) -> bool:
-        import os as _os
-        return _os.environ.get("TORTOISE_INDEX_NO_NETWORK", "").strip().lower() in (
-            "1", "true", "yes")
+        return _index_no_network_enabled()
 
     def _index_read_file(self, path, max_bytes: int):
         """Layer-2 BOUNDED BINARY read (§6.4 cycle-4 pin).

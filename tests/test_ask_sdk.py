@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -233,6 +234,432 @@ def test_annotate_undated_hit_byte_identical():
     from tortoise.retrieval import render_context
     assert render_context(hits, question_date="2026-08-29") == \
         render_context(ann, question_date="2026-08-29")
+
+
+# ── #4106: episodic turn Points must be DATABLE ───────────────────────────
+
+#: A capture-shaped session's RECORDED time. Turn Points carry no ``eventId``
+#: (the capture turn store stamps provenance on EXTRACTED points only), so a
+#: turn's ONLY recorded date is its session's own — the surface #4106 misses.
+TURN_SESSION = "turn-sess-1"
+TURN_DATE = "2023-05-20"
+DATED_SESSION = "turn-sess-dated"
+DATED_SESSION_DATE = "1999-01-01"
+
+
+def _seed_capture_turns(sdk: TortoiseSDK, session_id: str, *,
+                        now: str | None,
+                        conversation: list[dict]) -> list[str]:
+    """Seed ONE session through the SHARED capture-shaped turn store
+    (``tools.ask_spotcheck.seed_capture_turn_store``, #3914): deterministic
+    ``{sid}_t{i}`` ids, ``pointKind='event'``, ``is_episodic=true``, a
+    ``speaker``, NO ``sessionId``/``eventId`` prop, and the
+    ``(:Session)-[:CONTAINS]->(:Point)`` edge. ``now`` is the session's
+    recorded time (``s.created_at``), which capture writes from the same
+    ``now`` as its turns' ``createdAt``."""
+    from tools.ask_spotcheck import seed_capture_turn_store
+    return seed_capture_turn_store(sdk, session_id, conversation, now=now)
+
+
+def test_annotate_turn_session_date_from_the_session_record():
+    """#4106 property — a capture-shaped turn retrieved for a temporal
+    question renders a date EQUAL to its session's recorded time.
+
+    The ``:Event`` join that used to be the only date source is EMPTY for
+    these turns by construction (asserted here, so the test cannot pass
+    vacuously); the date must reach the reader from the session the turn is
+    CONTAINS-wired to — the same provenance the point fetch already resolves
+    session IDENTITY from.
+    """
+    sdk = _new_sdk()
+    turns = _seed_capture_turns(
+        sdk, TURN_SESSION, now=f"{TURN_DATE}T10:00:00Z",
+        conversation=[{"role": "user", "content": "I bought a smoker today"},
+                      {"role": "assistant", "content": "noted"}])
+    assert turns, "capture-shaped seeder must write turns"
+    proj = sdk._get_proj()
+    # Precondition: the turn has NO eventId, so the Event join is empty.
+    assert proj.g.query(
+        "MATCH (t:Point) WHERE t.id IN $ids RETURN count(t.eventId)",
+        params={"ids": turns}).result_set == [[0]]
+    # Precondition: the session's recorded time IS the fixture's date.
+    assert proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.created_at",
+        params={"sid": TURN_SESSION}).result_set[0][0] == \
+        f"{TURN_DATE}T10:00:00Z"
+
+    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    hit = {h["id"]: h for h in ann}[turns[0]]
+    assert hit["session_date"] == TURN_DATE, hit
+    assert hit["speaker"] == "user", hit
+
+    from tortoise.retrieval import render_context
+    evidence = render_context(ann)
+    assert f"(session date {TURN_DATE})" in evidence, evidence
+    sdk.close()
+
+
+def test_annotate_unknown_session_date_renders_as_unknown():
+    """NEGATIVE CONTROL (#4106): a turn whose session records NO date must
+    render as UNKNOWN — never as a default. A wrong date is worse than no
+    date, so neither the wall clock (the seeding ``now``), the turn's own
+    ``createdAt``, nor a NEIGHBOURING session's date may be substituted.
+    """
+    sdk = _new_sdk()
+    undated = _seed_capture_turns(
+        sdk, "undated-sess", now="2024-07-07T09:00:00Z",
+        conversation=[{"role": "user", "content": "I bought a smoker today"}])
+    # A DATED neighbour that the SAME query retrieves — so the "no other
+    # session's date leaks in" assertion below has something to catch.
+    dated = _seed_capture_turns(
+        sdk, DATED_SESSION, now=f"{DATED_SESSION_DATE}T10:00:00Z",
+        conversation=[{"role": "user",
+                       "content": "I also bought a smoker yesterday"}])
+    assert undated and dated
+    proj = sdk._get_proj()
+    # The undated session genuinely records NO time (the harness clock is
+    # still reflected on the turn's own createdAt — it must not be used).
+    proj.g.query("MATCH (s:Session {id:$sid}) SET s.created_at = null",
+                 params={"sid": "undated-sess"})
+    assert proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.created_at",
+        params={"sid": "undated-sess"}).result_set == [[None]]
+
+    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    by_id = {h["id"]: h for h in ann}
+    # Preconditions, both non-vacuous: the undated turn IS in the pool, and
+    # so IS the dated neighbour (whose own date must render).
+    assert undated[0] in by_id and dated[0] in by_id, sorted(by_id)
+    assert by_id[dated[0]]["session_date"] == DATED_SESSION_DATE, \
+        by_id[dated[0]]
+    assert not by_id[undated[0]].get("session_date"), by_id[undated[0]]
+
+    from tortoise.retrieval import render_context
+    evidence = render_context(ann)
+    # the dated neighbour's marker is PRESENT; the undated turn carries none
+    assert f"(session date {DATED_SESSION_DATE})" in evidence, evidence
+    assert evidence.count("(session date") == 1, evidence
+    # no default leaked in any form: not the wall clock, not the turn's own
+    # createdAt date
+    assert "2024-07-07" not in evidence, evidence
+    assert datetime.now(UTC).date().isoformat() not in evidence, \
+        evidence
+    sdk.close()
+
+
+def test_date_leg_attaches_no_session_id():
+    """D3 pool-safety (#1540 / #4106): the session-``created_at`` leg is a
+    DATE source only. The attached ``session_id`` set must be byte-identical
+    with and without it (only the ``eventId`` Event join may attach one — a
+    new identity source would re-bucket ``dedup_pool`` and move the 8k/32KiB
+    reader window)."""
+    sdk = _new_sdk()
+    turns = _seed_capture_turns(
+        sdk, TURN_SESSION, now=f"{TURN_DATE}T10:00:00Z",
+        conversation=[{"role": "user", "content": "I bought a smoker"}])
+    proj = sdk._get_proj()
+    # An EXTRACTED claim with capture's own provenance stamp: its ``eventId``
+    # join DOES yield a date (and a sessionId) — the pre-#4106 path.
+    claim = sdk.create_point("statement", "I bought a smoker in May")
+    proj.g.query(
+        "MATCH (p:Point {id:$pid}) SET p.eventId = 'ev-x'",
+        params={"pid": claim["id"]})
+    proj.g.query(
+        "MERGE (e:Event {eventId:'ev-x'}) SET e.startedAt = "
+        "'2023-05-21T10:00:00Z', e.sessionId = 'ev-sess'")
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+        "MERGE (s)-[:CONTAINS]->(p)",
+        params={"sid": TURN_SESSION, "pid": claim["id"]})
+
+    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    by_id = {h["id"]: h for h in ann}
+    # Precondition (non-vacuous): the date leg DID attach a date.
+    assert any(h.get("session_date") for h in ann), ann
+    # The turn gets the DATE from the session record ...
+    assert by_id[turns[0]]["session_date"] == TURN_DATE
+    # ... and NO identity: the CONTAINS session id is never attached as a
+    # session_id. (A buggy widening would attach TURN_SESSION here.)
+    assert not by_id[turns[0]].get("session_id"), by_id[turns[0]]
+    attached = {h["session_id"] for h in ann if h.get("session_id")}
+    assert attached == {"ev-sess"}, attached
+    sdk.close()
+
+
+def _ask_key(h: dict) -> str:
+    """The ask lane's own ``dedup_pool`` key extractor (``ask_lane.py``)."""
+    return (h.get("session_id") or h.get("session_date")
+            or f"idx:{h.get('lme_session_index', -1)}")
+
+
+def _seed_transcript_chunks(sdk: TortoiseSDK, session_id: str, date: str,
+                            n: int = 4) -> list[str]:
+    """Raw verbatim chunks in the eval ingest's shape (pointKind
+    ``session-transcript``, deterministic ``lme:`` ids, ``Session.created_at``
+    = the session's date, CONTAINS-wired) — the ONLY shape ``dedup_pool``'s
+    per-session cap actually caps, so it is the shape a date key can move."""
+    from tortoise.domain_loader import register_kind
+    register_kind("session-transcript")
+    proj = sdk._get_proj()
+    proj.g.query("MERGE (s:Session {id:$sid}) SET s.created_at=$ts",
+                 params={"sid": session_id, "ts": f"{date}T10:00:00Z"})
+    ids = []
+    for ci in range(n):
+        pid = f"lme:{session_id}:c{ci}"
+        sdk.create_point("session-transcript",
+                         f"verbatim chunk {ci} of {session_id}: the smoker",
+                         id=pid, is_episodic=True, status="draft")
+        proj.g.query("MATCH (s:Session {id:$sid}),(p:Point {id:$pid}) "
+                     "MERGE (s)-[:CONTAINS]->(p)",
+                     params={"sid": session_id, "pid": pid})
+        ids.append(pid)
+    return ids
+
+
+def test_date_leg_does_not_rebucket_a_chunk_pool():
+    """D3 pool-safety, non-vacuously measured (#4106).
+
+    Raw chunks carry NO snake ``session_id`` on the hit (the point fetch
+    emits the camel ``sessionId`` only) and NEVER ``lme_session_index``, so
+    the pre-#4106 key for every one of them was the single global bucket
+    ``idx:-1``. On the collision-prone case — two sessions sharing ONE date —
+    the date leg must therefore keep exactly the same survivors. Measured
+    through the real ``dedup_pool`` with the real ask key, not assumed.
+    """
+    sdk = _new_sdk()
+    _seed_transcript_chunks(sdk, "chunkA", TURN_DATE)
+    _seed_transcript_chunks(sdk, "chunkB", TURN_DATE)
+    hits = sdk.tortoise_fts_query("verbatim chunk smoker", limit=40,
+                                  include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    assert len(hits) >= 4, [h.get("id") for h in hits]
+    assert all(h["point_kind"] == "session-transcript" for h in hits), hits
+    # Preconditions, both measured: the date IS populated, and no hit
+    # carries a snake session_id (so the pre-fix key is the global idx:-1).
+    assert all(h.get("session_date") == TURN_DATE for h in ann), ann
+    assert not any(h.get("session_id") for h in hits), hits
+
+    from tortoise.retrieval import dedup_pool
+    stripped = [{k: v for k, v in h.items() if k != "session_date"}
+                for h in ann]
+    with_date = dedup_pool(ann, max_chunks_per_session=3, session_key=_ask_key)
+    without = dedup_pool(stripped, max_chunks_per_session=3,
+                         session_key=_ask_key)
+    assert [h["id"] for h in with_date] == [h["id"] for h in without], (
+        "the date leg re-bucketed the chunk pool: "
+        f"{[h['id'] for h in with_date]} vs {[h['id'] for h in without]}")
+    # ... and the survivors sit in ONE bucket in both readings (the same-date
+    # case is exactly the pre-fix global collapse, preserved not widened).
+    assert {_ask_key(h) for h in ann} == {TURN_DATE}
+    assert {_ask_key(h) for h in stripped} == {"idx:-1"}
+    sdk.close()
+
+
+def test_date_leg_never_narrows_the_chunk_pool():
+    """#4106 measured effect on DISTINCT dates: the date key is a refinement
+    of the pre-fix global ``idx:-1`` bucket, so it can restore chunks that
+    collapse was dropping — and can never keep fewer."""
+    sdk = _new_sdk()
+    _seed_transcript_chunks(sdk, "chunkA", "2023-03-15")
+    _seed_transcript_chunks(sdk, "chunkB", "2023-04-01")
+    hits = sdk.tortoise_fts_query("verbatim chunk smoker", limit=40,
+                                  include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    from tortoise.retrieval import dedup_pool
+    stripped = [{k: v for k, v in h.items() if k != "session_date"}
+                for h in ann]
+    with_date = dedup_pool(ann, max_chunks_per_session=3, session_key=_ask_key)
+    without = dedup_pool(stripped, max_chunks_per_session=3,
+                         session_key=_ask_key)
+    # Non-vacuity: the date leg produced DISTINCT per-session buckets, and
+    # the pre-fix reading really was the single global bucket — so the
+    # superset assertion below has signal (equality would red here).
+    assert {_ask_key(h) for h in ann} == {"2023-03-15", "2023-04-01"}, ann
+    assert {_ask_key(h) for h in stripped} == {"idx:-1"}, stripped
+    assert {h["id"] for h in without} < {h["id"] for h in with_date}, (
+        "expected the global idx:-1 bucket to have collapsed more hits: "
+        f"{sorted(h['id'] for h in without)} vs "
+        f"{sorted(h['id'] for h in with_date)}")
+    assert {h["id"] for h in without} <= {h["id"] for h in with_date}, (
+        f"the date leg DROPPED hits: {[h['id'] for h in without]} -> "
+        f"{[h['id'] for h in with_date]}")
+    sdk.close()
+
+
+def test_multi_session_point_takes_the_earliest_recorded_date():
+    """A point CONTAINS-wired to TWO sessions resolves to the EARLIEST of
+    their recorded times — deterministic (never the engine's unspecified row
+    order) and one of the point's own recorded session times, not an
+    inference. Mirrors the point fetch's own deterministic multi-session pick,
+    which is over session IDs rather than dates."""
+    sdk = _new_sdk()
+    point = sdk.create_point("statement",
+                             "I bought a smoker on the spring trip")
+    proj = sdk._get_proj()
+    for sid, ts in (("multi-late", "2023-05-20T10:00:00Z"),
+                    ("multi-early", "2023-03-15T10:00:00Z")):
+        proj.g.query("MERGE (s:Session {id:$sid}) SET s.created_at=$ts",
+                     params={"sid": sid, "ts": ts})
+        proj.g.query("MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                     "MERGE (s)-[:CONTAINS]->(p)",
+                     params={"sid": sid, "pid": point["id"]})
+    hits = sdk.tortoise_fts_query("smoker spring trip", limit=40,
+                                  include_terminal=True)
+    ann = {h["id"]: h for h in sdk.annotate_ask_hits(hits)}
+    assert ann[point["id"]]["session_date"] == "2023-03-15", \
+        ann[point["id"]]
+    sdk.close()
+
+
+def test_malformed_recorded_time_renders_as_unknown():
+    """#4106: a recorded time that is not ``YYYY-MM-DD`` (a bare word, an
+    epoch, an offset-less oddity) renders as UNKNOWN — never as a truncated
+    garbage ``date`` that a reader would compute elapsed time from."""
+    sdk = _new_sdk()
+    turns = _seed_capture_turns(
+        sdk, "bad-ts-sess", now="not-a-date",
+        conversation=[{"role": "user", "content": "I bought a smoker"}])
+    proj = sdk._get_proj()
+    assert proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.created_at",
+        params={"sid": "bad-ts-sess"}).result_set == [["not-a-date"]]
+    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = {h["id"]: h for h in sdk.annotate_ask_hits(hits)}
+    assert not ann[turns[0]].get("session_date"), ann[turns[0]]
+    assert "not-a-date" not in str(ann[turns[0]])
+    sdk.close()
+
+
+def test_eval_ingest_records_no_time_for_a_dateless_session():
+    """#4106 NEGATIVE CONTROL on the EVAL INGEST shapes: a session the dataset
+    does not date must record NO session time — not the ingestion wall clock.
+    ``Session.created_at`` is what the annotation reads, so a ``now()``
+    fallback there would render the RUN DATE as the session's date (a
+    fabricated fact on the read path) and would change daily.
+
+    BOTH writers are covered: the deterministic leg (``ingest_haystack``) and
+    the v2 phase-A write (``_write_v2_phase_a``) — a silent revert of either
+    one re-opens the fabrication path.
+    """
+    sdk = _new_sdk()
+    from tools.longmem_eval.ingest import ingest_haystack
+    ingest_haystack(sdk, {
+        "question_id": "dateless-eval-1",
+        "haystack_sessions": [[{"role": "user",
+                                "content": "I bought a smoker today"},
+                               {"role": "assistant", "content": "noted"}]],
+        "haystack_session_ids": ["dateless-sess"],
+        "haystack_dates": [""],
+    })
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (s:Session) RETURN s.id, s.created_at").result_set
+    assert rows, "ingest must write the session"
+    assert all(r[1] is None for r in rows), rows
+    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    assert ann and all(not h.get("session_date") for h in ann), ann
+    from tortoise.retrieval import render_context
+    assert "(session date" not in render_context(ann)
+    assert datetime.now(UTC).date().isoformat() not in render_context(ann)
+
+    # the v2 writer, same contract
+    from tools.longmem_eval.ingest_v2 import _write_v2_phase_a
+    _write_v2_phase_a(sdk, qid="dateless-v2", si=0, sid="dateless-v2-sess",
+                      s_node="lme:dateless-v2:s0",
+                      session=[{"role": "user",
+                                "content": "I bought a smoker today"}],
+                      session_date="", point_created_at="1970-01-01T00:00:00Z",
+                      chunk_turns=10)
+    v2 = proj.g.query(
+        "MATCH (s:Session {id:'lme:dateless-v2:s0'}) RETURN s.created_at"
+    ).result_set
+    assert v2 == [[None]], v2
+
+    # RE-INGEST over a store the OLD writer already stamped with its run
+    # clock: the dateless session must CONVERGE to "no time", not keep the
+    # fabricated date (a `coalesce` write would preserve it forever).
+    proj.g.query("MATCH (s:Session {id:$sid}) "
+                 "SET s.created_at = '2026-09-19T01:35:25+00:00'",
+                 params={"sid": "lme:dateless-eval-1:s0"})
+    ingest_haystack(sdk, {
+        "question_id": "dateless-eval-1",
+        "haystack_sessions": [[{"role": "user",
+                                "content": "I bought a smoker today"},
+                               {"role": "assistant", "content": "noted"}]],
+        "haystack_session_ids": ["dateless-sess"],
+        "haystack_dates": [""],
+    })
+    redo = proj.g.query(
+        "MATCH (s:Session {id:'lme:dateless-eval-1:s0'}) RETURN s.created_at"
+    ).result_set
+    assert redo == [[None]], redo
+    sdk.close()
+
+
+def test_eval_ingest_slash_date_reaches_the_reader():
+    """#4106 POSITIVE CONTROL on the eval ingest's REAL date format.
+
+    The dataset's ``haystack_dates`` are ``2023/05/20 (Sat) 03:29`` (measured:
+    23,867/23,867 slash-form, zero ISO), and the ingest writes that string
+    verbatim into ``Session.created_at``. The date annotation must normalise
+    it (not reject it) — a recorded date that is silently dropped is the same
+    class of loss as one that is never emitted.
+    """
+    sdk = _new_sdk()
+    from tools.longmem_eval.ingest import ingest_haystack
+    ingest_haystack(sdk, {
+        "question_id": "slash-eval-1",
+        "haystack_sessions": [[{"role": "user",
+                                "content": "I bought a smoker today"}]],
+        "haystack_session_ids": ["slash-sess"],
+        "haystack_dates": ["2023/05/20 (Sat) 03:29"],
+    })
+    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk.annotate_ask_hits(hits)
+    assert ann and all(h.get("session_date") == "2023-05-20" for h in ann), \
+        ann
+    from tortoise.retrieval import render_context
+    assert "(session date 2023-05-20)" in render_context(ann)
+    sdk.close()
+
+
+def test_ask_lane_evidence_carries_the_session_date(monkeypatch):
+    """End-to-end (#4106): the ask lane's assembled reader context carries
+    ``(session date YYYY-MM-DD)`` for a capture-shaped turn. No LLM call —
+    the lane's single reader call is stubbed."""
+    # The fleet shell carries TORTOISE_API_URL; the eval lane needs a LOCAL
+    # graph (the hosted ask surface was removed in #3849).
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+    class _FakeReader:
+        last_completion_tokens = 5
+
+        def complete(self, *, system: str, user: str) -> str:
+            return "you bought a smoker on 2023-05-20"
+
+        def close(self) -> None:
+            pass
+
+    sdk = _new_sdk()
+    _seed_capture_turns(
+        sdk, TURN_SESSION, now=f"{TURN_DATE}T10:00:00Z",
+        conversation=[{"role": "user", "content": "I bought a smoker today"}])
+    import tortoise.ask_lane as ask_lane_mod
+    monkeypatch.setattr(ask_lane_mod, "_default_ask_reader_factory",
+                        lambda: _FakeReader())
+    question = "how many days ago did I buy a smoker?"
+    result: dict = {}
+    for _ in range(3):  # embedded engine's per-strategy degradation flake
+        result = run_ask_lane(sdk, question, question_date="2023-05-25")
+        if f"(session date {TURN_DATE})" in result.get("evidence", ""):
+            break
+    assert f"(session date {TURN_DATE})" in result.get("evidence", ""), \
+        result.get("evidence")
+    sdk.close()
 
 
 def test_annotate_null_join_byte_identical():

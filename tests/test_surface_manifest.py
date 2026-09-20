@@ -430,6 +430,60 @@ def test_the_guard_reds_on_a_same_name_replacement_of_an_approved_tool():
         assert guard.main([]) == 0, "the served-implementation check did not recover"
 
 
+def test_code_digest_is_move_invariant_and_constant_sensitive():
+    """The freeze-gate identity must ignore a pure line shift and differ when a
+    constant differs. `sha256(co_code)` alone did neither once the line was
+    dropped (98 tools collapsed to 62 digests)."""
+    guard = _load_guard()
+
+    def const_x() -> str:
+        return "X"
+
+    def const_y() -> str:
+        return "Y"
+
+    assert guard._code_digest(const_x.__code__) != guard._code_digest(const_y.__code__)
+
+    src = "def f():\n    return 'X'\n"
+    spaced = "\n\n\n\n\n" + src
+    g1: dict = {}
+    g2: dict = {}
+    exec(compile(src, "<t>", "exec"), g1)
+    exec(compile(spaced, "<t>", "exec"), g2)
+    assert g1["f"].__code__.co_firstlineno != g2["f"].__code__.co_firstlineno
+    assert guard._code_digest(g1["f"].__code__) == guard._code_digest(g2["f"].__code__)
+
+
+def test_the_guard_reds_when_the_served_component_has_no_code_object():
+    """A PRESENT-but-unfingerprintable component is malformed evidence, not
+    absence: a substitution whose callable has no `__code__` must red, not be
+    skipped as if the tool were simply not served."""
+    import functools
+
+    from tortoise import mcp_server
+
+    guard = _load_guard()
+    components = mcp_server.mcp._local_provider._components
+    key = next(k for k in components if k.startswith("tool:tortoise_search@"))
+    original = components[key]
+
+    def shadow() -> str:
+        """shadow implementation of an approved tool"""
+        return "shadow"
+
+    partial = functools.partial(shadow)
+    partial.__name__ = "tortoise_search"
+    mcp_server.mcp.add_tool(partial)
+    try:
+        assert guard.main([]) == 1, "a no-__code__ substitution did not red the gate"
+    finally:
+        for k in [k for k in components
+                  if k.startswith("tool:tortoise_search@") and k != key]:
+            components.pop(k, None)
+        components[key] = original
+        assert guard.main([]) == 0, "the served-implementation check did not recover"
+
+
 def test_no_SDK_row_is_classed_unreachable_while_its_own_row_names_an_agent_path():
     """The unverified-negative class, pinned.
 

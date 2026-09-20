@@ -28,7 +28,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
+from tortoise.env_truthy import env_flag  # #4097: the declared truthy contract
+
 logger = logging.getLogger(__name__)
+
+
+def _embedded_aof_enabled() -> bool:
+    """`TORTOISE_EMBEDDED_AOF` — the embedded AOF durability opt-in.
+
+    #4097: the single resolution point for that knob (``FalkorProjection.__init__``
+    uses it), through the declared truthy contract. `=on` used to be silently inert
+    (the pre-#4097 literal was {"1","true","yes"}).
+    """
+    return env_flag("TORTOISE_EMBEDDED_AOF", False)
 
 # Process-lifetime cache for FalkorProjection._get_falkordb_version (#1359
 # review P2): version detection costs two network RTTs (MODULE LIST + INFO
@@ -1780,10 +1792,7 @@ class FalkorProjection(
             #    artifact — restores/migrates must remove a stale one at the
             #    target path (Redis loads AOF in preference to RDB).
             #  - :memory: is exempt (no file to persist).
-            aof_enabled = (
-                os.environ.get("TORTOISE_EMBEDDED_AOF", "").strip().lower()
-                in ("1", "true", "yes")
-            )
+            aof_enabled = _embedded_aof_enabled()
             aof_dir = (
                 os.path.basename(os.path.abspath(path)) + "-appendonlydir"
             ) if (path != ":memory:" and aof_enabled) else None
@@ -4483,7 +4492,11 @@ class FalkorProjection(
         unset flag routes through the helper's False return).
         """
         db = getattr(self, "db", None)
-        if db is not None and atexit_fast_close(getattr(db, "client", db)):
+        # #4214: `at_exit=True` — reached only from the `atexit` registration
+        # (see `register_atexit_close`), so a spent exit budget stops the
+        # cascade instead of letting it block `Py_FinalizeEx`.
+        if db is not None and atexit_fast_close(getattr(db, "client", db),
+                                                at_exit=True):
             self._closed = True
             return
         self.close()

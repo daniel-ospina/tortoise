@@ -53,6 +53,13 @@ from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
     provenance_basename,
 )
+from tortoise.capture_receipts import (  # #3809: ONE key definition
+    capture_last_error_key as _capture_last_error_key,
+)
+from tortoise.capture_receipts import (
+    capture_receipt_key as _capture_receipt_key,
+)
+from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -85,7 +92,11 @@ from tortoise.projection import (
     _journal_append_product,  # #1686: org_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
+from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
+    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
+    _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
+    _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
@@ -103,6 +114,13 @@ from tortoise.sdk import (
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.supabase_control import _service_key  # #3677
+
+# #4179: the team-account and user-account restore windows derive from the ONE
+# authority (tortoise/retention.py). Do not hard-code a window here — see
+# docs/retention-and-deletion.md. The user-account constant records the promise
+# for the support/email deletion path (there is no self-service deletion yet).
+TEAM_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
+USER_ACCOUNT_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
 
 _logger = logging.getLogger(__name__)
 
@@ -268,7 +286,7 @@ class _CaptureSlot:
       while its worker still occupies a pool thread (the shape of
       `quota.run_ask_bounded`, quota.py:791-816); or
     * the request's own teardown (`release()`) — for a replay / opt-out /
-      quota / provider-503 path that never extracts. Without that release the
+      quota / no-provider path that never extracts. Without that release the
       reservation would leak and permanently burn capacity.
 
     #3129: the same slot also owns the request's in-flight SESSION key, but on a
@@ -1534,6 +1552,16 @@ _DREAM_QUEUE_TTL_S = 600
 _DREAM_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_DREAM_WORKERS", 2), 8)),
     thread_name_prefix="dream-pass")
+
+# #3060 doctrine, applied to the activation scorecard: `LIFETIME_MEMORY_QUERY`
+# is an unbounded all-time scan of an org's Sessions + CONTAINS (the windowed
+# funnel rides the same hand-off), so this is the "long / stallable" class the
+# comment at the top of this file says must NOT share the loop's default
+# executor with ~80 other `to_thread` sites and the auth middleware's abuse
+# hooks. Its own small pool means a slow graph can only starve the scorecard.
+_SCORECARD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_SCORECARD_WORKERS", 2), 8)),
+    thread_name_prefix="activation-scorecard")
 
 
 async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
@@ -3149,12 +3177,12 @@ async def get_current_org(request: Request) -> dict:
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                # #4010: sessions are UNLIMITED for every tier — the flat v1
-                # 1000 cap was REOPENED and SUPERSEDED (see the module comment
-                # in tortoise/quota.py). `_ms` (the stored t.max_sessions) is
-                # read so the deliberate departure is visible at the exact
-                # site, and then NOT honoured — a stored 1000 must never
-                # re-cap an org after the constant is gone.
+                # #4010: sessions are UNLIMITED for every tier — the flat
+                # 1000 was an inherited code fallback, never a ratified cap
+                # (see the module comment in tortoise/quota.py). `_ms` (the
+                # stored t.max_sessions) is read so the removal is visible at
+                # the exact site, and then NOT honoured — a stored 1000 must
+                # never re-cap an org after the constant is gone.
                 "max_sessions": None,
                 # #1748: key creator's user UUID rides the org dict (Supabase
                 # resolve_api_key parity) so session-user-owned endpoints can
@@ -3455,12 +3483,24 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     _mp = row.get("max_points")
     if _mp is None:
         _mp = row.get("graph_size_cap")
+    # #3874: the key allowance is resolved through the MINT GATE's own
+    # resolver (_org_node_sync_limits → _org_limits_from_node) rather than a
+    # precedence copied here. The gate is the authority on the cap, so the
+    # pre-cap surface cannot advertise a value the gate would not enforce:
+    # there is ONE resolver, so the two cannot drift. A None/missing result
+    # (the resolver could not read the org) falls back to the pricing tier
+    # default — it must never pass a bare None, because a PRESENT-and-None
+    # limit means UNLIMITED to the quota gate (enforce_org_limit) and would
+    # fail OPEN.
+    _gate_limits = _org_node_sync_limits(org_id)
     org = {
         "org_id": org_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
         "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
         "max_points": int(_mp) if _mp is not None else lim["max_graph_nodes"],
-        "max_api_keys": lim["max_api_keys"],
+        "max_api_keys": (_gate_limits["max_api_keys"]
+                         if _gate_limits.get("max_api_keys") is not None
+                         else lim["max_api_keys"]),
         # #4010: sessions are unlimited for every tier — no cap of any kind,
         # so the resolved value is always the explicit None (the pre-#4010
         # `DEFAULT_MAX_SESSIONS` fallback is deleted, not relocated).
@@ -3860,23 +3900,93 @@ def _check_org_limit(org: dict, resource: str) -> None:
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
 
 
+def _alert_unmetered(lane: str, org_id: str | None,
+                     error: BaseException) -> None:
+    """Emit the #3981 operator alert for a dropped increment, never raising.
+
+    The alert lives in ``tortoise.metering`` — but that module may be the very
+    thing that failed to import (or a partial deploy may predate
+    ``report_unmetered_increment``). Importing it unguarded inside an
+    ``except`` handler would then turn a bookkeeping fault into the
+    user-facing failure the owner's ruling forbids, so the import gets its own
+    guard and the fallback logs directly.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+    except Exception:  # noqa: BLE001, RUF100 — the alert must never raise
+        logging.getLogger("tortoise.metering").error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
+            "(metering module unavailable)", lane, org_id or "<none>",
+            type(error).__name__, error)
+        return
+    report_unmetered_increment(lane=lane, org_id=org_id, error=error)
+
+
 def _record_write_op(org: dict, nodes_written: int = 0) -> None:
     """Best-effort write-op metering for overage billing (#681).
 
-    Call AFTER a successful write. Non-fatal — metering failures are logged
-    and swallowed; they never block the caller.
+    Call AFTER a successful write. The increment never blocks the caller — a
+    bookkeeping fault of ours must not fail a committed write — but the drop is
+    never SILENT (#3981): when the increment cannot be recorded the operator is
+    alerted (lane=write_op) and the error is absorbed here.
+
+    Note what the raise from window resolution IS: a SIGNAL, not a refusal. The
+    user-facing refusal, where one exists, is the pre-spend admission gate
+    (``_check_org_limit`` / the armed cohort cap), which runs BEFORE the write;
+    this function is downstream of it and can refuse nothing.
 
     nodes_written: net-new non-episodic nodes written by this call (the
     value-first commit cost driver, epic #909 §4.4/W-4/PL4 — the commit
     endpoint passes the reconciled net-new delta; hold commits bill 0 and
     skip this entirely).
     """
+    org_id = org.get("org_id", "")
     try:
         from tortoise.metering import record_write_ops
-        record_write_ops(org.get("org_id", ""), tier=org.get("tier"),
+        record_write_ops(org_id, tier=org.get("tier"),
                          nodes_written=nodes_written)
-    except Exception:
-        pass  # best-effort — never block the write path
+    except Exception as e:  # noqa: BLE001, RUF100 — never block the write path
+        _alert_unmetered("write_op", org_id, e)
+
+
+async def _emit_capture_ledger(org_id: str, session_id: str,
+                               meta: dict) -> None:
+    """Write a capture's MEASURED cost onto the durable per-period ledger.
+
+    #3665 (lane B7): the SAME measured cost as the analytics row, beside it.
+    #3359's analytics row is a measurement, not a ledger: nothing keyed by
+    org+period, so a spend CEILING could read it only by scanning every capture
+    row in the period. This row is one per (org, period) — the read side
+    ``cohort_cost.enforce_cohort_cost_cap`` gates on.
+
+    Best-effort by contract: a committed capture is never failed by bookkeeping.
+    The drop is NOT silent (#3981) — ``record_capture_usage`` raises on an
+    unresolvable metering window (a SIGNAL, not a refusal), and the handler
+    below reports lane=capture_ledger to the operator instead of swallowing it.
+
+    Both writes run off the event loop: the Supabase RPC / embedded registry
+    write and ``_track_analytics_event``'s synchronous ``httpx.Client`` POST are
+    blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
+    class). The analytics emit keeps its OWN best-effort handler — a ledger
+    failure is not an analytics failure and must not be labelled one.
+    """
+    try:
+        _cost_props = _capture_cost_props(session_id, meta)
+        if _cost_props is None:
+            return
+        from tortoise.metering import record_capture_usage
+        await asyncio.to_thread(
+            record_capture_usage, org_id,
+            cost_usd=float(_cost_props.get("cost_usd") or 0.0))
+    except Exception as e:  # noqa: BLE001, RUF100 — never block a committed capture
+        _alert_unmetered("capture_ledger", org_id, e)
+        return
+    try:
+        await asyncio.to_thread(
+            _track_analytics_event, org_id, "capture_cost", _cost_props)
+    except Exception:  # noqa: BLE001, RUF100 — never block capture
+        logging.getLogger("tortoise.api").exception(
+            "capture_cost analytics emit failed (non-fatal)")
 
 
 def _suspended_detail() -> dict:
@@ -4040,6 +4150,14 @@ class OrgInfoResponse(BaseModel):
     tier: str
     max_users: int
     max_graphs: int | None
+    # #3874: the org's API-key allowance — exposed so the keys surface can
+    # state "you get N keys" BEFORE the create call refuses at the cap.
+    # Resolved by the auth lane from the SAME limits source the mint gate
+    # (_mint_key → _org_node_sync_limits) enforces: the stored org limit
+    # with a pricing.json tier fallback. None only when a legacy/override
+    # dict predates the field — the client must then stay silent rather
+    # than fabricate a number.
+    max_api_keys: int | None = None
     max_orgs: int | None
     # #308 (R7): "active" | "flagged" over HTTP — a suspended org never
     # reaches this handler (403 SUSPENDED fires in get_current_org first);
@@ -4435,7 +4553,7 @@ def _control_plane_unavailable() -> HTTPException:
     handler as a raw 500, which the client rendered as the misleading
     "Invalid API key.". This 503 carries a structured error_code the client
     maps to the unified unavailable copy (copy-string contract with
-    website/signup.html: "Sign-in is temporarily unavailable — try again in
+    website/apps/dashboard/public/signup.html: "Sign-in is temporarily unavailable — try again in
     a moment.").
     """
     return HTTPException(
@@ -4774,10 +4892,14 @@ async def create_object(body: CreateObjectRequest, request: Request,
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     # #1643 (review P2-4): mirror the points handler's bookkeeping — object
     # writes must count toward metering + leave an audit trail.
-    try:  # noqa: SIM105
+    try:
         _record_write_op(org, nodes_written=1)
-    except Exception:
-        pass  # metering is best-effort — never fail the write
+    except Exception as e:  # noqa: BLE001, RUF100
+        # #3981: this outer guard exists so metering can never fail the write.
+        # ``_record_write_op`` already absorbs its own failures and alerts the
+        # operator (lane=write_op); if it ever escapes past that, the increment
+        # is dropped a second time and must not be silent either.
+        _alert_unmetered("object_write_op", org.get("org_id"), e)
     await _async_audit(request, org["org_id"], "object_create",
                        resource_id=node.get("id") or body.name,
                        detail={"name": body.name, "objectKind": body.objectKind})
@@ -4811,10 +4933,11 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
-    try:  # noqa: SIM105
+    try:
         _record_write_op(org, nodes_written=1)
-    except Exception:
-        pass  # metering is best-effort — never fail the write
+    except Exception as e:  # noqa: BLE001, RUF100
+        # #3981: same second-line guard as create_object above.
+        _alert_unmetered("subject_write_op", org.get("org_id"), e)
     await _async_audit(request, org["org_id"], "subject_create",
                        resource_id=node.get("id") or body.name,
                        detail={"name": body.name, "subjectKind": body.subjectKind})
@@ -5248,6 +5371,12 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         tier=org["tier"],
         max_users=org["max_users"],
         max_graphs=org["max_graphs"],
+        # #3874: the key allowance rides the overview read — the value is
+        # already resolved by get_current_org / _session_user_org from the
+        # org's stored limit (pricing tier fallback), the identical source
+        # _mint_key's cap gate counts against, so the pre-cap surface and
+        # the at-cap 402 detail cannot silently desync.
+        max_api_keys=org.get("max_api_keys"),
         # #308 (R7): flagged status rides /v1/team (suspended never reaches
         # here — the auth dependency 403s first; scoping delta 12).
         status="flagged" if org.get("flagged_at") is not None else "active",
@@ -5986,8 +6115,7 @@ def _signup_email_confirm() -> bool:
     Supabase's SMTP project-wide email-send bucket). false|0|no|off (case-insensitive) opt
     back into the confirmation-email funnel.
     """
-    val = os.environ.get("TORTOISE_SIGNUP_EMAIL_CONFIRM", "true").strip().lower()
-    return val not in ("false", "0", "no", "off")
+    return env_flag("TORTOISE_SIGNUP_EMAIL_CONFIRM", True)
 
 
 def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
@@ -7869,10 +7997,12 @@ def _llm_provider_keys() -> tuple[str, ...]:
 
 # Provider env keys the hosted deployment can use for LLM-grade extraction.
 # The provider/model choice is a product decision (deploy-time) — this module
-# only reports availability so capture fails closed when no key is configured.
+# only reports availability, which now decides one thing: whether a capture
+# runs LLM extraction or skips it with a visible "no-provider" receipt (#3892).
 # The regex extraction loop was REMOVED as a product path (#822): LLM
-# extraction is the default (and only) capture extraction, and the no-key
-# case fails closed with 503.
+# extraction is the default (and only) capture extraction. A missing key no
+# longer refuses the capture — the Session + its turn Points are still stored
+# and stay searchable; only the extraction into memory points is skipped.
 _LLM_PROVIDER_KEYS: tuple[str, ...] = _llm_provider_keys()
 
 
@@ -7880,8 +8010,8 @@ def _llm_provider_available() -> bool:
     """True when an LLM provider key is configured (or the TORTOISE_SESSION_
     LLM_MOCK=1 test seam is on — precedent: TORTOISE_BACKUP_STORAGE=memory /
     RATE_LIMIT_DISABLED). Must agree with tortoise.sdk._build_session_llm_extractor
-    (which consumes the same key set); a mismatch would fail the 503 gate open
-    or closed wrongly."""
+    (which consumes the same key set); a mismatch would extract when no
+    extractor can be built, or skip extraction when one can."""
     if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
         return True
     return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
@@ -7892,7 +8022,7 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     """Capture an agent session and extract turns as episodic Points.
 
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
-    the provider 503 / quota 402) so disabled orgs do no quota work at all; any
+    the quota 402) so disabled orgs do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
     dashboard failure sub-line reads this, NOT client state) — except the #3060
     capacity 429 and the #3129 in-flight 409, which are server conditions — and
@@ -8023,12 +8153,12 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
 
-    SCOPE — the retry is closed on the **v2 lane only**, and only for IN-PROCESS
-    cancellation:
+    SCOPE — the retry is closed to the CONVERGENT lanes (v2, and the keyless
+    "none" lane, #3892), and only for IN-PROCESS cancellation:
 
-    * the TRUE-retry gate requires BOTH the prior lane AND the retrying request
-      to be v2 (`prior_capture_extractor == "v2"` **and** the request's
-      `TORTOISE_SESSION_EXTRACTOR != "m2"`, #2473), so an abandoned **m2**
+    * the TRUE-retry gate requires the prior lane to be convergent — v2, or the
+      keyless "none" lane (#3892) — AND the retrying request's
+      `TORTOISE_SESSION_EXTRACTOR != "m2"` (#2473), so an abandoned **m2**
       capture re-POSTed still replays, and so does an abandoned v2 capture
       re-POSTed after the deployment's lane was switched to m2. Both are the
       documented, deliberate consequence of #2473: re-running m2 over a failed
@@ -8073,18 +8203,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
 
-    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old
-    "403 → 422 → 503 → 402" was stale, pre-#1927):
+    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
+    list was stale, pre-#1927):
       1. boundary 422 — invalid harness / conversation shape (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed
          payload;
       2. 409 — session_recording disabled (state-conflict);
-      3. 503 — no LLM provider;
-      4. 400 — turn cap > MAX_SESSION_TURNS;
-      5. 422 — empty/blank stored-window transcript (handler-level);
-      6. 402 — quota (skipped when session_existed).
+      3. 400 — turn cap > MAX_SESSION_TURNS;
+      4. 422 — empty/blank stored-window transcript (handler-level);
+      5. 402 — quota (skipped when session_existed).
+    #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
+    the capture is stored for every request and ONLY the LLM extraction is
+    skipped, reported truthfully as receipt mode "no-provider".
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -8131,18 +8263,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                       "sessions.")
         raise HTTPException(status_code=409, detail=detail)
 
-    # #822: LLM extraction is the default (and only) capture extraction —
-    # the regex loop was removed as a product path. No provider key →
-    # fail-closed 503 (matching today's `required` semantics; the
-    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured).
-    if not _llm_provider_available():
-        raise HTTPException(
-            status_code=503,
-            detail="Session extraction requires an LLM provider key (set "
-                   f"{' / '.join(_LLM_PROVIDER_KEYS)}). The regex extraction "
-                   "loop was removed as a product path (#822) — capture is "
-                   "disabled until a provider is configured.",
-        )
+    # #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL — a missing
+    # provider key does NOT refuse the capture. The Session MERGE and the
+    # mechanical turn Points run UNCHANGED below; ONLY the LLM extraction into
+    # memory points is skipped, and the receipt says so truthfully
+    # (`extraction_mode` "no-provider" + the additive warning). The key gates
+    # EXTRACTION, not STORAGE: the stored turns are searchable with no key at
+    # all (FTS is DB-side; the dense leg is a local model). The
+    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured. Mirrors
+    # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
+    # pre-#3892 503-first refusal.
+    no_provider = not _llm_provider_available()
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         # #2335 WI-1c: the turn-cap refusal is a structured record (the
@@ -8217,19 +8348,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to the v2 lane (the ONLY
-    # convergent lane — content-addressed pt_<sha> ids + graph content_hash
-    # resolution fold a re-attempt's partial claims onto the same nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
+    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
+    # content_hash resolution fold a re-attempt's partial claims onto the same
+    # nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
-    # replay skip closed). Retry fires only when the prior ran v2 AND this
-    # request runs v2 (env != m2) — otherwise replay (safe no-op).
+    # replay skip closed). Retry fires only when the prior ran a CONVERGENT
+    # lane (v2, or the keyless "none" lane, #3892) AND this request runs v2
+    # (env != m2) — otherwise replay (safe no-op).
+    # #3892 / #4007: a keyless capture records lane "none" (no lane ran), and
+    # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
+    # captured without a key gets its memory points once a key appears, on an
+    # EXPLICIT re-capture (never automatically). "none" is retry-eligible for
+    # the same reason "v2" is: it minted no claims of its own, and its turn ids
+    # are deterministic, so the re-attempt converges. The m2 exclusion is
+    # UNCHANGED and deliberate (see tortoise/sdk.py's retry gate).
     prior_capture_ok = session_row[1]
     prior_capture_extractor = session_row[2]
     retry_failed_capture = (
         session_existed and prior_capture_ok is False
-        and prior_capture_extractor == "v2"
+        and prior_capture_extractor in ("v2", "none")
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -8250,7 +8390,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #2335 WI-2b: a TRUE-retry re-POST (capture_ok False) re-runs
     # extraction and mints NEW non-episodic points — it is NOT a zero-node
     # replay, so the estimate gate must fire for it too (a retry can 402).
-    if not session_existed or retry_failed_capture:
+    # #3892: a keyless capture mints ZERO non-episodic points (only the
+    # episodic turn Points, which the points quota excludes), so the
+    # extraction estimate must not 402-block it — same rationale as the
+    # replay skip above. `_check_org_limit(org, "sessions")` still runs, but
+    # sessions are unlimited since #4010, so it is vacuous in practice.
+    if (not session_existed or retry_failed_capture) and not no_provider:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
         sdk_org = _data_sdk(org)
@@ -8281,6 +8426,59 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 detail=f"Team points limit reached: {count} in use + {est} estimated "
                        f"for this capture exceeds {max_points}. Upgrade your plan.",
             )
+
+        # #3665 (lane B7): the COHORT COST CAP — the pre-spend gate. It lives
+        # in the SAME guard as the points estimate for the same reason: a
+        # replay (``session_existed``, capture_ok) writes no nodes and runs no
+        # extraction, so it spends nothing and must never be 402-blocked
+        # (#1727's lesson); a TRUE-retry (#2335 WI-2b) re-runs extraction and
+        # therefore CAN be refused. Placed here — before the turn-write loop
+        # and both extraction calls — so a trip refuses the capture before the
+        # capture's OWN writes: no Session MERGE, no turn Points, no
+        # ``capture_ok``, no receipt, and the transcript stays on the user's
+        # machine, retryable verbatim. (The 402 itself still records the
+        # per-harness ``session_capture_last_error_*`` key in the wrapper, the
+        # same as every other refusal, and files an incident — neither is
+        # capture data.) Refusing anywhere later would leave ``capture_ok``
+        # NULL and turn the next same-``session_id`` POST into a silent
+        # zero-extract replay (the hazard ``_reserve_capture_slot`` documents).
+        #
+        # The error pair is the house contract: a ``QuotaExceededError``
+        # subclass → 402 (REST) / ``ERR_QUOTA`` (MCP); ``QuotaCheckError`` →
+        # 500, fail-closed, never a silent pass.
+        #
+        # Off the event loop: the cap's resolution reads the control plane with
+        # a synchronous ``httpx`` client, and this API runs a single uvicorn
+        # worker — pricing a cohort inline would stall every concurrent request
+        # for two round-trips (the #2988/#3498 class, same as the analytics
+        # emit below). ``to_thread`` copies the contextvars, so the
+        # selfhost-transport exemption still applies inside the worker.
+        from tortoise.cohort_cost import (
+            CohortCostCapExceeded,
+            enforce_cohort_cost_cap,
+            file_cohort_cost_incident,
+        )
+        try:
+            await asyncio.to_thread(enforce_cohort_cost_cap, org)
+        except CohortCostCapExceeded as e:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "cohort_cost_cap_refusal org=%r cohort_since=%r spent=%.6f "
+                "cap=%.2f period=%r harness=%r",
+                org.get("org_id"), e.incident_detail.get("cohort_since"),
+                e.incident_detail.get("spent_usd", 0.0),
+                e.incident_detail.get("cap_usd", 0.0),
+                e.incident_detail.get("period"), body.harness)
+            # The incident is network-bound (GitHub issue + Telegram) — filed
+            # OFF the event loop. This API runs a single uvicorn worker, so an
+            # inline synchronous POST here would stall every concurrent
+            # request for the round-trip (the #2988/#3498 sync-HTTP class).
+            await asyncio.to_thread(
+                file_cohort_cost_incident, org["org_id"], e.incident_detail)
+            raise HTTPException(status_code=402, detail=str(e)) from None
+        except QuotaCheckError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Quota check failed: {e}") from None
 
     _check_org_limit(org, "sessions")
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
@@ -8374,6 +8572,35 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # since #3914. #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    #
+    # #3892: metering truth. The turn loop below runs for EVERY request, so a
+    # re-capture of a GROWN transcript writes NEW turn Points even when the
+    # branch taken extracts nothing (a keyless re-capture, or a keyless retry
+    # on the M2 lane). The write-op/abuse meter keys on the ACTUAL write — the
+    # prior stored-turn count — not on which branch ran (see the meter below).
+    prior_turn_count = 0
+    if session_existed:
+        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
+        # meter, and it sits AFTER the Session MERGE that already committed —
+        # a transient graph error here must never 500 a committed capture
+        # (the file's posture, and every sibling bookkeeping read in this
+        # function). On failure 0 makes the meter OVER-count
+        # (`len(windowed) > 0`), the documented conservative posture, never a
+        # blind spot. It also must not abort the keyless→keyed upgrade this
+        # PR exists to enable.
+        try:
+            _prior_turns = proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true RETURN count(t)",
+                params={"sid": session_id}).result_set
+            prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "prior_turn_count read failed (non-fatal, metering over-counts)",
+                exc_info=True)
+            prior_turn_count = 0
+
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         # P1 #1529 (D10, #721 parity): isinstance-first content coercion — a
@@ -8468,19 +8695,54 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # warning below — the default vocabulary produces no minted kinds to
     # flag, so a log line alone would leave the degradation invisible).
     tenant_vocab_warning: str | None = None
-    if session_existed and not retry_failed_capture:
+    if no_provider:
+        # #3892 (owner ruling 2026-09-18): no provider key — the capture is
+        # still a capture. The Session MERGE + the mechanical turn loop above
+        # ran UNCHANGED, so the turns are STORED and searchable; only the LLM
+        # extraction into memory points is skipped, with the truthful mode +
+        # additive warning the assembly below reports. Placed BEFORE the
+        # #1727 replay branch ON PURPOSE: a keyless call must ALWAYS be
+        # reported as keyless, never as a silent "replayed" that hides the
+        # missing provider. Byte-parity with sdk.capture_session (#4014) — for
+        # keyless calls this branch defines the behaviour, and keyed behaviour
+        # is byte-identical (no_provider is False for a keyed call).
+        if state is not None and not session_existed:
+            # #3129: arm the abandoned-capture marker for a genuine FRESH
+            # attempt only — a keyless RE-capture of an existing session is
+            # replay-shaped (it records nothing below) and must not arm a write
+            # that could downgrade a succeeded prior to capture_ok=False.
+            state["attempted"] = True
+            state["proj"] = proj
+            state["lane"] = "none"
+        meta = {
+            "provider": None, "route": None, "failover_used": False,
+            "errors": [],
+            "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+            "mode": _CAPTURE_NO_PROVIDER_MODE,
+            # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+            # (additive meta contract), empty here (not fabricated).
+            "stats": {},
+        }
+    elif session_existed and not retry_failed_capture:
         # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
         # (capture_ok True) or the session predates capture_ok (legacy None —
         # presumed captured). A prior FAILED capture falls through to
         # extraction — retry is TRUE.
-        meta = {"errors": [], "warnings": [], "mode": "replayed",
+        _replay_warnings = [
+            "session already captured (same session_id) — no new extraction"]
+        if prior_capture_ok is False and prior_capture_extractor == "none":
+            # #3892 / #4007: the prior was a KEYLESS store — extraction has
+            # NEVER run for it. When this deployment is on the non-convergent
+            # M2 lane the re-attempt is refused, so a bare "already captured"
+            # would be a FALSE statement of this state and would hide the
+            # remedy. Disclose it, in the SAME words as sdk.capture_session.
+            _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        meta = {"errors": [], "warnings": _replay_warnings,
+                "mode": "replayed",
                 "route": None, "provider": None,
                 # #2335 WI-1a: hosted replayed carries no extractor_v2
                 # telemetry — stats always-present, empty on replay.
                 "stats": {}}
-        extraction_errors: list = []
-        extraction_warnings = [
-            "session already captured (same session_id) — no new extraction"]
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         if state is not None:
             state["attempted"] = True
@@ -8497,8 +8759,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 slot, sdk._extract_session_llm,
                 windowed, session_id, now)
         except ValueError as e:
-            # no-key fail-closed (outer 503 gate normally catches this first;
-            # belt-and-braces so an inner/outer drift never 500s, #1468).
+            # inner provider-gate drift on the M2 lane → a clean fail-closed
+            # 503 (mirrors the v2 branch below; belt-and-braces so an
+            # inner/outer drift never 500s, #1468). A keyless request never
+            # reaches here — it skips extraction entirely (#3892).
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
         if state is not None:
@@ -8571,11 +8835,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extraction failure keeps 200 + additive errors (the mutation already
     # happened — turn points landed — and E2E-8 permits "non-200 OR additive
     # warnings"; a non-200 would hide the partial write).
+    # #3892: the receipt reads the meta of WHICHEVER branch ran — including
+    # the keyless "no-provider" branch and a keyless RE-capture of an EXISTING
+    # session (which the replay-meta block below would otherwise leave with
+    # unset warnings). Mirrors sdk.capture_session's unconditional read.
+    extraction_errors = list(meta.get("errors") or [])
+    extraction_warnings = list(meta.get("warnings") or [])
     if not session_existed or retry_failed_capture:
-        # #2335 WI-2b: a retry's meta errors/warnings must surface (the
-        # re-attempted extraction's outcome, not the failed first attempt's).
-        extraction_errors = list(meta.get("errors") or [])
-        extraction_warnings = list(meta.get("warnings") or [])
         # #2444: partial-extraction failures are the product's live error surface —
         # surface them to Sentry (when enabled) with org/session context so an
         # agent (or the inbound intake) can act on recurring signatures.
@@ -8625,12 +8891,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent
     # writer's create is an idempotent no-op).
-    if not session_existed or retry_failed_capture:
+    if not session_existed or (retry_failed_capture and not no_provider):
         # #2335 WI-2b: a retry re-runs the mint — the deterministic Event id
         # (_session_capture_event_id) converges on the SAME node (MERGE), and
         # the retry-minted points get the provenance stamp + typed-Source
         # upgrade they need. (Refresh of startedAt/endedAt on the retry is
         # CORRECT — the successful retry is the real capture.)
+        # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
+        # materialization — a keyless attempt extracts nothing, so there is
+        # nothing to stamp, while re-minting re-journals EventRecorded and
+        # refreshes startedAt on every call. Byte-parity with
+        # sdk.capture_session.
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
@@ -8772,39 +9043,60 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         logging.getLogger("tortoise.api").exception(
             "session capture audit write failed (non-fatal)")
     # Metering (#681): best-effort write-op count for overage billing. A
-    # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
-    # not inflate metering/abuse with phantom writes (review PR #1827).
-    if not session_existed or retry_failed_capture:
+    # replay (session_existed) with an UNCHANGED transcript writes ZERO nodes —
+    # an idempotent re-POST must not inflate metering/abuse with phantom writes
+    # (review PR #1827). #3892: a re-capture of a GROWN transcript writes new
+    # turn Points even when the branch extracts nothing (keyless re-capture, or
+    # an M2-lane keyless retry), so the meter keys on the ACTUAL write
+    # (`prior_turn_count`), not on which branch ran — otherwise those paths are
+    # a billing/abuse blind spot. The conservative over-count for the abuse leg
+    # is the documented posture.
+    # #3892 (review cycle 1, P2): a KEYLESS re-capture of an UNCHANGED
+    # transcript writes nothing — its turn ids are deterministic, so the loop
+    # MERGEs onto the same Points — yet `retry_failed_capture` is True for it
+    # (prior lane "none"), which would meter a phantom write-op and charge the
+    # full transcript length on the abuse leg. The retry arm therefore applies
+    # only when the retry can EXTRACT (a keyed retry mints points); the
+    # grown-transcript arm still covers the keyless case that really writes.
+    if (not session_existed or (retry_failed_capture and not no_provider)
+            or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
-        # replay) — metering + abuse records fire for the re-attempt.
+        # replay) — metering + abuse records fire for the re-attempt. A keyless
+        # retry is metered too: see the #3892 lead-in above.
         _record_write_op(org)
-        # #3359: one capture_cost row per capture ATTEMPT that ran an
-        # extraction (successful or errored — a failed extraction that made
-        # provider calls has real spend, and the deadline/deadline_aborts
-        # disclosure depends on that row existing). Replay/M2 captures carry
-        # no extractor telemetry and emit nothing. Idempotent for free: this
-        # sits behind the SAME replay guard the write-op meter uses, so a
+        # #3359/#3665: one measured-cost ledger + analytics row per capture
+        # ATTEMPT that ran an extraction (successful or errored — a failed
+        # extraction that made provider calls has real spend, and the
+        # deadline/deadline_aborts disclosure depends on that row existing).
+        # A ZERO-CALL capture — the empty-transcript / keyless path — carries
+        # no extractor telemetry and emits nothing; an M2 capture DOES make
+        # provider calls, so since #3824 it emits a row carrying its call
+        # count as ``unattributed`` rather than vanishing into the same
+        # silence as a zero-call capture. Idempotent for free: this sits
+        # behind the SAME replay guard the write-op meter uses, so a
         # zero-node re-POST writes no second row; a genuine retry (#2335
         # WI-2b) does write a second row, which is why the report aggregates
-        # by session_id before percentiling. Best-effort — analytics must
+        # by session_id before percentiling. Best-effort — bookkeeping must
         # never block a committed capture.
-        try:
-            _cost_props = _capture_cost_props(session_id, meta)
-            if _cost_props is not None:
-                # Off the event loop: `_track_analytics_event` POSTs
-                # synchronously (`httpx.Client`), and this API runs a single
-                # uvicorn worker — calling it inline stalls EVERY concurrent
-                # request for the duration of a Supabase round-trip (the
-                # #2988 / #3498 class of sync-HTTP-on-the-loop bug). This is
-                # the first call site on the highest-frequency path, so it is
-                # routed through `asyncio.to_thread` (the house style).
-                await asyncio.to_thread(
-                    _track_analytics_event,
-                    org["org_id"], "capture_cost", _cost_props)
-        except Exception:  # noqa: BLE001, RUF100 — never block capture
-            import logging
-            logging.getLogger("tortoise.api").exception(
-                "capture_cost analytics emit failed (non-fatal)")
+        #
+        # #3665 (lane B7): the SAME measured cost onto the durable per-period
+        # LEDGER, beside the analytics row. #3359's analytics row is a
+        # measurement, not a ledger: nothing keyed by org+period, so a spend
+        # CEILING could only read it by scanning every capture row in the
+        # period. The ledger row is one per (org, period) — the read side
+        # `cohort_cost.enforce_cohort_cost_cap` gates on. Both writes run off
+        # the event loop (`asyncio.to_thread`): the Supabase RPC / embedded
+        # registry write and `_track_analytics_event`'s synchronous
+        # `httpx.Client` POST are blocking I/O, and this API runs a single
+        # uvicorn worker (the #2988 / #3498 class of sync-HTTP-on-the-loop
+        # bug).
+        #
+        # #3825/#3981: the ledger half raises on an unresolvable window; that
+        # raise is a SIGNAL, and ``_emit_capture_ledger`` reports the dropped
+        # increment to the operator (lane=capture_ledger) instead of leaving
+        # a silent short ledger row behind. A ledger failure is not an
+        # analytics failure and is never labelled one.
+        await _emit_capture_ledger(org["org_id"], session_id, meta)
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -9048,6 +9340,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     mode = meta.get("mode")
     if extraction_errors:
         effective_mode = "error" if mode != "empty" else "empty"
+    elif mode == _CAPTURE_NO_PROVIDER_MODE:
+        # #3892: the keyless capture — turns stored, extraction skipped.
+        # Reported under its OWN name, never folded into "llm" (which would
+        # claim an extraction that did not happen) nor "replayed". Checked
+        # before `route` for parity with sdk.capture_session.
+        effective_mode = _CAPTURE_NO_PROVIDER_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
     elif mode == "replayed":
@@ -9169,11 +9467,31 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # before the Session MERGE — nothing to record there.
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
-    if not session_existed or retry_failed_capture:
+    # #3892: what THIS attempt RECORDS on the Session. A keyed attempt records
+    # its real outcome + lane, exactly as before. A KEYLESS attempt records
+    # capture_ok=False + lane "none" (no extraction lane ran) — recording
+    # ok=True / lane "v2" instead would make a LATER capture WITH a key take
+    # the #1727 replay branch, silently extracting nothing and leaving the
+    # stored session permanently points-less. False + "none" is what the #2335
+    # TRUE-retry gate consumes, so the later keyed capture re-attempts and the
+    # deterministic turn ids converge. Byte-parity with sdk.capture_session
+    # (#4014). A keyless attempt records this ONLY when it CREATES the session:
+    # a keyless RE-capture must not rewrite a prior attempt's record (a prior
+    # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
+    _capture_ok_record = False if no_provider else _capture_ok
+    _capture_extractor_record = (
+        "none" if no_provider
+        else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
+              else "v2"))
+    _record_session_state = (
+        (not session_existed) if no_provider
+        else (not session_existed or retry_failed_capture))
+    if _record_session_state:
         # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
         # retry) — a replay performs NO Session write (zero-write no-op).
         # Review (PR #2473): the SET records the extractor lane that RAN so
-        # the retry gate can require a v2 prior (M2 partials never retried).
+        # the retry gate can require a convergent prior (M2 partials never
+        # retried).
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
@@ -9191,10 +9509,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "MATCH (s:Session {id:$sid}) "
                 "SET s.capture_ok=$ok, "
                 "    s.capture_extractor=$extractor",
-                params={"sid": session_id, "ok": _capture_ok,
-                        "extractor": "m2" if os.environ.get(
-                            "TORTOISE_SESSION_EXTRACTOR") == "m2"
-                        else "v2"})
+                params={"sid": session_id, "ok": _capture_ok_record,
+                        "extractor": _capture_extractor_record})
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")
@@ -9265,20 +9581,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # REGISTERED onboarding state keys (Task 11's registration table) — an
 # unregistered key would be silently dropped by the _update_onboarding_state
 # allowlist filter.
-
-def _capture_receipt_key(harness: str | None) -> str:
-    """Receipt state key for a harness — per-harness when present, the bare
-    legacy key for no-harness hooks (T1-P3 None-guard)."""
-    return f"session_capture_receipt_{harness}" if harness else \
-        "session_capture_receipt"
-
-
-def _capture_last_error_key(harness: str | None) -> str | None:
-    """Per-harness last-error state key. No bare variant is registered — a
-    legacy no-harness hook has no per-harness dashboard row to read it."""
-    if not harness:
-        return None
-    return f"session_capture_last_error_{harness}"
+#
+# #3809: the key SPELLING lives in ONE place — ``tortoise.capture_receipts``
+# — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
+# so both this server and ``tortoise session verify`` derive the same name.
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,
@@ -10277,6 +10583,25 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             "created_at": er[3],
         })
 
+    # #3809: the session's graph SOURCE node (`session:<id>`, ontology v3.6 §4.6
+    # agentSession) — so `tortoise session verify` can prove the session
+    # "appears in the graph as a source" over the REST surface rather than
+    # inferring it from the presence of turn points. Additive: a degraded
+    # capture that never materialized the Source reports `source: null`,
+    # never a fabricated stub.
+    source = None
+    source_rows = proj.g.query(
+        "MATCH (src:Source {url:$url}) "
+        "RETURN src.url, src.sourceKind, src.eventId",
+        params={"url": f"session:{session_id}"},
+    ).result_set
+    if source_rows:
+        source = {
+            "url": source_rows[0][0],
+            "sourceKind": source_rows[0][1],
+            "eventId": source_rows[0][2],
+        }
+
     return {
         "id": sess[0],
         "created_at": sess[1],
@@ -10293,7 +10618,214 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,
+        "source": source,
     }
+
+
+# #B7: the activation scorecard — which sessions actually produced memory, and
+# whether anything read it. Read-only; derives from data other components
+# already record (no new write, no change to the capture path).
+#
+# Distinct from `first_api_call` (tortoise/analytics.py), whose docstring calls
+# it the "Activation event" while it fires on ANY POST /v1/* returning <400,
+# and distinct from the dashboard's captureStatus `active` state, which is
+# receipt-authoritative ("the transcript was stored").
+#
+# The definition, its evidence, and the stages that are NOT measurable live in
+# tortoise/activation_scorecard.py — read that module's docstring first.
+@app.get("/v1/activation/scorecard")
+async def activation_scorecard(
+    since: str | None = None,
+    until: str | None = None,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Activation funnel for the calling org over [since, until).
+
+    Stages: captured -> stored -> memory_produced (session-scoped, graph),
+    recall_attempted (org/time-scoped, analytics), value_confirmed (a
+    REFUSAL — see the module). Every stage carries state + reason; a 0 is only
+    ever emitted with state == "measured".
+
+    Defaults to the beta's own <= 24h criterion window. 422 on a malformed,
+    naive, non-positive, or over-90-day window (a client error, never a silent
+    empty result).
+
+    Guards: `graphs:read` scope, then `_reject_graph_bound_org_surface` — the
+    graph legs read the org DEFAULT graph while the analytics leg is ORG-WIDE
+    (analytics_events carries no graph_id), so a graph-bound key would mix two
+    scopes and leak cross-graph activity.
+
+    Fail-soft: an unreadable graph or analytics store yields `unavailable`,
+    never a 500 and never a fabricated 0.
+    """
+    from tortoise.activation_scorecard import (
+        FUNNEL_QUERY as _FUNNEL,
+    )
+    from tortoise.activation_scorecard import (
+        LIFETIME_MEMORY_QUERY,
+        analytics_write_path_configured,
+        assemble,
+        graph_unavailable_stages,
+        stage_counts,
+    )
+    from tortoise.activation_scorecard import (
+        MCP_TELEMETRY_EVENT as _EVENT,
+    )
+    from tortoise.activation_scorecard import (
+        RECALL_PAGE_CAP as _CAP,
+    )
+    from tortoise.activation_scorecard import (
+        WindowError as _WindowError,
+    )
+    from tortoise.activation_scorecard import (
+        normalize_window as _norm_window,
+    )
+
+    _require_scope(org, "graphs:read", "activation_scorecard")
+    _reject_graph_bound_org_surface(org, "the activation scorecard")
+    try:
+        since_iso, until_iso = _norm_window(since, until)
+    except _WindowError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    log = logging.getLogger("tortoise.api")
+
+    def _read_graph() -> tuple[list, dict | None]:
+        sdk = _data_sdk(org)
+        proj = sdk._get_proj()
+        funnel = proj.g.query(
+            _FUNNEL, params={"since": since_iso, "until": until_iso}
+        ).result_set
+        life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set
+        return funnel, ({"first_memory_at": life[0][0],
+                         "sessions_with_memory": life[0][1]} if life else None)
+
+    # ── Stages 1-3, and the lifetime baseline for stage 4 ──────────────────
+    graph_error: str | None = None
+    rows: list = []
+    lifetime: dict | None = None
+    try:
+        # The FalkorDB client is synchronous and LIFETIME_MEMORY_QUERY is an
+        # unbounded all-time scan, so this runs on the scorecard's OWN pool
+        # (#3060 doctrine, above) rather than the loop's shared default
+        # executor — a slow graph must not stall other tenants of that pool
+        # (#3772 is the same separation for the write handlers).
+        rows, lifetime = await _run_off_loop(_SCORECARD_EXECUTOR, _read_graph)
+    except HTTPException:
+        # An authorization/tenancy denial from `_data_sdk` is NOT a graph
+        # outage — swallowing it would convert a 403 into a 200 with
+        # `unavailable` stages, defeating the guard this try block sits under.
+        raise
+    except Exception:
+        graph_error = "org_graph_unavailable"
+        log.warning("activation scorecard graph unavailable (fail-soft): %s",
+                    org["org_id"], exc_info=True)
+
+    if graph_error:
+        graph_stages = graph_unavailable_stages(graph_error)
+        graph_detail = {"captured_sessions": None, "stored_sessions": None,
+                        "memory_produced_sessions": None,
+                        "turn_points_total": None, "extracted_points_total": None}
+    else:
+        try:
+            graph_stages, graph_detail = stage_counts(
+                rows, since_iso, until_iso)
+        except Exception:
+            # A malformed funnel row (a driver/version/proxy shape anomaly) must
+            # not become a 500 — the handler's contract is fail-soft for an
+            # unreadable graph, and the analytics fold carries the same guard.
+            graph_error = "org_graph_unavailable"
+            log.warning(
+                "activation scorecard graph fold failed (fail-soft): %s",
+                org["org_id"], exc_info=True)
+            graph_stages = graph_unavailable_stages(graph_error)
+            graph_detail = {"captured_sessions": None,
+                            "stored_sessions": None,
+                            "memory_produced_sessions": None,
+                            "turn_points_total": None,
+                            "extracted_points_total": None}
+
+    # ── Stage 4 ────────────────────────────────────────────────────────────
+    analytics_state = ("configured" if analytics_write_path_configured()
+                       else "unset")
+    recall_cell, recall_detail = await asyncio.to_thread(
+        _read_recall, org, since_iso, until_iso, lifetime, graph_error,
+        analytics_state, log, _EVENT, _CAP)
+
+    payload = assemble(
+        org_id=org["org_id"], since=since_iso, until=until_iso,
+        graph_stages=graph_stages, graph_detail=graph_detail,
+        recall_cell=recall_cell, recall_detail=recall_detail,
+        lifetime=lifetime, analytics_state=analytics_state,
+    )
+    if graph_error:
+        payload["integrity"].append(graph_error)
+    if analytics_state == "unset":
+        # The writer cannot reach the store: every window is unmeasured, and a
+        # historical window can never be backfilled. Say so in the payload.
+        payload["notes"].append(
+            "analytics write path is not configured on this server — stage 4 "
+            "is unmeasured, not zero, and historical events are unrecoverable")
+    return payload
+
+
+def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
+                 graph_error: str | None, analytics_state: str, log,
+                 event: str, cap: int):
+    """Read the analytics rows for the window and fold them into stage 4.
+
+    Returns `(stage_cell, detail)`. Deliberately returns a NON-measured cell
+    — NEVER a zero — for every case where the store cannot be trusted to be
+    complete. Which of the two non-measured states applies follows the
+    module's vocabulary rule: `unavailable` for the RECOVERABLE failures (not
+    configured, unreachable, a full page — the read helper has no offset
+    support, so a full page is a lower bound), and `not_measurable` for an org
+    that has never produced memory, where there is nothing to recall from and
+    no retry would change it. Conflating those two would accuse a healthy org
+    of failing to report.
+    """
+    from tortoise.activation_scorecard import (
+        recall_stages as _recall_stages,
+    )
+    if analytics_state != "configured":
+        return _recall_stages(
+            None, None, reason="analytics_write_path_unconfigured")
+    if graph_error:
+        # first_memory_at is unknown, so stage 4 cannot be conditioned.
+        return _recall_stages(None, None, reason=graph_error)
+    try:
+        from tortoise.supabase_control import get_control_plane
+        analytics_rows = get_control_plane().query(
+            "analytics_events",
+            select=["event_name", "properties", "created_at"],
+            filters=[("org_id", "eq", org["org_id"]),
+                     ("event_name", "eq", event),
+                     # `gte` (not `gt`) so this leg is [since, until) — the
+                     # SAME interval as the graph legs. With `gt`, a tool call
+                     # landing exactly ON `since` was excluded while a session
+                     # created at that same instant was included, so the funnel
+                     # could disagree with itself on the boundary instant.
+                     ("created_at", "gte", since),
+                     ("created_at", "lt", until)],
+            order="created_at.desc",
+            limit=cap,
+        )
+        # The fold runs INSIDE the fail-soft guard: a store/proxy that returns
+        # an array of non-mapping elements must become `unavailable`, not an
+        # AttributeError 500 — the endpoint's own contract.
+        truncated = (isinstance(analytics_rows, list)
+                     and len(analytics_rows) >= cap)
+        return _recall_stages(
+            analytics_rows,
+            (lifetime or {}).get("first_memory_at"),
+            truncated=truncated,
+            window=(since, until),
+            memory_sessions=(lifetime or {}).get("sessions_with_memory"))
+    except Exception:
+        log.warning("activation scorecard analytics unreachable (fail-soft): %s",
+                    org["org_id"], exc_info=True)
+        return _recall_stages(
+            None, None, reason="analytics_store_unreachable")
 
 
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
@@ -11868,7 +12400,7 @@ async def delete_graph(graph_id: str, org_id: str,
 
 # ── #2304 trash surface (delete = quarantine → restore within grace) ───────
 # Owner Option C: a deleted custom graph sits in the org's TRASH for a
-# disclosed recovery window (default 7 days — the purge grace), then is
+# disclosed recovery window (default _TRASH_GRACE_DAYS — the purge grace), then is
 # physically erased. These endpoints are the owner/admin RESTORE surfaces:
 # they are SESSION-ONLY (a revoked graph key can never reach a tombstone)
 # and role-gated owner/admin (mirrors delete_graph's session branch). Keys
@@ -12042,7 +12574,7 @@ async def list_trash(org_id: str,
     graph can never be here. ``deleted_at`` absent = legacy tombstone
     (predates #2304 — treated as past-grace by the purge). Past-window and
     legacy rows remain LISTED (pending the purge) but are NOT restorable:
-    restore 410s them (#2465 — the 7-day window is a hard server-side
+    restore 410s them (#2465 — the _TRASH_GRACE_DAYS window is a hard server-side
     bound); the purge erases them on its cadence."""
     await _require_owner_admin_session(user, org_id)
     org = await _org_node(org_id)
@@ -12136,14 +12668,14 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             detail="Graph was purged (data physically erased) — not "
                    "restorable; re-create it from scratch")
     # #2465: the recovery window is a HARD server-side bound — a row past
-    # its 7 days (or a legacy tombstone with no deleted_at) is pending
+    # its _TRASH_GRACE_DAYS window (or a legacy tombstone with no deleted_at) is pending
     # permanent erasure and no longer restorable, matching the UI copy and
     # privacy §6 ("refused for restoration once the window has passed").
     # Only the purge clears these rows (operator cadence — #2317).
     if _trash_grace_expired(row.get("deleted_at")):
         raise HTTPException(
             status_code=410,
-            detail="The 7-day recovery window has passed — this graph is "
+            detail=f"The {_TRASH_GRACE_DAYS}-day recovery window has passed — this graph is "
                    "pending permanent erasure and can no longer be restored")
     name = (row.get("name") or "").strip()
     if name and await _trash_name_conflict(org_id, name, graph_id):
@@ -15477,7 +16009,7 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
 @app.delete("/v1/organizations/{org_id}", status_code=202)
 async def delete_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
-    """E2E-6-D — owner-only org deletion (soft delete → 24h grace → hard delete).
+    """E2E-6-D — owner-only org deletion (soft delete → TEAM_DELETE_GRACE_HOURS grace → hard delete).
 
     Immediate cascade, access-kill first: all API keys revoked (tt_ auth
     fails closed), active memberships marked removed (JWT-session access
@@ -15485,10 +16017,11 @@ async def delete_org(org_id: str, request: Request,
     promised ``grace_hours`` stamped LAST — a partial failure leaves the
     org not marked deleted and retries re-run the full cascade. The boot
     + hourly purge hard-deletes the org graph and control-plane rows once
-    the stored grace window elapses — deletion is irreversible within 24
-    hours (issue #302 indicator); the purge honors the stored window even
-    if the env var changes mid-grace. Immutable audit_events rows are
-    preserved by design (the delete trail survives).
+    the stored grace window elapses — the deletion then becomes irreversible
+    (issue #302 indicator, harmonised by #4179); the purge honors the
+    stored window even if the env default changes mid-grace (the env var is
+    only the fallback for rows with no stored grace). Immutable audit_events
+    rows are preserved by design (the delete trail survives).
 
     AuthZ-first: non-owners get 403 whether or not the org exists or is
     delete-pending (no existence oracle). Idempotent: repeat calls by the
@@ -15506,7 +16039,8 @@ async def delete_org(org_id: str, request: Request,
     if org_node is None:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
+    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
+                                       str(TEAM_DELETE_GRACE_HOURS)))
     if deleted_at:
         # Idempotent replay: already scheduled — same grace answer (200),
         # using the STORED grace window (promise made at schedule time).
@@ -15701,9 +16235,12 @@ def _purge_deleted_orgs() -> None:
 
     Runs at boot + hourly inside the event-retention loop (via
     asyncio.to_thread — sync DB work must not block the loop, #310). The
-    env cutoff pre-filters, then each org's STORED grace_hours (the
-    promise made at schedule time) decides — a config change mid-grace can
-    never hard-delete an org before its promised hard_delete_after.
+    fetch is a SUPERSET of every soft-deleted row (``deleted_at <= now``);
+    each org's STORED grace_hours (the promise made at schedule time) is
+    the sole authority, and the env var is only the fallback for rows that
+    carry no stored grace. A config change mid-grace therefore neither
+    hard-deletes an org before its promised hard_delete_after NOR defers
+    it past that promise (#4179).
 
     Registry mode cascades Membership/APIKey/Invitation nodes and drops
     the org graph; Supabase mode sweeps the registry nodes provision_tenant
@@ -15717,9 +16254,18 @@ def _purge_deleted_orgs() -> None:
     a purge failure never crashes the loop.
     """
     try:
-        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
-        env_cutoff = (datetime.now(UTC) - timedelta(hours=env_grace)).isoformat()
+        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
+                                          str(TEAM_DELETE_GRACE_HOURS)))
         now_dt = datetime.now(UTC)
+        # #4179 P1: the fetch must be a SUPERSET of every stored promise. The
+        # env default is only the fallback for a row with no stored
+        # grace_hours, so it must never pre-filter a row whose STORED promise
+        # already expired — a `now - env_grace` cutoff deferred a legacy
+        # 24h-stamped org by up to (env - stored) when
+        # TEAM_DELETE_GRACE_HOURS grew 24h→168h, purging it ~144h PAST its
+        # hard_delete_after. `deleted_at <= now` selects every soft-deleted
+        # row; `_past_grace` then decides each one on its own stored window.
+        scan_cutoff = now_dt.isoformat()
 
         def _past_grace(row_deleted_at, row_grace_hours) -> bool:
             """Stored grace (promised at schedule time) wins over env."""
@@ -15743,11 +16289,11 @@ def _purge_deleted_orgs() -> None:
             for row in cp.query(
                 "organizations",
                 select=["id", "graph_name", "grace_hours", "deleted_at"],
-                filters=[("deleted_at", "lte", env_cutoff)],
+                filters=[("deleted_at", "lte", scan_cutoff)],
             ):
                 org_id = row["id"]
                 if not _past_grace(row.get("deleted_at"), row.get("grace_hours")):
-                    continue  # env shrank — honor the stored promise
+                    continue  # stored promise decides (env = fallback only)
                 try:
                     # Registry cascade FIRST, control-plane LAST: the orgs
                     # row is the retry anchor — a failed registry purge or
@@ -15784,11 +16330,11 @@ def _purge_deleted_orgs() -> None:
             "MATCH (t:Team) WHERE t.deleted_at IS NOT NULL "
             "AND t.deleted_at < $cutoff "
             "RETURN t.id, t.graph_name, t.grace_hours, t.deleted_at",
-            params={"cutoff": env_cutoff},
+            params={"cutoff": scan_cutoff},
         ).result_set
         for org_id, graph_name, stored_grace, row_deleted_at in rows:
             if not _past_grace(row_deleted_at, stored_grace):
-                continue  # env shrank — honor the stored promise
+                continue  # stored promise decides (env = fallback only)
             try:
                 _purge_registry_org(sdk, org_id, graph_name)
                 _audit_logger.append(
@@ -16783,7 +17329,7 @@ def _linking_available() -> bool:
     via the Management API). Fail-closed: False until explicitly enabled —
     the banner's promise-free variant and the link-intent 503 depend on it.
     """
-    return os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED", "") == "1"
+    return is_truthy(os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED"))
 
 
 def _identity_admin_user(user_id: str) -> dict | None:
@@ -17757,6 +18303,15 @@ async def session_context(org: dict = Depends(get_current_org_gated)):  # noqa: 
         raise HTTPException(status_code=500, detail="Context unavailable")  # noqa: B904
 
 
+def _volunteer_slo_enforced() -> bool:
+    """`TORTOISE_VOLUNTEER_ENFORCE_SLO` — perf lane / induced-timeout tests only.
+
+    #4097: the single resolution point for that knob (``volunteer_context`` calls
+    it), through the declared truthy contract.
+    """
+    return is_truthy(os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO"))
+
+
 @app.post("/v1/context")
 async def volunteer_context(
     body: VolunteerContextRequest,
@@ -17823,8 +18378,7 @@ async def volunteer_context(
     # so a slow CI machine can never randomly empty a healthy request; the
     # HARD ceiling (8 × SLO) below degrades ANY pathological read (never 503,
     # never a hung caller) with the same fail-open shape.
-    enforce_slo = os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO", "").strip() \
-        .lower() in ("1", "true", "yes", "on")
+    enforce_slo = _volunteer_slo_enforced()
     completed = False
     try:
         # #1676 offload: the canonical pipeline is CPU/DB-blocking (hybrid
@@ -19580,6 +20134,11 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "deadline_aborts", "by_stage",
+    # #3824: provider calls the capture made that NO roll-up accounted for.
+    # Without this key in the allowlist the counter is stripped here — the
+    # documented #3359 loss mode — and F2 stays invisible even though the
+    # row was written.
+    "unattributed",
     # #3821: billing attribution. The Stripe webhook emits `plan` and `tier`
     # (the notify_kind row at the billing emit), but they were never
     # registered — so billing analytics rows have been written STRIPPED since
@@ -19714,7 +20273,7 @@ def _telemetry_strict() -> bool:
 
     Reading it at import time would both (a) make the flag untestable and
     (b) let a dev flag set before boot survive into production."""
-    return os.environ.get(_TELEMETRY_STRICT_ENV) == "1"
+    return is_truthy(os.environ.get(_TELEMETRY_STRICT_ENV))
 
 
 def _report_unregistered(where: str, subject: str,
@@ -20544,6 +21103,31 @@ def _analytics_alert_store():
         return None
 
 
+def _as_call_count(value) -> int:
+    """Coerce a #3824 call-evidence value to a non-negative int (0 on junk).
+
+    A producer is free to hand over ``None``/missing/negative/a
+    fraction/a non-finite or absurd-magnitude value; none of those may become
+    a phantom nonzero disclosure, and none may raise inside the capture
+    handler's best-effort emit. A call count is a WHOLE number, so a
+    fractional one is malformed and is treated as absent rather than
+    truncated into a phantom count. The magnitude bound matches the reader's
+    own ``_as_int`` (``tools/longmem_eval/costing.py``), so a magnitude the
+    emitter accepts is one the report cannot later read as junk.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and not value.is_integer():
+        return 0
+    try:
+        if abs(value) > 1e300:
+            return 0
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return n if n > 0 else 0
+
+
 def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     """#3359: the per-session cost driver as an analytics ``properties`` dict.
 
@@ -20553,14 +21137,44 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     ``calls_without_cost`` disclosure counter, and the per-stage/
     per-route ``by_stage`` envelope (repricable at report time).
 
-    Returns ``None`` when the extractor produced no LLM roll-up (a
-    replayed / M2 capture: ``meta["stats"]`` is ``{}``) — no measurement
-    exists, so no row is written. A capture whose extraction ERRORED does
-    carry a roll-up (and therefore a row): the provider calls were made and
-    their spend is real.
+    #3824 — TWO FACTS, NEVER ONE. A ``stats`` with no ``llm`` used to
+    collapse two distinct captures into the same ``None``:
+
+    * **F1 — zero provider calls.** The empty-transcript gate: nothing
+      was sent, so no row is written and the window stays clean.
+      ``return None`` is correct here.
+    * **F2 — calls were made and the roll-up did not survive.** The M2
+      session lane (#3747) issues real provider calls and discards their
+      usage; any future lane that builds its own ``meta`` does the same.
+      Absence made F2 indistinguishable from F1 *and* from "$0.00 spent",
+      so an all-M2 deployment read as "NO capture_cost ROWS IN THIS
+      WINDOW" — a missing measurement wearing the shape of a cheap one,
+      and #3780's cohort-cap denominator was set from that undercount.
+
+    The discriminator is the call evidence the producer keeps OUTSIDE the
+    roll-up (``meta["stats"]["unattributed"]``, written by
+    ``sdk._extract_session_llm``) — it survives exactly the case the
+    roll-up does not, because it is recorded at the CALL site rather than
+    reconstructed from the response. When it is present with no roll-up the
+    row is written anyway, every measured field zeroed and ``unattributed``
+    carrying the call count, so the spend is DISCLOSED rather than erased.
+    When a roll-up does survive, ``unattributed`` rides alongside it (0 on a
+    fully-metered capture) — the sibling-counter precedent
+    (``calls_without_cost`` / ``calls_without_usage`` /
+    ``deadline_aborts``) rather than a second, drifting total.
+
+    A capture whose extraction ERRORED does carry a roll-up (and therefore
+    a row): the provider calls were made and their spend is real.
     """
-    llm = ((meta.get("stats") or {}).get("llm") or {})
-    if not llm:
+    stats = meta.get("stats") or {}
+    llm = stats.get("llm") or {}
+    # #3824: calls made that no roll-up accounted for. Must live OUTSIDE
+    # ``llm`` — nested there it could not exist in the very case it
+    # describes (an empty roll-up).
+    unattributed = _as_call_count(stats.get("unattributed"))
+    if not llm and not unattributed:
+        # F1: zero provider calls. No measurement exists, so no row — a
+        # fabricated $0 row here is the phantom the reader must never see.
         return None
     return {
         "session_id": session_id,
@@ -20580,6 +21194,10 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # session as a clean $0 (#1787 P2-L is the counter's origin).
         "deadline_aborts": int(llm.get("deadline_aborts", 0) or 0),
         "by_stage": llm.get("by_stage") or {},
+        # #3824: provider calls with no surviving roll-up. Rides the row so
+        # the reader can count them into the denominator and refuse to read
+        # the capture as a measured $0.
+        "unattributed": unattributed,
     }
 
 
@@ -22880,7 +23498,7 @@ async def backups_sweep(request: Request):
 async def backups_purge(request: Request, body: dict | None = None):
     """#2304 — trash purge: physically erase every expired tombstone
     (custom graphs deleted > grace_days ago, plus legacy tombstones).
-    Internal-key only. Optional ``{"grace_days": N}`` overrides the 7-day
+    Internal-key only. Optional ``{"grace_days": N}`` overrides the _TRASH_GRACE_DAYS
     default (operator drills). Ownership-guarded namespace drops, idempotent,
     per-org/`-graph isolation; purged rows are stamped (kept — audit).
     In-flight guard: a concurrent purge returns 202.
@@ -24186,6 +24804,16 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             updates["subscription_id"] = data["id"]
         if data.get("current_period_end"):
             updates["current_period_end"] = data["current_period_end"]
+        # #3825 / D10: the METER WINDOW ANCHOR. The cost meter totals usage
+        # over the subscription's OWN billing period so it reconciles with the
+        # invoice line, and only the period END was persisted — leaving the
+        # window half-known, which ``metering._current_period`` refuses to
+        # guess at (a derived start is wrong for annual plans and plan
+        # changes, and a calendar-month fallback would put a paying org's
+        # spend on a row the cap's window read never looks at). This event
+        # carries the authoritative start next to the end already written here.
+        if data.get("current_period_start"):
+            updates["current_period_start"] = data["current_period_start"]
         if status:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be

@@ -37,13 +37,12 @@ OLD account (and the cross-subdomain cookie the dashboard reads was never
 written). Only the cookie is now consulted, and its ``access_token`` AND
 ``refresh_token`` must equal the pair just written.
 
-RESIDUAL SCOPE NOTE: ``website/apps/dashboard/dist/assets/index-*.js`` is a
-committed build of ``src/main.jsx`` and still carries the old literal —
-``deploy-pages.yml``'s ``deploy-dashboard`` job rebuilds and deploys it at
-deploy time but never COMMITS the rebuild, so the tracked artifact stays stale
-until someone runs ``npm run build`` (follow-up: #3787). The assertions below
-therefore read the SOURCES; they cannot see the committed bundle without build
-wiring.
+RESIDUAL SCOPE NOTE: the assertions below read the SOURCES, not bundles.
+#3775 untracked ``website/apps/dashboard/dist/`` (it is a build artifact now),
+and #4054 deleted the dashboard's session adapter, so the old note about a
+committed ``dist/assets/index-*.js`` carrying the literal no longer applies —
+there is no tracked bundle to drift and no client fragment consumer left in
+``main.jsx``.
 
 WHY A COOKIE-JAR SHIM
 ---------------------
@@ -454,16 +453,32 @@ def test_one_fragment_consumer_per_page() -> None:
     storage, and supabase-js clears ``window.location.hash`` BEFORE awaiting
     ``_saveSession()`` — so it destroys the fragment a second time and the
     bridge-level retention never reaches the product. ``detectSessionInUrl``
-    stays true only on the consent page, which loads no bridge."""
+    stays true only on the consent page, which loads no bridge.
+
+    #4054 retarget: the dashboard's session adapter is deleted, so main.jsx no
+    longer builds a supabase-js client at all — the old ``detectSessionInUrl:
+    false`` assertion on it is replaced by the STRONGER property that it cannot
+    be a fragment consumer (no client, no detectSessionInUrl). The old
+    "every bridge page loads the bridge" loop is likewise inverted: no page
+    loads the bridge any more, which is what makes the one-consumer property
+    hold trivially. Nothing was dropped — each assertion is retargeted to the
+    surface that still carries the invariant.
+    """
     assert "detectSessionInUrl: false" in SHARED.read_text(encoding="utf-8"), (
         "the shared bridge's factory must not let supabase-js re-ingest the "
         "fragment its own IIFE already consumed (#3503 P1)"
     )
+    # The dashboard is BFF-migrated: it builds NO supabase-js client and sets NO
+    # detectSessionInUrl, so it cannot be a second fragment consumer. (The old
+    # assertion required its client to set the flag false; there is no client
+    # left to set it.)
     dashboard = DASHBOARD.read_text(encoding="utf-8")
-    assert "detectSessionInUrl: false" in dashboard, (
-        "the dashboard loads the shared bridge (index.html) and builds its "
-        "client in main.jsx with the same cookie adapter — it must not ingest "
-        "the fragment a second time (#3503 P1)"
+    assert "detectSessionInUrl" not in dashboard, (
+        "main.jsx configures supabase-js auth again — it is BFF-migrated and "
+        "must not become a second fragment consumer (#3503 P1, #4054)"
+    )
+    assert "createClient(" not in dashboard, (
+        "main.jsx must not construct a supabase-js client (#4054)"
     )
     assert "detectSessionInUrl: false" in BLOG_ADMIN.read_text(encoding="utf-8"), (
         "blog-admin never receives the OAuth fragment (it reads the session "
@@ -481,13 +496,20 @@ def test_one_fragment_consumer_per_page() -> None:
         "the only consumer (#3503 P1)"
     )
 
-    # Every page still on the legacy bridge must load it (so the P1 assertion
-    # above is about a page where the bridge actually runs).
+    # #4054: the pages that used to load the bridge have all left it. The old
+    # loop asserted they DID load it (so the P1 assertion was about a page where
+    # the bridge ran); the retirement protocol inverts that into the absence
+    # proof — an empty bridge-page set is the end state.
     for page in (
-        REPO_ROOT / "website" / "signup.html",
-        REPO_ROOT / "website" / "signin.html",
+        REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "signup.html",
         REPO_ROOT / "website" / "apps" / "dashboard" / "index.html",
     ):
-        assert 'src="/assets/supabase-session.js"' in page.read_text(encoding="utf-8"), (
-            f"{page.name}: expected the shared bridge script tag"
+        assert 'src="/assets/supabase-session.js"' not in page.read_text(encoding="utf-8"), (
+            f"{page.name}: must not load the shared bridge (#4054)"
         )
+    # signin.html was the last legacy bridge page; it is deleted in #4054 (all
+    # of /signin, /signin/, /signin.html 301 to /auth).
+    assert not (REPO_ROOT / "website" / "signin.html").exists(), (
+        "the retired signin.html is back — it was the last page on the legacy "
+        "cross-subdomain bridge (#4054)"
+    )

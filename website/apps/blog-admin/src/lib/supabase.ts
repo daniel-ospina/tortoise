@@ -1,14 +1,16 @@
 /**
  * Supabase client for the Tortoise blog admin SPA.
  *
- * Session contract (#3485): the parent-domain cookie `sb-tortoise-auth-token`
- * (JSON, same shape supabase-js persists: { access_token, refresh_token, ... })
- * is the ONLY source of truth. The admin gate Function
- * (website/functions/admin/[[path]].ts) verifies that cookie server-side, so
- * client-visible must imply server-visible: a session this SPA can see but the
- * gate cannot is not a session — with `autoRefreshToken` it would refresh
- * itself and RE-MINT the cookie a sign-out just cleared, resurrecting exactly
- * the signed-out state #3485 removes.
+ * Session contract (#3485, revised by #4054/#4171): the SESSION is the BFF's
+ * HttpOnly `__Host-session` cookie on app.premiselabs.co, read through the
+ * same-origin `/api/session` probe (`session.ts`). This module is the DATA layer
+ * only — `sb-tortoise-auth-token` (JSON, same shape supabase-js persists:
+ * { access_token, refresh_token, ... }) still carries the credential for the 11
+ * PostgREST + 3 Storage calls the console makes directly to Supabase. That is a
+ * RETAINED legacy surface (`SCOPE.md` §4 W2, backlog #3559) — the admin gate
+ * does NOT verify this cookie (it resolves the BFF session), and the same-origin
+ * `/blog/api/*` proxy is what carries the BFF credential for those calls. Do not
+ * add a new caller without migrating it through the BFF.
  *
  * Storage adapter (parent-domain cookie; localStorage only as a dev fallback):
  *  - getItem: the COOKIE first. localStorage is read only when no cookie exists
@@ -37,7 +39,10 @@ import { createClient, type SupabaseClient, type SupportedStorage } from '@supab
 import type { Database } from '@/lib/types';
 
 export const STORAGE_KEY = 'sb-tortoise-auth-token';
-export const AUTH_URL = 'https://tortoise.premiselabs.co/auth';
+// Same-origin (#4171): the console and the auth page both live on the app
+// origin now. A hardcoded tortoise.* URL would make every sign-in a cross-origin
+// 302 -> 301 hop before it reaches /auth.
+export const AUTH_URL = '/auth';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
