@@ -98,6 +98,29 @@ DISCARD_CORRUPT = "corrupt_entry"
 #: A filesystem error while writing the spool — recorded, never silent.
 DISCARD_WRITE_FAILED = "spool_write_failed"
 
+#: Discard reasons where the entry is NOT removed — the capture is still on the
+#: spool and WILL be retried, so it is not a loss.
+#:
+#: Everything else in the ledger reached it through ``_discard_entry``, which
+#: records and then UNLINKS the turn log + meta: a real loss.
+#:
+#: The distinction exists because a caller's exit code must answer "was anything
+#: LOST?" — never "is the ledger non-empty?". ``DISCARD_ENTRY_FAILED`` is an
+#: internal bug (an unexpected raise while filing), not a data loss; the entry is
+#: kept with a backoff, so treating it as a failure would report a capture as
+#: lost while it is still on disk and still queued (#3971).
+RETAINED_DISCARD_REASONS = frozenset({DISCARD_ENTRY_FAILED})
+
+
+def is_lost_discard(record: dict) -> bool:
+    """True when a ledger record means the entry was REMOVED (a real loss).
+
+    A retained discard (``RETAINED_DISCARD_REASONS``) is recorded only, so the
+    capture survives to retry. Use this — not ``summary.discarded`` — to decide
+    whether a capture attempt actually lost anything.
+    """
+    return record.get("reason") not in RETAINED_DISCARD_REASONS
+
 
 @dataclass(frozen=True)
 class Bounds:
@@ -143,6 +166,17 @@ class FlushSummary:
     held_back: int = 0
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
+
+    @property
+    def lost(self) -> list[dict]:
+        """The ledger records that mean the capture is GONE.
+
+        ``discarded`` is the FULL ledger, retained entries included, because the
+        ledger is an audit surface — it must record every anomaly. An exit code
+        must key on THIS instead: ``entry_failed`` keeps the entry on the spool
+        with a backoff, so it is a deferral, not a loss (#3971).
+        """
+        return [d for d in self.discarded if is_lost_discard(d)]
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────
