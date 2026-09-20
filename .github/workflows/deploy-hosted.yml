@@ -266,6 +266,20 @@ jobs:
           # before/after each deploy (docs/infra-runbook.md §4.6 —
           # `fly secrets list -a tortoise-y4mjjq | grep TORTOISE_SESSION_LLM_MOCK`
           # must be empty).
+      # Fly secret provenance gate (#4126): fail-closed check that every secret
+      # on the app has a declared managing source. The 2026-09-19 incident:
+      # TORTOISE_SESSION_LLM_MODEL + OPENROUTER_API_KEY were hand-set on Fly
+      # with no managing source, the deployed key 403'd on every extraction
+      # call, and production answered 200 with extracted: 0 for 50/50 sessions
+      # — invisible to CI because a name no file mentions cannot be compared
+      # against anything. Runs BEFORE the drift gate so its output is visible on
+      # every deploy attempt, not only on a deploy that gets as far as Fly.
+      # Exit 2 (missing manifest / unreadable secret list) is fail-closed, like
+      # the migration gate; no `if:` guard.
+      - name: Check Fly secret provenance (fail-closed)
+        run: python3 .github/scripts/check-fly-secret-drift.py
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       # Migration drift gate (#1095): fail-closed check that repo migrations
       # are not ahead of prod before shipping app code. The #1001 P0 (code
       # reading teams.suspended_at/flagged_at whose migration never reached
