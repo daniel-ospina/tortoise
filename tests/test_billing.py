@@ -922,6 +922,102 @@ class TestBootReconcile:
             "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}).result_set
         assert row[0][0] == "solo", "mirror must converge to Stripe truth"
 
+    def test_mirror_writes_both_period_bounds_and_never_nulls_a_stored_one(
+            self, monkeypatch, billing_client):
+        """#4216 → mutation: bind ``current_period_end`` UNCONDITIONALLY
+        (``params["period_end"] = sub.get(...)``) — the pre-fix mirror's shape.
+
+        ``mirror_subscription`` is an AUTHORING path for the subscription: the
+        authoritative push must persist the meter window as a PAIR and must
+        never NULL a stored bound just because a payload omits it — a NULL end
+        makes ``metering._current_period`` RAISE, dropping the org's increments
+        and leaving its cohort cap unenforceable. Driven through the REAL
+        ``reconcile_org`` (whose only writer is the mirror) and read through the
+        REAL meter.
+
+        RED pre-fix: the stored ``current_period_end`` is cleared (the
+        unconditional bind writes ``None``) and ``_current_period`` raises.
+        """
+        from datetime import datetime
+
+        from tortoise import billing as bl
+        from tortoise import metering as m
+
+        monkeypatch.setattr(m, "_supabase_mode", lambda: False)  # registry lane
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        start = int(datetime.fromisoformat(
+            "2026-09-03T00:00:00+00:00").timestamp())
+        end = int(datetime.fromisoformat(
+            "2026-10-03T00:00:00+00:00").timestamp())
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_4216_mirror', "
+            "t.current_period_start=$ps, t.current_period_end=$pe",
+            params={"id": org_id, "ps": start, "pe": end})
+
+        # Stripe truth: this payload OMITS both bounds — it must not clear them.
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_4216_mirror", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"}}]}})
+        summary = bl.reconcile_org(sdk, org_id)
+        assert summary["action"] == "mirror_subscription"
+
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
+            "t.current_period_end", params={"id": org_id}).result_set[0]
+        assert row[0] == start and row[1] == end, row
+        assert m._current_period(org_id).end_iso == "2026-10-03T00:00:00+00:00"
+
+        # ...and when the payload DOES carry the bounds, the mirror writes them.
+        # #4216 / Stripe `2025-03-31.basil`: the bounds live on the ITEM here —
+        # the reader must fall back to it (top-level absent).
+        new_start = int(datetime.fromisoformat(
+            "2026-10-03T00:00:00+00:00").timestamp())
+        new_end = int(datetime.fromisoformat(
+            "2026-11-03T00:00:00+00:00").timestamp())
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: {
+                                "id": "sub_4216_mirror", "status": "active",
+                                "items": {"data": [
+                                    {"price": {"id": "price_200proMM"},
+                                     "current_period_start": new_start,
+                                     "current_period_end": new_end}]}})
+        bl.reconcile_org(sdk, org_id)
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
+            "t.current_period_end", params={"id": org_id}).result_set[0]
+        assert row[0] == new_start and row[1] == new_end, row
+
+    def test_subscription_period_bounds_reads_the_item_fallback(self):
+        """#4216 / Stripe `2025-03-31.basil`: the period fields moved onto the
+        subscription ITEMS. Mutation caught: reading only the top level — a
+        Basil-or-later payload then yields ``(None, None)`` and the meter anchor
+        is never written, leaving the paying org unmeterable.
+
+        Also pins the precedence: a pre-Basil top-level value WINS over an item
+        value.
+        """
+        from tortoise.billing import subscription_period_bounds
+
+        assert subscription_period_bounds({"items": {"data": [{
+            "current_period_start": 100, "current_period_end": 200}]}}) \
+            == (100, 200)
+        assert subscription_period_bounds({
+            "current_period_start": 1, "current_period_end": 2,
+            "items": {"data": [{"current_period_start": 3,
+                                 "current_period_end": 4}]}}) == (1, 2)
+        assert subscription_period_bounds({}) == (None, None)
+        assert subscription_period_bounds({"items": []}) == (None, None)
+        # a truthy NON-list/non-dict `items` must not raise (malformed webhook
+        # payload; the checkout call site is outside a try) — #4216 review.
+        assert subscription_period_bounds({"items": "x"}) == (None, None)
+        assert subscription_period_bounds({"items": 5}) == (None, None)
+        assert subscription_period_bounds({
+            "current_period_start": 7, "current_period_end": 8,
+            "items": "x"}) == (7, 8)
+
     def test_boot_reconcile_repairs_customer_only_team(self, monkeypatch, billing_client):
         """Missed checkout.session.completed: only stripe_customer_id exists."""
         from tortoise import billing as bl

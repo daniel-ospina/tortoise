@@ -3002,6 +3002,22 @@ def update_org_billing(cp, org_id: str, updates: dict) -> None:
     body = {k: v for k, v in updates.items() if k in allowed}
     if not body:
         return
+    # #4216: Stripe delivers the period bounds as Unix EPOCH INTS. These
+    # columns are ``timestamptz``, whose input function rejects a bare JSON
+    # number (PostgREST populates the record and Postgres raises
+    # ``date/time field value out of range: "1756348800"``) — verified against
+    # PGlite. The REGISTRY twin stores the int verbatim because
+    # ``metering._anchor_instant`` accepts both shapes, but the control plane
+    # can only bind an ISO-8601 instant. Normalising HERE — the one seam every
+    # Supabase-lane billing write passes through (checkout and
+    # ``customer.subscription.updated``) — fixes every writer at once without
+    # changing what the webhook handlers pass. (The registry twin does NOT use
+    # this seam: ``mirror_subscription`` writes the graph directly and
+    # ``_anchor_instant`` reads its epoch ints.)
+    for _col in ("current_period_start", "current_period_end"):
+        _v = body.get(_col)
+        if isinstance(_v, (int, float)) and not isinstance(_v, bool):
+            body[_col] = datetime.fromtimestamp(float(_v), tz=UTC).isoformat()
     cp.query(
         "organizations",
         method="PATCH",

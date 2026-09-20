@@ -600,10 +600,12 @@ def test_billing_webhook_persists_period_start(supabase_mode, monkeypatch):
 
     row = fake.tables["organizations"][0]
     assert row.get("subscription_id") == "sub_t12"
-    assert row.get("current_period_start") == start, (
+    # The control plane binds an ISO-8601 instant (`update_org_billing`
+    # normalises Stripe's epoch int — #4216), so the stored value is SUB_START.
+    assert row.get("current_period_start") == SUB_START, (
         "the meter window anchor was silently dropped by update_org_billing's "
         "allowed-set filter")
-    assert row.get("current_period_end") == end
+    assert row.get("current_period_end") == SUB_END
 
 
 # ── T13 — not applicable (documented, not implemented) ───────────────────────
@@ -685,3 +687,345 @@ def test_migration_rekeys_the_ledger_and_the_cohort_read_to_a_window():
             "- interval '1 month') AT TIME ZONE 'UTC'") in flat
     assert ("(((period || '-01T00:00:00+00:00')::timestamptz "
             "AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC'") in flat
+
+
+# ── #4216 — a subscription AUTHORING path must write a COMPLETE window ───────
+
+
+def test_checkout_webhook_writes_both_period_bounds(supabase_mode, monkeypatch):
+    """#4216 → mutation: revert ``checkout.session.completed`` to writing only
+    ``subscription_id`` (no period).
+
+    Checkout is an AUTHORING path for the subscription: a just-checked-out
+    PAYING org used to persist the id and NO period, so
+    ``metering._current_period`` raised for it, its increments were dropped and
+    the cohort cap could never be enforced for it (#3981 absorbed + alerted the
+    symptom; this is the DATA defect). Driven through the REAL
+    signature-verified endpoint with an existing org, then resolved through the
+    REAL meter.
+
+    RED: both ``current_period_start`` and ``current_period_end`` stay NULL and
+    ``_current_period`` raises.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    import tortoise.metering as m
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-checkout", "stripe_customer_id": "cus_4216"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+
+    start = int(datetime.fromisoformat(SUB_START).timestamp())
+    end = int(datetime.fromisoformat(SUB_END).timestamp())
+    # items empty → the tier cannot resolve, so this exercises ONLY the window
+    # write (no apply_limits / notify side path).
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {"id": "sub_4216", "status": "active",
+                                           "current_period_start": start,
+                                           "current_period_end": end,
+                                           "items": {"data": []}})
+    payload = {
+        "id": "evt_4216_checkout",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-checkout",
+            "customer": "cus_4216",
+            "customer_details": {"email": "o@e.com"},
+            "subscription": "sub_4216",
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    assert resp.status_code == 200, resp.text
+
+    row = fake.tables["organizations"][0]
+    assert row.get("subscription_id") == "sub_4216"
+    # #4216: the CONTROL PLANE can only bind an ISO-8601 instant — Stripe sends
+    # epoch ints, and `update_org_billing` normalises them at the one seam every
+    # Supabase-lane billing write passes through (PostgREST rejects a bare JSON
+    # number for a `timestamptz`). Mutation caught: dropping that normalisation
+    # (the int is stored / the real PATCH would 400).
+    from datetime import UTC as _UTC
+    assert row.get("current_period_start") == datetime.fromtimestamp(
+        start, tz=_UTC).isoformat()
+    assert row.get("current_period_end") == datetime.fromtimestamp(
+        end, tz=_UTC).isoformat()
+
+    # The whole point: the org's window now RESOLVES (no raise), so its ledger
+    # rows are addressable and the cap can measure it.
+    window = m._current_period("org-4216-checkout")
+    assert window.start_iso == SUB_START
+    assert window.end_iso == SUB_END
+
+
+def test_checkout_with_malformed_items_is_acked_not_500(supabase_mode, monkeypatch):
+    """#4216 → mutation: deref ``.get`` on a scalar ``items`` in
+    ``_price_id_from`` (or drop the shared ``_subscription_items`` guard).
+
+    The checkout call site is OUTSIDE any try, so a malformed payload raised
+    ``AttributeError`` → HTTP 500 before the metadata-tier fallback could run,
+    and Stripe would retry the same malformed event forever.
+
+    RED against THIS branch's structure: the narrow ``try`` now covers only
+    ``get_subscription``, so the deref escapes to the route's ``except
+    Exception`` → 500. On ``origin/main`` the whole block sat inside one outer
+    ``except Exception`` that masked the same AttributeError into a 200, so this
+    test pins the narrow-try decision + the ``_subscription_items`` guard, not a
+    branch-point regression.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-malformed", "stripe_customer_id": "cus_bad"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {"id": "sub_bad", "status": "active",
+                                           "items": "x"})
+    payload = {
+        "id": "evt_4216_malformed",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-malformed",
+            "customer": "cus_bad",
+            "subscription": "sub_bad",
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.parametrize("bad_sub", [
+    {"items": "x"},                             # scalar items
+    {"items": 5},                               # int items
+    {"items": {"data": [{"price": "x"}]}},       # non-dict price
+    {"items": {"data": [{"price": 7}]}},         # int price
+    {"items": [{"price": ["not", "a", "dict"]}]},  # list price
+])
+def test_checkout_with_malformed_subscription_shape_is_acked_not_500(
+        supabase_mode, monkeypatch, bad_sub):
+    """#4216 review → mutation: leave ANY unknown-shape ``.get`` in
+    ``_price_id_from`` unguarded.
+
+    ``_subscription_items`` hardened the ``items`` shape, but the sibling
+    ``(rows[0].get("price", {}) or {}).get("id")`` still raised on a truthy
+    non-dict ``price`` (``billing.subscription_plan`` guards the identical
+    access, so the shape is an expected payload class). The checkout call site
+    is OUTSIDE any try, so the ``AttributeError`` escapes to the route's
+    ``except Exception`` → HTTP 500 → Stripe redelivers the same malformed
+    event forever.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-shape", "stripe_customer_id": "cus_bad"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+    sub = {"id": "sub_bad", "status": "active", **bad_sub}
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: sub)
+    payload = {
+        "id": "evt_4216_shape",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-shape",
+            "customer": "cus_bad",
+            "subscription": "sub_bad",
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    assert resp.status_code == 200, resp.text
+
+
+def test_checkout_window_write_failure_is_retried_not_swallowed(
+        supabase_mode, monkeypatch):
+    """#4216 review → mutation: revert the checkout window write to the
+    log-and-CONTINUE ``try/except`` (i.e. drop the re-raise).
+
+    A swallowed window-write failure lets the route return 200, so Stripe never
+    redelivers and the org stays window-unresolvable (increments dropped, cap
+    unenforceable) until the next renewal — which a checkout-only org may never
+    receive. The fix APPLIES THE TIER FIRST (a taken payment must not sit on
+    free limits, #2789) and then re-raises so the event is retried; both writes
+    are idempotent, so the retry completes the window.
+
+    RED: response 200 (the failure is masked) instead of 500.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-wfail", "stripe_customer_id": "cus_4216"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+
+    real_update = supabase_mode.update_org_billing
+
+    def _fail_only_on_window(cp, org, updates):
+        if "current_period_start" in updates or "current_period_end" in updates:
+            raise RuntimeError("period column write exploded")
+        return real_update(cp, org, updates)
+
+    monkeypatch.setattr(supabase_mode, "update_org_billing", _fail_only_on_window)
+
+    class _StubCatalog:
+        def tier_for_price(self, price_id):
+            return "pro"
+
+    monkeypatch.setattr(bl, "PriceCatalog", _StubCatalog)
+
+    start = int(datetime.fromisoformat(SUB_START).timestamp())
+    end = int(datetime.fromisoformat(SUB_END).timestamp())
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {"id": "sub_4216", "status": "active",
+                                           "current_period_start": start,
+                                           "current_period_end": end,
+                                           "items": {"data": [
+                                               {"price": {"id": "price_x"}}]}})
+    payload = {
+        "id": "evt_4216_wfail",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-wfail",
+            "customer": "cus_4216",
+            "subscription": "sub_4216",
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    # The window failure is SURFACED (retried), not masked as a 200.
+    assert resp.status_code == 500, resp.text
+
+    row = fake.tables["organizations"][0]
+    # ...but the tier was applied FIRST, so the taken payment does not sit on
+    # free limits while Stripe redelivers (#2789).
+    assert row.get("tier") == "pro", row
+    # The window itself was NOT partially written.
+    assert row.get("current_period_start") is None, row
+    assert row.get("current_period_end") is None, row
+
+
+def test_new_org_window_failure_still_applies_the_metadata_tier(
+        supabase_mode, monkeypatch):
+    """#4216 review → mutation: re-raise ``window_error`` BEFORE the
+    ``is_new_org and resolved_tier is None`` metadata-tier fallback.
+
+    When the window write fails AND the subscription price does not resolve
+    (``tier is None``), the metadata fallback is the only path that lifts a new
+    PAID org off free limits in the registry/selfhost lane (``sdk.org_create``
+    hardcodes free; #2789). Re-raising early skips it. The fix runs the
+    fallback first and re-raises LAST, so the tier lands AND the event is
+    retried.
+
+    RED: the org is left on the default (free) tier while the route 500s.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-neworg", "stripe_customer_id": "cus_4216"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+    # Stub provisioning: this test is about the ORDER of the two failure
+    # paths, not about provisioning (covered elsewhere).
+    monkeypatch.setattr(ha, "_provision_new_org_from_checkout",
+                        lambda sdk, org_id, meta: org_id)
+
+    real_update = supabase_mode.update_org_billing
+
+    def _fail_only_on_window(cp, org, updates):
+        if "current_period_start" in updates or "current_period_end" in updates:
+            raise RuntimeError("period column write exploded")
+        return real_update(cp, org, updates)
+
+    monkeypatch.setattr(supabase_mode, "update_org_billing", _fail_only_on_window)
+
+    class _EmptyCatalog:
+        def tier_for_price(self, price_id):
+            return None
+
+    monkeypatch.setattr(bl, "PriceCatalog", _EmptyCatalog)
+
+    start = int(datetime.fromisoformat(SUB_START).timestamp())
+    end = int(datetime.fromisoformat(SUB_END).timestamp())
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {"id": "sub_4216", "status": "active",
+                                           "current_period_start": start,
+                                           "current_period_end": end,
+                                           "items": {"data": [
+                                               {"price": {"id": "price_x"}}]}})
+    payload = {
+        "id": "evt_4216_neworg_wfail",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-neworg",
+            "customer": "cus_4216",
+            "subscription": "sub_4216",
+            "metadata": {"new_org": "1", "tier": "pro",
+                          "user_id": "u_4216", "org_name": "New Org"},
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    assert resp.status_code == 500, resp.text
+
+    # The metadata fallback ran BEFORE the re-raise: the new paid org is NOT
+    # left on free limits while Stripe redelivers.
+    row = fake.tables["organizations"][0]
+    assert row.get("tier") == "pro", row
+
