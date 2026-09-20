@@ -55,8 +55,8 @@ test('#4258: MemorySources reads capture_extract with absence = ON and toggles i
     'End extraction toggle (#4258)', 'extraction row')
   assert.match(row, /aria-checked=\{extractOn\}/, 'the switch reflects the setting')
   assert.match(row, /onToggleCaptureExtract\(!extractOn\)/, 'the switch toggles the setting')
-  assert.match(row, /disabled=\{memoryBusy === 'extract' \|\| !sessionsOn\}/,
-    'the switch is disabled while busy and when recording is off')
+  assert.match(row, /disabled=\{!!memoryBusy \|\| !sessionsOn\}/,
+    'the switch is disabled while ANY memory row is busy and when recording is off')
   assert.match(row, /memoryErrors\.extract/, 'the row renders its own error')
 })
 

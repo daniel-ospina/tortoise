@@ -3701,22 +3701,39 @@ def _cmd_sessions_import(args) -> int:
     # extraction on the #2335 TRUE-retry lane.
     from tortoise.sdk import (
         _CAPTURE_EXTRACTION_DISABLED_MODE,
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
         _CAPTURE_EXTRACTION_DISABLED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
         _CAPTURE_NO_PROVIDER_MODE,
     )
     _clear_capture_error(harness)
     _capture_mode = result.get("extraction_mode")
-    if _capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
-                         _CAPTURE_EXTRACTION_DISABLED_MODE):
+    _warns = result.get("warnings") or []
+    # #4258/#4188: a store-only 2xx is DEFERRED in TWO shapes — the store-only
+    # MODES, and a "replayed" receipt carrying an upgrade-refused warning (the
+    # server REPLAYS a FAILED store-only prior on the non-convergent M2 lane,
+    # which is still "no extraction ever ran"). Writing a local receipt for
+    # either would make every later re-import skip the POST on a stale receipt,
+    # so the session could never gain memory points, and would leave the
+    # warning's own remedy an instruction the CLI itself makes unreachable.
+    _upgrade_refused = (
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns
+        or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
+    if (_capture_mode in (_CAPTURE_NO_PROVIDER_MODE,
+                          _CAPTURE_EXTRACTION_DISABLED_MODE)
+            or _upgrade_refused):
         # #4258: the missing key and the turned-off setting are INDEPENDENT
         # reasons. When BOTH hold, the mode is "no-provider" but the receipt
         # also carries the disabled warning — the remedy must then name both
         # levers, or it sends the user to a key that will not extract.
         _setting_off = (
             _capture_mode == _CAPTURE_EXTRACTION_DISABLED_MODE
-            or _CAPTURE_EXTRACTION_DISABLED_WARNING
-            in (result.get("warnings") or []))
-        if _setting_off and _capture_mode == _CAPTURE_NO_PROVIDER_MODE:
+            or _CAPTURE_EXTRACTION_DISABLED_WARNING in _warns
+            or _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in _warns)
+        _keyless = (
+            _capture_mode == _CAPTURE_NO_PROVIDER_MODE
+            or _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING in _warns)
+        if _setting_off and _keyless:
             _why = ("no LLM provider key, and extraction into memory is "
                     "turned OFF for this team (capture_extract)")
             _remedy = ("re-run this import once a key is configured and "

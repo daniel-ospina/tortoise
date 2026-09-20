@@ -503,14 +503,14 @@ function SettingsTab(props) {
       <section className="settings-home" aria-labelledby="settings-capture-heading">
         <h3 id="settings-capture-heading">Captured sessions</h3>
         <p className="dim small">
-          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory sources — extraction into memory is controlled by the toggle in Memory sources.
+          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory sources — extraction of those captures into memory is controlled by the toggle in Memory sources.
         </p>
         {/* #4258: the extraction-off state is honest on this home too — a row
             reading "0 extracted" must be distinguishable from a failure or a
             missing provider key. */}
         {!sessionsLoading && state && sessionsOn && state.capture_extract === false && (
           <p className="dim small">
-            Extraction into memory is off — new captures made through this service are stored but not extracted; sessions captured while this is off stay unextracted until extraction is turned back on and they are captured again. Change it under Memory sources above.
+            Extraction into memory is off — new captures made through this service are stored but not extracted, and those captures stay unextracted until extraction is turned back on and they are captured again. Change it under Memory sources above.
           </p>
         )}
         {/* #2000 (W4) review P2-3: honest states — never a fabricated
@@ -9809,7 +9809,7 @@ function MemorySources(props) {
           data-on={extractOn ? 'true' : 'false'}
           aria-label="Extract sessions into memory"
           onClick={() => onToggleCaptureExtract(!extractOn)}
-          disabled={memoryBusy === 'extract' || !sessionsOn}
+          disabled={!!memoryBusy || !sessionsOn}
         />
         <div className="toggle-body">
           <h4>Extract sessions into memory</h4>
@@ -9817,9 +9817,9 @@ function MemorySources(props) {
             When on, each session captured through this service is also
             extracted into memories once a provider key is configured. When
             off, those sessions are stored only — their turns stay searchable,
-            but nothing is extracted, and sessions captured while this is off
-            stay unextracted until extraction is turned back on and they are
-            captured again.
+            but nothing is extracted, and captures made through this service
+            while this is off stay unextracted until extraction is turned back
+            on and they are captured again.
           </p>
           {!sessionsOn && (
             <p className="dim small">Turn on agent session recording to change this.</p>

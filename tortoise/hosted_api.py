@@ -8386,8 +8386,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
     # captured without a key gets its memory points once a key appears, on an
     # EXPLICIT re-capture (never automatically). "none" is retry-eligible for
-    # the same reason "v2" is: it minted no claims of its own, and its turn ids
-    # are deterministic, so the re-attempt converges. The m2 exclusion is
+    # the same reason "v2" and "disabled" (#4258) are: none of them minted
+    # claims of its own, and their turn ids are deterministic, so the
+    # re-attempt converges. The m2 exclusion is
     # UNCHANGED and deliberate (see tortoise/sdk.py's retry gate).
     prior_capture_ok = session_row[1]
     prior_capture_extractor = session_row[2]
@@ -8737,12 +8738,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # that could downgrade a succeeded prior to capture_ok=False.
             state["attempted"] = True
             state["proj"] = proj
-            # #4258: when the setting is ALSO off, the DURABLE lane names the
-            # user setting rather than the transient key — both are
-            # retry-eligible, and the replay disclosure keys on this value.
-            state["lane"] = (
-                _CAPTURE_EXTRACTOR_LANE_DISABLED if not extract_enabled
-                else "none")
+            # #4258: the SAME derivation as the durable record (see
+            # _store_only_lane) — the two lane writers cannot disagree.
+            state["lane"] = _store_only_lane(no_provider, extract_enabled)
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": [],
@@ -8803,7 +8801,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         if state is not None and not session_existed:
             state["attempted"] = True
             state["proj"] = proj
-            state["lane"] = _CAPTURE_EXTRACTOR_LANE_DISABLED
+            # the SAME derivation as the durable record (see _store_only_lane)
+            state["lane"] = _store_only_lane(no_provider, extract_enabled)
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": [],
@@ -9563,8 +9562,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # retry-eligible (see _CAPTURE_EXTRACTOR_LANES_RETRYABLE), so a later
     # re-capture with extraction back ON still converges (#2335 TRUE retry).
     _capture_extractor_record = (
-        _CAPTURE_EXTRACTOR_LANE_DISABLED if not extract_enabled
-        else "none" if no_provider
+        _store_only_lane(no_provider, extract_enabled) if store_only
         else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
               else "v2"))
     _record_session_state = (
@@ -9638,7 +9636,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # per-point entries ride the enriched ``resp["points"]`` list (extra
     # wins on merge, D8).
     # #2335 WI-1d: the observation leg (hosted lane tag) — one structured
-    # line per capture; mode covers v2/m2/replayed/error — empty returns pre-emit.
+    # line per capture; mode covers v2/m2/replayed/error/no-provider/
+    # extraction-disabled — empty returns pre-emit.
     try:
         _emit_capture_observation(
             session_id=session_id, lane="hosted",
@@ -18777,6 +18776,22 @@ def _capture_extract_enabled(org: dict, state: dict | None = None) -> bool:
     if state is None:
         state = _get_onboarding_state(org["org_id"])
     return bool(state.get("capture_extract", True))
+
+
+def _store_only_lane(no_provider: bool, extract_enabled: bool) -> str:
+    """#4258: the Session lane recorded for a STORE-ONLY capture.
+
+    ONE derivation for BOTH writers of the lane — the durable
+    `_capture_extractor_record` and the #3129 abandoned-capture marker — so they
+    can never disagree. The user setting OUTRANKS the transient missing key when
+    both hold: it is the durable, user-controlled reason, and the M2-replay
+    disclosure keys on this value (diagnosing a configured-key team as keyless
+    would be a false statement, the defect this value exists to prevent). Both
+    lanes are retry-eligible (see `_CAPTURE_EXTRACTOR_LANES_RETRYABLE`).
+    """
+    if not extract_enabled:
+        return _CAPTURE_EXTRACTOR_LANE_DISABLED
+    return "none"
 
 
 def _onboarding_defaults() -> dict:

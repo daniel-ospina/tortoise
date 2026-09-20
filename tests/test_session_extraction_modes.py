@@ -877,6 +877,18 @@ def test_capture_extract_is_per_org(monkeypatch, client):
     assert ha_mod._capture_extract_enabled({"org_id": "other-team-4258"}) is True
 
 
+def test_store_only_lane_is_one_derivation():
+    """#4258: BOTH writers of the Session lane derive from `_store_only_lane`,
+    so the durable record and the #3129 abandoned marker cannot disagree. The
+    user setting outranks the transient missing key when both hold."""
+    from tortoise.hosted_api import _store_only_lane
+    from tortoise.sdk import _CAPTURE_EXTRACTOR_LANE_DISABLED
+
+    assert _store_only_lane(True, True) == "none"
+    assert _store_only_lane(True, False) == _CAPTURE_EXTRACTOR_LANE_DISABLED
+    assert _store_only_lane(False, False) == _CAPTURE_EXTRACTOR_LANE_DISABLED
+
+
 def test_capture_extract_off_recapture_on_m2_is_not_called_keyless(
         monkeypatch, client):
     """#4258: the disabled store records lane "disabled", NOT "none" — so the

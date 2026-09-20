@@ -3358,9 +3358,9 @@ class TortoiseSDK:
         # #3892: a keyless capture records lane "none" (no lane ran), and a
         # FAILED prior attempt is re-attempted (#2335 TRUE retry) — that is
         # how a session captured without a key gets its memory points once a
-        # key appears. "none" is retry-eligible for the same reason "v2" is
-        # (it minted no claims of its own, and its turn ids are deterministic,
-        # so the re-attempt converges).
+        # key appears. "none" is retry-eligible for the same reason "v2" and
+        # "disabled" (#4258) are: none of them minted claims of its own, and
+        # their turn ids are deterministic, so the re-attempt converges.
         # The m2 exclusion is UNCHANGED and deliberate: M2 dedups per-capture
         # only, so re-running it can mint duplicate claims (the #1727/#2473
         # hole). An earlier revision of this change admitted a "none" prior
@@ -3954,7 +3954,8 @@ class TortoiseSDK:
         resp["surfaced"] = surfaced_marker(
             extracted, verified_ids=verified_ids)
         # #2335 WI-1d: the observation leg — one structured line per capture
-        # at the shared assembly (mode covers v2/m2/replayed/error — empty returns pre-emit).
+        # at the shared assembly (mode covers v2/m2/replayed/error/no-provider/
+        # extraction-disabled — empty returns pre-emit).
         try:
             _emit_capture_observation(
                 session_id=session_id, lane="sdk",

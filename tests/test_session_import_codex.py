@@ -411,3 +411,59 @@ def test_sessions_import_deferred_remedy_names_both_levers(tmp_path, monkeypatch
     assert "no llm provider key" in err and "turned off" in err, err
     assert "key is configured and extraction is turned back on" in err, (
         "the remedy must name BOTH levers, not just the missing key: " + err)
+
+
+def test_sessions_import_defers_on_upgrade_refused_replay(tmp_path, monkeypatch, capsys):
+    """#4258/#4188: on the non-convergent M2 lane the server REPLAYS a FAILED
+    store-only prior — mode ``replayed`` + an upgrade-refused warning — which is
+    STILL "no extraction ever ran". The CLI must treat that as DEFERRED (no
+    local receipt), or every later re-import skips the POST on a stale receipt
+    and the session can never gain memory points, making the warning's own
+    remedy unreachable. Covers BOTH the keyless (pre-existing) and the
+    setting-disabled (#4258) warning shapes.
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+    )
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    def _run(warning):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "session_id": "s-replay",
+                    "extraction_mode": "replayed",
+                    "warnings": [
+                        "session already captured (same session_id) — no "
+                        "new extraction",
+                        warning,
+                    ],
+                }).encode()
+
+        args = SimpleNamespace(file=str(_pi_turns_file(tmp_path, 3)),
+                               harness="pi", session_id=None)
+        with mock.patch("urllib.request.urlopen",
+                        lambda req, timeout=None: _Resp()):
+            assert _cmd_sessions_import(args) == 0
+        capsys.readouterr()
+
+    # the setting-disabled variant (new in #4258) …
+    _run(_CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
+    assert list((tmp_path / "receipts").glob("*.json")) == [], (
+        "a replayed store-only receipt must not write a local receipt")
+    # … and the keyless variant (the pre-existing shape of the same hole).
+    _run(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+    assert list((tmp_path / "receipts").glob("*.json")) == []
