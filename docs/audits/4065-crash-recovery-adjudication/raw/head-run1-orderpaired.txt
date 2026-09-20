@@ -1,0 +1,351 @@
+# cmd: TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_tortoise_client.py tests/test_event_log.py tests/test_crash_recovery_e2e.py --deselect tests/test_tortoise_client.py -v -p no:cacheprovider -m 'not track_b and not live' --timeout=300 -r fEs
+# revision: 1fb9555112dabb8e0026c8d032ce752275981f0c (PR #4065 head)
+# lane: EMBEDDED (TORTOISE_TEST_CARVE_OUT=1, TORTOISE_DB_URI unset)
+# NOTE: repeat #1 of the order-paired run (no TORTOISE_REAPER_MIN_UPTIME knob)
+#
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /Users/danielospina/Documents/GitHub/tortoise/.venv/bin/python
+rootdir: /private/tmp/j3-4065/head
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 92 items / 66 deselected / 26 selected
+
+tests/test_event_log.py::TestAppendAndReplay::test_append_single_event PASSED [  3%]
+tests/test_event_log.py::TestAppendAndReplay::test_dedup_by_event_id PASSED [  7%]
+tests/test_event_log.py::TestAppendAndReplay::test_dedup_different_event_ids PASSED [ 11%]
+tests/test_event_log.py::TestAppendAndReplay::test_multiple_event_types PASSED [ 15%]
+tests/test_event_log.py::TestAppendAndReplay::test_no_event_id_no_dedup PASSED [ 19%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_empty_log PASSED [ 23%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_deterministic PASSED [ 26%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_changes_with_content PASSED [ 30%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_with_expected PASSED [ 34%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_wrong_expected PASSED [ 38%]
+tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_all_complete FAILED [ 42%]
+tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_missing FAILED [ 46%]
+tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_failed_card FAILED [ 50%]
+tests/test_event_log.py::TestCrashRecovery::test_recover_no_events PASSED [ 53%]
+tests/test_event_log.py::TestCrashRecovery::test_recover_from_last_completed_step FAILED [ 57%]
+tests/test_event_log.py::TestCrashRecovery::test_recover_ignores_other_cards FAILED [ 61%]
+tests/test_crash_recovery_e2e.py::test_crash_recovery_full_cycle FAILED  [ 65%]
+tests/test_crash_recovery_e2e.py::test_crash_recovery_multiple_checkpoints FAILED [ 69%]
+tests/test_crash_recovery_e2e.py::test_crash_recovery_no_crash_all_complete FAILED [ 73%]
+tests/test_crash_recovery_e2e.py::test_crash_recovery_card_failed_is_complete FAILED [ 76%]
+tests/test_crash_recovery_e2e.py::test_crash_recovery_empty_log PASSED   [ 80%]
+tests/test_crash_recovery_e2e.py::test_crash_recovery_hash_integrity_after_crash PASSED [ 84%]
+tests/test_crash_recovery_e2e.py::test_crash_recovery_concurrent_cards_independent FAILED [ 88%]
+tests/test_crash_recovery_e2e.py::test_crash_recovery_dedup_on_recovery_events PASSED [ 92%]
+tests/test_crash_recovery_e2e.py::test_scan_incomplete_card_never_created FAILED [ 96%]
+tests/test_crash_recovery_e2e.py::test_recover_card_absent_from_nonempty_log PASSED [100%]
+
+=================================== FAILURES ===================================
+_____________ TestCrashRecovery.test_scan_incomplete_all_complete ______________
+
+self = <test_event_log.TestCrashRecovery object at 0x10a43ba40>
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmptexh919h/events.jsonl')
+
+    def test_scan_incomplete_all_complete(self, tmp_log):
+        append_event(tmp_log, "card_created", {"card_id": "c1"}, event_id="ev-1")
+        append_event(tmp_log, "card_completed", {"card_id": "c1"}, event_id="ev-2")
+>       assert scan_incomplete(tmp_log, {"c1"}) == []
+E       AssertionError: assert ['c1'] == []
+E         
+E         Left contains one more item: 'c1'
+E         
+E         Full diff:
+E         - []
+E         + [
+E         +     'c1',
+E         + ]
+
+tests/test_event_log.py:125: AssertionError
+________________ TestCrashRecovery.test_scan_incomplete_missing ________________
+
+self = <test_event_log.TestCrashRecovery object at 0x10a448110>
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpwdgb39p_/events.jsonl')
+
+    def test_scan_incomplete_missing(self, tmp_log):
+        append_event(tmp_log, "card_created", {"card_id": "c1"}, event_id="ev-1")
+        append_event(tmp_log, "card_completed", {"card_id": "c1"}, event_id="ev-2")
+        append_event(tmp_log, "card_created", {"card_id": "c2"}, event_id="ev-3")
+        # c2 has no completion
+>       assert scan_incomplete(tmp_log, {"c1", "c2"}) == ["c2"]
+E       AssertionError: assert ['c1', 'c2'] == ['c2']
+E         
+E         At index 0 diff: 'c1' != 'c2'
+E         Left contains one more item: 'c2'
+E         
+E         Full diff:
+E           [
+E         +     'c1',
+E               'c2',
+E           ]
+
+tests/test_event_log.py:132: AssertionError
+______________ TestCrashRecovery.test_scan_incomplete_failed_card ______________
+
+self = <test_event_log.TestCrashRecovery object at 0x10a4487a0>
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpw35dxmtm/events.jsonl')
+
+    def test_scan_incomplete_failed_card(self, tmp_log):
+        append_event(tmp_log, "card_created", {"card_id": "c1"}, event_id="ev-1")
+        append_event(tmp_log, "card_failed", {"card_id": "c1"}, event_id="ev-2")
+        # card_failed is also a completion
+>       assert scan_incomplete(tmp_log, {"c1"}) == []
+E       AssertionError: assert ['c1'] == []
+E         
+E         Left contains one more item: 'c1'
+E         
+E         Full diff:
+E         - []
+E         + [
+E         +     'c1',
+E         + ]
+
+tests/test_event_log.py:138: AssertionError
+___________ TestCrashRecovery.test_recover_from_last_completed_step ____________
+
+self = <test_event_log.TestCrashRecovery object at 0x10a4494c0>
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpmr0qzsty/events.jsonl')
+
+    def test_recover_from_last_completed_step(self, tmp_log):
+        append_event(tmp_log, "card_created", {"card_id": "c1"}, event_id="ev-1")
+        append_event(tmp_log, "step_started", {"card_id": "c1", "step_id": "s1"}, event_id="ev-2")
+        append_event(tmp_log, "step_completed", {"card_id": "c1", "step_id": "s1"}, event_id="ev-3")
+    
+        def retry(cid, last_step):
+            return {"card_id": cid, "last_step": last_step}
+    
+        result = recover(tmp_log, "c1", retry)
+>       assert result["last_step"] == "s1"
+E       AssertionError: assert None == 's1'
+
+tests/test_event_log.py:157: AssertionError
+______________ TestCrashRecovery.test_recover_ignores_other_cards ______________
+
+self = <test_event_log.TestCrashRecovery object at 0x10a449b50>
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpotw6qum7/events.jsonl')
+
+    def test_recover_ignores_other_cards(self, tmp_log):
+        append_event(tmp_log, "card_created", {"card_id": "c1"}, event_id="ev-1")
+        append_event(tmp_log, "step_completed", {"card_id": "c1", "step_id": "s1"}, event_id="ev-2")
+        append_event(tmp_log, "card_created", {"card_id": "c2"}, event_id="ev-3")
+        append_event(tmp_log, "step_completed", {"card_id": "c2", "step_id": "other"}, event_id="ev-4")
+    
+        def retry(cid, last_step):
+            return {"card_id": cid, "last_step": last_step}
+    
+        result = recover(tmp_log, "c1", retry)
+>       assert result["last_step"] == "s1"  # c1's step, not c2's
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: assert None == 's1'
+
+tests/test_event_log.py:169: AssertionError
+________________________ test_crash_recovery_full_cycle ________________________
+
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmps4snxohf/events.jsonl')
+
+    def test_crash_recovery_full_cycle(tmp_log):
+        """Full round-trip: create cards + checkpoint → crash mid-card → recover → verify.
+    
+        Flow:
+          1. Card c1 completes fully (card_created → step_started → step_completed → card_completed)
+          2. Checkpoint saved (c1 done)
+          3. Card c2 starts but crashes mid-step (card_created → step_started — no completion)
+          4. Card c3 is created but crashes immediately (card_created only)
+          5. scan_incomplete finds c2, c3
+          6. recover replays from last checkpoint for each
+          7. Verify c2 resumes from last step, c3 from scratch
+        """
+        # ── Phase 1: Complete card c1 + checkpoint ─────────────────────────
+        append_event(tmp_log, "card_created", _card_created("c1"), event_id="ev-c1-create")
+        append_event(tmp_log, "step_started", _step_event("s1", "c1"), event_id="ev-c1-s1-start")
+        append_event(tmp_log, "step_completed", _step_event("s1", "c1"), event_id="ev-c1-s1-done")
+        append_event(tmp_log, "card_completed", _card_created("c1"), event_id="ev-c1-complete")
+    
+        # Checkpoint: capture that c1 is done
+        append_event(tmp_log, "checkpoint", _checkpoint_item(
+            "c1 completed; c2 not started; c3 not started"
+        ), event_id="ev-checkpoint-1")
+    
+        # ── Phase 2: c2 starts, crashes mid-step ───────────────────────────
+        append_event(tmp_log, "card_created", _card_created("c2"), event_id="ev-c2-create")
+        append_event(tmp_log, "step_started", _step_event("s1", "c2"), event_id="ev-c2-s1-start")
+        # CRASH HERE — no step_completed, no card_completed for c2
+    
+        # c3 created, crashes immediately
+        append_event(tmp_log, "card_created", _card_created("c3"), event_id="ev-c3-create")
+        # CRASH HERE — no completion for c3
+    
+        # Capture hash of the crashed-state log (all events written, no recovery yet)
+        pre_crash_hash = verify_hash(tmp_log)[1]
+    
+        # ── Phase 3: "Restart" — scan for incomplete cards ────────────────
+        all_card_ids = {"c1", "c2", "c3"}
+        incomplete = scan_incomplete(tmp_log, all_card_ids)
+>       assert "c1" not in incomplete, "c1 was completed — should not be incomplete"
+E       AssertionError: c1 was completed — should not be incomplete
+E       assert 'c1' not in ['c1', 'c2', 'c3']
+
+tests/test_crash_recovery_e2e.py:111: AssertionError
+___________________ test_crash_recovery_multiple_checkpoints ___________________
+
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmp074ncg62/events.jsonl')
+
+    def test_crash_recovery_multiple_checkpoints(tmp_log):
+        """Multiple checkpoints: recovery finds the last valid checkpoint for each card.
+    
+        Flow:
+          1. c1 created → checkpoint (c1 partial)
+          2. c1 step s1 completed → checkpoint (c1 at s1)
+          3. c1 step s2 started → CRASH
+          4. recover finds c1's last completed step (s1)
+        """
+        append_event(tmp_log, "card_created", _card_created("c1"), event_id="ev-c1-create")
+        append_event(tmp_log, "checkpoint", _checkpoint_item(
+            "c1 created, no steps done"
+        ), event_id="ev-cp-1")
+    
+        append_event(tmp_log, "step_started", _step_event("s1", "c1"), event_id="ev-c1-s1-start")
+        append_event(tmp_log, "step_completed", _step_event("s1", "c1"), event_id="ev-c1-s1-done")
+        append_event(tmp_log, "checkpoint", _checkpoint_item(
+            "c1 step s1 completed"
+        ), event_id="ev-cp-2")
+    
+        append_event(tmp_log, "step_started", _step_event("s2", "c1"), event_id="ev-c1-s2-start")
+        # CRASH — no step_completed for s2
+    
+        incomplete = scan_incomplete(tmp_log, {"c1"})
+        assert incomplete == ["c1"]
+    
+        def retry_fn(card_id: str, last_step: str | None) -> dict:
+            return {"card_id": card_id, "last_step": last_step}
+    
+        r = recover(tmp_log, "c1", retry_fn)
+        # c1 had step_completed for s1 → last_step should be "s1"
+>       assert r["last_step"] == "s1", (
+            f"Expected last_step='s1' (last completed step), got {r['last_step']}"
+        )
+E       AssertionError: Expected last_step='s1' (last completed step), got None
+E       assert None == 's1'
+
+tests/test_crash_recovery_e2e.py:193: AssertionError
+__________________ test_crash_recovery_no_crash_all_complete ___________________
+
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpf6dx12cf/events.jsonl')
+
+    def test_crash_recovery_no_crash_all_complete(tmp_log):
+        """No crash scenario: all cards complete → scan_incomplete returns empty."""
+        for cid in ("c1", "c2", "c3"):
+            append_event(tmp_log, "card_created", _card_created(cid), event_id=f"ev-{cid}-create")
+            append_event(tmp_log, "step_started", _step_event("s1", cid), event_id=f"ev-{cid}-s1-start")
+            append_event(tmp_log, "step_completed", _step_event("s1", cid), event_id=f"ev-{cid}-s1-done")
+            append_event(tmp_log, "card_completed", _card_created(cid), event_id=f"ev-{cid}-complete")
+    
+        incomplete = scan_incomplete(tmp_log, {"c1", "c2", "c3"})
+>       assert incomplete == [], f"All cards complete, got incomplete: {incomplete}"
+E       AssertionError: All cards complete, got incomplete: ['c1', 'c2', 'c3']
+E       assert ['c1', 'c2', 'c3'] == []
+E         
+E         Left contains 3 more items, first extra item: 'c1'
+E         
+E         Full diff:
+E         - []
+E         + [
+E         +     'c1',...
+E         
+E         ...Full output truncated (3 lines hidden), use '-vv' to show
+
+tests/test_crash_recovery_e2e.py:207: AssertionError
+_________________ test_crash_recovery_card_failed_is_complete __________________
+
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpzeo4zftq/events.jsonl')
+
+    def test_crash_recovery_card_failed_is_complete(tmp_log):
+        """card_failed counts as a completion — not reported as incomplete."""
+        append_event(tmp_log, "card_created", _card_created("c1"), event_id="ev-c1-create")
+        append_event(tmp_log, "card_failed", _card_created("c1"), event_id="ev-c1-fail")
+    
+        incomplete = scan_incomplete(tmp_log, {"c1"})
+>       assert incomplete == [], f"card_failed is a completion, got: {incomplete}"
+E       AssertionError: card_failed is a completion, got: ['c1']
+E       assert ['c1'] == []
+E         
+E         Left contains one more item: 'c1'
+E         
+E         Full diff:
+E         - []
+E         + [
+E         +     'c1',
+E         + ]
+
+tests/test_crash_recovery_e2e.py:216: AssertionError
+_______________ test_crash_recovery_concurrent_cards_independent _______________
+
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpivarcspo/events.jsonl')
+
+    def test_crash_recovery_concurrent_cards_independent(tmp_log):
+        """Cards operate independently — c1's crash doesn't affect c2's completion."""
+        # c1: incomplete (crashes)
+        append_event(tmp_log, "card_created", _card_created("c1"), event_id="ev-c1-create")
+        append_event(tmp_log, "step_started", _step_event("s1", "c1"), event_id="ev-c1-s1-start")
+        # c1 CRASH
+    
+        # c2: completes fully
+        append_event(tmp_log, "card_created", _card_created("c2"), event_id="ev-c2-create")
+        append_event(tmp_log, "step_started", _step_event("s1", "c2"), event_id="ev-c2-s1-start")
+        append_event(tmp_log, "step_completed", _step_event("s1", "c2"), event_id="ev-c2-s1-done")
+        append_event(tmp_log, "card_completed", _card_created("c2"), event_id="ev-c2-complete")
+    
+        incomplete = scan_incomplete(tmp_log, {"c1", "c2"})
+>       assert incomplete == ["c1"], f"Only c1 should be incomplete, got: {incomplete}"
+E       AssertionError: Only c1 should be incomplete, got: ['c1', 'c2']
+E       assert ['c1', 'c2'] == ['c1']
+E         
+E         Left contains one more item: 'c2'
+E         
+E         Full diff:
+E           [
+E               'c1',
+E         +     'c2',
+E           ]
+
+tests/test_crash_recovery_e2e.py:276: AssertionError
+___________________ test_scan_incomplete_card_never_created ____________________
+
+tmp_log = PosixPath('/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tmpj345fti2/events.jsonl')
+
+    def test_scan_incomplete_card_never_created(tmp_log):
+        """scan_incomplete with a card_id that has no card_created event at all.
+    
+        Real crash scenario: card was created in memory but card_created never
+        flushed to disk before SIGKILL. scan_incomplete should not crash.
+        """
+        append_event(tmp_log, "card_created", _card_created("c1"), event_id="ev-c1-create")
+        append_event(tmp_log, "card_completed", _card_created("c1"), event_id="ev-c1-done")
+    
+        # c2 never had any event — it was in-memory only when the kill happened
+        incomplete = scan_incomplete(tmp_log, {"c1", "c2"})
+        # c1 is complete, c2 has no events → neither should be reported incomplete
+        # (c2 never started from the log's perspective)
+>       assert "c1" not in incomplete, "c1 is complete"
+E       AssertionError: c1 is complete
+E       assert 'c1' not in ['c1', 'c2']
+
+tests/test_crash_recovery_e2e.py:316: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_all_complete
+FAILED tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_missing
+FAILED tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_failed_card
+FAILED tests/test_event_log.py::TestCrashRecovery::test_recover_from_last_completed_step
+FAILED tests/test_event_log.py::TestCrashRecovery::test_recover_ignores_other_cards
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_full_cycle - Ass...
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_multiple_checkpoints
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_no_crash_all_complete
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_card_failed_is_complete
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_concurrent_cards_independent
+FAILED tests/test_crash_recovery_e2e.py::test_scan_incomplete_card_never_created
+=========== 11 failed, 15 passed, 66 deselected in 198.45s (0:03:18) ===========

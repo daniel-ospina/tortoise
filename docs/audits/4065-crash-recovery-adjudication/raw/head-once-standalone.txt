@@ -1,0 +1,17 @@
+# cmd: TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_event_log.py -v -p no:cacheprovider -m 'not track_b and not live' -r fEs
+# revision: 1fb9555112dabb8e0026c8d032ce752275981f0c (PR #4065 head)
+# lane: EMBEDDED (TORTOISE_TEST_CARVE_OUT=1, TORTOISE_DB_URI unset)
+# NOTE: standalone = the CI 'test (b)' collection context is NOT reproduced
+#       -> the STALE file module-skips (bare `import shared_state` unavailable)
+#
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /Users/danielospina/Documents/GitHub/tortoise/.venv/bin/python
+rootdir: /private/tmp/j3-4065/head
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 0 items / 1 skipped
+
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_event_log.py:27: shared_state package not installed — event log tests require it
+============================== 1 skipped in 0.47s ==============================

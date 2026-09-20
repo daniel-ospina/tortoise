@@ -1,0 +1,40 @@
+# CI evidence — PR #4065 head 1fb955511, workflow run 35407858365, job 'test (b)' id 105877771740 (FAILED)
+# Source: gh api repos/daniel-ospina/tortoise/actions/jobs/105877771740/logs
+
+## The lane the failing job actually ran (NOT the docker lane)
+
+  CARVE_OUT: 1
+  EXPECT_URI: 
+  TORTOISE_DB_URI: 
+  TORTOISE_TEST_CARVE_OUT: 1
+  TORTOISE_TEST_EXPECT_URI: 
+  URI: 
+
+## 'docker lane unavailable' skips prove no docker server was used
+SKIPPED [1] tests/test_assembly_pure.py:608: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:624: docker lane unavailable (pure tests unaffected)
+
+## short test summary (the 11 FAILED node ids)
+=========================== short test summary info ============================
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_full_cycle - AssertionError: c1 was completed — should not be incomplete
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_multiple_checkpoints - AssertionError: Expected last_step='s1' (last completed step), got None
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_no_crash_all_complete - AssertionError: All cards complete, got incomplete: ['c1', 'c2', 'c3']
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_card_failed_is_complete - AssertionError: card_failed is a completion, got: ['c1']
+FAILED tests/test_crash_recovery_e2e.py::test_crash_recovery_concurrent_cards_independent - AssertionError: Only c1 should be incomplete, got: ['c1', 'c2']
+FAILED tests/test_crash_recovery_e2e.py::test_scan_incomplete_card_never_created - AssertionError: c1 is complete
+FAILED tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_all_complete - AssertionError: assert ['c1'] == []
+FAILED tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_missing - AssertionError: assert ['c1', 'c2'] == ['c2']
+FAILED tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_failed_card - AssertionError: assert ['c1'] == []
+FAILED tests/test_event_log.py::TestCrashRecovery::test_recover_from_last_completed_step - AssertionError: assert None == 's1'
+FAILED tests/test_event_log.py::TestCrashRecovery::test_recover_ignores_other_cards - AssertionError: assert None == 's1'
+SKIPPED [2] tests/test_longmem_reader_prompting.py:1497: OPENROUTER_API_KEY absent — real-model reader smoke gated
+SKIPPED [1] tests/test_longmem_rerank.py:1038: real cross-encoder is opt-in (TORTOISE_LME_RUN_REAL_MODEL=1)
+SKIPPED [1] tests/test_assembly_pure.py:608: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:624: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:653: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:677: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:699: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:797: docker lane unavailable (pure tests unaffected)
+
+## CI pytest invocation
+timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1

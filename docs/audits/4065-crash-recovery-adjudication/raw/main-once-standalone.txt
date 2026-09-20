@@ -1,0 +1,31 @@
+# cmd: TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_event_log.py -v -p no:cacheprovider -m 'not track_b and not live' -r fEs
+# revision: f2b3e91b2060bbf8e43806302e5998fe9c7e1c36 (origin/main)
+# lane: EMBEDDED (TORTOISE_TEST_CARVE_OUT=1, TORTOISE_DB_URI unset)
+# NOTE: standalone = the CI 'test (b)' collection context is NOT reproduced
+#
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /Users/danielospina/Documents/GitHub/tortoise/.venv/bin/python
+rootdir: /private/tmp/j3-4065/main
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 16 items
+
+tests/test_event_log.py::TestAppendAndReplay::test_append_single_event PASSED [  6%]
+tests/test_event_log.py::TestAppendAndReplay::test_dedup_by_event_id PASSED [ 12%]
+tests/test_event_log.py::TestAppendAndReplay::test_dedup_different_event_ids PASSED [ 18%]
+tests/test_event_log.py::TestAppendAndReplay::test_multiple_event_types PASSED [ 25%]
+tests/test_event_log.py::TestAppendAndReplay::test_no_event_id_no_dedup PASSED [ 31%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_empty_log PASSED [ 37%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_deterministic PASSED [ 43%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_changes_with_content PASSED [ 50%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_with_expected PASSED [ 56%]
+tests/test_event_log.py::TestIntegrity::test_verify_hash_wrong_expected PASSED [ 62%]
+tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_all_complete PASSED [ 68%]
+tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_missing PASSED [ 75%]
+tests/test_event_log.py::TestCrashRecovery::test_scan_incomplete_failed_card PASSED [ 81%]
+tests/test_event_log.py::TestCrashRecovery::test_recover_no_events PASSED [ 87%]
+tests/test_event_log.py::TestCrashRecovery::test_recover_from_last_completed_step PASSED [ 93%]
+tests/test_event_log.py::TestCrashRecovery::test_recover_ignores_other_cards PASSED [100%]
+
+======================== 16 passed in 105.47s (0:01:45) ========================

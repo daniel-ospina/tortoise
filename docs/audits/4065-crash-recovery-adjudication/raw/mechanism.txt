@@ -1,0 +1,72 @@
+# Mechanism — why the 11 red tests are red, and why the PR cannot be the cause
+
+## 1. The product code speaks camelCase; the stale tests spoke snake_case
+
+```
+$ git -C main show HEAD:tortoise/shared_state/event_log.py | sed -n '106p;128p'
+            if card_id and ev.get("type", "") in ("cardCompleted", "cardFailed"):
+        if ev.get("type", "") == "stepCompleted":
+```
+
+PR head (and the PR's pre-PR base d7c102559) — test_event_log.py:
+```
+$ sed -n '34,35p' /tmp/j3-4065/head/tests/test_event_log.py
+        "card_created", "step_started", "step_completed",
+        "gate_passed", "gate_blocked", "card_completed", "card_failed",
+```
+
+origin/main (after #4229 b49f5d6a0) — test_event_log.py:
+```
+$ sed -n '31,32p' /tmp/j3-4065/main/tests/test_event_log.py
+        "cardCreated", "stepStarted", "stepCompleted",
+        "gatePassed", "gateBlocked", "cardCompleted", "cardFailed",
+```
+append_event stores the type VERBATIM (EventCodec.encode: event['type'] = type_name),
+so a snake_case append is never recognised by the camelCase completion check.
+
+## 2. The import block differs too (this is why a STANDALONE run skips, not fails)
+
+PR head / base (bare top-level package — only importable if something else put
+`tortoise/` on sys.path first):
+```
+18:    from shared_state.events import register_event_type  # noqa: I001
+19:    from shared_state.event_log import (
+27:    pytest.skip("shared_state package not installed — event log tests require it", allow_module_level=True)
+```
+origin/main:
+```
+17:from tortoise.shared_state.events import register_event_type  # noqa: I001
+18:from tortoise.shared_state.event_log import (
+```
+
+The thing that puts `tortoise/` on sys.path earlier in the CI half:
+```
+$ sed -n '48,50p' /tmp/j3-4065/head/tortoise/tortoise_client.py
+_TORTOISE_ROOT = Path(__file__).resolve().parent
+if str(_TORTOISE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TORTOISE_ROOT))
+
+```
+tests/test_tortoise_client.py is the FIRST file in the CI 'test (b)' FILES list and does
+`from tortoise import tortoise_client` at module import — during COLLECTION. Every later
+module in the half can then `import shared_state` and reach tortoise/shared_state/.
+Standalone, that trigger is absent, so the stale file module-skips (collected 0 items).
+
+## 3. The fix already exists on main and touches NO PR file
+
+$ git -C /tmp/j3-4065/main log --oneline -1 -- tests/test_event_log.py
+b49f5d6a0 test(shared-state): 26 event-log/crash-recovery tests were never running (and 11 were stale) (#4229)
+
+$ git -C /tmp/j3-4065/main show --stat --oneline b49f5d6a0 | head -12
+b49f5d6a0 test(shared-state): 26 event-log/crash-recovery tests were never running (and 11 were stale) (#4229)
+ tests/test_crash_recovery_e2e.py | 133 ++++++++++++++++---------------
+ tests/test_event_log.py          |  87 ++++++++++-----------
+ tests/test_skip_guard.py         | 164 +++++++++++++++++++++++++++++++++++++++
+ tools/skip-guard.py              | 145 +++++++++++++++++++++++++++++-----
+ 4 files changed, 395 insertions(+), 134 deletions(-)
+
+## 4. The PR's own diff (assembly only — no shared fixture, no journal, no shared_state)
+
+$ gh api repos/daniel-ospina/tortoise/pulls/4065/files --jq '.[].filename'
+tests/test_assembly_pure.py
+tortoise/assembly.py
