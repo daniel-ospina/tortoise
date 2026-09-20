@@ -314,18 +314,22 @@ def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
 
 
 def payload_partition(
-    blocks: list[tuple[str, bool]],
-) -> tuple[set[str], set[str], dict[str, set[str]]]:
-    """``(assigned, unconditional, sources)`` over EVERY payload block.
+    blocks: list[tuple[str, bool]], gh_present: set[str]
+) -> tuple[set[str], set[str], set[str], dict[str, set[str]]]:
+    """``(assigned, unconditional, live, sources)`` over EVERY payload block.
 
     ``assigned``      names in the payload when every GitHub secret is present
     ``unconditional`` names the payload carries even with NO GitHub secret present
+    ``live``          names the payload carries with the secrets the RUN actually
+                      has. A name in ``assigned`` but not in ``live`` is skipped by
+                      this deploy, so whatever is on Fly survives — the #4126
+                      incident, whatever gates the assignment.
     ``sources[name]`` the GitHub secrets whose marker appears in the value the
                       workflow assigns to ``name`` — so a `gh-secret:<GH_NAME>`
                       declaration must name the secret that actually feeds THAT
                       variable, not merely one referenced anywhere.
 
-    The two samples are the only two the guard can take cheaply, and the payload
+    The synthetic samples are the two the guard can take cheaply, and the payload
     need not be monotone in the secret set — a ``[ -z "${{ secrets.X }}" ]`` guard
     assigns when X is ABSENT, so a name can sit in ``unconditional`` and not in
     ``assigned``. A MANAGED name is therefore the INTERSECTION (present with every
@@ -339,21 +343,26 @@ def payload_partition(
     """
     assigned: set[str] = set()
     unconditional: set[str] = set()
+    live: set[str] = set()
     guarded: set[str] = set()
     sources: dict[str, set[str]] = {}
     for script, step_conditional in blocks:
         secret_names = sorted(set(_SECRET_REF_RE.findall(script)))
         all_present = _capture_payload(script, {name: name for name in secret_names})
+        # The payload THIS run builds — markers only for the secrets the runner
+        # actually carries. One more execution of the same shell.
+        in_run = _capture_payload(script, {name: name for name in gh_present})
         block_assigned = set(all_present)
         block_unconditional = set() if step_conditional else set(_capture_payload(script, {}))
         guarded |= block_assigned - block_unconditional
         unconditional |= block_unconditional
         assigned |= block_assigned
+        live |= set(in_run)
         for name, value in all_present.items():
             sources.setdefault(name, set()).update(
                 s for s in secret_names if f"{_MARK_OPEN}{s}{_MARK_CLOSE}" in value
             )
-    return assigned, unconditional - guarded, sources
+    return assigned, unconditional - guarded, live, sources
 
 
 def conditional_names(assigned: set[str], unconditional: set[str]) -> set[str]:
@@ -423,8 +432,12 @@ def read_fly_secret_names(app: str) -> list[str]:
     names = []
     for item in payload:
         name = item.get("name") if isinstance(item, dict) else None
-        if not name:
-            raise ValueError(f"secret entry has no name: {item!r}")
+        # A non-string name is a payload the guard cannot classify. Accepting it by
+        # truthiness let it crash later (`TypeError: unhashable type` — or `'<' not
+        # supported between str and int` in a sort), an uncaught exception, so the
+        # process exited 1, the BYPASSABLE code, instead of fail-closed 2.
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"secret entry has no usable string name: {item!r}")
         names.append(name)
     # An EMPTY list is the same fail-open hazard as a wrong shape: every
     # `set(fly_names) - set(declared)` is empty, so a truncated payload reports
@@ -495,17 +508,19 @@ def main() -> int:
 
     secret_refs = workflow_secret_refs(workflow_text)
     try:
+        # Read FIRST: the partition needs it — the payload the RUN actually builds
+        # is one of its samples.
+        gh_present = read_gh_secret_presence()
+    except ValueError as exc:
+        _err(f"cannot determine secret provenance: {exc}")
+        return 2
+    try:
         blocks = extract_propagation_blocks(workflow_text)
-        assigned, unconditional, assignment_sources = payload_partition(blocks)
+        assigned, unconditional, live, assignment_sources = payload_partition(blocks, gh_present)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         # subprocess.SubprocessError/OSError must land HERE: escaping as an
         # uncaught exception would exit 1 — the code the deploy step translates
         # into a bypass — instead of fail-closed 2 (#4126 review).
-        _err(f"cannot determine secret provenance: {exc}")
-        return 2
-    try:
-        gh_present = read_gh_secret_presence()
-    except ValueError as exc:
         _err(f"cannot determine secret provenance: {exc}")
         return 2
     # Everything the payload carries that is NOT there with every GitHub secret
@@ -571,23 +586,12 @@ def main() -> int:
                     f"that secret does not feed the assignment of {name} "
                     f"(found: {sorted(assignment_sources.get(name) or [])})"
                 )
-            elif name in assigned_conditionally and gh_name not in gh_present and name in fly_names:
-                # Assigned behind a guard AND the GitHub secret does not exist in
-                # this run: the deploy skips the assignment every time and Fly
-                # keeps whatever value is there — hand-managed, the #4126 case.
-                # The guard alone is not evidence of harm (a guarded name whose
-                # secret EXISTS propagates on every deploy); the absence is.
-                violations.append(
-                    f"UNSOURCED — {name!r} is on Fly and is declared gh-secret:{gh_name}, "
-                    f"but that GitHub secret does not exist, so deploy-hosted.yml skips "
-                    f"the assignment and the Fly value is hand-managed. Assign it "
-                    f"unconditionally from version control, create the GitHub secret, or "
-                    f"drop the Fly secret"
-                )
             elif name in assigned_conditionally:
-                # Guarded, with the GitHub secret present: propagated on every
-                # deploy, so not managed-unconditionally but not drift either.
-                # CONSERVATIVE: any guarded assignment wins over an unguarded one.
+                # Guarded, and the guard's inputs are present in THIS run (the
+                # per-run skip check below is the authority on that): propagated
+                # on every deploy, so not managed-unconditionally but not drift
+                # either. CONSERVATIVE: any guarded assignment wins over an
+                # unguarded one.
                 conditional.append(name)
         elif kind == "workflow":
             if name not in assigned:
@@ -651,6 +655,28 @@ def main() -> int:
 
     # The list describes the FLY app's state, so a declared-but-not-yet-present
     # name is not debt — the reverse-completeness rule above already covers it.
+    #
+    # (3) Declared AND honoured with every secret present, but skipped by THIS run:
+    # the deploy leaves whatever is on Fly, so the value is hand-managed — the
+    # #4126 incident, whatever gates the assignment (a guard on the declared
+    # secret, or on any OTHER secret, or a composite flag). The two synthetic
+    # samples cannot see it; it is a property of the REAL secret set, which is why
+    # GH_SECRETS_PRESENT is read at all (#4259 review).
+    for name, source in sorted(declared.items()):
+        kind, _, gh_name = source.partition(":")
+        if kind not in ("gh-secret", "workflow") or name not in fly_names:
+            continue
+        if name in assigned and name not in live:
+            if kind == "gh-secret" and gh_name not in gh_present:
+                reason = f"its declared GitHub secret {gh_name} is not present in this run"
+            else:
+                reason = "the GitHub secrets this run carries make its assignment a no-op"
+            violations.append(
+                f"UNSOURCED — {name!r} is on Fly but this deploy does not assign it "
+                f"({reason}), so the Fly value is hand-managed. Assign it unconditionally "
+                "from version control, or drop the Fly secret"
+            )
+
     fly_conditional = [n for n in fly_names if n in set(conditional)]
     if fly_conditional:
         print(
@@ -692,4 +718,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Fail-closed belt and braces: an UNEXPECTED exception would make Python exit
+    # 1 — the code the deploy step translates into a bypass when
+    # `skip-fly-secret-provenance` is set. No unclassifiable state may take that
+    # path.
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        _err(f"cannot determine secret provenance: unexpected {type(exc).__name__}: {exc}")
+        sys.exit(2)

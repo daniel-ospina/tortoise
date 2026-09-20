@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -114,6 +115,18 @@ def _declared_gh_names(manifest: Path) -> set[str]:
     return names
 
 
+def _referenced_secret_names(workflow: Path) -> set[str]:
+    """Every ``secrets.X`` a fixture workflow references.
+
+    A fixture's contract is the all-present case, and a guard may read a secret
+    that is not itself DECLARED (it gates a name declared with another source) —
+    e.g. the fixture's `MULTILINE_FLAG` is gated on `A_KEY`/`B_KEY`. The
+    per-run skip rule reads the payload the RUN builds, so those guards must be
+    satisfied for the fixture to mean what it says.
+    """
+    return set(re.findall(r"secrets\.([A-Za-z0-9_]+)", workflow.read_text()))
+
+
 def _run(
     secrets: Path,
     *,
@@ -133,10 +146,10 @@ def _run(
     )
     if not drop_present:
         # The deploy step states which GitHub Actions secrets the run carries (no
-        # CI token can list them). The fixtures' contract — unless a test says
-        # otherwise — is that every `gh-secret:` the manifest declares exists.
+        # CI token can list them). Unless a test says otherwise, the fixtures mean
+        # "every secret this workflow reads exists".
         if present is None:
-            present = _declared_gh_names(manifest)
+            present = _declared_gh_names(manifest) | _referenced_secret_names(workflow)
         env["GH_SECRETS_PRESENT"] = " ".join(sorted(present))
     if extra_env:
         env.update(extra_env)
@@ -631,6 +644,10 @@ def test_bare_gh_secret_source_is_exit_2_not_exit_1():
     r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "bare-gh.json"), manifest=manifest)
     assert r.returncode == 2, r.stdout + r.stderr
     assert "gh-secret needs the GitHub secret name" in r.stderr
+    # ...and it is the DECLARATION check that says so, not the __main__ backstop
+    # that maps an escaped exception to exit 2 — pinning the backstop alone would
+    # let this defect hide behind it.
+    assert "unexpected" not in r.stderr, r.stderr
 
 
 def test_gh_secret_argument_on_a_non_gh_source_is_exit_2():
@@ -841,7 +858,7 @@ def test_secret_entry_without_a_name_is_exit_2():
     bad = _fixture("nameless.json", '[{"digest": "deadbeef"}]')
     r = _run(bad)
     assert r.returncode == 2, r.stdout + r.stderr
-    assert "has no name" in r.stderr
+    assert "no usable string name" in r.stderr
 
 
 # ── The GitHub-secret presence half — the incident's own shape ────────────────
@@ -938,6 +955,7 @@ def test_unset_presence_probe_is_exit_2_not_clean():
     r = _run(_secrets_file(_ALL_DECLARED, "probe.json"), drop_present=True)
     assert r.returncode == 2, r.stdout + r.stderr
     assert "GH_SECRETS_PRESENT is not set" in r.stderr
+    assert "unexpected" not in r.stderr, r.stderr
 
 
 def test_second_payload_block_is_scanned_too():
@@ -1001,6 +1019,91 @@ jobs:
     )
     assert r.returncode == 2, r.stdout + r.stderr
     assert "did not finish" in r.stderr
+    assert "unexpected" not in r.stderr, r.stderr
+
+
+def test_assignment_gated_on_another_absent_secret_is_unsourced():
+    """A guard on ANY secret the run does not carry leaves the Fly value alone.
+
+    The declared secret's own presence is not the question — the payload the RUN
+    builds is. Gating a name on a DIFFERENT secret (a natural future edit, e.g.
+    "all provider keys present") would otherwise certify as merely conditional
+    (#4259 review).
+    """
+    wf = _fixture(
+        "cross-guard.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS=""
+          [ -n "${{ secrets.GUARD }}" ] && ARGS="$ARGS FOO=${{ secrets.FOO }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture("cross-guard-manifest.txt", "FOO  gh-secret:FOO\n")
+    absent_guard = _run(
+        _secrets_file(["FOO"], "cross-guard-absent.json"),
+        manifest=manifest,
+        workflow=wf,
+        present={"FOO"},
+    )
+    assert absent_guard.returncode == 1, absent_guard.stdout + absent_guard.stderr
+    assert "UNSOURCED" in absent_guard.stdout and "FOO" in absent_guard.stdout
+    present_guard = _run(
+        _secrets_file(["FOO"], "cross-guard-present.json"),
+        manifest=manifest,
+        workflow=wf,
+        present={"FOO", "GUARD"},
+    )
+    assert present_guard.returncode == 0, present_guard.stdout + present_guard.stderr
+
+
+def test_workflow_declaration_skipped_in_this_run_is_unsourced():
+    """A `workflow` name the guarded payload skips in this run is hand-managed.
+
+    The shipped `BACKUP_SWEEP_ENABLED` is a composite flag: if any secret it
+    composes is missing, the assignment is skipped and Fly keeps the old value
+    (#4259 review).
+    """
+    wf = _fixture(
+        "composite.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS=""
+          if [ -n "${{ secrets.SECRET_VALUE }}" ]; then ARGS="$ARGS COMPOSITE_FLAG=true"; fi
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture("composite-manifest.txt", "COMPOSITE_FLAG  workflow\n")
+    r = _run(
+        _secrets_file(["COMPOSITE_FLAG"], "composite.json"),
+        manifest=manifest,
+        workflow=wf,
+        present=set(),
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNSOURCED" in r.stdout and "COMPOSITE_FLAG" in r.stdout
+
+
+def test_non_string_secret_name_is_exit_2_not_a_crash():
+    """A wrong-typed name must fail closed (exit 2), not crash (exit 1).
+
+    Truthiness alone accepted a non-string name, which then raised TypeError in a
+    set/sort — an uncaught exception, so the process exited 1, the code the deploy
+    step translates into a bypass (#4259 review).
+    """
+    r = _run(_fixture("bad-name.json", '[{"name": ["FASTAPI_INTERNAL_KEY"]}]'))
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "no usable string name" in r.stderr
+    # The SHAPE check must be the thing that catches it: without the assertion
+    # below, the __main__ backstop would hide a regression in the shape check
+    # behind its own generic exit-2.
+    assert "unexpected" not in r.stderr, r.stderr
 
 
 def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
@@ -1038,8 +1141,9 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     # the versioned default. Pinned on the partition, not just the manifest token —
     # reverting deploy-hosted.yml to the pre-#4126 guarded line must turn this red
     # (#4259 review P2: the manifest token alone stayed green on that revert).
-    _, unconditional, _ = module.payload_partition(
-        module.extract_propagation_blocks(REAL_WORKFLOW.read_text())
+    _, unconditional, _, _ = module.payload_partition(
+        module.extract_propagation_blocks(REAL_WORKFLOW.read_text()),
+        _declared_gh_names(REAL_MANIFEST),
     )
     assert "TORTOISE_SESSION_LLM_MODEL" in unconditional
     # The two names the deploy ADOPTED — their GitHub Actions secrets already
@@ -1053,7 +1157,17 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
         "real-manifest-names.json",
         json.dumps([{"name": n} for n in sorted(declared)]),
     )
-    r = _run(real_secrets, manifest=REAL_MANIFEST, workflow=REAL_WORKFLOW, toml=REAL_FLY_TOML)
+    r = _run(
+        real_secrets,
+        manifest=REAL_MANIFEST,
+        workflow=REAL_WORKFLOW,
+        toml=REAL_FLY_TOML,
+        # The real runner's view: the GitHub secrets the manifest declares. That
+        # deliberately EXCLUDES TORTOISE_SESSION_LLM_MODEL (declared `workflow`,
+        # whose GitHub secret does not exist) — which is exactly the state the
+        # versioned default was added for, so this fixture models production.
+        present=_declared_gh_names(REAL_MANIFEST),
+    )
     assert "STALE DECLARATION" not in r.stdout, r.stdout
     assert "UNDECLARED" not in r.stdout, r.stdout
     assert r.returncode == (1 if debt else 0), r.stdout + r.stderr
