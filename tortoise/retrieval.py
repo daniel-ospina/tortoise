@@ -395,6 +395,26 @@ def resolve_byte_cap_from_caps(caps: dict) -> int:
                    * BYTES_PER_TOKEN_FLOOR))
 
 
+def _sanitize_cap(raw, default: int, hi: int) -> int:
+    """A caps-dict entry validated EXACTLY as ``ask_env_int`` validates env.
+
+    ``None``, a bool, a non-numeric value and an out-of-range value all fall
+    back to ``default`` — never a raise, never a zero/negative budget. The
+    dict seam and the env seam share this rule so one nominal value cannot
+    resolve to two different windows.
+    """
+    if raw is None or isinstance(raw, bool):
+        return default
+    if not isinstance(raw, int):
+        try:
+            raw = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return default
+    if raw < 1 or raw > hi:
+        return default
+    return raw
+
+
 def resolve_token_cap_from_caps(caps: dict) -> int:
     """A caps dict's ``context_token_cap``, validated the same way the env
     knob is (falling back to the ask-lane default).
@@ -408,17 +428,52 @@ def resolve_token_cap_from_caps(caps: dict) -> int:
     absent key falls back to ``DEFAULT_ASK_CONTEXT_TOKEN_CAP``, so a dict
     with no token cap resolves like ``caps=None``.
     """
-    raw = caps.get("context_token_cap", DEFAULT_ASK_CONTEXT_TOKEN_CAP)
-    if isinstance(raw, bool):
-        return DEFAULT_ASK_CONTEXT_TOKEN_CAP
-    if not isinstance(raw, int):
-        try:
-            raw = int(str(raw).strip())
-        except (TypeError, ValueError):
-            return DEFAULT_ASK_CONTEXT_TOKEN_CAP
-    if raw < 1 or raw > MAX_ASK_CONTEXT_TOKEN_CAP:
-        return DEFAULT_ASK_CONTEXT_TOKEN_CAP
-    return raw
+    if "context_token_cap" not in caps:
+        # An ABSENT key means "no dict-level pin" — resolve the SAME env knob
+        # the env seam uses (and that ``resolve_byte_cap_from_caps`` already
+        # honours for its byte leg) instead of the bare literal. Reading the
+        # literal here let a legacy caps dict resolve a DIFFERENT token budget
+        # — and therefore a different DERIVED byte ceiling — than the
+        # env-pinned ask lane, reintroducing the two-seams-two-windows class
+        # #4105 removes.
+        return ask_env_int(ASK_CONTEXT_TOKEN_CAP_ENV,
+                           DEFAULT_ASK_CONTEXT_TOKEN_CAP,
+                           hi=MAX_ASK_CONTEXT_TOKEN_CAP)
+    return _sanitize_cap(caps.get("context_token_cap"),
+                         DEFAULT_ASK_CONTEXT_TOKEN_CAP,
+                         MAX_ASK_CONTEXT_TOKEN_CAP)
+
+
+def resolve_item_cap_from_caps(caps: dict) -> int:
+    """A caps dict's ``context_item_cap``, validated like the env knob.
+
+    Same family as ``resolve_token_cap_from_caps``: an absent, non-numeric or
+    out-of-range entry resolves to ``DEFAULT_ASK_CONTEXT_ITEM_CAP`` rather
+    than reaching ``assemble_context`` and raising — a legacy caps dict must
+    not turn a bad entry into a failed ask when the env seam falls back.
+    """
+    if "context_item_cap" not in caps:
+        return ask_env_int(ASK_CONTEXT_ITEM_CAP_ENV,
+                           DEFAULT_ASK_CONTEXT_ITEM_CAP, hi=_POOL_CLAMP[1])
+    return _sanitize_cap(caps.get("context_item_cap"),
+                         DEFAULT_ASK_CONTEXT_ITEM_CAP, _POOL_CLAMP[1])
+
+
+def resolve_limit_from_caps(caps: dict) -> int:
+    """A caps dict's retrieval-window ``limit``, validated like the env knob.
+
+    Invariant 1 of ``resolve_ask_retrieval_caps`` is re-applied here
+    (``limit >= context_item_cap``): the retrieval call cuts at
+    ``result_ids[:limit]`` BEFORE assembly, so a window narrower than the item
+    cap could never honour it.
+    """
+    if "limit" not in caps:
+        limit = ask_env_int(ASK_RETRIEVAL_LIMIT_ENV,
+                            DEFAULT_ASK_RETRIEVAL_LIMIT, hi=_POOL_CLAMP[1])
+    else:
+        limit = _sanitize_cap(caps.get("limit"),
+                              DEFAULT_ASK_RETRIEVAL_LIMIT, _POOL_CLAMP[1])
+    return max(limit, resolve_item_cap_from_caps(caps))
 
 
 def resolve_ask_boost_multipliers() -> dict:
@@ -847,8 +902,12 @@ def assemble_context(
 
     ``byte_cap`` (#1987 Task 5, P1-2): keyword-only, default None = unchanged
     behavior (the extraction/search AND eval lanes are unaffected — the eval
-    re-export ``assemble_context as _assemble_context`` never passes it). The
-    ASK lane passes the resolved ``byte_cap`` (#4105 — it was a 32 KiB
+    re-export ``assemble_context as _assemble_context`` never passes it).
+    ⚠️ #4105: the non-ASCII token surcharge is charged in the SHARED token
+    accounting regardless of ``byte_cap``, so on CJK/emoji pools the token
+    budget — not the byte cap — is what newly bounds those runs on EVERY
+    lane (ASCII-only input is byte-identical to the pre-#4105 arithmetic).
+    The ASK lane passes the resolved ``byte_cap`` (#4105 — it was a 32 KiB
     literal): the assembled evidence is enforced to
     BOTH the resolved token cap AND the resolved byte cap (defaults
     16 000 estimated tokens / 128 000 bytes; #4105)
@@ -867,8 +926,10 @@ def assemble_context(
     admitted-by-token hits out, so a byte ceiling that cannot be raised
     silently caps the window. ``stopped_by`` names the drop-bound that fired
     (``byte_cap`` / ``token_cap`` / ``item_cap``, else ``None``), preferring
-    the byte/token caps over ``item_cap`` because the item bound is also
-    "reached" when the pool simply ended. The return value is unchanged
+    the byte/token caps over ``item_cap`` and naming ``item_cap`` ONLY when
+    the item bound actually CUT the pool: the item bound is also "reached"
+    when the pool simply ended, so a pool that ended exactly at the bound is
+    ``None``, not ``item_cap``. The return value is unchanged
     (a list of hits), so pure-function callers are unaffected.
 
     Token accounting (the alignment invariant): raw whitespace words
@@ -878,10 +939,13 @@ def assemble_context(
     overage for unspaced CJK/emoji runs, so ``context_tokens`` is bounded by
     ``max_context_tokens`` on every script); the 1.1 markup multiplier
     applies
-    ONCE to the joined total, so ``context_tokens ==
-    estimate_tokens(render_context(...))`` holds exactly (no per-block
-    ``int()`` drift). Oversized hits are SKIPPED (continue), never starving
-    the rest of the context.
+    ONCE per block on the CUMULATIVE raw total, so the accepted set's FINAL
+    check is exactly its reported value: ``context_tokens ==
+    estimate_tokens_ask(render_context(...))`` (the ask-lane estimator, which
+    carries the same surcharge — a plain ``estimate_tokens`` drops it, so the
+    name here must be the ask one). ``assemble_context`` therefore bounds the
+    reported ``context_tokens``, on ASCII and non-ASCII alike. Oversized hits
+    are SKIPPED (continue), never starving the rest of the context.
 
     Claim-text-less hits (#2978) consume NO item slot and NO budget. A hit
     that renders ONLY decorations (``[session N]`` / session date / speaker
@@ -925,6 +989,10 @@ def assemble_context(
     dropped_by_token_cap = 0
     dropped_by_byte_cap = 0
     claim_bearing = 0
+    #: True only when the loop BROKE on the item bound with a pool item still
+    #: unexamined — i.e. the item cap actually cut the pool. A pool that
+    #: simply ENDED at the item bound must not be reported as item-bound.
+    item_bound_cut = False
     # The separator framing bytes (P1): render_context joins blocks with
     # "\n\n" AND appends a trailing "\n\n" after the header — account those
     # so ``len(evidence) <= byte_cap`` is a HARD invariant (not just the
@@ -934,6 +1002,7 @@ def assemble_context(
         if question_date else 0
     for h in pool:
         if len(selected) >= item_bound:
+            item_bound_cut = True
             break
         # #2978: a hit rendering ONLY decorations (no content AND no
         # supersession/validity marker text) carries nothing for the reader,
@@ -974,7 +1043,7 @@ def assemble_context(
         stopped_by = (
             "byte_cap" if dropped_by_byte_cap else
             "token_cap" if dropped_by_token_cap else
-            "item_cap" if len(selected) >= item_bound else None)
+            "item_cap" if item_bound_cut else None)
         stats.update({
             "items_selected": len(selected),
             "claim_bearing": claim_bearing,

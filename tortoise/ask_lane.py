@@ -485,6 +485,20 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         assembled = fired_block.post_cap_lines
         hits: list[dict] = []
         leg_trace: list[dict] = []
+        # #4105 review fix: the honest-budget census must cover the FIRED
+        # path too. It assembles under the SAME resolved token/byte caps, and
+        # a byte-bound drop there was previously silent (assembly.py has no
+        # logger), which contradicts the lane's own "never silently accepted
+        # and dropped" contract.
+        _fired_stats = fired_block.cap_stats or {}
+        if _fired_stats.get("dropped_by_byte_cap"):
+            _logger.warning(
+                "ask lane (connected assembly): byte cap %s dropped %d "
+                "hit(s) the token cap admitted (byte budget is the binding "
+                "constraint; raise TORTOISE_ASK_CONTEXT_BYTE_CAP or lower "
+                "TORTOISE_ASK_CONTEXT_TOKEN_CAP to match)",
+                _fired_stats.get("byte_cap"),
+                _fired_stats["dropped_by_byte_cap"])
     else:
         # Legacy lane: retrieval (whole-retrieval raises →
         # AskRetrievalUnavailable). A1/A3/A4/A6 (#2070): the ask-lane

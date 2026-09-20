@@ -45,6 +45,9 @@ from tortoise.retrieval import (
     render_context,
     resolve_ask_retrieval_caps,
     resolve_byte_cap_from_caps,
+    resolve_item_cap_from_caps,
+    resolve_limit_from_caps,
+    resolve_token_cap_from_caps,
 )
 
 _CAP_ENVS = (ASK_RETRIEVAL_LIMIT_ENV, ASK_CONTEXT_ITEM_CAP_ENV,
@@ -223,6 +226,39 @@ def test_legacy_token_cap_values_are_validated_on_the_dict_seam(monkeypatch):
 
 # ── assemble_context: whole-hit byte drop + the binding-bound census ───────
 
+def test_an_absent_token_key_follows_the_env_on_the_dict_seam(monkeypatch):
+    """#4105 review fix: on the dict seam an ABSENT token key must resolve the
+    same env knob the env seam resolves — otherwise the DERIVED byte ceiling
+    (and the budget the assembly enforces) diverge from the env-pinned lane
+    for the same nominal input."""
+    monkeypatch.setenv(ASK_CONTEXT_TOKEN_CAP_ENV, "32000")
+    assert resolve_token_cap_from_caps({}) == 32000
+    assert resolve_byte_cap_from_caps({}) == 32000 * BYTES_PER_TOKEN_FLOOR
+    assert resolve_byte_cap_from_caps({}) == \
+        resolve_ask_retrieval_caps()["context_byte_cap"]
+    # an explicit dict key still wins over the env, on BOTH halves
+    assert resolve_token_cap_from_caps({"context_token_cap": 8000}) == 8000
+    assert resolve_byte_cap_from_caps({"context_token_cap": 8000}) == max(
+        DEFAULT_CONTEXT_BYTE_CAP, 8000 * BYTES_PER_TOKEN_FLOOR)
+
+
+def test_item_cap_and_limit_are_validated_on_the_dict_seam(monkeypatch):
+    """The same validation the env seam applies: a legacy caps dict must not
+    turn a bad entry into a failed ask, or into a silently different window."""
+    for bad in (0, -1, 1 << 30, None, "not-a-number", 4096.5, True):
+        assert resolve_item_cap_from_caps({"context_item_cap": bad}) == \
+            DEFAULT_ASK_CONTEXT_ITEM_CAP
+        assert resolve_limit_from_caps({"limit": bad}) == \
+            DEFAULT_ASK_RETRIEVAL_LIMIT
+    # ``limit >= context_item_cap`` is re-applied on this seam
+    assert resolve_limit_from_caps({"context_item_cap": 500}) >= 500
+    assert resolve_limit_from_caps(
+        {"limit": 10, "context_item_cap": 500}) >= 500
+    # an absent key resolves the env knob, exactly like the env seam
+    monkeypatch.setenv(ASK_RETRIEVAL_LIMIT_ENV, "777")
+    assert resolve_limit_from_caps({}) == 777
+
+
 def test_byte_cap_drops_whole_hits_and_is_a_hard_bound():
     hits = _hits(40)
     stats: dict = {}
@@ -282,13 +318,25 @@ def test_raising_the_item_cap_without_bytes_is_visible_not_silent():
 def test_raising_the_byte_cap_makes_the_item_raise_real():
     stats: dict = {}
     selected = assemble_context(
-        _hits(200), top_k=200, max_context_tokens=100000,
+        _hits(250), top_k=200, max_context_tokens=100000,
         context_item_cap=200, byte_cap=1 << 22, stats=stats)
     assert len(selected) == 200
     assert stats["dropped_by_byte_cap"] == 0
-    # The pool ran out at the item bound, and nothing was dropped by a
-    # budget — so the ITEM cap is the bound that cut it.
+    # The pool ran PAST the item bound and nothing was dropped by a budget —
+    # so the ITEM cap is the bound that cut it.
     assert stats["stopped_by"] == "item_cap"
+
+
+def test_stopped_by_is_none_when_the_pool_merely_ended():
+    """A pool that ENDS exactly at the item bound did not have the item cap
+    bind — reporting ``item_cap`` there mislabels the census a caller reads to
+    decide which cap to raise."""
+    stats: dict = {}
+    selected = assemble_context(
+        _hits(3), top_k=200, max_context_tokens=100000,
+        context_item_cap=200, byte_cap=1 << 22, stats=stats)
+    assert len(selected) == 3
+    assert stats["stopped_by"] is None
 
 
 def test_token_cap_census_is_reported_separately():
