@@ -2132,6 +2132,283 @@ class InFlightMiddleware:
 app.add_middleware(InFlightMiddleware)
 
 
+# ── #3834: ONE transport-level wait bound across the surviving routes ────
+# Owner ruling 2026-09-20 (issue #3834, comment 5752962331): the cold/busy
+# question is re-homed from the removed ask route onto the TRANSPORT, because
+# it is transport-general and 126 routes survive on the hosted API. Cold waits
+# in the edge's ingress queue (an application bound cannot help it — see the
+# cold-half verification in `tests/test_transport_wait_bound.py`); the busy half
+# is bounded here.
+#
+# OVERRIDES: uniform per-route timeout bounds (the common server practice) — we
+# apply ONE bound at the transport and deliberately EXEMPT `POST /v1/context`,
+# which keeps its recorded 300ms-p95 / 2.4s-ceiling / reduced-answer-on-breach
+# behaviour (`tortoise/volunteer.py:76` SLO_MS, the hard ceiling in the POST
+# handler below). That fallback-instead-of-error is a RECORDED DECISION, not an
+# oversight, and a uniform bound would silently reverse it. The exemption is
+# intentional — do not "fix" it by making the bounds uniform.
+#
+# The number is not chosen here: it is the value the owner pinned for this
+# question (10 s, under the 15 s flat budget of the narrowest uncontrolled
+# client, D-12) and it is re-homed unchanged. It is a module constant rather
+# than an env knob on purpose — once a caller codes to the number, a silent
+# env change is a client-visible contract change (owner's own framing).
+#
+# Why the bound is justified even though the tail it cuts is small: the measured
+# maximum MCP tool-call latency sits ABOVE the 15 s client budget, so for that
+# tail the bound does not abandon work that would otherwise have succeeded — it
+# converts an opaque client-side timeout into a legible refusal. Measured on the
+# TRANSPORT-wide population (the 7,795 `mcp_tool_call` events in
+# `~/.tortoise/analytics_fallback.jsonl`; 22,510 events in the file at this
+# measurement, nearest-rank quantiles on `latency_ms`): p50 26 ms, p95 2,213 ms,
+# p99 22,476 ms, max 157,116 ms; 162 calls (2.1%) exceed the bound. ⚠️ Caveat
+# that travels with
+# these numbers: this is the MCP transport PER TOOL CALL, not the REST HTTP
+# request wait — the best available proxy, not the same quantity. The 10 s value
+# itself was derived from the ask lane's distribution at derivation time
+# (n=573, 1 call > 10 s) and re-homed onto this wider one; the breach event below exists so that the
+# difference is measurable in production rather than assumed.
+_TRANSPORT_WAIT_BOUND_S = 10.0
+
+#: Seconds advertised as the back-off on a breach. Ships WITH the bound as one
+#: unit — a bound alone turns an invisible failure into a visible one with no
+#: recovery. This is the single source for the number: the message below carries
+#: no literal, and the REST ``Retry-After`` header and the JSON-RPC
+#: ``error.data.retry_after`` both read it.
+_TRANSPORT_WAIT_RETRY_AFTER_S = 2
+
+#: The one deliberate exemption, METHOD-scoped: the ruling exempts
+#: `POST /v1/context` because that handler's fail-open ceiling is a recorded
+#: decision. `GET /v1/context` (`session_context`, a different handler with no
+#: recorded fallback) is NOT exempt — exempting it would widen the ruling past
+#: its record.
+_TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
+
+#: The readable refusal. Static and digit-free (the advertised delay has exactly
+#: one source, above) and transport-neutral (it also ships on the MCP surface,
+#: which has no header). Answers the three things a caller must be able to read
+#: at the call site: what happened, whether to retry, and how long to wait.
+_TRANSPORT_WAIT_BOUND_MESSAGE = (
+    "The server's wait budget for this request was exceeded before a response "
+    "was ready. The work may still complete on the server. Wait for the "
+    "advertised delay before retrying, and retry only if repeating the "
+    "operation is safe."
+)
+
+#: Analytics event name for a breach. Recorded through the EXISTING writer (no
+#: new table, no new metric endpoint) and only when an org has resolved.
+_TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
+
+#: Handlers abandoned past the bound, held only so their late exception is
+#: retrieved (never "exception was never retrieved") and so a test can await
+#: them. Entries remove themselves on completion — the set self-drains.
+_pending_wait_bound_requests: set = set()
+_pending_wait_bound_telemetry: set = set()
+
+
+def _is_jsonrpc_surface(route_path: str) -> bool:
+    """True for the mounted MCP app's route path, EXACTLY (`/mcpfoo` is a
+    sibling, not the MCP surface — same boundary the path canonicalizer uses)."""
+    return route_path == "/mcp" or route_path.startswith("/mcp/")
+
+
+def _cors_headers_for_scope(scope) -> list[tuple[bytes, bytes]]:
+    """Re-apply the CORS headers a refusal sent from OUTSIDE ``CORSMiddleware``
+    would otherwise lose.
+
+    This middleware is OUTERMOST, so ``CORSMiddleware`` (innermost) never sees
+    the refusal it emits — the same position problem ``#1591`` documents for the
+    unhandled-exception handler, where a browser client reads a header-less
+    response as "CORS blocked" instead of the real error. For THIS unit the
+    consequence would be worse than a 500: the whole point is that a caller can
+    READ why it was made to wait, and without ``Access-Control-Allow-Origin`` a
+    dashboard client cannot read the body at all. ``Retry-After`` is not a
+    CORS-safelisted response header, so ``Access-Control-Expose-Headers`` is the
+    other half — it is what ``CORSMiddleware(expose_headers=...)`` already adds
+    for the session-auth 503 (#3284).
+    """
+    origin = None
+    for name, value in scope.get("headers") or ():
+        if name == b"origin":
+            origin = value.decode("latin-1")
+            break
+    acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
+    return [
+        (b"access-control-allow-origin", acao.encode("latin-1")),
+        (b"access-control-allow-credentials", b"true"),
+        (b"access-control-expose-headers", b"Retry-After"),
+        (b"vary", b"Origin"),
+    ]
+
+
+async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
+    """Answer a breached request with the transport's OWN 504 refusal.
+
+    No new format: the REST arm is the §6.1 shape the rest of this app already
+    speaks (``JSONResponse`` with ``{"detail"}`` + ``Retry-After`` — see
+    ``RateLimitMiddleware`` and the trash-restore 503), and the MCP arm is
+    ``mcp_auth._jsonrpc_error`` — the primitive #3851 shipped the auth-plane
+    ``Retry-After`` through. Both responses are rendered by those existing
+    builders and only transported here as raw ASGI messages.
+    """
+    retry_after = _TRANSPORT_WAIT_RETRY_AFTER_S
+    if _is_jsonrpc_surface(route_path):
+        # Function-local: mcp_auth reaches back into this module (late, from a
+        # function body), so a module-level edge here would be a needless
+        # import-order coupling.
+        from tortoise.mcp_auth import ERR_TIMEOUT, _jsonrpc_error
+
+        resp = _jsonrpc_error(
+            ERR_TIMEOUT, _TRANSPORT_WAIT_BOUND_MESSAGE,
+            data={"retry_after": retry_after}, status=504,
+            headers={"Retry-After": str(retry_after)})
+    else:
+        resp = JSONResponse(
+            status_code=504,
+            content={"detail": _TRANSPORT_WAIT_BOUND_MESSAGE},
+            headers={"Retry-After": str(retry_after)})
+    headers = [(k.lower().encode("latin-1"), v.encode("latin-1"))
+               for k, v in resp.headers.items()]
+    headers.extend(_cors_headers_for_scope(scope))
+    await send({"type": "http.response.start", "status": resp.status_code,
+                "headers": headers})
+    await send({"type": "http.response.body", "body": resp.body})
+
+
+def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
+                            latency_ms: int) -> None:
+    """Fire-and-forget breach telemetry — OFF the request path.
+
+    ``_track_analytics_event`` does a BLOCKING ``httpx`` POST (5 s timeout), so
+    putting it on the request path would create the very latency this bound
+    exists to cut. Dispatched exactly as ``tortoise/mcp_server.py:208-224``
+    does: the default executor when a loop is running, else a daemon thread.
+    Never raises, never blocks.
+    """
+    props = {"path": route_path, "method": method, "latency_ms": latency_ms}
+
+    def _write() -> None:
+        try:
+            _track_analytics_event(org_id, _TRANSPORT_WAIT_BOUND_EVENT, props)
+        except Exception:
+            _logger.debug("wait-bound telemetry write failed", exc_info=True)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and not loop.is_closed():
+        try:
+            fut = loop.run_in_executor(None, _write)
+            _pending_wait_bound_telemetry.add(fut)
+            fut.add_done_callback(_pending_wait_bound_telemetry.discard)
+            return
+        except Exception:
+            _logger.debug("wait-bound telemetry schedule failed", exc_info=True)
+            return
+    try:
+        threading.Thread(target=_write, daemon=True).start()
+    except Exception:
+        _logger.debug("wait-bound telemetry thread start failed", exc_info=True)
+
+
+def _abandon_wait_bound_request(task) -> None:
+    """Let a breached request's handler run to completion; consume its result.
+
+    Deliberately NOT ``task.cancel()``. This module's own doctrine (#2988,
+    #3718) is that cancelling the await stops the AWAITABLE, not the worker
+    thread, while running every ``finally`` the handler owns — and 14 handlers
+    here close their SDK in a ``finally``, so a cancel would tear the projection
+    down under work that is still using it (exactly the #3718 P1). Unwinding
+    normally keeps the handler's own bookkeeping (and the ``InFlightMiddleware``
+    gauge the #2850 self-kill predicate reads) consistent.
+    """
+    _pending_wait_bound_requests.add(task)
+
+    def _done(t) -> None:
+        _pending_wait_bound_requests.discard(t)
+        if not t.cancelled():
+            t.exception()  # retrieve, so it is never reported as un-retrieved
+
+    task.add_done_callback(_done)
+
+
+class WaitBoundMiddleware:
+    """The transport-level wait bound (#3834) — one bound, every route but the
+    one recorded exemption.
+
+    Pure ASGI and OUTERMOST (registered last), for the same reasons
+    ``InFlightMiddleware`` is: it must see the request before any middleware can
+    short-circuit it, and it must cost no request/response wrapping on the hot
+    path. It covers the 126 REST routes AND the mounted MCP app by construction
+    — so it applies to the tools with no per-tool edit, which is the property
+    the ruling asks for.
+
+    On breach the caller gets a readable refusal (what happened, whether to
+    retry, how long) and the handler is left running rather than cancelled. The
+    two cases where a refusal cannot be substituted are handled honestly: a
+    response that has already STARTED streaming is allowed to finish (an ASGI
+    response cannot be replaced mid-flight), and the abandoned handler's late
+    response is DROPPED rather than sent over a reply it no longer owns.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        from starlette.routing import get_route_path
+
+        route_path = get_route_path(scope)
+        if (scope.get("method", ""), route_path) in _TRANSPORT_WAIT_BOUND_EXEMPT:
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+        refused = False
+
+        async def _guarded_send(message):
+            nonlocal response_started
+            if refused:
+                # The caller already has the refusal. An ASGI send after
+                # response.end is a protocol violation, so the abandoned
+                # handler's late response is dropped here.
+                return
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        t0 = time.monotonic()
+        task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
+        done, _ = await asyncio.wait({task},
+                                     timeout=_TRANSPORT_WAIT_BOUND_S)
+        if task in done:
+            task.result()  # re-raises exactly as a plain await would
+            return
+        if response_started:
+            # The response already began; a refusal can no longer be
+            # substituted, so the request is allowed to finish.
+            await task
+            return
+
+        refused = True
+        state = scope.get("state")
+        org_id = state.get("org_id") if isinstance(state, dict) else None
+        _emit_wait_bound_breach(org_id or "", route_path,
+                                scope.get("method", ""),
+                                int((time.monotonic() - t0) * 1000))
+        _logger.warning(
+            "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
+            _TRANSPORT_WAIT_BOUND_S, scope.get("method"), route_path)
+        await _send_wait_bound_refusal(send, scope, route_path)
+        _abandon_wait_bound_request(task)
+
+
+app.add_middleware(WaitBoundMiddleware)
+
+
 # Internal auth key for Edge Function → API communication
 # Read lazily (not at import): tests and multi-app processes set
 # FASTAPI_INTERNAL_KEY after tortoise.hosted_api may already be imported,
@@ -20331,6 +20608,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     # Registering them here repairs that shipped, silent loss; the structural
     # registration test is what keeps the two sets from drifting again.
     "plan", "tier",
+    # #3834: the transport-level wait bound's breach event. `method` and
+    # `latency_ms` are already registered above; `path` is the one new key.
+    # Without it the refusal would be counted but the ROUTE would be stripped
+    # here — the documented #3359/#3824 silent-loss mode, which would make the
+    # "which routes actually breach 10 s" question unanswerable in production.
+    "path",
 }
 
 # ── #3821: the unregistered-key choke point ─────────────────────────────

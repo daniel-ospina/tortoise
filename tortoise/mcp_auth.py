@@ -111,6 +111,13 @@ ERR_EXCLUDED = -32004
 ERR_REGISTRY = -32005
 # #308 (R5): suspended org — mirrors REST 403 SUSPENDED (appeal link in data)
 ERR_SUSPENDED = -32006
+# #3834: the transport-level wait bound was breached — the server stopped
+# waiting before a response was ready. The JSON-RPC twin of the REST 504 the
+# hosted transport returns for the same condition (`hosted_api.py`,
+# ``WaitBoundMiddleware``); the MCP surface has no HTTP body of its own, so the
+# advertised delay rides ``error.data.retry_after`` alongside the
+# ``Retry-After`` header (#3851's shape).
+ERR_TIMEOUT = -32007
 
 
 # ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────
