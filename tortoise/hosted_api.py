@@ -20392,11 +20392,12 @@ _ANALYTICS_RESOLVE_NOT_BEFORE = None
 # only when the window did not move under the resolve. The single exception is
 # the process-start UNKNOWN state, where a failed read arms nothing (the window
 # doubles as the alert gate): there a delivered write retries until the store
-# answers, and each retry pays a fresh store CONSTRUCTION plus one read
-# (`_analytics_alert_store()` rebuilds the channel and `_backup_storage()`
-# builds a new object-store client per attempt) — not the R2 PUT + GitHub
-# search + Telegram a dispatch costs. An honest bound, chosen over a window
-# that would silence a real episode.
+# answers, and each retry rebuilds the alert channel and pays one read —
+# `_analytics_alert_store()` rebuilds the channel per attempt, while the
+# object store and its boto3 client are process-wide (keyed on the resolved
+# R2 config, #3968) — not the R2 PUT + GitHub search + Telegram a dispatch
+# costs. An honest bound, chosen over a window that would silence a real
+# episode.
 _ANALYTICS_RESOLVE_BACKOFF_S = 300
 # #3820 (cycle-8 P1): the resolve is serialized by its OWN lock — separate from
 # `_ANALYTICS_ALERT_LOCK` so the claim cannot be blocked by the counters or the
