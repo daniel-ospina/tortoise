@@ -9124,7 +9124,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"
-                      for i in range(len(link_texts))])
+                      for i in range(len(link_texts))],
+            sdk=sdk)
         if link_result["attempted"]:
             proj.g.query(
                 "MATCH (s:Session {id:$sid}) SET "
@@ -22148,7 +22149,15 @@ def _relink_sessions_after_index(org_id: str) -> None:
     """
     try:
         from .session_link import link_session_entities
-        proj = _make_sdk(namespace=org_id)._get_proj()
+        # #3664: pass the SDK so the re-linked edges CAN be journaled — but on
+        # this lane _make_sdk/_data_sdk set no `event_log_path` and
+        # `EntityLinked` is JSONL-only (absent from _GRAPH_EVENT_TYPES), so
+        # `sdk._emit_event` is a no-op here (the same lane limit the turn
+        # record's note in _capture_session_impl documents). The re-linked
+        # edges are therefore live-only on the hosted lane; the JSONL-journal
+        # gap is filed as #4240. Do NOT read the `sdk=` argument as journaling.
+        _link_sdk = _make_sdk(namespace=org_id)
+        proj = _link_sdk._get_proj()
         rows = proj.g.query(
             "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
             "WHERE t.pointKind='event' "
@@ -22159,7 +22168,8 @@ def _relink_sessions_after_index(org_id: str) -> None:
             by_session[sid][0].append(str(content or ""))
             by_session[sid][1].append(tid)
         for sid, (texts, tids) in by_session.items():
-            result = link_session_entities(proj, sid, texts, turn_ids=tids)
+            result = link_session_entities(proj, sid, texts, turn_ids=tids,
+                                           sdk=_link_sdk)
             if result["attempted"]:
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}) SET "
