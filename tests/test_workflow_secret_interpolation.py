@@ -10,7 +10,7 @@ parses it**, so a secret value is *code*, not data:
 The fix binds each secret in the step's ``env:`` block (``KEY: ${{ secrets.X }}``)
 and reads it as a QUOTED shell variable (``"$KEY"``). An expanded variable's
 contents are data, never re-parsed. ``env:`` blocks themselves are safe —
-the substitution there is a YAML scalar, not shell source.
+there the substitution is a YAML scalar, not shell source.
 
 #4361 repaired every remaining site in ``blog-write-e2e.yml``,
 ``deploy-pages.yml``, ``attach-tortoise-domain.yml`` and
@@ -33,10 +33,33 @@ import pytest
 
 _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
-# Any secret interpolation at all — the #4334/#4361 hazard.
-_SECRET_INTERP = re.compile(r"\$\{\{[^}]*secrets\.[A-Z0-9_]+[^}]*\}\}")
+# A GitHub Actions expression span: `${{ … }}`. Match the SPAN first (non-greedy,
+# DOTALL) and then test its contents, so indexed/wrapped spellings are caught —
+# `secrets['FOO']`, `secrets[matrix.name]`, `format('{0}', secrets.FOO)` all
+# interpolate exactly like `secrets.FOO` but a `secrets\.` regex misses them.
+_ACTION_EXPR = re.compile(r"\$\{\{.*?\}\}", re.DOTALL)
+_SECRET_CONTEXT = re.compile(r"\bsecrets\s*[.\[]")
 # A step env binding to a single secret: `KEY: ${{ secrets.KEY }}`.
 _ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}")
+
+
+def _secret_interpolations(text: str) -> list[str]:
+    """Every ``${{ … }}`` span in ``text`` that reads a secret context."""
+    return [m.group(0) for m in _ACTION_EXPR.finditer(text) if _SECRET_CONTEXT.search(m.group(0))]
+
+
+def _scrub_run(run: str) -> str:
+    """Drop shell comment-only lines from a ``run:`` body.
+
+    Prose must not be able to satisfy the reference pin, nor desync the quote
+    scanner — a reviewer-verified evasion was a body whose only mention of the
+    variable was `# TODO: restore -H "Bearer $TOKEN"`, which passed every
+    assertion while the secret was never sent. Inline trailing comments are
+    deliberately not stripped: telling one from a `#` inside a string needs a
+    shell parser, and a variable on a line that also carries the consuming
+    command is exactly what the pin asserts.
+    """
+    return "\n".join(line for line in run.splitlines() if not line.lstrip().startswith("#"))
 
 
 def _references_outside_double_quotes(run: str, var: str) -> list[str]:
@@ -44,52 +67,67 @@ def _references_outside_double_quotes(run: str, var: str) -> list[str]:
 
     A double-quoted expansion is data; a bare expansion is re-split on IFS and
     glob-expanded, so a value with spaces/specials corrupts the command. A
-    single-quoted ``'$var'`` is also returned: a shell does not expand there,
-    so the literal text is sent and the secret silently never arrives. Walks
-    the text tracking single/double quote state and backslash escapes (inside
-    single quotes a backslash is literal, per POSIX).
+    single-quoted ``'$var'`` is also returned: a shell does not expand there, so
+    the literal text is sent and the secret silently never arrives.
+
+    Quote state is tracked per PHYSICAL LINE (reset at each newline) and
+    comment-only lines are skipped, so a stray quote or apostrophe in an
+    unrelated comment/here-doc line can neither hide an unquoted expansion nor
+    falsely flag a quoted one. Inside single quotes a backslash is literal, per
+    POSIX; elsewhere it escapes the next character.
     """
     pattern = re.compile(rf"\$\{{{var}\}}|\${var}(?![A-Za-z0-9_])")
     bad: list[str] = []
-    in_single = in_double = escaped = False
-    i = 0
-    while i < len(run):
-        ch = run[i]
-        if escaped:
-            escaped = False
-            i += 1
+    for line in _scrub_run(run).splitlines():
+        stripped = line.strip()
+        if not stripped:
             continue
-        if ch == "\\" and not in_single:
-            escaped = True
-            i += 1
-            continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            i += 1
-            continue
-        if ch == '"' and not in_single:
-            in_double = not in_double
-            i += 1
-            continue
-        if not in_double:
-            match = pattern.match(run, i)
-            if match:
-                start = run.rfind("\n", 0, i) + 1
-                end = run.find("\n", i)
-                bad.append(run[start : end if end != -1 else len(run)].strip())
-                i = match.end()
+        in_single = in_double = escaped = False
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if escaped:
+                escaped = False
+                i += 1
                 continue
-        i += 1
+            if ch == "\\" and not in_single:
+                escaped = True
+                i += 1
+                continue
+            if ch == "'" and not in_double:
+                in_single = not in_single
+                i += 1
+                continue
+            if ch == '"' and not in_single:
+                in_double = not in_double
+                i += 1
+                continue
+            if not in_double:
+                match = pattern.match(line, i)
+                if match:
+                    if stripped not in bad:
+                        bad.append(stripped)
+                    i = match.end()
+                    continue
+            i += 1
     return bad
 
-# ``deploy-hosted.yml`` is owned by the in-flight #4334 fix (PR #4357) and is
-# deliberately NOT touched here. While it still carries the pre-fix shape it is
-# skipped by the sweep below; once that PR lands the file has no offenders and
-# the general path checks it like any other. It additionally has a dedicated
-# step-level guard in ``tests/test_deploy_workflow.py`` (#4334/#4357), so the
-# class stays covered there in every state.
-_PENDING_FIX = {
-    "deploy-hosted.yml": "#4334 — PR #4357 (in flight; dedicated guard in tests/test_deploy_workflow.py)",
+
+# ``deploy-hosted.yml`` is owned by the in-flight #4334 fix (PR #4357) and this
+# change deliberately does not touch it. The sweep shields ONLY the two pre-fix
+# steps that PR rewrites — a NEW interpolating step in that file is still
+# flagged, so the exemption cannot hide a fresh regression. Once #4357 lands the
+# file has no offenders and is checked by the general path like any other
+# workflow; the entries then become inert and are deleted by whichever PR lands
+# second. (#4357 also adds a dedicated step-level guard in
+# ``tests/test_deploy_workflow.py`` that walks deploy-hosted.yml's steps.)
+_PENDING_FIX: dict[str, frozenset[str]] = {
+    "deploy-hosted.yml": frozenset(
+        {
+            "Verify secrets exist",
+            "Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)",
+        }
+    ),
 }
 
 # The #4361 fix sites: (workflow filename, step-name PREFIX) → env vars the
@@ -121,12 +159,15 @@ _FIXED_STEPS: dict[tuple[str, str], tuple[str, ...]] = {
 }
 
 
-def _workflow_docs() -> dict[str, dict]:
-    """Every workflow file, parsed (name → document)."""
-    docs: dict[str, dict] = {}
-    for path in sorted(_WORKFLOWS_DIR.glob("*.yml")):
-        docs[path.name] = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert docs, f"no workflows found under {_WORKFLOWS_DIR}"
+def _workflow_docs(directory: Path = _WORKFLOWS_DIR) -> dict[str, dict]:
+    """Every workflow file in ``directory``, parsed (name → document).
+
+    BOTH ``.yml`` and ``.yaml`` are enumerated — GitHub Actions executes either
+    extension, so globbing only ``.yml`` would leave a silently unscanned file.
+    """
+    paths = sorted(set(directory.glob("*.yml")) | set(directory.glob("*.yaml")))
+    docs = {path.name: yaml.safe_load(path.read_text(encoding="utf-8")) for path in paths}
+    assert docs, f"no workflow files found under {directory}"
     return docs
 
 
@@ -149,31 +190,68 @@ def _run_bodies(doc: dict):
                 yield step.get("name") or "<unnamed>", run
 
 
+def _offending_steps(doc: dict) -> list[str]:
+    """Steps whose run body interpolates a secret into the shell text."""
+    return [name for name, run in _run_bodies(doc) if _secret_interpolations(run)]
+
+
 @pytest.fixture(scope="module")
 def workflow_docs() -> dict[str, dict]:
     return _workflow_docs()
 
 
-def _offending_steps(doc: dict) -> list[str]:
-    """Steps whose run body interpolates a secret into the shell text."""
-    return [name for name, run in _run_bodies(doc) if _SECRET_INTERP.search(run)]
-
-
 def test_offender_scan_is_not_vacuous():
-    """The sweep must actually flag an interpolated secret — a guard that
-    can never fire is worse than none (it reads as coverage)."""
+    """The sweep must actually flag an interpolated secret — a guard that can
+    never fire is worse than none (it reads as coverage)."""
     unsafe = {
         "jobs": {
             "j": {
                 "steps": [
                     {"name": "bad", "run": 'x="${{ secrets.SECRET_A }}"'},
-                    {"name": "also-bad", "run": 'echo ${{ secrets.SECRET_B }}'},
+                    {"name": "also-bad", "run": "echo ${{ secrets.SECRET_B }}"},
                     {"name": "safe", "run": 'x="$SECRET_A"'},
                 ]
             }
         }
     }
     assert _offending_steps(unsafe) == ["bad", "also-bad"]
+
+
+def test_offender_scan_catches_indexed_and_wrapped_secret_spellings():
+    """Evasion pin: the indexed/wrapped spellings interpolate identically, so a
+    `secrets\\.` regex that misses them would under-report the hazard."""
+    assert _secret_interpolations('x="${{ secrets.FOO }}"')
+    assert _secret_interpolations("x=\"${{ secrets['FOO'] }}\"")
+    assert _secret_interpolations('x="${{ secrets[matrix.name] }}"')
+    assert _secret_interpolations("x=\"${{ format('{0}', secrets.FOO) }}\"")
+    assert not _secret_interpolations('x="${{ inputs.foo }}"')
+    assert not _secret_interpolations('x="$FOO"')
+
+
+def test_sweep_enumerates_both_workflow_extensions(tmp_path):
+    """GitHub executes `.yaml` too; globbing only `.yml` is an unscanned file."""
+    (tmp_path / "a.yml").write_text("jobs: {}\n", encoding="utf-8")
+    (tmp_path / "b.yaml").write_text("jobs: {}\n", encoding="utf-8")
+    assert set(_workflow_docs(tmp_path)) == {"a.yml", "b.yaml"}
+
+
+def test_pending_fix_shields_only_the_pinned_steps():
+    """The in-flight exemption must not become a shield for a NEW offender in
+    the same file — only the exact pre-fix step names are deferred."""
+    pinned = _PENDING_FIX["deploy-hosted.yml"]
+    shielded = {
+        "jobs": {"j": {"steps": [{"name": n, "run": 'x="${{ secrets.A }}"'} for n in pinned]}}
+    }
+    assert set(_offending_steps(shielded)) <= pinned
+    with_new = {
+        "jobs": {
+            "j": {
+                "steps": [{"name": n, "run": 'x="${{ secrets.A }}"'} for n in pinned]
+                + [{"name": "a brand new step", "run": "echo ${{ secrets.B }}"}]
+            }
+        }
+    }
+    assert not set(_offending_steps(with_new)) <= pinned
 
 
 def test_no_secret_interpolated_into_run_text(workflow_docs):
@@ -185,11 +263,12 @@ def test_no_secret_interpolated_into_run_text(workflow_docs):
     """
     offenders: dict[str, list[str]] = {}
     for filename, doc in workflow_docs.items():
-        # A file owned by an in-flight fix is skipped only while it still
-        # offends; once clean it is checked like any other.
-        if filename in _PENDING_FIX and _offending_steps(doc):
-            continue
         bad = _offending_steps(doc)
+        pinned = _PENDING_FIX.get(filename)
+        # Skip only the file's pinned pre-fix steps (see _PENDING_FIX); a clean
+        # file needs no skip, and a new offender is never shielded.
+        if bad and pinned is not None and set(bad) <= pinned:
+            continue
         if bad:
             offenders[filename] = bad
     assert not offenders, (
@@ -205,31 +284,40 @@ def test_no_secret_interpolated_into_run_text(workflow_docs):
 def test_fixed_steps_bind_secret_in_env_and_reference_it_quoted(workflow_docs):
     """Every #4361 site keeps the safe shape: bound in ``env:``, quoted in ``run:``.
 
-    Three independent reverts are caught: re-interpolating the secret into the
-    run text, referencing a variable the step never bound (expands empty, so
-    the secret is silently dropped), and dropping the quotes (word-splitting /
-    glob expansion at the call site).
+    Four independent reverts are caught: re-interpolating the secret into the
+    run text; binding the name to a DIFFERENT secret (cross-wired value);
+    binding it but never reading the variable in the command (expands empty,
+    secret silently dropped — a comment mention does not count); and reading it
+    outside double quotes (word-splitting/globbing, or a single-quoted literal
+    that never expands).
     """
     for (filename, prefix), env_vars in _FIXED_STEPS.items():
         step = _step(workflow_docs[filename], prefix)
         run = step.get("run", "")
+        code = _scrub_run(run)
 
-        assert not _SECRET_INTERP.search(run), (
+        assert not _secret_interpolations(run), (
             f"{filename}: {prefix!r} interpolates a secret into its run text again "
             "— bind it in `env:` and use \"$VAR\" (#4361)"
         )
 
         env = step.get("env") or {}
         for var in env_vars:
-            assert _ENV_SECRET.fullmatch(str(env.get(var, "")).strip()), (
+            bound = _ENV_SECRET.fullmatch(str(env.get(var, "")).strip())
+            assert bound is not None, (
                 f"{filename}: {prefix!r} must bind {var} in `env:` as "
                 f"'${{{{ secrets.{var} }}}}' — got {env.get(var)!r}"
             )
-            assert re.search(rf"\$\{{{var}\}}|\${var}(?![A-Za-z0-9_])", run), (
+            assert bound.group(1) == var, (
+                f"{filename}: {prefix!r} binds env {var} to secrets."
+                f"{bound.group(1)} — a cross-wired value reaches the command "
+                "(#4361)"
+            )
+            assert re.search(rf"\$\{{{var}\}}|\${var}(?![A-Za-z0-9_])", code), (
                 f"{filename}: {prefix!r} binds {var} in `env:` but its run "
                 f"text never reads it — the secret is silently unused (#4361)"
             )
-            unquoted = _references_outside_double_quotes(run, var)
+            unquoted = _references_outside_double_quotes(code, var)
             assert not unquoted, (
                 f"{filename}: {prefix!r} reads {var} outside double quotes on "
                 f"{unquoted!r} — an unquoted expansion is re-split/globbed, and a "
@@ -254,3 +342,15 @@ def test_quote_scanner_flags_unquoted_and_single_quoted_expansions():
     assert _references_outside_double_quotes('x \'a"b\' $V', "V") == ['x \'a"b\' $V']
     # An ESCAPED quote inside a double-quoted span is not a closing quote.
     assert _references_outside_double_quotes('x "a\\"b" $V', "V") == ['x "a\\"b" $V']
+    # A comment-only line is skipped in both directions …
+    assert _references_outside_double_quotes('# "$V" $V\ncmd "$V"', "V") == []
+    # … and an unclosed quote on one line must not desync the next.
+    assert _references_outside_double_quotes('echo "unclosed\ncmd "$V"', "V") == []
+
+
+def test_comment_lines_cannot_satisfy_the_reference_pin():
+    """A comment-only mention is not a use — the reviewer-verified evasion where
+    a body whose only `$VAR` mention was a TODO comment passed every pin."""
+    run = '# TODO restore -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"\ncurl -s "$URL"\n'
+    assert "$CLOUDFLARE_API_TOKEN" not in _scrub_run(run)
+    assert _references_outside_double_quotes(run, "CLOUDFLARE_API_TOKEN") == []

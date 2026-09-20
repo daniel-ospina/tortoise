@@ -734,6 +734,7 @@ surfaces:
   - test_value_extractor.py
   - test_wipe_server.py
   - test_wiring_phase01.py
+  - test_workflow_secret_interpolation.py
   - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py
@@ -1395,6 +1396,7 @@ durations:
   test_sdk_ep.py: 2.0
   test_session_context.py: 2.0
   test_slack_connector.py: 2.0
+  test_workflow_secret_interpolation.py: 2.0  # #4361: new file, no CI junit measurement yet — flat 2.0s floor (#4221 precedent)
   test_action_endpoints_dual_auth.py: 1.9
   test_cross_lens_candidates.py: 1.9
   test_ep_operatorless.py: 1.9
