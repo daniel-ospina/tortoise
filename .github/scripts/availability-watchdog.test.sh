@@ -2026,6 +2026,18 @@ assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env o
 # step-scoped refusal below passes with a job-level PROD_PROBE_URLS present.
 assert_not_contains "$JOB_ENV" "PROD_PROBE_URLS" \
   "PROD_PROBE_URLS is NOT job-level either (env precedence: job-level reaches the script and silently drills the auth probe)"
+assert_not_contains "$JOB_ENV" "PROBE_HOST_LABEL" \
+  "PROBE_HOST_LABEL is NOT job-level (a job-level label renames another surface's incident to a host it never probes)"
+# …and the positional slice above is not enough on its own. GitHub applies a
+# top-level env: to EVERY job and step, and YAML key order is not semantic, so a
+# workflow-level PROD_PROBE_URLS placed AFTER `steps:` sits outside JOB_ENV — the
+# reviewer reproduced it (a top-level `env: PROD_PROBE_URLS: …` appended to the
+# file, guard still 0 failures, auth probe silently a DRILL). Assert on the whole
+# comment-stripped workflow instead; that closes step, job, workflow-anywhere and
+# second-job placements at once. (The one `PROD_PROBE_URLS` mention in the file is
+# a comment and is stripped — a comment must never satisfy its own guard.)
+assert_not_contains "$WORKFLOW_CODE" "PROD_PROBE_URLS" \
+  "PROD_PROBE_URLS is not set at ANY level of the watchdog workflow (the workflow's own comment is stripped, so it cannot satisfy this)"
 
 # ── 96: the workflow drives the auth surface as its OWN step (#3628) ───────
 AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
@@ -2069,6 +2081,17 @@ assert_not_contains "$AUTH_STEP" "PROD_PROBE_URLS" \
 AUTH_WORKFLOW_CODE="$(grep -v '^[[:space:]]*#' "$AUTH_WORKFLOW" || true)"
 assert_not_contains "$AUTH_WORKFLOW_CODE" "tortoise.premiselabs.co/auth/start" \
   "no second step re-adds the pre-#4054 auth target (a 'legacy' probe would refile the false incident)"
+# Banning the old URL is not enough: the LABEL is the exact-title dedupe key, so a
+# label left behind on a *different* line orphans the incident just as the URL did.
+# The reviewer's mutants that slipped past a URL-only inventory: a SECOND
+# PROBE_HOST_LABEL line in the auth step (YAML last-wins → the old host), a second
+# step with the new URL but the old label, and a label on another surface. The old
+# host has no legitimate occurrence in this workflow at all, so ban the HOST, and
+# require the auth step to carry exactly one label line.
+assert_not_contains "$AUTH_WORKFLOW_CODE" "tortoise.premiselabs.co" \
+  "the departed host appears nowhere in the watchdog workflow (a leftover PROBE_HOST_LABEL would orphan that surface's incident)"
+assert_eq "$(printf '%s\n' "$AUTH_STEP" | grep -c 'PROBE_HOST_LABEL:')" "1" \
+  "the auth step carries exactly ONE host label (a duplicate line is last-wins and could re-point the dedupe key)"
 assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
