@@ -135,10 +135,12 @@ _MARK_CLOSE = "\x02"
 _STUB_ARG_SEP = "\x1e"
 _STUB_RECORD_SEP = "\x1d"
 # The propagation step's shell is located by its `fly secrets set` call. Both the
-# `flyctl` spelling and the `fly` alias are matched: the stub binaries install
-# both, so a payload written with the alias must not be invisible to detection
-# (an unseen block escapes the reverse-completeness half entirely).
-_PAYLOAD_CMD_RE = re.compile(r"\bfly(?:ctl)?\s+secrets\s+set\b")
+# `flyctl` spelling and the `fly` alias are matched, and global flags may precede
+# the subcommand (`flyctl --app X secrets set …`) — Fly accepts them, so a missing
+# match would make the block invisible to the reverse-completeness half.
+_PAYLOAD_CMD_RE = re.compile(
+    r"\bfly(?:ctl)?(?:\s+-{1,2}[\w-]+(?:=\S+|\s+\S+)?)*\s+secrets\s+set\b"
+)
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 # The Actions template reference substituted before the shell runs.
 _SECRET_TMPL_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
@@ -294,9 +296,15 @@ def _payload_assignments(groups: list[list[str]]) -> dict[str, str]:
     """
     captured: dict[str, str] = {}
     for argv in groups:
-        if len(argv) < 2 or argv[0] != "secrets" or argv[1] != "set":
+        # Global flags may precede the subcommand (`flyctl --app X secrets set …`),
+        # so the `secrets set` pair is located by content, never by position.
+        try:
+            index = argv.index("secrets")
+        except ValueError:
             continue
-        for token in argv[2:]:
+        if index + 1 >= len(argv) or argv[index + 1] != "set":
+            continue
+        for token in argv[index + 2:]:
             match = _ASSIGN_RE.fullmatch(token)
             if match:
                 captured[match.group(1)] = match.group(2)
@@ -388,6 +396,15 @@ def _capture_payload(
             ) from exc
         except OSError as exc:
             raise ValueError(f"the propagation shell could not be run: {exc}") from exc
+    if "command not found" in proc.stderr:
+        raise ValueError(
+            "the propagation shell invoked a command this harness does not model "
+            f"({proc.stderr.strip()[:200]}) — the stub PATH carries only fly/flyctl, "
+            "so whether the payload assigns the Fly secret depends on an external "
+            "command's output or exit status and cannot be determined. Build the "
+            "payload from shell builtins and `${{ secrets.* }}` expansions, or "
+            "assign the secret unconditionally"
+        )
     if proc.returncode != 0:
         raise ValueError(
             "the propagation shell failed under the stub (rc=%d): the payload "
@@ -436,7 +453,17 @@ def payload_partition(
     sources: dict[str, set[str]] = {}
     for script, step_env in scripts:
         secret_names = sorted(set(_SECRET_REF_RE.findall(script)))
-        all_present = _capture_payload(script, {name: name for name in secret_names}, step_env)
+        # An `env:` value may itself carry `${{ secrets.X }}` (Actions substitutes
+        # it into the step env). X need not appear in the `run:` body, so the
+        # "every secret present" sample must treat it as present too — otherwise
+        # a guard reading that env value flips relative to the `live` sample and a
+        # propagated name is misreported STALE (#4259 review).
+        sample_names = set(secret_names)
+        for value in (step_env or {}).values():
+            sample_names.update(_SECRET_REF_RE.findall(str(value)))
+        all_present = _capture_payload(
+            script, {name: name for name in sorted(sample_names)}, step_env
+        )
         # The payload THIS run builds — markers only for the secrets the runner
         # actually carries. One more execution of the same shell.
         in_run = _capture_payload(script, {name: name for name in gh_present}, step_env)
@@ -448,7 +475,7 @@ def payload_partition(
         live |= set(in_run)
         for name, value in all_present.items():
             sources.setdefault(name, set()).update(
-                s for s in secret_names if f"{_MARK_OPEN}{s}{_MARK_CLOSE}" in value
+                s for s in sample_names if f"{_MARK_OPEN}{s}{_MARK_CLOSE}" in value
             )
     return assigned, unconditional - guarded, live, sources
 

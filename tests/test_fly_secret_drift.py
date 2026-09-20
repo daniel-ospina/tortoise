@@ -1479,6 +1479,93 @@ jobs:
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+def test_secret_valued_step_env_is_modelled():
+    """An `env:` value carrying `${{ secrets.X }}` must be modelled in the samples.
+
+    `X` need not appear in the `run:` body, so the "every secret present" sample
+    used to substitute the env value as EMPTY while the run sample (built from the
+    real secret set) had it — the samples disagreed and a propagated name was
+    misreported STALE, hard-blocking a correct deploy (#4259 review).
+    """
+    body = (
+        '          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"\n'
+        '          if [ -n "$FLAG" ]; then ARGS="$ARGS GATED=${{ secrets.GATED }}"; fi\n'
+        "          flyctl secrets set --stage $ARGS\n"
+    )
+    manifest = _fixture(
+        "secret-env-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nGATED  gh-secret:GATED\n",
+    )
+    wf = _fixture(
+        "secret-env.yml",
+        "name: w\njobs:\n  j:\n    steps:\n      - env:\n"
+        "          FLAG: ${{ secrets.ENV_SECRET }}\n"
+        f"        run: |\n{body}",
+    )
+    # The run carries ENV_SECRET (the workflow references it in `env:`), so FLAG
+    # is non-empty and GATED IS assigned — the declaration is honoured.
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY", "GATED"], "secret-env.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_global_flags_before_the_subcommand_are_detected():
+    """`flyctl --app X secrets set …` is the same payload and must be classified.
+
+    Detection required the subcommand to follow the binary immediately, so a
+    block with a leading global flag was invisible — in a multi-block workflow its
+    names escaped the partition entirely (#4259 review).
+    """
+    wf = _fixture(
+        "global-flags.yml",
+        "name: w\njobs:\n  j:\n    steps:\n      - run: |\n"
+        '          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"\n'
+        "          flyctl --app fixture-app secrets set --stage $ARGS\n",
+    )
+    manifest = _fixture(
+        "global-flags-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "global-flags.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_unmodelled_command_in_the_payload_fails_closed():
+    """A payload whose control flow depends on an external command cannot be classified.
+
+    The stub PATH carries only fly/flyctl, so `grep` (or any other command) is
+    absent; under `set -e` a command-not-found inside an `if`/`!` condition is NOT
+    fatal, so the sample silently guessed the empty branch and certified a name
+    the real deploy skips (#4259 review).
+    """
+    wf = _fixture(
+        "unmodelled-cmd.yml",
+        "name: w\njobs:\n  j:\n    steps:\n      - run: |\n"
+        '          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"\n'
+        "          if ! flyctl secrets list --json | grep -q FOO; "
+        'then ARGS="$ARGS GATED=1"; fi\n'
+        "          flyctl secrets set --stage $ARGS\n",
+    )
+    manifest = _fixture(
+        "unmodelled-cmd-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nGATED  workflow\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "unmodelled-cmd.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "does not model" in r.stderr
+
+
 
 def test_step_marker_on_its_own_line_does_not_false_positive():
     """`-` alone on a line is a valid step marker, and it must not read as an `if:`.
