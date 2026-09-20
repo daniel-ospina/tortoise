@@ -179,6 +179,7 @@ LINKED_FILES = {
     "docs/scoping-2304-delete-semantics.md",
     "docs/scoping-2313-per-graph-backups.md",
     "docs/data-safety.md",
+    "docs/durability-posture.md",
     "docs/00_index.md",
     "tortoise/hosted_backup.py",
     "website/apps/dashboard/src/graphs.js",

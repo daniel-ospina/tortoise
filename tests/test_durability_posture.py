@@ -8,11 +8,18 @@ truth" statements, so the text inherited whatever the nearest comment believed;
 the fix was **deletion, not reconciliation** — only the canonical doc is
 allowed to pair a JSONL/journal/event-log with "source of truth".
 
-The pattern and the roots are the owner's, verbatim (issue #2881, §6)::
+The gate's pattern and roots are the owner's (issue #2881, §6), with ONE
+documented extension — the owner's pattern cannot see two forms this change
+also deletes: a bare ``log``/``event stream`` subject ("The log is the source of
+truth" — ``tortoise/projection/__init__.py:3``) and the ``is [the] truth``
+predicate ("the event log is truth" — ``tortoise/commit_ops.py:431``). The
+owner's ERE, verbatim::
 
     grep -rniE "(event log|journal|jsonl).{0,40}source of truth|source of truth.{0,40}(durab|journal|event log|jsonl)" \\
       tortoise/ README.md docs/durability-posture.md docs/quickstart-*.md \\
       docs/infra-runbook.md docs/data-safety.md docs/ONTOLOGY.md
+
+The extension lives in ``CLAIM_RE`` below and is pinned by the positive test.
 
 The gate is deliberately **scoped, not global**: the bare phrase is used
 hundreds of times repo-wide for unrelated things (pack schemas, eval specs, the
@@ -31,11 +38,17 @@ REPO = Path(__file__).resolve().parent.parent
 CANONICAL_DOC_REL = "docs/durability-posture.md"
 CANONICAL_DOC = REPO / CANONICAL_DOC_REL
 
-# The owner's ERE, verbatim, as a Python pattern. Line-at-a-time like grep, so
-# `.` never crosses a newline and the two alternations keep their local scope.
+# The owner's ERE — the first two alternations, verbatim — extended (review
+# finding) with a bare `log`/`event stream` subject and the `is [the] truth`
+# predicate, the two forms it cannot see. Line-at-a-time like grep, so `.`
+# never crosses a newline and the alternations keep their local scope. The
+# extension is scoped to the SAME paths and adds no false positives (the
+# legitimate "the derivation is the truth, the cache is a copy" stays green).
+_SUBJECT = r"(?:event log|journal|jsonl|\blog\b|event stream)"
 CLAIM_RE = re.compile(
-    r"(event log|journal|jsonl).{0,40}source of truth"
-    r"|source of truth.{0,40}(durab|journal|event log|jsonl)",
+    rf"{_SUBJECT}.{{0,40}}source of truth"
+    r"|source of truth.{0,40}(durab|journal|event log|jsonl)"
+    rf"|{_SUBJECT}.{{0,40}}is (?:the )?truth",
     re.IGNORECASE,
 )
 
@@ -100,13 +113,30 @@ def _claim_lines(path: Path) -> list[tuple[int, str]]:
 # ── 1. the scan reaches the declared roots ──────────────────────────────────
 
 def test_scan_reaches_the_declared_roots():
-    """Set-containment of sentinels — a narrowed root list must fail here even
-    if the claim scan would otherwise pass vacuously."""
+    """Every declared root must exist AND contribute scanned files — a
+    narrowed OR deleted root must fail here, not silently shrink the scan
+    (review finding: the old hand-maintained sentinel list was not bound to
+    the declared roots, so a missing/renamed root passed vacuously)."""
     scanned = {p.relative_to(REPO).as_posix() for p in _scanned_files()}
+    for rel in SCAN_FILES:
+        assert (REPO / rel).is_file(), f"declared scan file is missing: {rel}"
+        assert rel in scanned, f"declared scan file not scanned: {rel}"
+    for pattern in SCAN_GLOBS:
+        matches = sorted(REPO.glob(pattern))
+        assert matches, f"declared scan glob matches nothing: {pattern}"
+        for path in matches:
+            assert path.relative_to(REPO).as_posix() in scanned
+    for root in SCAN_DIRS:
+        assert (REPO / root).exists(), f"declared scan dir is missing: {root}"
+        assert any(rel.startswith(root + "/") for rel in scanned), (
+            f"declared scan dir contributed no files: {root}"
+        )
+    # And the named sentinels the gate's guarantee rests on.
     for sentinel in (
         "tortoise/log.py",
         "tortoise/consistency.py",
         "tortoise/projection/__init__.py",
+        "tortoise/commit_ops.py",
         "README.md",
         "docs/durability-posture.md",
         "docs/quickstart-selfhosted.md",
@@ -167,25 +197,38 @@ def test_canonical_doc_exists_and_states_the_rule():
 
 def test_canonical_doc_is_itself_a_claim_hit():
     """The exemption above is only sound if the canonical doc really does make
-    the claim (otherwise the whole gate could be satisfied by an empty doc)."""
+    the authority statement — assert the SPECIFIC phrase, not merely that some
+    regex hit exists (the gate's own description at the foot of the doc also
+    matches, so a bare hit check could pass on a doc with no authority claim)."""
     assert _claim_lines(CANONICAL_DOC), (
         f"{CANONICAL_DOC_REL} no longer contains the durability authority "
         "statement the gate exempts — fix the doc, not the gate"
+    )
+    text = CANONICAL_DOC.read_text(encoding="utf-8")
+    assert re.search(r"single source of truth for durability", text, re.I), (
+        f"{CANONICAL_DOC_REL} must state that it is the single authority for "
+        "durability claims, not merely contain a gate-shaped regex hit"
     )
 
 
 # ── 4. the regex fires on the defect and not on unrelated prose ─────────────
 
 def test_claim_regex_matches_the_original_defect_forms():
-    """The forms the four sites actually carried (#2881 §3)."""
+    """Every form the deleted sites actually carried — including the two the
+    owner's exact pattern cannot see, which this change also removes."""
     for claim in (
         "Append-only JSONL event log — the source of truth.",
         "The event log is the source of truth; the projection is a derived view.",
         "the JSONL event stream is the rebuild source of truth",
+        # the two forms the owner's pattern misses (review finding):
+        "The log is the source of truth; a projection is a derived view.",
+        "the journal/event stream is the truth",
+        "the event stream is the truth",
+        "# §11: the event log is truth; replay re-truncates identically",
+        # the durability-worded second alternation:
+        "the source of truth for durability claims",
     ):
         assert CLAIM_RE.search(claim), f"scan misses a real claim: {claim!r}"
-    # And the durability-worded second alternation.
-    assert CLAIM_RE.search("the source of truth for durability claims")
 
 
 def test_claim_regex_rejects_unrelated_source_of_truth_prose():
@@ -198,6 +241,8 @@ def test_claim_regex_rejects_unrelated_source_of_truth_prose():
         "the derivation is the truth, the cache is a copy",
         "one source of truth (#715)",
         "the journal/event stream is the reconstruction source for Object.status",
+        # `\blog\b` must not fire inside `changelog`:
+        "the changelog is the source of truth for released versions",
     ):
         assert not CLAIM_RE.search(unrelated), (
             f"scan false-positives on unrelated copy: {unrelated!r}"

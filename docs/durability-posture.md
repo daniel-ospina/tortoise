@@ -21,14 +21,17 @@ related:
 
 > **This is the single source of truth for durability claims.** Any statement
 > about what keeps a deployment's graph alive, what it can lose, and what has
-> actually been verified lives here. Other files state only the rule and link
-> here; they do not restate a mechanism, a window, or a verification level.
+> actually been verified lives here. Other files **must not carry a durability
+> authority claim of their own** — a mechanism, a loss window, or a verification
+> level stated as a promise; they state the rule and link here. (Known stale
+> restatements are tracked under *Open items*, not silently tolerated.)
 >
 > Durability vocabulary — *RPO, backup, snapshot, restore drill, AOF/RDB,
-> source of truth* — is **operational, not ontology**. It is deliberately absent
-> from `docs/ONTOLOGY.md`, which governs graph vocabulary. (That document carries
-> one qualified, domain-level line: the event stream is the reconstruction source
-> for `Object.status`.)
+> source of truth* — is **operational, not ontology**. No durability **authority**
+> statement lives in `docs/ONTOLOGY.md`, which governs graph vocabulary. That
+> document carries only domain-level reconstruction phrasing: the
+> `Object.status` rows (`§2`, `§4.3`) and the `§4.2`/`§4.3` "registration
+> durability" notes (journal survival for `rebuild_all`, not a backup promise).
 
 ## The rule
 
@@ -38,10 +41,13 @@ persistence plus an off-box copy of it.** Nothing else.
 - The **JSONL is a domain event log** — it reconstructs a projection under
   changed fold logic, migrates engines, and audits beyond `:GraphEvent`'s 30-day
   window. **It is never the durability mechanism.** It is written outside the
-  store's transaction, so it cannot be the authority: a log that misses raw
-  Cypher writes misses every SDK `_upsert` and cannot rebuild the graph at all
-  (`tortoise/backup.py:65-77` is RDB-first for exactly this reason), and a second
-  non-atomic copy is the textbook dual-write hazard.
+  store's transaction, so it cannot be the authority: it does not capture
+  raw-Cypher or graph-only writes (SDK `_upsert`, EP writes, deletes, connector
+  work), so a wipe-and-replay rebuilds only what the log holds, not the graph —
+  `tortoise/consistency.py::recover_from_log` documents that partial
+  reconstruction, and `tortoise/backup.py:65-77` is RDB-first for exactly this
+  reason. A second, non-atomic copy would also be the textbook dual-write hazard
+  (not merely incomplete — the two copies can disagree).
 - `:GraphEvent` is the **30-day delivery/audit stream**, not a backup.
 - This is the settled industry answer (Delta Lake, Apache Iceberg, PostgreSQL
   WAL, etcd, Neo4j, Memgraph, Debezium outbox): authority stays in a
@@ -63,7 +69,7 @@ operator's own backups while reporting health.
 | **Hosted — graph archives** (`tortoise/hosted_backup.py`, `tortoise/backup_sweep.py`) | Per-graph **logical dump** (`tortoise-logical-dump-v1`), AES-256-GCM encrypted, uploaded with a sha256 manifest to **Cloudflare R2 (off-box)**, swept hourly (`registry-backup-cron.yml`, `17 * * * *`). **Gated:** `BACKUP_SWEEP_ENABLED` is fail-closed (default off, `tortoise/backup_config.py:172-180`, `:249`); `deploy-hosted.yml:358-380` sets it true only when every required secret is present. | **≤ 1 h typical / ≤ 2 h worst-case** *when the sweep is enabled* (`docs/ops/registry-backup-dr.md` §RPO; achieved age is measured per team/graph via `/v1/internal/backups/status`). With the sweep **off**, there is **no archive and no bounded window** — the vendor snapshot below is the only off-box copy. | **Restore drill** — the monthly unattended drill (`registry-drill-cron.yml`, #2317) restores a real archive into `_drill_*` scratch and records pass/fail plus measured restore time vs RTO (`ops/drills/last.json` → `/status` `last_drill`). The restore path itself also verifies sha256 against the manifest and node/edge counts against the authenticated payload before swapping (`tortoise/hosted_backup.py:3-40`). The drill proves the *restore path* for an archive that exists; the sweep producing archives is what the freshness watcher covers (#2790 / #2922). |
 | **Hosted — vendor platform persistence** (FalkorDB Cloud) | Vendor-managed. Off-box **snapshots every 12 h, 7-day retention** (Startup & Pro); snapshots deleted after 14 days. **Restore creates a NEW instance.** | **≤ 12 h** off-box. In-box persistence (AOF) is **contested** — see below; until settled, treat in-box persistence as unverified. | **Existence only — not drilled.** The cadence and retention are vendor-documented; no restore of a vendor snapshot has been performed by us. |
 | **Self-hosted (Docker Compose sidecar)** | FalkorDB sidecar with AOF + named volume (`README.md` self-host path, `docker-compose.yml`) — **on-box only**. | AOF `everysec` = **≤ 1 s** on a clean host; **total loss** if the host or volume is lost. The documented compose path ships **no off-box copy**; `scripts/daily-backup.sh` is a host-specific RDB copy (issue #101) that is not wired into the compose path or its docs — the general off-box copy is **#2880 (pending)**. | **Not drilled.** AOF is a live on-box artifact, not a backup, and no restore of a self-hosted archive has been performed. |
-| **Embedded (redisLite — eval only)** | RDB file; **AOF off by default** (`TORTOISE_EMBEDDED_AOF=1` opts in — `tortoise/projection/__init__.py:36-45`, `:1157-1181`, `:1778-1793`). Single-writer; concurrent writers lose data. | AOF on: **≤ 1 s**. AOF off: **up to the next RDB save or a clean close** — RDB snapshots may never fire for a small graph (#915, #2879). | **Not drilled** (and not a production path). AOF's on-disk artifact is measured when opted in (`tests/test_embedded_durability_claim.py`) — presence, not a restore. |
+| **Embedded (redisLite — eval only)** | RDB file; **AOF off by default** (`TORTOISE_EMBEDDED_AOF=1` opts in — `tortoise/projection/__init__.py:36-45`, `:1157-1181`, `:1796-1799`). Single-writer; concurrent writers lose data. | AOF on: **≤ 1 s**. AOF off: **up to the next RDB save or a clean close** — RDB snapshots may never fire for a small graph (#915, #2879). | **Not drilled** (and not a production path). AOF's on-disk artifact is measured when opted in (`tests/test_embedded_durability_claim.py`) — presence, not a restore. |
 
 > These rows describe **data-plane durability**. Deletion and retention windows
 > are a separate promise and live in `docs/retention-and-deletion.md`; encryption
@@ -92,15 +98,26 @@ deployment's actual off-box mechanism, and in-box persistence is unverified.
 
 Three statements disagreed about whether the store or the journal was the
 durability authority, so the text inherited whatever the nearest comment
-believed. The fix is **deletion, not reconciliation**: only this file makes a
-durability statement. The durability-scoped gate in
-`tests/test_durability_posture.py` fails the build if a
-`(event log|journal|jsonl) … source of truth` claim reappears outside this file.
+believed. The fix is **deletion, not reconciliation**: no other file carries a
+durability authority claim. The durability-scoped gate in
+`tests/test_durability_posture.py` fails the build if a `log`/`journal`/`jsonl`/
+`event stream` is bound to `source of truth` — or to `is [the] truth` — outside
+this file.
 
 ## Open items
 
 - **#2880** — the self-hosted off-box copy. Until it ships, the self-hosted row
-  is on-box only and the rule above is not yet met there.
+  is on-box only and the rule above is not yet met there. `README.md`'s
+  "durable" for the compose path means *persistent on-box, multi-writer* (as
+  opposed to the single-writer embedded eval path), not an off-box-copy promise.
+- **#2968** — `docs/infra-runbook.md:29` still states "FalkorDB Cloud (managed)
+  — provides AOF durability", the exact claim this document marks CONTESTED.
+  Tracked there; the gate's pattern does not match an `AOF … durability` claim,
+  so it is not silently tolerated, it is a named residual.
+- **`graph-scripts/`** — `add_convergence_evidence.py` and `baseline_scan.py`
+  still describe the JSONL as the "source of truth" for graph convergence. This
+  document's gate is scoped to the contract surfaces (`tortoise/`, the five
+  docs, README); the archival/operation scripts are a separate, open residual.
 - **#2826 row A2** — the register row recommending the journal be authoritative.
   The #2881 design round (§7) recommends reversing it to store-authoritative.
   This document states the store-authoritative rule the shipped code already
