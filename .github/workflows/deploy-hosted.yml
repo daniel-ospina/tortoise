@@ -349,8 +349,18 @@ jobs:
           [ -n "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
           [ -n "${{ secrets.TURNSTILE_SECRET_KEY }}" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
           export GH_SECRETS_PRESENT="$GH_PRESENT"
+          # The gate parses the workflow YAML (a step/job `if:` or an `env:` value is
+          # not part of the `run:` shell, so execution cannot see it and line
+          # positions are not a contract). PyYAML is a project dependency; the runner
+          # has uv but not the project env, so provision it explicitly. A provisioning
+          # failure is an exit-2-CLASS failure — never the bypassable exit 1 — so it
+          # is distinguished before the gate runs.
+          if ! uv run --no-project --with pyyaml python3 -c "import yaml" >/dev/null 2>&1; then
+            echo "::error::cannot provision PyYAML for the Fly secret provenance gate — deploy blocked. Provisioning failure is exit-2 class and can never be bypassed." >&2
+            exit 2
+          fi
           set +e
-          python3 .github/scripts/check-fly-secret-drift.py
+          uv run --no-project --with pyyaml python3 .github/scripts/check-fly-secret-drift.py
           RC=$?
           set -e
           if [ "$RC" -eq 0 ]; then

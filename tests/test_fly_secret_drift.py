@@ -1176,6 +1176,169 @@ def test_non_string_secret_name_is_exit_2_not_a_crash():
     assert "unexpected" not in r.stderr, r.stderr
 
 
+def test_every_yaml_spelling_of_a_step_if_is_exit_2():
+    """The step `if:` is a YAML KEY, so its spelling cannot matter.
+
+    A positional line regex certified four spellings at exit 0 — the value on the
+    next line, `if :` (space before the colon), `"if":` (quoted key), and `if:`
+    written AFTER `run:` — each of which the deploy honours and the checker then
+    ignored (#4259 review). PyYAML resolves the key, so none of them can slip by.
+    """
+    call = (
+        '          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"\n'
+        "          flyctl secrets set --stage $ARGS\n"
+    )
+    spellings = {
+        "value on the next line": "      - if:\n          ${{ 1 == 1 }}\n        run: |\n",
+        "space before the colon": "      - if : ${{ 1 == 1 }}\n        run: |\n",
+        "quoted key": '      - "if": ${{ 1 == 1 }}\n        run: |\n',
+        "written after run": None,
+    }
+    for label, header in spellings.items():
+        if header is None:
+            body = "      - run: |\n" + call + "        if: ${{ 1 == 1 }}\n"
+        else:
+            body = header + call
+        wf = _fixture("spelled-if.yml", f"name: w\njobs:\n  j:\n    steps:\n{body}")
+        r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "spelled-if.json"), workflow=wf)
+        assert r.returncode == 2, f"{label}: rc={r.returncode}\n{r.stdout}{r.stderr}"
+        assert "step-level `if:`" in r.stderr, label
+
+
+def test_job_level_if_on_another_job_is_exit_2():
+    """The payload sits in ANOTHER job, gated: it can be skipped while we are green."""
+    wf = _fixture(
+        "job-if-other.yml",
+        """name: w
+jobs:
+  gate:
+    steps:
+      - run: python3 .github/scripts/check-fly-secret-drift.py
+  secrets:
+    if: ${{ 1 == 1 }}
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "job-if-other.json"), workflow=wf)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "job-level `if:`" in r.stderr
+
+
+def test_job_level_if_on_the_gates_own_job_is_not_rejected():
+    """The SHIPPED shape: the gate and the payload share one gated job.
+
+    A job-level `if:` there cannot forge a certificate — if the job is skipped the
+    gate never ran, so nothing is certified. Rejecting it would block the real
+    deploy (the shipped `deploy-api` job carries one).
+    """
+    wf = _fixture(
+        "job-if-same.yml",
+        """name: w
+jobs:
+  deploy:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    steps:
+      - run: python3 .github/scripts/check-fly-secret-drift.py
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    # The manifest must match THIS workflow: the shared MANIFEST fixture declares
+    # seven names this synthetic job never assigns, which would read as five
+    # STALE DECLARATION violations (exit 1) and mask the behaviour under test.
+    manifest = _fixture(
+        "job-if-same-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "job-if-same.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_step_env_is_modelled_in_the_run_sample():
+    """A step `env:` value is inherited by the payload shell.
+
+    The stub env used to carry only PATH/HOME/GITHUB_SHA, so a `[ -z "$VAR" ]`
+    guard read differently than in the deploy and the run sample disagreed with
+    reality — certifying a name the deploy skips (#4259 review).
+    """
+    body = (
+        '          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"\n'
+        '          if [ -z "$VAR" ]; then ARGS="$ARGS ENV_ONLY_KEY=1"; fi\n'
+        "          flyctl secrets set --stage $ARGS\n"
+    )
+    manifest = _fixture(
+        "step-env-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\nENV_ONLY_KEY  fly-toml-env\n",
+    )
+    without = _fixture(
+        "step-env-none.yml", f"name: w\njobs:\n  j:\n    steps:\n      - run: |\n{body}"
+    )
+    with_env = _fixture(
+        "step-env-set.yml",
+        f'name: w\njobs:\n  j:\n    steps:\n      - env:\n          VAR: "1"\n'
+        f"        run: |\n{body}",
+    )
+    # No env → the guard is TRUE → the deploy assigns ENV_ONLY_KEY, creating the
+    # Fly secret that shadows the versioned [env] value.
+    r_none = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "step-env-none.json"),
+        manifest=manifest,
+        workflow=without,
+    )
+    assert r_none.returncode == 1, r_none.stdout + r_none.stderr
+    assert "shadows [env]" in r_none.stdout
+    # env VAR=1 → the guard is FALSE → not assigned → no drift.
+    r_set = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "step-env-set.json"),
+        manifest=manifest,
+        workflow=with_env,
+    )
+    assert r_set.returncode == 0, r_set.stdout + r_set.stderr
+
+
+def test_step_marker_on_its_own_line_does_not_false_positive():
+    """`-` alone on a line is a valid step marker, and it must not read as an `if:`.
+
+    A positional scan walked past such a marker and matched an unrelated EARLIER
+    step's `if:`, blocking the deploy for nothing (#4259 review). Only the payload
+    step's own condition may matter.
+    """
+    wf = _fixture(
+        "dash-alone.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - if: ${{ 1 == 1 }}
+        run: echo "not the payload"
+      -
+        run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    # Matching manifest, for the same reason as the job-level test above: the
+    # shared MANIFEST fixture would otherwise emit STALE DECLARATION violations.
+    manifest = _fixture(
+        "dash-alone-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "dash-alone.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     """End-to-end over the SHIPPED artifacts, not fixtures.
 

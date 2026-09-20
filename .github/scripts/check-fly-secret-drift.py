@@ -70,6 +70,12 @@ Env seams (all optional; used by the hermetic test suite):
                             secrets. Unset is exit 2, never "all present".
   FLY_STUB_TIMEOUT          seconds before the stubbed payload run is treated as
                             unclassifiable (default 30) — a test seam.
+
+Requires PyYAML (a project dependency) to read the workflow's STRUCTURE — see
+``_yaml_module``: an `if:` or an `env:` on the payload step or its job is a YAML
+key, not shell text, and guessing at it from line positions certified a
+may-never-run step at exit 0. The deploy workflow provisions it with
+``uv run --no-project --with pyyaml``.
 """
 
 from __future__ import annotations
@@ -135,77 +141,121 @@ _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 _SECRET_TMPL_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
 
 
-def extract_propagation_blocks(text: str) -> list[str]:
-    """Every `run:` block that builds a Fly secrets payload, as shell text.
+def _yaml_module():
+    """PyYAML, or a fail-closed error naming how the gate is run."""
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover — exercised by the message only
+        raise ValueError(
+            "PyYAML is required to read the deploy workflow's structure — a YAML `if:` "
+            "on a step or job is not part of the `run:` shell, so execution cannot see "
+            "it and line positions cannot be trusted. The deploy workflow runs this "
+            f"gate with `uv run --no-project --with pyyaml python3`: {exc}"
+        ) from exc
+    return yaml
 
-    ALL of them, not just the first: the contract is bidirectional — a Fly
-    variable the deploy can assign must be declared — and a second propagation
-    step is exactly as much a managing source as the first. Reading only the
-    first left a name assigned by a later step undeclared and invisible.
 
-    Raises ValueError when a payload step cannot be located (fail-closed: a guard
-    that cannot read the payload would silently certify any fleet), and when a
-    payload step carries a YAML step-level `if:`. That `if:` is not part of the
-    `run:` shell, so executing the block cannot see it, and the checker cannot
-    evaluate it either — it would then certify names from a step that may never
-    run, which is the #4126 state (a propagation that silently does nothing while
-    the gate goes green). The remedy is to move the condition INSIDE the `run:`
-    shell, where the execution-based classifier sees the guard.
+# The step whose `run:` invokes this gate — used to tell the gate's OWN job from
+# another job (see `_gate_job`).
+_GATE_SELF_RE = re.compile(r"check-fly-secret-drift")
+
+
+def _gate_job(doc: dict) -> str | None:
+    """The job THIS gate runs in — the one whose step invokes this script.
+
+    The distinction matters for a job-level `if:`. A payload in this gate's OWN
+    job is certified only when the gate actually ran (they run together), so a
+    job-level `if:` here is irrelevant: if the job is skipped, NOTHING is
+    certified. A payload in ANOTHER job is certified by a gate that did run, so
+    that job's `if:` can skip the propagation while the gate stays green —
+    which is why only ANOTHER job's job-level `if:` is refused (#4259 review).
+    "None" (this gate is not wired into the workflow being checked) resolves
+    strict: every payload job counts as another job.
     """
-    lines = text.splitlines()
-    cmd_indices = [i for i, ln in enumerate(lines) if _PAYLOAD_CMD_RE.search(ln)]
-    if not cmd_indices:
-        raise ValueError("no `flyctl secrets set` invocation found in the deploy workflow")
-    blocks: list[str] = []
-    seen: set[int] = set()
-    for cmd_index in cmd_indices:
-        run_index = None
-        for i in range(cmd_index, -1, -1):
-            if re.match(r"\s*(-\s*)?run:\s*\|?\s*$", lines[i]):
-                run_index = i
-                break
-        if run_index is None:
-            raise ValueError("could not find the `run:` block holding the secrets payload")
-        if run_index in seen:
-            # Two payload invocations inside ONE block are one block: the union
-            # of its argv is what the deploy assigns.
+    for job_name, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
             continue
-        seen.add(run_index)
-        if _step_is_conditional(lines, run_index):
-            raise ValueError(
-                "a `run:` block that sets the Fly secrets carries a step-level `if:` — "
-                "the checker cannot evaluate YAML conditions, so it cannot certify that "
-                "the payload runs. Move the condition inside the `run:` shell (where the "
-                "execution-based classifier can see the guard) or drop it"
-            )
-        indent = len(lines[run_index]) - len(lines[run_index].lstrip())
-        body: list[str] = []
-        for line in lines[run_index + 1 :]:
-            if not line.strip():
-                body.append("")
+        for step in job.get("steps") or []:
+            if (
+                isinstance(step, dict)
+                and isinstance(step.get("run"), str)
+                and _GATE_SELF_RE.search(step["run"])
+            ):
+                return str(job_name)
+    return None
+
+
+def extract_propagation_blocks(text: str) -> list[tuple[str, dict[str, str]]]:
+    """Every step whose `run:` builds a Fly secrets payload, with its step env.
+
+    The workflow is PARSED, not scanned by line position. Everything that can make
+    a payload conditional on something the shell cannot see is a YAML KEY — an
+    `if:` on the step, an `if:` on the JOB, an `env:` value a guard reads — and a
+    positional scan is one formatting choice away from missing it: `if:` with its
+    value on the next line, `if :`, `"if":`, and `if:` written AFTER `run:` all
+    parse to the same step dict (four spellings certified a may-never-run step at
+    exit 0, #4259 review).
+
+    ALL payload steps are returned, not just the first: the contract is
+    bidirectional, and a second propagation step is as much a managing source as
+    the first.
+
+    Raises ValueError when the workflow is not parseable YAML, when no payload step
+    exists (fail-closed: a guard that cannot read the payload would silently certify
+    any fleet), and when a payload step or its job carries a YAML `if:` — an
+    UNVERIFIABLE state the checker cannot evaluate, so it must not certify names
+    from a step that may never run. That is the #4126 state (a propagation that
+    silently does nothing, with the gate green), and the remedy is to move the
+    condition INSIDE the `run:` shell, where execution sees the guard.
+    """
+    yaml = _yaml_module()
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"the deploy workflow is not parseable YAML: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise ValueError("the deploy workflow is not a YAML mapping")
+    blocks: list[tuple[str, dict[str, str]]] = []
+    gate_job = _gate_job(doc)
+    for job_name, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for index, step in enumerate(job.get("steps") or []):
+            if not isinstance(step, dict):
                 continue
-            if len(line) - len(line.lstrip()) <= indent:
-                break
-            body.append(line)
-        if not body:
-            raise ValueError("the secrets-payload `run:` block is empty")
-        block_indent = min((len(ln) - len(ln.lstrip()) for ln in body if ln.strip()), default=0)
-        blocks.append("\n".join(ln[block_indent:] for ln in body))
+            run = step.get("run")
+            if not isinstance(run, str) or not _PAYLOAD_CMD_RE.search(run):
+                continue
+            label = step.get("name") or f"#{index}"
+            if "if" in step:
+                raise ValueError(
+                    f"the step that sets the Fly secrets (job {job_name!r}, {label!r}) "
+                    "carries a step-level `if:` — the checker cannot evaluate YAML "
+                    "conditions, so it cannot certify that the payload runs. Move the "
+                    "condition inside the `run:` shell (where the execution-based "
+                    "classifier can see the guard) or drop it"
+                )
+            if "if" in job and str(job_name) != gate_job:
+                raise ValueError(
+                    f"the job {job_name!r} that sets the Fly secrets carries a "
+                    "job-level `if:`, and it is NOT the job this gate runs in — so the "
+                    "gate can be green on a run where that job never propagates. Move "
+                    "the condition into the step's `run:` shell (where the "
+                    "execution-based classifier can see the guard), run the gate in "
+                    "that job, or drop it"
+                )
+            # The step's and job's `env:` are inherited by the payload shell, so a
+            # guard may read them (`[ -z "$VAR" ]`). They are modelled — with
+            # secrets substituted exactly like the script — because a value the
+            # stub env lacks would make the run sample disagree with the deploy.
+            step_env: dict[str, str] = {}
+            for source in (job.get("env"), step.get("env")):
+                if isinstance(source, dict):
+                    step_env.update({str(k): str(v) for k, v in source.items()})
+            blocks.append((run, step_env))
     if not blocks:
-        raise ValueError("no usable `run:` block holds the secrets payload")
+        raise ValueError("no `flyctl secrets set` invocation found in the deploy workflow")
     return blocks
-
-
-def _step_is_conditional(lines: list[str], run_index: int) -> bool:
-    """True when the step owning ``run_index`` carries a step-level ``if:``."""
-    for line in reversed(lines[:run_index]):
-        # `- if: …` is both the step marker and the condition, so test the key
-        # BEFORE treating the line as a step boundary.
-        if re.match(r"\s*(-\s*)?if:\s*\S", line):
-            return True
-        if line.strip().startswith("- "):
-            break
-    return False
 
 
 def _stub_records(raw: str) -> list[list[str]]:
@@ -238,7 +288,9 @@ def _payload_assignments(groups: list[list[str]]) -> dict[str, str]:
     return captured
 
 
-def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
+def _capture_payload(
+    script: str, present: dict[str, str], step_env: dict[str, str] | None = None
+) -> dict[str, str]:
     """Run the propagation shell with a stubbed flyctl; return ``NAME -> value``.
 
     EXECUTION, not parsing. The block is the ground truth, and every shell
@@ -281,6 +333,13 @@ def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
             "HOME": stub_dir,
             "GITHUB_SHA": "fixture-sha",
         }
+        # The step's and the job's `env:` are inherited by the payload shell, and a
+        # guard may read one (`[ -z "$VAR" ]`). They are modelled with the same
+        # secret substitution as the script, so the run sample cannot disagree with
+        # the deploy over a value the stub env happened to lack. `setdefault` keeps
+        # PATH/HOME/GITHUB_SHA authoritative for the harness itself.
+        for key, value in (step_env or {}).items():
+            env.setdefault(key, _SECRET_TMPL_RE.sub(substitute, value))
         # fd 3 is opened by the wrapper and inherited across `exec`, so the stub
         # has somewhere private to write. `bash -e` mirrors GitHub's default
         # shell for a `run:` block; it is exec'd after the harness is set up so
@@ -317,7 +376,7 @@ def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
 
 
 def payload_partition(
-    scripts: list[str], gh_present: set[str]
+    scripts: list[tuple[str, dict[str, str]]], gh_present: set[str]
 ) -> tuple[set[str], set[str], set[str], dict[str, set[str]]]:
     """``(assigned, unconditional, live, sources)`` over EVERY payload block.
 
@@ -349,14 +408,14 @@ def payload_partition(
     live: set[str] = set()
     guarded: set[str] = set()
     sources: dict[str, set[str]] = {}
-    for script in scripts:
+    for script, step_env in scripts:
         secret_names = sorted(set(_SECRET_REF_RE.findall(script)))
-        all_present = _capture_payload(script, {name: name for name in secret_names})
+        all_present = _capture_payload(script, {name: name for name in secret_names}, step_env)
         # The payload THIS run builds — markers only for the secrets the runner
         # actually carries. One more execution of the same shell.
-        in_run = _capture_payload(script, {name: name for name in gh_present})
+        in_run = _capture_payload(script, {name: name for name in gh_present}, step_env)
         block_assigned = set(all_present)
-        block_unconditional = set(_capture_payload(script, {}))
+        block_unconditional = set(_capture_payload(script, {}, step_env))
         guarded |= block_assigned - block_unconditional
         unconditional |= block_unconditional
         assigned |= block_assigned
