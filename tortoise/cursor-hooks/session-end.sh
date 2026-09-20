@@ -220,7 +220,8 @@ for pattern in cands:
     exit 0
   fi
 
-  # Python fallback: run the resolved checkout as `python -m tortoise`.
+  # Python fallback: run the resolved checkout via an ENV-fed ``-c`` prefix
+  # (never ``-m`` — see the CWE-427 note at the invocation below).
   PYTHON_BIN=""
   if [ -z "$TORTOISE_BIN" ]; then
     if [ -x "$TORTOISE_MODULE/.venv/bin/python" ]; then
