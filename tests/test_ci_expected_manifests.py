@@ -23,6 +23,7 @@ containing all of them must pass. A pin that cannot fail is not a pin.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -117,9 +118,38 @@ def test_manifests_carry_provenance() -> None:
             line for line in path.read_text().splitlines() if line.startswith("#")
         )
         assert "PROVENANCE" in header, f"{path.name} has no provenance header"
-        assert "run" in header.lower() and "CI" in header, (
-            f"{path.name}'s header does not name the CI run it was measured from"
+        # A run ID, not the bare words: the earlier check passed on a header saying
+        # "NOT FROM A CI RUN", which is exactly the failure it exists to catch.
+        assert re.search(r"\brun\s+\d{6,}\b", header), (
+            f"{path.name}'s header names no CI run id — the next reader cannot re-derive the set"
         )
+        assert "PROVENANCE" in header and "junit" in header.lower(), (
+            f"{path.name}'s header does not name the artifact the set came from"
+        )
+
+
+def test_embedded_manifest_markers_are_documented_and_real() -> None:
+    """The 69 entries are TWO kinds with two different claims.
+
+    A `path::dotted.module` entry is pytest's synthetic module-level
+    collection-abort marker (the hosted-e2e modules gated by
+    `skip_unless_hosted_e2e()` -> `pytest.skip(..., allow_module_level=True)`).
+    It pins that the module still ABORTS AT COLLECTION — a strictly weaker claim
+    than "its tests are collected", which is why the header has to say so. Pin the
+    spelling (so a marker cannot be mistaken for a test), that the files exist, and
+    that the count is recorded in the header — a marker silently "cleaned up" into
+    a test nodeid would change what the set asserts.
+    """
+    nodeids = _nodeids(EMBEDDED)
+    markers = [n for n in nodeids if n.partition("::")[2] == _module_dotted(n.split("::")[0])]
+    tests = [n for n in nodeids if n not in markers]
+    assert markers and tests, f"expected both kinds; markers={len(markers)} tests={len(tests)}"
+    for marker in markers:
+        assert (ROOT / marker.split("::")[0]).is_file(), marker
+    header = "\n".join(line for line in EMBEDDED.read_text().splitlines() if line.startswith("#"))
+    assert str(len(markers)) in header and "collection" in header.lower(), (
+        "the header must state how many entries are collection-abort markers and what they assert"
+    )
 
 
 def test_platform_gated_manifest_covers_the_registry() -> None:
@@ -133,6 +163,20 @@ def test_platform_gated_manifest_covers_the_registry() -> None:
     from tests.test_markers import PLATFORM_GATED_TESTS
 
     listed = {Path(nid.split("::")[0]).name for nid in _nodeids(PLATFORM_GATED)}
+    # Basenames alone verified only that the FILE appears — not that its tests do.
+    # Compare the nodeids against the file's own `def test_*` names, so a test added
+    # to a gated file without regenerating the manifest is caught (a gate hiding only
+    # the NEW test would otherwise slip through).
+    for name in PLATFORM_GATED_TESTS:
+        file = ROOT / "tests" / name if not name.startswith("tests/") else ROOT / name
+        path = file if file.is_file() else next(ROOT.rglob(Path(name).name))
+        rel = str(path.relative_to(ROOT))
+        defs = set(re.findall(r"^\s*(?:async )?def (test_\w+)", path.read_text(), re.M))
+        pinned = {nid.split("::", 1)[1] for nid in _nodeids(PLATFORM_GATED) if nid.startswith(f"{rel}::")}
+        assert defs <= pinned, (
+            f"{rel} defines {sorted(defs - pinned)} with no nodeid in platform-gated.txt — "
+            "regenerate the manifest so a vanished test is noticed (#4215)"
+        )
     missing = sorted(set(PLATFORM_GATED_TESTS) - listed)
     assert not missing, (
         f"{missing} are registered as platform-gated but have no nodeid in "
@@ -159,8 +203,8 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     assert rel in text, f"{rel} is not referenced by {WORKFLOW.name} — nothing consumes it"
     invocations = 0
     for lineno, line in enumerate(text.splitlines(), 1):
-        if rel not in line:
-            continue
+        if rel not in line or line.lstrip().startswith("#"):
+            continue  # a comment mentioning the path is not a consumer
         # The command may continue on the next line(s) (YAML line continuations).
         window = "\n".join(text.splitlines()[lineno - 1: lineno + 2])
         assert "--manifest-only" in window, (

@@ -7,11 +7,26 @@
 # <testcase> (passed OR skipped) or the run reds, naming the one that
 # vanished. Supersets are fine — new marked tests need no edit.
 #
-# PROVENANCE (regenerate, never hand-edit): 69 collected tests from
-# CI run 35518962357 (head fd23a4033), job test-d14-hosted-api, junit /tmp/junit-d14.xml.
-# Regenerate: python3 tools/skip-guard.py --emit-manifest 'tests/' \
-#   --marker embedded_only --output config/ci-expected-nodeids/embedded-only.txt
-# (then verify the count matches a CI run — a local env collects fewer).
+# WHAT IS IN THE 69 ENTRIES — two kinds, and they assert different things:
+#   * 37 are real test nodeids (`path::test_name`): that test is still COLLECTED.
+#   * 32 are module-level collection-abort markers, spelled `path::dotted.module`
+#     (pytest's synthetic <testcase> with an empty classname). Each pins that the
+#     module STILL ABORTS AT COLLECTION in this lane — those are the hosted-e2e
+#     modules gated by `skip_unless_hosted_e2e()` ->
+#     `pytest.skip(..., allow_module_level=True)`. Note the weaker claim: if every
+#     test in such a module were deleted, the marker would remain. Removing the
+#     module-level gate makes the module collect instead, so the marker vanishes
+#     and the run reds.
+#
+# PROVENANCE (regenerate, never hand-edit): the 69 entries are the junitxml
+# <testcase> set of CI run 35518962357 (head fd23a4033), job
+# test-d14-hosted-api, artifact junit-d14.xml — reconstructed with
+# tools/skip-guard.py's own `reconstruct_nodeid`, so the spelling cannot diverge
+# from what the guard compares against.
+# Regenerate by re-running the d14 job and extracting its junit, NOT with
+# `--emit-manifest`: that flag runs `--collect-only`, which emits NOTHING for a
+# module that aborts at collection, so it would silently drop all 32 markers and
+# replace this header.
 tests/e2e/hosted/test_01_signup_provision.py::tests.e2e.hosted.test_01_signup_provision
 tests/e2e/hosted/test_02_free_tier_limits.py::tests.e2e.hosted.test_02_free_tier_limits
 tests/e2e/hosted/test_03_billing_upgrade.py::tests.e2e.hosted.test_03_billing_upgrade

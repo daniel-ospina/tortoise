@@ -1589,10 +1589,16 @@ jobs:
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
+            # BOTH guards must be able to red this step. It runs under `set +e`, and a
+            # `run:` block's status is its LAST command's — so an unguarded second
+            # invocation silently masked the first one's failure (the #1647 coverage
+            # guard's non-zero exit was discarded whenever the platform-gated guard
+            # passed). Accumulate the codes and exit non-zero if EITHER failed.
+            guard_rc=0
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt || guard_rc=1
             else
-              python3 tools/skip-guard.py /tmp/pytest.log
+              python3 tools/skip-guard.py /tmp/pytest.log || guard_rc=1
             fi
             # #4215: the runtime half of the platform-gate guard. The manifest
             # above is regenerated from THIS tree's --collect-only, so a gate that
@@ -1606,7 +1612,8 @@ jobs:
             # matchers must not run here.
             python3 tools/skip-guard.py /tmp/pytest.log \
               --junitxml=/tmp/junit.xml \
-              --manifest config/ci-expected-nodeids/platform-gated.txt --manifest-only
+              --manifest config/ci-expected-nodeids/platform-gated.txt --manifest-only || guard_rc=1
+            exit $guard_rc
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
