@@ -111,26 +111,36 @@ def _fixture_session_date(raw: str) -> str:
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
 
 
-def _clear_recorded_time(proj, session_id: str) -> None:
-    """Erase a seeded session's recorded time — session AND turns (#4106).
+class _CaptureClock:
+    """Sentinel: *"this caller models a CAPTURE, which always HAS a capture
+    time"* (#4156).
 
-    ``seed_capture_turn_store`` models a CAPTURE, so its ``now=None`` default
-    is the run clock, and capture always writes ``created_at``. A fixture
-    whose dataset records NO date for the session must therefore remove what
-    that default wrote: the ask-path date annotation reads
-    ``:Session.created_at``, so leaving the run clock there would render the
-    test run's date as the session's date. Turn ``createdAt`` is cleared with
-    it to keep the one-``now``-per-session shape intact.
+    ``now`` used to default to a plain ``None`` that was then substituted with
+    the run clock, so ``None`` silently MEANT "the run clock" and a caller that
+    wanted to record **no** time could not say so — it had to erase the
+    fabricated value afterwards (the ``_clear_recorded_time`` convention both
+    seeders carried, and the trap the next seeder would re-discover). The
+    default is now this sentinel: passing nothing still models a capture's own
+    clock, and ``now=None`` is an explicit *"no recorded time"* — which the
+    writers ENFORCE ON THE NODE (any recorded time already present is removed,
+    not merely left unwritten).
     """
-    proj.g.query("MATCH (s:Session {id:$sid}) SET s.created_at = null",
-                 params={"sid": session_id})
-    proj.g.query("MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                 "SET t.createdAt = null",
-                 params={"sid": session_id})
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "CAPTURE_CLOCK"
+
+
+#: The capture-shaped seeders' default ``now``: the run clock, NAMED so that
+#: "no recorded time" (an explicit ``None``) and "the capture simulation's
+#: recorded time" are two distinguishable values rather than one (#4156).
+CAPTURE_CLOCK = _CaptureClock()
 
 
 def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
-                          now: str | None = None) -> str:
+                          now: str | _CaptureClock | None = CAPTURE_CLOCK,
+                          ) -> str | None:
     """MERGE a ``(:Session)`` node in the shape BOTH capture writers write.
 
     The Session is never a bare ``{id}`` in production: both capture surfaces
@@ -142,23 +152,45 @@ def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
     commit reads ``s.is_episodic``) sees ``None`` on any graph seeded without
     them — so no fixture seeded that way can guard those surfaces.
 
+    ``now`` is the session's RECORDED time. The default (``CAPTURE_CLOCK``)
+    models a capture, which always has one, and resolves to the run clock.
+    An explicit ``now=None`` means the session records **NO** time, and that is
+    enforced against the node, not merely against this write: any
+    ``created_at`` already on it is REMOVED — which is the whole job of the
+    ``_clear_recorded_time`` helper this replaces (#4154 → #4156). "Skip the
+    write" alone would have left a stale, possibly fabricated, date on a
+    re-seeded node, i.e. exactly the trap #4156 exists to remove. Any other
+    ``str`` is recorded verbatim (including ``""`` — silently coercing a falsy
+    string to the run clock is the conflation #4156 removes; the read path
+    renders a non-date as UNKNOWN).
+
     Shared by every ask-lane seeder so the Session side cannot drift either.
-    Returns the ``now`` used, so a caller writing several sessions or turns
-    can hold ONE timestamp across them.
+    Returns the ``now`` used (``None`` when no time was recorded), so a caller
+    writing several sessions or turns can hold ONE timestamp across them.
     """
-    now = now or datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    if isinstance(now, _CaptureClock):
+        # The sentinel is resolved HERE, so a caller passing no ``now`` (or any
+        # ``_CaptureClock`` instance the annotation admits) gets the capture
+        # simulation's clock and nothing downstream sees the sentinel.
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    sets = "s.turn_count=$tc, s.is_episodic=true"
+    params: dict[str, object] = {"sid": session_id, "tc": turn_count}
+    if now is None:
+        sets = "s.created_at=null, " + sets
+    else:
+        sets = "s.created_at=coalesce(s.created_at, $now), " + sets
+        params["now"] = now
     sdk._get_proj().g.query(
-        "MERGE (s:Session {id:$sid}) "
-        "SET s.created_at=coalesce(s.created_at, $now), "
-        "    s.turn_count=$tc, s.is_episodic=true",
-        params={"sid": session_id, "now": now, "tc": turn_count},
+        f"MERGE (s:Session {{id:$sid}}) SET {sets}",
+        params=params,
     )
     return now
 
 
 def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
                             conversation: list[dict], *,
-                            now: str | None = None) -> list[str]:
+                            now: str | _CaptureClock | None = CAPTURE_CLOCK,
+                            ) -> list[str]:
     """Write ONE session's turns in the CAPTURE shape (#3914, #3910).
 
     The single seeder every ask-lane fixture writes through, so no fixture
@@ -189,6 +221,12 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     — capture's gate is PRE-MUTATION), so a degenerate session contributes no
     Session stub, no turn and no edge, exactly as in capture.
 
+    ``now`` follows :func:`merge_capture_session` exactly: the default
+    (``CAPTURE_CLOCK``) models a capture's own clock and is resolved ONCE so
+    the session and every turn share it; an explicit ``now=None`` means the
+    session and its turns record NO time, and any time already on them is
+    REMOVED (#4156).
+
     Returns the turn ids WRITTEN, in window order. An EMPTY list means the
     blank gate skipped the session — the caller must not assume a Point
     exists. Callers own any non-capture furniture (the ask fixtures' date-only
@@ -201,6 +239,19 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         return []
     proj = sdk._get_proj()
     now = merge_capture_session(sdk, session_id, len(windowed), now=now)
+    # #4156: the SAME contract as the Session side — the default models a
+    # capture's clock (already resolved above into one ``now`` shared by the
+    # session and every turn), while an explicit ``now=None`` means the
+    # session records NO time: the two time properties are not written here,
+    # and after the loop the WHOLE stored ``CONTAINS`` set is swept — the
+    # deleted ``_clear_recorded_time`` cleared every stored turn, and a
+    # shorter re-seed must not leave an earlier call's timestamps behind.
+    time_sets = ""
+    time_params: dict[str, object] = {}
+    if now is not None:
+        time_sets = ("t.createdAt=coalesce(t.createdAt, $now), "
+                     "t.updatedAt=$now, ")
+        time_params = {"now": now}
     turn_ids: list[str] = []
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
@@ -217,11 +268,11 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
             "    t.speaker=$speaker, "
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
-            "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch",
+            f"    {time_sets}"
+            "    t.content_hash=$ch",
             params={"id": turn_id, "c": turn_text, "k": "event",
-                    "speaker": role, "s": "draft", "now": now,
-                    "ch": _content_hash(turn_text)},
+                    "speaker": role, "s": "draft",
+                    "ch": _content_hash(turn_text), **time_params},
         )
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
@@ -229,6 +280,17 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
             params={"sid": session_id, "tid": turn_id},
         )
         turn_ids.append(turn_id)
+    if now is None:
+        # #4156: the sweep is over the session's STORED turn set, not over the
+        # window rewritten above — the deleted helper cleared
+        # ``(:Session)-[:CONTAINS]->(:Point)`` unconditionally, so a re-seed
+        # with a SHORTER conversation must clear the older turns too, or the
+        # session records a fabricated date again through the back door.
+        proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+            "SET t.createdAt = null, t.updatedAt = null",
+            params={"sid": session_id},
+        )
     return turn_ids
 
 
@@ -316,11 +378,10 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
         if not turn_ids:
             continue
         if not sdate:
-            # #4106: the fixture records NO date for this session, and
-            # ``seed_capture_turn_store``'s ``now=None`` default is capture's
-            # own RUN clock — erase it (session AND turns), so the read path
-            # reports UNKNOWN instead of fabricating the run date.
-            _clear_recorded_time(proj, sid)
+            # #4106/#4156: the fixture records NO date for this session, so
+            # the seeder is told exactly that (``now=None``) and writes NO
+            # recorded time — the read path reports UNKNOWN instead of a
+            # fabricated run date, with nothing to erase afterwards.
             continue
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
