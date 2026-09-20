@@ -22,7 +22,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.ask_spotcheck import _clear_recorded_time, seed_capture_turn_store
+from tools.ask_spotcheck import seed_capture_turn_store
 from tortoise.reader import reader_prompt_constants
 from tortoise.retrieval import (
     DEFAULT_CONTEXT_ITEM_CAP,
@@ -79,6 +79,9 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
         # #4106: ONE ``now`` for the session and its turns — capture's own
         # shape — and it is the fixture's session date, so the rendered
         # ``(session date …)`` is TRUE and the committed goldens are stable.
+        # An absent date passes ``now=None``, which since #4156 means "record
+        # NO time" rather than "use the run clock", so the read path reports
+        # UNKNOWN with nothing to erase afterwards.
         turn_ids = seed_capture_turn_store(
             sdk, sid,
             [{"role": seed.get("role") or "user",
@@ -89,10 +92,9 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
             continue
         ids[seed.get("label", f"s{i}")] = turn_ids[0]
         if not sdate:
-            # The fixture records no date for this session, and the shared
-            # seeder's ``now=None`` default is capture's RUN clock — erase it
-            # so the read path reports UNKNOWN rather than the run date.
-            _clear_recorded_time(proj, sid)
+            # The fixture records no date for this session, so the seeder was
+            # told exactly that and wrote no recorded time — the read path
+            # reports UNKNOWN rather than the run date.
             continue
         event_id = seed.get("eventId") or f"ev-{i}"
         proj.g.query(
