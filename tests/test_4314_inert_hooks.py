@@ -267,7 +267,7 @@ def test_verify_reports_inert_for_an_rc0_but_effectless_install(
     assert report["exit_code"] == sv.EXIT_BROKEN, report
 
 
-def test_hook_src_dir_record_never_writes_the_real_home(tmp_path):
+def test_hook_src_dir_record_never_writes_the_real_home(tmp_path, monkeypatch):
     """The record must never land on the developer's machine from a test.
 
     #3721's trap: an earlier cut of #4314 used ``Path.home()`` unconditionally
@@ -285,6 +285,11 @@ def test_hook_src_dir_record_never_writes_the_real_home(tmp_path):
     derived = hi._hook_src_dir_base(None)
     assert derived != real and real not in derived.parents, derived
     assert "tortoise-hook-src-tests" in str(derived), derived
+    # PYTEST_CURRENT_TEST carries the phase; one test must map to ONE dir.
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/x.py::test_y (call)")
+    call_dir = hi._hook_src_dir_base(None)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/x.py::test_y (setup)")
+    assert hi._hook_src_dir_base(None) == call_dir
     explicit = tmp_path / "explicit-home"
     assert hi._hook_src_dir_base(explicit) == explicit
 

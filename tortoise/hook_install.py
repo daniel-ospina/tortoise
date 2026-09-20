@@ -173,8 +173,13 @@ def _hook_src_dir_base(home: Path | None) -> Path:
         return Path(home)
     test_id = os.environ.get("PYTEST_CURRENT_TEST")
     if test_id:
+        # ``PYTEST_CURRENT_TEST`` is ``"<nodeid> (call|setup|teardown)"`` —
+        # the phase suffix differs per phase, so hashing it verbatim gave one
+        # test three directories and a record written in ``setup`` was
+        # invisible in ``call``.  Strip the phase so ONE test == ONE dir.
+        node_id = test_id.rsplit(" (", 1)[0]
         digest = hashlib.sha256(
-            test_id.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+            node_id.encode("utf-8", "surrogatepass")).hexdigest()[:16]
         return Path(tempfile.gettempdir()) / "tortoise-hook-src-tests" / digest
     return Path.home()
 
