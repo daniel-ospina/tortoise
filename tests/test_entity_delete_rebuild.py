@@ -476,19 +476,37 @@ class TestIdentityIsKindPlusId:
 
     def test_rebuild_dispatch_arm_is_kind_scoped(self, env):
         """The chronological ``apply()`` arm must be kind-scoped too, or the
-        two replay arms diverge."""
+        two replay arms diverge.
+
+        The collision must exist in JOURNAL order for the delete record: the
+        Point is created BEFORE the delete is appended, so the chronological
+        arm has a same-id foreign-kind node to scope against. (The earlier
+        shape created the Point after the delete, leaving the arm nothing to
+        mis-scope against — so an id-wide regression slipped through.)
+        """
         sdk, events = env
         proj = sdk._get_proj()
         url = "https://collide.test/3860-dispatch"
         sdk.create_source(url, "document")
-        assert sdk._delete_entity(url) is True
-        sdk.create_point("statement", "collide-point", id=url)
+        pid = sdk.create_point("statement", "collide-point", id=url)["id"]
+        assert _point(proj, pid), "seed Point must exist live"
+
+        # The Source delete is journaled AFTER the Point exists, so the
+        # chronological apply() arm has a foreign-kind node to scope against.
+        with open(events / "events.jsonl", "a") as fh:
+            fh.write(json.dumps({
+                "event_id": ulid(), "ts": datetime.now(UTC).isoformat(),
+                "type": "EntityMutated", "initiated_by": "raw-producer",
+                "projection_version": 2, "id": pid, "op": "delete",
+                "label": "Source",
+            }) + "\n")
 
         proj.rebuild(EventLog(str(events / "events.jsonl")))
         assert not _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url), (
             "rebuild(EventLog) resurrected the deleted Source — #3860")
-        assert _point(proj, url), (
-            "rebuild(EventLog) destroyed the live Point — #3860")
+        assert _point(proj, pid), (
+            "rebuild(EventLog) destroyed the live Point: the chronological "
+            "apply() arm is not kind-scoped — #3860")
 
     def test_in_memory_fold_ignores_foreign_kind_delete(self):
         """T2 on the third replay arm: ``_apply_one``'s index is point-only,
