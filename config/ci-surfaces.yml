@@ -363,6 +363,10 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
+  # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
+  # write/read marker split. No DB, no network — default `core` surface is correct.
+  - test_4220_blog_residue_cleanup.py
   - test_ask_eval_only.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
@@ -822,6 +826,12 @@ surfaces:
   # website/functions/_middleware.ts under Node) and the console's move to the
   # app origin. Pure/harness — no wrangler, no network.
   - test_admin_origin_redirect.py
+  # #4316: the agent DELETE surface's P1 draft-only guard + ownership/status
+  # predicates, executed against website/functions/blog/api/posts/[[path]].ts
+  # under Node with a stubbed fetch (no wrangler, no network, no DB). The E2E
+  # environment cannot express the cross-agent 403 (one key) or archived→409
+  # (the agent API cannot archive) — those cases live here.
+  - test_blog_agent_delete_guard.py
   - test_dashboard_unknown_address.py
   - test_github_connect.py
   - test_github_connector.py
