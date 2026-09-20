@@ -1366,8 +1366,9 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
              "it does NOT carry the leg reason, so a degraded read here is "
              "NOT by itself evidence of a missing vector: in embedded mode "
              "the seeder writes the product's own vector by default (#4194). "
-             "The reason taxonomy (`no_embeddings`/`no_embedder`/`timeout`/"
-             "`breaker_open`/`query_failed`/`index_missing`) is visible in a "
+             "The reason taxonomy (`no_embeddings`/`no_embedder`/"
+             "`encode_failed`/`timeout`/`breaker_open`/`query_failed`/"
+             "`index_missing`) is visible in a "
              "leg-trace diagnostic, e.g. docs/runbook/"
              "w7a_gold_rank_diagnostic.py."
              ) if degraded
