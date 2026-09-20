@@ -681,7 +681,16 @@ jobs:
         run: |
           pip install pytest requests playwright pytest-playwright
           pip install -e .
-      - name: Run blog E2E suite against production
+      - name: Run blog E2E suite against production (read-only)
+        # #4220: `-m "not blog_write"` excludes the two tests that CREATE rows
+        # (create/publish/unpublish). A deploy must not mutate production
+        # content, and a write test that fails mid-run leaves residue. Those two
+        # now run on demand — see .github/workflows/blog-write-e2e.yml.
+        #
+        # BLOG_E2E_AGENT_KEY is deliberately NOT in this job any more: the
+        # read-only assertions need no credential, so a deploy no longer holds a
+        # production write-capable key at all (defence in depth — even if the
+        # marker were dropped, the write tests skip without a key).
         env:
           RUN_BLOG_E2E: '1'
           ALLOW_PROD: '1'
@@ -690,6 +699,5 @@ jobs:
           TORTOISE_TEST_CARVE_OUT: '1'
           BASE_URL: https://premiselabs.co
           TORTISE_HOST: https://tortoise.premiselabs.co
-          BLOG_E2E_AGENT_KEY: ${{ secrets.BLOG_E2E_AGENT_KEY }}
         run: |
-          python3 -m pytest tests/e2e/test_blog.py -v
+          python3 -m pytest tests/e2e/test_blog.py -v -m "not blog_write"
