@@ -52,7 +52,12 @@ VALUES
      '2026-06-01T00:00:00+00:00', '2026-06-01T00:00:00+00:00'),
     -- no subscription → must never be repaired from a single stray bound.
     ('4216-free-one-bound', '4216-free-one-bound', 'org_4216-free-one-bound',
-     NULL, '2026-05-01T00:00:00+00:00', NULL);
+     NULL, '2026-05-01T00:00:00+00:00', NULL),
+    -- whitespace-only subscription_id: the runtime resolver treats it as NO
+    -- subscription (calendar month, cap enforceable), so the repair must not
+    -- derive or report it.
+    ('4216-blank-sub', '4216-blank-sub', 'org_4216-blank-sub', '   ',
+     NULL, NULL);
 
 -- 1) The repair RETURNS exactly the unusable orgs (loud, not silent).
 --    Mutation caught: dropping either reported class (both-NULL / inverted /
@@ -166,6 +171,11 @@ BEGIN
        OR f_e IS NOT NULL THEN
         RAISE EXCEPTION 'a no-subscription org must be untouched (% %)', f_s, f_e;
     END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-blank-sub';
+    IF f_s IS NOT NULL OR f_e IS NOT NULL THEN
+        RAISE EXCEPTION 'a blank-subscription org must be untouched (% %)', f_s, f_e;
+    END IF;
 END $$;
 
 -- 5) IDEMPOTENT: a second run derives nothing further and still reports the
@@ -238,4 +248,4 @@ SET TIME ZONE 'UTC';
 DELETE FROM public.organizations
  WHERE id IN ('4216-end-null', '4216-start-null', '4216-dst',
               '4216-dst-start', '4216-both-null', '4216-inverted',
-              '4216-empty', '4216-free-one-bound');
+              '4216-empty', '4216-free-one-bound', '4216-blank-sub');

@@ -99,6 +99,7 @@ BEGIN
              (current_period_end AT TIME ZONE 'UTC' - interval '1 month')
              AT TIME ZONE 'UTC'
      WHERE subscription_id IS NOT NULL
+       AND btrim(subscription_id) <> ''
        AND current_period_end IS NOT NULL
        AND current_period_start IS NULL;
 
@@ -110,6 +111,7 @@ BEGIN
              (current_period_start AT TIME ZONE 'UTC' + interval '1 month')
              AT TIME ZONE 'UTC'
      WHERE subscription_id IS NOT NULL
+       AND btrim(subscription_id) <> ''
        AND current_period_start IS NOT NULL
        AND current_period_end IS NULL;
 
@@ -123,6 +125,7 @@ BEGIN
                 AND o.current_period_end IS NULL) AS both_null
           FROM public.organizations AS o
          WHERE o.subscription_id IS NOT NULL
+           AND btrim(o.subscription_id) <> ''
            AND (
                 (o.current_period_start IS NULL
                  AND o.current_period_end IS NULL)

@@ -1010,6 +1010,13 @@ class TestBootReconcile:
                                  "current_period_end": 4}]}}) == (1, 2)
         assert subscription_period_bounds({}) == (None, None)
         assert subscription_period_bounds({"items": []}) == (None, None)
+        # a truthy NON-list/non-dict `items` must not raise (malformed webhook
+        # payload; the checkout call site is outside a try) — #4216 review.
+        assert subscription_period_bounds({"items": "x"}) == (None, None)
+        assert subscription_period_bounds({"items": 5}) == (None, None)
+        assert subscription_period_bounds({
+            "current_period_start": 7, "current_period_end": 8,
+            "items": "x"}) == (7, 8)
 
     def test_boot_reconcile_repairs_customer_only_team(self, monkeypatch, billing_client):
         """Missed checkout.session.completed: only stripe_customer_id exists."""

@@ -505,10 +505,19 @@ def _subscription_items(sub: dict) -> list:
     """A Stripe subscription's item rows, for either payload shape.
 
     Stripe returns ``items`` as a ``{'data': [...]}`` envelope; fixtures and
-    older payloads use a flat list. Anything else yields ``[]``.
+    older payloads use a flat list. Anything else (a scalar, a missing key,
+    ``None``) yields ``[]`` — NEVER an ``AttributeError``: this helper runs on
+    webhook payloads, so a malformed shape must not raise. (#4216 review: the
+    first version called ``.get`` on any truthy non-dict and 500'd the
+    checkout route, before the metadata-tier fallback could run.)
     """
-    items = (sub or {}).get("items") or {}
-    rows = items if isinstance(items, list) else (items or {}).get("data") or []
+    items = (sub or {}).get("items")
+    if isinstance(items, list):
+        rows = items
+    elif isinstance(items, dict):
+        rows = items.get("data") or []
+    else:
+        rows = []
     return rows if isinstance(rows, list) else []
 
 
@@ -530,15 +539,16 @@ def subscription_period_bounds(sub: dict) -> tuple:
     """
     if not isinstance(sub, dict):
         return None, None
-    item = next(iter(_subscription_items(sub)), {})
-    if not isinstance(item, dict):
-        item = {}
     start = sub.get("current_period_start")
     end = sub.get("current_period_end")
-    if start is None:
-        start = item.get("current_period_start")
-    if end is None:
-        end = item.get("current_period_end")
+    if start is None or end is None:
+        item = next(iter(_subscription_items(sub)), {})
+        if not isinstance(item, dict):
+            item = {}
+        if start is None:
+            start = item.get("current_period_start")
+        if end is None:
+            end = item.get("current_period_end")
     return start, end
 
 
