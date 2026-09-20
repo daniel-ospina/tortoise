@@ -1,6 +1,12 @@
-"""Static regression tests for the premiselabs.co contact form (#2409).
+"""Regression tests for the premiselabs.co contact form (#2409).
 
-Guards the contract the form exists to honour — at the repo level, no network:
+Most of this file is STATIC source analysis, at the repo level and without
+network access. Four fixes cannot be proven by reading source — the byte cap,
+the redirect policy, the honeypot's confirmation and the log contents are
+BEHAVIOURAL — so section 7 executes the two modules under Node (Deno as a
+fallback) with a stub `fetch` and asserts the outcomes (see `_CONTACT_HARNESS`).
+
+Guards the contract the form exists to honour:
 
   1. DELIVERY TARGET IS SETTLED. The owner ruling (issue #2409, 2026-09-18) puts
      the outside-product channel at `hello@premiselabs.co`. It is a CODE
@@ -49,6 +55,9 @@ Run:  python -m pytest tests/test_contact_form.py -v
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import tempfile
 from html import unescape
 from pathlib import Path
 
@@ -1145,3 +1154,438 @@ def test_ops_step_is_documented() -> None:
     assert "Contact form (#2409)" in readme
     assert "CONTACT_INTAKE_URL" in readme
     assert "503" in readme
+
+
+# ── 7. Behavioural contract — the fixes a source scan cannot prove ────────
+#
+# The rest of this file READS source; these tests RUN it. The two modules are
+# copied into a temp dir (the seam import rewritten to an explicit `.ts`, which
+# both runtimes require for a direct import) and driven through a stub `fetch`,
+# with types stripped rather than checked, so the Cloudflare ambient
+# `PagesFunction` type need not exist. Each test fails if its fix is reverted.
+# Node is tried first (`--experimental-strip-types`, already on the CI runner, so
+# the guard needs no new runtime there); Deno is the fallback. When NEITHER is
+# available the test FAILS — a skipped guard is indistinguishable from a passing
+# one, which is the hole this replaced.
+_CONTACT_HARNESS = r'''
+// Behavioural harness for the contact form's Pages Function + transport seam.
+// Run with no args for all checks, or name checks to run only those.
+// Exit 0 = every selected check passed; a failed check throws (non-zero exit).
+import { onRequest } from "./contact.ts";
+
+const enc = new TextEncoder();
+// Runtime-agnostic argv: Node (`--experimental-strip-types`) is preferred, Deno
+// is the fallback. `declare` is erased by both, so nothing references `process`
+// under Deno or `Deno` under Node.
+declare const Deno: { args: string[] } | undefined;
+declare const process: { argv: string[] };
+const only: string[] = typeof Deno !== "undefined" ? Deno.args : process.argv.slice(2);
+
+function assert(cond: unknown, msg: string): asserts cond {
+  if (!cond) throw new Error(msg);
+}
+
+const ENV = {
+  CONTACT_INTAKE_URL: "https://intake.test/inbound-ingest",
+  CONTACT_INTAKE_SECRET: "s3cret",
+};
+
+async function post(body: BodyInit, contentType: string, env: Record<string, unknown>) {
+  const req = new Request("https://premiselabs.co/api/contact", {
+    method: "POST",
+    headers: { "content-type": contentType },
+    body,
+  });
+  return await onRequest({ request: req, env } as never);
+}
+
+// ── FIX 1: a streamed 72 KB form body must be refused 413 ──────────────────
+if (only.length === 0 || only.includes("fix1")) {
+  const big = "a".repeat(72 * 1024);
+  const stream = new ReadableStream({
+    start(c) {
+      c.enqueue(enc.encode(`name=Ada&email=ada@example.com&message=${big}`));
+      c.close();
+    },
+  });
+  const req = new Request("https://premiselabs.co/api/contact", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: stream,
+    // Node's undici requires `duplex` for a streaming body; Deno accepts it too.
+    duplex: "half",
+  });
+  assert(!req.headers.has("content-length"), "harness precondition: body must be streamed (no content-length)");
+  const res = await onRequest({ request: req, env: {} } as never);
+  const text = await res.text();
+  assert(res.status === 413, `streamed 72 KB form body: expected 413, got ${res.status} ${text}`);
+
+  // …and the form-data branch still PARSES after the bytes are re-read: a small
+  // multipart post (whose boundary lives in the content-type header) must reach
+  // validation and succeed, so the byte cap cannot have broken the no-JS path.
+  const boundary = "----ct-harness-boundary";
+  const multipart = [
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="name"',
+    "",
+    "Ada",
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="email"',
+    "",
+    "ada@example.com",
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="message"',
+    "",
+    "hello there",
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (() => Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const ok = await post(multipart, `multipart/form-data; boundary=${boundary}`, ENV);
+    const okText = await ok.text();
+    assert(
+      ok.status === 200,
+      `multipart form post after the byte cap: expected 200, got ${ok.status} ${okText}`,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// ── FIX 2: a 3xx intake response is a failure, not a success ───────────────
+if (only.length === 0 || only.includes("fix2")) {
+  let sawRedirectMode: string | null | undefined;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((_u: string | URL | Request, init?: RequestInit) => {
+    sawRedirectMode = init?.redirect;
+    // Emulate a following fetch: only a manual fetch can SEE the 3xx; a
+    // following one is handed the 200 landing page the redirect led to.
+    return Promise.resolve(
+      init?.redirect === "manual"
+        ? new Response("moved", { status: 302, headers: { location: "https://intake.test/final" } })
+        : new Response("landing page", { status: 200 }),
+    );
+  }) as typeof fetch;
+  try {
+    const res = await post(
+      JSON.stringify({ name: "Ada", email: "ada@example.com", message: "hello" }),
+      "application/json",
+      ENV,
+    );
+    const text = await res.text();
+    assert(sawRedirectMode === "manual", `fetch must pass redirect: "manual" (got ${sawRedirectMode})`);
+    assert(res.status === 502, `3xx intake must be a failure (502), got ${res.status} ${text}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// ── FIX 3: the honeypot answers exactly like a real success ────────────────
+if (only.length === 0 || only.includes("fix3")) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (() => Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+  try {
+    const hp = await post(
+      JSON.stringify({ name: "Ada", email: "ada@example.com", message: "hi", hp: "bot" }),
+      "application/json",
+      ENV,
+    );
+    const ok = await post(
+      JSON.stringify({ name: "Ada", email: "ada@example.com", message: "hi" }),
+      "application/json",
+      ENV,
+    );
+    const hpBody = (await hp.json()) as { message?: string };
+    const okBody = (await ok.json()) as { message?: string };
+    assert(hp.status === 200 && ok.status === 200, `honeypot/real status: ${hp.status}/${ok.status}`);
+    assert(
+      hpBody.message === okBody.message,
+      `honeypot message ${JSON.stringify(hpBody.message)} differs from real success ${JSON.stringify(okBody.message)}`,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// ── FIX 4: the upstream body is never logged ───────────────────────────────
+if (only.length === 0 || only.includes("fix4")) {
+  const realFetch = globalThis.fetch;
+  const realError = console.error;
+  const logged: string[] = [];
+  console.error = (...args: unknown[]) => {
+    logged.push(args.map(String).join(" "));
+  };
+  globalThis.fetch = (() =>
+    Promise.resolve(new Response("UPSTREAM-SECRET-BODY", { status: 500 }))) as typeof fetch;
+  try {
+    const res = await post(
+      JSON.stringify({ name: "Ada", email: "ada@example.com", message: "hi" }),
+      "application/json",
+      ENV,
+    );
+    assert(res.status === 502, `500 intake must be a failure, got ${res.status}`);
+    assert(logged.length > 0, "a rejected intake must be logged");
+    assert(
+      !logged.some((l) => l.includes("UPSTREAM-SECRET-BODY")),
+      `the upstream body was logged: ${JSON.stringify(logged)}`,
+    );
+    assert(
+      logged.some((l) => l.includes("500")),
+      `the log must carry the upstream status: ${JSON.stringify(logged)}`,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+    console.error = realError;
+  }
+}
+
+// A request stub whose body records whether the HANDLER read it.
+//
+// A real `Request` cannot answer that: undici pre-pulls a stream body as soon as
+// the Request is constructed, so a pull counter fires even when the handler never
+// touches the body — an assertion that fails for a reason unrelated to the fix.
+// The stub observes the handler's own `getReader()` call instead.
+function stubRequest(headers: Record<string, string>, body: { getReader(): unknown } | null) {
+  const h = new Map(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+  let reads = 0;
+  return {
+    stubReads: () => reads,
+    request: {
+      url: "https://premiselabs.co/api/contact",
+      method: "POST",
+      headers: { get: (n: string) => h.get(n.toLowerCase()) ?? null },
+      body: body
+        ? {
+            getReader: () => {
+              reads += 1;
+              return body.getReader();
+            },
+          }
+        : null,
+    },
+  };
+}
+
+// ── FIX 5: the byte cap must bound what is SPENT, not only what is KEPT ────
+// `arrayBuffer()` buffers the whole body before the caller can measure it, so a
+// 100 MB post cost 100 MB of isolate memory before the 16 KiB cap ever ran: the
+// cap bounded the parse, not the read. Both halves of that are asserted here.
+if (only.length === 0 || only.includes("fix5")) {
+  // 5a — a declared oversize is refused WITHOUT reading the body. The reader
+  // rejects, so a read is not merely wasteful here, it is a failure, and the
+  // stub counts the handler's own getReader() calls.
+  const declared = stubRequest(
+    { "content-type": "application/json", "content-length": String(64 * 1024 * 1024) },
+    {
+      getReader: () => ({
+        read: () => Promise.reject(new Error("the body was read despite a declared oversize")),
+        cancel: () => Promise.resolve(),
+      }),
+    },
+  );
+  const resDeclared = await onRequest({ request: declared.request, env: ENV } as never);
+  assert(resDeclared.status === 413, `declared oversize: expected 413, got ${resDeclared.status}`);
+  assert(
+    declared.stubReads() === 0,
+    "a declared oversize must be refused without reading the body",
+  );
+
+  // 5b — with NO declared length the read STOPS at the ceiling rather than
+  // draining the stream: 100 KiB is offered and far fewer chunks may be consumed.
+  // (fix1 pins the 413 verdict against a REAL stream; this is the spend, exact.)
+  let chunksRead = 0;
+  const streamed = stubRequest(
+    { "content-type": "application/json" },
+    {
+      getReader: () => ({
+        read: () => {
+          if (chunksRead >= 100) return Promise.resolve({ done: true, value: undefined });
+          chunksRead += 1;
+          return Promise.resolve({ done: false, value: new Uint8Array(1024).fill(97) });
+        },
+        cancel: () => Promise.resolve(),
+      }),
+    },
+  );
+  const resStreamed = await onRequest({ request: streamed.request, env: ENV } as never);
+  assert(resStreamed.status === 413, `streamed oversize: expected 413, got ${resStreamed.status}`);
+  assert(
+    chunksRead < 64,
+    `the reader drained the body instead of stopping at the ceiling: ${chunksRead} KiB consumed`,
+  );
+}
+
+// ── FIX 6: a rejected submission is CHARGED — the flood is what gets throttled ─
+// The limiter used to sit after validation, so the 400/413/415 paths returned
+// before it and never incremented the counter: the traffic that costs the most
+// was the traffic that was counted the least. Now it is charged, and the refusal
+// happens BEFORE the body is read.
+if (only.length === 0 || only.includes("fix6")) {
+  const flood = "203.0.113.77"; // TEST-NET-3: this check owns the key
+  const postFrom = async (body: BodyInit) => {
+    const req = new Request("https://premiselabs.co/api/contact", {
+      method: "POST",
+      headers: { "content-type": "application/json", "cf-connecting-ip": flood },
+      body,
+    });
+    return await onRequest({ request: req, env: ENV } as never);
+  };
+  for (let i = 0; i < 5; i += 1) {
+    const bad = await postFrom(
+      JSON.stringify({ name: "Ada", email: "not-an-email", message: "hi" }),
+    );
+    assert(bad.status === 400, `rejected submission #${i + 1}: expected 400, got ${bad.status}`);
+  }
+  const sixth = stubRequest(
+    {
+      "content-type": "application/json",
+      "content-length": String(64 * 1024 * 1024),
+      "cf-connecting-ip": flood,
+    },
+    {
+      getReader: () => ({
+        read: () => Promise.reject(new Error("a rate-limited request must not read its body")),
+        cancel: () => Promise.resolve(),
+      }),
+    },
+  );
+  const resSixth = await onRequest({ request: sixth.request, env: ENV } as never);
+  assert(
+    resSixth.status === 429,
+    `the sixth submission from one connection: expected 429, got ${resSixth.status}`,
+  );
+  assert(
+    sixth.stubReads() === 0,
+    "a rate-limited request must be refused before its body is read",
+  );
+}
+
+console.log("contact harness: all selected checks passed");
+'''
+
+
+def _contact_harness_runtime() -> list[str] | None:
+    """The command prefix that can run a `.ts` harness, or None when there is none.
+
+    Node is tried first: `--experimental-strip-types` (Node >= 22.6) runs the two
+    modules as-is and Node is already on the CI runner, so the guard needs no new
+    runtime there. The probe RUNS a trivial `.ts` file rather than reading a
+    version string, so an unfamiliar-but-capable future Node keeps working and an
+    old one falls through to Deno instead of failing the suite.
+    """
+    node = shutil.which("node")
+    if node is not None:
+        with tempfile.TemporaryDirectory() as probe_dir:
+            (Path(probe_dir) / "probe.ts").write_text("const x: number = 1;\n", encoding="utf-8")
+            probe = subprocess.run(
+                [node, "--experimental-strip-types", "probe.ts"],
+                cwd=probe_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        if probe.returncode == 0:
+            return [node, "--experimental-strip-types"]
+    deno = shutil.which("deno") or str(Path.home() / ".deno" / "bin" / "deno")
+    if Path(deno).is_file():
+        return [deno, "run", "--no-check", "--quiet"]
+    return None
+
+
+def _run_contact_harness(*checks: str) -> None:
+    """Run the behavioural harness for the named checks (all of them when none).
+
+    FAILS (never skips) when no TypeScript runtime is available: a skipped guard
+    reports the same green as a passing one, and CI is where the merge decision
+    is made — the exact place a silent skip must not be accepted.
+    """
+    import pytest
+
+    runtime = _contact_harness_runtime()
+    if runtime is None:
+        pytest.fail(
+            "no TypeScript runtime for the contact-form behavioural harness — "
+            "need node >= 22.6 (--experimental-strip-types) or deno; refusing "
+            "to skip, because a skipped guard looks like a passing one"
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        entry = _src(FUNCTION_TS).replace(
+            '"../_shared/contact-transport"', '"./contact-transport.ts"'
+        )
+        assert '"./contact-transport.ts"' in entry, (
+            "the seam import did not resolve — contact.ts's import path changed"
+        )
+        (tmpdir / "contact.ts").write_text(entry, encoding="utf-8")
+        (tmpdir / "contact-transport.ts").write_text(_src(TRANSPORT_TS), encoding="utf-8")
+        (tmpdir / "driver.ts").write_text(_CONTACT_HARNESS, encoding="utf-8")
+        result = subprocess.run(
+            [*runtime, "driver.ts", *checks],
+            cwd=tmpdir,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    assert result.returncode == 0, (
+        f"contact harness {checks or 'all'} failed (exit {result.returncode}):\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+    assert "all selected checks passed" in result.stdout
+
+
+def test_streamed_form_body_over_the_byte_cap_is_refused() -> None:
+    """FIX 1: a 72 KB form body with NO Content-Length must be a 413.
+
+    The old code trusted the client's `Content-Length`, counted `text.length`
+    (UTF-16 units, not bytes) on the JSON path, and left the form-data path
+    with no cap at all — so this streamed body reached validation and was
+    answered 400 as an over-long message, and a larger one would simply have
+    been buffered. The fix reads the body once as bytes and caps that count.
+    """
+    _run_contact_harness("fix1")
+
+
+def test_intake_redirect_is_a_failure_not_a_success() -> None:
+    """FIX 2: a 3xx from the intake must not be reported as delivered.
+
+    A FOLLOWED redirect replays the POST as an empty GET, so the message is
+    lost while the landing page answers 200 and the visitor is told it
+    arrived. The harness's stub `fetch` only surfaces the 3xx when
+    `redirect: "manual"` is set, so the check fails if that option is dropped.
+    """
+    _run_contact_harness("fix2")
+
+
+def test_honeypot_confirmation_is_identical_to_a_real_success() -> None:
+    """FIX 3: a different confirmation string let a bot detect the trap."""
+    _run_contact_harness("fix3")
+
+
+def test_rejected_intake_body_is_never_logged() -> None:
+    """FIX 4: the upstream body is not ours to print — only the status is."""
+    _run_contact_harness("fix4")
+
+
+def test_byte_cap_bounds_what_is_spent_not_only_what_is_kept() -> None:
+    """FIX 5: the ceiling must stop the READ, not just the parse.
+
+    The cap used to run on a fully buffered body, so an unauthenticated 100 MB
+    post spent 100 MB of isolate memory before the 16 KiB check was consulted.
+    5a fails if a declared oversize is read at all; 5b fails if a streamed body
+    is drained rather than abandoned at the ceiling.
+    """
+    _run_contact_harness("fix5")
+
+
+def test_a_rejected_submission_is_charged_against_the_limit() -> None:
+    """FIX 6: rejected traffic must be throttled, not waved through.
+
+    The limiter ran after validation, so 400/413/415 returned before it and never
+    incremented the counter — the requests that cost the most were counted the
+    least. Five rejected submissions must now charge the connection, and the
+    sixth must be refused BEFORE its body is read.
+    """
+    _run_contact_harness("fix6")
+

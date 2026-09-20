@@ -57,6 +57,14 @@ interface ContactEnv {
 
 /** Owner-decided destination for the outside-product surface. Not configurable. */
 const CONTACT_TO = "hello@premiselabs.co";
+/**
+ * The receipt-only confirmation. It states what is true at that moment — the
+ * message was received — and promises no reply (intake is the receiving
+ * mechanism). The honeypot answers with THIS string: a different one would let
+ * a bot tell the trap from a real success, which is the whole point of the
+ * generic answer there.
+ */
+const CONFIRMATION = "Thanks — we've received your message.";
 const MAX_NAME = 100;
 const MAX_EMAIL = 254;
 const MAX_MESSAGE = 5000;
@@ -179,20 +187,17 @@ async function readPayload(request: Request): Promise<
   { ok: true; data: Record<string, unknown> } | { ok: false; status: number; error: string; message: string }
 > {
   const raw = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-  const declared = Number(request.headers.get("content-length") || "0");
-  if (declared > MAX_BODY_BYTES) {
-    return { ok: false, status: 413, error: "payload_too_large", message: "That message is too large to submit." };
-  }
+  // Read the body ONCE, as BYTES, through the capped reader below. Two signals
+  // that look like a size are not one: `Content-Length` is client-supplied and
+  // a streamed body need not send it at all, and `text.length` counts UTF-16
+  // units rather than bytes — so the authority is the number of bytes the reader
+  // actually accumulated. Every branch below (JSON, urlencoded, multipart) is
+  // fed from those same capped bytes.
+  const read = await readBodyCapped(request);
+  if (!read.ok) return read;
+  const buf = read.buf;
+  const text = new TextDecoder().decode(buf);
   if (raw === "application/json") {
-    let text: string;
-    try {
-      text = await request.text();
-    } catch {
-      return { ok: false, status: 400, error: "invalid_body", message: "We could not read that submission." };
-    }
-    if (text.length > MAX_BODY_BYTES) {
-      return { ok: false, status: 413, error: "payload_too_large", message: "That message is too large to submit." };
-    }
     try {
       const parsed: unknown = JSON.parse(text);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -204,10 +209,15 @@ async function readPayload(request: Request): Promise<
     }
   }
   // The no-JS fallback path: a plain <form> post. Kept working so the page
-  // degrades instead of dumping a 415 JSON blob on a visitor.
+  // degrades instead of dumping a 415 JSON blob on a visitor. The bytes were
+  // read and capped above, so this branch cannot be a cap-free route; the
+  // request body itself is spent, so the bytes are re-wrapped with the ORIGINAL
+  // content-type (which carries the multipart boundary) before parsing.
   if (raw === "application/x-www-form-urlencoded" || raw === "multipart/form-data") {
     try {
-      const fd = await request.formData();
+      const fd = await new Response(buf, {
+        headers: { "Content-Type": request.headers.get("content-type") || raw },
+      }).formData();
       const data: Record<string, unknown> = {};
       for (const [k, v] of fd.entries()) data[k] = typeof v === "string" ? v : "";
       return { ok: true, data };
@@ -223,11 +233,90 @@ async function readPayload(request: Request): Promise<
   };
 }
 
+/**
+ * Read the request body under a hard byte ceiling, without ever holding more
+ * than the ceiling in memory.
+ *
+ * `request.arrayBuffer()` is the obvious call and the wrong one here: it buffers
+ * the WHOLE body before the caller can measure it, so a 100 MB post costs 100 MB
+ * of isolate memory before the 16 KiB cap ever runs — the cap would bound what we
+ * KEEP, not what we SPEND. Cloudflare allows a request body of roughly 100 MB
+ * against a 128 MB isolate, so that path is reachable with one unauthenticated
+ * curl loop, and it would spend the memory of every route of this Worker.
+ *
+ * So: refuse a declared oversize before reading a byte (a fast path —
+ * `Content-Length` is client-supplied, so it is not the authority), then stream
+ * and stop the moment the running total would exceed the ceiling, cancelling the
+ * body so the remainder is never pulled.
+ */
+async function readBodyCapped(
+  request: Request,
+): Promise<{ ok: true; buf: ArrayBuffer } | { ok: false; status: number; error: string; message: string }> {
+  const tooLarge = {
+    ok: false as const,
+    status: 413,
+    error: "payload_too_large",
+    message: "That message is too large to submit.",
+  };
+  const declared = Number(request.headers.get("content-length") || "0");
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return tooLarge;
+  if (!request.body) return { ok: true, buf: new ArrayBuffer(0) };
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_BODY_BYTES) {
+        try {
+          // Stop paying for the rest of the body rather than draining it.
+          await reader.cancel();
+        } catch {
+          // Already closed or errored — there is nothing left to release.
+        }
+        return tooLarge;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, status: 400, error: "invalid_body", message: "We could not read that submission." };
+  }
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, buf: buf.buffer };
+}
+
 async function handlePost(request: Request, env: ContactEnv): Promise<Response> {
   // Cross-site browser submissions are refused outright — the honeypot and the
   // rate limit are only meaningful for traffic that cannot pick its own key.
   if (isCrossSite(request)) {
     return fail(403, "cross_site_blocked", "This form only accepts submissions from pages on this site.");
+  }
+
+  // ── Rate limit, BEFORE the body is read ─────────────────────────────────
+  // Counted first on purpose. This check used to sit after validation, on the
+  // reasoning that "a malformed payload costs nothing" — the reasoning was
+  // wrong. Reading the body IS the cost, so an oversize or malformed flood is
+  // the traffic that spends the most while being counted the least: the
+  // 413/400/415 paths all returned before this line, so they never charged the
+  // counter. Charging what is actually spent throttles the flood rather than the
+  // visitor who mistypes. The honeypot and the field checks stay below, because
+  // they need the parsed body.
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  if (rateLimited(ip, Date.now())) {
+    return fail(
+      429,
+      "rate_limited",
+      "Too many messages from this connection. Please wait a few minutes, or email hello@premiselabs.co directly.",
+      { "Retry-After": String(Math.ceil(RATE_WINDOW_MS / 1000)) },
+    );
   }
 
   const payload = await readPayload(request);
@@ -241,7 +330,7 @@ async function handlePost(request: Request, env: ContactEnv): Promise<Response> 
   // response is a plain success on purpose: telling a bot it was detected only
   // teaches it to leave the field empty.
   if (typeof body.hp === "string" && body.hp.trim() !== "") {
-    return json({ ok: true, message: "Thanks — your message is on its way." }, 200);
+    return json({ ok: true, message: CONFIRMATION }, 200);
   }
 
   const name = singleLine(typeof body.name === "string" ? body.name : "");
@@ -254,17 +343,6 @@ async function handlePost(request: Request, env: ContactEnv): Promise<Response> 
   if (message.length === 0 || message.length > MAX_MESSAGE) problems.push("a message (up to 5000 characters)");
   if (problems.length > 0) {
     return fail(400, "invalid_input", `Please provide ${problems.join(", ")}.`);
-  }
-
-  // ── Rate limit (after validation: a malformed payload costs nothing) ────
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  if (rateLimited(ip, Date.now())) {
-    return fail(
-      429,
-      "rate_limited",
-      "Too many messages from this connection. Please wait a few minutes, or email hello@premiselabs.co directly.",
-      { "Retry-After": String(Math.ceil(RATE_WINDOW_MS / 1000)) },
-    );
   }
 
   // ── Intake (the one transport seam) ─────────────────────────────────────
@@ -301,10 +379,7 @@ async function handlePost(request: Request, env: ContactEnv): Promise<Response> 
   // message was received — because "we'll reply" is a commitment this form's
   // transport cannot keep while intake has no reader (relay condition,
   // tortoise #2409).
-  return json(
-    { ok: true, message: "Thanks — we've received your message." },
-    200,
-  );
+  return json({ ok: true, message: CONFIRMATION }, 200);
 }
 
 /**

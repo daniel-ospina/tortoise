@@ -200,6 +200,11 @@ export async function enqueue(msg: ContactMessage, env: TransportEnv): Promise<I
         "x-inbound-secret": intakeSecret,
       },
       body: JSON.stringify(item),
+      // Never follow a redirect: a followed 3xx replays this POST as an empty
+      // GET, so the message is LOST while the landing page answers 200 — a
+      // success report for a submission that was dropped. Manual mode surfaces
+      // the 3xx so it takes the `failed` path below.
+      redirect: "manual",
     });
   } catch (err) {
     console.error("contact: intake request failed:", err instanceof Error ? err.message : "network error");
@@ -207,9 +212,8 @@ export async function enqueue(msg: ContactMessage, env: TransportEnv): Promise<I
   }
 
   if (!upstream.ok) {
-    // Log the intake status + message (never a body's contents).
-    const detail = await upstream.text().catch(() => "");
-    console.error(`contact: intake rejected the submission (${upstream.status}): ${detail.slice(0, 300)}`);
+    // Log the intake status only — never the response body's contents.
+    console.error(`contact: intake rejected the submission (${upstream.status})`);
     return { status: "failed" };
   }
 
