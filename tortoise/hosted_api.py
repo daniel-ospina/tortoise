@@ -11692,7 +11692,7 @@ async def _provision_preflight(org: dict) -> None:
     if org.get("tier", "free") in _GRAPH_TIER_BLOCKED:
         raise HTTPException(
             status_code=402,
-            detail="Custom graphs require the Pro plan. Upgrade to create "
+            detail="Custom graphs require the Builder plan. Upgrade to create "
                    "multiple graphs.",
             headers={"X-Upgrade-CTA": "pro"},
         )
@@ -13257,7 +13257,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             tier = org.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Pro or Team tier — upgrade to invite members")
+                                    detail="Invites require the Builder or Team tier — upgrade to invite members")
             # #1965: per-org lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per org_id; the count
@@ -13329,7 +13329,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Pro or Team tier — upgrade to invite members")
+                                detail="Invites require the Builder or Team tier — upgrade to invite members")
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -22802,7 +22802,7 @@ def _require_backup_tier(org: dict) -> None:
     if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Pro feature — upgrade to enable hourly backups",
+            detail="Backups are a Builder feature — upgrade to enable hourly backups",
         )
 
 

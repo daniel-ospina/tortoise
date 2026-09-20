@@ -5533,7 +5533,7 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite members.')
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.')
           setBusy(false)
           return
         }
@@ -9446,7 +9446,7 @@ function claimIntentInFlight() {
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
+              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>

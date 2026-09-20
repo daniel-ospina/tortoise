@@ -13,10 +13,12 @@ export const PLAN_TIERS = ['free', 'solo', 'pro', 'team']
 
 // anon = unclaimed zero-email teams (internal tier, #1082) — never shown in
 // the grid; the current-plan card humanizes it as Free.
+// #4336: the `pro` tier renders as "Builder" — the internal tier key stays
+// `pro` (Stripe price ids, pricing.json keys, quota/tier code).
 export const TIER_LABELS = {
   free: 'Free',
   solo: 'Solo',
-  pro: 'Pro',
+  pro: 'Builder',
   team: 'Team',
   anon: 'Free',
 }

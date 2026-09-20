@@ -336,7 +336,7 @@ def test_billing_team_context(page: Page):
         select.select_option("team_b")
     assert "team_b" in team_reads
     expect(page.get_by_role("heading", name="Billing — Bravo")).to_be_visible()
-    expect(page.get_by_text("Pro plan")).to_be_visible()
+    expect(page.get_by_text("Builder plan")).to_be_visible()
     expect(page.get_by_text("100", exact=True)).to_be_visible()  # write_ops_used re-hydrated
 
 
@@ -645,7 +645,7 @@ def test_create_team_pre_checked_at_cap(page: Page):
     expect(dialog.get_by_label("Organization name")).to_be_visible()
     expect(dialog.get_by_role("button", name="Continue to checkout")).to_be_visible()
     # paid plan chooser is server-resolved (no hardcoded Stripe ids)
-    expect(dialog.get_by_role("button", name="Pro · $25/mo")).to_be_visible()
+    expect(dialog.get_by_role("button", name="Builder · $25/mo")).to_be_visible()
     expect(dialog.get_by_role("button", name="Solo · $9/mo")).to_be_visible()
 
 
