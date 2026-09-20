@@ -1167,3 +1167,54 @@ class TestTeamInfoBillingSurface:
                                          headers=billing_client["headers"])
         assert r.status_code == 200, r.text
         assert r.json()["subscription_status"] is None
+
+    def test_team_info_exposes_nodes_used_and_max_nodes(self, billing_client, tmp_path):
+        """#4331: /v1/team carries the node figure the cap ACTUALLY gates
+        (`count_org_usage(org, 'points')`: non-episodic Points + Object +
+        Subject, #1911) and the org's enforced node cap (`max_points`).
+        `point_count` is NOT that figure — it is :Point-only."""
+        org_id = billing_client["org_id"]
+        from tortoise.sdk import TortoiseSDK
+        tenant = TortoiseSDK(os.path.join(tmp_path, "billing_api.db"),
+                             namespace=org_id)
+        try:
+            tenant.create_object("acme", objectKind="org")
+            r = billing_client["client"].get(
+                "/v1/team", headers=billing_client["headers"])
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["nodes_used"] == 1          # the Object counts
+            assert body["point_count"] == 0         # :Point-only stays 0
+            assert body["max_nodes"] == 10000       # free tier default
+        finally:
+            tenant.close()
+
+    def test_team_info_max_nodes_honors_stored_override(self, billing_client):
+        """#4331: `max_nodes` is the org's OWN cap (`max_points`), not the
+        tier's nominal default — a stored override must be what the display
+        compares against, because it is what the write gate enforces."""
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_points = 12345",
+            params={"id": billing_client["org_id"]})
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        assert r.json()["max_nodes"] == 12345
+
+    def test_team_info_nodes_used_fails_soft(self, monkeypatch, billing_client):
+        """#4331: a quota-read failure must NOT 500 /v1/team — the node stat
+        degrades to 0 (the graph-recovery soft path) while the rest of the
+        billing surface still renders."""
+        import tortoise.quota as quota
+
+        def _boom(*a, **kw):
+            raise RuntimeError("graph unavailable")
+
+        monkeypatch.setattr(quota, "count_org_usage", _boom)
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["nodes_used"] == 0
+        assert body["max_nodes"] == 10000
+        assert body["tier"] == "free"

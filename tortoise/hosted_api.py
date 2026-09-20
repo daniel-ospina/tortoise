@@ -4188,6 +4188,16 @@ class OrgInfoResponse(BaseModel):
     # suspension renders from the 403 detail (scoping delta 12).
     status: str = "active"
     point_count: int = 0
+    # #4331: node usage against the plan's node allowance. `nodes_used` is the
+    # count the points cap ACTUALLY gates — count_org_usage(org, "points"):
+    # non-episodic Points PLUS Object + Subject nodes (#1911). It is
+    # deliberately NOT `point_count` above: that is :Point-only AND
+    # demo-excluded, so rendering it against the node cap would be a lying UI.
+    # `max_nodes` is the org's own enforced cap (`max_points`, a stored
+    # override included), never the tier's nominal default alone. Both are
+    # best-effort — a broken graph must never 500 /v1/team.
+    nodes_used: int = 0
+    max_nodes: int | None = None
     # #1591: the org's graph may be missing/broken (a half-failed
     # provisioning) — /v1/team must FAIL SOFT (point_count=0, graph_ready
     # false) instead of hard-500ing, so the dashboard renders and the graph
@@ -5375,11 +5385,42 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
             params={"demo_ids": list(_DEMO_POINT_IDS)},
         ).result_set[0][0]
     except Exception:
-        import logging
+        # module-level `logging` (do NOT re-import locally — a local import
+        # makes `logging` function-local and unbound on the paths that never
+        # reach this except).
         logging.getLogger("tortoise.api").warning(
             "org_info graph unavailable (fail-soft): %s", org["org_id"],
             exc_info=True)
         graph_ready = False
+
+    # #4331: the node figure the plan cap gates — the SAME counter
+    # count_org_usage(org, "points") the points gate enforces (non-episodic
+    # Points + Object + Subject, #1911). Best-effort: a broken/missing graph or
+    # a quota read failure must NOT 500 /v1/team (mirrors the point_count
+    # fail-soft above) — the client then renders 0 rather than dead-ending.
+    nodes_used = 0
+    try:
+        from tortoise.quota import count_org_usage
+        nodes_used = count_org_usage(org["org_id"], "points", sdk=sdk)
+    except Exception:
+        logging.getLogger("tortoise.api").warning(
+            "org_info node usage unavailable (fail-soft): %s", org["org_id"],
+            exc_info=True)
+
+    # #4331: the org's enforced node cap — `max_points` (a stored per-org
+    # override, and the value the points gate enforces) with the pricing tier's
+    # max_graph_nodes as fallback for a legacy dict that predates the field.
+    max_nodes = org.get("max_points")
+    if max_nodes is None:
+        try:
+            from tortoise.pricing import tier_limits
+            max_nodes = tier_limits(
+                org.get("tier") or "free").get("max_graph_nodes")
+        except Exception:
+            logging.getLogger("tortoise.api").warning(
+                "org_info max_nodes unavailable (fail-soft): %s",
+                org["org_id"], exc_info=True)
+            max_nodes = None
 
     # Metering (#681): fetch write-op usage for the current billing period.
     from tortoise.metering import get_current_usage
@@ -5409,6 +5450,9 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         # 500 on every /v1/team call, exposed by the zero-email signup verification).
         max_orgs=None,
         point_count=point_count,
+        # #4331: node usage vs the enforced node cap (best-effort; never 500).
+        nodes_used=nodes_used,
+        max_nodes=max_nodes,
         graph_ready=graph_ready,
         write_ops_used=usage["write_ops_used"],
         write_ops_limit=usage["write_ops_limit"],

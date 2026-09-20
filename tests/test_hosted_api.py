@@ -1409,6 +1409,23 @@ class TestTeamInfo:
         assert body["max_orgs"] is None
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
+        # #4331: node usage vs the plan's node allowance.
+        assert "nodes_used" in body and isinstance(body["nodes_used"], int)
+        assert body["max_nodes"] == 10000  # TEST_TEAM.max_points (free tier)
+
+    def test_team_info_nodes_used_counts_object_not_point_count(self, client):
+        """#4331: `nodes_used` is the count the points cap gates —
+        non-episodic Points PLUS Object + Subject (#1911) — NOT `point_count`
+        (:Point-only, demo-excluded). An Object write moves nodes_used and
+        leaves point_count alone; rendering point_count against the node cap
+        would be a lying UI."""
+        before = client.get("/v1/team").json()
+        r = client.post("/v1/objects",
+                        json={"name": "node-cap-obj", "objectKind": "project"})
+        assert r.status_code == 200, r.text
+        after = client.get("/v1/team").json()
+        assert after["nodes_used"] == before["nodes_used"] + 1
+        assert after["point_count"] == before["point_count"]
 
     def test_unhandled_500_carries_cors_headers(self, client, monkeypatch):
         """#1591: an unhandled exception must return a 500 WITH the CORS
@@ -1523,6 +1540,10 @@ class TestTeamInfo:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["point_count"] == 0
+        # #4331: the node count (a second graph read) degrades the same way —
+        # it must never turn the fail-soft overview into a 500.
+        assert body["nodes_used"] == 0
+        assert body["max_nodes"] == 10000
         assert body["graph_ready"] is False
 
     def test_team_info_reflects_point_count(self, client):

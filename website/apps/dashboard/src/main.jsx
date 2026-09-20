@@ -3,6 +3,11 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
+// #4331: node usage vs the plan's enforced node allowance — the server's
+// nodes_used/max_nodes pair, the nudge derivation, and the next purchasable
+// plan for the header upgrade control. Pure, node --test unit-tested
+// (nodeUsage.test.js).
+import { nextUpgradePlan, nodeBarColor, nodeNudge, nodeUsage } from './nodeUsage.js'
 import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
@@ -2602,6 +2607,16 @@ function claimIntentInFlight() {
   // re-subscription.
   const PORTAL_STATUSES = [...ACTIVE_STATUSES, 'canceled', 'unpaid']
   const canManageSubscription = team && PORTAL_STATUSES.includes(team.subscription_status)
+
+  // #4331: node usage vs the plan's ENFORCED node allowance, as /v1/team
+  // states both fields (never computed here). `nodeState` is null when the
+  // server has not supplied both numbers — the surface then stays silent
+  // instead of inventing an allowance. `nodeHint` is the at/near-limit nudge
+  // and `nodeNext` the next plan this deployment can actually check out
+  // (both consumed by the Billing card and the header upgrade control).
+  const nodeState = nodeUsage(team)
+  const nodeHint = nodeNudge(team)
+  const nodeNext = nextUpgradePlan(planOptions(), team)
 
   // #1623: parameterized upgrade — the header Upgrade button uses the
   // server-resolved default (team.checkout_price_id); the Billing page and
@@ -8422,10 +8437,33 @@ function claimIntentInFlight() {
             </div>
           </div>
         )}
+        {/* #4331: the header tier badge is a REAL upgrade control — it names
+            the next tier the server can actually check out (with its price)
+            and opens Stripe directly via upgradeToPrice. When the catalog has
+            no price id for a next step it routes to the in-product Billing
+            tab instead of the marketing pricing page — a marketing link is a
+            dead end where "we have nothing to sell you" is the truth. An
+            active subscriber sees the Manage-subscription control below
+            instead (checkout 409s on an active subscription by design). */}
+        {team && team.tier !== 'team' && !canManageSubscription && (
+          nodeNext ? (
+            <button
+              className="tier-badge"
+              onClick={() => upgradeToPrice(team.checkout_price_ids[nodeNext.tier])}
+              disabled={checkoutPending}
+            >
+              {checkoutPending ? 'Opening checkout…' : `Upgrade to ${nodeNext.label} · $${nodeNext.price}/mo`}
+            </button>
+          ) : (
+            <button className="tier-badge" onClick={() => setTab('billing')}>
+              Upgrade — see plans
+            </button>
+          )
+        )}
+        {/* #4331: the full plan comparison is in-product — the Billing tab's
+            plans grid, never the marketing page. */}
         {team && team.tier !== 'team' && (
-          <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {team.tier || 'free'} tier · Upgrade
-          </a>
+          <button className="tier-badge" onClick={() => setTab('billing')}>Compare plans</button>
         )}
         {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
             for teams with an existing Stripe customer (#310 backend exists). */}
@@ -9525,6 +9563,11 @@ function claimIntentInFlight() {
               </div>
               <div className="cards" style={{ marginTop: 12, marginBottom: 0 }}>
                 <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
+                {/* #4331: the ENFORCED node count vs the plan's node allowance
+                    (server fields — NOT point_count, which is :Point-only and
+                    demo-excluded). Rendered from nodeState so a server that
+                    has not supplied both numbers shows no fabricated figure. */}
+                <div className="card"><div className="card-val">{(team.nodes_used ?? 0).toLocaleString()}</div><div className="card-label">Nodes used{nodeState ? ` / ${nodeState.max.toLocaleString()}` : ''}</div></div>
                 <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
@@ -9542,6 +9585,40 @@ function claimIntentInFlight() {
                     {Math.round(((team.write_ops_used ?? 0) / team.write_ops_limit) * 100)}% of monthly write ops
                     {team.overage_eligible && team.overage_cost_usd ? ` · overage after limit at $${team.overage_cost_usd}/10k ops` : ''}
                   </p>
+                </div>
+              )}
+              {/* #4331: node usage bar + at/near-limit nudge. Same progress
+                  treatment as write ops — accent < 80%, amber ≥ 80%, red at
+                  100% — plus the upgrade nudge (Free: keep writing; paid: a
+                  higher allowance). The nudge deliberately promises no
+                  chargeable node overage: none is implemented today. */}
+              {nodeState && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ background: 'var(--surface-hover, rgba(255,255,255,0.06))', borderRadius: 6, height: 8, overflow: 'hidden' }}>
+                    <div style={{
+                      width: `${nodeState.pct}%`,
+                      background: nodeBarColor(nodeState.level),
+                      height: '100%',
+                    }} />
+                  </div>
+                  <p className="dim small" style={{ marginTop: 6 }}>
+                    {nodeState.used.toLocaleString()} / {nodeState.max.toLocaleString()} nodes used ({nodeState.pct}%)
+                  </p>
+                  {nodeHint && (
+                    <p className="dim small" style={{ marginTop: 4 }}>
+                      {nodeHint}{' '}
+                      {nodeNext && (
+                        <button
+                          type="button"
+                          className="ghost small"
+                          onClick={() => upgradeToPrice(team.checkout_price_ids[nodeNext.tier])}
+                          disabled={checkoutPending}
+                        >
+                          {checkoutPending ? 'Opening checkout…' : `Upgrade to ${nodeNext.label}`}
+                        </button>
+                      )}
+                    </p>
+                  )}
                 </div>
               )}
               {hasActiveSubscription && (
