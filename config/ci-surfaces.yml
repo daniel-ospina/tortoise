@@ -856,6 +856,10 @@ surfaces:
   # (the agent API cannot archive) — those cases live here.
   - test_blog_agent_delete_guard.py
   - test_dashboard_unknown_address.py
+  # #2409: the public contact form. The handler's behaviour — the byte ceiling
+  # (including what it SPENDS), the rate limiter, the honeypot, the transport —
+  # executed under Node with a stubbed fetch (no wrangler, no network, no DB).
+  - test_contact_form.py
   - test_github_connect.py
   - test_github_connector.py
   - test_github_indexer.py
@@ -1203,6 +1207,12 @@ durations:
   test_shared_state_imports.py: 2.0
   test_shared_state_monitoring.py: 2.0
   test_shared_state_recovery.py: 2.0
+  # #2409: the contact form's behavioural harness — same situation as the six
+  # above (a file that has not run on main cannot appear in a junit artifact).
+  # Entered at the flat 2.0s default for the same stated reason: coverage stays
+  # 100% and the LPT pack is not mis-balanced by this host's inflated local
+  # timing. Refresh it from the first post-merge main run that includes it.
+  test_contact_form.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
