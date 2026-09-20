@@ -3883,6 +3883,87 @@ def test_cli_full_scan_resolves_from_flag_and_env(monkeypatch, capsys):
     capsys.readouterr()
 
 
+def test_discover_deadline_bounds_pass1(tmp_path, monkeypatch, caplog):
+    """#4244: the deadline must bound PASS 1 — the phase that actually runs
+    long. `_run_sweep`'s docstring promises the suite-end sweep "can never
+    run past pytest-timeout", but it bounded only `reap()`: `discover()` ran
+    first, took no deadline, and cost 181s on a host with 263 live redis
+    servers (one probe each) — 6x over the conftest's 30s budget.
+
+    The throttle must be gated on COMPLETION, not submission: submitting a
+    task is ~free, so a per-submission clock check queued every server before
+    the first probe returned. This pins the completion-gated window.
+    """
+    import tortoise.embedded_reaper as _R
+
+    per_probe = 0.2
+    n = 200
+    monkeypatch.setattr(_R, "_pgrep_redis_servers", lambda: list(range(n)))
+    monkeypatch.setattr(_R, "_batch_process_info", lambda pids: {})
+    monkeypatch.setattr(_R, "_real_gettempdir", lambda: str(tmp_path))
+
+    def slow_probe(pid):
+        time.sleep(per_probe)
+        return None          # no socket dir -> record skipped, work still paid
+
+    monkeypatch.setattr(_R, "_socket_dir_from_cmdline", slow_probe)
+
+    jobs = 4
+    budget = 1.0
+    with caplog.at_level("WARNING"):
+        t = time.time()
+        recs = _R.discover(jobs=jobs, deadline=time.monotonic() + budget)
+        elapsed = time.time() - t
+
+    # Bounded by the budget plus ONE window of in-flight probes (the pool is
+    # shut down without waiting), NOT by the 200 servers.
+    assert elapsed < budget + jobs * per_probe + 1.0, (
+        f"discover() ran {elapsed:.1f}s for a {budget}s budget — the deadline "
+        f"is not bounding pass 1"
+    )
+    assert elapsed < n * per_probe / jobs, \
+        "the sweep drained every queued probe — submission is not throttled"
+    # Fail-closed: a truncated pass 1 is never a finished scan.
+    assert recs.complete is False, \
+        "a budget-truncated pass 1 must report complete=False"
+    assert any("classification budget expired" in r.message
+               for r in caplog.records), \
+        "the truncation must be logged"
+
+    # Counter-case: with no deadline the full pass still runs, so the bound
+    # above is the deadline's doing and not an artefact of the fake probe.
+    caplog.clear()
+    recs_all = _R.discover(jobs=jobs)
+    assert recs_all.complete is True, \
+        "the unbounded path must still report a finished scan"
+    assert not any("classification budget expired" in r.message
+                   for r in caplog.records), \
+        "the unbounded path must not report a truncation"
+
+
+def test_run_sweep_threads_its_deadline_into_discovery(monkeypatch):
+    """#4244: `_run_sweep`'s deadline must reach `discover()`, or the
+    documented pytest-timeout guarantee is a comment rather than a bound."""
+    import tortoise.embedded_reaper as _R
+
+    seen = {}
+
+    def _fake_discover(**kw):
+        seen.update(kw)
+        out = _R._ScanAwareList()
+        out.complete = True
+        return out
+
+    monkeypatch.setattr(_R, "discover", _fake_discover)
+    monkeypatch.setattr(_R, "_mark_orphan_confirmation", lambda recs: None)
+    deadline = time.monotonic() + 30.0
+    _R._run_sweep(dry_run=True, batch_size=10, deadline=deadline)
+    assert seen.get("deadline") == deadline, (
+        f"_run_sweep passed deadline={seen.get('deadline')!r} to discover(); "
+        f"expected {deadline!r}"
+    )
+
+
 def test_main_surfaces_truncation(monkeypatch, capsys):
     """#4068: a truncated discovery must never read as a finished sweep."""
     import tortoise.embedded_reaper as _R

@@ -1204,7 +1204,8 @@ def _socket_dir_from_cmdline(pid: int) -> str | None:
 
 
 def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
-             full_scan: bool = False) -> list[dict]:
+             full_scan: bool = False,
+             deadline: float | None = None) -> list[dict]:
     """Scan for redislite orphans; return classified records.
 
     Two passes (issue #1005 perf — the tempdir accumulates tens of thousands
@@ -1221,6 +1222,20 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
 
     jobs>1 parallelizes per-dir classification. Fail-closed semantics are
     per-record and unchanged under parallelism.
+
+    ``deadline`` is an ABSOLUTE monotonic cutoff bounding PASS 1 (#4244). It
+    exists because pass 1 is the phase that actually runs long — one probe
+    per live redis server on the host, and an UNRESPONSIVE socket burns a
+    full probe timeout, so the cost scales with how many servers the machine
+    is running (255 observed on a fleet box: 181s of a 30s budget). Without
+    it, `_run_sweep`'s documented "the sweep can never run past
+    pytest-timeout" guarantee was false by 6x, because `reap()` was bounded
+    and the `discover()` that precedes it was not. A truncated pass is
+    reported through the same ``complete=False`` channel as a truncated pass
+    2 — never as a finished scan — and the un-visited remainder is
+    re-attempted by the next scheduled sweep.
+
+    PASS 2 IS DELIBERATELY NOT BOUNDED BY IT: see the comment at its call.
     """
     tmpdir = _real_gettempdir()
 
@@ -1234,7 +1249,7 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
     try:
         records, complete = _discover_from_live(
             live_pids, jobs, tmpdir, seen_dirs, max_tempdir_entries,
-            full_scan=full_scan)
+            full_scan=full_scan, deadline=deadline)
     finally:
         _PROC_INFO_CACHE = {}
     out = _ScanAwareList(records)
@@ -1243,10 +1258,28 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
 
 
 def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
-                        max_tempdir_entries, full_scan: bool = False):
+                        max_tempdir_entries, full_scan: bool = False,
+                        deadline: float | None = None):
     """Classification half of discover() (separated so the proc-info cache
-    has a deterministic lifetime). Returns ``(records, scan_complete)``."""
+    has a deterministic lifetime). Returns ``(records, scan_complete)``.
+
+    ``deadline`` (absolute monotonic, #4244) bounds pass 1 with a SLIDING
+    WINDOW gated on COMPLETION: at most ``jobs`` probes are in flight and the
+    clock is re-checked after each result, so the overrun is one window's
+    worth of probes rather than the host's whole server count.
+    """
     results = []
+    # Completeness of pass 1, kept separate from pass 2's scan flag so the
+    # two are ANDed at the end (#4244): a sweep truncated in EITHER pass is
+    # not a finished scan.
+    live_complete = True
+    # The deadline bounds PASS 1, and pass 1 alone (#4244): it is the phase
+    # whose cost scales with how many redis servers the HOST is running (one
+    # probe each, and an unresponsive socket burns a full probe timeout), so
+    # it is the one that has to be capped. Pass 2 keeps its own
+    # SOCKET_WALK_TIMEOUT below — it is cheap (measured 0.0s) and it is the
+    # pass that finds THIS host's residue, so starving it to protect a bound
+    # is backwards.
 
     def _classify_live(pid: int) -> dict | None:
         sock_dir = _socket_dir_from_cmdline(pid)
@@ -1262,15 +1295,59 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
         rec["_live"] = True
         return rec
 
+    def _spent() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
     if jobs > 1 and len(live_pids) > 1:
+        from collections import deque
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=jobs) as pool:
-            for rec in pool.map(_classify_live, live_pids):
+        # A SLIDING WINDOW, not a submission throttle (#4244). Submitting a
+        # task is ~free, so a loop that checked the clock per submission
+        # queued all 263 servers in microseconds and then blocked in the
+        # pool's shutdown for the full ~130s drain — the budget never fired.
+        # Holding at most `jobs` probes in flight and re-checking the clock
+        # after each COMPLETION gates the loop on probe time, which is what
+        # the budget is about.
+        pool = ThreadPoolExecutor(max_workers=jobs)
+        exhausted = False
+        try:
+            pending: deque = deque()
+            remaining = iter(live_pids)
+            while True:
+                while (not exhausted and len(pending) < jobs
+                       and not _spent()):
+                    try:
+                        pending.append(pool.submit(_classify_live,
+                                                   next(remaining)))
+                    except StopIteration:
+                        exhausted = True
+                if not pending:
+                    break
+                rec = pending.popleft().result()
                 if rec is not None:
                     results.append(rec)
                     seen_dirs.add(os.path.dirname(rec["socket_path"]))
+                if not pending and not exhausted and _spent():
+                    break
+        finally:
+            # Never block the caller on probes still in flight: the budget is
+            # spent and their records would be discarded anyway (#4244). What
+            # remains is bounded by one window, not by the host's server
+            # count.
+            pool.shutdown(wait=False, cancel_futures=True)
+        live_complete = exhausted
+        if not exhausted:
+            logger.warning(
+                "live-server classification budget expired — classified "
+                "%d of %d live pids", len(results), len(live_pids))
     else:
         for pid in live_pids:
+            if _spent():
+                live_complete = False
+                logger.warning(
+                    "live-server classification budget expired — classified "
+                    "%d of %d live pids", len(results), len(live_pids))
+                break
             rec = _classify_live(pid)
             if rec is not None:
                 results.append(rec)
@@ -1288,6 +1365,15 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
     # enumeration for detection; it adds no reachability an earlier release
     # lacked. max_tempdir_entries is retained for API compatibility but no
     # longer gates the walk.
+    # Pass 2 keeps its OWN budget, deliberately NOT clamped to the caller's
+    # deadline (#4244). Clamping it looks tidier but starves the pass that
+    # matters: pass 1's in-flight probes overrun the deadline by a whole
+    # window, so by the time pass 2 ran the clamp left it zero directories —
+    # a sweep that stops finding its own residue. The two passes have
+    # different jobs and different costs: pass 1 is best-effort over OTHER
+    # people's servers (bounded by the caller), pass 2 is the cheap, bounded
+    # scan for THIS host's socket dirs (measured at 0.0s). So the budget
+    # bounds pass 1, and pass 2 keeps the SOCKET_WALK_TIMEOUT it always had.
     scan = _scan_socket_dirs(
         tmpdir, full_scan=full_scan,
         deadline=time.monotonic() + SOCKET_WALK_TIMEOUT)
@@ -1333,7 +1419,7 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                 continue
             if rec is not None:
                 results.append(rec)
-    return results, scan.complete
+    return results, (scan.complete and live_complete)
 
 
 class _ScanResult(NamedTuple):
@@ -2681,7 +2767,8 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # finished scan. The returned list is a `_ScanAwareList` carrying
     # `.complete` (False = at least one bounded scan returned a partial set).
     """
-    records = _as_scan_aware(discover(jobs=jobs, full_scan=full_scan))
+    records = _as_scan_aware(discover(jobs=jobs, full_scan=full_scan,
+                                      deadline=deadline))
     discovery_complete = records.complete
     # #1383: reapable classes are candidate (live orphan -> kill) and
     # stale_socket (dead-pid leftover dir -> guarded rmtree). Phase 1
