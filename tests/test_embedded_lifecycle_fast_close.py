@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -207,12 +208,13 @@ def test_atexit_seams_registered():
 # #2875/#3685 leak) the root's OWN stat is the expensive one — measured
 # 13 ms–3.4 s (median ≈0.43 s) at nlink 55 k, while a child of it and a
 # synthetic 55 000-subdirectory directory on the same APFS volume are both
-# 0.00 ms. The exit seam used to call realpath ~9 times per leaked client, so
+# 0.00 ms. The exit seam used to call realpath ~5 times per leaked client, so
 # `Py_FinalizeEx` spent minutes inside `lstat` — the reported hang that
 # `pytest-timeout` cannot interrupt.
 #
-# The tests below pin the two properties that remove it. Each FAILS on the
-# pre-#4214 code (counts are 2–3 per call there) and states its mutation.
+# The tests below pin the two properties that remove it. On the pre-#4214 tree
+# the three call-counting ones fail on their assertion; the differential test
+# is a guard for the classification itself.
 
 
 def _count_temp_root_stats(monkeypatch, fn, n):
@@ -220,20 +222,31 @@ def _count_temp_root_stats(monkeypatch, fn, n):
 
     The temp root's own stat is the measured cost driver, so this counts
     precisely that call rather than "some filesystem access".
+
+    Both SPELLINGS are counted: on macOS ``tempfile.gettempdir()`` is
+    ``/var/folders/…`` while ``realpath`` resolves the ``/var -> /private/var``
+    symlink and stats ``/private/var/folders/…``. Keying on the raw spelling
+    alone made these tests count 0 on the very platform the bug was filed on,
+    so they greened against the pre-fix code (found in review).
     """
-    root = os.path.abspath(tempfile.gettempdir())
+    raw_root = tempfile.gettempdir()
+    roots = {os.path.abspath(raw_root), os.path.realpath(raw_root)}
     hits: list[str] = []
     real_lstat = os.lstat
 
     def spy(path, *args, **kwargs):
-        if not isinstance(path, int) and os.fspath(path) == root:
+        if not isinstance(path, int) and os.fspath(path) in roots:
             hits.append(os.fspath(path))
         return real_lstat(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "lstat", spy)
     # The memoized resolve is process-wide; clear it so this test observes the
-    # same first-call path a fresh test process would.
-    monkeypatch.setattr(embedded_lifecycle, "_TMPDIR_RESOLVED", None)
+    # same first-call path a fresh test process would. `raising=False` so the
+    # pre-fix tree fails on the ASSERTION, not on a missing attribute.
+    monkeypatch.setattr(embedded_lifecycle, "_TMPDIR_RESOLVED", None,
+                        raising=False)
+    monkeypatch.setattr(embedded_lifecycle, "_TMPDIR_RESOLVED_RAW", None,
+                        raising=False)
     for i in range(n):
         fn(i)
     return len(hits)
@@ -340,8 +353,9 @@ def test_ephemeral_classification_is_unchanged_by_the_fast_path():
 def test_exit_budget_short_circuits_the_seam(monkeypatch):
     """Mutation: drop the ``_atexit_budget_expired()`` guard from
     `atexit_fast_close` (and `_gc_close`). A spent exit budget must stop the
-    seam and neutralise redislite's own atexit close so it cannot re-run the
-    slow path we just declined.
+    seam before the EXPENSIVE work (the co-tenant probe and the rmtree) and
+    neutralise redislite's own atexit close so it cannot re-run the slow path
+    we just declined.
 
     ``at_exit=True`` is what marks the cascade — a mid-run call must NOT be
     budgeted (a caller there can still see and fix a slow close).
@@ -353,24 +367,107 @@ def test_exit_budget_short_circuits_the_seam(monkeypatch):
         pidfile="/nonexistent/redis.pid",
     )
     monkeypatch.setenv("TORTOISE_FAST_ATEXIT", "1")
-    monkeypatch.setattr(embedded_lifecycle, "_atexit_budget_expired", lambda: True)
-    walked: list[object] = []
-    monkeypatch.setattr(
-        embedded_lifecycle, "_is_ephemeral_test_server",
-        lambda c: (walked.append(c), True)[1])
+    monkeypatch.setattr(embedded_lifecycle, "_atexit_deadline",
+                        time.monotonic() - 1)
+    monkeypatch.setattr(embedded_lifecycle, "_is_ephemeral_test_server",
+                        lambda c: True)
+    probed: list[object] = []
+    monkeypatch.setattr(embedded_lifecycle, "cotenant_holds_server",
+                        lambda c: (probed.append(c), False)[1])
     try:
         assert atexit_fast_close(stub) is not True, (
             "a mid-run call must not take the exit-budget short-circuit")
-        walked.clear()
+        assert probed == [stub], (
+            "the mid-run path must still probe the co-tenant")
+        probed.clear()
         assert atexit_fast_close(stub, at_exit=True) is True, \
-            "a spent exit budget must report the client handled, not re-probe"
-        assert walked == [], (
-            "a spent exit budget must not run the classification walk")
+            "a spent exit budget must report the client handled"
+        assert probed == [], (
+            "a spent exit budget must stop BEFORE the co-tenant probe")
         assert stub.pidfile is None, (
             "redislite's own atexit close must be neutralised so the declined "
             "close cannot re-run at exit")
     finally:
         shutil.rmtree(stub.redis_dir, ignore_errors=True)
+
+
+def test_exit_budget_never_skips_a_non_fast_path_client(monkeypatch):
+    """The budget may skip ONLY a client the fast path would have handled
+    (flag on AND ephemeral).
+
+    Mutation: check the budget before the `_fast_atexit_enabled()` /
+    `_is_ephemeral_test_server` gates (the shipped first revision). A
+    path-based or non-ephemeral server then reports "handled" with the flag
+    unset and its pidfile neutralised, so its redislite SAVE `_cleanup()`
+    never runs — and the #2052 reaper PROTECTS path-based servers by design,
+    so a user's DB is stranded and the single-writer embedded file can be
+    held into the next run. (Found in review, P0.)
+    """
+    from tortoise import embedded_lifecycle as el
+
+    keep = "/nonexistent/redis.pid"
+    stub = SimpleNamespace(
+        redis_dir=tempfile.mkdtemp(prefix="tortoise_4214_user_"),
+        dbdir=os.path.join(str(Path.home()), "tortoise-4214-user.db"),
+        socket_file=None,
+        pidfile=keep,
+    )
+    monkeypatch.setattr(el, "_atexit_deadline", time.monotonic() - 1)
+    try:
+        monkeypatch.delenv("TORTOISE_FAST_ATEXIT", raising=False)
+        assert atexit_fast_close(stub, at_exit=True) is False, \
+            "flag off -> must fall through to the normal close"
+        assert stub.pidfile == keep, (
+            "a non-fast-path client must not be neutralised")
+
+        monkeypatch.setenv("TORTOISE_FAST_ATEXIT", "1")
+        assert atexit_fast_close(stub, at_exit=True) is False, \
+            "non-ephemeral -> must fall through to the normal SAVE close"
+        assert stub.pidfile == keep, (
+            "a non-ephemeral client must not be neutralised")
+    finally:
+        shutil.rmtree(stub.redis_dir, ignore_errors=True)
+
+
+def test_gc_close_exit_budget_skips_only_fast_path_clients(monkeypatch):
+    """`_gc_close` is the weakref exit seam. Its budget guard is separate from
+    `atexit_fast_close`'s and must (a) fire only on the exit pass, (b) skip the
+    co-tenant probe, (c) release the owner record, and (d) not fire for a
+    client the fast path would not have handled.
+
+    Mutations: drop the guard; or apply it when `_in_weakref_exit_finalizer()`
+    is False, which budgets the #1475 close-on-GC contract mid-run.
+    """
+    from tortoise import embedded_lifecycle as el
+
+    d = tempfile.mkdtemp(prefix="tortoise_4214_")
+    stub = SimpleNamespace(
+        redis_dir=d, dbdir=d, pidfile="p",
+        socket_file=os.path.join(d, "redis.socket"),
+        connection_pool=SimpleNamespace(disconnect=lambda: None))
+    monkeypatch.setenv("TORTOISE_FAST_ATEXIT", "1")
+    monkeypatch.setattr(el, "_atexit_deadline", time.monotonic() - 1)
+    probed: list[object] = []
+    monkeypatch.setattr(el, "cotenant_holds_server",
+                        lambda c: (probed.append(c), True)[1])
+    released: list[object] = []
+    monkeypatch.setattr(el, "_release_owner_quietly",
+                        lambda db: released.append(db))
+    try:
+        # mid-run GC: the budget must NOT apply, even though it is spent
+        monkeypatch.setattr(el, "_in_weakref_exit_finalizer", lambda: False)
+        el._gc_close(lambda: stub)
+        assert probed == [stub], "mid-run GC must still probe (#1475 contract)"
+
+        # weakref exit pass with a spent budget: stop before the probe
+        probed.clear()
+        released.clear()
+        monkeypatch.setattr(el, "_in_weakref_exit_finalizer", lambda: True)
+        el._gc_close(lambda: stub)
+        assert probed == [], "a spent exit budget must skip the co-tenant probe"
+        assert released == [stub], "the owner record must be released"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_exit_cascade_still_reclaims_the_socket_dir(monkeypatch):
@@ -393,6 +490,12 @@ def test_exit_cascade_still_reclaims_the_socket_dir(monkeypatch):
     # A non-shared server whose socket is already gone: the seam reaches its
     # reclamation decision (the `except OSError` branch) with no live peer.
     monkeypatch.setattr(el, "cotenant_holds_server", lambda c: False)
+    # The process budget is global and may already be spent by an earlier
+    # test's direct seam call; this test is about the RECLAMATION, so give it
+    # an unspent one (monkeypatch restores the module state afterwards).
+    # `raising=False` so on a pre-#4214 tree this guard fails on BEHAVIOUR
+    # (the `at_exit` kwarg), not on a missing attribute.
+    monkeypatch.setattr(el, "_atexit_deadline", None, raising=False)
     d = tempfile.mkdtemp(prefix="tortoise_4214_")
 
     def stub():
@@ -411,40 +514,91 @@ def test_exit_cascade_still_reclaims_the_socket_dir(monkeypatch):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_exit_budget_is_per_cascade_not_per_process(monkeypatch):
-    """Mutation: drop the silence check and keep one process-lifetime
-    deadline. An ``_atexit_close`` called early in a long session (tests call
-    it directly; production only ever calls it from ``atexit``) then expires
-    the budget for the real exit cascade, which is measured 30 s later — that
-    silently truncates the cascade's cleanup, and it made an earlier version
-    of this test pass for the wrong reason.
+def test_exit_budget_cannot_be_re_armed_by_a_slow_step(monkeypatch):
+    """Mutation: re-derive the deadline from the previous call's timestamp (a
+    "a silence longer than the budget ends the cascade" heuristic). The thing
+    being bounded is the CALLER's own slow step, which this function cannot
+    see — so in a cascade where every step exceeds the budget, every call
+    reads as a new cascade, re-arms, and returns False forever. The bound then
+    never fires in exactly the regime it exists for. (Found in review of the
+    first revision.)
     """
     from tortoise import embedded_lifecycle as el
 
-    monkeypatch.setenv("TORTOISE_ATEXIT_BUDGET", "5")
+    monkeypatch.setenv("TORTOISE_ATEXIT_BUDGET", "0.05")
     monkeypatch.setattr(el, "_atexit_deadline", None)
-    monkeypatch.setattr(el, "_atexit_last_seam_call", None)
 
     assert el._atexit_budget_expired() is False
-    assert el._atexit_budget_expired() is False, "a contiguous cascade holds"
+    for _ in range(3):
+        time.sleep(0.06)  # every step exceeds the budget
+        assert el._atexit_budget_expired() is True, (
+            "a spent budget must stay spent — a slow cascade cannot re-arm it")
 
-    # A silence longer than the budget ends the cascade -> a fresh deadline.
-    monkeypatch.setattr(el, "_atexit_last_seam_call",
-                        time.monotonic() - 600)
-    monkeypatch.setattr(el, "_atexit_deadline", time.monotonic() - 600)
-    assert el._atexit_budget_expired() is False, \
-        "a later cascade must get its own budget"
+
+def test_exit_budget_env_parsing(monkeypatch):
+    """Mutation: drop the finite/positive check. `nan` parses as a float and
+    `now >= nan` is always False, so a typo'd env value silently DISABLES the
+    bound that exists to guarantee the process exits. Blank/garbage must keep
+    the default; only an explicit 0/negative opts out.
+    """
+    from tortoise import embedded_lifecycle as el
+
+    default = el._ATEXIT_BUDGET_DEFAULT
+    for raw, expected in (("", default), ("garbage", default),
+                          ("nan", default), ("inf", default),
+                          ("1e999", default), ("0", float("inf")),
+                          ("-5", float("inf")), ("2.5", 2.5)):
+        monkeypatch.setenv("TORTOISE_ATEXIT_BUDGET", raw)
+        assert el._atexit_budget_seconds() == expected, raw
+
+
+def test_tempdir_memos_follow_a_redirected_tempdir(monkeypatch):
+    """Both #4214 memos must follow a redirected ``tempfile.tempdir``.
+
+    Mutation: memoize without keying on the raw value. `tempfile.tempdir` is
+    assignable and the reaper's own suite redirects it (the
+    ``monkeypatch_tempdir`` tests in `tests/test_reaper.py`), so a sticky memo
+    makes those tests read the real root and fail in file order — or, worse,
+    pins a pytest tmp_path that is then deleted and poisons every later call
+    in the process. (Found in review.)
+    """
+    from tortoise import embedded_reaper as reaper
+
+    monkeypatch.setattr(embedded_lifecycle, "_TMPDIR_RESOLVED", None)
+    monkeypatch.setattr(embedded_lifecycle, "_TMPDIR_RESOLVED_RAW", None)
+    monkeypatch.setattr(reaper, "_REAL_TEMPDIR", None)
+    monkeypatch.setattr(reaper, "_REAL_TEMPDIR_RAW", None)
+    first = tempfile.mkdtemp(prefix="tortoise_4214_root_")
+    second = tempfile.mkdtemp(prefix="tortoise_4214_root_")
+    try:
+        monkeypatch.setattr(tempfile, "tempdir", first)
+        assert embedded_lifecycle._resolved_tempdir() == os.path.realpath(first)
+        assert reaper._real_gettempdir() == os.path.realpath(first)
+        monkeypatch.setattr(tempfile, "tempdir", second)
+        assert embedded_lifecycle._resolved_tempdir() == os.path.realpath(second), \
+            "the lifecycle memo must follow a redirected tempdir"
+        assert reaper._real_gettempdir() == os.path.realpath(second), \
+            "the reaper memo must follow a redirected tempdir"
+    finally:
+        for d in (first, second):
+            shutil.rmtree(d, ignore_errors=True)
 
 
 _SLOW_ROOT_STAT_SCRIPT = r'''
-import os, tempfile, time
+import gc, os, tempfile, time, weakref
 
 from tortoise import embedded_lifecycle as el
 
-ROOT = os.path.abspath(tempfile.gettempdir())
+# BOTH spellings: `realpath` resolves the `/var -> /private/var` symlink on
+# macOS, so keying the injection on the raw spelling alone makes this script
+# miss every real root stat on the platform the bug was filed on.
+ROOTS = {os.path.abspath(tempfile.gettempdir()),
+         os.path.realpath(tempfile.gettempdir())}
 REPORT = os.environ["SLEEP_REPORT"]
+WEAKREF_REPORT = os.environ["WEAKREF_REPORT"]
 DELAY = float(os.environ["SLOW_ROOT_STAT"])
 open(REPORT, "w").close()
+open(WEAKREF_REPORT, "w").close()
 _real_lstat = os.lstat
 
 
@@ -454,7 +608,7 @@ def _bump(what):
 
 
 def slow_lstat(path, *a, **k):
-    if not isinstance(path, int) and os.fspath(path) == ROOT:
+    if not isinstance(path, int) and os.fspath(path) in ROOTS:
         _bump("lstat " + os.fspath(path))
         time.sleep(DELAY)
     return _real_lstat(path, *a, **k)
@@ -472,7 +626,8 @@ class _Client:
     only ever be the EXIT seam's."""
 
     def __init__(self, i):
-        d = os.path.join(ROOT, "tortoise_4214_%d" % i)
+        d = os.path.join(tempfile.gettempdir(),
+                         "tortoise_4214_%s_%d" % (os.environ["RUN_TAG"], i))
         self.redis_dir = d
         self.dbdir = d
         self.pidfile = os.path.join(d, "redis.pid")
@@ -511,6 +666,30 @@ for i in range(int(os.environ["N_CLIENTS"])):
 # pay for it.
 os.lstat = slow_lstat
 
+
+# The weakref exit-pass detector itself, through the real machinery: a
+# mid-run finalizer (forced with gc.collect()) must read False, and the exit
+# pass must read True. `sys.is_finalizing()` is False in BOTH (measured on
+# CPython 3.12.13), which is why the detector reads the frame instead.
+class _ProbeOwner:
+    pass
+
+
+def _probe(_db):
+    with open(WEAKREF_REPORT, "a") as fh:
+        fh.write("exit_pass=%s\n" % el._in_weakref_exit_finalizer())
+
+
+_probe_owner = _ProbeOwner()
+weakref.finalize(_probe_owner, _probe, None)
+del _probe_owner
+gc.collect()  # mid-run -> must record False
+
+# A SECOND probe owner, kept alive, so its finalizer runs in the weakref EXIT
+# pass (a finalizer is one-shot: the one above has already fired).
+_exit_owner = _ProbeOwner()
+weakref.finalize(_exit_owner, _probe, None)
+
 print("READY", flush=True)
 '''
 
@@ -532,16 +711,20 @@ def test_interpreter_exits_after_a_slow_temp_root_stat(tmp_path):
     Mutation: re-add a per-client `os.path.realpath` under the temp root to
     ``_is_ephemeral_test_server`` or ``_remove_ephemeral_socket_dir`` (or drop
     the ``at_exit`` short-circuit order that keeps repeat seam invocations
-    from re-walking). Pre-#4214 this counts 2 x N = 12 injected calls for 6
-    clients; the fix counts 0.
+    from re-walking), or use `sys.is_finalizing()` instead of the weakref exit
+    frame — pre-#4214 this counts several injected calls per client (observed
+    30 for 6 clients); the fix counts 0 and detects the exit pass.
     """
     n_clients = 6
     delay = 0.2
     report = tmp_path / "sleeps.txt"
+    weakref_report = tmp_path / "weakref.txt"
     script = tmp_path / "slow_exit_4214.py"
     script.write_text(_SLOW_ROOT_STAT_SCRIPT)
+    run_tag = uuid.uuid4().hex[:8]
     env = dict(os.environ, SLOW_ROOT_STAT=str(delay), N_CLIENTS=str(n_clients),
-               SLEEP_REPORT=str(report), TORTOISE_FAST_ATEXIT="1")
+               SLEEP_REPORT=str(report), WEAKREF_REPORT=str(weakref_report),
+               RUN_TAG=run_tag, TORTOISE_FAST_ATEXIT="1")
     # A hang is a failure in its own right: `pytest-timeout` cannot interrupt
     # `Py_FinalizeEx`, so the subprocess TIMEOUT below is what pins "the
     # interpreter exits", and the injected-call count pins "it did not have to
@@ -556,7 +739,8 @@ def test_interpreter_exits_after_a_slow_temp_root_stat(tmp_path):
         # path, where the assertion never runs.
         tmp_root = os.path.abspath(tempfile.gettempdir())
         for i in range(n_clients):
-            shutil.rmtree(os.path.join(tmp_root, f"tortoise_4214_{i}"),
+            shutil.rmtree(os.path.join(tmp_root,
+                                       f"tortoise_4214_{run_tag}_{i}"),
                           ignore_errors=True)
     assert proc.returncode == 0, proc.stderr
     assert "READY" in proc.stdout, proc.stdout
@@ -565,6 +749,16 @@ def test_interpreter_exits_after_a_slow_temp_root_stat(tmp_path):
         f"the exit seam stat-ed the temp root {len(hits)} times for "
         f"{n_clients} clients ({hits[:4]}…) — that is the per-client "
         f"realpath walk that hangs Py_FinalizeEx (#4214)")
+    # The exit-pass detector, through the real machinery: a mid-run finalizer
+    # must read False and the weakref exit pass must read True. Mutations:
+    # gate on `sys.is_finalizing()` (False in both, measured on CPython
+    # 3.12.13 — the first revision's silent no-op), or treat any finalizer as
+    # the exit pass (which would budget the #1475 close-on-GC contract).
+    probes = weakref_report.read_text().splitlines()
+    assert "exit_pass=False" in probes, (
+        f"a mid-run finalizer must NOT read as interpreter exit: {probes}")
+    assert "exit_pass=True" in probes, (
+        f"the weakref exit pass must be detected: {probes}")
 
 
 def test_atexit_seams_reclaim_the_socket_dir(monkeypatch):
@@ -589,6 +783,10 @@ def test_atexit_seams_reclaim_the_socket_dir(monkeypatch):
     # reaches its reclamation decision (the `except OSError` branch).
     monkeypatch.setattr(embedded_lifecycle, "cotenant_holds_server",
                         lambda c: False)
+    # See the note in `test_exit_cascade_still_reclaims_the_socket_dir`: the
+    # process budget is global and may already be spent by an earlier test.
+    monkeypatch.setattr(embedded_lifecycle, "_atexit_deadline", None,
+                        raising=False)
 
     def _client():
         d = tempfile.mkdtemp(prefix="tortoise_4214_")

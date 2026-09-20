@@ -321,14 +321,20 @@ def _parse_min_uptime() -> int:
 #: The reaper calls this from its per-record classification loop, and the
 #: realpath walk re-stats the temp root itself — on a leak-degraded box that
 #: is the single most expensive syscall in the sweep (0.4–3.4 s measured at
-#: nlink 55 k). The value is a process constant.
+#: nlink 55 k). The value is a process constant, BUT `tempfile.tempdir` is
+#: assignable (tests redirect it), so the memo is keyed on the raw value and
+#: is recomputed whenever that changes — a pure memo with no invalidation
+#: would pin the first root forever and silently defeat every redirect.
 _REAL_TEMPDIR: str | None = None
+_REAL_TEMPDIR_RAW: str | None = None
 
 
 def _real_gettempdir() -> str:
-    global _REAL_TEMPDIR
-    if _REAL_TEMPDIR is None:
-        _REAL_TEMPDIR = os.path.realpath(tempfile.gettempdir())
+    global _REAL_TEMPDIR, _REAL_TEMPDIR_RAW
+    raw = tempfile.gettempdir()
+    if _REAL_TEMPDIR is None or raw != _REAL_TEMPDIR_RAW:
+        _REAL_TEMPDIR = os.path.realpath(raw)
+        _REAL_TEMPDIR_RAW = raw
     return _REAL_TEMPDIR
 
 
