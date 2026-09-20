@@ -393,6 +393,7 @@ surfaces:
   - test_client_status_vocabulary.py
   - test_embedder_provision.py
   - test_embedded_evidence.py
+  - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -1217,6 +1218,11 @@ durations:
   test_shared_state_imports.py: 2.0
   test_shared_state_monitoring.py: 2.0
   test_shared_state_recovery.py: 2.0
+  # #4327: no CI junit measurement yet (new file), so enter at the flat 2.0s
+  # default per the #3400/#4221 convention — the conservative floor keeps the
+  # 90% durations-coverage floor satisfied; refresh from the first post-merge
+  # main run that includes it.
+  test_installer_preserves_foreign_skill_content.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
