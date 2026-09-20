@@ -79,16 +79,24 @@ def _junit_for(nodeids: list[str], path: Path) -> None:
     """Write a junit (xunit1 shape) that contains exactly `nodeids`.
 
     pytest's own junit is the only writer in CI, so the attributes that
-    `skip-guard._read_junitxml` reads are reproduced exactly: `file`, `classname`
-    (module-dotted, plus any class), `name`. The class part is joined with '.'
-    in classname and '::' in the nodeid, which is what that reader inverts.
+    `skip-guard._read_junitxml` reads are reproduced exactly: `file`, `classname`,
+    `name`. A collected test gets the module-dotted path (plus any class) as
+    `classname` and the bare name in `name`; a module-level collection-abort marker
+    has NO class, so pytest writes `classname=""` and the dotted module as the NAME.
+    Both shapes are reproduced here — writing only the first made 32 of the 69
+    entries a shape pytest never emits, so the marker reconstruction the guard
+    depends on went untested (cycle-4 finding).
     """
     suite = ET.Element("testsuite", {"name": "pytest", "tests": str(len(nodeids))})
     for nodeid in nodeids:
         file, *parts = nodeid.split("::")
         name = parts[-1]
-        classname = _module_dotted(file)
-        if len(parts) > 1:
+        # `path::dotted.module` -- the marker spelling (`_module_dotted`).
+        marker = len(parts) == 1 and name == _module_dotted(file)
+        classname = "" if marker else _module_dotted(file)
+        if marker:
+            name = _module_dotted(file)
+        elif len(parts) > 1:
             classname = f"{classname}." + ".".join(parts[:-1])
         ET.SubElement(
             suite,
@@ -182,9 +190,12 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     assert "still aborts at collection" in header.lower(), (
         "the header must state what a marker asserts (a weaker claim than a collected test)"
     )
-    # The RECORDED count must be the actual one, and no other count may be stated:
-    # `str(len(markers)) in header` passed on any header containing that digit string.
-    recorded = [int(n) for n in re.findall(r"(\d+)[^\n]*\bmarkers?\b", header)]
+    # The RECORDED count must be the actual one, and no other count may be stated.
+    # Anchor the number to its CLAUSE: `(\d+)[^\n]*\bmarkers?\b` spanned the whole
+    # line, so an honest rewrite ("Of the 69 entries, 32 are module-level … markers")
+    # captured 69 and red a correct header (cycle-4 finding — the over-constrained
+    # regex class cycle 2 fixed for provenance, one line over).
+    recorded = [int(n) for n in re.findall(r"(\d+)\s+are\s+module-level", header)]
     assert recorded and all(n == len(markers) for n in recorded), (
         f"the header records {recorded} markers but the manifest has {len(markers)}"
     )
@@ -193,7 +204,7 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     # whose real-test entries were deleted is still satisfied by its own junit. The
     # header's real-test count is the only written record of how many there were,
     # so it is pinned against the manifest (cycle-3 finding).
-    recorded_tests = [int(n) for n in re.findall(r"(\d+)[^\n]*\breal test", header)]
+    recorded_tests = [int(n) for n in re.findall(r"(\d+)\s+are\s+real test", header)]
     assert recorded_tests and all(n == len(tests) for n in recorded_tests), (
         f"the header records {recorded_tests} real test nodeids but the manifest has {len(tests)}"
     )
@@ -218,9 +229,28 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
         nums = [int(n) for n in re.findall(r"\b(\d+)\b", line)]
         assert nums, f"the header names {label} but records no marker count for it"
         stated[label] = nums[0]
-    assert sum(stated.values()) == len(markers), (
-        f"the header's per-family counts {stated} sum to {sum(stated.values())}, "
-        f"but the manifest has {len(markers)} markers"
+    # …and the numbers must be TRUE, not merely consistent: three counts that add up
+    # are satisfied by a wrong split (20/6/6 passed — cycle-4 finding), and the split
+    # is the fat a maintainer acts on ("this marker is spurious, clean it up").
+    # Classify every marker module by the gate it really has.
+    actual: dict[str, int] = {}
+    for marker in markers:
+        src = _strip_docstrings((ROOT / marker.split("::")[0]).read_text())
+        if "skip_unless_hosted_e2e" in src:
+            fam = "hosted E2E"
+        elif re.search(r"RUN_[A-Z_]*E2E", src):
+            fam = "opt-in e2e"
+        elif "TORTOISE_DB_URI" in src:
+            fam = "docker-lane"
+        else:
+            raise AssertionError(
+                f"{marker} aborts at collection via no gate this pin knows — a fourth "
+                "gate family must be named in the header and classified here"
+            )
+        actual[fam] = actual.get(fam, 0) + 1
+    assert actual == stated, (
+        f"the header states {stated} but the markers actually split {actual} — the "
+        "per-family split is what tells a maintainer whether a marker is spurious"
     )
 
 
@@ -254,6 +284,21 @@ def test_platform_gated_manifest_covers_the_registry() -> None:
         assert defs <= pinned, (
             f"{rel} defines {sorted(defs - pinned)} with no nodeid in platform-gated.txt — "
             "regenerate the manifest so a vanished test is noticed (#4215)"
+        )
+        # A bare-NAME subset is satisfied by a colliding new test: a new
+        # `class TestZ: def test_x` where `test_x` is already pinned adds no name to
+        # `defs` and no nodeid to `pinned`, so the new (collected) test could be
+        # hidden by the gate with the pin still green (cycle-4 finding). Count DEFS
+        # and NODEIDS, not distinct names — one def may pin several nodeids
+        # (parametrization), so the manifest must list at least one per def.
+        n_defs = len(
+            re.findall(r"^\s*(?:async )?def (test_\w+)", _strip_docstrings(path.read_text()), re.M)
+        )
+        n_pinned = len([nid for nid in _nodeids(PLATFORM_GATED) if nid.startswith(f"{rel}::")])
+        assert n_pinned >= n_defs, (
+            f"{rel} defines {n_defs} test functions but platform-gated.txt has only "
+            f"{n_pinned} nodeids for it — a def whose bare name collides with a pinned "
+            "one would otherwise be invisible (#4215)"
         )
     missing = sorted(set(PLATFORM_GATED_TESTS) - listed)
     assert not missing, (
@@ -332,7 +377,13 @@ def test_a_single_vanished_nodeid_fails_and_is_named() -> None:
         _junit_for([nid for nid in nodeids if nid != victim], junit)
         result = _run_guard(EMBEDDED, junit)
     assert result.returncode != 0, "a vanished nodeid did NOT fail the check"
-    assert victim in result.stdout, (
-        f"the check failed but did not name the vanished nodeid {victim!r}; it must name it "
-        f"so the reader does not have to diff junits.\n{result.stdout}"
+    # Pin the SHAPE of the report, not just the presence of the string: a guard that
+    # dumps the whole expected set would satisfy `victim in stdout` while leaving the
+    # reader to diff junits — the thing this message exists to prevent (cycle-4
+    # finding). Exactly ONE nodeid may be listed as missing, and it must be the
+    # victim; `   - <nodeid>` is the guard's missing-list bullet.
+    listed = [l for l in result.stdout.splitlines() if l.startswith("   - ")]
+    assert listed == [f"   - {victim}"], (
+        f"the check must LIST exactly the vanished nodeid {victim!r} as missing, so the "
+        f"reader does not have to diff junits; it listed {listed}.\n{result.stdout}"
     )
