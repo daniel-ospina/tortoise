@@ -49,7 +49,7 @@ repair — the ledger is the pending-decision record, not a suppression list.
 
 The reds below are of two KINDS and must not read alike. A GENUINE defect is an
 entry that used to resolve and stopped. The EXPECTED surface change of #4282 is
-the canonical redesign — 98 -> 25 MCP tools and 150 -> 41 SDK methods — which
+the canonical redesign — 98 -> 25 MCP tools and 150 -> 40 SDK methods — which
 rewrites the 99-entry registry this instrument pins and legitimately leaves
 entries unresolved. The failure messages therefore append the #4282 rendezvous
 context ONLY when the run's shape matches the redesign, gated on the registry
@@ -141,13 +141,21 @@ _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
 # at a floor of 5) or the curated ledger to be ORPHANED (its recorded names gone
 # from the registry).
 #
-# Residual, stated rather than hidden: a STAGED redesign that rewrites
-# tortoise/sdk.py before the registry still measures 99 entries, so it is
-# indistinguishable from a mass rename and stays a plain defect report. That is
-# the intended direction of the error — investigate the diff, do not assume.
+# Residuals, stated rather than hidden:
+#  * a STAGED redesign that rewrites tortoise/sdk.py before the registry still
+#    measures 99 entries, so it is indistinguishable from a mass rename and stays
+#    a plain defect report — the intended direction of the error;
+#  * once the gate opens it opens for the WHOLE run, so a genuine regression
+#    running alongside the redesign also carries the note — which is why the note
+#    withholds the excuse and tells the reader to still read the specific id;
+#  * the predicate keys on SHAPE, not on the change's identity, so an unrelated
+#    >= _RESHAPE_MIN_ENTRIES-entry shrink would be reported under #4282's name; and
+#  * _BASELINE_ENTRY_COUNT is a frozen literal — the Phase 0.4 retarget MUST reset
+#    it, or this gate stays permanently open once the redesign lands.
+# Investigate the diff; do not assume.
 _BASELINE_ENTRY_COUNT = 99       # the pre-#4282 registry this instrument pins
 _EXPECTED_MCP_TOOLS = 25         # #4282: 98 -> 25
-_EXPECTED_SDK_METHODS = 41       # #4282: 150 -> 41
+_EXPECTED_SDK_METHODS = 40       # #4282: 150 -> 40
 _RESHAPE_MIN_ENTRIES = 25        # a defect does not remove a quarter of the surface
 _HOLLOWED_MIN_DEAD = 20          # a large absolute hole / a mass break
 _HOLLOWED_FRACTION = 0.25        # ...or a quarter of the (possibly shrunken) registry,
@@ -157,19 +165,21 @@ _DEAD_TARGETS = tuple(e.name for e, target, _where in _TARGETS if not callable(t
 
 _RENDEZVOUS_NOTE = (
     "\n"
-    "  \u26a0\ufe0f EXPECTED SURFACE CHANGE (#4282) \u2014 READ THIS BEFORE 'FIXING' ANYTHING.\n"
-    "  This red has the SHAPE of the #4282 surface redesign, not of an instrument fault.\n"
-    f"  The canonical redesign lands {_EXPECTED_MCP_TOOLS} MCP tools (from 98) and\n"
-    f"  {_EXPECTED_SDK_METHODS} SDK methods (from 150), so the pre-#4282 registry of\n"
-    f"  {_BASELINE_ENTRY_COUNT} entries is rewritten and entries legitimately stop resolving.\n"
-    "    * If the diff carries that redesign: this is a RENDEZVOUS, not a bug.\n"
+    "  \u26a0\ufe0f IF THIS DIFF LANDS THE #4282 SURFACE REDESIGN, THIS RED IS EXPECTED.\n"
+    "  Otherwise it is a GENUINE DEFECT and this note does not excuse it.\n"
+    "  The #4282 redesign lands 25 MCP tools (from 98) and 40 SDK methods (from 150),\n"
+    f"  so the pre-#4282 registry of {_BASELINE_ENTRY_COUNT} entries is rewritten and\n"
+    "  entries legitimately stop resolving — a RENDEZVOUS, not an instrument fault.\n"
     "    * RETARGET POINT: retarget this instrument at Phase 0.4, when\n"
     "      tortoise/__init__.py gains __all__ and there is a real declaration to pin.\n"
+    "      Retargeting INCLUDES resetting _BASELINE_ENTRY_COUNT — leaving it at 99\n"
+    "      keeps this gate permanently open.\n"
     "    * DO NOT weaken, skip or delete this test to make it green. A red that reads\n"
     "      like a bug gets worked around; a red that reads like a rendezvous gets acted\n"
     "      on. Re-point the ledger at the new surface instead.\n"
-    "    * If the diff does NOT carry a surface change, IGNORE this note \u2014 the detail\n"
-    "      above is a GENUINE DEFECT and this note does not excuse it."
+    "    * This note is attached to EVERY failing case in the run once the registry\n"
+    "      has shrunk — including any genuine regression running alongside the\n"
+    "      redesign — so still read the specific unresolved id above."
 )
 
 
