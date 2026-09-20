@@ -824,12 +824,14 @@ def test_capture_extract_off_stores_without_extracting(monkeypatch, client):
         params={"sid": sid}).result_set
     assert extracted_rows[0][0] == 0, "OFF must mint no extracted points"
 
-    # (3) the record is retry-eligible: capture_ok False + lane "none", so a
-    # LATER re-capture with extraction back ON re-attempts (#2335 TRUE retry).
+    # (3) the record is retry-eligible: capture_ok False + lane "disabled" (a
+    # DISTINCT value from the keyless "none", #4258 — see
+    # _CAPTURE_EXTRACTOR_LANES_RETRYABLE), so a LATER re-capture with
+    # extraction back ON re-attempts (#2335 TRUE retry).
     st = proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
         params={"sid": sid}).result_set[0]
-    assert st[0] is False and st[1] == "none", st
+    assert st[0] is False and st[1] == "disabled", st
 
     # (4) retrievable through the EXISTING read path while extraction is OFF —
     # proof (b) says "stored AND retrievable", so assert the REAL search rather
@@ -869,6 +871,75 @@ def test_capture_extract_is_per_org(monkeypatch, client):
     assert ha_mod._capture_extract_enabled({"org_id": "test-team-722"}) is False
     # a different org, whose stored state lacks the key, still reads ON.
     assert ha_mod._capture_extract_enabled({"org_id": "other-team-4258"}) is True
+
+
+def test_capture_extract_off_recapture_on_m2_is_not_called_keyless(
+        monkeypatch, client):
+    """#4258: the disabled store records lane "disabled", NOT "none" — so the
+    M2-replay disclosure cannot diagnose a team whose key IS configured as
+    "stored WITHOUT a provider key". Mutation guard: recording "none" for the
+    disabled store (the pre-review overload) makes the first warning assert
+    fire.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.sdk import (
+        _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,
+        _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,
+    )
+
+    # a provider IS available; the M2 lane is what makes the re-attempt refuse.
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+    marker = "m2disabledproofzzq"
+    conv = [{"role": "user",
+             "content": f"we decided the {marker} capture is store-only"}]
+
+    r1 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-hosted-m2-disabled"})
+    assert r1.status_code == 200, r1.text[:400]
+    assert r1.json()["extraction_mode"] == "extraction-disabled", r1.json()
+
+    # re-capture the SAME session_id: on M2 the retry gate refuses, so it
+    # replays.
+    r2 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-hosted-m2-disabled"})
+    assert r2.status_code == 200, r2.text[:400]
+    body = r2.json()
+    assert body["extraction_mode"] == "replayed", body
+    warnings = " ".join(body["warnings"])
+    assert _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING not in warnings, (
+        "a configured-key, setting-disabled prior must never be diagnosed as "
+        "keyless: " + warnings)
+    assert _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING in warnings, (
+        "the disabled prior must disclose its OWN reason + remedy: " + warnings)
+
+
+@pytest.mark.embedded_only  # mock extractor provides the points (docker lane's real S3 leg yields 0)
+def test_capture_extract_off_then_on_recapture_extracts(monkeypatch, client):
+    """#4258: the disabled store (lane "disabled") is RETRY-ELIGIBLE — after
+    the team turns extraction back ON, an explicit re-capture of the SAME
+    session extracts on the #2335 TRUE-retry lane instead of replaying
+    forever. Mutation guard: dropping `disabled` from
+    `_CAPTURE_EXTRACTOR_LANES_RETRYABLE` REDs this test.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=False)
+    conv = [{"role": "user",
+             "content": "we decided the recapture-after-on path extracts"}]
+    r1 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-disabled-then-on"})
+    assert r1.json()["extraction_mode"] == "extraction-disabled", r1.json()
+
+    ha_mod._update_onboarding_state("test-team-722", capture_extract=True)
+    r2 = client.post("/v1/sessions", json={
+        "conversation": conv, "session_id": "s-disabled-then-on"})
+    body = r2.json()
+    assert body["extraction_mode"] not in ("extraction-disabled", "replayed"), (
+        "turning extraction back on + re-capturing must re-attempt, not replay: "
+        + str(body))
+    assert body["extraction_mode"] == "llm:mock", body
+    assert body["extracted"] >= 1, body
 
 
 def test_capture_extract_off_with_no_provider_discloses_both(monkeypatch, client):

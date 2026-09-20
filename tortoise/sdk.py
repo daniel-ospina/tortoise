@@ -208,6 +208,20 @@ _CAPTURE_EXTRACTION_DISABLED_WARNING = (
     "memory) and re-capture the session to extract"
 )
 
+#: #4258: the sibling of ``_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING`` for a
+#: prior stored with extraction TURNED OFF (session lane ``"disabled"``) that
+#: is re-captured while the deployment sits on the non-convergent M2 lane. It
+#: exists because the keyless warning would be a FALSE diagnosis here — a
+#: provider key IS configured, the user's own setting was the reason nothing
+#: was extracted. Names every lever that actually applies.
+_CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING = (
+    "this session's turns were stored with extraction turned OFF "
+    "('capture_extract') and no extraction has ever run for it; extraction "
+    "was NOT re-attempted because TORTOISE_SESSION_EXTRACTOR=m2 selects a "
+    "non-convergent lane (re-running it could mint duplicate claims) — unset "
+    "it, turn extraction back on, and re-capture the session to extract"
+)
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider

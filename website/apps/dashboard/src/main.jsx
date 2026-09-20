@@ -510,7 +510,7 @@ function SettingsTab(props) {
             missing provider key. */}
         {!sessionsLoading && state && state.capture_extract === false && (
           <p className="dim small">
-            Extraction into memory is off — captured sessions are stored but not turned into memories. Change it under Memory sources above.
+            Extraction into memory is off — new captures are stored but not extracted; sessions captured while this is off stay unextracted until they are captured again. Change it under Memory sources above.
           </p>
         )}
         {/* #2000 (W4) review P2-3: honest states — never a fabricated

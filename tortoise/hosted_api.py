@@ -91,6 +91,7 @@ from tortoise.projection import (
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
     _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
+    _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,  # #4258: its M2-replay sibling (never the keyless one)
     _CAPTURE_EXTRACTION_DISABLED_WARNING,  # #4258: its canonical "stored, not extracted" notice
     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
@@ -110,6 +111,16 @@ from tortoise.sdk import (
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
+
+#: #4258: the Session `capture_extractor` lane recorded when the team's
+#: extraction setting (not a missing key) is why nothing was extracted. It is a
+#: DISTINCT value from "none" (the keyless lane) on purpose: the M2-replay
+#: disclosure treats `capture_extractor == "none"` as proof of a keyless prior,
+#: so overloading it would emit the keyless warning ("stored WITHOUT a provider
+#: key") for a team whose key IS configured. Both store-only lanes are
+#: retry-eligible (no claims were minted, turn ids are deterministic).
+_CAPTURE_EXTRACTOR_LANE_DISABLED = "disabled"
+_CAPTURE_EXTRACTOR_LANES_RETRYABLE = ("v2", "none", _CAPTURE_EXTRACTOR_LANE_DISABLED)
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.supabase_control import _service_key  # #3677
 
@@ -8382,7 +8393,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     prior_capture_extractor = session_row[2]
     retry_failed_capture = (
         session_existed and prior_capture_ok is False
-        and prior_capture_extractor in ("v2", "none")
+        and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -8756,6 +8767,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # would be a FALSE statement of this state and would hide the
             # remedy. Disclose it, in the SAME words as sdk.capture_session.
             _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        elif (prior_capture_ok is False
+              and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
+            # #4258: the prior was an EXTRACTION-DISABLED store — a provider
+            # key may well be configured, so the keyless warning above would be
+            # a false diagnosis. Disclose the real reason + remedy under its
+            # OWN words (the m2 lane refuses the re-attempt here too).
+            _replay_warnings.append(
+                _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
         meta = {"errors": [], "warnings": _replay_warnings,
                 "mode": "replayed",
                 "route": None, "provider": None,
@@ -9532,8 +9551,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # a keyless RE-capture must not rewrite a prior attempt's record (a prior
     # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
     _capture_ok_record = False if store_only else _capture_ok
+    # #4258: distinguish the TWO store-only causes on the record — "none" is
+    # the keyless lane, "disabled" is the team's setting. Both are
+    # retry-eligible (see _CAPTURE_EXTRACTOR_LANES_RETRYABLE), so a later
+    # re-capture with extraction back ON still converges (#2335 TRUE retry).
     _capture_extractor_record = (
-        "none" if store_only
+        "none" if no_provider
+        else _CAPTURE_EXTRACTOR_LANE_DISABLED if store_only
         else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
               else "v2"))
     _record_session_state = (
