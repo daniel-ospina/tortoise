@@ -55,8 +55,9 @@ entries unresolved. The failure messages therefore append the #4282 rendezvous
 context ONLY when the run's shape matches the redesign, gated on the registry
 having SHRUNK by >= ``_RESHAPE_MIN_ENTRIES`` (a defect does not rewrite the
 registry), so no small-scale genuine regression can be pre-excused as "the
-redesign". When the rendezvous does open, the instruction is to RETARGET the
-instrument at Phase 0.4 — never to weaken or delete it to make it green.
+redesign". When the rendezvous opens, the instruction is to RETARGET the
+instrument at Phase 0.4 — never to weaken or delete the INSTRUMENT to make it green.
+The rendezvous MACHINERY itself is transition-scoped and is deleted at that retarget.
 """
 from __future__ import annotations
 
@@ -150,8 +151,11 @@ _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
 #    withholds the excuse and tells the reader to still read the specific id;
 #  * the predicate keys on SHAPE, not on the change's identity, so an unrelated
 #    >= _RESHAPE_MIN_ENTRIES-entry shrink would be reported under #4282's name; and
-#  * _BASELINE_ENTRY_COUNT is a frozen literal — the Phase 0.4 retarget MUST reset
-#    it, or this gate stays permanently open once the redesign lands.
+#  * _BASELINE_ENTRY_COUNT is a frozen literal tied to the PRE-#4282 baseline. The
+#    Phase 0.4 retarget must DELETE this rendezvous machinery: leaving the baseline
+#    at 99 stops the note firing once a successful redesign leaves fewer than
+#    _HOLLOWED_MIN_DEAD entries unresolved, and resetting it to the new size makes
+#    `shrunk` (n <= baseline - _RESHAPE_MIN_ENTRIES) unsatisfiable. Neither is a fix.
 # Investigate the diff; do not assume.
 _BASELINE_ENTRY_COUNT = 99       # the pre-#4282 registry this instrument pins
 _EXPECTED_MCP_TOOLS = 25         # #4282: 98 -> 25
@@ -172,14 +176,18 @@ _RENDEZVOUS_NOTE = (
     "  entries legitimately stop resolving — a RENDEZVOUS, not an instrument fault.\n"
     "    * RETARGET POINT: retarget this instrument at Phase 0.4, when\n"
     "      tortoise/__init__.py gains __all__ and there is a real declaration to pin.\n"
-    "      Retargeting INCLUDES resetting _BASELINE_ENTRY_COUNT — leaving it at 99\n"
-    "      keeps this gate permanently open.\n"
+    "      This rendezvous machinery is TRANSITION-SCOPED and must be DELETED there:\n"
+    "      _RESHAPE_MIN_ENTRIES is measured against the PRE-#4282 baseline, so leaving\n"
+    "      _BASELINE_ENTRY_COUNT at 99 stops the note firing once the redesign leaves\n"
+    "      fewer than _HOLLOWED_MIN_DEAD entries unresolved, while resetting it to the\n"
+    "      new size makes the shrink test unsatisfiable. Neither is a fix — delete it.\n"
     "    * DO NOT weaken, skip or delete this test to make it green. A red that reads\n"
     "      like a bug gets worked around; a red that reads like a rendezvous gets acted\n"
     "      on. Re-point the ledger at the new surface instead.\n"
-    "    * This note is attached to EVERY failing case in the run once the registry\n"
-    "      has shrunk — including any genuine regression running alongside the\n"
-    "      redesign — so still read the specific unresolved id above."
+    "    * This note is attached to the entry-resolution, collection-gate and\n"
+    "      live-surface failures that arise in this shape — including any genuine\n"
+    "      regression running alongside the redesign — so still read the specific\n"
+    "      unresolved id above."
 )
 
 
@@ -267,7 +275,7 @@ assert _CASES, "empty scoreboard — no registry entries to resolve (fail-closed
 assert [e.name for e in TOOL_REGISTRY] == _CASES, (
     f"the scoreboard PARAMETRISED {len(_CASES)} cases for {len(TOOL_REGISTRY)} registry "
     f"entries — a sample (or a truncated decorator list) is not a scoreboard. "
-    f"Unresolved this run: {len(_DEAD_TARGETS)} of {len(TOOL_REGISTRY)}."
+    f"Unresolved in the full registry: {len(_DEAD_TARGETS)} of {len(TOOL_REGISTRY)}."
     f"{_rendezvous()}"
 )
 _ORPHANS = sorted(_DEAD_LINKS_AWAITING_4282 - set(_CASES))
