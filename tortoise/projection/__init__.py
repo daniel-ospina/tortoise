@@ -4492,7 +4492,11 @@ class FalkorProjection(
         unset flag routes through the helper's False return).
         """
         db = getattr(self, "db", None)
-        if db is not None and atexit_fast_close(getattr(db, "client", db)):
+        # #4214: `at_exit=True` — reached only from the `atexit` registration
+        # (see `register_atexit_close`), so a spent exit budget stops the
+        # cascade instead of letting it block `Py_FinalizeEx`.
+        if db is not None and atexit_fast_close(getattr(db, "client", db),
+                                                at_exit=True):
             self._closed = True
             return
         self.close()
