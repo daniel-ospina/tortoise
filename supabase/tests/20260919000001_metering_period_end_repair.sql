@@ -62,7 +62,13 @@ VALUES
     -- exercised too (without it branch 2 would derive an end).
     ('4216-blank-sub-bound', '4216-blank-sub-bound',
      'org_4216-blank-sub-bound', '   ',
-     '2026-06-01T00:00:00+00:00', NULL);
+     '2026-06-01T00:00:00+00:00', NULL),
+    -- branch-1 counterparts (start NULL, end set) so the OTHER UPDATE's
+    -- `subscription_id`/`btrim` guard is exercised too.
+    ('4216-blank-sub-end', '4216-blank-sub-end', 'org_4216-blank-sub-end', '   ',
+     NULL, '2026-06-01T00:00:00+00:00'),
+    ('4216-free-no-sub-end', '4216-free-no-sub-end', 'org_4216-free-no-sub-end',
+     NULL, NULL, '2026-07-01T00:00:00+00:00');
 
 -- 1) The repair RETURNS exactly the unusable orgs (loud, not silent).
 --    Mutation caught: dropping either reported class (both-NULL / inverted /
@@ -187,6 +193,20 @@ BEGIN
        OR f_e IS NOT NULL THEN
         RAISE EXCEPTION 'a blank-subscription org must not be derived (% %)', f_s, f_e;
     END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-blank-sub-end';
+    IF f_s IS NOT NULL
+       OR f_e IS DISTINCT FROM '2026-06-01T00:00:00+00:00'::timestamptz THEN
+        RAISE EXCEPTION 'a blank-subscription org must not derive a start (% %)',
+            f_s, f_e;
+    END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-free-no-sub-end';
+    IF f_s IS NOT NULL
+       OR f_e IS DISTINCT FROM '2026-07-01T00:00:00+00:00'::timestamptz THEN
+        RAISE EXCEPTION 'a no-subscription org must not derive a start (% %)',
+            f_s, f_e;
+    END IF;
 END $$;
 
 -- 5) IDEMPOTENT: a second run derives nothing further and still reports the
@@ -259,4 +279,5 @@ DELETE FROM public.organizations
  WHERE id IN ('4216-end-null', '4216-start-null', '4216-dst',
               '4216-dst-start', '4216-both-null', '4216-inverted',
               '4216-empty', '4216-free-one-bound', '4216-blank-sub',
-              '4216-blank-sub-bound');
+              '4216-blank-sub-bound', '4216-blank-sub-end',
+              '4216-free-no-sub-end');

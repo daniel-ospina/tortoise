@@ -777,7 +777,12 @@ def test_checkout_with_malformed_items_is_acked_not_500(supabase_mode, monkeypat
     ``AttributeError`` → HTTP 500 before the metadata-tier fallback could run,
     and Stripe would retry the same malformed event forever.
 
-    RED pre-fix: 500 instead of the 200 ack.
+    RED against THIS branch's structure: the narrow ``try`` now covers only
+    ``get_subscription``, so the deref escapes to the route's ``except
+    Exception`` → 500. On ``origin/main`` the whole block sat inside one outer
+    ``except Exception`` that masked the same AttributeError into a 200, so this
+    test pins the narrow-try decision + the ``_subscription_items`` guard, not a
+    branch-point regression.
     """
     from fastapi.testclient import TestClient
 
