@@ -392,6 +392,7 @@ surfaces:
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
   - test_embedder_provision.py
+  - test_embedded_evidence.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -1204,6 +1205,12 @@ durations:
 # instead of silently dropping the six back to the default anyway, and cannot
 # mis-balance the LPT pack. Refresh these six from the first post-merge main
 # run that includes them.
+  # #3827: new file in this pool — no CI junit measurement exists yet, so it takes
+  # the flat 2.0s default under the #3400 policy above rather than the local timings
+  # measured on this host (257s/627s at load 64-136, ~81s of which is the autouse
+  # session-fixture baseline every lane pays — local values are not the input here).
+  # Refresh from the first post-merge main run that includes it.
+  test_embedded_evidence.py: 2.0
   test_shared_state_concurrency.py: 2.0
   test_shared_state_events.py: 2.0
   test_shared_state_events_claim.py: 2.0
