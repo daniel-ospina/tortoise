@@ -697,6 +697,10 @@ def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3682: capture is opt-in, so a test that drives the capture path must
+    # consent explicitly (the credential alone no longer does).
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+
     f = tmp_path / "transcript.txt"
     f.write_text("User: we decided to ship it\nAssistant: agreed\n")
     assert _parse_transcript(f.read_text())
