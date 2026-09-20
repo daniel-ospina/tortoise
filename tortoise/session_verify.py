@@ -8,7 +8,11 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
 1. **installed** — the seam is present AND the harness's own registration
    loader resolves it, AND the installed artifact actually FIRES (the
    registered command is executed with the harness's documented event
-   payload);
+   payload).  This link measures the INSTALL leg ONLY: present + registered +
+   fired rc=0 is ``PROVEN``, and it is ``INERT`` only when the hook left its
+   own local breadcrumb proving the install leg resolved nothing.  An API
+   outage, a missing key, or a capture that files nothing (the ``captured``
+   link's business) must never rewrite a working install as INERT;
 2. **captured** — a ``session_capture_receipt_<harness>`` advanced and the
    session is retrievable by id with the expected turns;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
@@ -301,17 +305,14 @@ def _write_probe_transcript(harness: str, directory: Path) -> Path:
 def _fire_env(base_env: dict[str, str] | None) -> dict[str, str]:
     """The environment the installed hook runs under.
 
-    The fired hook must be able to resolve the CLI.  It prefers ``tortoise``
-    on PATH (the normal installed case); when that is absent the shipped hooks
-    fall back to ``$TORTOISE_SRC_DIR``.  Seed that to the package this command
-    itself is running from, so ``python -m tortoise`` (no console script on
-    PATH) still fires the seam — unless the operator pinned it.
+    Deliberately does NOT seed ``TORTOISE_SRC_DIR``.  The install's own
+    resolution path — the ``hook-src-dir`` record the installer writes under
+    the harness HOME — is the thing whose behaviour must be exercised, so an
+    install that cannot resolve reads ``INERT`` instead of being propped up
+    by a variable no production harness sets (#4314).  A caller may still pin
+    it explicitly through ``base_env``; verify only stops supplying it.
     """
-    env = dict(os.environ if base_env is None else base_env)
-    env.setdefault(
-        "TORTOISE_SRC_DIR",
-        str(Path(capture_install.PACKAGE_DIR).resolve().parent))
-    return env
+    return dict(os.environ if base_env is None else base_env)
 
 
 class LaunchOutcome(enum.Enum):
@@ -699,14 +700,12 @@ def verify_session_capture(harness: str,
                 STATUS_FAIL,
                 "not reachable — the capture was not observed on this run")
             return report
-        # rc=0 is NOT evidence of an effect. An install that resolves nothing
-        # exits 0 and captures nothing (the shipped hooks' own silent
-        # ``exit 0``, #4314), so ``installed`` stays INERT until a DOWNSTREAM
-        # EFFECT — a receipt advance or a retrievable probe session — lands.
-        report["links"]["installed"] = _link(
-            STATUS_INERT,
-            f"fired (rc=0) but no downstream effect is proven yet: "
-            f"{fired.detail}")
+        # The INSTALL leg is present + registered + fired rc=0. It is PROVEN
+        # unless the hook's OWN local breadcrumb proves the install leg
+        # resolved nothing (#4314). The capture outcome is the `captured`
+        # link's business, never this one — an API outage must not rewrite a
+        # working install as INERT.
+        report["links"]["installed"] = _install_link(harness, fired)
 
         # ── link 2: captured ─────────────────────────────────────────────
         deadline = time.monotonic() + max(1.0, timeout)
@@ -756,26 +755,14 @@ def verify_session_capture(harness: str,
                     receipt_before=receipt_before, receipt_after=receipt_after,
                     turns=len(turn_points))
 
-        # `installed` may only be PROVEN on the DOWNSTREAM EFFECT that proves
-        # the seam did work — never on rc=0 alone (#4314). A receipt advance
-        # is an effect even when the session read failed to observe the
-        # session (the effect precedes the read); a retrievable session is one
-        # too. With neither, the install fired and did nothing: INERT, with
-        # the hook's own local breadcrumb surfaced when it left one.
-        effect = (detail is not None
-                  or (receipt_after is not None
-                      and receipt_after != receipt_before))
-        if effect:
-            report["links"]["installed"] = _link(
-                STATUS_PROVEN,
-                f"present, registered, and fired with a downstream effect: "
-                f"{fired.detail}")
-        else:
-            report["links"]["installed"] = _link(
-                STATUS_INERT,
-                f"fired (rc=0) but produced no downstream effect — the "
-                f"capture did not land ({fired.detail})",
-                breadcrumb=_local_capture_error(harness))
+        # Re-evaluate the INSTALL leg now that the observation window has
+        # closed. It is PROVEN on present + registered + fired rc=0, and INERT
+        # only when the hook's OWN breadcrumb proves it resolved nothing
+        # (#4314). The capture outcome belongs to `captured`, never here: an
+        # API outage must not rewrite a working install as INERT. Re-reading
+        # also catches a detached worker (Codex/Cursor) whose breadcrumb lands
+        # asynchronously, after the synchronous hook already returned.
+        report["links"]["installed"] = _install_link(harness, fired)
 
         # ── link 3: memory ───────────────────────────────────────────────
         if detail is None:
@@ -816,12 +803,10 @@ def verify_session_capture(harness: str,
         # the probe session may exist.  Record the failure and let the
         # `finally` delete what the fire may have written.  An unexpected
         # exception still runs the `finally` and then propagates to the CLI's
-        # catch-all (exit 1) — cleanup is never skipped either way.
-        report["links"]["installed"] = _link(
-            STATUS_INERT,
-            f"fired with no observable effect: {fired.detail}; the downstream "
-            f"effect could not be read ({e}) — not PROVEN on rc=0 alone",
-            breadcrumb=_local_capture_error(harness))
+        # catch-all (exit 1) — cleanup is never skipped either way.  The
+        # INSTALL leg is still decided by its own breadcrumb, never by the
+        # read that failed.
+        report["links"]["installed"] = _install_link(harness, fired)
         report["links"]["captured"] = _link(
             STATUS_FAIL, f"the session read failed after the seam fired: {e}")
         report["links"]["memory"] = _link(
@@ -837,6 +822,26 @@ def verify_session_capture(harness: str,
             api_url, api_key, probe_id, keep=keep, launch=launch)
         report["exit_code"] = _exit_code(report)
     return report
+
+
+def _install_link(harness: str, fired: Any) -> dict[str, Any]:
+    """The INSTALL leg's verdict: present + registered + fired rc=0.
+
+    ``PROVEN`` unless the hook left its OWN local breadcrumb, which is the
+    install leg's own evidence that it resolved nothing and captured nothing
+    (#4314).  The capture outcome belongs to the ``captured`` link, never
+    here — an API outage must not rewrite a working install as ``INERT``.
+    """
+    breadcrumb = _local_capture_error(harness)
+    if breadcrumb is not None:
+        return _link(
+            STATUS_INERT,
+            f"fired (rc=0) but the hook's own breadcrumb shows the install "
+            f"resolved nothing and captured nothing ({fired.detail})",
+            breadcrumb=breadcrumb)
+    return _link(
+        STATUS_PROVEN,
+        f"present, registered, and fired with rc=0: {fired.detail}")
 
 
 def _local_capture_error(harness: str) -> dict[str, Any] | None:
@@ -987,6 +992,11 @@ def render_report(report: dict[str, Any]) -> str:
         lines.append(
             f"  {icons.get(entry['status'], '?')} {link}: "
             f"{entry['status']} — {entry['detail']}")
+        breadcrumb = entry.get("breadcrumb")
+        if breadcrumb:
+            detail = (breadcrumb.get("detail")
+                      if isinstance(breadcrumb, dict) else breadcrumb)
+            lines.append(f"      ↳ hook breadcrumb: {detail}")
     cleanup = report.get("cleanup") or {}
     if cleanup.get("detail"):
         lines.append(f"  cleanup: {cleanup['detail']}")
