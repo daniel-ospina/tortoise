@@ -1207,6 +1207,16 @@ durations:
   test_shared_state_imports.py: 2.0
   test_shared_state_monitoring.py: 2.0
   test_shared_state_recovery.py: 2.0
+  # #4069: the two new temp-dir hygiene files. Same case as the six above — a
+  # file that has never run on CI cannot appear in a junit artifact, so it takes
+  # the flat 2.0s default rather than a local number. Local timing on the
+  # #4221 verification host says these are NOT trivial (~55s and ~95s for 11 +
+  # 25 tests, the session sweep dominating), which is exactly the reading this
+  # map's policy rejects as lane-inflated: it is left in this comment as the
+  # reason the refresh matters, not as an entered value. Refresh both from the
+  # first post-merge main run that includes them.
+  test_tmpdir_hygiene.py: 2.0
+  test_tmpdir_sweep.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
