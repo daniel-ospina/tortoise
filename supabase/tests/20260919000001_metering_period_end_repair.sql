@@ -116,12 +116,12 @@ SELECT '4216-blank-cps-' || cp, '4216-blank-cps-' || cp,
 -- predicate would leave them unrepaired, the #4216 defect in the other
 -- direction. (U+0080, U+180E, U+200B, U+FEFF.)
 --
--- COVERAGE, stated precisely. The DROP direction is EXHAUSTIVE: the generated
--- rows above are one per declared code point, so dropping any one of them REDs
--- the suite. The ADD direction is an adversarial SAMPLE, not exhaustive — an
--- exhaustive sweep of the code-point space belongs in a property test, not
--- here; U+180E is the specific trap (it was Unicode whitespace until
--- Unicode 6.3 and is the classic over-broad-strip bug).
+-- COVERAGE, stated precisely. The DROP direction is EXHAUSTIVE: every declared
+-- code point has generated blank-id rows (three shapes each), so dropping any
+-- one of them REDs the suite. The ADD direction is an adversarial SAMPLE, not
+-- an exhaustive sweep — that belongs in a property test, not here; U+180E is
+-- the specific trap (it was Unicode whitespace until Unicode 6.3 and is the
+-- classic over-broad-strip bug).
 INSERT INTO public.organizations
     (id, name, graph_name, subscription_id,
      current_period_start, current_period_end)
@@ -261,7 +261,7 @@ BEGIN
             f_s, f_e;
     END IF;
     -- EVERY member of the blank set, not a spot check. A code point DROPPED
-    -- from ``blank_chars`` makes its generated row a REAL subscription, which
+    -- from ``blank_chars`` makes its generated rows REAL subscriptions, which
     -- REDs here: an end-only row would gain a start, a start-only row would
     -- gain an end. (A both-NULL row has no derivable bound, so a dropped code
     -- point surfaces for that shape in test 1's returned set instead.)
