@@ -67,6 +67,33 @@ DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({
     "upsert_tenant_manifest",
 })
 
+# Entries whose handler does NOT reach the SDK method the entry declares — the
+# DECLARED-BINDING DIVERGENCE class (#4337).  A declaration that merely RESOLVES
+# is not a declaration that is USED: `tortoise_operator_action` declares
+# `operator_action` (a real method) and its handler calls `mitigate_operator` /
+# `annotate_operator`; `tortoise_traverse` declares `traverse` and reaches no
+# public SDK method at all.  Both passed every check here, because no arm
+# compared the DECLARATION against the operations the handler reaches.
+#
+# Each entry records the WHOLE divergence — the declared method AND the set the
+# handler actually reaches — not just the tool name.  A name-only ledger would be
+# a blanket exemption: the tool could re-diverge to a *different* declared method
+# and stay green.  Recording both sides means the entry cannot outlive the
+# specific defect it records (a repair, or a different divergence, is reported).
+#
+# KNOWN BOUND, inherited from `handler_operations`: it records an attribute
+# REFERENCE to an SDK method, not a call.  A handler that merely names its
+# declared method in dead code (`if False: return _get_org_sdk().query`) would
+# satisfy this arm.  Both real defects are genuine calls to *other* methods with
+# no mention of the declared one, so both are caught; tightening the reach
+# semantics is a `handler_operations` change that would move every other check
+# that consumes it, and is deliberately not done here.
+DECLARED_BINDING_DIVERGENCES: dict[str, tuple[str, frozenset[str]]] = {
+    "tortoise_operator_action": (
+        "operator_action", frozenset({"annotate_operator", "mitigate_operator"})),
+    "tortoise_traverse": ("traverse", frozenset()),
+}
+
 # Operations a handler reaches that are reads with no registry binding (they
 # need no binding).  Enumerated so the binding-resolution guard is scoped.
 UNBOUND_READ_OPERATIONS: frozenset[str] = frozenset({
@@ -847,8 +874,13 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
 
 
 def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[str]:
-    """Every declared sdk_method resolves, every entry has a handler, and no
-    handler hides a call behind dynamic dispatch."""
+    """Every declared sdk_method resolves AND IS REACHED, every entry has a
+    handler, and no handler hides a call behind dynamic dispatch.
+
+    Resolution alone is not enough (#4337): a name that exists on ``TortoiseSDK``
+    can still be a name the handler never calls.  Declaring a method is a claim
+    about what a tool does; reaching it is the fact.
+    """
     methods = sdk_method_names()
     funcs = set(_module_level_funcs(_mcp_tree(mcp_src)))
     out: list[str] = []
@@ -861,6 +893,36 @@ def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[s
             out.append(f"{e.name}: no module-level handler (register_all skips it)")
         for site in handler_operations(e.name, mcp_src).unresolved:
             out.append(f"{e.name}: {site}")
+    # The declared binding must be REACHED, not merely resolvable (#4337).
+    # Independent of the resolution arm above, and exact in both directions.
+    for e in entries:
+        if not e.sdk_method or e.sdk_method not in methods:
+            continue
+        reached = frozenset(handler_operations(e.name, mcp_src).operations)
+        # the ledger records PUBLIC destinations — a private helper call
+        # (`_get_proj`) is not a binding claim.  The filter is load-bearing for
+        # `tortoise_traverse` (raw `{_get_proj}` vs public `{}`), and a no-op for
+        # `tortoise_operator_action`.
+        public_reached = frozenset(x for x in reached if not x.startswith("_"))
+        recorded = DECLARED_BINDING_DIVERGENCES.get(e.name)
+        if e.sdk_method in reached:
+            if recorded is not None:
+                out.append(
+                    f"{e.name}: listed in DECLARED_BINDING_DIVERGENCES but its handler "
+                    f"now reaches {e.sdk_method!r} — delete the ledger entry")
+            continue
+        if recorded is None:
+            out.append(
+                f"{e.name}: declares sdk_method {e.sdk_method!r} that its handler never "
+                f"reaches (reaches: {sorted(public_reached) or 'nothing public'}) — #4337")
+            continue
+        # Ledgered: the ledger must still describe THIS divergence exactly.
+        rec_declared, rec_reached = recorded
+        if e.sdk_method != rec_declared or public_reached != rec_reached:
+            out.append(
+                f"{e.name}: DECLARED_BINDING_DIVERGENCES records declared="
+                f"{rec_declared!r} reached={sorted(rec_reached)} but it is now declared="
+                f"{e.sdk_method!r} reached={sorted(public_reached)} — update the entry")
     # every guard-relevant operation a handler reaches must be bound to a tool
     guard_relevant = (sdk_graph_mutators() | sdk_operator_only_mutators()
                       | sdk_filesystem_methods())
@@ -935,6 +997,18 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
     for op in sorted(INTERNAL_PATH_READERS):
         if op not in methods:
             out.append(f"INTERNAL_PATH_READERS entry {op!r} does not resolve")
+    # DECLARED_BINDING_DIVERGENCES liveness (#4337).  The divergence arm in
+    # `binding_resolution_violations` iterates the ENTRIES, so a ledger key whose
+    # registry entry was removed or renamed is never visited and would persist
+    # unexamined.  This is the declared-set liveness home: it is called with the
+    # full registry, whereas the divergence arm is also called on probe SUBSETS
+    # (where the real ledger keys are legitimately absent and a liveness check
+    # here would be a false red).
+    known = {e.name for e in entries}
+    for name in sorted(set(DECLARED_BINDING_DIVERGENCES) - known):
+        out.append(
+            f"DECLARED_BINDING_DIVERGENCES entry {name!r} has no registry entry "
+            f"— delete the ledger entry")
     return out
 
 

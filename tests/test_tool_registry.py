@@ -497,6 +497,28 @@ class TortoiseSDK:
         return _mod_mut_2()
 '''
 
+# A handler for a name recorded in DECLARED_BINDING_DIVERGENCES that DOES reach
+# its declared method — i.e. the defect has been repaired.  Used only to prove
+# the ledger is exact in the second direction.
+_REPAIRED_BINDING_SRC = '''
+def _get_org_sdk():
+    ...
+
+def tortoise_operator_action(action, id):
+    return _get_org_sdk().operator_action(id)
+'''
+
+# A ledgered name whose divergence has DRIFTED — it declares a different method
+# than the ledger records, and still never reaches it.  A name-only ledger would
+# accept this silently; recording the declared method catches it.
+_DRIFTED_BINDING_SRC = '''
+def _get_org_sdk():
+    ...
+
+def tortoise_traverse(entity_id, max_hops=2):
+    return _get_org_sdk().get_point(entity_id)
+'''
+
 
 def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool, writes: bool = False):
     from tortoise.tool_registry import ToolDefinition
@@ -659,6 +681,43 @@ class TestCapabilityModel:
             violations = binding_resolution_violations([entry], _PROBE_SRC)
             assert any("dispatch" in v for v in violations), (probe, violations)
 
+    def test_T3_declared_binding_must_be_reached_not_merely_resolvable(self):
+        """#4337: a declared `sdk_method` that RESOLVES but is never called must
+        fail. `query` is a real method on TortoiseSDK, so the resolution arm
+        passes it; only reading the handler body can see that this handler calls
+        `create_point` instead."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        diverged = _probe("tortoise_probe_reader", "query",
+                          annotations=_ro(), http_policy=True)
+        violations = binding_resolution_violations([diverged], _PROBE_SRC)
+        assert any("never" in v and "query" in v for v in violations), violations
+
+    def test_T3_divergence_ledger_cannot_outlive_its_defect(self):
+        """The ledger is exact in BOTH directions: a repaired divergence must red
+        the build until its entry is deleted, so an exception cannot outlive the
+        defect it records."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        repaired = _probe("tortoise_operator_action", "operator_action",
+                          annotations=_ro(), http_policy=True)
+        violations = binding_resolution_violations([repaired], _REPAIRED_BINDING_SRC)
+        assert any("delete the ledger" in v for v in violations), violations
+
+    def test_T3_divergence_ledger_records_the_specific_defect(self):
+        """A name-only ledger would be a blanket exemption: the entry could
+        re-diverge to a DIFFERENT declared method and stay green. The ledger
+        records the declared method, so drift is reported."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        drifted = _probe("tortoise_traverse", "query",
+                         annotations=_ro(), http_policy=True)
+        violations = binding_resolution_violations([drifted], _DRIFTED_BINDING_SRC)
+        assert any("update the entry" in v for v in violations), violations
+
     def test_T1_partial_or_dead_self_guard_fails(self):
         """T1: presence of `_http_excluded_error` is not enough — a conditional
         or dead guard does not dominate the write, so it must fail."""
@@ -775,6 +834,17 @@ class TestCapabilityModel:
         assert any("does not resolve" in v
                    for v in declared_set_violations(TOOL_REGISTRY,
                                                    sdk_src="class TortoiseSDK:\n    pass\n"))
+
+    def test_declared_binding_divergence_ledger_is_live(self):
+        """#4337: a ledger key whose registry entry is gone must fail, not persist
+        unexamined — the name-goes-stale vacuity #4113 exists to remove. The
+        divergence arm iterates ENTRIES, so it cannot see a key with no entry."""
+        from tool_surface_capabilities import declared_set_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        dropped = [e for e in TOOL_REGISTRY if e.name != "tortoise_traverse"]
+        assert any("DECLARED_BINDING_DIVERGENCES" in v
+                   for v in declared_set_violations(dropped))
 
     def test_guard1_declared_and_unguarded_branches_fail(self):
         """Guard 1 must fire on the declared-binding leg and on an HTTP-excluded
