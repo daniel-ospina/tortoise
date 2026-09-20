@@ -56,6 +56,7 @@ marker would destroy exactly the customizations this migration must protect).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -151,6 +152,30 @@ def _atomic_write_text(dst: Path, text: str) -> None:
         raise
 
 
+def _hook_src_dir_base(home: Path | None) -> Path:
+    """The base the ``hook-src-dir`` record is written under.
+
+    ``~/.tortoise`` by default — but FAIL-SAFE IN TESTS, the same guard
+    ``capture_spool.spool_dir`` applies to the spool: a pytest process that did
+    not pass an explicit ``home`` must never write to the developer machine's
+    real ``~/.tortoise``.  Under pytest the base is derived DETERMINISTICALLY
+    from the test id, so every process of one test shares one directory and
+    none of them touches the real home.
+
+    This is not hypothetical: the first cut of #4314 used ``Path.home()``
+    unconditionally and a single test run created
+    ``~/.tortoise/hook-src-dir`` on the developer's machine.
+    """
+    if home is not None:
+        return Path(home)
+    test_id = os.environ.get("PYTEST_CURRENT_TEST")
+    if test_id:
+        digest = hashlib.sha256(
+            test_id.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        return Path(tempfile.gettempdir()) / "tortoise-hook-src-tests" / digest
+    return Path.home()
+
+
 def _record_hook_src_dir(home: Path | None = None) -> None:
     """Record this package's module dir for the installed hooks to resolve.
 
@@ -164,7 +189,7 @@ def _record_hook_src_dir(home: Path | None = None) -> None:
     install, and a re-run whose record is already correct does not rewrite
     (and does not churn the file's mtime).
     """
-    base = Path(home) if home is not None else Path.home()
+    base = _hook_src_dir_base(home)
     target = base / HOOK_SRC_DIR_RELPATH
     text = str(Path(__file__).resolve().parent.parent) + "\n"
     try:

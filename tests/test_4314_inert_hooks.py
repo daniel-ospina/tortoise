@@ -13,11 +13,13 @@ names the mutation that turns it RED.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
+from tortoise import hook_install as hi
 from tortoise.capture_install import install_capture
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -236,3 +238,23 @@ def test_verify_reports_inert_for_an_rc0_but_effectless_install(
     assert installed["status"] != "PROVEN"
     assert installed["breadcrumb"]["harness"] == "claude", installed
     assert report["exit_code"] == sv.EXIT_BROKEN, report
+
+
+def test_hook_src_dir_record_never_writes_the_real_home(tmp_path):
+    """The record must never land on the developer's machine from a test.
+
+    #3721's trap, and the same fail-safe ``capture_spool.spool_dir`` applies to
+    the spool: an earlier cut of #4314 used ``Path.home()`` unconditionally and a
+    single test run created ``~/.tortoise/hook-src-dir`` for real.
+
+    Mutation: revert ``_hook_src_dir_base`` to ``Path.home()`` → RED.
+    LEGITIMATE GREEN: an explicit ``home`` is honoured verbatim, which the
+    installer relies on when it has resolved a harness home.
+    """
+    assert os.environ.get("PYTEST_CURRENT_TEST"), "not running under pytest"
+    real = Path.home()
+    derived = hi._hook_src_dir_base(None)
+    assert derived != real and real not in derived.parents, derived
+    assert "tortoise-hook-src-tests" in str(derived), derived
+    explicit = tmp_path / "explicit-home"
+    assert hi._hook_src_dir_base(explicit) == explicit
