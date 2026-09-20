@@ -168,6 +168,71 @@ def test_child_process_inherits_the_private_root():
 
 # ── the scan guard ───────────────────────────────────────────────────────
 
+def test_root_is_not_a_needle_for_the_string_pre_filter(monkeypatch):
+    """#3752 CI regression (`test_pack_shipping_wheel.py`, ubuntu runner):
+    `$TMPDIR` is unset there, so the temp dir IS `/tmp` — a real directory —
+    and `os.path.dirname('/tmp')` IS the filesystem root. `_tmpdir_spellings()`
+    appends each spelling's PARENT, so `/` became a substring needle; `'/' in
+    <command>` holds for essentially every command line, so the cheap
+    pre-filter always fired and a `python -c` script's `/` (a Python DIVISION
+    operator) was then judged an ancestor of the temp dir, rejecting a
+    legitimate wheel smoke-test subprocess.
+
+    This pins the NEEDLE side against that exact condition — the spellings
+    list must not contain `os.sep`. Asserting only that the failing argv is
+    allowed under the SUITE's own spellings would be vacuous: under isolation
+    the temp dir is the private root, whose parent is not `/`, so the defect
+    is never set up.
+    """
+    from tests import _tmpdir_isolation as iso
+
+    # A temp dir whose parent is the filesystem root — the runner's shape,
+    # reproduced with a macOS-real spelling (/private/tmp's parent is
+    # /private, so use /private as "the temp dir" to get dirname == "/").
+    monkeypatch.setattr(iso, "HOST_TMPDIR", os.sep + "private")
+    monkeypatch.setattr(iso, "_ENV_TMPDIR_AT_IMPORT", "")
+    spellings = iso._tmpdir_spellings()
+    assert os.sep not in spellings, (
+        f"the filesystem root must never be a substring needle, got "
+        f"{spellings!r}"
+    )
+    assert os.sep + "private" in spellings, "the real spelling must survive"
+
+    # ...and the consequence: a script containing a bare `/` token is not
+    # pre-filtered into the token scan by an unrelated needle.
+    script = ('\nfrom pathlib import Path\n'
+              'packaged = Path("x").resolve().parent / "packs"\n')
+    assert iso._command_touches_host_tempdir(script) is None, \
+        "an unrelated command must not be pre-filtered in"
+
+    # The SCOPE predicate is unchanged: the root still counts as an ancestor
+    # (the parametrized ancestor case depends on it), and a descendant — the
+    # private session root — is still legitimate.
+    assert iso._is_host_tempdir_scope(os.sep) is True
+    assert iso._is_host_tempdir_scope(iso.HOST_TMPDIR + "/tt_abc") is False
+
+
+def test_string_pre_filter_still_catches_a_command_naming_the_temp_dir(
+        monkeypatch):
+    """Counter-case: dropping the root needle must not turn the string layer
+    off — a command that DOES name the temp dir must still be routed into the
+    token scan."""
+    from tests import _tmpdir_isolation as iso
+
+    here = os.path.realpath(tempfile.gettempdir())
+    # The MODULE list (not a self-injected one) must still carry the temp dir:
+    # this is what makes the isolated check below meaningful rather than a
+    # tautology over a list the test supplied itself.
+    assert any(here.startswith(s) for s in iso._TMPDIR_SPELLINGS), (
+        f"the module needle list lost the temp dir spelling: "
+        f"{iso._TMPDIR_SPELLINGS!r}"
+    )
+    monkeypatch.setattr(iso, "HOST_TMPDIR", here)
+    monkeypatch.setattr(iso, "_TMPDIR_SPELLINGS", (here,))
+    hit = iso._command_touches_host_tempdir(f"find {here} -maxdepth 2")
+    assert hit == here, f"the string layer stopped catching {here!r}: {hit!r}"
+
+
 @pytest.mark.parametrize("shared_path", [
     pytest.param(lambda: HOST_TMPDIR, id="host-root"),
     pytest.param(lambda: os.path.realpath(HOST_TMPDIR), id="realpath"),

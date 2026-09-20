@@ -85,7 +85,25 @@ def _tmpdir_spellings() -> tuple[str, ...]:
             continue
         spellings.append(value)
         spellings.append(os.path.dirname(value))
-    return tuple(dict.fromkeys(s for s in spellings if s))
+    # A filesystem ROOT is not a usable NEEDLE. `'/' in command` is true of
+    # essentially every command line, so carrying it turns this cheap
+    # pre-filter into "always yes" and routes every string through the token
+    # scan — which is how a `python -c` script's `/` (a Python DIVISION
+    # operator) came to be judged an ancestor of the temp dir and a legitimate
+    # wheel smoke-test subprocess was rejected on the ubuntu runner, where
+    # `$TMPDIR` is unset so the temp dir IS `/tmp` and its parent IS `/`. On
+    # macOS the parent is a long `/var/folders/...` and stays in the list.
+    #
+    # RESIDUAL: with `/` gone, a command STRING that names only the root
+    # (`sh -c 'find / …'`) no longer matches any needle, so the STRING layer
+    # does not see it. The ARGV layer still rejects a literal `/` token
+    # (`_is_host_tempdir_scope` is unchanged), and the in-process guard still
+    # rejects `os.scandir`/`listdir`/`walk` of the ROOT — the parametrized
+    # ancestor case pins exactly that. A whole-filesystem `find` behind an
+    # opaque shell string is the one shape left to those layers. Removing the
+    # needle is worth that: a pre-filter that fires on every command line
+    # makes the guard's verdict meaningless.
+    return tuple(dict.fromkeys(s for s in spellings if s and s != os.sep))
 
 
 _TMPDIR_SPELLINGS = _tmpdir_spellings()
@@ -467,6 +485,11 @@ def _is_host_tempdir_scope(path) -> bool:
         target = os.path.realpath(raw)
     except (TypeError, ValueError, OSError):
         return False
+    # The root is deliberately NOT special-cased here: `_is_under(child, '/')`
+    # legitimately means "every absolute path", and the ancestor rule is what
+    # makes `os.scandir(dirname(HOST_TMPDIR))` — a real ancestor scan — fail
+    # closed. The false positives that rule caused came from the STRING
+    # pre-filter, not from this predicate, and are fixed in `_tmpdir_spellings`.
     return target == HOST_TMPDIR or _is_under(HOST_TMPDIR, target)
 
 
