@@ -1,7 +1,9 @@
 """Startup consistency check — verify event log Point count matches graph.
 
-The event log is the source of truth; the projection is a derived view.
-This module verifies the counts haven't diverged (quick check, not full diff).
+The projection is a derived view folded from the domain event log (the
+reconstruction source — not the durability authority; see
+docs/durability-posture.md). This module verifies the counts haven't diverged
+(quick check, not full diff).
 """
 from __future__ import annotations
 
@@ -36,11 +38,13 @@ def check_consistency(log_path: str, projection) -> dict:
 def recover_from_log(events_dir: str, projection) -> dict:
     """Rebuild a projection from a JSONL event-log dir when its graph was lost.
 
-    Corruption recovery (#428): the event log is the source of truth, the
-    projection a derived view. An embedded DB that answers 0 nodes while its
-    adjacent JSONL log has events was lost — redislite starts fresh when its
-    RDB is corrupt, an interrupted restore left an empty graph, or the DB was
-    deleted out from under the log. Rebuild = wipe + full replay.
+    Corruption recovery (#428): the projection is a derived view rebuilt from
+    the domain event log (the reconstruction source — not the durability
+    authority; see docs/durability-posture.md). An embedded DB that answers
+    0 nodes while its adjacent JSONL log has events was lost — redislite
+    starts fresh when its RDB is corrupt, an interrupted restore left an
+    empty graph, or the DB was deleted out from under the log. Rebuild =
+    wipe + full replay.
 
     Safety (mirrors migrate_db's 3-way discriminator):
       - Only rebuilds when db has 0 total nodes and the log has > 0 events
