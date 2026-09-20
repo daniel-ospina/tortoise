@@ -46,6 +46,17 @@ So this file is red evidence by construction: it is green only while the dead se
 is exactly the five recorded in ``_DEAD_LINKS_AWAITING_4282``. Do NOT add a name
 to that ledger to silence a failure, and do NOT remove a name to accommodate a
 repair — the ledger is the pending-decision record, not a suppression list.
+
+The reds below are of two KINDS and must not read alike. A GENUINE defect is an
+entry that used to resolve and stopped. The EXPECTED surface change of #4282 is
+the canonical redesign — 98 -> 25 MCP tools and 150 -> 41 SDK methods — which
+rewrites the 99-entry registry this instrument pins and legitimately leaves
+entries unresolved. The failure messages therefore append the #4282 rendezvous
+context ONLY when the run's shape matches the redesign, gated on the registry
+having SHRUNK by >= ``_RESHAPE_MIN_ENTRIES`` (a defect does not rewrite the
+registry), so no small-scale genuine regression can be pre-excused as "the
+redesign". When the rendezvous does open, the instruction is to RETARGET the
+instrument at Phase 0.4 — never to weaken or delete it to make it green.
 """
 from __future__ import annotations
 
@@ -102,7 +113,11 @@ def _marks(entry):
                 f"TortoiseSDK does not have. Repairing it is #4282's work on the "
                 f"owner-approved canonical list (docs/product/canonical-mcp-tools.md). "
                 f"Repairing it XPASSes this case, which "
-                f"strict=True reds; a sixth dead entry is not listed here and fails."
+                f"strict=True reds; a sixth dead entry is not listed here and fails. "
+                f"When the #4282 redesign lands ({_EXPECTED_MCP_TOOLS} MCP tools from 98, "
+                f"{_EXPECTED_SDK_METHODS} SDK methods from 150), re-point this ledger at "
+                f"the new surface and RETARGET the instrument at Phase 0.4 — do NOT "
+                f"weaken or delete the test to make it green."
             ),
         ),
     )
@@ -112,6 +127,74 @@ def _marks(entry):
 # import-time gate below pins the cases pytest was actually GIVEN (the decorator's
 # argvalues) rather than this declared list.
 _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
+
+# --- the #4282 rendezvous, and the gate that keeps it from being an excuse ---
+# A blanket "this is expected" on every red would turn this instrument into a
+# rubber stamp and let a GENUINE defect be waved through as "the redesign". The
+# note is therefore gated on SHAPE, and the gate is deliberately conservative:
+# it can only open when the registry itself has SHRUNK by >= _RESHAPE_MIN_ENTRIES
+# from its pinned pre-#4282 size. A defect does not rewrite the registry —
+# renaming one SDK method leaves all 99 entries declared — so no small-scale
+# genuine regression can ever pick up the note. Inside that gate the note
+# additionally requires the surface to be HOLLOWED (>= _HOLLOWED_MIN_DEAD entries
+# unresolved in absolute terms, or >= a quarter of whatever the registry now is,
+# at a floor of 5) or the curated ledger to be ORPHANED (its recorded names gone
+# from the registry).
+#
+# Residual, stated rather than hidden: a STAGED redesign that rewrites
+# tortoise/sdk.py before the registry still measures 99 entries, so it is
+# indistinguishable from a mass rename and stays a plain defect report. That is
+# the intended direction of the error — investigate the diff, do not assume.
+_BASELINE_ENTRY_COUNT = 99       # the pre-#4282 registry this instrument pins
+_EXPECTED_MCP_TOOLS = 25         # #4282: 98 -> 25
+_EXPECTED_SDK_METHODS = 41       # #4282: 150 -> 41
+_RESHAPE_MIN_ENTRIES = 25        # a defect does not remove a quarter of the surface
+_HOLLOWED_MIN_DEAD = 20          # a large absolute hole / a mass break
+_HOLLOWED_FRACTION = 0.25        # ...or a quarter of the (possibly shrunken) registry,
+_HOLLOWED_FRACTION_FLOOR = 5     #     at a floor of 5 entries
+
+_DEAD_TARGETS = tuple(e.name for e, target, _where in _TARGETS if not callable(target))
+
+_RENDEZVOUS_NOTE = (
+    "\n"
+    "  \u26a0\ufe0f EXPECTED SURFACE CHANGE (#4282) \u2014 READ THIS BEFORE 'FIXING' ANYTHING.\n"
+    "  This red has the SHAPE of the #4282 surface redesign, not of an instrument fault.\n"
+    f"  The canonical redesign lands {_EXPECTED_MCP_TOOLS} MCP tools (from 98) and\n"
+    f"  {_EXPECTED_SDK_METHODS} SDK methods (from 150), so the pre-#4282 registry of\n"
+    f"  {_BASELINE_ENTRY_COUNT} entries is rewritten and entries legitimately stop resolving.\n"
+    "    * If the diff carries that redesign: this is a RENDEZVOUS, not a bug.\n"
+    "    * RETARGET POINT: retarget this instrument at Phase 0.4, when\n"
+    "      tortoise/__init__.py gains __all__ and there is a real declaration to pin.\n"
+    "    * DO NOT weaken, skip or delete this test to make it green. A red that reads\n"
+    "      like a bug gets worked around; a red that reads like a rendezvous gets acted\n"
+    "      on. Re-point the ledger at the new surface instead.\n"
+    "    * If the diff does NOT carry a surface change, IGNORE this note \u2014 the detail\n"
+    "      above is a GENUINE DEFECT and this note does not excuse it."
+)
+
+
+def _looks_like_4282(orphans: int = 0) -> bool:
+    """True only when this run's shape matches the #4282 redesign.
+
+    The hard invariant: the note cannot open unless the registry has shrunk by
+    >= ``_RESHAPE_MIN_ENTRIES``. A single-entry (or handful) genuine regression
+    leaves the registry at ``_BASELINE_ENTRY_COUNT`` and therefore can never be
+    pre-excused; it keeps the plain defect report.
+    """
+    n = len(TOOL_REGISTRY)
+    dead = len(_DEAD_TARGETS)
+    shrunk = n <= _BASELINE_ENTRY_COUNT - _RESHAPE_MIN_ENTRIES
+    hollowed = dead >= _HOLLOWED_MIN_DEAD or (
+        dead >= _HOLLOWED_FRACTION_FLOOR and dead >= _HOLLOWED_FRACTION * n
+    )
+    ledger_gone = orphans > 0
+    return shrunk and (hollowed or ledger_gone)
+
+
+def _rendezvous(orphans: int = 0) -> str:
+    """The #4282 context, or ``""`` when this red reads as a plain defect."""
+    return _RENDEZVOUS_NOTE if _looks_like_4282(orphans) else ""
+
 
 # Cases that actually EXECUTED, recorded by the scoreboard as each case runs. The
 # import-time gate proves the case set was declared; only this proves it RAN.
@@ -134,13 +217,15 @@ def test_every_registered_entry_resolves_to_a_live_method(entry, target, where):
     _EXECUTED.add(entry.name)
     assert callable(target), (
         f"{entry.name} does not resolve: the registry names {where!r}, which is "
-        f"{'absent' if target is None else type(target).__name__!r}. The dead thing is the "
-        f"DECLARED SDK BINDING — registry drift, not a missing capability. For the #4282 "
+        f"{'absent' if target is None else type(target).__name__!r}. Unresolved this run: "
+        f"{len(_DEAD_TARGETS)} of {len(TOOL_REGISTRY)} registry entries. The dead thing is "
+        f"the DECLARED SDK BINDING — registry drift, not a missing capability. For the #4282 "
         f"entries the behaviour already exists one import away "
         f"(pack_state.get_tenant_packs, pack_manifest_store.upsert_tenant_manifest, "
         f"navigation.entityProfile, monitoring.metrics, analyze.analyze) and the MCP "
         f"handlers already call it; what is absent is the SDK name the registry declares. "
         f"Declared sdk_method={entry.sdk_method!r}."
+        f"{_rendezvous()}"
     )
 
 
@@ -171,12 +256,18 @@ _CASES = [param.values[0].name for param in _parametrized_cases()]
 assert _CASES, "empty scoreboard — no registry entries to resolve (fail-closed)"
 assert [e.name for e in TOOL_REGISTRY] == _CASES, (
     f"the scoreboard PARAMETRISED {len(_CASES)} cases for {len(TOOL_REGISTRY)} registry "
-    f"entries — a sample (or a truncated decorator list) is not a scoreboard"
+    f"entries — a sample (or a truncated decorator list) is not a scoreboard. "
+    f"Unresolved this run: {len(_DEAD_TARGETS)} of {len(TOOL_REGISTRY)}."
+    f"{_rendezvous()}"
 )
 _ORPHANS = sorted(_DEAD_LINKS_AWAITING_4282 - set(_CASES))
 assert not _ORPHANS, (
     f"orphaned ledger entries — recorded dead in _DEAD_LINKS_AWAITING_4282 but "
-    f"consumed by no case: {_ORPHANS}"
+    f"consumed by no case: {_ORPHANS}. Either the registry renamed/removed those "
+    f"entries without re-pointing the ledger, or entries were deleted from the "
+    f"registry to silence their cases. The registry now declares "
+    f"{len(TOOL_REGISTRY)} entries."
+    f"{_rendezvous(len(_ORPHANS))}"
 )
 
 
@@ -220,6 +311,7 @@ def test_live_mcp_surface_registers_every_entry():
     assert registered == expected, (
         f"live MCP surface drift — absent: {sorted(expected - registered)}, "
         f"extra: {sorted(registered - expected)}"
+        f"{_rendezvous()}"
     )
 
 
