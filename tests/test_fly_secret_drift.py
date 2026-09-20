@@ -35,6 +35,8 @@ _AMBIENT = (
     "FLY_TOML",
     "DEPLOY_WORKFLOW",
     "FLY_SECRETS_CMD",
+    "GH_SECRETS_PRESENT",
+    "FLY_STUB_TIMEOUT",
 )
 
 _FLY_TOML = """\
@@ -102,12 +104,25 @@ def _secrets_file(names: list[str], name: str) -> Path:
     )
 
 
+def _declared_gh_names(manifest: Path) -> set[str]:
+    """The GitHub secret names a manifest declares, for the presence fixture."""
+    names: set[str] = set()
+    for line in manifest.read_text().splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) == 2 and parts[1].startswith("gh-secret:"):
+            names.add(parts[1].split(":", 1)[1])
+    return names
+
+
 def _run(
     secrets: Path,
     *,
     manifest: Path = MANIFEST,
     workflow: Path = WORKFLOW,
     toml: Path = FLY_TOML,
+    present: set[str] | None = None,
+    drop_present: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {k: v for k, v in os.environ.items() if k not in _AMBIENT}
     env.update(
@@ -116,6 +131,15 @@ def _run(
         DEPLOY_WORKFLOW=str(workflow),
         FLY_TOML=str(toml),
     )
+    if not drop_present:
+        # The deploy step states which GitHub Actions secrets the run carries (no
+        # CI token can list them). The fixtures' contract — unless a test says
+        # otherwise — is that every `gh-secret:` the manifest declares exists.
+        if present is None:
+            present = _declared_gh_names(manifest)
+        env["GH_SECRETS_PRESENT"] = " ".join(sorted(present))
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(SCRIPT)], capture_output=True, text=True, env=env, timeout=60
     )
@@ -820,6 +844,165 @@ def test_secret_entry_without_a_name_is_exit_2():
     assert "has no name" in r.stderr
 
 
+# ── The GitHub-secret presence half — the incident's own shape ────────────────
+# #4126 happened because `[ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ] &&
+# ARGS=...` was a permanent no-op: the GitHub secret never existed, so the
+# hand-set Fly value survived every deploy. A guard alone is not harm (with the
+# secret present it propagates every run); the harm is the ABSENCE, which only
+# the deploy run can see — hence `GH_SECRETS_PRESENT`.
+
+_GUARDED_WORKFLOW = """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS=""
+          [ -n "${{ secrets.GUARDED_KEY }}" ] && ARGS="$ARGS GUARDED_KEY=${{ secrets.GUARDED_KEY }}"
+          flyctl secrets set --stage $ARGS
+"""
+
+_GUARDED_MANIFEST = "GUARDED_KEY  gh-secret:GUARDED_KEY\n"
+
+
+def test_guarded_declaration_with_no_github_secret_is_unsourced():
+    """The #4126 incident's exact shape: the guard's GitHub secret is absent.
+
+    The guarded propagation is then a no-op on EVERY deploy and the Fly value is
+    hand-managed. The gate used to print this as CONDITIONAL PROPAGATION and exit
+    0 — i.e. the incident's own name passed (#4259 review P1).
+    """
+    wf = _fixture("guarded.yml", _GUARDED_WORKFLOW)
+    manifest = _fixture("guarded-manifest.txt", _GUARDED_MANIFEST)
+    r = _run(
+        _secrets_file(["GUARDED_KEY"], "guarded-absent.json"),
+        manifest=manifest,
+        workflow=wf,
+        present=set(),
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNSOURCED" in r.stdout and "GUARDED_KEY" in r.stdout
+
+
+def test_guarded_declaration_with_the_github_secret_present_is_not_drift():
+    """The same guarded line with the secret present propagates on every deploy.
+
+    The two cases must not be conflated: only the ABSENCE is the #4126 defect,
+    and only the deploy run can observe it.
+    """
+    wf = _fixture("guarded-present.yml", _GUARDED_WORKFLOW)
+    manifest = _fixture("guarded-present-manifest.txt", _GUARDED_MANIFEST)
+    r = _run(
+        _secrets_file(["GUARDED_KEY"], "guarded-present.json"),
+        manifest=manifest,
+        workflow=wf,
+        present={"GUARDED_KEY"},
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "1 conditionally propagated" in r.stdout
+
+
+def test_absent_github_secret_for_a_name_not_on_fly_is_not_drift():
+    """Not-yet-configured is not drift: nothing on Fly can be hand-managed."""
+    wf = _fixture(
+        "guarded-half.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          [ -n "${{ secrets.GUARDED_KEY }}" ] && ARGS="$ARGS GUARDED_KEY=${{ secrets.GUARDED_KEY }}"
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "guarded-half-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+        "GUARDED_KEY  gh-secret:GUARDED_KEY\n",
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "guarded-half.json"),
+        manifest=manifest,
+        workflow=wf,
+        present={"FASTAPI_INTERNAL_KEY"},
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_unset_presence_probe_is_exit_2_not_clean():
+    """Fail-closed: without the probe a declaration cannot be verified.
+
+    Treating an unset probe as "every secret exists" would silently reopen the
+    hole whenever a workflow edit dropped the export (#4259 review P1).
+    """
+    r = _run(_secrets_file(_ALL_DECLARED, "probe.json"), drop_present=True)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "GH_SECRETS_PRESENT is not set" in r.stderr
+
+
+def test_second_payload_block_is_scanned_too():
+    """A later `flyctl secrets set` step assigns Fly variables as well.
+
+    Only the FIRST payload block used to be read, so a name assigned by a second
+    step was never declared, never detected, and the bidirectional contract was
+    one-sided (#4259 review P2).
+    """
+    wf = _fixture(
+        "two-blocks.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          flyctl secrets set --stage $ARGS
+      - run: |
+          flyctl secrets set --stage EXTRA_SECRET=literal
+""",
+    )
+    manifest = _fixture(
+        "two-blocks-manifest.txt", "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "two-blocks.json"),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNDECLARED" in r.stdout and "EXTRA_SECRET" in r.stdout
+
+
+def test_hanging_payload_is_exit_2_not_a_crash():
+    """A payload that never finishes is unclassifiable → exit 2.
+
+    An uncaught TimeoutExpired would exit 1 — the code the deploy step translates
+    into a bypass (#4259 review P2).
+    """
+    wf = _fixture(
+        "hang.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          while :; do :; done
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "hang-manifest.txt", "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+    )
+    r = _run(
+        _secrets_file(["FASTAPI_INTERNAL_KEY"], "hang.json"),
+        manifest=manifest,
+        workflow=wf,
+        extra_env={"FLY_STUB_TIMEOUT": "2"},
+    )
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "did not finish" in r.stderr
+
+
 def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     """End-to-end over the SHIPPED artifacts, not fixtures.
 
@@ -851,6 +1034,14 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     # indistinguishable, and Fly's hand-set value is overwritten on the next
     # deploy.
     assert declared["TORTOISE_SESSION_LLM_MODEL"] == "workflow"
+    # ... and the declaration is TRUE: the deploy assigns it UNCONDITIONALLY from
+    # the versioned default. Pinned on the partition, not just the manifest token —
+    # reverting deploy-hosted.yml to the pre-#4126 guarded line must turn this red
+    # (#4259 review P2: the manifest token alone stayed green on that revert).
+    _, unconditional, _ = module.payload_partition(
+        module.extract_propagation_blocks(REAL_WORKFLOW.read_text())
+    )
+    assert "TORTOISE_SESSION_LLM_MODEL" in unconditional
     # The two names the deploy ADOPTED — their GitHub Actions secrets already
     # existed, so declaring the deploy the source makes them rotatable from
     # version control.

@@ -297,6 +297,58 @@ jobs:
       # manifest) can never be bypassed and always blocks the deploy.
       - name: Check Fly secret provenance (fail-closed)
         run: |
+          # Which GitHub Actions secrets does THIS run actually carry? No CI token
+          # can list repository secrets, so the checker is told. A declared
+          # `gh-secret:X` whose X is missing from this list is a VIOLATION when the
+          # name is on Fly: the guarded propagation skips the assignment on every
+          # deploy, so Fly keeps a hand-managed value — the #4126 incident, where
+          # TORTOISE_SESSION_LLM_MODEL's GitHub secret never existed and the
+          # hand-set Fly value survived every deploy.
+          #
+          # NAMES only — no secret value is ever appended (and none is needed).
+          # A name MISSING from this list reads as ABSENT, so forgetting a line
+          # FAILS the deploy for that name instead of silently reopening the hole.
+          # Keep it in step with .github/scripts/fly-managed-secrets.txt: every
+          # `gh-secret:<NAME>` there needs its line here.
+          GH_PRESENT=""
+          [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ] && GH_PRESENT="$GH_PRESENT BACKUP_ALERT_ASSIGNEE"
+          [ -n "${{ secrets.BACKUP_SIMULATE_ENABLED }}" ] && GH_PRESENT="$GH_PRESENT BACKUP_SIMULATE_ENABLED"
+          [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && GH_PRESENT="$GH_PRESENT BILLING_CANCEL_URL"
+          [ -n "${{ secrets.BILLING_FROM_EMAIL }}" ] && GH_PRESENT="$GH_PRESENT BILLING_FROM_EMAIL"
+          [ -n "${{ secrets.BILLING_NOTIFY_TO }}" ] && GH_PRESENT="$GH_PRESENT BILLING_NOTIFY_TO"
+          [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && GH_PRESENT="$GH_PRESENT BILLING_SUCCESS_URL"
+          [ -n "${{ secrets.DEEPSEEK_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT DEEPSEEK_API_KEY"
+          [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && GH_PRESENT="$GH_PRESENT DR_ISSUES_PAT"
+          [ -n "${{ secrets.FALKORDB_CLOUD_URI }}" ] && GH_PRESENT="$GH_PRESENT FALKORDB_CLOUD_URI"
+          [ -n "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] && GH_PRESENT="$GH_PRESENT FASTAPI_INTERNAL_KEY"
+          [ -n "${{ secrets.GEMINI_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT GEMINI_API_KEY"
+          [ -n "${{ secrets.GH_CALLBACK_URL }}" ] && GH_PRESENT="$GH_PRESENT GH_CALLBACK_URL"
+          [ -n "${{ secrets.GH_CLIENT_ID }}" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_ID"
+          [ -n "${{ secrets.GH_CLIENT_SECRET }}" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_SECRET"
+          [ -n "${{ secrets.OPENAI_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT OPENAI_API_KEY"
+          [ -n "${{ secrets.OPENROUTER_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT OPENROUTER_API_KEY"
+          [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT POSTHOG_API_KEY"
+          [ -n "${{ secrets.POSTHOG_HOST }}" ] && GH_PRESENT="$GH_PRESENT POSTHOG_HOST"
+          [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && GH_PRESENT="$GH_PRESENT R2_ACCESS_KEY_ID"
+          [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && GH_PRESENT="$GH_PRESENT R2_ACCOUNT_ID"
+          [ -n "${{ secrets.R2_BUCKET }}" ] && GH_PRESENT="$GH_PRESENT R2_BUCKET"
+          [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && GH_PRESENT="$GH_PRESENT R2_SECRET_ACCESS_KEY"
+          [ -n "${{ secrets.RESEND_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT RESEND_API_KEY"
+          [ -n "${{ secrets.RESEND_FROM_EMAIL }}" ] && GH_PRESENT="$GH_PRESENT RESEND_FROM_EMAIL"
+          [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && GH_PRESENT="$GH_PRESENT STRIPE_PRICE_IDS"
+          [ -n "${{ secrets.STRIPE_SECRET_KEY }}" ] && GH_PRESENT="$GH_PRESENT STRIPE_SECRET_KEY"
+          [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ] && GH_PRESENT="$GH_PRESENT STRIPE_WEBHOOK_SECRET"
+          [ -n "${{ secrets.SUPABASE_ANON_KEY }}" ] && GH_PRESENT="$GH_PRESENT SUPABASE_ANON_KEY"
+          [ -n "${{ secrets.SUPABASE_SERVICE_KEY }}" ] && GH_PRESENT="$GH_PRESENT SUPABASE_SERVICE_KEY"
+          [ -n "${{ secrets.SUPABASE_URL }}" ] && GH_PRESENT="$GH_PRESENT SUPABASE_URL"
+          [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_BOT_TOKEN"
+          [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_CHAT_ID"
+          [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY"
+          [ -n "${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY_PREVIOUS"
+          [ -n "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_ENCRYPTION_KEY"
+          [ -n "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
+          [ -n "${{ secrets.TURNSTILE_SECRET_KEY }}" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
+          export GH_SECRETS_PRESENT="$GH_PRESENT"
           set +e
           python3 .github/scripts/check-fly-secret-drift.py
           RC=$?
@@ -412,6 +464,17 @@ jobs:
           # the default". A GitHub secret still overrides the default when one
           # exists. Unset on both → the per-provider default (deepseek-chat)
           # applies at runtime.
+          #
+          # #4259 review: the versioned default NAMES a provider, so it requires
+          # that provider's key. Removing OPENROUTER_API_KEY while another
+          # provider key is set would leave the override pointing at a provider
+          # the app is no longer configured for (sdk raises on the mismatch), so
+          # warn here rather than let the deploy ship that state silently.
+          if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ] && [ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ]; then
+            echo "::notice::TORTOISE_SESSION_LLM_MODEL comes from a GitHub secret — the key it names must be configured"
+          elif [ -z "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ] && [ -z "${{ secrets.OPENROUTER_API_KEY }}" ]; then
+            echo "::warning::TORTOISE_SESSION_LLM_MODEL is the versioned openrouter default but OPENROUTER_API_KEY is not set on GitHub — session-capture extraction will fail until that key is configured or the model override is changed (docs/infra-runbook.md §4)"
+          fi
           if [ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ]; then
             ARGS="$ARGS TORTOISE_SESSION_LLM_MODEL=${{ secrets.TORTOISE_SESSION_LLM_MODEL }}"
           else

@@ -26,9 +26,11 @@ Sources (see the manifest header for the full rationale):
                          Actions secret ``<GH_NAME>`` (not always the same name).
                          Propagated *unconditionally* is the managed state; a
                          name the workflow only assigns behind a
-                         ``[ -n "${{ secrets.X }}" ] &&`` guard is reported as
-                         CONDITIONAL — while that GitHub secret is absent, the
-                         Fly value is unmanaged, which is exactly the #4126 case.
+                         ``[ -n "${{ secrets.X }}" ] &&`` guard is CONDITIONAL —
+                         and if that name is on Fly while ``GH_SECRETS_PRESENT``
+                         does not carry ``<GH_NAME>``, the deploy skips the
+                         assignment every run and Fly keeps a hand-managed value:
+                         that is the #4126 defect and it FAILS.
 ``workflow``             the workflow sets it from non-secret context
                          (``${GITHUB_SHA}``, a composed flag, a deliberately
                          versioned default that is always assigned).
@@ -47,10 +49,11 @@ Sources (see the manifest header for the full rationale):
 Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
   0 — every Fly secret is declared and every declaration is honoured
   1 — drift found (undeclared Fly secret, a declaration the deploy does not
-      honour, or a name whose declaration names NO managing source at all)
+      honour, a name whose declaration names NO managing source, or a guarded
+      declaration whose GitHub secret does not exist)
   2 — could not determine state (missing/unparsable manifest, unreadable or
-      EMPTY secret list, malformed entry). Fail-closed: an unreadable state —
-      including a payload that reads as "no secrets" — is never clean.
+      EMPTY secret list, malformed entry, absent GH_SECRETS_PRESENT, a payload
+      that cannot be read). Fail-closed: an unreadable state is never clean.
 
 Env seams (all optional; used by the hermetic test suite):
   FLY_SECRETS_FILE          fixture path holding the ``--json`` secret list
@@ -60,6 +63,13 @@ Env seams (all optional; used by the hermetic test suite):
   DEPLOY_WORKFLOW           deploy workflow path override
   FLY_SECRETS_CMD           secret-list command override
                             (default ``flyctl secrets list --app <app> --json``)
+  GH_SECRETS_PRESENT        space-separated names of the GitHub Actions secrets
+                            the CURRENT run has. REQUIRED — the deploy step
+                            builds it from the ``${{ secrets.X }}`` values it
+                            propagates, because no CI token can list repo
+                            secrets. Unset is exit 2, never "all present".
+  FLY_STUB_TIMEOUT          seconds before the stubbed payload run is treated as
+                            unclassifiable (default 30) — a test seam.
 """
 
 from __future__ import annotations
@@ -77,6 +87,33 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_MANIFEST = REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
 DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
+
+
+def read_gh_secret_presence() -> set[str]:
+    """The GitHub Actions secrets the runner actually HAS, as a name set.
+
+    The guard cannot read GitHub secret existence itself (a workflow run's token
+    cannot list repo secrets), so the deploy step states it in
+    ``GH_SECRETS_PRESENT`` — built from the same ``${{ secrets.X }}`` values it
+    propagates. Without it a ``gh-secret:<X>`` declaration whose GitHub secret
+    does not exist is indistinguishable from one whose secret does, and the gate
+    exits 0 while the deploy silently skips the assignment and Fly keeps a
+    hand-managed value: exactly the #4126 incident (#4259 review P1).
+
+    FAIL-CLOSED: an unset variable is an unreadable state (exit 2), never "all
+    present" — a missing probe must not silently reopen the hole. A name the
+    probe omits reads as ABSENT, so forgetting a probe line fails the deploy for
+    that name rather than passing it.
+    """
+    raw = os.environ.get("GH_SECRETS_PRESENT")
+    if raw is None:
+        raise ValueError(
+            "GH_SECRETS_PRESENT is not set — the deploy step must state which GitHub "
+            "Actions secrets this run can see (a gh-secret declaration cannot be "
+            "verified against GitHub otherwise)"
+        )
+    return set(raw.split())
+
 
 # `NAME=…` tokens in a captured `flyctl secrets set` payload.
 _ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=([^\s]*)")
@@ -98,51 +135,67 @@ _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 _SECRET_TMPL_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
 
 
-def extract_propagation_script(text: str) -> str:
-    """The `run:` shell block that builds the Fly secrets payload.
+def extract_propagation_blocks(text: str) -> list[tuple[str, bool]]:
+    """Every `run:` block that builds a Fly secrets payload, plus its step `if:`.
 
-    Raises ValueError when it cannot be located — fail-closed, because a guard
-    that cannot read the payload would silently certify any fleet.
+    ALL of them, not just the first: the contract is bidirectional — a Fly
+    variable the deploy can assign must be declared — and a second propagation
+    step is exactly as much a managing source as the first. Reading only the
+    first left a name assigned by a later step undeclared and invisible.
+
+    Each entry is ``(shell, step_conditional)``. ``step_conditional`` is a YAML
+    ``if:`` on the step, which is not part of the `run:` shell, so executing the
+    block cannot see it: a gated step means every name it assigns is only
+    propagated when the condition holds, which is the fail-safe direction.
+
+    Raises ValueError when a payload step cannot be located — fail-closed,
+    because a guard that cannot read the payload would silently certify any fleet.
     """
     lines = text.splitlines()
-    cmd_index = next((i for i, ln in enumerate(lines) if _PAYLOAD_CMD_RE.search(ln)), None)
-    if cmd_index is None:
+    cmd_indices = [i for i, ln in enumerate(lines) if _PAYLOAD_CMD_RE.search(ln)]
+    if not cmd_indices:
         raise ValueError("no `flyctl secrets set` invocation found in the deploy workflow")
-    run_index = None
-    for i in range(cmd_index, -1, -1):
-        if re.match(r"\s*(-\s*)?run:\s*\|?\s*$", lines[i]):
-            run_index = i
-            break
-    if run_index is None:
-        raise ValueError("could not find the `run:` block holding the secrets payload")
-    indent = len(lines[run_index]) - len(lines[run_index].lstrip())
-    body: list[str] = []
-    for line in lines[run_index + 1 :]:
-        if not line.strip():
-            body.append("")
+    blocks: list[tuple[str, bool]] = []
+    seen: set[int] = set()
+    for cmd_index in cmd_indices:
+        run_index = None
+        for i in range(cmd_index, -1, -1):
+            if re.match(r"\s*(-\s*)?run:\s*\|?\s*$", lines[i]):
+                run_index = i
+                break
+        if run_index is None:
+            raise ValueError("could not find the `run:` block holding the secrets payload")
+        if run_index in seen:
+            # Two payload invocations inside ONE block are one block: the union
+            # of its argv is what the deploy assigns.
             continue
-        if len(line) - len(line.lstrip()) <= indent:
-            break
-        body.append(line)
-    if not body:
-        raise ValueError("the secrets-payload `run:` block is empty")
-    block_indent = min((len(ln) - len(ln.lstrip()) for ln in body if ln.strip()), default=0)
-    return "\n".join(ln[block_indent:] for ln in body)
+        seen.add(run_index)
+        indent = len(lines[run_index]) - len(lines[run_index].lstrip())
+        body: list[str] = []
+        for line in lines[run_index + 1 :]:
+            if not line.strip():
+                body.append("")
+                continue
+            if len(line) - len(line.lstrip()) <= indent:
+                break
+            body.append(line)
+        if not body:
+            raise ValueError("the secrets-payload `run:` block is empty")
+        block_indent = min((len(ln) - len(ln.lstrip()) for ln in body if ln.strip()), default=0)
+        blocks.append(
+            (
+                "\n".join(ln[block_indent:] for ln in body),
+                _step_is_conditional(lines, run_index),
+            )
+        )
+    if not blocks:
+        raise ValueError("no usable `run:` block holds the secrets payload")
+    return blocks
 
 
-def payload_step_is_conditional(text: str) -> bool:
-    """True when the payload step carries a step-level ``if:``.
-
-    A YAML ``if:`` on the step is not part of the `run:` shell, so executing the
-    block cannot see it. It is read here instead: a gated step means every name it
-    assigns is only propagated when the condition holds — the fail-safe
-    direction, since an over-conditional name stays visible in the debt list.
-    """
-    lines = text.splitlines()
-    cmd_index = next((i for i, ln in enumerate(lines) if _PAYLOAD_CMD_RE.search(ln)), None)
-    if cmd_index is None:
-        return False
-    for line in reversed(lines[:cmd_index]):
+def _step_is_conditional(lines: list[str], run_index: int) -> bool:
+    """True when the step owning ``run_index`` carries a step-level ``if:``."""
+    for line in reversed(lines[:run_index]):
         # `- if: …` is both the step marker and the condition, so test the key
         # BEFORE treating the line as a step boundary.
         if re.match(r"\s*(-\s*)?if:\s*\S", line):
@@ -230,16 +283,28 @@ def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
         # shell for a `run:` block; it is exec'd after the harness is set up so
         # the narrowed PATH cannot hide it.
         command = f"exec 3>{shlex.quote(str(argv_log))}; exec {shlex.quote(bash)} -e"
-        proc = subprocess.run(
-            [bash, "-c", command],
-            input=rendered,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=30,
-        )
-        # Read the stub's records BEFORE the temporary directory is torn down.
-        records = _stub_records(argv_log.read_text())
+        # A payload that hangs is an unreadable state: it must fail closed, never
+        # escape as an uncaught TimeoutExpired (Python exits 1 — the BYPASSABLE
+        # drift code). The seam keeps the hermetic test fast.
+        timeout = float(os.environ.get("FLY_STUB_TIMEOUT") or 30)
+        try:
+            proc = subprocess.run(
+                [bash, "-c", command],
+                input=rendered,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=timeout,
+            )
+            # Read the stub's records BEFORE the temporary directory is torn down.
+            records = _stub_records(argv_log.read_text())
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError(
+                f"the propagation shell did not finish within {timeout:g}s under the "
+                "stub — a payload that hangs cannot be classified"
+            ) from exc
+        except OSError as exc:
+            raise ValueError(f"the propagation shell could not be run: {exc}") from exc
     if proc.returncode != 0:
         raise ValueError(
             f"the propagation shell failed under the stub (rc={proc.returncode}): "
@@ -249,12 +314,12 @@ def _capture_payload(script: str, present: dict[str, str]) -> dict[str, str]:
 
 
 def payload_partition(
-    script: str, step_conditional: bool = False
+    blocks: list[tuple[str, bool]],
 ) -> tuple[set[str], set[str], dict[str, set[str]]]:
-    """``(assigned, unconditional, sources)`` — computed by executing the block.
+    """``(assigned, unconditional, sources)`` over EVERY payload block.
 
     ``assigned``      names in the payload when every GitHub secret is present
-    ``unconditional`` names in the payload when NO GitHub secret is present
+    ``unconditional`` names the payload carries even with NO GitHub secret present
     ``sources[name]`` the GitHub secrets whose marker appears in the value the
                       workflow assigns to ``name`` — so a `gh-secret:<GH_NAME>`
                       declaration must name the secret that actually feeds THAT
@@ -268,17 +333,27 @@ def payload_partition(
     propagation that depends on a secret. Sampling ``assigned`` alone classified a
     `-z`-guarded name as managed (#4126 review).
 
-    ``step_conditional`` forces ``unconditional`` empty: a step-level ``if:``
-    gates the whole payload, which the shell cannot show.
+    CONSERVATIVE over blocks: a name is unconditional only if EVERY block that
+    assigns it assigns it unconditionally. Blocks run in order and the last write
+    wins, so one guarded writer is enough to leave a hand-managed value in place.
     """
-    secret_names = sorted(set(_SECRET_REF_RE.findall(script)))
-    all_present = _capture_payload(script, {name: name for name in secret_names})
-    assigned = set(all_present)
-    unconditional = set() if step_conditional else set(_capture_payload(script, {}))
-    sources: dict[str, set[str]] = {name: set() for name in assigned}
-    for name, value in all_present.items():
-        sources[name] = {s for s in secret_names if f"{_MARK_OPEN}{s}{_MARK_CLOSE}" in value}
-    return assigned, unconditional, sources
+    assigned: set[str] = set()
+    unconditional: set[str] = set()
+    guarded: set[str] = set()
+    sources: dict[str, set[str]] = {}
+    for script, step_conditional in blocks:
+        secret_names = sorted(set(_SECRET_REF_RE.findall(script)))
+        all_present = _capture_payload(script, {name: name for name in secret_names})
+        block_assigned = set(all_present)
+        block_unconditional = set() if step_conditional else set(_capture_payload(script, {}))
+        guarded |= block_assigned - block_unconditional
+        unconditional |= block_unconditional
+        assigned |= block_assigned
+        for name, value in all_present.items():
+            sources.setdefault(name, set()).update(
+                s for s in secret_names if f"{_MARK_OPEN}{s}{_MARK_CLOSE}" in value
+            )
+    return assigned, unconditional - guarded, sources
 
 
 def conditional_names(assigned: set[str], unconditional: set[str]) -> set[str]:
@@ -420,10 +495,16 @@ def main() -> int:
 
     secret_refs = workflow_secret_refs(workflow_text)
     try:
-        script = extract_propagation_script(workflow_text)
-        assigned, unconditional, assignment_sources = payload_partition(
-            script, step_conditional=payload_step_is_conditional(workflow_text)
-        )
+        blocks = extract_propagation_blocks(workflow_text)
+        assigned, unconditional, assignment_sources = payload_partition(blocks)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        # subprocess.SubprocessError/OSError must land HERE: escaping as an
+        # uncaught exception would exit 1 — the code the deploy step translates
+        # into a bypass — instead of fail-closed 2 (#4126 review).
+        _err(f"cannot determine secret provenance: {exc}")
+        return 2
+    try:
+        gh_present = read_gh_secret_presence()
     except ValueError as exc:
         _err(f"cannot determine secret provenance: {exc}")
         return 2
@@ -490,9 +571,22 @@ def main() -> int:
                     f"that secret does not feed the assignment of {name} "
                     f"(found: {sorted(assignment_sources.get(name) or [])})"
                 )
+            elif name in assigned_conditionally and gh_name not in gh_present and name in fly_names:
+                # Assigned behind a guard AND the GitHub secret does not exist in
+                # this run: the deploy skips the assignment every time and Fly
+                # keeps whatever value is there — hand-managed, the #4126 case.
+                # The guard alone is not evidence of harm (a guarded name whose
+                # secret EXISTS propagates on every deploy); the absence is.
+                violations.append(
+                    f"UNSOURCED — {name!r} is on Fly and is declared gh-secret:{gh_name}, "
+                    f"but that GitHub secret does not exist, so deploy-hosted.yml skips "
+                    f"the assignment and the Fly value is hand-managed. Assign it "
+                    f"unconditionally from version control, create the GitHub secret, or "
+                    f"drop the Fly secret"
+                )
             elif name in assigned_conditionally:
-                # Assigned behind a guard: while that GitHub secret is absent the
-                # Fly value is untouched, i.e. hand-managed — the #4126 case.
+                # Guarded, with the GitHub secret present: propagated on every
+                # deploy, so not managed-unconditionally but not drift either.
                 # CONSERVATIVE: any guarded assignment wins over an unguarded one.
                 conditional.append(name)
         elif kind == "workflow":
