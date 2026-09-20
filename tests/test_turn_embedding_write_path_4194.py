@@ -390,15 +390,35 @@ def test_rebuild_recomputes_the_turn_embedding(tmp_path, embedder, monkeypatch):
         s.close()
 
 
-def test_wrong_length_model_output_degrades_to_no_vector(monkeypatch, embedder):
-    """The dimension guard is ENFORCED, not assumed (#4194).
+def test_wrong_width_model_output_degrades_to_no_vector(sdk, monkeypatch, embedder):
+    """A width the STORE cannot hold degrades to no vector (#4194, #4280).
 
-    A model returning a vector whose width is not :data:`EMBEDDING_DIM` must
-    degrade to ``None`` (turn stored, leg impaired) rather than hand a
-    wrong-space vector to ``vecf32`` — the exact "runs and returns garbage"
-    failure.
+    The width constraint belongs to the Point HNSW index — which exists only on
+    the non-embedded lane — so the STORE declares it
+    (``FalkorProjection.required_embedding_dim``) and the write path applies it
+    at the store-scoped entry point (``embeddings.encode_for_store`` /
+    ``encode_batch_for_store``). Asserted there, and then end-to-end: a
+    wrong-width model captured into a store that declares :data:`EMBEDDING_DIM`
+    stores the turn with NO vector instead of handing ``vecf32`` a wrong-space
+    vector, and the same model into a store that declares ``None`` (no index —
+    the embedded brute-force lane) stores its own vector.
+
+    ⛔ The encoder SEAM (``compute_embedding`` / ``compute_embeddings``)
+    deliberately does NOT apply the guard and keeps its own narrow call shape:
+    it is a widely-REPLACED interception point (``tools/longmem_eval/
+    encode_cache.py`` and the longmem eval doubles swap the function itself),
+    so a caller-side width keyword would raise ``TypeError`` inside every
+    replacement and be swallowed by the write paths' ``except Exception`` —
+    the same silent degrade in a new place (#4280 review).
     """
-    from tortoise.embeddings import EMBEDDING_DIM, compute_embeddings
+    from tortoise.embeddings import (
+        EMBEDDING_DIM,
+        compute_embedding,
+        compute_embeddings,
+        encode_batch_for_store,
+        encode_for_store,
+    )
+    from tortoise.projection import FalkorProjection
 
     assert len(embedder.encode(["x"])[0]) == EMBEDDING_DIM
 
@@ -410,8 +430,41 @@ def test_wrong_length_model_output_degrades_to_no_vector(monkeypatch, embedder):
         EmbeddingModel, "get",
         classmethod(lambda cls, load_timeout=None: _WrongDim()))
     EmbeddingModel._reset()
-    assert compute_embeddings(["a", "b"]) == [None, None]
-    assert compute_embedding("a") is None
+
+    # The seam encodes whatever the model returns (an index-less lane holds it)…
+    assert len(compute_embedding("a")) == EMBEDDING_DIM - 1
+    assert len(compute_embeddings(["a", "b"])[0]) == EMBEDDING_DIM - 1
+    # … and the STORE's declared width is what degrades it.
+    assert encode_for_store("a", EMBEDDING_DIM) is None
+    assert encode_batch_for_store(["a", "b"], EMBEDDING_DIM) == [None, None]
+    # No index declared → the encoder's own width governs (nothing dropped).
+    assert encode_for_store("a", None) is not None
+    assert encode_batch_for_store(["a"], None)[0] is not None
+
+    # End-to-end: an INDEXED store (declares EMBEDDING_DIM) stores the turn
+    # with no vector — the turn itself still lands.
+    _keyless(monkeypatch)
+    monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                        property(lambda self: EMBEDDING_DIM))
+    res = sdk.capture_session(CONV, session_id="sess-4194-wrongdim")
+    assert res["turns"] == len(CONV), res
+    rows = _turn_rows(sdk, "sess-4194-wrongdim")
+    assert len(rows) == len(CONV)
+    for tid, content, stored in rows:
+        assert content, f"{tid}: the turn must still be stored"
+        assert stored is None, (
+            f"{tid}: a {EMBEDDING_DIM - 1}-wide vector was stored in a "
+            f"{EMBEDDING_DIM}-wide index")
+
+    # Same model, a store with NO index: the encoder's own width is stored.
+    monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                        property(lambda self: None))
+    res2 = sdk.capture_session(CONV, session_id="sess-4194-noidx")
+    assert res2["turns"] == len(CONV), res2
+    for tid, _content, stored in _turn_rows(sdk, "sess-4194-noidx"):
+        assert stored is not None, (
+            f"{tid}: the index-less lane must keep the encoder's vector")
+        assert len(stored) == EMBEDDING_DIM - 1, tid
 
 
 # ── 4. The hosted write path is the same write ────────────────────────────

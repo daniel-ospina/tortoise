@@ -4450,11 +4450,11 @@ class FalkorProjection(
             # but NOT `db.idx.vector.createNodeIndex`). Record which API
             # succeeded on self._vector_index_api for the query path.
             if not getattr(self, '_is_embedded', False):
-                # #4194: the width comes from the ONE constant
-                # `compute_embeddings` validates stored vectors against, so a
-                # FRESH index creation and the write path cannot disagree — a
-                # bare literal here plus a rotated `EMBEDDING_DIM` would bless
-                # vectors the index cannot hold (the mismatched-vector trap).
+                # #4194/#4280: the width is the ONE constant the STORE declares
+                # (`FalkorProjection.required_embedding_dim`), so a FRESH index
+                # creation and the write path cannot disagree — a bare literal
+                # here plus a rotated `EMBEDDING_DIM` would bless vectors the
+                # index cannot hold (the mismatched-vector trap).
                 # ⛔ This single-sources CREATION only: an EXISTING index is
                 # never reconciled (both 'already' branches below assume it is
                 # correct). A dimension change is still the documented
@@ -4497,6 +4497,36 @@ class FalkorProjection(
             logging.getLogger(__name__).info(
                 "Skipping FTS and vector indexes: FalkorDB %s < 4.x",
                 '.'.join(map(str, _ver)))
+
+    @property
+    def required_embedding_dim(self) -> int | None:
+        """The embedding width THIS store can hold, for the write path to declare.
+
+        #4280: the width constraint belongs to the Point HNSW index, and only
+        the non-embedded lanes have one (see the vector-index block above:
+        "Embedded mode (redislite) uses brute-force vec.euclideanDistance
+        instead. HNSW requires RediSearch module, not bundled with redislite.").
+        So there is exactly ONE rule, in ONE place:
+
+          * non-embedded (docker/server/hosted) → :data:`EMBEDDING_DIM`, the
+            width the index is created with — a stored vector of another width
+            is a broken leg, not a near-miss.
+          * embedded (FalkorDBLite) → ``None``: no index exists, the read path
+            is a dimension-agnostic brute-force scan, and any self-consistent
+            encoder width is fully functional. Enforcing :data:`EMBEDDING_DIM`
+            here silently NULLed every vector for an injected non-384 embedder
+            and starved the cross-lens candidate pool (#4280).
+
+        Callers pass this to ``embeddings.encode_for_store`` /
+        ``encode_batch_for_store`` — NOT to the ``compute_embedding`` /
+        ``compute_embeddings`` seam, which takes no width (that seam is a
+        widely-replaced interception point; see ``encode_for_store``'s
+        docstring).
+        """
+        if getattr(self, "_is_embedded", False):
+            return None
+        from ..embeddings import EMBEDDING_DIM
+        return EMBEDDING_DIM
 
     def backfill_document_search_text(self) -> int:
         """#125: set _searchText=title on Documents missing it (idempotent).
@@ -4632,8 +4662,10 @@ class FalkorProjection(
         # on compute failure, set to None rather than preserving old embedding (#19).
         if new_content is not None:
             try:
-                from tortoise.embeddings import compute_embedding
-                emb = compute_embedding(new_content) if new_content else None
+                from tortoise.embeddings import encode_for_store
+                emb = (encode_for_store(
+                    new_content, self.required_embedding_dim)
+                    if new_content else None)
                 params["embedding"] = emb  # None = wipe stale embedding for empty content
             except Exception:
                 params["embedding"] = None  # wipe stale embedding on failure (#19)

@@ -8622,7 +8622,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # inline — the two share the helper, not the scheduling.
     _turn_texts = _capture_turn_texts(windowed)
     _turn_embs = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts)
+        _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
+        proj.required_embedding_dim)
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         # P1 #1529 (D10, #721 parity): the stored text (and its isinstance-first

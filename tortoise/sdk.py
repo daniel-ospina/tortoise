@@ -23,6 +23,10 @@ from typing import Any
 
 from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
+# #4280: the model's declared width — the fail-closed DEFAULT for a caller that
+# forgets to name its store's constraint (see `_capture_turn_embeddings`). Leaf
+# module (numpy + env_truthy only), so this is not an import cycle.
+from .embeddings import EMBEDDING_DIM as _DEFAULT_EMBEDDING_DIM
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
@@ -481,7 +485,10 @@ def _capture_turn_texts(windowed: list[dict]) -> list[str]:
     return texts
 
 
-def _capture_turn_embeddings(turn_texts: list[str]) -> list[list[float] | None]:
+def _capture_turn_embeddings(
+    turn_texts: list[str],
+    expected_dim: int | None = _DEFAULT_EMBEDDING_DIM,
+) -> list[list[float] | None]:
     """Embed the stored turn texts with the SAME local embedder the query uses.
 
     (#4194) Episodic turn Points used to be written with raw Cypher and NO
@@ -495,12 +502,21 @@ def _capture_turn_embeddings(turn_texts: list[str]) -> list[list[float] | None]:
     NORMALISATION. A mismatched vector still "runs" and returns garbage, which
     is worse than the previous honest zero. So this calls the same shared
     ``compute_embeddings`` (same ``EmbeddingModel`` singleton, same
-    un-normalised output, dimension ENFORCED to :data:`EMBEDDING_DIM`) that
-    ``compute_embedding`` delegates to — never the TF-IDF ``_encode`` fallback,
-    whose dimensionality is a vocabulary size and would corrupt the dense leg
-    silently. The 512-word cap is WRITE-side (``_truncate_for_embedding``); the
-    read path encodes its query whole — model/dimension/normalisation are the
-    shared contract, the cap is not.
+    un-normalised output) that ``compute_embedding`` delegates to — never the
+    TF-IDF ``_encode`` fallback, whose dimensionality is a vocabulary size and
+    would corrupt the dense leg silently. The 512-word cap is WRITE-side
+    (``_truncate_for_embedding``); the read path encodes its query whole —
+    model/dimension/normalisation are the shared contract, the cap is not.
+
+    ``expected_dim`` is the CALLER's store width (``proj.required_embedding_dim``
+    — :data:`EMBEDDING_DIM` when the store has a Point HNSW index, ``None`` on
+    the index-less embedded brute-force lane, where any self-consistent width
+    is storable). It is threaded through rather than assumed, because the
+    width constraint belongs to the INDEX, not to the encoder (#4280).
+
+    The batch goes through :func:`embeddings.encode_batch_for_store`, which
+    applies that width to the rows — the seam itself keeps its narrow shape so
+    an installed ``EncodeCache`` (and the eval doubles) stay compatible.
 
     Model-load policy: this uses the embedder's OWN bound, exactly as
     ``create_point`` and the read path do — a capture does not get a shorter
@@ -513,8 +529,8 @@ def _capture_turn_embeddings(turn_texts: list[str]) -> list[list[float] | None]:
     leg impaired).
     """
     try:
-        from .embeddings import compute_embeddings
-        return compute_embeddings(turn_texts)
+        from .embeddings import encode_batch_for_store
+        return encode_batch_for_store(turn_texts, expected_dim)
     except Exception:  # noqa: BLE001, RUF100 — embedding is optional
         return [None] * len(turn_texts)
 
@@ -2730,11 +2746,15 @@ class TortoiseSDK:
         else:
             pid = ulid()
 
-        # Compute embedding (Phase 1A, #7698) — stored as Point property
+        # Compute embedding (Phase 1A, #7698) — stored as Point property.
+        # #4280: the store declares the width it can hold; on the embedded
+        # lane that is None (no vector index — brute-force scan), so a
+        # self-consistent injected encoder is stored instead of silently NULLed.
         embedding = None
         try:
-            from .embeddings import compute_embedding
-            embedding = compute_embedding(content)
+            from .embeddings import encode_for_store
+            embedding = encode_for_store(
+                content, self._get_proj().required_embedding_dim)
         except Exception:
             pass  # Graceful — embedding is optional
 
@@ -3425,7 +3445,8 @@ class TortoiseSDK:
         # `None` per turn when no embedder is available — the turn is still
         # stored and the read path declares its vector leg impaired.
         _turn_texts = _capture_turn_texts(windowed)
-        _turn_embs = _capture_turn_embeddings(_turn_texts)
+        _turn_embs = _capture_turn_embeddings(
+            _turn_texts, proj.required_embedding_dim)
         for i, turn in enumerate(windowed):
             # #721: _normalize_turn_role is the isinstance-first pattern — an
             # `or "unknown"` fallback only fixes falsy roles, but TRUTHY

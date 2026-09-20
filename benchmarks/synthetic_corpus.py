@@ -30,9 +30,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # #4194: the width is single-sourced from the write-path constant (also used by
-# the Point vector-index DDL and `compute_embeddings`' validation) so the
-# synthetic corpus, the index and the real write path cannot disagree; all 4
-# #1349 candidates are 384-dim.
+# the Point vector-index DDL and by the store-scoped width guard the write paths
+# apply) so the synthetic corpus, the index and the real write path cannot
+# disagree; all 4 #1349 candidates are 384-dim.
 from tortoise.embeddings import EMBEDDING_DIM
 
 KIND_WEIGHTS: list[tuple[str, float]] = [
