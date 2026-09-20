@@ -11,12 +11,18 @@
 #   * 37 are real test nodeids (`path::test_name`): that test is still COLLECTED.
 #   * 32 are module-level collection-abort markers, spelled `path::dotted.module`
 #     (pytest's synthetic <testcase> with an empty classname). Each pins that the
-#     module STILL ABORTS AT COLLECTION in this lane — those are the hosted-e2e
-#     modules gated by `skip_unless_hosted_e2e()` ->
-#     `pytest.skip(..., allow_module_level=True)`. Note the weaker claim: if every
-#     test in such a module were deleted, the marker would remain. Removing the
-#     module-level gate makes the module collect instead, so the marker vanishes
-#     and the run reds.
+#     module STILL ABORTS AT COLLECTION in this lane. THREE gate families produce
+#     them, and the per-family counts are listed here because a marker whose
+#     mechanism is unnamed reads as spurious — the hosted E2E suite is not the only
+#     one, and checking e.g. tests/test_capabilities_endpoint.py against a
+#     hosted-only story invites exactly the cleanup this file exists to prevent:
+#       14  hosted E2E — `tests/e2e/hosted/…`, gated by `skip_unless_hosted_e2e()`
+#       10  opt-in e2e suites — gated on a `RUN_*_E2E` variable, skipped by default
+#        8  docker-lane modules — gated on `TORTOISE_DB_URI` (tier-2 embedded legs skip)
+#     Note the weaker claim: if every test in such a module were deleted, the marker
+#     would remain. Removing the module-level gate makes the module collect instead,
+#     so the marker vanishes and the run reds. Both counts on this line and the
+#     per-family split are pinned by tests/test_ci_expected_manifests.py.
 #
 # PROVENANCE (regenerate, never hand-edit): the 69 entries are the junitxml
 # <testcase> set of CI run 35518962357 (head fd23a4033), job

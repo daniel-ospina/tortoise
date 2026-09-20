@@ -136,7 +136,10 @@ def test_manifests_carry_provenance() -> None:
         header = "\n".join(
             line for line in path.read_text().splitlines() if line.startswith("#")
         )
-        assert "PROVENANCE" in header, f"{path.name} has no provenance header"
+        # Case-insensitively: the point is that provenance IS recorded, not that one
+        # word is spelled in capitals — `Provenance` is an honest header (cycle-3
+        # finding: this red a correct tree on the casing of a single word).
+        assert "provenance" in header.lower(), f"{path.name} has no provenance header"
         # A run ID, not the bare words: the earlier check passed on a header saying
         # "NOT FROM A CI RUN", which is exactly the failure it exists to catch. Accept
         # the spellings a real header may use (`run:`, `run-id`, `job`, a `.../runs/<id>`
@@ -146,7 +149,7 @@ def test_manifests_carry_provenance() -> None:
         ) or re.search(r"/runs/\d{6,}", header), (
             f"{path.name}'s header names no CI run id — the next reader cannot re-derive the set"
         )
-        assert "PROVENANCE" in header and "junit" in header.lower(), (
+        assert "provenance" in header.lower() and "junit" in header.lower(), (
             f"{path.name}'s header does not name the artifact the set came from"
         )
 
@@ -155,13 +158,16 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     """The 69 entries are TWO kinds with two different claims.
 
     A `path::dotted.module` entry is pytest's synthetic module-level
-    collection-abort marker (the hosted-e2e modules gated by
-    `skip_unless_hosted_e2e()` -> `pytest.skip(..., allow_module_level=True)`).
-    It pins that the module still ABORTS AT COLLECTION — a strictly weaker claim
-    than "its tests are collected", which is why the header has to say so. Pin the
-    spelling (so a marker cannot be mistaken for a test), that the files exist, and
-    that the count is recorded in the header — a marker silently "cleaned up" into
-    a test nodeid would change what the set asserts.
+    collection-abort marker, produced by `pytest.skip(..., allow_module_level=True)`
+    at import time. Three gate families produce them in this lane: the hosted E2E
+    suite (`tests/e2e/hosted/…`, gated by `skip_unless_hosted_e2e()`), the opt-in
+    e2e suites (gated on a `RUN_*_E2E` variable), and docker-lane modules (gated on
+    `TORTOISE_DB_URI`). It pins that the module still ABORTS AT COLLECTION — a
+    strictly weaker claim than "its tests are collected", which is why the header
+    has to say so. Pin the spelling (so a marker cannot be mistaken for a test),
+    that the files exist, and that BOTH counts are recorded in the header — a
+    marker silently "cleaned up" into a test nodeid would change what the set
+    asserts, and a narrowed manifest must not be able to shrink its own claim.
     """
     nodeids = _nodeids(EMBEDDED)
     markers = [n for n in nodeids if n.partition("::")[2] == _module_dotted(n.split("::")[0])]
@@ -170,7 +176,10 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     for marker in markers:
         assert (ROOT / marker.split("::")[0]).is_file(), marker
     header = "\n".join(line for line in EMBEDDED.read_text().splitlines() if line.startswith("#"))
-    assert "collection" in header.lower(), (
+    # Pin the CLAIM, not a substring of it: `"collection" in header.lower()` was
+    # satisfied by the regenerate paragraph alone, so the sentence stating what a
+    # marker asserts could be deleted (cycle-3 finding).
+    assert "still aborts at collection" in header.lower(), (
         "the header must state what a marker asserts (a weaker claim than a collected test)"
     )
     # The RECORDED count must be the actual one, and no other count may be stated:
@@ -178,6 +187,40 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     recorded = [int(n) for n in re.findall(r"(\d+)[^\n]*\bmarkers?\b", header)]
     assert recorded and all(n == len(markers) for n in recorded), (
         f"the header records {recorded} markers but the manifest has {len(markers)}"
+    )
+    # The OTHER count was unchecked, and it is the one that can hide a silent
+    # NARROWING: `--manifest-only` compares expected-minus-observed, so a manifest
+    # whose real-test entries were deleted is still satisfied by its own junit. The
+    # header's real-test count is the only written record of how many there were,
+    # so it is pinned against the manifest (cycle-3 finding).
+    recorded_tests = [int(n) for n in re.findall(r"(\d+)[^\n]*\breal test", header)]
+    assert recorded_tests and all(n == len(tests) for n in recorded_tests), (
+        f"the header records {recorded_tests} real test nodeids but the manifest has {len(tests)}"
+    )
+    # A marker's mechanism is per-family, and naming only one of the three made the
+    # header FALSE for 18 of the 32 markers (a maintainer checking
+    # `test_capabilities_endpoint.py` against it read "this marker is spurious" —
+    # exactly the cleanup the frozen set exists to prevent). Require all three to be
+    # named, and require the stated per-family counts to add up to every marker, so
+    # the numbers are load-bearing rather than decorative.
+    families = {
+        "hosted E2E": "skip_unless_hosted_e2e",
+        "opt-in e2e": "RUN_",
+        "docker-lane": "TORTOISE_DB_URI",
+    }
+    stated: dict[str, int] = {}
+    for label, token in families.items():
+        line = next((l for l in header.splitlines() if token in l), None)
+        assert line is not None, (
+            f"the header does not name the {label} gate family ({token!r}) — a marker whose "
+            "mechanism is unnamed reads as spurious"
+        )
+        nums = [int(n) for n in re.findall(r"\b(\d+)\b", line)]
+        assert nums, f"the header names {label} but records no marker count for it"
+        stated[label] = nums[0]
+    assert sum(stated.values()) == len(markers), (
+        f"the header's per-family counts {stated} sum to {sum(stated.values())}, "
+        f"but the manifest has {len(markers)} markers"
     )
 
 
@@ -276,7 +319,14 @@ def test_a_single_vanished_nodeid_fails_and_is_named() -> None:
     """
     nodeids = _nodeids(EMBEDDED)
     assert len(nodeids) > 10, "the bite test needs a manifest that is not trivially small"
-    victim = next(nid for nid in nodeids if nid.endswith("::test_env_override_is_honoured_and_loud"))
+    markers = {n for n in nodeids if n.partition("::")[2] == _module_dotted(n.split("::")[0])}
+    tests = sorted(n for n in nodeids if n not in markers)
+    assert len(tests) > 3, f"the bite test needs real test nodeids; only {tests} present"
+    # Pick the victim FROM THE MANIFEST, never by a literal test name: renaming or
+    # removing a privileged test is an honest regeneration of this file, and doing
+    # so used to make this pin raise StopIteration instead of asserting (cycle-3
+    # finding — the same "cannot be satisfied honestly" defect one call deeper).
+    victim = tests[len(tests) // 2]
     with tempfile.TemporaryDirectory() as tmp:
         junit = Path(tmp) / "junit.xml"
         _junit_for([nid for nid in nodeids if nid != victim], junit)
