@@ -511,7 +511,9 @@ def _subscription_items(sub: dict) -> list:
     first version called ``.get`` on any truthy non-dict and 500'd the
     checkout route, before the metadata-tier fallback could run.)
     """
-    items = (sub or {}).get("items")
+    # Guard the SUBJECT as well as the value: a non-dict ``sub`` must yield
+    # ``[]`` too (``hosted_api._price_id_from`` passes the raw payload in).
+    items = sub.get("items") if isinstance(sub, dict) else None
     if isinstance(items, list):
         rows = items
     elif isinstance(items, dict):
@@ -605,10 +607,16 @@ def mirror_subscription(sdk, org_id: str, sub: dict, *,
     # Basil-or-later Stripe account (period fields on the subscription ITEMS)
     # still writes a window. Each bound is written ONLY when the payload
     # carries it, so a partial subscription object can never NULL OUT a bound
-    # already stored. (A payload that carries ONE bound and not the other still
-    # leaves a half-known anchor — the meter refuses it loudly and
-    # ``20260919000001`` repairs it; that is the documented, reported state, not
-    # a silent one.)
+    # already stored.
+    #
+    # A payload that carries ONE bound and not the other leaves a half-known
+    # REGISTRY anchor here (this writer owns the ``:Team`` graph twin). That is
+    # NOT repaired by ``20260919000001`` — that migration updates the Supabase
+    # ``organizations`` row, a different lane this writer never touches. The
+    # half-known twin is REPORTED, not silent (the meter refuses it and
+    # ``cohort_cost`` raises the #3981 alert) and is COMPLETED by the next
+    # authoritative push — a later ``mirror_subscription`` or
+    # ``customer.subscription.updated`` payload carrying the missing bound.
     period_start, period_end = subscription_period_bounds(sub)
     if period_start:
         set_fields += ", t.current_period_start=$period_start"

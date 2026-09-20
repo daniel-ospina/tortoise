@@ -27,10 +27,14 @@
 --      20260918000001 derivation, repeated here so the function is
 --      self-contained and safe to re-invoke);
 --   2. ``start`` known, ``end`` missing → ``end = start + 1 month`` — the
---      direction the original backfill lacked. Its producer is a PARTIAL
---      subscription payload (a ``mirror_subscription`` / a
---      ``customer.subscription.updated`` event that carried one bound and not
---      the other). NOTE: since Stripe API ``2025-03-31.basil`` the period
+--      direction the original backfill lacked. Its producer ON
+--      ``organizations`` is a PARTIAL subscription payload from the
+--      ``customer.subscription.updated`` webhook that carried one bound and
+--      not the other. (``mirror_subscription`` can leave the same half-known
+--      shape on the REGISTRY ``:Team`` twin, which this migration cannot
+--      reach — that twin is completed by the next authoritative push and
+--      reported by the #3981 runtime alert, never repaired here.) NOTE: since
+--      Stripe API ``2025-03-31.basil`` the period
 --      fields live on the subscription ITEMS; the webhook readers use
 --      ``billing.subscription_period_bounds`` (top-level, then item) so a
 --      Basil-or-later account still writes the anchor.
@@ -82,6 +86,15 @@
 -- to run at any time: every UPDATE is guarded on the missing bound, so a re-run
 -- is a no-op for rows a previous run (or a later webhook) already completed —
 -- and it never touches a row outside the two derivation branches.
+--
+-- BLANK-SUBSCRIPTION PREDICATE. Every population guard tests
+-- ``btrim(subscription_id, E' \t\r\n\v\f\u00A0\u0085') <> ''`` — the SAME
+-- whitespace set Python's ``str.strip()`` removes in the runtime authority
+-- ``metering._current_period`` (``not str(sub_id).strip()``). A bare
+-- ``btrim(x)`` trims ASCII SPACES ONLY, so a tab-only ``subscription_id``
+-- would be treated as a real subscription here while the meter treats it as
+-- free (calendar month, cap enforceable), letting this migration write onto a
+-- row outside its two derivation branches. (#4216 review.)
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.metering_repair_period_bounds()
@@ -99,7 +112,7 @@ BEGIN
              (current_period_end AT TIME ZONE 'UTC' - interval '1 month')
              AT TIME ZONE 'UTC'
      WHERE subscription_id IS NOT NULL
-       AND btrim(subscription_id) <> ''
+       AND btrim(subscription_id, E' \t\r\n\v\f\u00A0\u0085') <> ''
        AND current_period_end IS NOT NULL
        AND current_period_start IS NULL;
 
@@ -111,7 +124,7 @@ BEGIN
              (current_period_start AT TIME ZONE 'UTC' + interval '1 month')
              AT TIME ZONE 'UTC'
      WHERE subscription_id IS NOT NULL
-       AND btrim(subscription_id) <> ''
+       AND btrim(subscription_id, E' \t\r\n\v\f\u00A0\u0085') <> ''
        AND current_period_start IS NOT NULL
        AND current_period_end IS NULL;
 
@@ -125,7 +138,7 @@ BEGIN
                 AND o.current_period_end IS NULL) AS both_null
           FROM public.organizations AS o
          WHERE o.subscription_id IS NOT NULL
-           AND btrim(o.subscription_id) <> ''
+           AND btrim(o.subscription_id, E' \t\r\n\v\f\u00A0\u0085') <> ''
            AND (
                 (o.current_period_start IS NULL
                  AND o.current_period_end IS NULL)

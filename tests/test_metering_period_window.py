@@ -817,3 +817,135 @@ def test_checkout_with_malformed_items_is_acked_not_500(supabase_mode, monkeypat
                        headers={"stripe-signature": f"t={issued},v1={signed}"})
     assert resp.status_code == 200, resp.text
 
+
+@pytest.mark.parametrize("bad_sub", [
+    {"items": "x"},                             # scalar items
+    {"items": 5},                               # int items
+    {"items": {"data": [{"price": "x"}]}},       # non-dict price
+    {"items": {"data": [{"price": 7}]}},         # int price
+    {"items": [{"price": ["not", "a", "dict"]}]},  # list price
+])
+def test_checkout_with_malformed_subscription_shape_is_acked_not_500(
+        supabase_mode, monkeypatch, bad_sub):
+    """#4216 review → mutation: leave ANY unknown-shape ``.get`` in
+    ``_price_id_from`` unguarded.
+
+    ``_subscription_items`` hardened the ``items`` shape, but the sibling
+    ``(rows[0].get("price", {}) or {}).get("id")`` still raised on a truthy
+    non-dict ``price`` (``billing.subscription_plan`` guards the identical
+    access, so the shape is an expected payload class). The checkout call site
+    is OUTSIDE any try, so the ``AttributeError`` escapes to the route's
+    ``except Exception`` → HTTP 500 → Stripe redelivers the same malformed
+    event forever.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-shape", "stripe_customer_id": "cus_bad"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+    sub = {"id": "sub_bad", "status": "active", **bad_sub}
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: sub)
+    payload = {
+        "id": "evt_4216_shape",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-shape",
+            "customer": "cus_bad",
+            "subscription": "sub_bad",
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    assert resp.status_code == 200, resp.text
+
+
+def test_checkout_window_write_failure_is_retried_not_swallowed(
+        supabase_mode, monkeypatch):
+    """#4216 review → mutation: revert the checkout window write to the
+    log-and-CONTINUE ``try/except`` (i.e. drop the re-raise).
+
+    A swallowed window-write failure lets the route return 200, so Stripe never
+    redelivers and the org stays window-unresolvable (increments dropped, cap
+    unenforceable) until the next renewal — which a checkout-only org may never
+    receive. The fix APPLIES THE TIER FIRST (a taken payment must not sit on
+    free limits, #2789) and then re-raises so the event is retried; both writes
+    are idempotent, so the retry completes the window.
+
+    RED: response 200 (the failure is masked) instead of 500.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-wfail", "stripe_customer_id": "cus_4216"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+
+    real_update = supabase_mode.update_org_billing
+
+    def _fail_only_on_window(cp, org, updates):
+        if "current_period_start" in updates or "current_period_end" in updates:
+            raise RuntimeError("period column write exploded")
+        return real_update(cp, org, updates)
+
+    monkeypatch.setattr(supabase_mode, "update_org_billing", _fail_only_on_window)
+
+    class _StubCatalog:
+        def tier_for_price(self, price_id):
+            return "pro"
+
+    monkeypatch.setattr(bl, "PriceCatalog", _StubCatalog)
+
+    start = int(datetime.fromisoformat(SUB_START).timestamp())
+    end = int(datetime.fromisoformat(SUB_END).timestamp())
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {"id": "sub_4216", "status": "active",
+                                           "current_period_start": start,
+                                           "current_period_end": end,
+                                           "items": {"data": [
+                                               {"price": {"id": "price_x"}}]}})
+    payload = {
+        "id": "evt_4216_wfail",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-wfail",
+            "customer": "cus_4216",
+            "subscription": "sub_4216",
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    # The window failure is SURFACED (retried), not masked as a 200.
+    assert resp.status_code == 500, resp.text
+
+    row = fake.tables["organizations"][0]
+    # ...but the tier was applied FIRST, so the taken payment does not sit on
+    # free limits while Stripe redelivers (#2789).
+    assert row.get("tier") == "pro", row
+    # The window itself was NOT partially written.
+    assert row.get("current_period_start") is None, row
+    assert row.get("current_period_end") is None, row
+

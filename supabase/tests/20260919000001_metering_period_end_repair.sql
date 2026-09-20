@@ -67,6 +67,18 @@ VALUES
     -- `subscription_id`/`btrim` guard is exercised too.
     ('4216-blank-sub-end', '4216-blank-sub-end', 'org_4216-blank-sub-end', '   ',
      NULL, '2026-06-01T00:00:00+00:00'),
+    -- ...and NON-SPACE whitespace (tab / newline / NBSP), which a bare
+    -- ``btrim(x)`` would NOT treat as blank: the guard must match the runtime
+    -- resolver's ``str.strip()`` exactly, or it derives/reports a row the meter
+    -- considers a FREE org (#4216 review).
+    ('4216-blank-sub-tab', '4216-blank-sub-tab', 'org_4216-blank-sub-tab',
+     E'\t', NULL, NULL),
+    ('4216-blank-sub-tab-bound', '4216-blank-sub-tab-bound',
+     'org_4216-blank-sub-tab-bound', E'\t\n',
+     '2026-06-01T00:00:00+00:00', NULL),
+    ('4216-blank-sub-nbsp-end', '4216-blank-sub-nbsp-end',
+     'org_4216-blank-sub-nbsp-end', E'\u00A0',
+     NULL, '2026-06-01T00:00:00+00:00'),
     ('4216-free-no-sub-end', '4216-free-no-sub-end', 'org_4216-free-no-sub-end',
      NULL, NULL, '2026-07-01T00:00:00+00:00');
 
@@ -201,6 +213,26 @@ BEGIN
             f_s, f_e;
     END IF;
     SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-blank-sub-tab';
+    IF f_s IS NOT NULL OR f_e IS NOT NULL THEN
+        RAISE EXCEPTION 'a tab-only subscription_id must be untouched (% %)',
+            f_s, f_e;
+    END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-blank-sub-tab-bound';
+    IF f_s IS DISTINCT FROM '2026-06-01T00:00:00+00:00'::timestamptz
+       OR f_e IS NOT NULL THEN
+        RAISE EXCEPTION 'a tab-only subscription_id must not be derived (% %)',
+            f_s, f_e;
+    END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-blank-sub-nbsp-end';
+    IF f_s IS NOT NULL
+       OR f_e IS DISTINCT FROM '2026-06-01T00:00:00+00:00'::timestamptz THEN
+        RAISE EXCEPTION 'an NBSP-only subscription_id must not derive a start (% %)',
+            f_s, f_e;
+    END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
       FROM public.organizations WHERE id = '4216-free-no-sub-end';
     IF f_s IS NOT NULL
        OR f_e IS DISTINCT FROM '2026-07-01T00:00:00+00:00'::timestamptz THEN
@@ -280,4 +312,6 @@ DELETE FROM public.organizations
               '4216-dst-start', '4216-both-null', '4216-inverted',
               '4216-empty', '4216-free-one-bound', '4216-blank-sub',
               '4216-blank-sub-bound', '4216-blank-sub-end',
+              '4216-blank-sub-tab', '4216-blank-sub-tab-bound',
+              '4216-blank-sub-nbsp-end',
               '4216-free-no-sub-end');

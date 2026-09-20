@@ -24665,14 +24665,19 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         """Extract items[0].price.id handling BOTH Stripe shapes: items may be
         a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter).
 
-        Reads through ``_subscription_items`` so a malformed (scalar) ``items``
-        cannot raise here — the checkout call site is outside any try, and this
-        was the last ``.get`` on an unknown-shape ``items`` (#4216 review).
+        EVERY unknown-shape access is guarded so a malformed payload cannot
+        raise here — the checkout call site is outside any try, so a raise
+        would 500 the route and make Stripe redeliver the same bad event
+        forever. Reads ``items`` through ``_subscription_items`` and the
+        ``price`` value through an ``isinstance(..., dict)`` check (the sibling
+        access in ``billing.subscription_plan`` guards the same shapes) —
+        #4216 review.
         """
         rows = _subscription_items(sub)
         if not rows or not isinstance(rows[0], dict):
             return None
-        return (rows[0].get("price", {}) or {}).get("id")
+        price = rows[0].get("price")
+        return price.get("id") if isinstance(price, dict) else None
 
     def _resolve_tier_from_price(price_id: str | None) -> str | None:
         """price → tier; unknown price → None + ops-notify signal."""
@@ -24731,8 +24736,16 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                 # removes). Both bounds come from the SAME authoritative Stripe
                 # subscription object the tier is resolved from. Only the bounds
                 # the payload CARRIES are written; a bound it omits is left
-                # alone (never NULLed). The window write is ISOLATED so its
-                # failure cannot suppress the upgrade below.
+                # alone (never NULLed).
+                #
+                # FAILURE ORDER (#4216 review): a window-write failure must not
+                # SUPPRESS the tier upgrade (a taken payment must not sit on
+                # free limits, #2789) — but it must also not be SWALLOWED as a
+                # 200, or the org stays window-unresolvable until the next
+                # renewal webhook, which for a checkout-only org may never
+                # arrive. So record the failure, still apply the tier, then
+                # re-raise: the route 500s, Stripe redelivers, and both writes
+                # are idempotent so the window write is retried.
                 #
                 # NOTE (#4216 review): a failure of ``apply_limits`` /
                 # ``_set({"tier": ...})`` now PROPAGATES (the route 500s and
@@ -24745,10 +24758,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                     ("current_period_start", period_start),
                     ("current_period_end", period_end),
                 ) if v}
+                window_error = None
                 if window:
                     try:
                         _set(window)
                     except Exception as e:
+                        window_error = e
                         _logger.warning(
                             "webhook: period window write failed: %s",
                             redact_error(e))
@@ -24758,6 +24773,10 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                     _set({"tier": tier})
                     notify_kind = "billing_upgrade"
                     resolved_tier = tier
+                if window_error is not None:
+                    # The upgrade above is applied (idempotent); surface the
+                    # window failure so the event is RETRIED, not acknowledged.
+                    raise window_error
         if is_new_org and resolved_tier is None:
             # The metadata tier was server-resolved from the price at checkout
             # time and provision_org already wrote the matching quotas, so a
