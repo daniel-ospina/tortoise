@@ -50,6 +50,25 @@ def _nodeids(path: Path) -> list[str]:
     ]
 
 
+def _bare_test_name(nid_suffix: str) -> str:
+    """`TestGroup::test_x[1]` -> `test_x`: the function name pytest would collect.
+
+    Both sides of the registry comparison must be normalised, or an HONESTLY
+    regenerated manifest can never satisfy it: pytest spells a class-scoped test
+    `Class::name` and a parametrized one `name[param]`, while `def` gives the bare
+    name — so the pin would red a correct tree, and the only way out would be to
+    weaken it (the same "a source scan cannot close the class" disease this PR is
+    about).
+    """
+    return nid_suffix.split("::")[-1].split("[")[0]
+
+
+def _strip_docstrings(text: str) -> str:
+    """Remove triple-quoted blocks, so a `def test_x` written inside a docstring or an
+    example block is not read as a real test."""
+    return re.sub(r'"""[\s\S]*?"""', "", re.sub(r"'''[\s\S]*?'''", "", text))
+
+
 def _module_dotted(file: str) -> str:
     """`tests/test_x.py` -> `tests.test_x` (the junit `classname` prefix)."""
     assert file.endswith(".py"), file
@@ -119,8 +138,12 @@ def test_manifests_carry_provenance() -> None:
         )
         assert "PROVENANCE" in header, f"{path.name} has no provenance header"
         # A run ID, not the bare words: the earlier check passed on a header saying
-        # "NOT FROM A CI RUN", which is exactly the failure it exists to catch.
-        assert re.search(r"\brun\s+\d{6,}\b", header), (
+        # "NOT FROM A CI RUN", which is exactly the failure it exists to catch. Accept
+        # the spellings a real header may use (`run:`, `run-id`, `job`, a `.../runs/<id>`
+        # URL) — over-constraining this to one phrase would red an honest header.
+        assert re.search(
+            r"(?:run|runs|job)[\s:/#_=-]*(?:id[\s:=]*)?\d{6,}", header, re.I
+        ) or re.search(r"/runs/\d{6,}", header), (
             f"{path.name}'s header names no CI run id — the next reader cannot re-derive the set"
         )
         assert "PROVENANCE" in header and "junit" in header.lower(), (
@@ -147,8 +170,14 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     for marker in markers:
         assert (ROOT / marker.split("::")[0]).is_file(), marker
     header = "\n".join(line for line in EMBEDDED.read_text().splitlines() if line.startswith("#"))
-    assert str(len(markers)) in header and "collection" in header.lower(), (
-        "the header must state how many entries are collection-abort markers and what they assert"
+    assert "collection" in header.lower(), (
+        "the header must state what a marker asserts (a weaker claim than a collected test)"
+    )
+    # The RECORDED count must be the actual one, and no other count may be stated:
+    # `str(len(markers)) in header` passed on any header containing that digit string.
+    recorded = [int(n) for n in re.findall(r"(\d+)[^\n]*\bmarkers?\b", header)]
+    assert recorded and all(n == len(markers) for n in recorded), (
+        f"the header records {recorded} markers but the manifest has {len(markers)}"
     )
 
 
@@ -171,8 +200,14 @@ def test_platform_gated_manifest_covers_the_registry() -> None:
         file = ROOT / "tests" / name if not name.startswith("tests/") else ROOT / name
         path = file if file.is_file() else next(ROOT.rglob(Path(name).name))
         rel = str(path.relative_to(ROOT))
-        defs = set(re.findall(r"^\s*(?:async )?def (test_\w+)", path.read_text(), re.M))
-        pinned = {nid.split("::", 1)[1] for nid in _nodeids(PLATFORM_GATED) if nid.startswith(f"{rel}::")}
+        defs = set(
+            re.findall(r"^\s*(?:async )?def (test_\w+)", _strip_docstrings(path.read_text()), re.M)
+        )
+        pinned = {
+            _bare_test_name(nid.split("::", 1)[1])
+            for nid in _nodeids(PLATFORM_GATED)
+            if nid.startswith(f"{rel}::")
+        }
         assert defs <= pinned, (
             f"{rel} defines {sorted(defs - pinned)} with no nodeid in platform-gated.txt — "
             "regenerate the manifest so a vanished test is noticed (#4215)"
