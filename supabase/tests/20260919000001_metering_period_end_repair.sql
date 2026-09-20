@@ -79,6 +79,14 @@ VALUES
     ('4216-blank-sub-nbsp-end', '4216-blank-sub-nbsp-end',
      'org_4216-blank-sub-nbsp-end', E'\u00A0',
      NULL, '2026-06-01T00:00:00+00:00'),
+    -- ...and a Unicode space OUTSIDE the ASCII/NBSP set (U+2003 EM SPACE), so
+    -- the predicate must be the full ``str.strip()`` set, not a short list of
+    -- the obvious ones. Both directions (no bound / one bound) are seeded.
+    ('4216-blank-sub-emsp', '4216-blank-sub-emsp', 'org_4216-blank-sub-emsp',
+     E'\u2003', NULL, NULL),
+    ('4216-blank-sub-emsp-end', '4216-blank-sub-emsp-end',
+     'org_4216-blank-sub-emsp-end', E'\u2003',
+     NULL, '2026-06-01T00:00:00+00:00'),
     ('4216-free-no-sub-end', '4216-free-no-sub-end', 'org_4216-free-no-sub-end',
      NULL, NULL, '2026-07-01T00:00:00+00:00');
 
@@ -233,6 +241,19 @@ BEGIN
             f_s, f_e;
     END IF;
     SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-blank-sub-emsp';
+    IF f_s IS NOT NULL OR f_e IS NOT NULL THEN
+        RAISE EXCEPTION 'a U+2003-only subscription_id must be untouched (% %)',
+            f_s, f_e;
+    END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
+      FROM public.organizations WHERE id = '4216-blank-sub-emsp-end';
+    IF f_s IS NOT NULL
+       OR f_e IS DISTINCT FROM '2026-06-01T00:00:00+00:00'::timestamptz THEN
+        RAISE EXCEPTION 'a U+2003-only subscription_id must not derive a start (% %)',
+            f_s, f_e;
+    END IF;
+    SELECT current_period_start, current_period_end INTO f_s, f_e
       FROM public.organizations WHERE id = '4216-free-no-sub-end';
     IF f_s IS NOT NULL
        OR f_e IS DISTINCT FROM '2026-07-01T00:00:00+00:00'::timestamptz THEN
@@ -313,5 +334,6 @@ DELETE FROM public.organizations
               '4216-empty', '4216-free-one-bound', '4216-blank-sub',
               '4216-blank-sub-bound', '4216-blank-sub-end',
               '4216-blank-sub-tab', '4216-blank-sub-tab-bound',
-              '4216-blank-sub-nbsp-end',
+              '4216-blank-sub-nbsp-end', '4216-blank-sub-emsp',
+              '4216-blank-sub-emsp-end',
               '4216-free-no-sub-end');

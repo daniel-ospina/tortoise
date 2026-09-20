@@ -24700,7 +24700,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         # client_reference_id; the registry lane returns its own id, so the
         # effective id is adopted for every later write AND reported back to
         # the caller for the dedup marker / tier read / audit.
-        meta = data.get("metadata") or {}
+        # Guard the SUBJECT of every payload read. A non-dict ``metadata`` /
+        # ``customer_details`` would raise AttributeError here, before any try,
+        # and the route's handler would 500 → Stripe redelivers the same bad
+        # event forever — the class this PR hardens for ``items``/``price``.
+        meta = data.get("metadata")
+        meta = meta if isinstance(meta, dict) else {}
         is_new_org = str(meta.get("new_org") or "") == "1"
         if is_new_org:
             # Sync call: _webhook_apply_event itself already runs in a worker
@@ -24708,7 +24713,10 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             # blocking control-plane + graph writes — stays on that thread.
             org_id = _provision_new_org_from_checkout(sdk, org_id, meta)
         cust = data.get("customer")
-        email = (data.get("customer_details") or {}).get("email")
+        customer_details = data.get("customer_details")
+        customer_details = (
+            customer_details if isinstance(customer_details, dict) else {})
+        email = customer_details.get("email")
         sub_id = data.get("subscription")
         updates = {"subscription_status": "active", "stripe_customer_id": cust}
         if email:
@@ -24717,6 +24725,7 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             updates["subscription_id"] = sub_id
         _set(updates)
         resolved_tier = None
+        window_error = None
         if sub_id:
             try:
                 sub = StripeClient().get_subscription(sub_id)
@@ -24743,9 +24752,11 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                 # free limits, #2789) — but it must also not be SWALLOWED as a
                 # 200, or the org stays window-unresolvable until the next
                 # renewal webhook, which for a checkout-only org may never
-                # arrive. So record the failure, still apply the tier, then
-                # re-raise: the route 500s, Stripe redelivers, and both writes
-                # are idempotent so the window write is retried.
+                # arrive. So record the failure and carry on: the tier is
+                # applied, the new-org metadata fallback below still runs, and
+                # the failure is re-raised at the END of this branch. The route
+                # then 500s, Stripe redelivers, and every write is idempotent,
+                # so the window write is retried.
                 #
                 # NOTE (#4216 review): a failure of ``apply_limits`` /
                 # ``_set({"tier": ...})`` now PROPAGATES (the route 500s and
@@ -24773,10 +24784,6 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                     _set({"tier": tier})
                     notify_kind = "billing_upgrade"
                     resolved_tier = tier
-                if window_error is not None:
-                    # The upgrade above is applied (idempotent); surface the
-                    # window failure so the event is RETRIED, not acknowledged.
-                    raise window_error
         if is_new_org and resolved_tier is None:
             # The metadata tier was server-resolved from the price at checkout
             # time and provision_org already wrote the matching quotas, so a
@@ -24802,6 +24809,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                     f"new-org checkout for team {org_id} has no resolvable "
                     f"paid tier (metadata tier={meta_tier!r}, subscription "
                     "tier unresolved) — refusing to ack")
+        if window_error is not None:
+            # The tier upgrade (or the #2789 metadata fallback) above has been
+            # applied — every write is idempotent — so surface the window
+            # failure LAST: the route 500s and Stripe redelivers, retrying the
+            # window write, instead of acking an org left unmeterable.
+            raise window_error
         return notify_kind, org_id
 
     if etype == "invoice.payment_failed":

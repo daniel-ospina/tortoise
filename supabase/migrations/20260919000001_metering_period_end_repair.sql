@@ -88,13 +88,17 @@
 -- and it never touches a row outside the two derivation branches.
 --
 -- BLANK-SUBSCRIPTION PREDICATE. Every population guard tests
--- ``btrim(subscription_id, E' \t\r\n\v\f\u00A0\u0085') <> ''`` — the SAME
--- whitespace set Python's ``str.strip()`` removes in the runtime authority
--- ``metering._current_period`` (``not str(sub_id).strip()``). A bare
--- ``btrim(x)`` trims ASCII SPACES ONLY, so a tab-only ``subscription_id``
--- would be treated as a real subscription here while the meter treats it as
--- free (calendar month, cap enforceable), letting this migration write onto a
--- row outside its two derivation branches. (#4216 review.)
+-- ``btrim(subscription_id, blank_chars) <> ''``, where ``blank_chars`` is the
+-- FULL whitespace set Python's ``str.strip()`` removes in the runtime
+-- authority ``metering._current_period`` (``not str(sub_id).strip()``): the
+-- ASCII whitespace, the C0 separators (U+001C–U+001F), NEL (U+0085), NBSP
+-- (U+00A0), and the Unicode space separators (U+1680, U+2000–U+200A, U+2028,
+-- U+2029, U+202F, U+205F, U+3000). A bare ``btrim(x)`` trims ASCII SPACES
+-- ONLY, so, e.g., a tab- or U+2003-only ``subscription_id`` would be treated
+-- as a real subscription here while the meter treats the org as free
+-- (calendar month, cap enforceable), letting this migration write onto a row
+-- outside its two derivation branches. ``blank_chars`` is declared ONCE so
+-- the three guards cannot drift. (#4216 review.)
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.metering_repair_period_bounds()
@@ -104,6 +108,11 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+    -- The whitespace set Python's ``str.strip()`` (``str.isspace()``) removes:
+    -- ASCII whitespace + the C0 separators + NEL/NBSP + the Unicode space
+    -- separators. Held in ONE place so the three guards below cannot drift
+    -- from the runtime authority ``metering._current_period``.
+    blank_chars constant text := E' \t\n\v\f\r\u001C\u001D\u001E\u001F\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000';
     r record;
 BEGIN
     -- 1) end known, start missing → derive the start.
@@ -112,7 +121,7 @@ BEGIN
              (current_period_end AT TIME ZONE 'UTC' - interval '1 month')
              AT TIME ZONE 'UTC'
      WHERE subscription_id IS NOT NULL
-       AND btrim(subscription_id, E' \t\r\n\v\f\u00A0\u0085') <> ''
+       AND btrim(subscription_id, blank_chars) <> ''
        AND current_period_end IS NOT NULL
        AND current_period_start IS NULL;
 
@@ -124,7 +133,7 @@ BEGIN
              (current_period_start AT TIME ZONE 'UTC' + interval '1 month')
              AT TIME ZONE 'UTC'
      WHERE subscription_id IS NOT NULL
-       AND btrim(subscription_id, E' \t\r\n\v\f\u00A0\u0085') <> ''
+       AND btrim(subscription_id, blank_chars) <> ''
        AND current_period_start IS NOT NULL
        AND current_period_end IS NULL;
 
@@ -138,7 +147,7 @@ BEGIN
                 AND o.current_period_end IS NULL) AS both_null
           FROM public.organizations AS o
          WHERE o.subscription_id IS NOT NULL
-           AND btrim(o.subscription_id, E' \t\r\n\v\f\u00A0\u0085') <> ''
+           AND btrim(o.subscription_id, blank_chars) <> ''
            AND (
                 (o.current_period_start IS NULL
                  AND o.current_period_end IS NULL)

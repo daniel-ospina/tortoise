@@ -949,3 +949,83 @@ def test_checkout_window_write_failure_is_retried_not_swallowed(
     assert row.get("current_period_start") is None, row
     assert row.get("current_period_end") is None, row
 
+
+def test_new_org_window_failure_still_applies_the_metadata_tier(
+        supabase_mode, monkeypatch):
+    """#4216 review → mutation: re-raise ``window_error`` BEFORE the
+    ``is_new_org and resolved_tier is None`` metadata-tier fallback.
+
+    When the window write fails AND the subscription price does not resolve
+    (``tier is None``), the metadata fallback is the only path that lifts a new
+    PAID org off free limits in the registry/selfhost lane (``sdk.org_create``
+    hardcodes free; #2789). Re-raising early skips it. The fix runs the
+    fallback first and re-raises LAST, so the tier lands AND the event is
+    retried.
+
+    RED: the org is left on the default (free) tier while the route 500s.
+    """
+    from fastapi.testclient import TestClient
+
+    import tortoise.hosted_api as ha
+    from tests.fake_control_plane import FakeControlPlane
+    from tortoise import billing as bl
+
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    fake = FakeControlPlane({"organizations": [
+        {"id": "org-4216-neworg", "stripe_customer_id": "cus_4216"}]})
+    monkeypatch.setattr(supabase_mode, "get_control_plane", lambda: fake)
+    # Stub provisioning: this test is about the ORDER of the two failure
+    # paths, not about provisioning (covered elsewhere).
+    monkeypatch.setattr(ha, "_provision_new_org_from_checkout",
+                        lambda sdk, org_id, meta: org_id)
+
+    real_update = supabase_mode.update_org_billing
+
+    def _fail_only_on_window(cp, org, updates):
+        if "current_period_start" in updates or "current_period_end" in updates:
+            raise RuntimeError("period column write exploded")
+        return real_update(cp, org, updates)
+
+    monkeypatch.setattr(supabase_mode, "update_org_billing", _fail_only_on_window)
+
+    class _EmptyCatalog:
+        def tier_for_price(self, price_id):
+            return None
+
+    monkeypatch.setattr(bl, "PriceCatalog", _EmptyCatalog)
+
+    start = int(datetime.fromisoformat(SUB_START).timestamp())
+    end = int(datetime.fromisoformat(SUB_END).timestamp())
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {"id": "sub_4216", "status": "active",
+                                           "current_period_start": start,
+                                           "current_period_end": end,
+                                           "items": {"data": [
+                                               {"price": {"id": "price_x"}}]}})
+    payload = {
+        "id": "evt_4216_neworg_wfail",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "client_reference_id": "org-4216-neworg",
+            "customer": "cus_4216",
+            "subscription": "sub_4216",
+            "metadata": {"new_org": "1", "tier": "pro",
+                          "user_id": "u_4216", "org_name": "New Org"},
+        }},
+    }
+    raw = json.dumps(payload).encode()
+    issued = str(int(time.time()))
+    signed = hmac.new(b"whsec_test", f"{issued}.{raw.decode()}".encode(),
+                      hashlib.sha256).hexdigest()
+
+    with TestClient(ha.app) as tc:
+        resp = tc.post("/webhooks/stripe", content=raw,
+                       headers={"stripe-signature": f"t={issued},v1={signed}"})
+    assert resp.status_code == 500, resp.text
+
+    # The metadata fallback ran BEFORE the re-raise: the new paid org is NOT
+    # left on free limits while Stripe redelivers.
+    row = fake.tables["organizations"][0]
+    assert row.get("tier") == "pro", row
+
