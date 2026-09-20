@@ -344,7 +344,7 @@ rows:
   cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
     — waits for your approval
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:a6d828573b6efd9e
+  served_from: tortoise/mcp_server.py:3d72f7a7b56da6d0
   family: memory
   family_rank: 1
   served: http
@@ -365,7 +365,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # Served-surface change (#3949): the write now OBSERVES whether the caller
+  # filed a decision-shaped point instead of claiming the step on any write.
+  # Fingerprint a6d828573b6efd9e -> 3d72f7a7b56da6d0. Row refresh only — no
+  # tool added, removed or renamed; approved in #3949 by @daniel-ospina.
+  approval: '#3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
@@ -2324,7 +2328,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_decision
-  served_from: tortoise/mcp_server.py:d687db94a7343283
+  served_from: tortoise/mcp_server.py:5b94130694a2f699
   family: journal
   family_rank: 7
   served: http
@@ -2345,7 +2349,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # Served-surface change (#3949): this call IS the observation, so it declares
+  # it rather than letting the helper infer one. Fingerprint
+  # d687db94a7343283 -> 5b94130694a2f699. Row refresh only — no tool added,
+  # removed or renamed; approved in #3949 by @daniel-ospina.
+  approval: '#3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval

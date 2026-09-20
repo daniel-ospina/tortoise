@@ -873,6 +873,7 @@ surfaces:
   - test_capabilities_endpoint.py  # #2004 (W8): docker-lane catalog endpoint + build-fork gate tests
   - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
   - test_onboarding_analytics_patch.py
+  - test_onboarding_auto_complete.py
   - test_onboarding_endpoints.py
   - test_onboarding_false_completion_repair.py  # #3912: false decide-completed repair + guard (docker-lane)
   - test_onboarding_health_flip.py
@@ -1710,6 +1711,10 @@ durations:
   test_navigation.py: 0.0
   test_no_tests_imports_in_production.py: 0.0
   test_onboard_prompt_ref.py: 0.0
+  # #3949: 24 tests, ~0.02s of junit testcase time (run 35392801726, test-b
+  # leg) — the file's own cost is negligible; the lane's shared session fixture
+  # is not attributable to it. Refresh from the first post-merge main run.
+  test_onboarding_auto_complete.py: 0.0
   test_onboarding_seed.py: 0.0
   test_onboarding_variants.py: 0.0
   test_operator_source_unit.py: 0.0
