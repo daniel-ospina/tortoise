@@ -1586,6 +1586,10 @@ durations:
   longmem_eval/test_context_assembly_arms.py: 0.1
   longmem_eval/test_gold_evidence_claims.py: 0.1
   mini_beir/test_mini_beir.py: 0.1
+  # #3926/#4173: measured 0.114s — run 35444881400 (head d96b92d20),
+  # `pytest-log-test-a` junit.xml, `time` summed over the file's 3 `testcase`
+  # elements (its shard); 0.1 is that sum at this map's one-decimal convention.
+  test_3926_error_prop_guard.py: 0.1
   test_abuse.py: 0.1
   test_aggregative_intent.py: 0.1
   test_api.py: 0.1
