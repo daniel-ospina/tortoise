@@ -186,7 +186,8 @@ _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING = (
     "or capture the session under a convergent lane, to extract"
 )
 
-#: #4258 (owner ruling on #3892, comment 5737715963): the truthful
+#: #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+#: default ON; reaffirmed by 5737715963): the truthful
 #: ``extraction_mode`` for a capture whose org turned extraction OFF
 #: (onboarding_state.capture_extract = false). A member of the SAME
 #: ``extraction_mode`` vocabulary as ``_CAPTURE_NO_PROVIDER_MODE`` — a
@@ -203,8 +204,8 @@ _CAPTURE_EXTRACTION_DISABLED_WARNING = (
     "extraction into memory is turned OFF for this team "
     "('capture_extract'); the session's turns were STORED and remain "
     "searchable, but LLM extraction into memory points was skipped — turn "
-    "extraction back on (dashboard: Memory sources > Agent session "
-    "recording > Extract into memory) and re-capture the session to extract"
+    "extraction back on (dashboard: Memory sources > Extract sessions into "
+    "memory) and re-capture the session to extract"
 )
 
 

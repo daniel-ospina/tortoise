@@ -365,3 +365,48 @@ def test_sessions_import_defers_on_extraction_disabled(tmp_path, monkeypatch, ca
     assert len(list((tmp_path / "receipts").glob("*.json"))) == 1, (
         "the keyed control must write a receipt — otherwise the empty dir "
         "above proves nothing")
+
+
+def test_sessions_import_deferred_remedy_names_both_levers(tmp_path, monkeypatch, capsys):
+    """#4258 + #3892: when the receipt is BOTH keyless AND extraction-disabled,
+    the deferred remedy must name both levers. Naming only the missing key
+    would send the user to configure a provider that still would not extract
+    while the team's `capture_extract` setting is OFF — the same wrong-lever
+    defect the review flagged (a remedy that cannot fix the state it names).
+    """
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.sdk import _CAPTURE_EXTRACTION_DISABLED_WARNING
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            # the no-provider branch wins the MODE, but the server still adds
+            # the extraction-disabled warning additively (#4258).
+            return json.dumps({
+                "session_id": "s-both",
+                "extraction_mode": "no-provider",
+                "warnings": ["no LLM provider key",
+                             _CAPTURE_EXTRACTION_DISABLED_WARNING],
+            }).encode()
+
+    args = SimpleNamespace(file=str(_pi_turns_file(tmp_path, 3)),
+                           harness="pi", session_id=None)
+    with mock.patch("urllib.request.urlopen", lambda req, timeout=None: _Resp()):
+        assert _cmd_sessions_import(args) == 0
+    assert list((tmp_path / "receipts").glob("*.json")) == [], (
+        "a deferred import writes no receipt")
+    err = capsys.readouterr().err.lower()
+    assert "no llm provider key" in err and "turned off" in err, err
+    assert "key is configured and extraction is turned back on" in err, (
+        "the remedy must name BOTH levers, not just the missing key: " + err)

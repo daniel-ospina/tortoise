@@ -8216,8 +8216,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
     the capture is stored for every request and ONLY the LLM extraction is
     skipped, reported truthfully as receipt mode "no-provider".
-    #4258 (owner ruling on #3892, comment 5737715963): the SAME store-only
-    outcome is reachable by the USER — onboarding_state.capture_extract=false
+    #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    default ON; reaffirmed by 5737715963): the SAME store-only outcome is
+    reachable by the USER — onboarding_state.capture_extract=false
     (per-org, default ON when absent) stores the turns and skips extraction,
     reported truthfully as receipt mode "extraction-disabled".
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
@@ -8277,8 +8278,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
     # pre-#3892 503-first refusal.
     no_provider = not _llm_provider_available()
-    # #4258 (owner ruling on #3892, comment 5737715963): extraction into memory
-    # is a PER-ORG user setting, default ON. OFF is "store but don't extract" —
+    # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    # default ON; reaffirmed by 5737715963): extraction into memory is a
+    # PER-ORG user setting, default ON. OFF is "store but don't extract" —
     # the same store-only shape as the keyless path, but under its OWN truthful
     # reason (a provider may well be configured). `store_only` is the single
     # predicate every store-only decision below keys on, so the keyless and the
@@ -8728,7 +8730,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": [],
-            "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+            # #4258: when the team ALSO turned extraction off, both reasons
+            # are true and both belong on the receipt — the no-provider branch
+            # wins the MODE (a missing key is the harder blocker), but the
+            # user's own setting must not vanish from the disclosure.
+            "warnings": ([_CAPTURE_NO_PROVIDER_WARNING] if extract_enabled
+                         else [_CAPTURE_NO_PROVIDER_WARNING,
+                               _CAPTURE_EXTRACTION_DISABLED_WARNING]),
             "mode": _CAPTURE_NO_PROVIDER_MODE,
             # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
             # (additive meta contract), empty here (not fabricated).
@@ -8755,8 +8763,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # telemetry — stats always-present, empty on replay.
                 "stats": {}}
     elif not extract_enabled:
-        # #4258 (owner ruling on #3892, comment 5737715963): the team turned
-        # extraction OFF. The turn loop above already ran UNCHANGED, so the
+        # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+        # default ON; reaffirmed by 5737715963): the team turned extraction OFF.
+        # The turn loop above already ran UNCHANGED, so the
         # Session + its turn Points are STORED and searchable; only the LLM
         # extraction into memory points is skipped — exactly the keyless
         # shape, reported under its own reason. Placed AFTER the replay
@@ -9385,7 +9394,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #4258: the team turned extraction off — turns stored, extraction
         # skipped by the USER's setting. Its own name for the same reason the
         # keyless case has one: the causes are different and the receipt must
-        # not conflate them. Checked before `route` for the same parity.
+        # not conflate them. Checked before `route` so an off setting is never
+        # reported as an "llm" extraction that did not run. (Unlike the keyless
+        # branch this has no SDK counterpart today: sdk.capture_session does
+        # not read the setting — that lane is a deferred follow-up.)
         effective_mode = _CAPTURE_EXTRACTION_DISABLED_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
@@ -18669,7 +18681,8 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
 
 
 def _capture_extract_enabled(org: dict) -> bool:
-    """#4258 (owner ruling on #3892, comment 5737715963): the EFFECTIVE
+    """#4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
+    default ON; reaffirmed by 5737715963): the EFFECTIVE
     ``capture_extract`` for a capture — a PER-ORG user setting, default ON.
 
     Read with an EXPLICIT ``True`` default so an older stored onboarding state

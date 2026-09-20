@@ -52,7 +52,7 @@ test('#4258: MemorySources reads capture_extract with absence = ON and toggles i
     'absence must read ON (only an explicit false disables extraction)')
 
   const row = slice('Extraction toggle (#4258)',
-    '// #1728 (Task 16/17): github index-job status line', 'extraction row')
+    'End extraction toggle (#4258)', 'extraction row')
   assert.match(row, /aria-checked=\{extractOn\}/, 'the switch reflects the setting')
   assert.match(row, /onToggleCaptureExtract\(!extractOn\)/, 'the switch toggles the setting')
   assert.match(row, /disabled=\{memoryBusy === 'extract' \|\| !sessionsOn\}/,
@@ -67,8 +67,10 @@ test('#4258: the LIVE Settings surface passes the handler (archived wizard stays
   // The ARCHIVED wizard block is line-count-pinned by overview.test.js (#2361)
   // and site-pinned by overviewSettings.test.js (DE2E-2), so its call site must
   // NOT gain the prop — the component therefore defaults it.
-  assert.match(mainJsx, /onToggleCaptureExtract = \(\) => \{\}/,
-    'MemorySources must default the optional handler for the archived call site')
+  assert.match(mainJsx, /onToggleCaptureExtract = null/,
+    'MemorySources must default the optional handler to null for the archived call site')
+  assert.match(mainJsx, /\{onToggleCaptureExtract && \(/,
+    'the row must not render where no handler exists (the archived wizard)')
   assert.match(mainJsx, /onToggleCaptureExtract\(!extractOn\)/,
     'the defaulted prop must be the one the row invokes')
 })

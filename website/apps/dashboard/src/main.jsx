@@ -503,7 +503,7 @@ function SettingsTab(props) {
       <section className="settings-home" aria-labelledby="settings-capture-heading">
         <h3 id="settings-capture-heading">Captured sessions</h3>
         <p className="dim small">
-          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory.
+          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory sources — extraction into memory is controlled by the toggle in Memory sources.
         </p>
         {/* #2000 (W4) review P2-3: honest states — never a fabricated
             "recording is off" while the onboarding state is still loading
@@ -9470,8 +9470,10 @@ function MemorySources(props) {
     onToggleIssues, onToggleDocs, onToggleSessions,
     // #4258: optional — the byte-pinned ARCHIVED wizard block (#2361 rollback)
     // shares this component and must stay untouched, so its call site omits the
-    // prop; the LIVE Settings surface always passes it.
-    onToggleCaptureExtract = () => {},
+    // prop; the LIVE Settings surface always passes it. `null` (not a no-op)
+    // so the row is NOT rendered where no handler exists — an inert switch
+    // that silently does nothing is worse than an absent one.
+    onToggleCaptureExtract = null,
     onConnectGithub, onIndexDocs, onReindexGithub,
     onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
   } = props
@@ -9740,7 +9742,7 @@ function MemorySources(props) {
         />
         <div className="toggle-body">
           <h4>Agent session recording</h4>
-          <p>When on, sessions from tools with capture installed are filed to your graph as memory.</p>
+          <p>When on, sessions from tools with capture installed are filed to your graph as a memory source; whether they are also extracted into memory is controlled below.</p>
           {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
           <div className="harness-statuses">
             {HARNESS_ORDER.map((h) => {
@@ -9781,7 +9783,10 @@ function MemorySources(props) {
 
       {/* ── Extraction toggle (#4258) — when recording is on, decide whether a
           captured session is ALSO extracted into memory points (default ON;
-          #3892 owner ruling). Off = store the turns, skip extraction. ── */}
+          #3892 owner ruling 5723832861, reaffirmed by 5737715963). Off = store
+          the turns, skip extraction. Rendered only where a handler exists —
+          the archived wizard passes none, so an inert switch is not shown. ── */}
+      {onToggleCaptureExtract && (
       <div className="toggle-row">
         <button
           type="button"
@@ -9789,7 +9794,7 @@ function MemorySources(props) {
           role="switch"
           aria-checked={extractOn}
           data-on={extractOn ? 'true' : 'false'}
-          aria-label="Extract captured sessions into memory"
+          aria-label="Extract sessions into memory"
           onClick={() => onToggleCaptureExtract(!extractOn)}
           disabled={memoryBusy === 'extract' || !sessionsOn}
         />
@@ -9798,7 +9803,9 @@ function MemorySources(props) {
           <p>
             When on, each captured session is also extracted into memories
             (uses your provider key). When off, sessions are stored only — their
-            turns stay searchable, but nothing is extracted.
+            turns stay searchable, but nothing is extracted, and sessions
+            captured while this is off stay unextracted until they are
+            captured again.
           </p>
           {!sessionsOn && (
             <p className="dim small">Turn on agent session recording to change this.</p>
@@ -9806,6 +9813,8 @@ function MemorySources(props) {
           {memoryErrors.extract && <p className="error" role="alert">{memoryErrors.extract}</p>}
         </div>
       </div>
+      )}
+      {/* ── End extraction toggle (#4258) ── */}
     </div>
   )
 }

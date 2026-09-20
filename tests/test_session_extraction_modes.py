@@ -11,6 +11,8 @@ gone. Semantics under test:
   - provider availability reflects the keys the code actually consumes
     (ANTHROPIC_API_KEY excluded — #722)
 """
+from __future__ import annotations
+
 import os
 import tempfile
 
@@ -721,7 +723,8 @@ def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
 
 
 # ── #4258: the per-org "capture also extracts into memory" user setting ──────
-# Owner ruling on #3892 (comment 5737715963): extraction into memory is a USER
+# Owner ruling on #3892 (comment 5723832861 — user-configurable, default ON;
+# reaffirmed by 5737715963): extraction into memory is a USER
 # SETTING, default ON; the non-default is "store but don't extract". The setting
 # is read per-org from onboarding_state.capture_extract, with absence reading ON
 # (an older stored state must never silently mean OFF).
