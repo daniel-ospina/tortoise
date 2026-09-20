@@ -1418,12 +1418,23 @@ def test_fast_close_reclaims_the_ephemeral_socket_dir(tmp_path, monkeypatch):
     NOSAVEd server's dir leaked forever (measured: 10,711 orphaned dirs vs
     123 live). The fast path must reclaim it.
 
+    #4214: this MUST hold on the exit seam too, not just mid-run — after a
+    clean NOSAVE shutdown redislite has unlinked both ``redis.socket`` and
+    ``redis.pid``, and the #4068 reaper's discovery requires one of those
+    markers, so a deferred dir is invisible to the reaper and leaks forever.
+
     RED mutation: drop the ``_remove_ephemeral_socket_dir`` call from the
     fast path's SHUTDOWN-NOSAVE branch — the dir survives the close.
     """
     from tortoise.projection import FalkorProjection
 
     monkeypatch.setenv("TORTOISE_FAST_ATEXIT", "1")
+    # #4214: the exit budget is process-global, and an earlier test in this
+    # session may have consumed it by driving a seam directly. This test is
+    # about RECLAMATION, so give the seam an unspent budget (monkeypatch
+    # restores the module state afterwards).
+    from tortoise import embedded_lifecycle as _el
+    monkeypatch.setattr(_el, "_atexit_deadline", None)
     db_path = str(tmp_path / "f3_reclaim.db")
     proj = FalkorProjection(db_path, graph_name="test")
     inner = getattr(proj.db, "client", proj.db)
