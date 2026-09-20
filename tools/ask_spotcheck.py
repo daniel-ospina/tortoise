@@ -43,7 +43,10 @@ captured session's turn store actually has: one episodic turn Point per
 windowed turn of every session that passes the shared blank gate (a session
 with no extractable line writes nothing — capture's pre-mutation gate)
 (deterministic ``f"{sid}_t{i}"`` id, ``pointKind='event'``,
-``is_episodic=true``, ``speaker``, no ``sessionId``/``eventId`` prop) wired
+``is_episodic=true``, ``speaker``, no ``sessionId``/``eventId`` prop, and the
+product's own turn EMBEDDING via the STORE seam
+(``encode_batch_for_store`` + ``proj.required_embedding_dim``, #4304) — #4194;
+dense ON by default, ``embed=False`` for the #4197 backlog state) wired
 to its ``:Session`` (id = the fixture's own ``haystack_session_ids[i]``, or
 the synthetic ``sess-{i}`` placeholder when the fixture carries none) by
 the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance mechanism the
@@ -59,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -85,6 +89,8 @@ from tortoise.sdk import (  # noqa: E402
     _normalize_turn_role,
     _session_llm_transcript,
 )
+
+_logger = logging.getLogger(__name__)
 
 _COMMITTED_FIXTURE = os.path.join(
     _REPO_ROOT, "tests", "fixtures", "ask_spotcheck_composition.json")
@@ -190,9 +196,63 @@ def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
     return now
 
 
+#: W7A: the ask lane's DEFAULT seeding mode. ``True`` = the seeder stores the
+#: product's own turn vector (the post-#4194 shape the instrument measures);
+#: ``False`` = the pre-#4194 / no-embedder store (#4197's backlog). Single
+#: source so a receipt can NAME the mode it was produced in without restating
+#: it by hand (a receipt that does not name its seeding mode is not evidence).
+SEED_TURNS_EMBEDDED_BY_DEFAULT = True
+
+
+def _turn_embeddings(turn_texts: list[str],
+                     expected_dim: int | None,
+                     ) -> list[list[float] | None]:
+    """The turn vectors the PRODUCT's write path stores (#4194, W7A).
+
+    A fixture must model what the product's write path now does, and that path
+    now embeds every episodic turn with the SAME local encoder the query leg
+    uses — so the dense leg is live for captured turns. This routes through the
+    product's OWN store-scoped entry point — ``embeddings.encode_batch_for_store``
+    with ``proj.required_embedding_dim`` — NOT the raw encoder seam. The width
+    constraint belongs to the STORE's vector index (#4280), and calling
+    ``compute_embeddings`` directly would re-create the exact defect #4280
+    carried: a stored vector of the wrong width is a broken leg, while on the
+    index-less brute-force lane any self-consistent width is usable and must
+    NOT be dropped. The store helper applies the width and LOGS every dropped
+    row, so a fixture cannot hand ``vecf32`` a vector the read path cannot use
+    in silence.
+
+    ``expected_dim`` is the caller's own store width
+    (``proj.required_embedding_dim``) — a required argument, never a defaulted
+    copy of ``EMBEDDING_DIM``, because the two lanes answer differently
+    (``EMBEDDING_DIM`` vs ``None``) and the wrong one silently NULLs every
+    vector on the lane it does not describe (#4280 review).
+
+    Fail-soft, exactly as the product's turn write: ``None`` per turn when no
+    embedder is installed (the turn is still stored; the read path declares the
+    vector leg impaired).
+    """
+    if not turn_texts:
+        return []
+    try:
+        from tortoise.embeddings import encode_batch_for_store
+        return encode_batch_for_store(turn_texts, expected_dim)
+    except Exception:  # noqa: BLE001, RUF100 — embedding stays optional
+        # A whole-batch failure must stay audible: silently returning ``None``
+        # per turn is indistinguishable from "the leg ran and found nothing"
+        # — the way #4280 hid (the product's own turn write logs here too).
+        _logger.warning(
+            "ask seeder: turn embedding batch failed — %d turn(s) stored "
+            "with no vector (the dense leg degrades to keyword-only for them).",
+            len(turn_texts), exc_info=True,
+        )
+        return [None] * len(turn_texts)
+
+
 def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
                             conversation: list[dict], *,
                             now: str | _CaptureClock | None = CAPTURE_CLOCK,
+                            embed: bool = SEED_TURNS_EMBEDDED_BY_DEFAULT,
                             ) -> list[str]:
     """Write ONE session's turns in the CAPTURE shape (#3914, #3910).
 
@@ -215,6 +275,21 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         and NO ``sessionId`` / ``eventId`` prop (capture writes neither, so
         no prop can satisfy an identity read that the ``CONTAINS`` edge
         alone carries);
+      * the product's OWN turn vector (``embed=True``, the DEFAULT): the
+        stored ``[role] <content>`` text routed through the product's
+        STORE-scoped encoder (``embeddings.encode_batch_for_store`` with
+        ``proj.required_embedding_dim`` — #4304's seam, never the raw
+        encoder) and stored as ``vecf32``. The product's turn write now embeds
+        every turn (#4194), so a fixture seeded without a vector models a
+        store the product no longer writes and BLINDS every retrieval
+        measurement to the dense leg — the frozen instrument reported
+        ``retrieval_degraded`` 21/21 for that reason (W7A). ``embed=False``
+        seeds a PRE-#4194 / no-embedder store instead: a FRESH turn gets
+        ``NULL``, and — mirroring the product's own three-way guard — an
+        unchanged re-seed PRESERVES its vector while a changed one CLEARS it.
+        That is the shape a capture made before #4194 (or with no embedder)
+        actually has; re-embedding such a backlog is part of the saved-backlog
+        decision, #4197;
       * the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance
         mechanism the shipping read resolves identity from
         (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``).
@@ -264,35 +339,56 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         time_sets = ("t.createdAt=coalesce(t.createdAt, $now), "
                      "t.updatedAt=$now, ")
         time_params = {"now": now}
+    # The stored text is composed ONCE — the same string the node stores and
+    # the string that is encoded, so a dense hit always resolves to the turn
+    # whose text was embedded (#4194's own rule).
+    turn_texts = [f"[{_normalize_turn_role(t.get('role'))}] "
+                  f"{t['content'][:5000]}" for t in windowed]
+    # SWITCHABLE SEEDING (W7A): embedded by DEFAULT, because the product's
+    # write path now embeds every episodic turn (#4194) and a fixture without
+    # a vector BLINDS every retrieval measurement to the dense leg — the
+    # frozen instrument reported ``retrieval_degraded`` 21/21 for exactly that
+    # reason. ``embed=False`` RETAINS the pre-#4194 / no-embedder store so the
+    # un-backfilled backlog stays measurable; re-embedding that saved backlog
+    # is the user-facing choice owned by #4197. A receipt produced in either
+    # mode must NAME the mode.
+    embeddings = (_turn_embeddings(turn_texts, proj.required_embedding_dim)
+                  if embed else [None] * len(turn_texts))
     turn_ids: list[str] = []
-    # #4194 deliberately does NOT embed here. The real capture write paths now
-    # store a turn embedding (same local embedder as the query encoder), but
-    # ask-lane fixtures must keep seeding the shape their consumers actually
-    # meet in production today: a store captured before #4194 (or one captured
-    # with no embedder installed) has NO turn embedding, and its backlog
-    # re-embedding is the user-facing choice owned by #4197. Seeding an
-    # embedding here would hide the keyword-only dense-leg degradation the ask
-    # lane must still survive. Revisit with #4197.
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         turn_id = f"{session_id}_t{i}"
         # `_capture_turn_window` already truncated to the cap; the [:5000]
         # mirrors the live store loop's explicit (idempotent) window.
-        turn_text = f"[{role}] {turn['content'][:5000]}"
+        turn_text = turn_texts[i]
         # Node MERGE BEFORE the edge MERGE — capture's #490 ordering rule: a
         # full-path MERGE whose edge is missing makes FalkorDB create the
         # whole path from scratch, duplicating the Point node.
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
+            # #4194: capture the node's PRE-write content_hash before the SET
+            # reassigns it, so the vector preserve/clear decision is made
+            # against the real prior (the product's own turn write does this).
+            "WITH t, t.content_hash AS prior_ch "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
             "    t.speaker=$speaker, "
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             f"    {time_sets}"
-            "    t.content_hash=$ch",
+            "    t.content_hash=$ch, "
+            # The product's own vector, vecf32-wrapped (the read path's
+            # vec.euclideanDistance rejects a plain-list stored embedding),
+            # and the product's OWN three-way guard: new vector when one was
+            # encoded; else PRESERVE an unchanged turn's vector (so
+            # ``embed=False`` models the no-embedder RE-capture too); else
+            # CLEAR it (a preserved vector for changed text is the dense-leg
+            # lie).
+            "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
+            "        WHEN prior_ch = $ch THEN t.embedding ELSE NULL END",
             params={"id": turn_id, "c": turn_text, "k": "event",
                     "speaker": role, "s": "draft",
-                    "ch": _content_hash(turn_text), **time_params},
+                    "ch": _content_hash(turn_text), "emb": embeddings[i],
+                    **time_params},
         )
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
@@ -318,7 +414,8 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     return turn_ids
 
 
-def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
+def _seed_memory(sdk: TortoiseSDK, question: dict, *,
+                 embed: bool = SEED_TURNS_EMBEDDED_BY_DEFAULT) -> None:
     """Seed the haystack in the CAPTURE shape (#3910).
 
     Mirrors the turn-store sub-step of ``_capture_session_impl`` — the part
@@ -358,8 +455,13 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     on a graph where the edge path was entirely broken.
 
     Deliberately NOT reproduced (this seeds a TURN STORE, it is not a
-    capture): no ``embedding`` / ``search_keys`` on turn Points, no
-    ``:Source`` materialization, no extracted claim Points. The per-session
+    capture): no ``search_keys`` on turn Points, no ``:Source``
+    materialization, no extracted claim Points. The turn EMBEDDING **IS**
+    reproduced (``embed=True``, the default) because the product's write path
+    now stores one (#4194) and a fixture without it blinds every retrieval
+    measurement to the dense leg (W7A); ``embed=False`` reproduces the
+    pre-#4194 / no-embedder store (re-embedding that saved backlog is the
+    #4197 owner decision). The per-session
     ``:Event`` write is RETAINED for fixture compatibility (nothing in the
     repo reads ``ev-s{i}``, and it is NOT capture's ``sessionCaptured``
     Event — different id, different prop set): it is a date-only marker, and
@@ -398,7 +500,8 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
         # for the session and all of its turns, as capture writes them.
         turn_ids = seed_capture_turn_store(
             sdk, sid, session or [],
-            now=f"{sdate}T10:00:00Z" if sdate else None)
+            now=f"{sdate}T10:00:00Z" if sdate else None,
+            embed=embed)
         if not turn_ids:
             continue
         if not sdate:

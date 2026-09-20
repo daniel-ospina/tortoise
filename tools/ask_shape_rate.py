@@ -104,6 +104,7 @@ if _REPO_ROOT not in sys.path:
 # The ONE capture-shaped seeder (#3914) plus the shared leg primitives. Imported,
 # never mirrored: a local copy is exactly how the shape drifts.
 from tools.ask_spotcheck import (  # noqa: E402
+    SEED_TURNS_EMBEDDED_BY_DEFAULT,
     _gold_sessions_covered,
     _seed_memory,
     _to_iso_date,
@@ -1010,6 +1011,22 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         "instrument_sha256": _sha256_file(os.path.abspath(__file__)),
         "generated_at": datetime.now(UTC).isoformat(),
         "fixture": fixture_shape,
+        # W7A: NAME the seeding mode this receipt was produced in. Derived from
+        # the seeder's OWN default (never restated by hand), because the D3
+        # numbers are only comparable WITHIN one mode: the embedded seeder
+        # models the post-#4194 product (dense leg live), the un-embedded one
+        # models #4197's backlog and blinds the dense leg. A receipt that does
+        # not name its seeding mode is not evidence.
+        "seeding_mode": {
+            "mode": ("embedded" if SEED_TURNS_EMBEDDED_BY_DEFAULT
+                     else "un-embedded-backlog"),
+            "seeder": "tools.ask_spotcheck._seed_memory",
+            "embed": SEED_TURNS_EMBEDDED_BY_DEFAULT,
+            "note": ("embedded = turn Points carry the product's own vector "
+                     "via encode_batch_for_store/required_embedding_dim "
+                     "(#4194/#4304); un-embedded-backlog = #4197's pre-#4194 "
+                     "store, where the dense leg is inert"),
+        },
         "decision_rule": {
             "shape_rate_min": SHAPE_RATE_ADOPT,
             "provenance_min": f"{FIXTURE_N}/{FIXTURE_N}",
@@ -1305,11 +1322,16 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
              "answer — a hedged answer whose phrasing is outside that "
              "vocabulary is not flagged. The receipt carries every "
              "answer_head so the field can be audited."),
-            ("The capture-shaped seed writes turn Points with NO stored "
-             "embedding (capture's turn store writes none either), so the "
-             "dense leg is inert (`no_embeddings`) and this rate is the "
-             "SPARSE (FTS+RRF) lane's answer-shape rate.") if degraded
-             else "no retrieval_degraded question observed",
+            (f"retrieval_degraded fired on {len(degraded)} question(s) in "
+             "seeding mode "
+             + ("'embedded': " if SEED_TURNS_EMBEDDED_BY_DEFAULT
+                else "'un-embedded-backlog': ")
+             + "the dense leg was inert for those questions, so their "
+             "answer-shape result is the SPARSE (FTS+RRF) lane's. In "
+             "embedded mode this means the EMBEDDER was unavailable for the "
+             "seed — NOT that the seeder omits a vector (it writes the "
+             "product's own by default, #4194).") if degraded
+            else "no retrieval_degraded question observed",
             ("The reader is deepseek/deepseek-v4-flash at temperature 0, "
              "max_tokens 500. The historical 0.90 (2026-09-04) used a "
              "qwen3.8-max reader + gpt-4o judge — a different reader AND a "
