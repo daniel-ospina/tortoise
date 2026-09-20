@@ -956,64 +956,53 @@ class TestBootReconcile:
         with pytest.raises(bl.StripeAPIError):
             bl.reconcile_org(billing_client["sdk"], org_id)
 
-    def test_boot_reconcile_hanging_stripe_never_blocks_boot(self, monkeypatch, billing_client):
-        """The lifespan's startup half must RETURN (not block) even with a
-        hanging Stripe client.
+class TestLifespanStartup:
+    def test_lifespan_startup_returns_without_blocking(self, monkeypatch, tmp_path):
+        """The lifespan's startup half must RETURN promptly — a startup that
+        blocks would hold uvicorn's bind.
 
-        NOTE(#4262): the boot billing-reconcile daemon thread this test was
-        written for no longer exists (nothing creates a `billing-reconcile`
-        thread and `reconcile_org` has no production caller), so the Stripe /
-        `_iter_registered_orgs` monkeypatches below are inert and the test now
-        covers only "lifespan startup is non-blocking". Tracked for removal or
-        rewrite in #4262.
+        NOTE(#4262): this replaces `test_boot_reconcile_hanging_stripe_never_
+        blocks_boot`, which asserted a boot billing-reconcile daemon thread that
+        no longer exists (nothing creates a `billing-reconcile` thread and
+        `reconcile_org` has no production caller). The old test called
+        `_lifespan(None)`, which crashed immediately in `_start_liveness(None)`,
+        so its assertion could never fail; it then nested a second lifespan
+        inside the shared TestClient's. This runs the lifespan against its own
+        stub app instead, and guards the whole thread body so an in-thread crash
+        cannot read as a successful return.
         """
-        import threading  # noqa: I001
-        import time
-        import tortoise.hosted_api as ha
-        from tortoise import billing as bl
+        import asyncio
+        import threading
+        from types import SimpleNamespace
 
-        # Simulate a hanging Stripe client inside the real daemon-thread pass.
-        monkeypatch.setattr(bl.StripeClient, "get_subscription",
-                            lambda self, sid: time.sleep(999))
-        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
-                            lambda self, cid: time.sleep(999))
-        # point _iter_registered_teams at ONE team
-        org_id = billing_client["org_id"]
-        billing_client["sdk"]._get_registry().query(
-            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_1', "
-            "t.stripe_customer_id='cus_1'", params={"id": org_id})
-        monkeypatch.setattr(ha, '_iter_registered_orgs',
-                            lambda: [{"org_id": org_id, "name": "x"}])
+        from tortoise.hosted_api import _lifespan
 
-        started = time.monotonic()
-        threads_before = threading.active_count()  # noqa: F841
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "lifespan.db"))
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+
         thread_error: list[BaseException] = []
 
-        # Run the lifespan's startup half in a thread and assert it RETURNS
-        # (does not block) while Stripe hangs. The real app is required:
-        # `_lifespan(None)` crashed immediately in `_start_liveness(None)`,
-        # so the assertion could never fail. The error list is required too:
-        # an exception inside the thread KILLS it, which would otherwise read
-        # as a successful return (`is_alive()` False) and mask the crash.
         def _run():
-            from tortoise.hosted_api import _lifespan, app  # noqa: I001
-            import asyncio
-            # simulate lifespan startup: create the thread, don't await it
-            ha_threads = [t for t in threading.enumerate() if t.name == "billing-reconcile"]  # noqa: F841
-            async def _lifespan_quick():
-                async with _lifespan(app):
-                    return
+            # The WHOLE body is guarded: an exception before `asyncio.run`
+            # (e.g. a broken import) would otherwise kill the thread and read
+            # as a successful return.
             try:
-                asyncio.run(_lifespan_quick())
+                async def _quick():
+                    app = SimpleNamespace(state=SimpleNamespace())
+                    async with _lifespan(app):
+                        return
+
+                asyncio.run(_quick())
             except BaseException as exc:
                 thread_error.append(exc)
 
-        t = threading.Thread(target=_run)
+        # daemon=True: a regression that BLOCKS startup must fail the assertion
+        # below, not pin interpreter shutdown.
+        t = threading.Thread(target=_run, daemon=True)
         t.start()
-        t.join(timeout=5)
-        elapsed = time.monotonic() - started
-        assert elapsed < 5, "lifespan must not block on a hanging Stripe client"
-        assert not t.is_alive(), "lifespan thread did not return within 5s"
+        t.join(timeout=10)
+        assert not t.is_alive(), "lifespan startup did not return within 10s"
         assert not thread_error, f"lifespan raised in its thread: {thread_error!r}"
 
 

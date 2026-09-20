@@ -7,6 +7,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_search_engine_nameerror.py 
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
@@ -31,63 +32,87 @@ def sdk():
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
+def _seed_matching_point(sdk):
+    """Insert one point the FTS query will match.
+
+    The malformed-filter branches are gated on a non-empty result set
+    (`if relationship_filter and result_ids:`), so against an empty DB they
+    short-circuit before the malformed input is ever parsed — leaving the guard
+    vacuous. Seed a match so the branch under test actually executes.
+    """
+    sdk.create_point("statement", "test content")
+
+
 class TestSearchNameError:
     """Issue #92: bare 'logger' references in search code paths must not crash."""
 
-    def test_malformed_relationship_filter_no_nameerror(self, sdk):
-        """relationship_filter without ':' should not raise NameError."""
+    def test_malformed_relationship_filter_no_nameerror(self, sdk, caplog):
+        """relationship_filter without ':' should warn, not raise NameError."""
         # badformat has no colon — should trigger the "Invalid format" warning
         # but NOT a NameError
-        try:
-            results = sdk.tortoise_fts_query(  # noqa: F841
-                query="test",
-                relationship_filter="badformat",
-            )
-        except NameError as e:
-            pytest.fail(
-                f"relationship_filter='badformat' raised NameError: {e}"
-            )
+        _seed_matching_point(sdk)
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            try:
+                sdk.tortoise_fts_query(
+                    query="test",
+                    relationship_filter="badformat",
+                )
+            except NameError as e:
+                pytest.fail(
+                    f"relationship_filter='badformat' raised NameError: {e}"
+                )
+        assert "relationship_filter must be 'predicate:target_id'" in caplog.text
 
-    def test_relationship_filter_no_predicate_no_nameerror(self, sdk):
+    def test_relationship_filter_no_predicate_no_nameerror(self, sdk, caplog):
         """relationship_filter with colon but empty predicate should not crash."""
-        try:
-            results = sdk.tortoise_fts_query(  # noqa: F841
-                query="test",
-                relationship_filter=":target",
-            )
-        except NameError as e:
-            pytest.fail(
-                f"relationship_filter=':target' raised NameError: {e}"
-            )
+        _seed_matching_point(sdk)
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            try:
+                sdk.tortoise_fts_query(
+                    query="test",
+                    relationship_filter=":target",
+                )
+            except NameError as e:
+                pytest.fail(
+                    f"relationship_filter=':target' raised NameError: {e}"
+                )
+        assert "Invalid relationship_filter format: :target" in caplog.text
 
-    def test_relationship_filter_no_target_no_nameerror(self, sdk):
+    def test_relationship_filter_no_target_no_nameerror(self, sdk, caplog):
         """relationship_filter with colon but empty target should not crash."""
-        try:
-            results = sdk.tortoise_fts_query(  # noqa: F841
-                query="test",
-                relationship_filter="predicate:",
-            )
-        except NameError as e:
-            pytest.fail(
-                f"relationship_filter='predicate:' raised NameError: {e}"
-            )
+        _seed_matching_point(sdk)
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            try:
+                sdk.tortoise_fts_query(
+                    query="test",
+                    relationship_filter="predicate:",
+                )
+            except NameError as e:
+                pytest.fail(
+                    f"relationship_filter='predicate:' raised NameError: {e}"
+                )
+        assert "Invalid relationship_filter format: predicate:" in caplog.text
 
-    def test_ascii_arrow_traversal_path_no_nameerror(self, sdk):
+    def test_ascii_arrow_traversal_path_no_nameerror(self, sdk, caplog):
         """ASCII '->' in traversal_path should log a warning, not crash."""
-        try:
-            results = sdk.tortoise_fts_query(  # noqa: F841
-                query="test",
-                traversal_path="Product->Feature",
-            )
-        except NameError as e:
-            pytest.fail(
-                f"traversal_path='Product->Feature' raised NameError: {e}"
-            )
+        _seed_matching_point(sdk)
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            try:
+                sdk.tortoise_fts_query(
+                    query="test",
+                    traversal_path="Product->Feature",
+                )
+            except NameError as e:
+                pytest.fail(
+                    f"traversal_path='Product->Feature' raised NameError: {e}"
+                )
+        assert "traversal_path uses ASCII '->'" in caplog.text
 
     def test_traversal_path_no_nameerror(self, sdk):
-        """Unicode 'Product→Feature' traversal_path (no matching pack relation)."""
+        """Unicode 'Product→Feature' traversal_path must not raise NameError."""
+        _seed_matching_point(sdk)
         try:
-            results = sdk.tortoise_fts_query(  # noqa: F841
+            sdk.tortoise_fts_query(
                 query="test",
                 traversal_path="Product→Feature",
             )

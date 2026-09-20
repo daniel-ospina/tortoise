@@ -46,9 +46,12 @@ class TestDedupAlwaysPersistsHash:
         p2 = sdk.create_point("hypothesis", content, dedup=True,
                               credibility="T1")
         assert p1["id"] == p2["id"]
-        # baseline preserved: the late credibility='T1' must not be written
-        # onto the existing point — dedup returns the ORIGINAL unchanged.
-        assert p2.get("credibility") == p1.get("credibility")
+        # Baseline preserved: `credibility` is never stored as a node property —
+        # it lands as a calibrated prior (a fresh credibility="T1" write gets
+        # ep_alpha=5.0 / baseline_source="set-by-author"). The dedup hit must
+        # NOT apply the late prior to the existing point.
+        assert p2.get("ep_alpha") == p1.get("ep_alpha")
+        assert p2.get("baseline_source") == p1.get("baseline_source")
 
 
 class TestCrossContextDedup:
