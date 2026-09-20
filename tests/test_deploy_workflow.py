@@ -28,7 +28,7 @@ toggles and REMOVED — the STRIPE_PRICE_IDS outage) and executes content like
 references it as a quoted shell variable, passing flyctl a bash ARRAY. These
 tests assert that safe shape: every secret is bound in ``env:``
 (``KEY: ${{ secrets.KEY }}``) AND appended to the array (``ARGS+=(KEY="$KEY")``),
-and that no ``${{ secrets.X }}`` remains in either step's run text.
+and that no ``${{ secrets.X }}`` remains in any step's run text.
 """
 from __future__ import annotations
 
@@ -73,6 +73,15 @@ _ARRAY_PAIR = re.compile(r'([A-Z0-9_]+)="\$\{?([A-Z0-9_]+)\}?"')
 # Exempted by name, so the parser can accept the brace spelling without the
 # exemption depending on a regex that misses it.
 _NON_SECRET_PAIRS = {("TORTOISE_GIT_SHA", "GITHUB_SHA")}
+# The only argv keys whose FLY-side name deliberately differs from the env var
+# it reads. Every other key must equal the variable it reads — the app resolves
+# its config by the env NAME, so a fly-side typo ships the secret under a name
+# nothing reads while the verify-secrets gate still passes.
+_FLY_RENAMES = {
+    "GITHUB_CLIENT_ID": "GH_CLIENT_ID",
+    "GITHUB_CLIENT_SECRET": "GH_CLIENT_SECRET",
+    "GITHUB_CALLBACK_URL": "GH_CALLBACK_URL",
+}
 # A step env binding to a single secret: `KEY: ${{ secrets.KEY }}`.
 _ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}")
 # Any secret interpolation at all — the #4334 hazard.
@@ -253,9 +262,9 @@ def test_secrets_never_interpolated_into_run_text(workflow_text):
     TEXT before bash parses it. A secret value containing ``"`` is read as a
     quote toggle and REMOVED (the STRIPE_PRICE_IDS catalog reached Fly as
     501 chars with zero quotes), and a value containing ``$(…)`` / backticks
-    EXECUTES. Neither secret-bearing step may interpolate a secret into its run
-    text — the secret must be bound in ``env:`` and expanded as ``"$VAR"``,
-    whose contents are data, never re-parsed."""
+    EXECUTES. No step at all may interpolate a secret into its run text — the
+    secret must be bound in ``env:`` and expanded as ``"$VAR"``, whose
+    contents are data, never re-parsed."""
     steps = _steps()
     for name, step in steps.items():
         run = step.get("run", "")
@@ -272,9 +281,12 @@ def test_every_env_bound_secret_reaches_fly(workflow_text):
     """#4334 — bidirectional coverage for the secrets-set step.
 
     Every secret bound in the step's ``env:`` must be appended to the flyctl
-    array (else it is wired to nothing), and every array element must read an
-    env-bound secret (else it sends a stale/empty value). ``FLY_API_TOKEN`` is
-    the one exemption: flyctl consumes it from the environment, never as argv."""
+    array (else it is wired to nothing), every array element must read an
+    env-bound secret (else it sends a stale/empty value), and every fly-side
+    argv key must be the env name the app reads (or a declared `_FLY_RENAMES`
+    rename — a fly-side typo ships the secret under a name nothing reads while
+    the gate passes). ``FLY_API_TOKEN`` is the one exemption: flyctl consumes it
+    from the environment, never as argv."""
     step = _steps()[_SET_STEP]
     bindings = set(_env_bindings(step))
     shell_vars = set(_secret_array_pairs(step.get("run", "")).values())
@@ -283,6 +295,16 @@ def test_every_env_bound_secret_reaches_fly(workflow_text):
         f"bound-but-not-sent: {sorted(bindings - _NON_SYNCED - shell_vars)}; "
         f"sent-but-not-bound: {sorted(shell_vars - bindings)}"
     )
+    # The FLY-side argv name is what the app resolves config by. Pin it to the
+    # env name it reads (or a declared rename); a fly-side typo/swap otherwise
+    # passes every value-based guard above.
+    for fly_name, shell_var in _secret_array_pairs(step.get("run", "")).items():
+        expected = _FLY_RENAMES.get(fly_name, fly_name)
+        assert expected == shell_var, (
+            f"fly argv key {fly_name} reads ${shell_var}, but the expected env "
+            f"name is {expected} — a fly-side typo/undeclared rename would ship "
+            f"the secret under a name nothing reads while the gate passes (#4334)"
+        )
 
 
 def test_env_bindings_use_the_same_named_secret(workflow_text):
@@ -303,9 +325,11 @@ def test_optional_fly_appends_are_n_guarded(workflow_text):
     """#4334 — every single-key `ARGS+=(K="$K")` append stays `[ -n "$K" ]`-guarded.
 
     The guard is what keeps an unset optional secret OUT of the argv; dropping
-    it would push `K=` to Fly and clobber any out-of-band value. The two
-    unconditional appends (the base three-key array and the Stripe pair) carry
-    multiple pairs and are deliberately exempt."""
+    it would push `K=` to Fly and clobber any out-of-band value. Two append
+    shapes are deliberately exempt: the two multi-pair appends (the base
+    three-key array and the Stripe pair), and
+    `TORTOISE_GIT_SHA="${GITHUB_SHA}"` — GITHUB_SHA is a GitHub built-in that is
+    always set, not an env-bound secret, so it needs no guard (`_NON_SECRET_PAIRS`)."""
     run = _steps()[_SET_STEP]["run"]
     for line in run.splitlines():
         m = re.search(r"ARGS\+=\(([^)]*)\)", line)
