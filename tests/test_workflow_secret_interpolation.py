@@ -17,10 +17,13 @@ there the substitution is a YAML scalar, not shell source.
 ``e2e-live-reconcile.yml``. This module is the standing guard for the class: no
 step in any ``.github/workflows/*.{yml,yaml}`` may interpolate a secret into its
 ``run:`` body, and the #4361 steps are pinned to the safe shape (bound in
-``env:``, referenced quoted) so a partial revert fails loudly. The only steps
-the sweep does not report are the two ``deploy-hosted.yml`` steps whose run
-bodies still carry a pre-fix interpolation, pinned by (job, step) in
-``_PENDING_FIX``; every other secret-in-run step in any workflow is reported.
+``env:``, referenced quoted) so a partial revert fails loudly. The carriers the
+sweep resolves into run text are the ``secrets`` context, secret-bound ``env``
+keys (workflow-root, job and step scope, transitively), and job outputs defined
+from a secret; arbitrary data flow through a step's own output
+(``steps.<id>.outputs.<name>``) is out of its bounded scope. The only steps it
+does not report are the two ``deploy-hosted.yml`` steps whose run bodies still
+carry a pre-fix interpolation, pinned by (job, step) in ``_PENDING_FIX``.
 """
 from __future__ import annotations
 
@@ -47,6 +50,12 @@ _SECRET_CONTEXT = re.compile(r"\bsecrets\b", re.IGNORECASE)
 # runner's context lookup: `env.KEY`, `env['KEY']`, `env["KEY"]`.
 _ENV_DOT_REF = re.compile(r"\benv\.([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 _ENV_INDEX_REF = re.compile(r"\benv\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
+# `needs.<job>.outputs.<name>` — a job output consumed downstream, dot and index
+# form (`needs['job'].outputs['name']`), case-insensitive like the runner.
+_NEEDS_JOB_DOT_REF = re.compile(r"\bneeds\.([A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
+_NEEDS_JOB_INDEX_REF = re.compile(r"\bneeds\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
+_OUTPUTS_DOT_REF = re.compile(r"\.outputs\.([A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
+_OUTPUTS_INDEX_REF = re.compile(r"\.outputs\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
 # A step env binding to a single secret: `KEY: ${{ secrets.KEY }}`.
 _ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}", re.IGNORECASE)
 
@@ -84,29 +93,90 @@ def _secret_interpolations(text: str) -> list[str]:
     return [s for s in _expression_spans(text) if _SECRET_CONTEXT.search(s)]
 
 
-def _secret_env_keys(*envs: dict | None) -> set[str]:
-    """Env keys whose value, in the given ``env:`` maps, is a secret expression."""
+def _env_refs(text: str) -> list[str]:
+    """``env`` context references in ``text`` — dot and index form."""
+    return _ENV_DOT_REF.findall(text) + [m[1] for m in _ENV_INDEX_REF.findall(text)]
+
+
+def _resolve_secret_env_keys(*envs: dict | None) -> set[str]:
+    """Env keys bound, directly or transitively, to a secret in the given maps.
+
+    A key is secret-bound when its value contains a ``secrets`` context, or
+    ``${{ env.OTHER }}`` where OTHER is itself secret-bound (a fixpoint, so
+    chains of any length resolve). ``envs`` should carry every scope visible to
+    the step — workflow root, job, and step — since the ``env`` context unions
+    all three.
+    """
     keys: set[str] = set()
     for env in envs:
         for name, value in (env or {}).items():
             if _SECRET_CONTEXT.search(str(value)):
                 keys.add(str(name))
+    changed = True
+    while changed:
+        changed = False
+        lowered = {k.lower() for k in keys}
+        for env in envs:
+            for name, value in (env or {}).items():
+                if str(name) in keys:
+                    continue
+                if any(r.lower() in lowered for r in _env_refs(str(value))):
+                    keys.add(str(name))
+                    changed = True
     return keys
 
 
-def _run_secret_uses(run: str, secret_env_keys: set[str]) -> list[str]:
+def _secret_output_keys(doc: dict) -> set[tuple[str, str]]:
+    """``(job, output_name)`` whose job-output definition reads a secret.
+
+    A definition reads a secret directly (``secrets`` context) or through a
+    secret-bound ``env`` key visible to the job (workflow-root + job scope,
+    transitively). Deeper flow — a ``steps.<id>.outputs`` chain — is outside the
+    guard's scope.
+    """
+    found: set[tuple[str, str]] = set()
+    root_env = doc.get("env")
+    for job_name, job in (doc.get("jobs") or {}).items():
+        job = job or {}
+        keys = {k.lower() for k in _resolve_secret_env_keys(root_env, job.get("env"))}
+        for name, value in (job.get("outputs") or {}).items():
+            text = str(value)
+            via_env = any(r.lower() in keys for r in _env_refs(text))
+            if _SECRET_CONTEXT.search(text) or via_env:
+                found.add((str(job_name), str(name)))
+    return found
+
+
+def _needs_output_refs(span: str) -> set[tuple[str, str]]:
+    """``(job, output)`` referenced by a ``needs`` span, dot or index form."""
+    jobs = _NEEDS_JOB_DOT_REF.findall(span) + [
+        m[1] for m in _NEEDS_JOB_INDEX_REF.findall(span)
+    ]
+    outs = _OUTPUTS_DOT_REF.findall(span) + [m[1] for m in _OUTPUTS_INDEX_REF.findall(span)]
+    return {(j.lower(), o.lower()) for j in jobs for o in outs}
+
+
+def _run_secret_uses(
+    run: str,
+    secret_env_keys: set[str],
+    secret_outputs: set[tuple[str, str]] = frozenset(),
+) -> list[str]:
     """Expressions in ``run`` that put a secret into the shell SOURCE.
 
-    Two shapes: a direct ``secrets`` context, and ``${{ env.KEY }}`` for an env
-    key that is itself bound to a secret — which re-interpolates the value into
-    the run text exactly like the direct form (the #4334 hazard), and is one
-    token away from the fix shape this repo prescribes.
+    Three known carriers: a direct ``secrets`` context; ``${{ env.KEY }}`` for
+    an env key bound directly or transitively to a secret; and
+    ``${{ needs.<job>.outputs.<name> }}`` for a job output defined from a
+    secret. Each re-interpolates the secret into the run text exactly like the
+    direct form (the #4334 hazard), and the env form is one token away from the
+    fix shape this repo prescribes.
     """
     uses = _secret_interpolations(run)
-    lowered = {k.lower() for k in secret_env_keys}
+    lowered_env = {k.lower() for k in secret_env_keys}
+    lowered_out = {(job.lower(), name.lower()) for job, name in secret_outputs}
     for span in _expression_spans(run):
-        refs = _ENV_DOT_REF.findall(span) + [m[1] for m in _ENV_INDEX_REF.findall(span)]
-        if any(r.lower() in lowered for r in refs) and span not in uses:
+        refs_env = any(r.lower() in lowered_env for r in _env_refs(span))
+        refs_out = bool(_needs_output_refs(span) & lowered_out)
+        if (refs_env or refs_out) and span not in uses:
             uses.append(span)
     return uses
 
@@ -247,15 +317,16 @@ def _step(doc: dict, prefix: str) -> dict:
 def _offending_identities(doc: dict) -> list[tuple[str, str]]:
     """``(job, step)`` for every step whose run body puts a secret into the shell."""
     found: list[tuple[str, str]] = []
-    for job_name, job in doc.get("jobs", {}).items():
+    root_env = doc.get("env")
+    secret_outputs = _secret_output_keys(doc)
+    for job_name, job in (doc.get("jobs") or {}).items():
         job = job or {}
-        job_keys = _secret_env_keys(job.get("env"))
         for step in job.get("steps", []):
             run = step.get("run")
             if not isinstance(run, str):
                 continue
-            keys = job_keys | _secret_env_keys(step.get("env"))
-            if _run_secret_uses(run, keys):
+            keys = _resolve_secret_env_keys(root_env, job.get("env"), step.get("env"))
+            if _run_secret_uses(run, keys, secret_outputs):
                 found.append((job_name, step.get("name") or "<unnamed>"))
     return found
 
@@ -377,6 +448,70 @@ def test_offender_scan_catches_a_secret_reached_through_env():
     ]
 
 
+def test_offender_scan_resolves_root_env_and_env_chains():
+    """The `env` context unions workflow-root, job and step scope, and a key may
+    be bound to another secret-bound key — all must resolve."""
+    doc = {
+        "env": {"ROOT_TOKEN": "${{ secrets.ROOT_TOKEN }}"},
+        "jobs": {
+            "j": {
+                "env": {"JOB_TOKEN": "${{ env.ROOT_TOKEN }}"},
+                "steps": [
+                    {"name": "root env", "run": 'echo "${{ env.ROOT_TOKEN }}"'},
+                    {
+                        "name": "env chain",
+                        "env": {"CHAIN": "${{ env.JOB_TOKEN }}"},
+                        "run": 'echo "${{ env.CHAIN }}"',
+                    },
+                    {"name": "unbound env is not a secret", "run": 'echo "${{ env.PLAIN }}"'},
+                ],
+            }
+        },
+    }
+    assert _offending_steps(doc) == ["root env", "env chain"]
+
+
+def test_offender_scan_follows_a_secret_through_job_outputs():
+    """A job output can be defined from a secret; consuming it via
+    `${{ needs.<job>.outputs.<name> }}` re-interpolates the value into run text."""
+    doc = {
+        "jobs": {
+            "prep": {
+                "runs-on": "ubuntu-latest",
+                "env": {"T": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
+                "outputs": {
+                    "token": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
+                    "env_derived": "${{ env.T }}",
+                    "safe": "x",
+                },
+                "steps": [{"name": "noop", "run": "echo ok"}],
+            },
+            "use": {
+                "needs": "prep",
+                "steps": [
+                    {
+                        "name": "leak",
+                        "run": 'curl -H "Bearer ${{ needs.prep.outputs.token }}" https://x',
+                    },
+                    {
+                        "name": "leak index form",
+                        "run": "curl -H \"Bearer ${{ needs['prep'].outputs['token'] }}\" https://x",
+                    },
+                    {
+                        "name": "leak env-derived output",
+                        "run": 'curl -H "Bearer ${{ needs.prep.outputs.env_derived }}" https://x',
+                    },
+                    {
+                        "name": "safe output",
+                        "run": 'echo "${{ needs.prep.outputs.safe }}"',
+                    },
+                ],
+            },
+        }
+    }
+    assert _offending_steps(doc) == ["leak", "leak index form", "leak env-derived output"]
+
+
 def test_sweep_enumerates_both_workflow_extensions(tmp_path):
     """GitHub executes `.yaml` too; globbing only `.yml` is an unscanned file."""
     (tmp_path / "a.yml").write_text("jobs: {}\n", encoding="utf-8")
@@ -414,9 +549,10 @@ def test_no_secret_interpolated_into_run_text(workflow_docs):
     GitHub substitutes the value into the shell SOURCE before bash parses it: a
     JSON catalog's quotes are stripped (the #4334 outage) and ``$(…)`` /
     backticks execute. Bind the secret in ``env:`` and use ``"$VAR"`` instead.
-    The only deferral is the two ``deploy-hosted.yml`` steps pinned in
-    ``_PENDING_FIX``, and only while that file's offenders are exactly those
-    steps.
+    The sweep resolves the ``secrets`` context, secret-bound ``env`` keys
+    (root/job/step, transitively) and secret-defined job outputs; the only
+    deferral is the two ``deploy-hosted.yml`` steps pinned in ``_PENDING_FIX``,
+    and only while that file's offenders are exactly those steps.
     """
     offenders: dict[str, list[str]] = {}
     for filename, doc in workflow_docs.items():
@@ -457,7 +593,7 @@ def test_fixed_steps_bind_secret_in_env_and_reference_it_quoted(workflow_docs):
         run = step.get("run", "")
         code = _scrub_run(run)
 
-        secret_env = _secret_env_keys(step.get("env"))
+        secret_env = _resolve_secret_env_keys(step.get("env"))
         assert not _run_secret_uses(run, secret_env), (
             f"{filename}: {prefix!r} interpolates a secret into its run text again "
             "— bind it in `env:` and use \"$VAR\" (#4361)"
