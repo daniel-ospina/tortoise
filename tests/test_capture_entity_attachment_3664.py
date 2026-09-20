@@ -452,6 +452,198 @@ def test_noop_link_after_hard_delete_does_not_resurrect(journal_sdk):
         "recover_from_log resurrected the link")
 
 
+# ── HARD-DELETE STALENESS: the record SHAPE and the KEY (#3722 c5 P2) ─────
+
+def _write_journal(events_dir, events):
+    """Write a raw JSONL journal (one dict per line) for replay testing."""
+    import json
+
+    events_dir.mkdir(parents=True, exist_ok=True)
+    with open(events_dir / "events.jsonl", "w", encoding="utf-8") as fh:
+        for ev in events:
+            fh.write(json.dumps(ev) + "\n")
+
+
+def _replay_every_engine(proj, events_dir, query):
+    """Run ALL THREE replay engines over one journal (wiping between them) and
+    return ``{engine: query_result}`` — the live==replay spine the staleness
+    regressions below share. A failed recovery is asserted, never silently
+    counted as a zero."""
+    import json
+
+    from tortoise.consistency import recover_from_log
+
+    class _Log:
+        def read_all(self):
+            with open(events_dir / "events.jsonl", encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+
+    out = {}
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(events_dir))
+    out["rebuild_all"] = proj.g.query(query).result_set[0][0]
+
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild(_Log())
+    out["rebuild"] = proj.g.query(query).result_set[0][0]
+
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    r = recover_from_log(str(events_dir), proj)
+    assert r["recovered"] is True, r
+    out["recover_from_log"] = proj.g.query(query).result_set[0][0]
+    return out
+
+
+def test_nested_points_merged_suppresses_entity_link(tmp_path):
+    """The hard-delete staleness rule must read the NORMALIZED record: a NESTED
+    ``PointsMerged`` (``merge_ids`` inside ``point``) — the supported journal
+    shape pinned by ``test_projection.py::test_falkor_apply_points_merged_nested_format``
+    (#325), and the shape ``apply()`` / ``rebuild_all`` actually delete
+    through — must suppress an ``EntityLinked`` whose endpoint it merged away.
+
+    The reader used the RAW record (``ev.get("merge_ids")``), so the nested
+    shape returned ``{}`` and never suppressed: the deleted link RESURRECTED on
+    the endpoint re-created under the SAME id, in every replay engine.
+
+    MUTATION: read the raw record in ``journal_hard_delete_seqs`` (drop the
+    ``_norm``) → the nested merge is invisible, the edge returns after replay,
+    and this REDs.
+    """
+    events = [
+        {"type": "PointAdded",
+         "point": {"id": "pt-x", "content": "c", "pointKind": "statement"}},
+        {"type": "ObjectRegistered", "id": "obj-y", "name": "obj-y"},
+        {"type": "EntityLinked", "id": "pt-x", "source_id": "pt-x",
+         "source_label": "Point", "target_label": "Object",
+         "target_id": "obj-y", "edge_type": "aboutObject"},
+        # NESTED shape: merge_ids lives inside `point` (#325).
+        {"type": "PointsMerged",
+         "point": {"keep_id": "pt-keep", "merge_ids": ["pt-x"]}},
+        # The endpoint re-created under the SAME id — must not bring the
+        # deleted link back.
+        {"type": "PointAdded",
+         "point": {"id": "pt-x", "content": "c2",
+                   "pointKind": "statement"}},
+    ]
+    sdk = TortoiseSDK(str(tmp_path / "nested-merge.db"))
+    try:
+        proj = sdk._get_proj()
+        events_dir = tmp_path / "events"
+        _write_journal(events_dir, events)
+        counts = _replay_every_engine(
+            proj, events_dir,
+            "MATCH (:Point {id:'pt-x'})-[:aboutObject]->"
+            "(:Object {id:'obj-y'}) RETURN count(*)")
+        assert counts == {"rebuild_all": 0, "rebuild": 0,
+                          "recover_from_log": 0}, counts
+        # Non-vacuous: the endpoint WAS re-created by the replay — the link is
+        # absent because it is STALE, not because its endpoint is missing.
+        assert proj.g.query(
+            "MATCH (:Point {id:'pt-x'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+    finally:
+        sdk.close()
+
+
+def test_session_link_survives_same_id_non_session_delete(tmp_path):
+    """A ``:Session``-source link must NOT be suppressed by an unrelated
+    same-id hard delete of a NON-Session entity.
+
+    The staleness test was id-only, but NO journaled hard delete can remove a
+    ``:Session`` node: ``EntityMutated`` replays ``_delete_entity_by_id``
+    (Point/Subject/Object/Document/Source/Event — the live ``_delete_entity``
+    is the same six and documents Session/APIKey/Org/Tag as intentionally NOT
+    deleted), and ``PointsMerged`` deletes Points only. So id-only suppression
+    dropped a live ``(Session)-[:aboutObject]->(Object)`` edge whenever another
+    label's entity with the SAME id was deleted later, while the live Session
+    kept it — live != replay.
+
+    MUTATION: drop the label set (id-only key) in ``fold_deferred_entity_links``
+    → the edge is suppressed in every engine and this REDs.
+    """
+    events = [
+        {"type": "SessionRecorded", "id": "session-X"},
+        {"type": "ObjectRegistered", "id": "obj-s", "name": "obj-s"},
+        {"type": "EntityLinked", "id": "session-X", "source_id": "session-X",
+         "source_label": "Session", "target_label": "Object",
+         "target_id": "obj-s", "edge_type": "aboutObject"},
+        # A POINT reusing the session's id...
+        {"type": "PointAdded",
+         "point": {"id": "session-X", "content": "c",
+                   "pointKind": "statement"}},
+        # ...hard-deleted. Live deletes the POINT only; the Session survives
+        # WITH its edge.
+        {"type": "EntityMutated", "id": "session-X", "op": "delete",
+         "label": "Point"},
+    ]
+    sdk = TortoiseSDK(str(tmp_path / "session-src.db"))
+    try:
+        proj = sdk._get_proj()
+        events_dir = tmp_path / "events"
+        _write_journal(events_dir, events)
+        counts = _replay_every_engine(
+            proj, events_dir,
+            "MATCH (:Session {id:'session-X'})-[:aboutObject]->"
+            "(:Object {id:'obj-s'}) RETURN count(*)")
+        assert counts == {"rebuild_all": 1, "rebuild": 1,
+                          "recover_from_log": 1}, counts
+        # Live == replay for the rest of the end-state too: the Session
+        # survives and the same-id Point is gone.
+        assert proj.g.query(
+            "MATCH (:Session {id:'session-X'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+        assert proj.g.query(
+            "MATCH (:Point {id:'session-X'}) RETURN count(*)"
+        ).result_set[0][0] == 0
+    finally:
+        sdk.close()
+
+
+def test_nested_entity_mutated_delete_suppresses_entity_link(tmp_path):
+    """The same normalized-shape read must see a NESTED ``EntityMutated``
+    op=delete (``id``/``op`` inside ``point``).
+
+    ``_norm`` splices the payload over the envelope, and ``apply()`` /
+    ``rebuild_all`` fold the delete through that shape — but the staleness
+    reader read the raw record, so a nested delete was invisible and a link
+    whose endpoint it removed RESURRECTED on the same-id re-creation.
+
+    MUTATION: read the raw record in ``journal_hard_delete_seqs`` (drop the
+    ``_norm``) → the nested delete is invisible, the edge returns after replay,
+    and this REDs.
+    """
+    events = [
+        {"type": "PointAdded",
+         "point": {"id": "pt-n", "content": "c", "pointKind": "statement"}},
+        {"type": "ObjectRegistered", "id": "obj-n", "name": "obj-n"},
+        {"type": "EntityLinked", "id": "pt-n", "source_id": "pt-n",
+         "source_label": "Point", "target_label": "Object",
+         "target_id": "obj-n", "edge_type": "aboutObject"},
+        # NESTED shape: the delete payload rides under `point`.
+        {"type": "EntityMutated",
+         "point": {"id": "pt-n", "op": "delete", "label": "Point"}},
+        {"type": "PointAdded",
+         "point": {"id": "pt-n", "content": "c2",
+                   "pointKind": "statement"}},
+    ]
+    sdk = TortoiseSDK(str(tmp_path / "nested-mutation.db"))
+    try:
+        proj = sdk._get_proj()
+        events_dir = tmp_path / "events"
+        _write_journal(events_dir, events)
+        counts = _replay_every_engine(
+            proj, events_dir,
+            "MATCH (:Point {id:'pt-n'})-[:aboutObject]->"
+            "(:Object {id:'obj-n'}) RETURN count(*)")
+        assert counts == {"rebuild_all": 0, "rebuild": 0,
+                          "recover_from_log": 0}, counts
+        assert proj.g.query(
+            "MATCH (:Point {id:'pt-n'}) RETURN count(*)"
+        ).result_set[0][0] == 1
+    finally:
+        sdk.close()
+
+
 # ── OBSERVABILITY: a dropped link is visible and not counted as applied ───
 
 def test_fold_deferred_entity_links_counts_only_applied_links(
@@ -734,8 +926,10 @@ def test_entity_linked_session_source_without_session_recorded_survives_rebuild_
 
     The sweep used to run at the end of pass 1b, BEFORE pass 2's
     ``_upsert_point_edges`` recreated the ``:Session`` from
-    ``contains_session`` — so ``_fold_entity_linked`` MATCHed neither endpoint
-    and the edge was silently dropped (``rebuild`` reproduced it; the existing
+    ``contains_session`` — so ``_fold_entity_linked`` matched only the TARGET
+    endpoint (pass 1b already folds ``ObjectRegistered``) and the
+    ``(Session)-[:aboutObject]->(Object)`` edge was silently dropped
+    (``rebuild`` reproduced it; the existing
     ``test_capture_about_edges_and_session_survive_rebuild`` could not catch
     it because its journal always carries a ``SessionRecorded``).
 

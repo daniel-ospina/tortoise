@@ -704,22 +704,33 @@ class _EntityHandlers:
         record is also accepted (its list index is its seq) so a caller with
         no envelope still works.
 
-        ``hard_delete_seqs`` (``{id: max_hard_delete_seq}``, built by
-        ``projection.journal_hard_delete_seqs``) makes the fold HARD-DELETE
+        ``hard_delete_seqs`` (``{id: (max_hard_delete_seq, labels)}``, built
+        by ``projection.journal_hard_delete_seqs``) makes the fold HARD-DELETE
         aware. ``_fold_entity_linked`` is an unconditional MATCH…MERGE, and
         ids are reused routinely (name-deterministic for Object/Subject,
         content-addressed for Points), so without this boundary a link whose
         endpoint was deleted and later re-created under the SAME id came back
         on replay while live had no such edge — the deleted link RESURRECTED.
         A link at seq L whose source OR target has a hard delete at a seq
-        AFTER L is therefore skipped. A later re-link (its own seq > the
-        delete) is judged on its own seq and survives, so the rule needs no
-        extra state.
+        AFTER L **that can remove that endpoint's LABEL** is therefore
+        skipped. The label test is load-bearing (#3722 review cycle 5 P2):
+        ``EntityMutated`` replays ``_delete_entity_by_id`` (the six canonical
+        labels only) and ``PointsMerged`` removes Points only, so a journaled
+        hard delete can NEVER remove a ``:Session`` node — an id-only test
+        wrongly suppressed a live ``(Session)-[:aboutObject]->(Object)`` edge
+        whenever any other-label entity with the same id was deleted later.
+        A later re-link (its own seq > the delete) is judged on its own seq
+        and survives, so the rule needs no extra state.
 
         Returns the number of links APPLIED (the edge exists after the fold) —
         the honest count: a MALFORMED record, an ABSENT endpoint, and a STALE
         link are all DROPPED and never counted as applied (review P2, #3722).
         """
+        # #3722 review (cycle 5): the label-aware staleness helper lives next
+        # to the reader that now publishes per-delete label sets (lazy import
+        # mirrors ``_writable_id`` — avoids the import cycle).
+        from tortoise.projection import _hard_delete_suppresses
+
         hard_delete_seqs = hard_delete_seqs or {}
         applied = 0
         for seq, raw in _seq_events(events):
@@ -727,10 +738,11 @@ class _EntityHandlers:
             if isinstance(ev, dict):
                 sid = ev.get("source_id") or ev.get("id")
                 tid = ev.get("target_id")
-                if ((isinstance(sid, str)
-                     and hard_delete_seqs.get(sid, -1) > seq)
-                        or (isinstance(tid, str)
-                            and hard_delete_seqs.get(tid, -1) > seq)):
+                if (_hard_delete_suppresses(
+                        hard_delete_seqs, sid, ev.get("source_label"), seq)
+                        or _hard_delete_suppresses(
+                            hard_delete_seqs, tid,
+                            ev.get("target_label", "Object"), seq)):
                     # Stale: the live endpoint was hard-deleted AFTER this
                     # link, and its re-creation does not bring the edge back.
                     continue
