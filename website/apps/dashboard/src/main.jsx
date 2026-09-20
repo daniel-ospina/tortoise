@@ -2610,13 +2610,17 @@ function claimIntentInFlight() {
 
   // #4331: node usage vs the plan's ENFORCED node allowance, as /v1/team
   // states both fields (never computed here). `nodeState` is null when the
-  // server has not supplied both numbers — the surface then stays silent
-  // instead of inventing an allowance. `nodeHint` is the at/near-limit nudge
-  // and `nodeNext` the next plan this deployment can actually check out
-  // (both consumed by the Billing card and the header upgrade control).
-  const nodeState = nodeUsage(team)
-  const nodeHint = nodeNudge(team)
+  // server has not supplied both numbers OR the tenant graph could not be
+  // read (`graph_ready === false`) — a failed read must never render as a
+  // confident "0 / N (0%)". `nodeHint` is the at/near-limit nudge and
+  // `nodeNext` the next plan this deployment can actually check out (both
+  // consumed by the Billing card and the header upgrade control).
+  const nodeState = team && team.graph_ready !== false ? nodeUsage(team) : null
   const nodeNext = nextUpgradePlan(planOptions(), team)
+  // `hasUpgrade` keeps the nudge copy honest: no "upgrade for a higher
+  // allowance" promise when no plan above the current one is purchasable
+  // (top tier, or an empty catalog).
+  const nodeHint = nodeNudge(team, Boolean(nodeNext))
 
   // #1623: parameterized upgrade — the header Upgrade button uses the
   // server-resolved default (team.checkout_price_id); the Billing page and
@@ -8441,29 +8445,31 @@ function claimIntentInFlight() {
             the next tier the server can actually check out (with its price)
             and opens Stripe directly via upgradeToPrice. When the catalog has
             no price id for a next step it routes to the in-product Billing
-            tab instead of the marketing pricing page — a marketing link is a
-            dead end where "we have nothing to sell you" is the truth. An
-            active subscriber sees the Manage-subscription control below
-            instead (checkout 409s on an active subscription by design). */}
+            tab instead of the marketing pricing page (a marketing link is a
+            dead end where "we have nothing to sell you" is the truth). Any
+            existing Stripe-customer status (active/trialing/past_due/
+            canceled/unpaid) is managed through the portal — matching the
+            Billing plan grid — so the checkout control is withheld there and
+            the Manage-subscription control below is the path. The full plan
+            comparison is in-product (the Billing plans grid; its per-card
+            no-price-id fallback is #4335's surface). */}
         {team && team.tier !== 'team' && !canManageSubscription && (
           nodeNext ? (
-            <button
-              className="tier-badge"
-              onClick={() => upgradeToPrice(team.checkout_price_ids[nodeNext.tier])}
-              disabled={checkoutPending}
-            >
-              {checkoutPending ? 'Opening checkout…' : `Upgrade to ${nodeNext.label} · $${nodeNext.price}/mo`}
-            </button>
+            <>
+              <button
+                className="tier-badge"
+                onClick={() => upgradeToPrice(team.checkout_price_ids[nodeNext.tier])}
+                disabled={checkoutPending}
+              >
+                {checkoutPending ? 'Opening checkout…' : `Upgrade to ${nodeNext.label} · $${nodeNext.price}/mo`}
+              </button>
+              <button className="tier-badge" onClick={() => setTab('billing')}>Compare plans</button>
+            </>
           ) : (
             <button className="tier-badge" onClick={() => setTab('billing')}>
               Upgrade — see plans
             </button>
           )
-        )}
-        {/* #4331: the full plan comparison is in-product — the Billing tab's
-            plans grid, never the marketing page. */}
-        {team && team.tier !== 'team' && (
-          <button className="tier-badge" onClick={() => setTab('billing')}>Compare plans</button>
         )}
         {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
             for teams with an existing Stripe customer (#310 backend exists). */}
@@ -9565,9 +9571,10 @@ function claimIntentInFlight() {
                 <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
                 {/* #4331: the ENFORCED node count vs the plan's node allowance
                     (server fields — NOT point_count, which is :Point-only and
-                    demo-excluded). Rendered from nodeState so a server that
-                    has not supplied both numbers shows no fabricated figure. */}
-                <div className="card"><div className="card-val">{(team.nodes_used ?? 0).toLocaleString()}</div><div className="card-label">Nodes used{nodeState ? ` / ${nodeState.max.toLocaleString()}` : ''}</div></div>
+                    demo-excluded). Both the value and the denominator come
+                    from nodeState, so an absent field / unreadable graph shows
+                    "—" rather than a fabricated 0. */}
+                <div className="card"><div className="card-val">{nodeState ? nodeState.used.toLocaleString() : '—'}</div><div className="card-label">Nodes used{nodeState ? ` / ${nodeState.max.toLocaleString()}` : ''}</div></div>
                 <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Memories</div></div>
                 <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
                 <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
@@ -9591,7 +9598,9 @@ function claimIntentInFlight() {
                   treatment as write ops — accent < 80%, amber ≥ 80%, red at
                   100% — plus the upgrade nudge (Free: keep writing; paid: a
                   higher allowance). The nudge deliberately promises no
-                  chargeable node overage: none is implemented today. */}
+                  chargeable node overage: the owner DECIDED it (option B,
+                  ~$2/10k nodes/mo above cap on Solo/pro/Team, 2026-09-20)
+                  but it is NOT implemented in this lane. */}
               {nodeState && (
                 <div style={{ marginTop: 10 }}>
                   <div style={{ background: 'var(--surface-hover, rgba(255,255,255,0.06))', borderRadius: 6, height: 8, overflow: 'hidden' }}>
@@ -9607,7 +9616,21 @@ function claimIntentInFlight() {
                   {nodeHint && (
                     <p className="dim small" style={{ marginTop: 4 }}>
                       {nodeHint}{' '}
-                      {nodeNext && (
+                      {/* Same remedy routing as the plan cards above: an
+                          existing Stripe customer (active/trialing/past_due/
+                          canceled/unpaid) manages through the portal —
+                          checkout 409s on an active subscription — while
+                          everyone else gets the next purchasable plan. */}
+                      {canManageSubscription ? (
+                        <button
+                          type="button"
+                          className="ghost small"
+                          onClick={manageBilling}
+                          disabled={billingPending}
+                        >
+                          {billingPending ? 'Opening portal…' : 'Manage subscription'}
+                        </button>
+                      ) : nodeNext ? (
                         <button
                           type="button"
                           className="ghost small"
@@ -9616,7 +9639,7 @@ function claimIntentInFlight() {
                         >
                           {checkoutPending ? 'Opening checkout…' : `Upgrade to ${nodeNext.label}`}
                         </button>
-                      )}
+                      ) : null}
                     </p>
                   )}
                 </div>

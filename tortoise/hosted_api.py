@@ -4196,7 +4196,10 @@ class OrgInfoResponse(BaseModel):
     # `max_nodes` is the org's own enforced cap (`max_points`, a stored
     # override included), never the tier's nominal default alone. Both are
     # best-effort — a broken graph must never 500 /v1/team.
-    nodes_used: int = 0
+    # `nodes_used` is None when the count could not be read: a failed read
+    # must NOT be reported as a genuine 0 (the client then renders no
+    # figure), mirroring `max_nodes`'s unknown sentinel.
+    nodes_used: int | None = None
     max_nodes: int | None = None
     # #1591: the org's graph may be missing/broken (a half-failed
     # provisioning) — /v1/team must FAIL SOFT (point_count=0, graph_ready
@@ -5397,8 +5400,10 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # count_org_usage(org, "points") the points gate enforces (non-episodic
     # Points + Object + Subject, #1911). Best-effort: a broken/missing graph or
     # a quota read failure must NOT 500 /v1/team (mirrors the point_count
-    # fail-soft above) — the client then renders 0 rather than dead-ending.
-    nodes_used = 0
+    # fail-soft above). On failure it stays None — a read failure is NOT a
+    # genuine zero, and the client must render no figure rather than a
+    # falsely reassuring "0 / N (0%)".
+    nodes_used: int | None = None
     try:
         from tortoise.quota import count_org_usage
         nodes_used = count_org_usage(org["org_id"], "points", sdk=sdk)

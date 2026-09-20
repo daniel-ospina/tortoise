@@ -61,7 +61,6 @@ test('#4331: a missing/junk server number renders NOTHING, never a fabricated al
     { nodes_used: 5 }, { max_nodes: 100 },
     { nodes_used: null, max_nodes: 100 },
     { nodes_used: 5, max_nodes: null },
-    { nodes_used: 5, max_nodes: 0 },
     { nodes_used: 5, max_nodes: -1 },
     { nodes_used: 'x', max_nodes: 100 },
     { nodes_used: 5, max_nodes: 'x' },
@@ -72,11 +71,29 @@ test('#4331: a missing/junk server number renders NOTHING, never a fabricated al
   }
 })
 
+test('#4331: a stored max_nodes=0 is a REAL absolute cap, not "unknown"', () => {
+  // Tests pin that `_org_limits_from_node` preserves an explicit 0 override
+  // (tests/test_quota.py) and `enforce_org_limit` refuses every write at it.
+  const u = nodeUsage({ nodes_used: 0, max_nodes: 0 })
+  assert.deepEqual({ used: u.used, max: u.max, pct: u.pct, level: u.level },
+    { used: 0, max: 0, pct: 100, level: 'at_limit' })
+  assert.match(nodeNudge({ tier: 'free', nodes_used: 0, max_nodes: 0 }), /reached your node limit/i)
+})
+
+test('#4331: the level uses the unrounded ratio (99.5% must not read as reached)', () => {
+  assert.equal(nodeUsage({ nodes_used: 995, max_nodes: 1000 }).pct, 100)
+  assert.equal(nodeUsage({ nodes_used: 995, max_nodes: 1000 }).level, 'near')
+  // 79.5% rounds to 80 for DISPLAY but is still under the nudge threshold.
+  assert.equal(nodeUsage({ nodes_used: 795, max_nodes: 1000 }).pct, 80)
+  assert.equal(nodeUsage({ nodes_used: 795, max_nodes: 1000 }).level, 'ok')
+  assert.equal(nodeUsage({ nodes_used: 800, max_nodes: 1000 }).level, 'near')
+})
+
 // ── 2. Colour thresholds ─────────────────────────────────────────────────
 
 test('#4331: bar colour is accent < 80%, amber ≥ 80%, red at 100%', () => {
   assert.equal(nodeBarColor('ok'), 'var(--accent, #06b6d4)')
-  assert.match(nodeBarColor('near'), /#f59e0b/, 'amber at ≥80%')
+  assert.match(nodeBarColor('near'), /var\(--amber, #fbbf24\)/, 'amber at ≥80%')
   assert.match(nodeBarColor('at_limit'), /#f87171/, 'red at 100%')
 })
 
@@ -89,13 +106,25 @@ test('#4331: the nudge is silent below 80% and fires at/above it', () => {
 })
 
 test('#4331: free vs paid nudges say different things', () => {
-  const free = nodeNudge({ tier: 'free', nodes_used: 80, max_nodes: 100 })
-  const paid = nodeNudge({ tier: 'pro', nodes_used: 80, max_nodes: 100 })
+  const free = nodeNudge({ tier: 'free', nodes_used: 80, max_nodes: 100 }, true)
+  const paid = nodeNudge({ tier: 'pro', nodes_used: 80, max_nodes: 100 }, true)
   assert.match(free, /upgrade to keep writing/i)
-  assert.match(paid, /near your node allowance — upgrade for a higher allowance/i)
+  assert.match(paid, /near your node allowance/i)
+  assert.match(paid, /upgrade for a higher allowance/i)
   assert.notEqual(free, paid)
   // anon is the internal free tier — it must read as free.
-  assert.equal(nodeNudge({ tier: 'anon', nodes_used: 80, max_nodes: 100 }), free)
+  assert.equal(nodeNudge({ tier: 'anon', nodes_used: 80, max_nodes: 100 }, true), free)
+})
+
+test('#4331: no purchasable upgrade → the nudge states the cap, never promises an upgrade', () => {
+  for (const tier of ['team', 'pro', 'free']) {
+    for (const used of [80, 100]) {
+      const hint = nodeNudge({ tier, nodes_used: used, max_nodes: 100 }, false)
+      assert.doesNotMatch(hint, /upgrade/i,
+        `must not promise an upgrade that cannot be bought: ${hint}`)
+      assert.match(hint, /node (limit|allowance)/i, hint)
+    }
+  }
 })
 
 test('#4331: the paid nudge promises no chargeable node overage (none is implemented)', () => {
@@ -137,15 +166,24 @@ test('#4331: no purchasable step up → null (the honest no-price-id case)', () 
     nextUpgradePlan(PLANS, { tier: 'free', checkout_price_ids: { pro: 'price_pro' } }).tier,
     'pro',
   )
+  // An unrecognised PAID tier must never fall back to the lowest plan (that
+  // would sell a downgrade as an "upgrade").
+  assert.equal(
+    nextUpgradePlan(PLANS, { tier: 'enterprise', checkout_price_ids: IDS }),
+    null,
+  )
 })
 
 // ── 5. Wiring: the Billing card ─────────────────────────────────────────
 
-test('#4331: the Billing card shows nodes_used / max_nodes', () => {
+test('#4331: the Billing card shows nodes_used / max_nodes and never fabricates a 0', () => {
   assert.match(flat, /Nodes used/, 'the Billing stats row must have a Nodes card')
-  assert.match(flat, /team\.nodes_used/, 'the card value must read the server nodes_used')
+  assert.match(flat, /nodeState \? nodeState\.used\.toLocaleString\(\) : '—'/,
+    'the card value must be suppressed (not 0) when the count is unknown')
   assert.match(flat, /nodeState \? ` \/ \$\{nodeState\.max\.toLocaleString\(\)\}`/,
     'the card label must show the server max_nodes')
+  assert.match(flat, /team\.graph_ready !== false \? nodeUsage\(team\) : null/,
+    'an unreadable graph must make the node figure unknown, not zero')
 })
 
 test('#4331: the node bar shares the write-ops treatment with amber/red thresholds', () => {
@@ -154,9 +192,22 @@ test('#4331: the node bar shares the write-ops treatment with amber/red threshol
   assert.match(flat, /width: `\$\{nodeState\.pct\}%`/, 'the bar width must be the capped pct')
 })
 
-test('#4331: the at/near-limit nudge renders with an upgrade CTA', () => {
+test('#4331: the nudge copy is purchasability-aware and never promises an unbuyable upgrade', () => {
+  assert.match(flat, /nodeNudge\(team, Boolean\(nodeNext\)\)/,
+    'the nudge must know whether a purchasable upgrade exists')
+})
+
+test('#4331: the nudge remedy matches the plan cards — portal for Stripe customers, checkout otherwise', () => {
   assert.match(flat, /nodeHint && \(/, 'the nudge must render when nodeHint fires')
-  assert.match(flat, /Upgrade to \$\{nodeNext\.label\}/, 'the nudge CTA names the next plan')
+  // The CTA is inside a canManageSubscription ? portal : nodeNext ? checkout
+  // : null chain — an active subscriber must never get the 409-ing checkout.
+  const start = flat.indexOf('{nodeHint && (')
+  assert.notEqual(start, -1, 'the nudge block must exist')
+  const nudge = flat.slice(start, start + 1400)
+  assert.match(nudge, /canManageSubscription \? \(/, 'Stripe customers get the portal path')
+  assert.match(nudge, /onClick=\{manageBilling\}/, 'the portal control manages the subscription')
+  assert.match(nudge, /: nodeNext \? \(/, 'only a non-managed team gets the checkout CTA')
+  assert.match(nudge, /Upgrade to \$\{nodeNext\.label\}/, 'the checkout CTA names the next plan')
 })
 
 // ── 6. Wiring: the header upgrade control ───────────────────────────────
@@ -176,7 +227,10 @@ test('#4331: the header control degrades honestly when no price id exists', () =
   assert.match(header, /Upgrade — see plans/, 'no purchasable plan → a truthful label')
   assert.match(header, /onClick=\{\(\) => setTab\('billing'\)\}/,
     'the fallback must route to the in-product Billing tab')
-  assert.match(header, /Compare plans/, 'the full comparison lives in the Billing tab')
+  // "Compare plans" is rendered INSIDE the purchasable branch, so the
+  // no-price-id state shows ONE control, not two identical ones.
+  const branch = header.slice(header.indexOf('nodeNext ? ('), header.indexOf(') : (', header.indexOf('nodeNext ? (')))
+  assert.match(branch, /Compare plans/, 'the comparison lives in the Billing tab')
 })
 
 test('#4331: an active subscriber keeps the portal path, not a checkout control', () => {

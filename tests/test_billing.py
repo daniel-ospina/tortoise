@@ -1215,6 +1215,8 @@ class TestTeamInfoBillingSurface:
                                          headers=billing_client["headers"])
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["nodes_used"] == 0
+        # None, not 0: a failed read must not look like a genuinely empty org
+        # (the client renders no figure for None).
+        assert body["nodes_used"] is None
         assert body["max_nodes"] == 10000
         assert body["tier"] == "free"

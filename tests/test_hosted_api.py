@@ -1541,8 +1541,9 @@ class TestTeamInfo:
         body = r.json()
         assert body["point_count"] == 0
         # #4331: the node count (a second graph read) degrades the same way —
-        # it must never turn the fail-soft overview into a 500.
-        assert body["nodes_used"] == 0
+        # it must never turn the fail-soft overview into a 500, and a failed
+        # read is None (unknown), NOT a falsely reassuring 0.
+        assert body["nodes_used"] is None
         assert body["max_nodes"] == 10000
         assert body["graph_ready"] is False
 
