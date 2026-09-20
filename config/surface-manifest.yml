@@ -230,7 +230,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_recall
-  served_from: tortoise/mcp_server.py:32a22d4162be59b6
+  served_from: tortoise/mcp_server.py:d625dc916f15d980
   family: memory
   family_rank: 1
   served: http
@@ -260,7 +260,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_recall`: the #3926
+  # typed-error guard refactor moved its fingerprint 32a22d4162be59b6 -> d625dc916f15d980.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
@@ -290,7 +293,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_suggest_entry_points
-  served_from: tortoise/mcp_server.py:4fc2d2c7d48e54e5
+  served_from: tortoise/mcp_server.py:564fb24731914250
   family: memory
   family_rank: 1
   served: http
@@ -310,7 +313,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_suggest_entry_points`: the #3926
+  # typed-error guard refactor moved its fingerprint 4fc2d2c7d48e54e5 -> 564fb24731914250.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_index_files
@@ -344,7 +350,7 @@ rows:
   cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
     — waits for your approval
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:a6d828573b6efd9e
+  served_from: tortoise/mcp_server.py:ae05db8604547f1a
   family: memory
   family_rank: 1
   served: http
@@ -365,7 +371,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_create_point`: the #3926
+  # typed-error guard refactor moved its fingerprint a6d828573b6efd9e -> ae05db8604547f1a.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
@@ -495,7 +504,7 @@ rows:
   cluster_canonical: tortoise_update
   cluster_note: group `update` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_delete
-  served_from: tortoise/mcp_server.py:bc9ed3ffe618b1f1
+  served_from: tortoise/mcp_server.py:92890c80d0ad8e5e
   family: memory
   family_rank: 1
   served: http
@@ -515,7 +524,10 @@ rows:
   recommended_family: memory
   proposed: true
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_delete`: the #3926
+  # typed-error guard refactor moved its fingerprint bc9ed3ffe618b1f1 -> 92890c80d0ad8e5e.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: tortoise_delete
   cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
@@ -2324,7 +2336,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_decision
-  served_from: tortoise/mcp_server.py:d687db94a7343283
+  served_from: tortoise/mcp_server.py:db5fa336a73abb42
   family: journal
   family_rank: 7
   served: http
@@ -2345,7 +2357,10 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # PR #4173 changed the implementation served as `tortoise_file_decision`: the #3926
+  # typed-error guard refactor moved its fingerprint d687db94a7343283 -> db5fa336a73abb42.
+  # No tool was added, removed or renamed; landing PR #4173 is the approving act.
+  approval: '#4173 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval
