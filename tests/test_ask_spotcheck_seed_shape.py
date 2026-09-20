@@ -258,8 +258,8 @@ def test_dateless_fixture_session_records_no_recorded_time(tmp_path):
     #4156 means "record NO time" rather than "use the run clock". The
     ask-path date annotation reads ``:Session.created_at``, so a run clock
     there would render as the session's date — a fabricated fact in front of
-    a temporal question. Nothing is written and the reader's context carries
-    NO date marker.
+    a temporal question. NO recorded time is written (and nothing has to be
+    erased afterwards), so the reader's context carries NO date marker.
     """
     from tools.ask_spotcheck import _seed_memory
 

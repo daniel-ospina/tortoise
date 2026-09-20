@@ -223,9 +223,17 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
 
     ``now`` follows :func:`merge_capture_session` exactly: the default
     (``CAPTURE_CLOCK``) models a capture's own clock and is resolved ONCE so
-    the session and every turn share it; an explicit ``now=None`` means the
-    session and its turns record NO time, and any time already on them is
-    REMOVED (#4156).
+    the session and every turn share it. An explicit ``now=None`` means the
+    session records NO time, and that is enforced against the node — the
+    session's ``created_at`` and the time properties of every Point it
+    ``CONTAINS`` are REMOVED, not merely left unwritten (#4156).
+
+    ⚠️ The whole contract is contingent on the blank gate below ADMITTING the
+    session: a degenerate conversation returns before any write, so a
+    re-seed of a previously-timed session with a blank conversation is left
+    completely untouched (its recorded time included). That is deliberate —
+    capture's gate is pre-mutation and a real capture of a blank session
+    writes nothing either; do not "fix" it by moving the gate.
 
     Returns the turn ids WRITTEN, in window order. An EMPTY list means the
     blank gate skipped the session — the caller must not assume a Point
@@ -281,11 +289,15 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         )
         turn_ids.append(turn_id)
     if now is None:
-        # #4156: the sweep is over the session's STORED turn set, not over the
-        # window rewritten above — the deleted helper cleared
-        # ``(:Session)-[:CONTAINS]->(:Point)`` unconditionally, so a re-seed
+        # #4156: the sweep is over the session's STORED ``CONTAINS`` Point
+        # set — not over the window rewritten above, and not only over turns:
+        # the deleted helper ran the same unrestricted match, and a re-seed
         # with a SHORTER conversation must clear the older turns too, or the
         # session records a fabricated date again through the back door.
+        # (Capture CONTAINS-wires extracted claim Points as well, so those are
+        # swept with the turns — their ``createdAt`` here, and their
+        # ``updatedAt`` too, which the deleted helper left alone. No caller
+        # passes ``now=None`` for a session holding extracted claims today.)
         proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
             "SET t.createdAt = null, t.updatedAt = null",
