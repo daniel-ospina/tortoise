@@ -67,28 +67,47 @@ VALUES
     -- `subscription_id`/`btrim` guard is exercised too.
     ('4216-blank-sub-end', '4216-blank-sub-end', 'org_4216-blank-sub-end', '   ',
      NULL, '2026-06-01T00:00:00+00:00'),
-    -- ...and NON-SPACE whitespace (tab / newline / NBSP), which a bare
-    -- ``btrim(x)`` would NOT treat as blank: the guard must match the runtime
-    -- resolver's ``str.strip()`` exactly, or it derives/reports a row the meter
-    -- considers a FREE org (#4216 review).
-    ('4216-blank-sub-tab', '4216-blank-sub-tab', 'org_4216-blank-sub-tab',
-     E'\t', NULL, NULL),
-    ('4216-blank-sub-tab-bound', '4216-blank-sub-tab-bound',
-     'org_4216-blank-sub-tab-bound', E'\t\n',
-     '2026-06-01T00:00:00+00:00', NULL),
-    ('4216-blank-sub-nbsp-end', '4216-blank-sub-nbsp-end',
-     'org_4216-blank-sub-nbsp-end', E'\u00A0',
-     NULL, '2026-06-01T00:00:00+00:00'),
-    -- ...and a Unicode space OUTSIDE the ASCII/NBSP set (U+2003 EM SPACE), so
-    -- the predicate must be the full ``str.strip()`` set, not a short list of
-    -- the obvious ones. Both directions (no bound / one bound) are seeded.
-    ('4216-blank-sub-emsp', '4216-blank-sub-emsp', 'org_4216-blank-sub-emsp',
-     E'\u2003', NULL, NULL),
-    ('4216-blank-sub-emsp-end', '4216-blank-sub-emsp-end',
-     'org_4216-blank-sub-emsp-end', E'\u2003',
-     NULL, '2026-06-01T00:00:00+00:00'),
     ('4216-free-no-sub-end', '4216-free-no-sub-end', 'org_4216-free-no-sub-end',
      NULL, NULL, '2026-07-01T00:00:00+00:00');
+
+-- 0b) EVERY code point the predicate claims to treat as blank, GENERATED from
+--     the set itself, so the parity claim is mutation-tested across the whole
+--     set rather than spot-checked (a dropped OR added code point REDs the
+--     suite). ``cp`` list = ``str.isspace()``: ASCII whitespace, U+001C–U+001F,
+--     U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F, U+205F,
+--     U+3000.
+INSERT INTO public.organizations
+    (id, name, graph_name, subscription_id,
+     current_period_start, current_period_end)
+SELECT '4216-blank-cp-' || cp, '4216-blank-cp-' || cp,
+       'org_4216-blank-cp-' || cp, chr(cp), NULL, NULL
+  FROM unnest(ARRAY[9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,
+                    8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,
+                    8287,12288]) AS t(cp);
+
+-- ...and the same set again carrying ONLY an end, so BOTH derivation guards
+-- (start-from-end and end-from-start) are exercised for every code point.
+INSERT INTO public.organizations
+    (id, name, graph_name, subscription_id,
+     current_period_start, current_period_end)
+SELECT '4216-blank-cpe-' || cp, '4216-blank-cpe-' || cp,
+       'org_4216-blank-cpe-' || cp, chr(cp),
+       NULL, '2026-06-01T00:00:00+00:00'
+  FROM unnest(ARRAY[9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,
+                    8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,
+                    8287,12288]) AS t(cp);
+
+-- NEGATIVE controls: code points that share an encoding prefix with a blank one
+-- (or are otherwise easy to mistake for whitespace) but are NOT whitespace.
+-- They must STILL be treated as real subscription ids — a wrongly WIDENED
+-- predicate would leave them unrepaired, the #4216 defect in the other
+-- direction. (U+0080, U+180E, U+200B, U+FEFF.)
+INSERT INTO public.organizations
+    (id, name, graph_name, subscription_id,
+     current_period_start, current_period_end)
+SELECT '4216-ctrl-' || cp, '4216-ctrl-' || cp, 'org_4216-ctrl-' || cp,
+       chr(cp), NULL, '2026-06-01T00:00:00+00:00'
+  FROM unnest(ARRAY[128, 6158, 8203, 65279]) AS t(cp);
 
 -- 1) The repair RETURNS exactly the unusable orgs (loud, not silent).
 --    Mutation caught: dropping either reported class (both-NULL / inverted /
@@ -176,6 +195,7 @@ DECLARE a timestamptz; b timestamptz;
         i_s timestamptz; i_e timestamptz;
         z_s timestamptz; z_e timestamptz;
         f_s timestamptz; f_e timestamptz;
+        n_cp integer;
 BEGIN
     SELECT current_period_start, current_period_end INTO a, b
       FROM public.organizations WHERE id = '4216-both-null';
@@ -220,38 +240,36 @@ BEGIN
         RAISE EXCEPTION 'a blank-subscription org must not derive a start (% %)',
             f_s, f_e;
     END IF;
-    SELECT current_period_start, current_period_end INTO f_s, f_e
-      FROM public.organizations WHERE id = '4216-blank-sub-tab';
-    IF f_s IS NOT NULL OR f_e IS NOT NULL THEN
-        RAISE EXCEPTION 'a tab-only subscription_id must be untouched (% %)',
-            f_s, f_e;
+    -- EVERY member of the blank set, not a spot check: the both-NULL rows must
+    -- stay both-NULL and the end-only rows must NOT gain a start. Mutation
+    -- caught: dropping ANY code point from ``blank_chars`` (there is one
+    -- generated row per code point), or narrowing the set to the "obvious"
+    -- ASCII ones.
+    SELECT count(*) INTO n_cp
+      FROM public.organizations
+     WHERE id LIKE '4216-blank-cp-%'
+       AND (current_period_start IS NOT NULL OR current_period_end IS NOT NULL);
+    IF n_cp <> 0 THEN
+        RAISE EXCEPTION '% blank-cp org(s) filtered — the predicate is not the '
+                        'full str.strip() set', n_cp;
     END IF;
-    SELECT current_period_start, current_period_end INTO f_s, f_e
-      FROM public.organizations WHERE id = '4216-blank-sub-tab-bound';
-    IF f_s IS DISTINCT FROM '2026-06-01T00:00:00+00:00'::timestamptz
-       OR f_e IS NOT NULL THEN
-        RAISE EXCEPTION 'a tab-only subscription_id must not be derived (% %)',
-            f_s, f_e;
+    SELECT count(*) INTO n_cp
+      FROM public.organizations
+     WHERE id LIKE '4216-blank-cpe-%' AND current_period_start IS NOT NULL;
+    IF n_cp <> 0 THEN
+        RAISE EXCEPTION '% blank-cpe org(s) derived a start from a blank id', n_cp;
     END IF;
-    SELECT current_period_start, current_period_end INTO f_s, f_e
-      FROM public.organizations WHERE id = '4216-blank-sub-nbsp-end';
-    IF f_s IS NOT NULL
-       OR f_e IS DISTINCT FROM '2026-06-01T00:00:00+00:00'::timestamptz THEN
-        RAISE EXCEPTION 'an NBSP-only subscription_id must not derive a start (% %)',
-            f_s, f_e;
-    END IF;
-    SELECT current_period_start, current_period_end INTO f_s, f_e
-      FROM public.organizations WHERE id = '4216-blank-sub-emsp';
-    IF f_s IS NOT NULL OR f_e IS NOT NULL THEN
-        RAISE EXCEPTION 'a U+2003-only subscription_id must be untouched (% %)',
-            f_s, f_e;
-    END IF;
-    SELECT current_period_start, current_period_end INTO f_s, f_e
-      FROM public.organizations WHERE id = '4216-blank-sub-emsp-end';
-    IF f_s IS NOT NULL
-       OR f_e IS DISTINCT FROM '2026-06-01T00:00:00+00:00'::timestamptz THEN
-        RAISE EXCEPTION 'a U+2003-only subscription_id must not derive a start (% %)',
-            f_s, f_e;
+    -- NEGATIVE controls: a code point that is NOT blank must still be repaired
+    -- as a real subscription (a wrongly WIDENED predicate would skip it).
+    SELECT count(*) INTO n_cp
+      FROM public.organizations
+     WHERE id LIKE '4216-ctrl-%'
+       AND current_period_start IS DISTINCT FROM
+           (current_period_end AT TIME ZONE 'UTC' - interval '1 month')
+           AT TIME ZONE 'UTC';
+    IF n_cp <> 0 THEN
+        RAISE EXCEPTION '% non-blank control org(s) were NOT repaired — the '
+                        'predicate wrongly treats them as blank', n_cp;
     END IF;
     SELECT current_period_start, current_period_end INTO f_s, f_e
       FROM public.organizations WHERE id = '4216-free-no-sub-end';
@@ -333,7 +351,7 @@ DELETE FROM public.organizations
               '4216-dst-start', '4216-both-null', '4216-inverted',
               '4216-empty', '4216-free-one-bound', '4216-blank-sub',
               '4216-blank-sub-bound', '4216-blank-sub-end',
-              '4216-blank-sub-tab', '4216-blank-sub-tab-bound',
-              '4216-blank-sub-nbsp-end', '4216-blank-sub-emsp',
-              '4216-blank-sub-emsp-end',
-              '4216-free-no-sub-end');
+              '4216-free-no-sub-end')
+    OR id LIKE '4216-blank-cp-%'
+    OR id LIKE '4216-blank-cpe-%'
+    OR id LIKE '4216-ctrl-%';

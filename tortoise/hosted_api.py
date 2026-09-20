@@ -24700,10 +24700,11 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         # client_reference_id; the registry lane returns its own id, so the
         # effective id is adopted for every later write AND reported back to
         # the caller for the dedup marker / tier read / audit.
-        # Guard the SUBJECT of every payload read. A non-dict ``metadata`` /
-        # ``customer_details`` would raise AttributeError here, before any try,
-        # and the route's handler would 500 → Stripe redelivers the same bad
-        # event forever — the class this PR hardens for ``items``/``price``.
+        # Guard the nested VALUES read out of ``data`` (``metadata`` /
+        # ``customer_details``): a non-dict value would raise AttributeError at
+        # ``.get(...)``, before any try, and the route's handler would 500 →
+        # Stripe redelivers the same bad event forever — the class this PR
+        # hardens for ``items``/``price``.
         meta = data.get("metadata")
         meta = meta if isinstance(meta, dict) else {}
         is_new_org = str(meta.get("new_org") or "") == "1"
