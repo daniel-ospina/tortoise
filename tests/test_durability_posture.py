@@ -24,7 +24,7 @@ The extension lives in ``CLAIM_RE`` below and is pinned by the positive test.
 The gate is deliberately **scoped, not global**: the bare phrase is used
 hundreds of times repo-wide for unrelated things (pack schemas, eval specs, the
 legitimate "corpus files (source of truth)" at
-``docs/quickstart-selfhosted.md:232``). A global gate would be noise and would
+``docs/quickstart-selfhosted.md:265``). A global gate would be noise and would
 be switched off; this one names the exact deployment-claim shape.
 
 Unconditional (no network, no browser, no DB): plain file scan.
