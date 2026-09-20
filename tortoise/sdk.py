@@ -16908,9 +16908,12 @@ class TortoiseSDK:
         # NOTE (issue #327): deletion covers only canonical entity labels —
         # Session/APIKey/Org/Tag nodes are intentionally NOT deleted (legacy
         # matched them by id/eventId; no caller relies on it).
+        # #3860: the ONE label→id-property table, shared with the replay fold
+        # (``projection._delete_entity_by_id``) so the producer and the fold
+        # cannot drift.
+        from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
         total = 0
-        for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
-                            ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
+        for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             r = proj.g.query(
                 f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
                 params={"id": id_val},
