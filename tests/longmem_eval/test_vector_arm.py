@@ -58,7 +58,14 @@ from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).parent.parent / "fixtures" / "longmemeval_mini.json"
 
-_FAKE_DIM = 32
+_FAKE_DIM = 32  # token-hash bucket count — the vectors' only information
+# #4280: the STORED width must be the store's index width. A narrower vector is
+# refused by an indexed store (`create_point` → `encode_for_store` → the store's
+# `required_embedding_dim`), so this buckets into ``_FAKE_DIM`` and then
+# ZERO-PADS to :data:`EMBEDDING_DIM`. Padding adds only exact 0.0 terms, so
+# every cosine — and therefore every hand-computed rank/threshold in this
+# module — is unchanged, while the vector is storable on BOTH lanes (embedded
+# and a `TORTOISE_DB_URI` server, which has the 384-dim Point HNSW index).
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -75,7 +82,7 @@ def _fake_vec(text: str) -> list[float]:
     dims: dict[str, float] = {}
     for tok in _TOKEN_RE.findall((text or "").lower()):
         dims[tok] = dims.get(tok, 0.0) + 1.0
-    vec = [0.0] * _FAKE_DIM
+    vec = [0.0] * emb.EMBEDDING_DIM
     for tok, c in dims.items():
         vec[zlib.crc32(tok.encode("utf-8")) % _FAKE_DIM] += c
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
