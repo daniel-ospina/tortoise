@@ -24538,8 +24538,9 @@ async def billing_portal(request: Request, org: dict = Depends(get_current_org_s
 
 # #4335: a broken/misconfigured price catalog used to degrade silently — a
 # total billing outage looked exactly like a UI preference, and the dashboard
-# could only fall back to a marketing link. Emit the exception class + message
-# ONCE per outage at WARNING and latch the emission so the per-request /v1/team
+# could only fall back to a marketing link. Emit the failure ONCE per outage at
+# WARNING (catalog-load exception class + message, or a parsed catalog that
+# resolves no paid tier) and latch the emission so the per-request /v1/team
 # call cannot flood the log. A success clears the latch so a NEW breakage after
 # a recovery is still reported.
 _checkout_catalog_failure_logged = False
@@ -24592,7 +24593,11 @@ def _default_checkout_price_id() -> str | None:
     except Exception as exc:  # best-effort, never 5xx /v1/team
         _log_checkout_catalog_failure(exc)
         return None
-    _checkout_catalog_failure_logged = False
+    if price is not None:
+        # Only a resolved default proves the catalog is healthy — clearing the
+        # latch when pro is merely absent would let the zero-paid-tier warning
+        # in _checkout_price_ids() re-fire on every request.
+        _checkout_catalog_failure_logged = False
     return price
 
 
@@ -24600,7 +24605,10 @@ def _checkout_price_ids() -> dict[str, str]:
     """#1623: tier → monthly price_id for the paid public tiers, server-
     resolved from STRIPE_PRICE_IDS (the Billing page's per-plan Upgrade
     CTAs — never hardcoded in the client). Free/anon ($0) have no checkout.
-    Best-effort {} when the catalog is unconfigured.
+    Best-effort {} when the catalog is unconfigured. A parsed catalog that
+    resolves NO paid tier is a total checkout outage and is reported once
+    through the same latch; a legitimately PARTIAL catalog (some paid tiers,
+    e.g. solo/team only) is supported by #2789 and stays silent.
     """
     global _checkout_catalog_failure_logged
     try:
@@ -24613,6 +24621,13 @@ def _checkout_price_ids() -> dict[str, str]:
     except Exception as exc:  # best-effort, never 5xx /v1/team
         _log_checkout_catalog_failure(exc)
         return {}
+    if not ids:
+        # Parsed fine but resolves no paid checkout tier — every paid Upgrade
+        # CTA is dead. Report that ONCE (do not clear the latch); a partial
+        # catalog keeps ≥1 tier and is not a failure (#2789).
+        _log_checkout_catalog_failure(
+            LookupError("STRIPE_PRICE_IDS resolved no paid checkout tier (solo/pro/team)"))
+        return ids
     _checkout_catalog_failure_logged = False
     return ids
 
