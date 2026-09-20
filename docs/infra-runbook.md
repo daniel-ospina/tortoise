@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-09-19
+updated: 2026-09-20
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
@@ -69,10 +69,10 @@ agree on that spelling — `.mcp.json`, `README.md`, `client/README.md`,
 `docs/INGEST_CONTRACT.md`, `docs/data-safety.md`, and the availability watchdog's
 `DEFAULT_PROBE_URL` (`.github/scripts/availability-watchdog.sh`). Other hostnames are
 different surfaces, **not** competing client-facing API bases —
-`tortoise.premiselabs.co` (landing / legal, Cloudflare Pages — the sign-in BFF
-**moved off** this origin to `app.premiselabs.co` in #4054, so its `/auth/start` is a
-404 by design),
-`app.premiselabs.co` (dashboard **and the sign-in BFF**), and `tortoise-y4mjjq.fly.dev` (the Fly app host, also
+`tortoise.premiselabs.co` (landing / legal, Cloudflare Pages — its `/auth/start`
+answers **404 by design**: the sign-in BFF moved off this origin in #4054),
+`app.premiselabs.co` (dashboard — and the BFF/auth surface since #4054), and
+`tortoise-y4mjjq.fly.dev` (the Fly app host, also
 used as a server-side/internal base such as `INTERNAL_API_URL`).
 
 ⛔ **`tortoise.dev` is a third party's zone. Never point a client, a doc, or a DNS
@@ -1003,8 +1003,8 @@ before the run declares DOWN, so a single transient blip cannot fire an alarm.
 #### 7.1b The Pages auth target (#3628)
 
 The second step probes `GET https://app.premiselabs.co/auth/start`
-(the dashboard Pages project — the SESSION-BEARING origin, per #4054; the
-marketing origin answers 404 by design since the BFF moved there).
+(the `tortoise-dashboard` Pages project — the SESSION-BEARING origin; #4054 moved
+the BFF there, so the marketing origin answers **404 by design**).
 It exists because of the **#3616 sign-in outage** (~35 min):
 only `/auth/start` revealed it. The other candidate routes stayed GREEN the
 whole time — this is the trap to remember when tempted to probe something
@@ -1023,7 +1023,7 @@ The auth target's UP contract is **narrower and stronger** than the API's:
 |---|---|---|
 | `PROBE_EXPECT_STATUS` | `302` | A healthy `/auth/start` is a redirect, not a 200. The watchdog's built-in arms classify 3xx as UNEXPECTED, so **without this allow-list a healthy site would page** — the #1 way to get this wrong |
 | `PROBE_REQUIRE_HEADER` | `code_challenge_method=s256` | Proof the PKCE flow row was actually written to D1. A 302 **without** it is an *answered-but-wrong* (UNEXPECTED → `PROD DEGRADED`) verdict, not an outage — “the site is up but nobody can sign in”, the entire lesson of #3616 |
-| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed — and renaming it **orphans any incident filed under the old title**, which then has to be closed by hand rather than auto-resolved |
+| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed; renaming it **orphans incidents filed under the old title** (closed by hand, not auto-resolved). Two production targets must not share one label, or they fight over a single issue |
 
 The allow-list replaces **only** the UP arms: `000`/`5xx` are checked **first**
 and stay **DOWN** even if listed, and any other status stays **UNEXPECTED**. A

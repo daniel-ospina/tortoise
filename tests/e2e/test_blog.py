@@ -26,13 +26,22 @@ Run locally against a wrangler pages dev preview:
 Post-deploy (CI / manual):
   RUN_BLOG_E2E=1 BASE_URL=https://premiselabs.co \
     TORTISE_HOST=https://tortoise.premiselabs.co pytest tests/e2e/test_blog.py -v
+
+Write-path tests (#4220): the two tests that CREATE rows are marked
+``blog_write`` and are NOT run by the deploy job — a deploy must not mutate
+production content. They run on demand against a chosen target:
+  RUN_BLOG_E2E=1 ALLOW_PROD=1 BASE_URL=https://premiselabs.co \
+    TORTISE_HOST=https://tortoise.premiselabs.co BLOG_E2E_AGENT_KEY=... \
+    pytest tests/e2e/test_blog.py -v -m blog_write
+Also available as the `Blog write E2E (manual)` workflow (workflow_dispatch).
+Both write tests DELETE the row they created (agent API DELETE, in a
+``finally:``) and assert it is gone — see #4220.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
-import uuid
 import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urlparse
 
@@ -194,6 +203,20 @@ def test_purge_endpoint_rejects_unauthenticated() -> None:
     assert r.status_code == 401, f"purge no-session → {r.status_code}"
 
 
+def test_agent_api_rejects_unauthenticated_delete() -> None:
+    """#4220: the new DELETE surface is not an anonymous delete.
+
+    Mutates nothing (no key → no write), so it runs on every deploy — the
+    destructive surface gets a fail-closed check on each one. Falsifiable: a
+    change that let DELETE fail open would return 200/404 here, not 401.
+    """
+    url = f"{TORTISE}/blog/api/posts/any-slug"
+    no_key = SESSION.delete(url, timeout=20)
+    assert no_key.status_code == 401, f"delete no-key → {no_key.status_code}"
+    bad_key = SESSION.delete(url, headers={"X-Agent-Key": "invalid-key"}, timeout=20)
+    assert bad_key.status_code == 401, f"delete bad-key → {bad_key.status_code}"
+
+
 # ── #1864/#1865/#1866: crawler-visibility lifecycle + meta contract ─────────
 # These need a VALID agent key (provisioned in blog_agent_keys with
 # agent_name='blog-e2e'; pass the raw key as BLOG_E2E_AGENT_KEY). Without it
@@ -206,52 +229,108 @@ NO_AGENT_KEY = pytest.mark.skipif(
     not AGENT_KEY,
     reason="BLOG_E2E_AGENT_KEY required (provision blog-e2e key in blog_agent_keys)",
 )
+# #4220: the deploy job runs this file with `-m "not blog_write"`. A test that
+# creates/publishes prod content must not run on every deploy — it mutates the
+# editorial queue and, if it fails mid-run, leaves residue. These two run on
+# demand (workflow_dispatch / explicit local invocation).
+BLOG_WRITE = pytest.mark.blog_write
 
 
+def _delete_post(url: str, slug: str) -> requests.Response:
+    """DELETE one of our own posts via the agent API (#4220)."""
+    return SESSION.delete(f"{url}/{slug}", headers=AGENT_HEADERS, timeout=20)
+
+
+def _unpublish_best_effort(url: str, slug: str) -> None:
+    """PATCH status=draft, ignoring failure (#4316).
+
+    DELETE is DRAFT-ONLY (the recorded lifecycle has no published→deleted
+    transition), so a caller that may be facing a PUBLISHED row — the pre-clean
+    of a run killed mid-lifecycle — must unpublish first, or the pre-clean's
+    DELETE 409s and leaves the stale slug to collide with its own create.
+    Best-effort: an absent row 404s, which is the normal case.
+    """
+    with contextlib.suppress(Exception):
+        SESSION.patch(f"{url}/{slug}", json={"status": "draft"},
+                      headers=AGENT_HEADERS, timeout=20)
+
+
+def _delete_post_verified(url: str, slug: str) -> None:
+    """Delete `slug` and assert the row is GONE, not merely unpublished (#4220).
+
+    404 on the first call is tolerated — the row may never have been created
+    (e.g. the test failed before its POST). A 200 is then re-probed: if the
+    DELETE had only unpublished, or silently no-op'd, the second call would
+    return 200 again rather than 404. The re-probe is the falsifiable half.
+    """
+    first = _delete_post(url, slug)
+    assert first.status_code in (200, 404), f"cleanup DELETE → {first.status_code} {first.text[:200]}"
+    if first.status_code == 200:
+        again = _delete_post(url, slug)
+        assert again.status_code == 404, (
+            f"{slug} still present after DELETE ({again.status_code}) — residue would accumulate"
+        )
+
+
+@BLOG_WRITE
 @NO_AGENT_KEY
 def test_agent_api_meta_length_contract() -> None:
     """#1866: agent API rejects meta fields beyond the editor/SSR contract
     (60/155) — a 61/156-char value must 400, boundary 60/155 must 200."""
     url = f"{TORTISE}/blog/api/posts"
     long_title = "meta contract e2e " + "x" * 30
-    slug = f"meta-contract-{abs(hash(long_title)) % 100000}"
+    # #4220: a DETERMINISTIC slug. The old `abs(hash(long_title)) % 100000`
+    # re-randomised per process (PYTHONHASHSEED), so every run minted a NEW
+    # slug — a fresh row per deploy with no name to clean up. One stable slug
+    # keeps residue bounded to a single row even if a run is killed outright.
+    slug = "meta-contract-e2e"
 
-    # Create with over-limit meta fields → 400 validation
-    r = SESSION.post(
-        url,
-        json={
-            "title": long_title,
-            "body": "body",
-            "slug": slug,
-            "meta_title": "t" * 61,
-            "meta_description": "d" * 156,
-        },
-        headers=AGENT_HEADERS,
-        timeout=20,
-    )
-    assert r.status_code == 400, f"over-limit meta → {r.status_code}"
-    body = r.json()
-    assert "meta_title" in body, f"expected meta_title error, got {body}"
-    assert "meta_description" in body, f"expected meta_description error, got {body}"
+    # #4220: pre-clean — a crashed prior run can leave this exact slug behind,
+    # and then the boundary POST below would 409 instead of 201. Absent is the
+    # normal case, so the result is not asserted here.
+    _unpublish_best_effort(url, slug)  # #4316: DELETE is draft-only
+    _delete_post(url, slug)
 
-    # Boundary values (60/155) → accepted
-    r = SESSION.post(
-        url,
-        json={
-            "title": long_title,
-            "body": "body",
-            "slug": slug,
-            "meta_title": "t" * 60,
-            "meta_description": "d" * 155,
-        },
-        headers=AGENT_HEADERS,
-        timeout=20,
-    )
-    assert r.status_code == 201, f"boundary meta → {r.status_code}"
-    # Cleanup — the row is draft; drafts are invisible to crawlers either way,
-    # but unpublish (already draft) and let the row sit in the review queue.
+    try:
+        # Create with over-limit meta fields → 400 validation
+        r = SESSION.post(
+            url,
+            json={
+                "title": long_title,
+                "body": "body",
+                "slug": slug,
+                "meta_title": "t" * 61,
+                "meta_description": "d" * 156,
+            },
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 400, f"over-limit meta → {r.status_code}"
+        body = r.json()
+        assert "meta_title" in body, f"expected meta_title error, got {body}"
+        assert "meta_description" in body, f"expected meta_description error, got {body}"
+
+        # Boundary values (60/155) → accepted
+        r = SESSION.post(
+            url,
+            json={
+                "title": long_title,
+                "body": "body",
+                "slug": slug,
+                "meta_title": "t" * 60,
+                "meta_description": "d" * 155,
+            },
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 201, f"boundary meta → {r.status_code}"
+    finally:
+        # #4220: delete the row we created and verify it is gone. The old
+        # note — "let the row sit in the review queue" — was the defect.
+        _delete_post_verified(url, slug)
 
 
+@BLOG_WRITE
 @NO_AGENT_KEY
 def test_publish_lifecycle_crawler_visibility() -> None:
     """#1864 + #1865: the crawler-visibility lifecycle —
@@ -267,10 +346,20 @@ def test_publish_lifecycle_crawler_visibility() -> None:
     # (already covered by test_admin_gate_redirects_unauthenticated).
     # The X-Robots-Tag on non-published blog responses is asserted below.
 
-    run_seed = os.environ.get('RUN_ID', uuid.uuid4().hex)
+    # #4220: a stable slug by default (an explicit RUN_ID still overrides).
+    # A per-run random slug minted a NEW row every run; one stable slug bounds
+    # residue to a single row if a run is killed outright.
+    run_seed = os.environ.get("RUN_ID") or "crawler"
     slug = f"lifecycle-e2e-{run_seed[:8]}"
     url = f"{TORTISE}/blog/api/posts"
     title = f"Lifecycle E2E {slug}"
+
+    # #4220: pre-clean — a crashed prior run can leave this slug PUBLISHED, which
+    # would fail the "draft → 404" assertion below. Unpublish (DELETE is
+    # draft-only — #4316) then delete it first (absent is the normal case, so
+    # the result is not asserted here).
+    _unpublish_best_effort(url, slug)
+    _delete_post(url, slug)
 
     def create() -> None:
         r = SESSION.post(
@@ -335,6 +424,69 @@ def test_publish_lifecycle_crawler_visibility() -> None:
         in_feed, in_sitemap = article_in_feed_sitemap()
         assert not in_feed and not in_sitemap, "unpublished leaked into feed/sitemap"
     finally:
-        # Best-effort cleanup: leave the row as a draft (never republish).
+        # #4220: take the row off the public surface first (best-effort — it may
+        # still be PUBLISHED if the run died mid-lifecycle), then DELETE it and
+        # verify it is gone. The old cleanup stopped at the unpublish and left
+        # the row in the production review queue forever.
         with contextlib.suppress(Exception):
             unpublish_agent()
+        _delete_post_verified(url, slug)
+
+
+@BLOG_WRITE
+@NO_AGENT_KEY
+def test_delete_refuses_a_published_post() -> None:
+    """#4316 P1: DELETE is DRAFT-ONLY — a published post must survive it.
+
+    The recorded lifecycle (plan §W4) is draft → published → archived
+    (terminal): there is no published→deleted transition. `created_by` is the
+    CREATOR while an operator publishes with `published_by`, so without the
+    draft-only guard the agent key could irreversibly destroy an
+    operator-approved, LIVE article.
+
+    Falsifiable in both directions: pre-fix, the DELETE returns 200 and the
+    article disappears; and the still-served assertion catches a 409 that
+    deleted anyway (a refusal that is not real).
+    """
+    url = f"{TORTISE}/blog/api/posts"
+    slug = "lifecycle-e2e-published-delete"
+
+    def patch(payload: dict) -> requests.Response:
+        return SESSION.patch(f"{url}/{slug}", json=payload, headers=AGENT_HEADERS, timeout=20)
+
+    # Pre-clean: a crashed prior run can leave this slug published (DELETE is
+    # draft-only) or draft. Unpublish, then delete; absent is the normal case.
+    _unpublish_best_effort(url, slug)
+    _delete_post(url, slug)
+
+    try:
+        r = SESSION.post(
+            url,
+            json={"title": f"Delete guard {slug}", "body": "live body", "slug": slug},
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 201, f"create → {r.status_code} {r.text[:200]}"
+        r = patch({"status": "published"})
+        assert r.status_code == 200, f"publish → {r.status_code} {r.text[:200]}"
+
+        refused = _delete_post(url, slug)
+        assert refused.status_code == 409, (
+            f"DELETE published → {refused.status_code} (want 409) {refused.text[:200]}"
+        )
+        assert refused.json().get("error") == "published", refused.text[:200]
+
+        # The refusal must be REAL: the published article is still served.
+        live = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+        assert live.status_code == 200, (
+            f"published post gone after a refused DELETE ({live.status_code}) — the guard deleted it anyway"
+        )
+
+        # And the draft-only guard is a status gate, not a broken delete: once
+        # unpublished, the same call removes the row.
+        assert patch({"status": "draft"}).status_code == 200, "unpublish failed"
+        assert _delete_post(url, slug).status_code == 200, "draft DELETE after unpublish failed"
+    finally:
+        with contextlib.suppress(Exception):
+            patch({"status": "draft"})
+        _delete_post_verified(url, slug)

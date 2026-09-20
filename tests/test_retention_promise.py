@@ -149,6 +149,11 @@ EXCLUDED_PREFIXES = {
 # auditing every hit; a NEW hit fails the test, which is the point.
 SCATTER_ALLOWLIST: dict[str, str] = {
     "docs/infra-runbook.md": "links the canonical doc",
+    # #2881: the durability authority. It must state the VENDOR's snapshot
+    # retention (7-day) and deletion (14-day) windows as verified facts, and its
+    # own loss windows — a different axis from the deletion promise. It links
+    # docs/retention-and-deletion.md in prose.
+    "docs/durability-posture.md": "durability authority — states vendor snapshot retention/loss windows; links the canonical doc",
     "docs/ops/registry-backup-dr.md": "links the canonical doc",
     "docs/registry-graph-schema.md": "links the canonical doc",
     "docs/scoping-2304-delete-semantics.md": "graph-delete semantics record — links the canonical doc",
@@ -174,6 +179,7 @@ LINKED_FILES = {
     "docs/scoping-2304-delete-semantics.md",
     "docs/scoping-2313-per-graph-backups.md",
     "docs/data-safety.md",
+    "docs/durability-posture.md",
     "docs/00_index.md",
     "tortoise/hosted_backup.py",
     "website/apps/dashboard/src/graphs.js",

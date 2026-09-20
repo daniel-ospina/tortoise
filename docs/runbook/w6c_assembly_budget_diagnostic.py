@@ -22,13 +22,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from tools.ask_spotcheck import _seed_memory, _to_iso_date  # noqa: E402
+from w6c_gold_rank_diagnostic import FIVE, FIXTURE, _attach_dense_vectors  # noqa: E402
 
+from tools.ask_spotcheck import _seed_memory, _to_iso_date  # noqa: E402
 from tortoise import ask_lane as ask_lane_mod  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
-
-from w6c_gold_rank_diagnostic import (  # noqa: E402
-    FIVE, FIXTURE, _attach_dense_vectors)
 
 
 class StubReader:
