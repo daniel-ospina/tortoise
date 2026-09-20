@@ -222,6 +222,21 @@ _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING = (
     "it, turn extraction back on, and re-capture the session to extract"
 )
 
+#: #4258: the Session `capture_extractor` lane recorded when the team's
+#: extraction setting (not a missing key) is why nothing was extracted. A
+#: DISTINCT value from "none" (the keyless lane) on purpose: the M2-replay
+#: disclosure treats `capture_extractor == "none"` as proof of a keyless prior,
+#: so overloading it would emit the keyless warning ("stored WITHOUT a provider
+#: key") for a team whose key IS configured. Shared by BOTH capture lanes so the
+#: retry gate cannot diverge (a value one lane writes, the other must read).
+_CAPTURE_EXTRACTOR_LANE_DISABLED = "disabled"
+
+#: #4258: the lanes a FAILED prior capture may be re-attempted from. All three
+#: minted no claims of their own and their turn ids are deterministic, so the
+#: re-attempt converges. Shared (hosted + SDK) — see the lane constant above.
+_CAPTURE_EXTRACTOR_LANES_RETRYABLE = (
+    "v2", "none", _CAPTURE_EXTRACTOR_LANE_DISABLED)
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider
@@ -3360,7 +3375,7 @@ class TortoiseSDK:
         # a claim-free M2 retry provable; see issue #3996.
         retry_failed_capture = (
             session_existed and prior_capture_ok is False
-            and prior_capture_extractor in ("v2", "none")
+            and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
             and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
         proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
@@ -3542,6 +3557,14 @@ class TortoiseSDK:
                 # constant so the hosted lane discloses the SAME state.
                 _replay_warnings.append(
                     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+            elif (prior_capture_ok is False
+                  and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
+                # #4258: the prior was an EXTRACTION-DISABLED store (the hosted
+                # lane writes this lane value) — a provider key may be
+                # configured, so the KEYLESS warning above would be a false
+                # diagnosis. Disclose the real reason + every real lever.
+                _replay_warnings.append(
+                    _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
             meta = {
                 "provider": None, "route": None, "failover_used": False,
                 "errors": [], "warnings": _replay_warnings, "mode": "replayed",

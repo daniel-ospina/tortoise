@@ -508,9 +508,9 @@ function SettingsTab(props) {
         {/* #4258: the extraction-off state is honest on this home too — a row
             reading "0 extracted" must be distinguishable from a failure or a
             missing provider key. */}
-        {!sessionsLoading && state && state.capture_extract === false && (
+        {!sessionsLoading && state && sessionsOn && state.capture_extract === false && (
           <p className="dim small">
-            Extraction into memory is off — new captures are stored but not extracted; sessions captured while this is off stay unextracted until they are captured again. Change it under Memory sources above.
+            Extraction into memory is off — new captures are stored but not extracted; sessions captured while this is off stay unextracted until extraction is turned back on and they are captured again. Change it under Memory sources above.
           </p>
         )}
         {/* #2000 (W4) review P2-3: honest states — never a fabricated
@@ -9815,10 +9815,10 @@ function MemorySources(props) {
           <h4>Extract sessions into memory</h4>
           <p>
             When on, each session captured through this service is also
-            extracted into memories once a provider key is configured (uses a
-            configured provider key). When off, those sessions are stored only
-            — their turns stay searchable, but nothing is extracted, and
-            sessions captured while this is off stay unextracted until they are
+            extracted into memories once a provider key is configured. When
+            off, those sessions are stored only — their turns stay searchable,
+            but nothing is extracted, and sessions captured while this is off
+            stay unextracted until extraction is turned back on and they are
             captured again.
           </p>
           {!sessionsOn && (

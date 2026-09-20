@@ -3696,7 +3696,8 @@ def _cmd_sessions_import(args) -> int:
     # once extraction can run — and the owner ruling requires an EXPLICIT
     # re-capture to extract (nothing here spends automatically). Deferred ⇒
     # NO local receipt: the server keeps the graph state truthful
-    # (capture_ok=False, lane "none") and re-running this import re-attempts
+    # (capture_ok=False; lane "none" for the keyless store, "disabled" for
+    # the setting-disabled store) and re-running this import re-attempts
     # extraction on the #2335 TRUE-retry lane.
     from tortoise.sdk import (
         _CAPTURE_EXTRACTION_DISABLED_MODE,

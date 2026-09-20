@@ -93,6 +93,8 @@ from tortoise.sdk import (
     _CAPTURE_EXTRACTION_DISABLED_MODE,  # #4258: extraction-turned-off receipt mode
     _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING,  # #4258: its M2-replay sibling (never the keyless one)
     _CAPTURE_EXTRACTION_DISABLED_WARNING,  # #4258: its canonical "stored, not extracted" notice
+    _CAPTURE_EXTRACTOR_LANE_DISABLED,  # #4258: the setting-disabled Session lane value
+    _CAPTURE_EXTRACTOR_LANES_RETRYABLE,  # #4258: the shared retry-eligible lane set
     _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
     _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
     _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
@@ -111,16 +113,6 @@ from tortoise.sdk import (
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
-
-#: #4258: the Session `capture_extractor` lane recorded when the team's
-#: extraction setting (not a missing key) is why nothing was extracted. It is a
-#: DISTINCT value from "none" (the keyless lane) on purpose: the M2-replay
-#: disclosure treats `capture_extractor == "none"` as proof of a keyless prior,
-#: so overloading it would emit the keyless warning ("stored WITHOUT a provider
-#: key") for a team whose key IS configured. Both store-only lanes are
-#: retry-eligible (no claims were minted, turn ids are deterministic).
-_CAPTURE_EXTRACTOR_LANE_DISABLED = "disabled"
-_CAPTURE_EXTRACTOR_LANES_RETRYABLE = ("v2", "none", _CAPTURE_EXTRACTOR_LANE_DISABLED)
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.supabase_control import _service_key  # #3677
 
@@ -8252,7 +8244,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # layer gets the same clear 409 (state-conflict: recording policy off —
     # NOT the old 403 consent error), capture stops (no Session write, no
     # receipt), and the per-harness last-error surfaces the message.
-    recording_ok, rec_layer = _session_recording_allowed(org)
+    _onboard_state = _get_onboarding_state(org["org_id"])
+    recording_ok, rec_layer = _session_recording_allowed(org, _onboard_state)
     if not recording_ok:
         if rec_layer == "graph":
             # #2302 (recording-on surface): the graph-layer 409 copy names
@@ -8296,7 +8289,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # reason (a provider may well be configured). `store_only` is the single
     # predicate every store-only decision below keys on, so the keyless and the
     # user-disabled cases can never drift apart.
-    extract_enabled = _capture_extract_enabled(org)
+    extract_enabled = _capture_extract_enabled(org, _onboard_state)
     store_only = no_provider or not extract_enabled
 
     if len(body.conversation) > MAX_SESSION_TURNS:
@@ -8791,12 +8784,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # branch: a re-capture of an ALREADY-SUCCEEDED session is honestly a
         # replay (no extraction ran then either), and a FAILED prior falls
         # through to here instead of re-attempting an extraction the user
-        # turned off. `lane` stays "none" so a LATER re-capture with
-        # extraction back ON re-attempts through the #2335 TRUE-retry path.
+        # turned off. `lane` is the DISTINCT "disabled" value (never "none",
+        # which the replay disclosure reads as keyless) so a LATER re-capture
+        # with extraction back ON re-attempts through the #2335 TRUE-retry path,
+        # and the #3129 abandoned-marker write persists the RIGHT reason.
         if state is not None and not session_existed:
             state["attempted"] = True
             state["proj"] = proj
-            state["lane"] = "none"
+            state["lane"] = _CAPTURE_EXTRACTOR_LANE_DISABLED
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": [],
@@ -18674,7 +18669,8 @@ def _graph_recording_override(org: dict) -> bool | None:
         return None
 
 
-def _session_recording_allowed(org: dict) -> tuple[bool, str]:
+def _session_recording_allowed(org: dict,
+                               state: dict | None = None) -> tuple[bool, str]:
     """C6 #2115 (D-C6-3): the EFFECTIVE session_recording for a capture.
 
     Resolution order: the graph's override (D-C6-1 storage) → when None the
@@ -18682,8 +18678,14 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     dashboard toggle + MCP tortoise_onboarding_session_recording write).
     Returns (allowed, surface) where surface names the deciding layer for
     the 409 message (``graph`` vs ``org``).
+
+    ``state`` may be passed by a caller that ALREADY read the onboarding
+    state (the capture hot path reads it once for BOTH this flag and
+    ``capture_extract``, #4258) — the read is a blocking control-plane round
+    trip, so it must not be repeated per capture.
     """
-    state = _get_onboarding_state(org["org_id"])
+    if state is None:
+        state = _get_onboarding_state(org["org_id"])
     if not state.get("session_recording"):
         # #1927 master kill (round-1 decision c2): the org-level OFF is
         # the user's explicit opt-out — a per-graph override NEVER re-enables
@@ -18704,7 +18706,7 @@ def _session_recording_allowed(org: dict) -> tuple[bool, str]:
     return True, "team"
 
 
-def _capture_extract_enabled(org: dict) -> bool:
+def _capture_extract_enabled(org: dict, state: dict | None = None) -> bool:
     """#4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
     default ON; reaffirmed by 5737715963): the EFFECTIVE
     ``capture_extract`` for a capture — a PER-ORG user setting, default ON.
@@ -18714,8 +18716,13 @@ def _capture_extract_enabled(org: dict) -> bool:
     never silently mean OFF. Deliberately NOT the ``session_recording``
     polarity: that key is an opt-out, where absence correctly means OFF; this
     one is read as an opt-in-consumed setting, where absence means ON.
+
+    ``state`` may be passed by a caller that already read it (see
+    ``_session_recording_allowed``) — the read is a blocking control-plane
+    round trip, so the capture hot path reads it ONCE, not twice (#4258).
     """
-    state = _get_onboarding_state(org["org_id"])
+    if state is None:
+        state = _get_onboarding_state(org["org_id"])
     return bool(state.get("capture_extract", True))
 
 

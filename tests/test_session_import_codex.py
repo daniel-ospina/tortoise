@@ -320,7 +320,8 @@ def test_sessions_import_defers_on_extraction_disabled(tmp_path, monkeypatch, ca
     established for the keyless mode. A receipt would make every later
     re-import skip the POST (`receipt.exists()` → 0), so the session could never
     gain memory points after extraction is turned back on — even though the
-    server left it retry-eligible (capture_ok=False, lane "none").
+    server left it retry-eligible (capture_ok=False, lane "disabled"; "none"
+    is the keyless sibling).
 
     The control (a keyed `llm:*` 2xx) DOES write the receipt, so the assertion
     discriminates rather than merely observing an empty dir.

@@ -773,7 +773,11 @@ def test_capture_extract_defaults_on_and_registered():
 
     assert DEFAULT_ONBOARDING_STATE["capture_extract"] is True
     assert _ONBOARDING_DEFAULT_STATE["capture_extract"] is True
-    assert "capture_extract" in _ALLOWED_STATE_KEYS
+    # the allowlist is DERIVED from _ONBOARDING_DEFAULT_STATE, so asserting
+    # capture_extract's membership here would be implied by the line above and
+    # could never fail on its own. Assert the DERIVATION instead — that is the
+    # property that actually keeps the PATCH writer from dropping the key.
+    assert _ALLOWED_STATE_KEYS == set(_ONBOARDING_DEFAULT_STATE.keys())
     assert "capture_extract" in OnboardingStatePatchRequest.model_fields
 
 
