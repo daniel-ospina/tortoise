@@ -29,7 +29,6 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 sys.path.insert(0, _REPO_ROOT)
 
 from tools.ask_spotcheck import _seed_memory  # noqa: E402
-
 from tortoise.embeddings import compute_embeddings  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
@@ -62,7 +61,12 @@ def _attach_dense_vectors(sdk) -> dict:
     texts = [r[1] or "" for r in rows]
     vecs = compute_embeddings(texts)
     written = 0
-    for pid, vec in zip(ids, vecs):
+    # strict=True: compute_embeddings is length-preserving by contract (one
+    # entry per input text, None where the model is unavailable), and ids/vecs
+    # are both built 1:1 from the same query rows — a length mismatch means a
+    # violated embedder contract and would silently under-populate the dense
+    # arm this diagnostic exists to measure. Raise instead.
+    for pid, vec in zip(ids, vecs, strict=True):
         if vec is None:
             continue
         sdk._get_proj().g.query(

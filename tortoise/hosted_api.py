@@ -56,6 +56,10 @@ from tortoise.capture_receipts import (
     capture_receipt_key as _capture_receipt_key,
 )
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+from tortoise.file_indexer import (  # #4005 shared identity primitives
+    derive_session_source_url,
+    provenance_basename,
+)
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -9768,16 +9772,22 @@ async def session_install_probe(body: InstallProbeRequest,
 # judge_summary dropped from v1).
 
 # Privacy helpers (W-7 / §6.1): provenance paths are BASENAME only — the full
-# local path never leaves the machine; the session Source url derives from the
-# basename (+ contentHash), never the full path.
+# local path never leaves the machine. The session Source's IDENTITY is the
+# canonical ``session:<session_id>`` (ONTOLOGY §4.6, #4005) — the same url the
+# capture path materializes and ``delete_session`` deletes; the W-7 basename
+# rides as a PROPERTY (``sourcePath`` on the Source/Document), never in the url.
 
 
-def _session_source_basename(payload: CommitPayload) -> str:  # noqa: F821
-    """The session Source identity = the FIRST provenance basename (privacy,
-    W-7). Empty when the payload has no provenance_refs (valid empty commit)."""
+def _document_source_basename(payload: CommitPayload) -> str:  # noqa: F821
+    """The payload's W-7 basename (FIRST provenance_ref) — the value written
+    to ``Document.sourcePath``. NOT the session Source identity (that is the
+    canonical ``session:<session_id>``, #4005). Empty when the payload has no
+    provenance_refs (valid empty commit). Derived through the ONE shared
+    ``file_indexer.provenance_basename`` primitive — the same one Layer-1 uses
+    — so Layer-1's accepted set and this value can never disagree."""
     if not payload.provenance_refs:
         return ""
-    return os.path.basename(payload.provenance_refs[0].path.rstrip("/"))
+    return provenance_basename(payload.provenance_refs[0].path)
 
 
 def _commit_response(
@@ -9939,7 +9949,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     reconcile = plan.reconcile
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
-    session_basename = _session_source_basename(payload)
+    document_basename = _document_source_basename(payload)
 
     # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
     # the value-chain container is episodic; the VALUE Points below are the
@@ -9969,7 +9979,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         params={"did": doc_id, "title": payload.summary or session_id,
                 "summary": payload.summary, "arc": payload.story_arc,
                 "sid": session_id, "eid": event_id,
-                "srcpath": session_basename, "now": now},
+                "srcpath": document_basename, "now": now},
     )
 
     # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
@@ -10028,19 +10038,50 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 params={"eid": ev.id, "name": name},
             )
 
-    # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
-    # + external artifacts from sources[]; the session Source references the
-    # Document AND the external artifacts (DE2E-5 chain). ──
+    # ── 4. Source bridge: the session Source (#4005 — the canonical
+    # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
+    # the capture path materializes (sdk._materialize_session_source), the
+    # projection stub mints (_mint_source_stub) and delete_session / the
+    # capture orphan sweep delete — so capture, commit and delete converge on
+    # ONE Source, with an alias rule for pre-fix basename nodes tracked in
+    # #4125) + external artifacts from sources[]; the session Source
+    # references the Document AND the external artifacts (DE2E-5 chain). The
+    # contentHash is the client-supplied raw anchor and NEVER hash(url): an
+    # absent anchor is passed through as NULL so _upsert_source's conditional
+    # write PRESERVES the stored hash/version (an anchored re-commit followed
+    # by an anchorless one must not wipe the anchor — see #3998). The raw's
+    # W-7 basename rides as a PROPERTY (Source.sourcePath / Document.sourcePath),
+    # never in the identity. ──
     session_urls: list[str] = []
-    for ref in payload.provenance_refs:
-        url = os.path.basename(ref.path.rstrip("/"))
-        if url not in session_urls:
-            session_urls.append(url)
+    # The payload's point/event source_refs use the W-7 basename; the graph
+    # Source identity is the canonical session url. This maps one to the other
+    # so extractedFrom still resolves. Both sides derive the basename through
+    # the ONE shared file_indexer primitive (Layer-1 uses the same one), so
+    # Layer-1 can never accept a source_ref this map does not know. The stored
+    # point/event `source_ref` PROPERTY keeps the W-7 basename by design — the
+    # provenance resolution surface is the `extractedFrom` edge (J-4), which
+    # this map re-points; no in-repo reader resolves a Source via `source_ref`
+    # (#4005 review, sub-threshold #40).
+    session_ref_urls: dict[str, str] = {}
+    if payload.provenance_refs:
+        session_url = derive_session_source_url(session_id)
+        session_urls.append(session_url)
+        session_spans: list[str] = []
+        for ref in payload.provenance_refs:
+            session_spans.extend(ref.spans)
+            base = provenance_basename(ref.path)
+            if base:
+                session_ref_urls.setdefault(base, session_url)
+        # An absent anchor stays absent: NULL (not "") so the conditional
+        # MERGE preserves a previously stored contentHash/version/title.
+        anchor = next((ref.contentHash for ref in payload.provenance_refs
+                       if ref.contentHash), None)
         sdk.create_source(
-            url, "agentSession",
-            contentHash=content_hash(url) if url else "",
-            provenance_spans=list(ref.spans), is_episodic=True,
+            session_url, "agentSession",
+            contentHash=anchor,
+            provenance_spans=session_spans, is_episodic=True,
             sourceDate=payload.captured_at,
+            source_path=document_basename or None,
         )
     external_urls: list[str] = []
     for src in payload.sources:
@@ -10091,7 +10132,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): the commit-receiver points were
                 # written WITHOUT session_id — the source-session attribution
                 # evidence mark needs the point's session on both capture
@@ -10113,7 +10156,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): see above — session_id on the
                 # committed points so both capture paths (SDK + hosted) carry
                 # the same source-session attribution surface.
@@ -24748,7 +24793,13 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
     """
     import json as _json
 
-    from tortoise.billing import PriceCatalog, StripeClient, apply_limits
+    from tortoise.billing import (
+        PriceCatalog,
+        StripeClient,
+        _subscription_items,
+        apply_limits,
+        subscription_period_bounds,
+    )
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -24772,10 +24823,21 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
 
     def _price_id_from(sub: dict) -> str | None:
         """Extract items[0].price.id handling BOTH Stripe shapes: items may be
-        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter)."""
-        items = sub.get("items") or {}
-        rows = items if isinstance(items, list) else items.get("data") or []
-        return (rows[0].get("price", {}) or {}).get("id") if rows else None
+        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter).
+
+        EVERY unknown-shape access is guarded so a malformed payload cannot
+        raise here — the checkout call site is outside any try, so a raise
+        would 500 the route and make Stripe redeliver the same bad event
+        forever. Reads ``items`` through ``_subscription_items`` and the
+        ``price`` value through an ``isinstance(..., dict)`` check (the sibling
+        access in ``billing.subscription_plan`` guards the same shapes) —
+        #4216 review.
+        """
+        rows = _subscription_items(sub)
+        if not rows or not isinstance(rows[0], dict):
+            return None
+        price = rows[0].get("price")
+        return price.get("id") if isinstance(price, dict) else None
 
     def _resolve_tier_from_price(price_id: str | None) -> str | None:
         """price → tier; unknown price → None + ops-notify signal."""
@@ -24798,7 +24860,13 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         # client_reference_id; the registry lane returns its own id, so the
         # effective id is adopted for every later write AND reported back to
         # the caller for the dedup marker / tier read / audit.
-        meta = data.get("metadata") or {}
+        # Guard the nested VALUES read out of ``data`` (``metadata`` /
+        # ``customer_details``): a non-dict value would raise AttributeError at
+        # ``.get(...)``, before any try, and the route's handler would 500 →
+        # Stripe redelivers the same bad event forever — the class this PR
+        # hardens for ``items``/``price``.
+        meta = data.get("metadata")
+        meta = meta if isinstance(meta, dict) else {}
         is_new_org = str(meta.get("new_org") or "") == "1"
         if is_new_org:
             # Sync call: _webhook_apply_event itself already runs in a worker
@@ -24806,7 +24874,10 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             # blocking control-plane + graph writes — stays on that thread.
             org_id = _provision_new_org_from_checkout(sdk, org_id, meta)
         cust = data.get("customer")
-        email = (data.get("customer_details") or {}).get("email")
+        customer_details = data.get("customer_details")
+        customer_details = (
+            customer_details if isinstance(customer_details, dict) else {})
+        email = customer_details.get("email")
         sub_id = data.get("subscription")
         updates = {"subscription_status": "active", "stripe_customer_id": cust}
         if email:
@@ -24815,17 +24886,65 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             updates["subscription_id"] = sub_id
         _set(updates)
         resolved_tier = None
+        window_error = None
         if sub_id:
             try:
                 sub = StripeClient().get_subscription(sub_id)
+            except Exception as e:
+                sub = None
+                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
+            if sub is not None:
+                # #4216: checkout is an AUTHORING path for the subscription —
+                # it must persist the METER WINDOW ANCHOR, not only
+                # ``subscription_id``. ``metering._current_period`` needs a
+                # COMPLETE half-open interval
+                # ``[current_period_start, current_period_end)``; without it a
+                # just-checked-out PAYING org is permanently
+                # window-unresolvable — its increments are dropped and the cohort
+                # cost cap cannot be enforced for it (absorbed + alerted per
+                # #3981, but unenforceable, which is the defect this issue
+                # removes). Both bounds come from the SAME authoritative Stripe
+                # subscription object the tier is resolved from. Only the bounds
+                # the payload CARRIES are written; a bound it omits is left
+                # alone (never NULLed).
+                #
+                # FAILURE ORDER (#4216 review): a window-write failure must not
+                # SUPPRESS the tier upgrade (a taken payment must not sit on
+                # free limits, #2789) — but it must also not be SWALLOWED as a
+                # 200, or the org stays window-unresolvable until the next
+                # renewal webhook, which for a checkout-only org may never
+                # arrive. So record the failure and carry on: the tier is
+                # applied, the new-org metadata fallback below still runs, and
+                # the failure is re-raised at the END of this branch. The route
+                # then 500s, Stripe redelivers, and every write is idempotent,
+                # so the window write is retried.
+                #
+                # NOTE (#4216 review): a failure of ``apply_limits`` /
+                # ``_set({"tier": ...})`` now PROPAGATES (the route 500s and
+                # Stripe redelivers) instead of being swallowed as a
+                # "subscription fetch failed" 200 — deliberate and consistent
+                # with #2789: a taken payment must never sit unretried on free
+                # limits. The previous outer except covered the whole block.
+                period_start, period_end = subscription_period_bounds(sub)
+                window = {k: v for k, v in (
+                    ("current_period_start", period_start),
+                    ("current_period_end", period_end),
+                ) if v}
+                window_error = None
+                if window:
+                    try:
+                        _set(window)
+                    except Exception as e:
+                        window_error = e
+                        _logger.warning(
+                            "webhook: period window write failed: %s",
+                            redact_error(e))
                 tier = _resolve_tier_from_price(_price_id_from(sub))
                 if tier:
                     apply_limits(sdk, org_id, tier)
                     _set({"tier": tier})
                     notify_kind = "billing_upgrade"
                     resolved_tier = tier
-            except Exception as e:
-                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
         if is_new_org and resolved_tier is None:
             # The metadata tier was server-resolved from the price at checkout
             # time and provision_org already wrote the matching quotas, so a
@@ -24851,6 +24970,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                     f"new-org checkout for team {org_id} has no resolvable "
                     f"paid tier (metadata tier={meta_tier!r}, subscription "
                     "tier unresolved) — refusing to ack")
+        if window_error is not None:
+            # The tier upgrade (or the #2789 metadata fallback) above has been
+            # applied — every write is idempotent — so surface the window
+            # failure LAST: the route 500s and Stripe redelivers, retrying the
+            # window write, instead of acking an org left unmeterable.
+            raise window_error
         return notify_kind, org_id
 
     if etype == "invoice.payment_failed":
@@ -24872,8 +24997,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         updates: dict = {}
         if data.get("id"):
             updates["subscription_id"] = data["id"]
-        if data.get("current_period_end"):
-            updates["current_period_end"] = data["current_period_end"]
+        # #4216: read the period through the top-level-then-item helper — a
+        # Basil-or-later Stripe account carries the bounds on the subscription
+        # ITEMS, and reading only the top level would drop the anchor entirely.
+        period_start, period_end = subscription_period_bounds(data)
+        if period_end:
+            updates["current_period_end"] = period_end
         # #3825 / D10: the METER WINDOW ANCHOR. The cost meter totals usage
         # over the subscription's OWN billing period so it reconciles with the
         # invoice line, and only the period END was persisted — leaving the
@@ -24882,8 +25011,8 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         # changes, and a calendar-month fallback would put a paying org's
         # spend on a row the cap's window read never looks at). This event
         # carries the authoritative start next to the end already written here.
-        if data.get("current_period_start"):
-            updates["current_period_start"] = data["current_period_start"]
+        if period_start:
+            updates["current_period_start"] = period_start
         if status:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be

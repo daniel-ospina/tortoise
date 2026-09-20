@@ -2,23 +2,22 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-# #331: parents[2] = repo root tortoise/ dir -- parents[1] is
-# tortoise/shared_state, where `shared_state` is not importable
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from shared_state.events import EventCodec, event_types, register_event_type
+# #4221: moved here from tortoise/shared_state/tests/ — every CI lane
+# collects tests/, so the old location was never collected. The
+# `sys.path.insert` + top-level `shared_state` import it used to need
+# went with the move; the package is imported by its real name.
+from tortoise.shared_state.events import EventCodec, event_types, register_event_type
 
 
 @pytest.fixture(autouse=True)
 def _clear_registry():
     """Isolate tests from global state."""
-    import shared_state.events as _ev
+    import tortoise.shared_state.events as _ev
     _ev._event_types.clear()
 
 

@@ -1,16 +1,13 @@
 """Tests for monitoring — GoldenSignals, collect_signals."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest  # noqa: F401
 
-# #331: parents[2] = repo root tortoise/ dir -- parents[1] is
-# tortoise/shared_state, where `shared_state` is not importable
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from shared_state.monitoring import GoldenSignals, collect_signals
+# #4221: moved here from tortoise/shared_state/tests/ — every CI lane
+# collects tests/, so the old location was never collected. The
+# `sys.path.insert` + top-level `shared_state` import it used to need
+# went with the move; the package is imported by its real name.
+from tortoise.shared_state.monitoring import GoldenSignals, collect_signals
 
 
 class TestGoldenSignals:

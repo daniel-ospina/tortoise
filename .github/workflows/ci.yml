@@ -269,8 +269,24 @@ jobs:
               "dashboard_e2e": any_file(
                   isfile("tests/e2e/test_keys_table_mixed.py"),
                   isfile("tests/e2e/test_graphs_management.py"),
+                  # #4221: `test_session_login_flow.py` is the SHARED HARNESS
+                  # for every migrated dashboard spec (the two CI specs, the
+                  # ship-test guard, and the onboarding suite wired in below),
+                  # so a change to it must re-run this job even though its own
+                  # three tests are not part of the list. It was previously
+                  # listed here while NOTHING ran it — which is the inversion
+                  # #4221 flags; the entry is now load-bearing rather than idle.
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
+                  # #4221: the onboarding wizard spec (36 collected cases) was
+                  # registered and green but never invoked. It is the one spec
+                  # of the four that #4221 named as never-run that still passes
+                  # end-to-end against the CURRENT app (see the issue's follow-up
+                  # for the other three), so it joins the job's pytest list and
+                  # needs this path entry — otherwise a PR touching ONLY it
+                  # skips the job (skipped, not failed). Same #3501 rationale as
+                  # the auth-suite entries under `website` above.
+                  isfile("tests/e2e/test_dashboard_onboarding.py"),
                   # #3806: the ship-test guard's browser half (real clean-browser
                   # walk against the built bundle) + the instrument it guards.
                   isfile("tests/e2e/test_ship_test_onboarding.py",
@@ -1091,11 +1107,28 @@ jobs:
           echo "::error::wrangler (dashboard) dev server failed to start"
           tail -50 /tmp/wrangler-dash.log || true
           exit 1
-      - name: Run keys-table mixed-fixture e2e (#2166/#2178) + ship-test guard (#3806)
+      # #4221: this step used to run three of the seven `RUN_DASHBOARD_E2E`
+      # specs, so the onboarding spec's 36 cases (plus 48 more across the three
+      # stale specs and the flow module named below) were registered, reported
+      # green, and never invoked. The onboarding spec joins the list here; the
+      # others are NOT wired because they are stale against the #3501 BFF
+      # session seam and the #4054 auth-origin move — wiring them would turn
+      # this job red on every run. Evidence and the follow-up are on #4221.
+      #   test_dashboard_identity.py    — 21/22 fail (seeds the retired
+      #                                   `sb-tortoise-auth-token`; mocks only
+      #                                   the legacy absolute api host)
+      #   test_dashboard_gate.py        — 15/19 fail (asserts the pre-#4054
+      #                                   prod-origin /auth redirect target)
+      #   test_dashboard_billing.py     — 4/4 fail (drives the moved /auth page
+      #                                   through the retired local :8788 origin)
+      #   test_session_login_flow.py    — 3/3 fail (same class); the module
+      #                                   itself is the shared harness, so it
+      #                                   stays in the change detector above
+      - name: Run dashboard e2e — keys-table (#2166/#2178), graphs, ship-test guard (#3806), onboarding (#4221)
         run: >
           RUN_DASHBOARD_E2E=1
           python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py
-          tests/e2e/test_ship_test_onboarding.py
+          tests/e2e/test_ship_test_onboarding.py tests/e2e/test_dashboard_onboarding.py
           -q -rs -p no:cacheprovider
         env:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required

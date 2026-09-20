@@ -382,6 +382,72 @@ def test_unresolvable_window_is_served_and_alerted_never_500(
         "cap incident (that would conflate 'over budget' with 'cannot say')")
 
 
+def test_checkout_written_window_makes_the_cap_enforceable(
+        capture_env, incidents, monkeypatch):
+    """#4216 end-to-end: the CHECKOUT path now writes the org's window, so the
+    cohort cap IS enforced for it (402) — instead of being absorbed as
+    unenforceable and served (the pre-#4216 behaviour, and the paired negative
+    directly above).
+
+    REDs on the pre-#4216 tree: ``checkout.session.completed`` wrote
+    ``subscription_id`` and NO period, so ``metering._current_period`` raised,
+    ``enforce_cohort_cost_cap`` absorbed it (#3981) and this over-cap capture
+    returned 200 with the extraction running — the cap silently unenforceable
+    for a paying org. (With the checkout fix reverted, the anchor assertion
+    below fires first; with THAT removed, the capture 200s — the 402 vs 200
+    contrast is the same mutation either way.)
+
+    Mutations caught: reverting the checkout window write (the 402 becomes a
+    200); and the gate substituting a calendar month for a subscription org
+    (the cohort read would target a different window and miss the ledger row).
+    """
+    import json
+    from datetime import datetime
+
+    from tortoise import billing as bl
+
+    org_id = COHORT_ORG
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    start = int(datetime.fromisoformat(
+        "2026-08-01T00:00:00+00:00").timestamp())
+    end = int(datetime.fromisoformat(
+        "2026-09-01T00:00:00+00:00").timestamp())
+    monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
+                        lambda self, payload, sig: {
+                            "id": "evt_4216_e2e",
+                            "type": "checkout.session.completed",
+                            "data": {"object": {
+                                "client_reference_id": org_id,
+                                "customer": "cus_4216_e2e",
+                                "subscription": "sub_4216_e2e"}}})
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {
+                            "id": "sub_4216_e2e", "status": "active",
+                            "current_period_start": start,
+                            "current_period_end": end,
+                            "items": {"data": []}})
+
+    r = capture_env.client.post(
+        "/webhooks/stripe", content=json.dumps({}),
+        headers={"stripe-signature": "t=1,v1=x"})
+    assert r.status_code == 200, r.text
+
+    anchor = _ha._make_sdk(namespace="registry")._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
+        "t.current_period_end", params={"id": org_id}).result_set[0]
+    assert anchor[0] is not None and anchor[1] is not None, (
+        f"the checkout webhook must persist a COMPLETE window: {anchor}")
+
+    _spend(org_id, CAP_USD + 1.0)
+
+    r = capture_env.client.post(
+        "/v1/sessions", json={"conversation": _CONV, "harness": "claude"})
+    assert r.status_code == 402, (
+        "a metered paying org's cohort cap must be ENFORCED, not absorbed")
+    assert capture_env.extraction_calls == []
+
+
 # ── 3. the MCP surface reports the same class ───────────────────────────────
 
 
