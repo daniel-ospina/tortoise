@@ -89,17 +89,51 @@ test('#3874: the at-cap detail wins — it IS the enforced cap', () => {
   assert.match(upgradeNoticeFrom(capDetail(4), { max_api_keys: 9 }), /limit of 4 API keys/)
 })
 
-// ── 4. Approved copy is NOT re-litigated ─────────────────────────────────
-// #3874 changes the number's SOURCE only. The numbered sentences stay
-// byte-identical to the approved #1147/#2229 wording.
+// ── 4. Number-stable copy; the create remedy tail is #2699's ─────────────
+// #3874 changed the number's SOURCE only. #2699 then changed the create/shared
+// notice's REMEDY TAIL: "regenerate an existing key instead" is unreachable at
+// the cap (rotate mints the replacement through the SAME capped
+// POST /v1/team/keys, so it 402s too). The numbered SENTENCE stays
+// byte-identical to the approved #1147 wording; only the tail moves. The
+// rotate notice (#2229) is untouched.
 
-test('#3874: numbered notices keep the approved wording (source change only)', () => {
+test('#3874: numbered notices keep the approved number sentence (source change only)', () => {
   assert.equal(
     upgradeNoticeFrom(capDetail(2), { max_api_keys: 2 }),
-    "You've reached your plan's limit of 2 API keys. Upgrade to add more — or regenerate an existing key instead.")
+    "You've reached your plan's limit of 2 API keys. Revoke an existing key to free a slot — or upgrade to add more.")
   assert.equal(
     rotateCapNoticeFrom(capDetail(2), { max_api_keys: 2 }),
     "You're at your plan's limit of 2 API keys. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more.")
+})
+
+// ── 4b. #2699: the at-cap remedy must be ACHIEVABLE ──────────────────────
+// The create/shared notice used to advertise "regenerate an existing key
+// instead" — but a team AT the cap 402s on the rotate path too (rotate mints
+// the replacement through the same capped POST /v1/team/keys before revoking
+// the old row). These pin the achievable remedy.
+//
+// TWO tests, not one, so each branch's failure against the OLD string is
+// observable in isolation: in a single shared test the numbered assert.equal
+// throws first and the no-number assertion is never evaluated.
+
+test('#2699: the numbered create notice offers the achievable remedy, never regenerate', () => {
+  const up = upgradeNoticeFrom(capDetail(2), { max_api_keys: 2 })
+  // The enforced number the user needs stays stated.
+  assert.match(up, /limit of 2 API keys/, up)
+  // The remedy that works AT the cap: revoke frees a slot
+  // (quota._count_resource('api_keys') counts only non-revoked, non-expired rows).
+  assert.match(up, /Revoke an existing key to free a slot/, up)
+  // The dead end is gone — the RED direction (fails against the pre-#2699 string).
+  assert.doesNotMatch(up, /regenerate/i, up)
+})
+
+test('#2699: the degraded (no-number) create notice offers the achievable remedy, never regenerate', () => {
+  const up = upgradeNoticeFrom('', {})
+  assert.equal(up,
+    "You've reached your plan's API key limit. Revoke an existing key to free a slot — or upgrade to add more.")
+  assert.match(up, /Revoke an existing key to free a slot/, up)
+  assert.doesNotMatch(up, /regenerate/i, up)
+  assert.doesNotMatch(up, /\bof \d+ API keys\b/, `must not invent a limit: ${up}`)
 })
 
 // ── 5. Cross-surface agreement (the issue's core invariant) ──────────────
