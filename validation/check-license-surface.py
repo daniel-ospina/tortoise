@@ -151,13 +151,25 @@ def bsl_declaration(text: str, *, whole_file_names: bool = False) -> str | None:
     return None
 
 
+def _display(path: Path) -> Path:
+    """Repo-relative where possible, absolute otherwise — never raise.
+
+    A surface is normally under ROOT, but the functions below must stay usable
+    (and testable) for any path, so they do not assume it.
+    """
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
 def check_consumer_surface(name: str, spec: dict) -> list[str]:
     """MIT licence present + no BSL declaration anywhere under the surface."""
     errors: list[str] = []
     licence = spec["licence"]
     if not licence.exists():
         errors.append(
-            f"{name}: no per-directory licence at {licence.relative_to(ROOT)} — the "
+            f"{name}: no per-directory licence at {_display(licence)} — the "
             "surface inherits the repo's BSL 1.1 by default (#4366)"
         )
     else:
@@ -173,7 +185,7 @@ def check_consumer_surface(name: str, spec: dict) -> list[str]:
     # markers and appends BSL terms is the same copy-paste accident class, and
     # a presence-only MIT check would pass it (verified bypass, cycle-2 review).
     for path in sorted(p for p in spec["path"].rglob("*") if p.is_file()):
-        rel = path.relative_to(ROOT)
+        rel = _display(path)
         try:
             body = path.read_text()
         except UnicodeDecodeError:
