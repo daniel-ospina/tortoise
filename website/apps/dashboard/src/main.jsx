@@ -954,6 +954,26 @@ function wizardWorkflowsText(key, mode) {
   return `${WORKFLOWS_PROMPT}\n\n${wizardPromptText('claude-web', 2, key, mode)}`
 }
 
+// #4330: ONE cap notice, TWO surfaces — the API Keys tab and the create-key
+// modal. Extracted so the upgrade CTA cannot drift between them; the modal MUST
+// carry it. Before this, a create-key 402 advanced the modal to a broken 'done'
+// stage (an empty `.key-value` box, and a clipboard write of the literal
+// "null") while the notice sat on the tab BEHIND the modal, invisible.
+function CapNotice({ text, team, checkoutPending, onUpgrade }) {
+  return (
+    <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
+      <span className="dim small">{text}</span>
+      {team?.checkout_price_id ? (
+        <button className="ghost small" onClick={onUpgrade} disabled={checkoutPending}>
+          {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+        </button>
+      ) : (
+        <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+      )}
+    </div>
+  )
+}
+
 function App() {
   // #1280 (P0, mirrored from fix/1280): banner state MUST live inside the
   // component — a module-top-level useState crashes the whole bundle.
@@ -1115,11 +1135,23 @@ function claimIntentInFlight() {
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
   const [keyModalBusy, setKeyModalBusy] = React.useState(false)
   const [keyModalStage, setKeyModalStage] = React.useState('form') // 'form' | 'done'
+  // #4330: show-once reveal feedback. `keyCopied` drives the Copy control's
+  // "Copied ✓" state and its live-region announcement; `keyCopyFailed` is the
+  // clipboard-refused fallback — the key stays on screen, selected for a
+  // manual copy (never a silent loss of a shown-once secret, #2392 class).
+  const [keyCopied, setKeyCopied] = React.useState(false)
+  const [keyCopyFailed, setKeyCopyFailed] = React.useState(false)
   // key-label: inline-rename state (which row is being edited + its draft text)
   const [editingKeyId, setEditingKeyId] = React.useState(null)
   const [editingKeyName, setEditingKeyName] = React.useState('')
   const renameCancelRef = React.useRef(false) // key-label: Escape-in-edit suppresses the blur-save
   const [capNotice, setCapNotice] = React.useState('') // #1147: tier-cap upgrade prompt (keys tab)
+  // #4330 (review P2): the create-key dialog's OWN cap notice. `capNotice` is
+  // shared with the rotate path, whose 402 message is rotate-specific ("revoke
+  // an unused key first") — advice that is false inside the create dialog. A
+  // dedicated slot means the dialog can never render another surface's remedy,
+  // and the tab keeps its existing banner lifecycle untouched.
+  const [keyModalCapNotice, setKeyModalCapNotice] = React.useState('')
   // #1287: welcome-as-dashboard-subpage — first-time users land on
   // /welcome (key reveal + MCP/SDK chooser); returning users get home.
   const [welcomeMode, setWelcomeMode] = React.useState(
@@ -4275,6 +4307,8 @@ function claimIntentInFlight() {
     setSessions([])
     setNewKey(null)
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
+    // #4330 (review cycle 2, P2): the dialog's cap notice is per-session data.
+    setKeyModalCapNotice('')
     setRotatedKey(null) // #2735: the rotate reveal is one-time plaintext — never survives logout
     // #1082: clear the claim intent on logout (a stale pasted key must not
     // auto-claim the next user's session).
@@ -4882,6 +4916,11 @@ function claimIntentInFlight() {
     // switch never flashes the previous team's members/graphs, and record the
     // requested team as current for staleness guards.
     setCapNotice('') // #1147: a cap banner from the previous team must not stick
+    // #4330 (review cycle 2, P2): its DIALOG sibling is team-scoped data too —
+    // `upgradeNoticeFrom`'s numbered fallback reads this team's `max_api_keys`,
+    // so a stale dialog notice would render the PREVIOUS team's limit under the
+    // new team's header.
+    setKeyModalCapNotice('')
     const prevOrgId = currentOrgId
     const tok = sessionTokenRef.current
     if (!tok) return // Round-3: guard BEFORE wiping state — logout→apikey
@@ -5753,18 +5792,26 @@ function claimIntentInFlight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overviewSkeletonLive, frameStale])
 
+  // #4330: createKey REPORTS its outcome — it returns the minted plaintext on
+  // success and null on every failure (busy re-entry, invalid Custom date, the
+  // identity guard, a rejected mint, a 2xx with no plaintext). Callers gate the
+  // form → 'done' transition on that return value. Before this, every caller
+  // advanced unconditionally, so a failed mint left `newKey` at its initial
+  // null: the reveal rendered an empty `.key-value` box and "Copy & done" ran
+  // `navigator.clipboard.writeText(null)` → the four-character string "null".
   async function createKey() {
     // Round-17 (P3): capture the team AT CALL TIME — the previous guard compared
     // orgIdRef.current to currentOrgId, which are always written together and
     // can never diverge, so it was dead code. Capture to a local and compare
     // against the ref after the await (the round-16 mutation pattern).
     const _teamAtCall = currentOrgId
-    if (busy) return // Round-27: in-function double-click guard (disabled attr is click-path only)
+    if (busy) return null // Round-27: in-function double-click guard (disabled attr is click-path only)
     // #2426: a Custom-date preset with no valid in-range date must not mint
     // — the button is also disabled, but Enter-to-create needs the same gate
     // (never silently mint a Never key when the user picked Custom).
-    if (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate)) return
+    if (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate)) return null
     setCapNotice('')
+    setKeyModalCapNotice('')
     setError('')
     setBusy(true)
     try {
@@ -5778,29 +5825,107 @@ function claimIntentInFlight() {
       // Identity guard BEFORE any UI write: a team switch during the POST must
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
-      if (orgIdRef.current !== _teamAtCall) return
-      setNewKey((mk && (mk.key || mk.api_key)) || '')
+      if (orgIdRef.current !== _teamAtCall) return null
+      // #4330: a 2xx that carries no plaintext is NOT a reveal. The secret is
+      // unrecoverable at this point, so refuse the success path rather than
+      // render an empty box (and never let a falsy value reach the clipboard).
+      const plaintext = (mk && (mk.key || mk.api_key)) || ''
+      if (!plaintext) {
+        setError('The server did not return the new key\u2019s value, so it cannot be shown. Refresh the list and revoke any unlabeled key you just created.')
+        await loadAll('')
+        return null
+      }
+      setNewKey(plaintext)
+      setKeyCopied(false)
+      setKeyCopyFailed(false)
       // #2426: the show-once card states the key's expiry — the authoritative
       // server echo (absent on a Never mint → null → 'never expires').
       setNewKeyExpiresAt((mk && mk.expires_at) || null)
       setNewKeyName('')
       setNewKeyExpiryDate('')
       await loadAll('')
+      return plaintext
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
       if (orgIdRef.current === _teamAtCall) {
         // #1147: a tier-cap 402 (hosted_api._check_team_limit) is a LIMIT,
-        // not an error — surface the upgrade prompt with the real cap.
+        // not an error — surface the upgrade prompt with the real cap. The
+        // dialog carries the same message in its OWN slot (#4330) so the user
+        // learns the reason without dismissing it; the tab banner still shows
+        // after a dismiss.
         if (e.status === 402) {
-          setCapNotice(upgradeNoticeFrom(e.message, team))
+          const notice = upgradeNoticeFrom(e.message, team)
+          setCapNotice(notice)
+          setKeyModalCapNotice(notice)
           setError('')
         } else {
           setError(e.message)
         }
       }
+      return null
     } finally {
       setBusy(false)
     }
+  }
+
+  // #4330: the reveal's Copy is its OWN control (never fused with dismiss — a
+  // failed copy used to take the shown-once key with it). It never writes a
+  // non-string: `navigator.clipboard.writeText(null)` stringifies to "null".
+  async function copyNewKey() {
+    const plaintext = typeof newKey === 'string' ? newKey : ''
+    if (!plaintext) return
+    // Feed the connect snippet even if the clipboard refuses (in-memory only).
+    setWizardDurableKey(plaintext)
+    try {
+      await navigator.clipboard.writeText(plaintext)
+      setKeyCopied(true)
+      setKeyCopyFailed(false)
+    } catch {
+      // #2735/#2392 class: keep the shown-once plaintext on screen and select
+      // it for a manual copy rather than losing it to a failed clipboard write.
+      setKeyCopied(false)
+      setKeyCopyFailed(true)
+      const el = document.querySelector('.key-create-modal .key-value')
+      if (el) {
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        const sel = window.getSelection()
+        sel.removeAllRanges()
+        sel.addRange(range)
+      }
+    }
+  }
+
+  // #4330: the create-key reveal's key. Derived ONCE here so the render is
+  // total: the done stage shows iff this is a non-empty string, and the form
+  // renders in every other state — so a falsy `newKey` can never produce the
+  // empty `.key-value` box (the owner's "square") and is never handed to
+  // `navigator.clipboard.writeText` (which stringifies `null` to "null").
+  const newKeyReveal = (keyModalStage === 'done' && typeof newKey === 'string' && newKey) || ''
+
+  // #4330: Done dismisses the reveal — the key is already live and listed; this
+  // only drops the browser's last copy of the plaintext. Guarded so a click
+  // cannot silently destroy a shown-once secret the user never copied. The
+  // backdrop routes through here too (review P2: an unguarded backdrop was the
+  // reveal's most common dismiss path, and it bypassed this guard).
+  //
+  // Review cycle 4 (P2): the prompt deliberately claims only what is TRUE —
+  // this DIALOG will not show the key again. It must not claim the key is
+  // unrecoverable: this same function hands the plaintext to `wizardDurableKey`,
+  // which the connect step renders, so an unrecoverability claim would be false
+  // (the repo pins exactly this standard — `KEY_VISIBILITY_NOTE` and the
+  // wizardConnectTripwire "shown once" ban).
+  function dismissKeyModal() {
+    const plaintext = typeof newKey === 'string' ? newKey : ''
+    if (plaintext && !keyCopied
+        && !window.confirm('Close without copying it? This dialog will not show the key again.')) return
+    if (plaintext) setWizardDurableKey(plaintext)
+    setKeyModalOpen(false)
+    setNewKey(null)
+    setNewKeyExpiresAt(null)
+    setKeyCopied(false)
+    setKeyCopyFailed(false)
+    setKeyModalCapNotice('')
   }
 
   async function regenerateKey(keyId) {
@@ -7916,10 +8041,16 @@ function claimIntentInFlight() {
       />
       {/* #api-keys-ux: key creation modal — form stage (name + expiry) transitions to done stage (show key once + copy) */}
       {keyModalOpen && (
-        <div className="modal-backdrop" onClick={() => { if (!keyModalBusy) { setKeyModalOpen(false); setNewKey(null); setNewKeyExpiresAt(null) } }}>
+        <div className="modal-backdrop" onClick={() => { if (!keyModalBusy) dismissKeyModal() }}>
           <div className="modal key-create-modal" role="dialog" aria-modal="true" aria-label="Create API key"
                onClick={(e) => e.stopPropagation()}>
-            {keyModalStage === 'form' && (
+            {/* #4330 (review P2): the reveal is an OPT-IN stage. `newKeyReveal`
+                is the ONLY gate — the done stage renders iff a live non-empty
+                key exists, and every other state (including a team switch or
+                logout that nulls `newKey` mid-reveal) falls back to the form
+                instead of a content-free dialog. This replaces a bare
+                `keyModalStage === 'done'` gate that could render nothing. */}
+            {!newKeyReveal && (
               <>
                 <h2>Create new API key</h2>
                 {keysLoaded && allowanceLine(team, keys) && (
@@ -7932,7 +8063,7 @@ function claimIntentInFlight() {
                     value={newKeyName}
                     maxLength={64}
                     onChange={(e) => setNewKeyName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && !(newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate)) && (async () => { setKeyModalBusy(true); setKeyModalStage('form'); await createKey(); setKeyModalBusy(false); setKeyModalStage('done') })()}
+                    onKeyDown={(e) => e.key === 'Enter' && !(newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate)) && (async () => { setKeyModalBusy(true); setKeyModalStage('form'); const mk = await createKey(); setKeyModalBusy(false); if (mk) setKeyModalStage('done') })()}
                   />
                   <select
                     aria-label="Expiry"
@@ -7955,28 +8086,49 @@ function claimIntentInFlight() {
                   )}
                 </div>
                 <div className="new-key-actions">
-                  <button className="ghost" onClick={() => { setKeyModalOpen(false); setNewKey(null); setNewKeyExpiresAt(null) }} disabled={keyModalBusy}>Cancel</button>
+                  {/* #4330 (review cycle 2, P2): Cancel routes through the same
+                      guarded dismiss as the backdrop/Done, so it clears the
+                      reveal feedback AND the dialog's cap notice. Safe here:
+                      Cancel only renders in the form stage, where no key
+                      exists, so no confirm is raised. */}
+                  <button className="ghost" onClick={dismissKeyModal} disabled={keyModalBusy}>Cancel</button>
                   <button
-                    onClick={async () => { setKeyModalBusy(true); await createKey(); setKeyModalBusy(false); setKeyModalStage('done') }}
+                    onClick={async () => { setKeyModalBusy(true); const mk = await createKey(); setKeyModalBusy(false); if (mk) setKeyModalStage('done') }}
                     disabled={keyModalBusy || (newKeyExpiryPreset === 'custom' && !expiryDaysFromDate(newKeyExpiryDate))}
                   >{keyModalBusy ? 'Creating…' : 'Create key'}</button>
                 </div>
+                {/* #4330: the failure reason must render INSIDE the modal. A
+                    cap 402 puts its message on `capNotice` (not `error`), and
+                    the tab-level notice sits behind this dialog — so without
+                    this the user saw a silent form → empty reveal. */}
+                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
                 {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
               </>
             )}
-            {keyModalStage === 'done' && (
+            {/* #4330: the reveal renders the live key only — `newKeyReveal` is
+                derived so a falsy/empty `newKey` can never render the empty
+                `.key-value` box the owner reported (nor hand `null` to the
+                clipboard). */}
+            {newKeyReveal && (
               <>
                 <h2>New API key</h2>
                 <p className="dim">Copy this key now — it is shown once only.</p>
-                <code className="key-value">{newKey}</code>
+                <code className="key-value">{newKeyReveal}</code>
                 {newKeyExpiresAt ? (
                   <span className="dim">expires {fmtExpiryDate(newKeyExpiresAt)}</span>
                 ) : (
                   <span className="dim">never expires</span>
                 )}
                 <div className="new-key-actions">
-                  <button onClick={() => { navigator.clipboard.writeText(newKey); setWizardDurableKey(newKey); setNewKey(null); setNewKeyExpiresAt(null); setKeyModalOpen(false) }}>Copy &amp; done</button>
+                  <button onClick={copyNewKey}>{keyCopied ? 'Copied ✓' : 'Copy'}</button>
+                  <button className="ghost" onClick={dismissKeyModal}>Done</button>
                 </div>
+                <span className="sr-only" role="status" aria-live="polite">{keyCopied ? 'Copied to clipboard' : ''}</span>
+                {keyCopyFailed && (
+                  <p className="error" role="alert" style={{ marginTop: 8 }}>
+                    Your browser blocked the clipboard — the key is selected above; press ⌘/Ctrl-C to copy it.
+                  </p>
+                )}
               </>
             )}
           </div>
@@ -8561,8 +8713,13 @@ function claimIntentInFlight() {
                   notice renders as a FULL-WIDTH paragraph BELOW this .row
                   (Members-tab precedent) — as a span inside the flex .row it
                   wrapped badly beside the h2 on narrow viewports. */}
+              {/* #4330 (review cycle 2, P2): the handler clears the DIALOG's cap
+                  notice on open — BEFORE `setKeyModalOpen(true)`, so the #2710
+                  queue-site window (setKeyModalOpen(true) → "+ New key") stays
+                  intact. Without this a reopened dialog rendered the previous
+                  attempt's notice with no mint attempted. */}
               {isOwnerAdmin && (
-                <button className="ghost" onClick={() => { setKeyModalOpen(true); setKeyModalStage('form'); setError(''); setNewKeyName(''); setNewKeyExpiryPreset('30'); setNewKeyExpiryDate('') }}>+ New key</button>
+                <button className="ghost" onClick={() => { setKeyModalCapNotice(''); setKeyModalOpen(true); setKeyModalStage('form'); setError(''); setNewKeyName(''); setNewKeyExpiryPreset('30'); setNewKeyExpiryDate('') }}>+ New key</button>
               )}
             </div>
             {/* #3874: the allowance stated BEFORE the cap — the same
@@ -8584,18 +8741,8 @@ function claimIntentInFlight() {
               </p>
             )}
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
-            {capNotice && (
-              <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
-                <span className="dim small">{capNotice}</span>
-                {team?.checkout_price_id ? (
-                  <button className="ghost small" onClick={upgrade} disabled={checkoutPending}>
-                    {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                  </button>
-                ) : (
-                  <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
-                )}
-              </div>
-            )}
+            {/* #4330: the SAME notice component the create-key modal renders. */}
+            {capNotice && <CapNotice text={capNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgrade} />}
 
             {/* #2735: rotate's replacement reveal. #2667 moved create-key
                 into the Create API key modal and DELETED the standalone
