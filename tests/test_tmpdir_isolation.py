@@ -198,16 +198,31 @@ def test_root_is_not_a_needle_for_the_string_pre_filter(monkeypatch):
     )
     assert os.sep + "private" in spellings, "the real spelling must survive"
 
-    # ...and the consequence: a script containing a bare `/` token is not
-    # pre-filtered into the token scan by an unrelated needle.
+    # ...and the consequence, exercised against the RECOMPUTED list so it is
+    # meaningful on every host (the import-time list on macOS never contained
+    # `/`, so asserting against it would be vacuous here).
+    monkeypatch.setattr(iso, "_TMPDIR_SPELLINGS", spellings)
     script = ('\nfrom pathlib import Path\n'
               'packaged = Path("x").resolve().parent / "packs"\n')
     assert iso._command_touches_host_tempdir(script) is None, \
         "an unrelated command must not be pre-filtered in"
+    # The ARGV invariants that make the skip safe: a bare root ARG is not a
+    # temp-dir scan (the CI shape that broke — `git -C / status`), while an
+    # argv that IS the temp dir is still rejected.
+    assert iso._subprocess_touches_host_tempdir(
+        ['git', '-C', os.sep, 'status']) is None, \
+        "a bare-root ARGV element is not a temp-dir scan"
+    assert iso._subprocess_touches_host_tempdir(
+        ['find', iso.HOST_TMPDIR, '-maxdepth', '2']) is not None, \
+        "an argv naming the temp dir must still be caught"
 
-    # The SCOPE predicate is unchanged: the root still counts as an ancestor
-    # (the parametrized ancestor case depends on it), and a descendant — the
-    # private session root — is still legitimate.
+    # The IN-PROCESS predicate is unchanged: the root still counts as an
+    # ancestor, which is what makes `os.scandir(dirname(HOST_TMPDIR))` fail
+    # closed on the runner (the parametrized ancestor case pins the shared
+    # predicate for `scandir`; `listdir`/`walk` share it), and a descendant —
+    # the private session root — is still legitimate. Only the ARGV/STRING
+    # token layer skips a bare root, because there it is a division operator
+    # or an ordinary argument.
     assert iso._is_host_tempdir_scope(os.sep) is True
     assert iso._is_host_tempdir_scope(iso.HOST_TMPDIR + "/tt_abc") is False
 

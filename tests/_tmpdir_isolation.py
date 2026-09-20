@@ -94,15 +94,15 @@ def _tmpdir_spellings() -> tuple[str, ...]:
     # `$TMPDIR` is unset so the temp dir IS `/tmp` and its parent IS `/`. On
     # macOS the parent is a long `/var/folders/...` and stays in the list.
     #
-    # RESIDUAL: with `/` gone, a command STRING that names only the root
-    # (`sh -c 'find / …'`) no longer matches any needle, so the STRING layer
-    # does not see it. The ARGV layer still rejects a literal `/` token
-    # (`_is_host_tempdir_scope` is unchanged), and the in-process guard still
-    # rejects `os.scandir`/`listdir`/`walk` of the ROOT — the parametrized
-    # ancestor case pins exactly that. A whole-filesystem `find` behind an
-    # opaque shell string is the one shape left to those layers. Removing the
-    # needle is worth that: a pre-filter that fires on every command line
-    # makes the guard's verdict meaningless.
+    # RESIDUAL, stated as plainly as it can be: a command that names the ROOT
+    # — `find / …`, in argv form or behind an opaque shell string — is caught
+    # by NO layer of the subprocess guard. It was only ever caught by accident
+    # (the `/` needle), and keeping it meant the pre-filter fired on every
+    # command line, so the guard rejected legitimate `python -c` scripts and
+    # `git -C / …`. What DOES still catch a real walk of the root is the
+    # IN-PROCESS guard, which rejects `os.scandir`/`listdir`/`walk` of it as a
+    # test runs. Losing a whole-filesystem `find` is the price of a pre-filter
+    # that means something; a gate that false-blocks gets disabled.
     return tuple(dict.fromkeys(s for s in spellings if s and s != os.sep))
 
 
@@ -485,11 +485,13 @@ def _is_host_tempdir_scope(path) -> bool:
         target = os.path.realpath(raw)
     except (TypeError, ValueError, OSError):
         return False
-    # The root is deliberately NOT special-cased here: `_is_under(child, '/')`
+    # The root is deliberately NOT special-cased HERE: `_is_under(child, '/')`
     # legitimately means "every absolute path", and the ancestor rule is what
     # makes `os.scandir(dirname(HOST_TMPDIR))` — a real ancestor scan — fail
-    # closed. The false positives that rule caused came from the STRING
-    # pre-filter, not from this predicate, and are fixed in `_tmpdir_spellings`.
+    # closed. It IS special-cased in `_subprocess_touches_host_tempdir`, whose
+    # callers pass raw argv elements and shlex-split script text, where a bare
+    # `/` is a division operator or an ordinary argument rather than a scan.
+    # Two different questions, so two different predicates.
     return target == HOST_TMPDIR or _is_under(HOST_TMPDIR, target)
 
 
@@ -530,9 +532,24 @@ def _subprocess_touches_host_tempdir(args) -> str | None:
     for token in args:
         if isinstance(token, bytes):
             token = os.fsdecode(token)
-        if isinstance(token, (str, os.PathLike)) and \
-                _is_host_tempdir_scope(token):
-            return os.fspath(token) if not isinstance(token, str) else token
+        if not isinstance(token, (str, os.PathLike)):
+            continue
+        raw = token if isinstance(token, str) else os.fspath(token)
+        # A bare filesystem ROOT is not evidence of a temp-dir scan. `/` is
+        # also a Python division operator and a routine argv element
+        # (`git -C / status`); on a GitHub runner `$TMPDIR` is unset so
+        # HOST_TMPDIR IS `/tmp` and its PARENT IS `/`, which made the root an
+        # "ancestor" of the temp dir and rejected both shapes. A real walk of
+        # the root is still caught — by the IN-PROCESS guard, which keeps
+        # rejecting `os.scandir`/`listdir`/`walk` of it (see
+        # `_is_host_tempdir_scope`, deliberately unchanged).
+        try:
+            if os.path.realpath(raw) == os.sep:
+                continue
+        except (TypeError, ValueError, OSError):
+            pass
+        if _is_host_tempdir_scope(token):
+            return raw
     return None
 
 
@@ -549,15 +566,20 @@ def _command_touches_host_tempdir(command) -> str | None:
     or ``find <session root>`` — the reaper's own legitimate walk) still passes
     while ``find <host T>`` does not.
 
-    The fast-path substring test uses EVERY spelling of the temp dir captured
+    The fast-path substring test uses every spelling of the temp dir captured
     at import (the raw `tempfile.gettempdir()`, its realpath, the `$TMPDIR`
     spelling and ITS realpath, and the temp dir's parent — on macOS `$TMPDIR`
     is `/var/folders/...` while the realpath is `/private/var/folders/...`, so
     testing only the realpath made the shell form fail OPEN on the canonical
     spelling; `$TMPDIR` is also unset on GitHub's ubuntu runners, where the
     spelling is `tempfile.gettempdir()`'s own fallback). A hit then routes the
-    string to the per-token realpath scope test — a pre-filter MISS returns
-    None without deciding anything, which is why the list has to be complete.
+    string to the per-token realpath scope test.
+
+    The list is deliberately NOT complete: a filesystem ROOT is excluded as a
+    needle (see `_tmpdir_spellings`), so a pre-filter MISS on a root-only
+    command is expected and is documented there as the residual. A miss
+    otherwise means the string cannot be naming the temp dir in a known
+    spelling.
 
     Still unguarded (inherent to a static-content check on a command STRING):
     a command SUBSTITUTION that computes an ancestor or the temp dir at run
