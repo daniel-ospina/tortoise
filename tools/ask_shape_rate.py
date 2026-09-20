@@ -429,12 +429,25 @@ def _substrate_label() -> str:
     """A receipt-safe label for the store the run measured against.
 
     NEVER echoes the raw ``TORTOISE_ASK_SHAPE_DB_URI``, and never echoes the
-    URI's PATH: the documented form embeds a password in the userinfo, and a
-    receipt is a TRACKED file that gets committed. A malformed value (e.g. a
-    single slash, ``docker:/:pw@host:6379/g``) leaves the userinfo in
-    ``urlparse(...).path`` rather than in ``netloc``, so echoing the path is
-    a credential leak — the label is therefore built from validated
-    components ONLY, and any URI without a host is refused by name.
+    URI's PATH OR ANY PART OF ITS AUTHORITY: the documented form embeds a
+    password in the userinfo, and a receipt is a TRACKED file that gets
+    committed.
+
+    ⚠️ Masking on ``u.username``/``u.password`` is NOT sufficient —
+    ``urlparse`` splits userinfo at the LAST ``@``, so a password containing
+    ``@``/``?``/``#``/``/`` can land in ``hostname`` while BOTH of those
+    fields parse EMPTY. Measured at review:
+    ``docker://:@S3cret-Pa55w0rd?@host:6379/g`` parsed to
+    ``hostname='s3cret-pa55w0rd', username='', password=''`` and echoed the
+    full password; ``docker://:P@ssw0rd?x@host:6379/g`` echoed the fragment
+    ``ssw0rd`` after a ``***@`` mask. A malformed value (e.g. a single
+    slash, ``docker:/:pw@host:6379/g``) puts the userinfo in
+    ``urlparse(...).path`` instead, so echoing the path leaks too.
+
+    The label therefore echoes the SCHEME (the substrate class) and the
+    validated numeric PORT only — never the host, never the userinfo, never
+    the path. A URI with no host is refused by name, and so is a
+    non-numeric port.
     """
     base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
     if not base:
@@ -449,12 +462,23 @@ def _substrate_label() -> str:
             "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI is not a usable "
             "connection URI (no host) — expected a form like "
             "docker://:pw@host:6379/<graph>")
-    port = f":{u.port}" if u.port else ""
-    auth = "***@" if (u.username or u.password) else ""
+    try:
+        # ``urlparse`` validates the port LAZILY: reading ``u.port`` on a
+        # non-numeric value raises, and the exception text carries the
+        # offending fragment — which, on the pathological URIs above, can be
+        # a password. Refuse it BY NAME here instead of letting a raw
+        # ValueError carry the value into stderr.
+        port = f":{u.port}" if u.port else ""
+    except ValueError:
+        raise SystemExit(
+            "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI has a non-numeric "
+            "port — expected a form like docker://:pw@host:6379/<graph>") \
+            from None
     # The graph segment is deliberately NOT echoed (it is part of the path,
     # which is where a malformed userinfo can land). The receipt records
-    # WHERE the rate was measured, not the scratch graph's name.
-    return f"{u.scheme}://{auth}{u.hostname}{port}/<graph>"
+    # WHERE the rate was measured, not the scratch graph's name — and, per
+    # the docstring, not the host either.
+    return f"{u.scheme}://<redacted>{port}/<graph>"
 
 
 def _drop_docker_graph(base: str, name: str) -> None:

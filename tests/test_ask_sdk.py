@@ -354,8 +354,9 @@ def test_date_leg_attaches_no_session_id():
     """D3 pool-safety (#1540 / #4106): the session-``created_at`` leg is a
     DATE source only. The attached ``session_id`` set must be byte-identical
     with and without it (only the ``eventId`` Event join may attach one — a
-    new identity source would re-bucket ``dedup_pool`` and move the 8k/32KiB
-    reader window)."""
+    new identity source would re-bucket ``dedup_pool`` and move the resolved
+    ask-lane reader window (200/200/16000/derived since #4105; 8k/32KiB
+    before it))."""
     sdk = _new_sdk()
     turns = _seed_capture_turns(
         sdk, TURN_SESSION, now=f"{TURN_DATE}T10:00:00Z",

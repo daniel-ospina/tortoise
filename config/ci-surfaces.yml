@@ -955,6 +955,7 @@ surfaces:
   - test_cross_lens.py
   - test_crypto.py
   - test_d3_session_identity.py   # D3/#3800: retrieved-session identity — ask `retrieved_session_ids` + `[session <id>]` evidence tag + wire `sessionId`
+  - test_ask_shape_rate_receipt_redaction.py   # #4105: the D3 instrument's receipt label never echoes the DB credential (hermetic)
   - test_eval_ingest_cache.py  # #2080 ingest-cache seam (docker-lane leg — the retriever/namespace surface, mirrors test_retrieval.py)
   - test_operator_dedup_parity.py
   - test_postmerge_dedup.py
@@ -1470,6 +1471,7 @@ durations:
   test_agent_ops_pack.py: 0.9
   test_ask_retrieval_levers.py: 0.9
   test_ask_retrieval_budget.py: 2.0
+  test_ask_shape_rate_receipt_redaction.py: 2.0
   test_battery_arms_real.py: 0.9
   test_capability_catalog.py: 0.9
   test_capture_session_supersession_e2e.py: 0.9

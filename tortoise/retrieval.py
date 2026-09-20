@@ -595,7 +595,11 @@ def estimate_tokens(text: str) -> int:
     10% markup allowance). ``assemble_context``'s budget accounting uses the
     identical per-block words, so ``estimate_tokens(render_context(...))``
     equals the assembly's ``context_tokens`` exactly (no per-block int
-    drift — the alignment invariant, R1 #1540)."""
+    drift — the alignment invariant, R1 #1540) **for a DEFAULT caller**,
+    which is what the eval lane re-exporting ``assemble_context`` is. The
+    ASK lane opts in to ``nonascii_token_surcharge`` (#4105) and its matching
+    estimator is ``estimate_tokens_ask``; a caller that opts in must use that
+    one, not this one."""
     return int(len(text.split()) * 1.1)
 
 
@@ -924,8 +928,11 @@ def assemble_context(
     independently, by the SAME mechanism as the token cap — WHOLE-HIT DROP
     (lowest-ranked hits dropped until under budget, never mid-hit character
     truncation), so decoding the evidence never splits a character
-    (P2-18) and ``len(evidence.encode("utf-8")) <= byte_cap`` is a hard output
-    invariant by construction.
+    (P2-18) and the assembled BLOCKS are bounded by ``byte_cap`` by
+    construction. (A ``byte_cap`` below the once-prepended ``Current Date:``
+    header's own framing bytes is NOT honoured: the header is charged against
+    the budget but is not droppable, so it is emitted regardless. The same
+    framing floor applies to ``max_context_tokens``.)
 
     ``stats`` (#4105): optional out-dict. When supplied it is updated with the
     admission census (``items_selected``, ``claim_bearing``, ``bytes_used``,
