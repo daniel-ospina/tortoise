@@ -1717,9 +1717,9 @@ export WATCHDOG_NOW_EPOCH="$NOW"
 #   * PROBE_EXPECT_STATUS / PROBE_REQUIRE_HEADER did not exist and `is_prod`
 #     was a single-literal comparison, so the auth URL classified as a DRILL
 #     ([DRILL]-titled incident, no PROD page).
-AUTH_URL="https://tortoise.premiselabs.co/auth/start"
+AUTH_URL="https://app.premiselabs.co/auth/start"
 API_URL="https://api.premiselabs.co/v1/organizations"
-AUTH_TITLE_DOWN='[monitor] PROD DOWN — tortoise.premiselabs.co is not answering the availability probe'
+AUTH_TITLE_DOWN='[monitor] PROD DOWN — app.premiselabs.co is not answering the availability probe'
 PKCE_HEADERS=$'HTTP/2 302\r\nlocation: https://github.com/login/oauth/authorize?client_id=x&code_challenge=abc&code_challenge_method=s256\r\n'
 
 # Unit-call the pure helpers straight from the script (the WATCHDOG_LIB_ONLY
@@ -1804,7 +1804,7 @@ assert_contains "$(patched_body)" "down_runs=4" "empty restartable set: the prod
 # ── 86: a healthy 302 + the PKCE header on the auth target → UP ─────────────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="302"
@@ -1818,7 +1818,7 @@ assert_eq "$(cat "$STUB_TMP/probe.count")" "2" "auth healthy: one probe + one re
 # ── 87: the SAME 302 without the header is NOT UP (the #3616 class) ────────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="302"
@@ -1848,7 +1848,7 @@ assert_eq "$(cat "$STUB_TMP/probe.count")" "1" "auth: the header check is determ
 # wrong surface (review P3).
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="200"          # answered, but OUTSIDE the allow-list
@@ -1879,7 +1879,7 @@ assert_contains "$(patched_body)" "authenticated API route" "api status mismatch
 # ── 88: a 503 on the auth target → DOWN and flyctl is NEVER called ─────────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="503"
@@ -1895,7 +1895,7 @@ assert_contains "$(patched_body)" "NO Fly machine" "auth: the incident body expl
 # The strongest possible case for a restart and it must still not happen.
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export STUB_PROBE_CODES="503"
 export FLY_API_TOKEN="fly-token"
@@ -1912,30 +1912,30 @@ assert_contains "$(comments_all)" "NO Fly machine" "auth sustained: a human sees
 # ── 90: the auth URL is PROD (not DRILL) → PROD title with its OWN label ───
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export STUB_PROBE_CODES="503"
 run_watchdog
 assert_contains "$(created_json)" "[monitor] PROD DOWN" "auth: the incident is PROD-titled (the URL is in the prod SET)"
 assert_not_contains "$(created_json)" "DRILL" "auth: the incident is NOT a drill"
-assert_contains "$(created_json)" "tortoise.premiselabs.co" "auth: the title carries the auth host — its OWN dedupe key"
+assert_contains "$(created_json)" "app.premiselabs.co" "auth: the title carries the auth host — its OWN dedupe key"
 
 # ── 90b: the auth run never adopts (or mutates) the API incident ───────────
 reset_case
 seed_issue down "$((NOW - 600))" 3 0 ""   # seeds an OPEN API incident (#42)
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export STUB_PROBE_CODES="503"
 run_watchdog
 assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "auth: the API incident is NOT adopted → the auth incident is filed fresh"
 assert_eq "$(count_calls 'GH PATCH repos/.*/issues/42$')" "0" "auth: the API incident (#42) is NEVER mutated (separate dedupe identity)"
-assert_contains "$(created_json)" "tortoise.premiselabs.co" "auth: the fresh incident carries the auth host"
+assert_contains "$(created_json)" "app.premiselabs.co" "auth: the fresh incident carries the auth host"
 
 # ── 91: the required-header match is CASE-INSENSITIVE ──────────────────────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
 export STUB_PROBE_CODES="302"
@@ -1946,7 +1946,7 @@ assert_eq "$RC" "0" "auth: header name/value casing is irrelevant → still UP"
 # ── 92: a trailing slash still classifies as PROD ──────────────────────────
 reset_case
 export PROBE_URL="$AUTH_URL/"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302"
 export STUB_PROBE_CODES="503"
 run_watchdog
@@ -1969,7 +1969,7 @@ assert_eq "$(count_calls 'FLYCTL')" "0" "api regression: 503 with no token → n
 # ── 97: a malformed allow-list cannot make a 5xx healthy (end to end) ──────
 reset_case
 export PROBE_URL="$AUTH_URL"
-export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_HOST_LABEL="app.premiselabs.co"
 export PROBE_EXPECT_STATUS="302 503"    # 503 must NOT become healthy
 export STUB_PROBE_CODES="503"
 run_watchdog
@@ -2017,10 +2017,25 @@ assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env o
 AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
 # Same comment-stripping rule as case 85: a comment must not satisfy the guard.
 AUTH_STEP="$(sed -n '/Probe the Pages auth surface/,/availability-watchdog.sh/p' "$AUTH_WORKFLOW" | grep -v '^[[:space:]]*#' || true)"
-assert_contains "$AUTH_STEP" "https://tortoise.premiselabs.co/auth/start" "the auth step targets /auth/start"
+assert_contains "$AUTH_STEP" "https://app.premiselabs.co/auth/start" "the auth step probes the SESSION-BEARING origin (/auth/start on app.*, #4054)"
 assert_contains "$AUTH_STEP" "PROBE_EXPECT_STATUS: '302'" "the auth step expects a 302"
 assert_contains "$AUTH_STEP" "PROBE_REQUIRE_HEADER: 'code_challenge_method=s256'" "the auth step requires the PKCE header"
-assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: tortoise.premiselabs.co" "the auth step passes its OWN host label (its own dedupe key)"
+# The host label is the incident DEDUPE KEY and `is_prod` is decided by SET
+# MEMBERSHIP over the URLs, so the URL, its label and the script's constant must
+# move TOGETHER. These are DERIVED, not pinned to a literal, because that is the
+# exact drift that stranded the probe: #4054 moved the BFF to app.* and left all
+# three behind, so a literal pin would have had to be edited in three places and
+# the guard would have gone on passing while sign-in was unmonitored.
+AUTH_PROBE_URL_STEP="$(printf '%s\n' "$AUTH_STEP" | sed -n 's|.*PROBE_URL: \(https://[^ ]*\).*|\1|p' | head -1)"
+AUTH_HOST="$(printf '%s' "$AUTH_PROBE_URL_STEP" | sed -n 's|https://\([^/]*\)/.*|\1|p')"
+assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: $AUTH_HOST" \
+  "the auth step's host label matches the host it actually probes (its dedupe key)"
+# …and the script must classify that same URL as PRODUCTION. PROD_PROBE_URLS is
+# built from AUTH_PROBE_URL; if only the workflow moves, the step still runs but
+# is classified a DRILL — [DRILL]-titled, no page, self-heal disarmed — while
+# looking correct in the diff.
+assert_contains "$(grep '^AUTH_PROBE_URL=' "$WATCHDOG" || true)" "$AUTH_PROBE_URL_STEP" \
+  "the watchdog script's AUTH_PROBE_URL matches the step's probe URL (else the run is silently a DRILL)"
 assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"

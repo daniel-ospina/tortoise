@@ -186,8 +186,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PROBE_URL: https://tortoise.premiselabs.co/auth/start
-          PROBE_HOST_LABEL: tortoise.premiselabs.co
+          PROBE_URL: https://app.premiselabs.co/auth/start
+          PROBE_HOST_LABEL: app.premiselabs.co
           # Healthy = 302 with the PKCE challenge in the response headers. The
           # old hardcoded UP arms classified 3xx as UNEXPECTED, so a naive
           # probe of this route would page on a HEALTHY site; the allow-list

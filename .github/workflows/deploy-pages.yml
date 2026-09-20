@@ -241,7 +241,10 @@ jobs:
       # KNOWN LIMIT below.
       - name: Post-deploy — sign-in is actually reachable
         run: |
-          url=https://tortoise.premiselabs.co/auth/start
+          # The BFF's session-bearing origin is app.premiselabs.co (#4054): the
+          # whole point of this probe is the REAL user path, so it must not
+          # verify a host the sign-in flow no longer touches.
+          url=https://app.premiselabs.co/auth/start
           code=000
           curl_rc=0
           # Poll: Pages can briefly serve the previous deployment after upload.
