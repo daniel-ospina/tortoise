@@ -29,9 +29,10 @@ related:
 > Durability vocabulary — *RPO, backup, snapshot, restore drill, AOF/RDB,
 > source of truth* — is **operational, not ontology**. No durability **authority**
 > statement lives in `docs/ONTOLOGY.md`, which governs graph vocabulary. That
-> document carries only domain-level reconstruction phrasing: the
-> `Object.status` rows (`§2`, `§4.3`) and the `§4.2`/`§4.3` "registration
-> durability" notes (journal survival for `rebuild_all`, not a backup promise).
+> document carries only domain-level phrasing — such as the `Object.status`
+> rows (`§2`, `§4.3`), the `§4.2`/`§4.3` "registration durability" notes (journal
+> survival for `rebuild_all`), and the Episodic-layer "is the truth" lines
+> (`§2`, `§5`) — never a durability authority claim.
 
 ## The rule
 
@@ -41,13 +42,14 @@ persistence plus an off-box copy of it.** Nothing else.
 - The **JSONL is a domain event log** — it reconstructs a projection under
   changed fold logic, migrates engines, and audits beyond `:GraphEvent`'s 30-day
   window. **It is never the durability mechanism.** It is written outside the
-  store's transaction, so it cannot be the authority: it does not capture
-  raw-Cypher or graph-only writes (SDK `_upsert`, EP writes, deletes, connector
-  work), so a wipe-and-replay rebuilds only what the log holds, not the graph —
-  `tortoise/consistency.py::recover_from_log` documents that partial
-  reconstruction, and `tortoise/backup.py:65-77` is RDB-first for exactly this
-  reason. A second, non-atomic copy would also be the textbook dual-write hazard
-  (not merely incomplete — the two copies can disagree).
+  store's transaction, so it cannot be the authority, and it is not complete:
+  a lane with no `event_log_path` (the hosted write path, `tortoise/sdk.py:3416`)
+  journals nothing, pre-#2194/#2295 journals miss first-registration writes, and
+  raw-Cypher paths have no event at all — so a wipe-and-replay rebuilds only what
+  the log holds, not the graph (`tortoise/consistency.py::recover_from_log`
+  documents that partial reconstruction; `tortoise/backup.py:65-77` is RDB-first
+  for exactly this reason). A second, non-atomic copy would also be the textbook
+  dual-write hazard — the two copies can disagree.
 - `:GraphEvent` is the **30-day delivery/audit stream**, not a backup.
 - This is the settled industry answer (Delta Lake, Apache Iceberg, PostgreSQL
   WAL, etcd, Neo4j, Memgraph, Debezium outbox): authority stays in a
@@ -66,7 +68,7 @@ operator's own backups while reporting health.
 
 | Deployment | Mechanism (where the data lives) | Honest loss window | Strongest verification actually performed |
 |---|---|---|---|
-| **Hosted — graph archives** (`tortoise/hosted_backup.py`, `tortoise/backup_sweep.py`) | Per-graph **logical dump** (`tortoise-logical-dump-v1`), AES-256-GCM encrypted, uploaded with a sha256 manifest to **Cloudflare R2 (off-box)**, swept hourly (`registry-backup-cron.yml`, `17 * * * *`). **Gated:** `BACKUP_SWEEP_ENABLED` is fail-closed (default off, `tortoise/backup_config.py:172-180`, `:249`); `deploy-hosted.yml:358-380` sets it true only when every required secret is present. | **≤ 1 h typical / ≤ 2 h worst-case** *when the sweep is enabled* (`docs/ops/registry-backup-dr.md` §RPO; achieved age is measured per team/graph via `/v1/internal/backups/status`). With the sweep **off**, there is **no archive and no bounded window** — the vendor snapshot below is the only off-box copy. | **Restore drill** — the monthly unattended drill (`registry-drill-cron.yml`, #2317) restores a real archive into `_drill_*` scratch and records pass/fail plus measured restore time vs RTO (`ops/drills/last.json` → `/status` `last_drill`). The restore path itself also verifies sha256 against the manifest and node/edge counts against the authenticated payload before swapping (`tortoise/hosted_backup.py:3-40`). The drill proves the *restore path* for an archive that exists; the sweep producing archives is what the freshness watcher covers (#2790 / #2922). |
+| **Hosted — graph archives** (`tortoise/hosted_backup.py`, `tortoise/backup_sweep.py`) | Per-graph **logical dump** (`tortoise-logical-dump-v1`), AES-256-GCM encrypted, uploaded with a sha256 manifest to **Cloudflare R2 (off-box)**, swept hourly (`registry-backup-cron.yml`, `17 * * * *`). **Gated:** `BACKUP_SWEEP_ENABLED` is fail-closed (default off, `tortoise/backup_config.py:172-180`, `:249`); `deploy-hosted.yml:358-380` sets it true only when every required secret is present. | **≤ 1 h typical / ≤ 2 h worst-case** for *entitled* graphs (`tier ≠ free` AND `backup_enabled`; `tortoise/backup_sweep.py:248-272`) *when the sweep is enabled* (`docs/ops/registry-backup-dr.md` §RPO; achieved age is measured per team/graph via `/v1/internal/backups/status`). An **unentitled** graph has **no periodic archive** — its window is unbounded. With the sweep **off** the same holds; the Pro on-demand `POST /v1/backups` (`tortoise/hosted_api.py:22938`) and the vendor snapshot below remain. | **Restore drill** — the monthly unattended drill (`registry-drill-cron.yml`, #2317) restores a real archive into `_drill_*` scratch and records pass/fail plus measured restore time vs RTO (`ops/drills/last.json` → `/status` `last_drill`). The restore path itself also verifies sha256 against the manifest and node/edge counts against the authenticated payload before swapping (`tortoise/hosted_backup.py:3-40`). The drill proves the *restore path* for an archive that exists; the sweep producing archives is what the freshness watcher covers (#2790 / #2922). |
 | **Hosted — vendor platform persistence** (FalkorDB Cloud) | Vendor-managed. Off-box **snapshots every 12 h, 7-day retention** (Startup & Pro); snapshots deleted after 14 days. **Restore creates a NEW instance.** | **≤ 12 h** off-box. In-box persistence (AOF) is **contested** — see below; until settled, treat in-box persistence as unverified. | **Existence only — not drilled.** The cadence and retention are vendor-documented; no restore of a vendor snapshot has been performed by us. |
 | **Self-hosted (Docker Compose sidecar)** | FalkorDB sidecar with AOF + named volume (`README.md` self-host path, `docker-compose.yml`) — **on-box only**. | AOF `everysec` = **≤ 1 s** on a clean host; **total loss** if the host or volume is lost. The documented compose path ships **no off-box copy**; `scripts/daily-backup.sh` is a host-specific RDB copy (issue #101) that is not wired into the compose path or its docs — the general off-box copy is **#2880 (pending)**. | **Not drilled.** AOF is a live on-box artifact, not a backup, and no restore of a self-hosted archive has been performed. |
 | **Embedded (redisLite — eval only)** | RDB file; **AOF off by default** (`TORTOISE_EMBEDDED_AOF=1` opts in — `tortoise/projection/__init__.py:36-45`, `:1157-1181`, `:1796-1799`). Single-writer; concurrent writers lose data. | AOF on: **≤ 1 s**. AOF off: **up to the next RDB save or a clean close** — RDB snapshots may never fire for a small graph (#915, #2879). | **Not drilled** (and not a production path). AOF's on-disk artifact is measured when opted in (`tests/test_embedded_durability_claim.py`) — presence, not a restore. |
@@ -98,11 +100,13 @@ deployment's actual off-box mechanism, and in-box persistence is unverified.
 
 Three statements disagreed about whether the store or the journal was the
 durability authority, so the text inherited whatever the nearest comment
-believed. The fix is **deletion, not reconciliation**: no other file carries a
-durability authority claim. The durability-scoped gate in
-`tests/test_durability_posture.py` fails the build if a `log`/`journal`/`jsonl`/
-`event stream` is bound to `source of truth` — or to `is [the] truth` — outside
-this file.
+believed. The fix is **deletion, not reconciliation**: the three contradicting
+journal-authority statements are removed, and no other file in the gate's
+contract surfaces carries the claim. Every remaining live restatement is
+enumerated under *Open items*, not silently tolerated. The durability-scoped
+gate in `tests/test_durability_posture.py` fails the build if a
+`log`/`journal`/`jsonl`/`event stream` is bound to `source of truth` — or to
+`is [the] truth` — outside this file.
 
 ## Open items
 

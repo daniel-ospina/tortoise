@@ -47,7 +47,7 @@ CANONICAL_DOC = REPO / CANONICAL_DOC_REL
 _SUBJECT = r"(?:event log|journal|jsonl|\blog\b|event stream)"
 CLAIM_RE = re.compile(
     rf"{_SUBJECT}.{{0,40}}source of truth"
-    r"|source of truth.{0,40}(durab|journal|event log|jsonl)"
+    rf"|source of truth.{{0,40}}(?:durab|{_SUBJECT})"
     rf"|{_SUBJECT}.{{0,40}}is (?:the )?truth",
     re.IGNORECASE,
 )
@@ -225,6 +225,9 @@ def test_claim_regex_matches_the_original_defect_forms():
         "the journal/event stream is the truth",
         "the event stream is the truth",
         "# §11: the event log is truth; replay re-truncates identically",
+        # the REVERSE direction must cover the widened subjects too:
+        "the source of truth is the log",
+        "the source of truth is the event stream",
         # the durability-worded second alternation:
         "the source of truth for durability claims",
     ):
