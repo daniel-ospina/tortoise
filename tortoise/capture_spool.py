@@ -88,6 +88,10 @@ DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded"
 DISCARD_TRANSCRIPT_EMPTY = "transcript_empty"
 #: A transcript that cannot be read at all (EACCES, EISDIR, non-UTF-8 bytes).
 DISCARD_TRANSCRIPT_UNREADABLE = "transcript_unreadable"
+#: An UNEXPECTED failure while filing one entry (a bug, not a classification):
+#: recorded and backed off, but the entry is KEPT — an internal bug must never
+#: delete user data.
+DISCARD_ENTRY_FAILED = "entry_failed"
 #: The spool's own `entries/` listing cannot be read — every capture is invisible.
 DISCARD_SPOOL_UNREADABLE = "spool_unreadable"
 DISCARD_CORRUPT = "corrupt_entry"
@@ -157,7 +161,7 @@ def spool_dir() -> Path:
         return Path(override)
     test_id = os.environ.get("PYTEST_CURRENT_TEST")
     if test_id:
-        digest = hashlib.sha256(test_id.encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(_utf8(test_id)).hexdigest()[:16]
         return Path(tempfile.gettempdir()) / "tortoise-capture-spool-tests" / digest
     return Path.home() / ".tortoise" / "capture-spool"
 
@@ -184,18 +188,34 @@ def _discard_path(root: Path) -> Path:
 def content_digest(turns: list[dict]) -> str:
     """sha256 of the canonical turns — the dedup + capture-key source."""
     blob = json.dumps(turns, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_utf8(blob)).hexdigest()
 
 
 def capture_key(session_id: str, turns: list[dict]) -> str:
     """The stable, content-addressed client idempotency key."""
     seed = f"{session_id}\u0000{content_digest(turns)}"
-    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_utf8(seed)).hexdigest()
+
+
+def _utf8(text: str) -> bytes:
+    """Encode for HASHING, tolerating lone surrogates.
+
+    A `session_id` (or turn text) can carry a lone surrogate — JS `JSON.stringify`
+    emits one for an unpaired code unit, and a hand-written meta can contain
+    anything. `str.encode("utf-8")` raises `UnicodeEncodeError` on those, which
+    escaped `entry_key`/`capture_key`/`content_digest` on EVERY leg (crashing
+    `session spool` with a traceback, and wedging the drain by making the entry
+    unreadable-then-removable-never). `surrogatepass` is deterministic and
+    injective, and for every normal id it produces the SAME bytes as plain
+    `utf-8`, so no existing key or digest changes. The digest (never the raw id)
+    is what lands in a filename.
+    """
+    return text.encode("utf-8", "surrogatepass")
 
 
 def entry_key(session_id: str) -> str:
     """Filesystem-safe, collision-resistant stem for a session id."""
-    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(_utf8(session_id)).hexdigest()[:32]
 
 
 # ── Failure classification + backoff ───────────────────────────────────────
@@ -701,80 +721,109 @@ def flush_spool(
     summary.discarded.extend(discards)
     for meta in sorted(metas, key=_age_key):
         sid = meta.get("session_id", "")
-        if only_session_id and sid != only_session_id:
-            continue
-        if exclude_session_id and sid == exclude_session_id:
-            summary.held_back += 1
-            continue
-        if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
-            summary.skipped += 1
-            continue
-        if _backoff_ms(meta) > now_ms:
-            summary.skipped += 1
-            continue
-
-        turns = read_spool_turns(root, sid)
-        if not turns:
-            summary.discarded.append(
-                _discard_entry(root, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty or unreadable")
-            )
-            continue
-
-        # The digest of what will actually be POSTed. The CAS below compares the
-        # disk against THIS, never against the stale pre-POST meta: a writer that
-        # appended to the log and then died before its meta write leaves the meta
-        # digest unchanged, and comparing meta-to-meta would stamp `filed_key`
-        # over a turn that was never posted.
-        posted_digest = content_digest(turns)
-        summary.attempted += 1
-        payload = {
-            "harness": meta.get("harness", "claude"),
-            "session_id": sid,
-            "source": meta.get("source"),
-            "conversation": turns,
-            "machine_id": meta.get("machine_id"),
-        }
-        if meta.get("model"):
-            payload["model"] = meta["model"]
-        outcome = post(payload)
-        summary.outcomes[sid] = outcome
-        if outcome.ok:
-            # COMPARE-AND-SWAP, on the POSTED CONTENT. A concurrent capture (a
-            # resumed session, or the SessionStart drain racing a live turn) can
-            # grow this entry while the POST is in flight. Stamp `filed_key` only
-            # when what is on disk NOW is exactly what was posted; otherwise the
-            # entry stays unfiled and the next opportunity re-posts the longer
-            # conversation. Comparing meta-to-meta was wrong: a writer killed
-            # between its log append and its meta write leaves the meta digest
-            # stale, so the check passed while a turn went unfiled forever.
-            on_disk_turns = read_spool_turns(root, sid)
-            on_disk = read_spool_meta(root, sid)
-            if (on_disk is not None
-                    and content_digest(on_disk_turns) == posted_digest):
-                on_disk["filed_key"] = on_disk.get("capture_key") or capture_key(sid, on_disk_turns)
-                on_disk["filed_at"] = datetime.fromtimestamp(
-                    now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-                on_disk["attempts"] = 0
-                on_disk["next_attempt_at_ms"] = 0
-                _write_meta(root, on_disk)
-            # else: the posted content WAS filed; the entry keeps the newer turns
-            # and stays unfiled, so they are re-posted next time.
-            summary.filed += 1
-            continue
-        if classify_failure(outcome.status, outcome.detail) == "permanent":
-            summary.discarded.append(_discard_entry(
-                root, meta, f"permanent_http_{outcome.status if outcome.status is not None else 'none'}",
-                outcome.detail or "permanent client error",
-            ))
-            continue
-        # Re-read before the backoff write-back for the same reason as the CAS
-        # above: never clobber newer turns written while the POST was in flight.
-        pending = read_spool_meta(root, sid) or meta
-        pending["attempts"] = int(meta.get("attempts") or 0) + 1
-        pending["next_attempt_at_ms"] = now_ms + backoff_delay(pending["attempts"]) * 1000
-        _write_meta(root, pending)
-        summary.deferred += 1
+        try:
+            _flush_one(root, meta, sid, summary, post, now_ms, only_session_id,
+                       exclude_session_id, bounds)
+        except Exception as exc:
+            # A per-entry bug must never WEDGE the drain — one bad entry used to
+            # make `flush_spool` raise for every later opportunity, forever.
+            #
+            # It must also not DELETE: the failure is UNCLASSIFIED (a bug, not a
+            # permanent 4xx), so the entry is recorded in the ledger and left on
+            # the spool with a backoff. Removing it here would turn an internal
+            # bug into permanent data loss.
+            summary.discarded.append(record_discard(root, {
+                "session_id": sid or "unknown",
+                "capture_key": meta.get("capture_key"),
+                "reason": DISCARD_ENTRY_FAILED,
+                "detail": f"unexpected failure while filing: {exc!r}",
+            }))
+            with contextlib.suppress(Exception):
+                retry_meta = read_spool_meta(root, sid) or meta
+                retry_meta["attempts"] = int(meta.get("attempts") or 0) + 1
+                retry_meta["next_attempt_at_ms"] = (
+                    now_ms + backoff_delay(retry_meta["attempts"]) * 1000)
+                _write_meta(root, retry_meta)
+            summary.deferred += 1
     return summary
+
+
+def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: PostFn,
+               now_ms: float, only_session_id: str | None,
+               exclude_session_id: str | None, bounds: Bounds) -> None:
+    """Attempt ONE spool entry. Extracted so `flush_spool` can guard every entry."""
+    if only_session_id and sid != only_session_id:
+        return
+    if exclude_session_id and sid == exclude_session_id:
+        summary.held_back += 1
+        return
+    if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
+        summary.skipped += 1
+        return
+    if _backoff_ms(meta) > now_ms:
+        summary.skipped += 1
+        return
+    turns = read_spool_turns(root, sid)
+    if not turns:
+        summary.discarded.append(
+            _discard_entry(root, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty or unreadable")
+        )
+        return
+    # The digest of what will actually be POSTed. The CAS below compares the
+    # disk against THIS, never against the stale pre-POST meta: a writer that
+    # appended to the log and then died before its meta write leaves the meta
+    # digest unchanged, and comparing meta-to-meta would stamp `filed_key`
+    # over a turn that was never posted.
+    posted_digest = content_digest(turns)
+    summary.attempted += 1
+    payload = {
+        "harness": meta.get("harness", "claude"),
+        "session_id": sid,
+        "source": meta.get("source"),
+        "conversation": turns,
+        "machine_id": meta.get("machine_id"),
+    }
+    if meta.get("model"):
+        payload["model"] = meta["model"]
+    outcome = post(payload)
+    summary.outcomes[sid] = outcome
+    if outcome.ok:
+        # COMPARE-AND-SWAP, on the POSTED CONTENT. A concurrent capture (a
+        # resumed session, or the SessionStart drain racing a live turn) can
+        # grow this entry while the POST is in flight. Stamp `filed_key` only
+        # when what is on disk NOW is exactly what was posted; otherwise the
+        # entry stays unfiled and the next opportunity re-posts the longer
+        # conversation. Comparing meta-to-meta was wrong: a writer killed
+        # between its log append and its meta write leaves the meta digest
+        # stale, so the check passed while a turn went unfiled forever.
+        on_disk_turns = read_spool_turns(root, sid)
+        on_disk = read_spool_meta(root, sid)
+        if (on_disk is not None
+                and content_digest(on_disk_turns) == posted_digest):
+            on_disk["filed_key"] = on_disk.get("capture_key") or capture_key(sid, on_disk_turns)
+            on_disk["filed_at"] = datetime.fromtimestamp(
+                now_ms / 1000.0, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            on_disk["attempts"] = 0
+            on_disk["next_attempt_at_ms"] = 0
+            _write_meta(root, on_disk)
+        # else: the posted content WAS filed; the entry keeps the newer turns
+        # and stays unfiled, so they are re-posted next time.
+        summary.filed += 1
+        return
+    if classify_failure(outcome.status, outcome.detail) == "permanent":
+        summary.discarded.append(_discard_entry(
+            root, meta, f"permanent_http_{outcome.status if outcome.status is not None else 'none'}",
+            outcome.detail or "permanent client error",
+        ))
+        return
+    # Re-read before the backoff write-back for the same reason as the CAS
+    # above: never clobber newer turns written while the POST was in flight.
+    pending = read_spool_meta(root, sid) or meta
+    pending["attempts"] = int(meta.get("attempts") or 0) + 1
+    pending["next_attempt_at_ms"] = now_ms + backoff_delay(pending["attempts"]) * 1000
+    _write_meta(root, pending)
+    summary.deferred += 1
+    return
 
 
 def _write_meta(root: Path, meta: dict) -> None:

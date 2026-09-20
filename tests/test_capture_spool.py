@@ -344,11 +344,17 @@ def test_cli_capture_writes_the_spool_BEFORE_the_network(tmp_path, monkeypatch):
         return handle
 
     monkeypatch.setattr(cli, "_session_post", exploding_post)
-    with pytest.raises(Boom):
-        cli.main(["session", "capture", "--file", str(transcript), "--session-id", "sess-order"])
-
+    # An exploding transport is an UNCLASSIFIED per-entry failure: it is
+    # recorded (`entry_failed`), backed off, and the entry is KEPT — a bug must
+    # never delete user data and must never wedge the drain.
+    assert cli.main(["session", "capture", "--file", str(transcript),
+                     "--session-id", "sess-order"]) == 0
     assert read_spool_turns(tmp_path / "spool", "sess-order"), \
         "the turns must be durable BEFORE the network attempt"
+    assert read_discards(tmp_path / "spool")[-1]["reason"] == "entry_failed"
+    meta = read_spool_meta(tmp_path / "spool", "sess-order")
+    assert meta["attempts"] == 1 and meta["next_attempt_at_ms"] > 0, \
+        "it is retried later, with backoff — not dropped"
 
 
 def test_cli_interrupted_capture_is_filed_by_the_next_drain(tmp_path, monkeypatch):
