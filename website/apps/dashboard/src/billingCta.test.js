@@ -15,9 +15,11 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
+  CHECKOUT_NOT_OFFERED_REASON,
   CHECKOUT_UNAVAILABLE_REASON,
   COMPARE_PLANS_URL,
   checkoutCtaFor,
+  nextUpgradeTier,
 } from './billingCta.js'
 import { stripComments } from './testSupport.js'
 
@@ -53,6 +55,33 @@ test('#4335: the compare-plans destination is explicit and secondary', () => {
   for (const priceId of ['price_x', '']) {
     assert.equal(checkoutCtaFor(priceId).href, null)
   }
+})
+
+test('#4335: a not-offered tier reads as not-offered, not as a retryable outage', () => {
+  // The catalog resolved SOME paid tier, so this tier's absence is deliberate
+  // (#2789) — the copy must not promise a retry that can never succeed.
+  const cta = checkoutCtaFor('', { anyConfigured: true })
+  assert.equal(cta.disabled, true)
+  assert.equal(cta.reason, CHECKOUT_NOT_OFFERED_REASON)
+  assert.doesNotMatch(cta.reason, /try again|temporarily/i)
+  assert.equal(cta.href, null)
+  // …while a genuinely-empty catalog keeps the outage copy.
+  assert.equal(checkoutCtaFor('', { anyConfigured: false }).reason,
+    CHECKOUT_UNAVAILABLE_REASON)
+})
+
+test('#4335: the cap-notice target is the next configured tier strictly above the org (never downgrade)', () => {
+  const order = ['free', 'solo', 'pro', 'team']
+  const ids = { solo: 'p_solo', pro: 'p_pro', team: 'p_team' }
+  assert.deepEqual(nextUpgradeTier('free', ids, order), { tier: 'solo', priceId: 'p_solo' })
+  assert.deepEqual(nextUpgradeTier('solo', ids, order), { tier: 'pro', priceId: 'p_pro' })
+  assert.deepEqual(nextUpgradeTier('pro', ids, order), { tier: 'team', priceId: 'p_team' })
+  // Top tier → no higher plan exists.
+  assert.equal(nextUpgradeTier('team', ids, order), null)
+  // Partial catalog (solo only): a solo org has nothing to upgrade to, and a
+  // team org must never be offered a cheaper plan.
+  assert.equal(nextUpgradeTier('solo', { solo: 'p_solo' }, order), null)
+  assert.equal(nextUpgradeTier('team', { solo: 'p_solo' }, order), null)
 })
 
 // ── Wiring backstop (presence, NOT behavioural proof) ─────────────────────

@@ -43,7 +43,7 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from 
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom } from './keyAllowance.js'
 // #4335: the billing CTA's honest-unavailable derivation — one pure source so
 // the three render sites cannot drift (see billingCta.js).
-import { COMPARE_PLANS_URL, checkoutCtaFor } from './billingCta.js'
+import { COMPARE_PLANS_URL, checkoutCtaFor, nextUpgradeTier } from './billingCta.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -963,9 +963,9 @@ function wizardWorkflowsText(key, mode) {
 // never becomes a marketing link. The caller may add the secondary
 // "Compare plans" link. Other CTAs (header badge #4331; the error-banner and
 // Graphs-tab upgrade buttons) are out of scope here.
-function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false }) {
+function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = false, anyConfigured = false }) {
   const reasonId = React.useId()
-  const cta = checkoutCtaFor(priceId)
+  const cta = checkoutCtaFor(priceId, { anyConfigured })
   if (cta.disabled) {
     // #4335 review: native `disabled` already conveys the state (a redundant
     // aria-disabled would contradict it), and the reason is visible AND tied
@@ -995,11 +995,19 @@ function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = 
 // carry it. Before this, a create-key 402 advanced the modal to a broken 'done'
 // stage (an empty `.key-value` box, and a clipboard write of the literal
 // "null") while the notice sat on the tab BEHIND the modal, invisible.
-function CapNotice({ text, priceId, checkoutPending, onUpgrade }) {
+function CapNotice({ text, team, checkoutPending, onUpgrade }) {
+  // A cap-notice "Upgrade" must be a real upgrade: the next configured paid
+  // tier STRICTLY above the org's current tier. When the deployment sells no
+  // higher tier (top tier, or solo-only), render no CTA — never a
+  // current/downgrade plan behind an "Upgrade" label.
+  const target = nextUpgradeTier(team?.tier, team?.checkout_price_ids,
+    planOptions().map((p) => p.tier))
   return (
     <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
       <span className="dim small">{text}</span>
-      <UpgradeCta priceId={priceId} onUpgrade={() => onUpgrade(priceId)} pending={checkoutPending} className="ghost small" />
+      {target && (
+        <UpgradeCta priceId={target.priceId} onUpgrade={() => onUpgrade(target.priceId)} pending={checkoutPending} className="ghost small" />
+      )}
       <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
     </div>
   )
@@ -8031,7 +8039,7 @@ function claimIntentInFlight() {
                                     </button>
                                   ) : (
                                     <>
-                                      <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} block />
+                                      <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} anyConfigured={Object.keys(team.checkout_price_ids || {}).length > 0} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} block />
                                       <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
                                     </>
                                   )}
@@ -8206,7 +8214,7 @@ function claimIntentInFlight() {
                     cap 402 puts its message on `capNotice` (not `error`), and
                     the tab-level notice sits behind this dialog — so without
                     this the user saw a silent form → empty reveal. */}
-                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} priceId={team?.checkout_price_id || newOrgDefaultPrice(team)} checkoutPending={checkoutPending} onUpgrade={upgradeToPrice} />}
+                {keyModalCapNotice && <CapNotice text={keyModalCapNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgradeToPrice} />}
                 {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
               </>
             )}
@@ -8847,7 +8855,7 @@ function claimIntentInFlight() {
             )}
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {/* #4330: the SAME notice component the create-key modal renders. */}
-            {capNotice && <CapNotice text={capNotice} priceId={team?.checkout_price_id || newOrgDefaultPrice(team)} checkoutPending={checkoutPending} onUpgrade={upgradeToPrice} />}
+            {capNotice && <CapNotice text={capNotice} team={team} checkoutPending={checkoutPending} onUpgrade={upgradeToPrice} />}
 
             {/* #2735: rotate's replacement reveal. #2667 moved create-key
                 into the Create API key modal and DELETED the standalone
@@ -9631,7 +9639,7 @@ function claimIntentInFlight() {
                       <button className="ghost" disabled title="The free plan needs no checkout">Free — no card needed</button>
                     ) : (
                       <>
-                        <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} className="btn-primary" block />
+                        <UpgradeCta priceId={hasPrice ? team.checkout_price_ids[p.tier] : ''} anyConfigured={Object.keys(team.checkout_price_ids || {}).length > 0} onUpgrade={() => upgradeToPrice(team.checkout_price_ids[p.tier])} pending={checkoutPending} className="btn-primary" block />
                         <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
                       </>
                     )}
