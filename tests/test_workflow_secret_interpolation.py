@@ -17,9 +17,10 @@ there the substitution is a YAML scalar, not shell source.
 ``e2e-live-reconcile.yml``. This module is the standing guard for the class: no
 step in any ``.github/workflows/*.{yml,yaml}`` may interpolate a secret into its
 ``run:`` body, and the #4361 steps are pinned to the safe shape (bound in
-``env:``, referenced quoted) so a partial revert fails loudly. The one deferral
-is the two ``deploy-hosted.yml`` steps pinned in ``_PENDING_FIX`` until the
-in-flight #4334 fix (PR #4357) lands.
+``env:``, referenced quoted) so a partial revert fails loudly. The only steps
+the sweep does not report are the two ``deploy-hosted.yml`` steps whose run
+bodies still carry a pre-fix interpolation, pinned by (job, step) in
+``_PENDING_FIX``; every other secret-in-run step in any workflow is reported.
 """
 from __future__ import annotations
 
@@ -35,17 +36,23 @@ import pytest
 
 _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
-# A secret context inside an expression. The runner resolves context names
-# case-insensitively (OrdinalIgnoreCase), so `SECRETS.FOO`/`Secrets.FOO` are
-# matched too; indexed syntax (`secrets['FOO']`, `secrets[matrix.name]`) is
-# matched by the `[.\[]` class.
-_SECRET_CONTEXT = re.compile(r"\bsecrets\s*[.\[]", re.IGNORECASE)
+# A `secrets` context token inside an expression. Matched BARE (`\bsecrets\b`)
+# and case-insensitively: the runner resolves context names with
+# OrdinalIgnoreCase, and the bare token is what `toJSON(secrets)` /
+# `format('{0}', secrets)` use to dump the whole context into shell source.
+# Member access (`secrets.X`, `secrets['X']`, `secrets[matrix.name]`) is the
+# common subset. `MY_SECRETS` is a different identifier and is not matched.
+_SECRET_CONTEXT = re.compile(r"\bsecrets\b", re.IGNORECASE)
+# `env` context references — dot and index form, both case-insensitive like the
+# runner's context lookup: `env.KEY`, `env['KEY']`, `env["KEY"]`.
+_ENV_DOT_REF = re.compile(r"\benv\.([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+_ENV_INDEX_REF = re.compile(r"\benv\[\s*(['\"])([^'\"]+)\1\s*\]", re.IGNORECASE)
 # A step env binding to a single secret: `KEY: ${{ secrets.KEY }}`.
 _ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}", re.IGNORECASE)
 
 
-def _secret_interpolations(text: str) -> list[str]:
-    """Every ``${{ … }}`` span in ``text`` that reads a secret context.
+def _expression_spans(text: str) -> list[str]:
+    """Every ``${{ … }}`` expression span in ``text``.
 
     Span extraction mirrors the Actions runner rather than a non-greedy regex:
     a ``}}`` inside a single-quoted string literal does NOT terminate the
@@ -54,12 +61,12 @@ def _secret_interpolations(text: str) -> list[str]:
     non-greedy ``\\$\\{\\{.*?\\}\\}`` form truncated the span at the inner
     ``}}`` and never re-scanned the remainder — a fail-open for that spelling.
     """
-    found: list[str] = []
+    spans: list[str] = []
     i = 0
     while True:
         start = text.find("${{", i)
         if start == -1:
-            return found
+            return spans
         j = start + 3
         in_string = False
         while j < len(text):
@@ -68,10 +75,40 @@ def _secret_interpolations(text: str) -> list[str]:
             elif not in_string and text.startswith("}}", j):
                 break
             j += 1
-        span = text[start : j + 2] if j < len(text) else text[start:]
-        if _SECRET_CONTEXT.search(span):
-            found.append(span)
+        spans.append(text[start : j + 2] if j < len(text) else text[start:])
         i = max(j + 2, start + 3)
+
+
+def _secret_interpolations(text: str) -> list[str]:
+    """Every expression span in ``text`` that reads the ``secrets`` context."""
+    return [s for s in _expression_spans(text) if _SECRET_CONTEXT.search(s)]
+
+
+def _secret_env_keys(*envs: dict | None) -> set[str]:
+    """Env keys whose value, in the given ``env:`` maps, is a secret expression."""
+    keys: set[str] = set()
+    for env in envs:
+        for name, value in (env or {}).items():
+            if _SECRET_CONTEXT.search(str(value)):
+                keys.add(str(name))
+    return keys
+
+
+def _run_secret_uses(run: str, secret_env_keys: set[str]) -> list[str]:
+    """Expressions in ``run`` that put a secret into the shell SOURCE.
+
+    Two shapes: a direct ``secrets`` context, and ``${{ env.KEY }}`` for an env
+    key that is itself bound to a secret — which re-interpolates the value into
+    the run text exactly like the direct form (the #4334 hazard), and is one
+    token away from the fix shape this repo prescribes.
+    """
+    uses = _secret_interpolations(run)
+    lowered = {k.lower() for k in secret_env_keys}
+    for span in _expression_spans(run):
+        refs = _ENV_DOT_REF.findall(span) + [m[1] for m in _ENV_INDEX_REF.findall(span)]
+        if any(r.lower() in lowered for r in refs) and span not in uses:
+            uses.append(span)
+    return uses
 
 
 def _scrub_run(run: str) -> str:
@@ -138,16 +175,14 @@ def _references_outside_double_quotes(run: str, var: str) -> list[str]:
     return bad
 
 
-# ``deploy-hosted.yml`` is owned by the in-flight #4334 fix (PR #4357) and this
-# change deliberately does not touch it. The sweep defers only while that file's
-# offenders are EXACTLY these two steps — identified by (job, step-name) and
-# matched as an exact set AND count. A new interpolating step there, even one
-# reusing a pinned NAME, changes the identity set or the count and is flagged,
-# so the exemption cannot hide a fresh regression. Once #4357 lands the file has
-# no offenders and is checked by the general path like any other workflow; the
-# entry then becomes inert and is deleted by whichever PR lands second. (#4357
-# also adds a dedicated step-level guard in ``tests/test_deploy_workflow.py``
-# that walks deploy-hosted.yml's steps.)
+# Two ``deploy-hosted.yml`` steps still carry a pre-fix interpolation; the sweep
+# defers them so an unreviewed file cannot be rewritten here. The deferral is
+# exact: it applies only while that file's offenders are these two (job, step)
+# identities — exact set AND count. A new interpolating step there, a duplicate
+# reusing a pinned name, or a pinned name in another job changes the identity
+# set or count and is reported, so the exemption cannot hide a fresh regression.
+# Once the file has no offenders the condition no longer matches and the entry is
+# inert; the general path then sweeps the file like any other.
 _PENDING_FIX: dict[str, frozenset[tuple[str, str]]] = {
     "deploy-hosted.yml": frozenset(
         {
@@ -208,22 +243,21 @@ def _step(doc: dict, prefix: str) -> dict:
     raise AssertionError(f"no step named {prefix!r} — the guard's anchor moved")
 
 
-def _run_bodies(doc: dict):
-    """Yield ``(job_name, step_name, run_text)`` for every step with a run body."""
-    for job_name, job in doc.get("jobs", {}).items():
-        for step in job.get("steps", []):
-            run = step.get("run")
-            if isinstance(run, str):
-                yield job_name, step.get("name") or "<unnamed>", run
-
 
 def _offending_identities(doc: dict) -> list[tuple[str, str]]:
-    """``(job, step)`` for every step whose run body interpolates a secret."""
-    return [
-        (job, name)
-        for job, name, run in _run_bodies(doc)
-        if _secret_interpolations(run)
-    ]
+    """``(job, step)`` for every step whose run body puts a secret into the shell."""
+    found: list[tuple[str, str]] = []
+    for job_name, job in doc.get("jobs", {}).items():
+        job = job or {}
+        job_keys = _secret_env_keys(job.get("env"))
+        for step in job.get("steps", []):
+            run = step.get("run")
+            if not isinstance(run, str):
+                continue
+            keys = job_keys | _secret_env_keys(step.get("env"))
+            if _run_secret_uses(run, keys):
+                found.append((job_name, step.get("name") or "<unnamed>"))
+    return found
 
 
 def _offending_steps(doc: dict) -> list[str]:
@@ -265,9 +299,9 @@ def test_offender_scan_catches_indexed_and_wrapped_secret_spellings():
 
 
 def test_offender_scan_survives_a_brace_pair_inside_a_string_literal():
-    """#4361 re-review: a `}}` inside a single-quoted literal does not end the
-    expression for the Actions runner, so a secret after it must still be seen —
-    the non-greedy regex truncated the span and returned no offender."""
+    """A `}}` inside a single-quoted literal does not end the expression for the
+    Actions runner, so a secret after it must still be seen — a non-greedy
+    regex truncates the span at the inner `}}` and returns no offender."""
     run = (
         "curl -H \"Authorization: Bearer "
         "${{ fromJSON('{\"a\":{\"b\":1}}').a.b + secrets.BAR }}\""
@@ -283,6 +317,66 @@ def test_offender_scan_is_case_insensitive_on_the_secret_context():
         assert _secret_interpolations(f'x="${{{{ {spelling} }}}}"'), spelling
 
 
+def test_offender_scan_catches_a_bare_secrets_context():
+    """`toJSON(secrets)` / `format('{0}', secrets)` dump the whole context into
+    the shell source — the bare token must be matched, not just member access."""
+    run = 'echo "${{ toJSON(secrets) }}"'
+    assert _secret_interpolations(run)
+    assert _offending_steps({"jobs": {"j": {"steps": [{"name": "dump", "run": run}]}}}) == [
+        "dump"
+    ]
+    assert _secret_interpolations("x=\"${{ format('{0}', secrets) }}\"")
+
+
+def test_offender_scan_catches_a_secret_reached_through_env():
+    """`${{ env.KEY }}` where KEY is bound to a secret re-interpolates the value
+    into the run text exactly like `${{ secrets.X }}` — one token from the fix
+    shape, so the sweep must resolve secret-bound env keys (step- and job-scope)."""
+    doc = {
+        "jobs": {
+            "j": {
+                "env": {"JOB_TOKEN": "${{ secrets.JOB_TOKEN }}"},
+                "steps": [
+                    {
+                        "name": "via step env",
+                        "env": {"TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
+                        "run": 'curl -H "Authorization: Bearer ${{ env.TOKEN }}" https://x',
+                    },
+                    {
+                        "name": "via env index form",
+                        "env": {"TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
+                        "run": "curl -H \"Authorization: Bearer ${{ env['TOKEN'] }}\" https://x",
+                    },
+                    {
+                        "name": "via case-mismatched env",
+                        "env": {"TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}"},
+                        "run": 'curl -H "Authorization: Bearer ${{ env.token }}" https://x',
+                    },
+                    {
+                        "name": "via job env",
+                        "run": 'curl -H "Authorization: Bearer ${{ env.JOB_TOKEN }}" https://x',
+                    },
+                    {
+                        "name": "plain env is fine",
+                        "env": {"PLAIN": "value"},
+                        "run": 'echo "${{ env.PLAIN }}"',
+                    },
+                    {
+                        "name": "a key only bound in another step is not in scope",
+                        "run": 'echo "${{ env.TOKEN }}"',
+                    },
+                ],
+            }
+        }
+    }
+    assert _offending_steps(doc) == [
+        "via step env",
+        "via env index form",
+        "via case-mismatched env",
+        "via job env",
+    ]
+
+
 def test_sweep_enumerates_both_workflow_extensions(tmp_path):
     """GitHub executes `.yaml` too; globbing only `.yml` is an unscanned file."""
     (tmp_path / "a.yml").write_text("jobs: {}\n", encoding="utf-8")
@@ -291,9 +385,9 @@ def test_sweep_enumerates_both_workflow_extensions(tmp_path):
 
 
 def test_pending_fix_defers_only_the_exact_pinned_steps():
-    """The in-flight exemption must not become a shield: it defers only when the
-    file's offenders are EXACTLY the pinned (job, step) identities — a new
-    offender, even one reusing a pinned name, changes the set/count and fails."""
+    """The deferral must not become a shield: it applies only when the file's
+    offenders are exactly the pinned (job, step) identities — a new offender,
+    even one reusing a pinned name, changes the set/count and fails."""
 
     def doc(job: str, names: list[str]) -> dict:
         return {
@@ -321,8 +415,8 @@ def test_no_secret_interpolated_into_run_text(workflow_docs):
     JSON catalog's quotes are stripped (the #4334 outage) and ``$(…)`` /
     backticks execute. Bind the secret in ``env:`` and use ``"$VAR"`` instead.
     The only deferral is the two ``deploy-hosted.yml`` steps pinned in
-    ``_PENDING_FIX`` (owned by in-flight PR #4357) — and only while that file's
-    offenders are exactly those steps.
+    ``_PENDING_FIX``, and only while that file's offenders are exactly those
+    steps.
     """
     offenders: dict[str, list[str]] = {}
     for filename, doc in workflow_docs.items():
@@ -363,7 +457,8 @@ def test_fixed_steps_bind_secret_in_env_and_reference_it_quoted(workflow_docs):
         run = step.get("run", "")
         code = _scrub_run(run)
 
-        assert not _secret_interpolations(run), (
+        secret_env = _secret_env_keys(step.get("env"))
+        assert not _run_secret_uses(run, secret_env), (
             f"{filename}: {prefix!r} interpolates a secret into its run text again "
             "— bind it in `env:` and use \"$VAR\" (#4361)"
         )
