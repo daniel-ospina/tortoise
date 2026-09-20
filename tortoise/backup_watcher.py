@@ -30,6 +30,7 @@ import logging
 import resource
 import threading
 import time  # noqa: F401
+from collections.abc import Mapping, MappingView
 from datetime import datetime, timezone
 from typing import Any, Callable  # noqa: UP035
 
@@ -331,13 +332,36 @@ class BackupWatcher:
         # leaves the set resolves — the per_team scan alone cannot close a
         # state-only org (never present in per_team).
         self._last_backup_set_missing: set[str] = set()
+        # #3658 review (cycle 7): the universe-shrink reference, re-baselined
+        # ONLY on a CONFIRMED poll — the mirror of `_last_graph_keys`. A
+        # degraded poll's `per_team` is the census (see `compute_status`), so
+        # persisting it would forget an org that left the census, and once the
+        # poll recovered the shrink set would no longer contain that org —
+        # stranding its incidents open forever.
+        self._last_confirmed_per_team: set[str] = set()
+        # #3658 review (cycle 8): the eligibility CREDIBILITY reference — the
+        # last CONFIRMED PURE CENSUS. Not `per_team` (which is `census ∪
+        # r2_orgs`): on an unconfirmed census the fallback `orgs` IS the previous
+        # `per_team`, so reusing it would let an R2-only id (a departed org whose
+        # prefix outlives it) credential a foreign eligibility read — silencing
+        # the whole census and poisoning `_known_eligible`, which never clears
+        # by itself.
+        self._last_confirmed_census: set[str] = set()
         self._last_status: dict[str, Any] = {}
         self._rss_baseline: int | None = None
         self._start_time: datetime = self._now()
 
     # ── helpers ─────────────────────────────────────────────────────────────
-    def _eligible_set(self) -> set[str] | None:
+    def _eligible_set(self, census_orgs: set[str]) -> set[str] | None:
         """The sweep's eligibility set, or None when the gate must be OFF.
+
+        ``census_orgs`` is the org census this poll watches. It is the
+        CREDIBILITY reference: a non-empty eligibility set that shares no id
+        with it is not usable evidence and is treated as unconfirmed (see the
+        check below). Deliberately the CENSUS and not the union with the R2
+        listing — a ``backups/<id>/`` prefix outlives a departed or foreign
+        org until lifecycle purge, so an R2-only id must not be able to make an
+        otherwise-foreign eligibility read look healthy.
 
         ``None`` means "every org is a backup target": no provider is wired
         (the legacy all-org sweep), or eligibility is unconfirmed AND there is
@@ -346,14 +370,17 @@ class BackupWatcher:
         genuine NEVER_BACKED_UP, and the census provider already degrades to
         ``[]`` (no alerts) on its own failure.
 
-        An unconfirmed read (a raise, a non-id-set value, or the provider
-        returning ``None``) does NOT re-open the whole non-eligible census: it
-        falls back to the last CONFIRMED set, exactly as a degraded R2 poll
-        evaluates from the last-known-good cache, and marks the poll
-        ``eligible_degraded``. That keeps a transient control-plane blip from
-        both re-filing every false NEVER_BACKED_UP and resolving real ones
-        (#3658 review). Only a first-contact failure — no confirmed set yet —
-        leaves the gate off (pre-#3658 parity).
+        An unconfirmed read (a raise, a non-id-set value, the provider
+        returning ``None``, or an EMPTY result) does NOT re-open the whole
+        non-eligible census: it falls back to the last CONFIRMED set, exactly
+        as a degraded R2 poll evaluates from the last-known-good cache, and
+        reports ``eligible_degraded``. An empty result is treated as
+        unconfirmed rather than as "no org is eligible" because the two are
+        indistinguishable here and the confirmed reading would resolve the
+        entire DR surface while claiming eligibility was healthy. Only a
+        first-contact failure — no confirmed set yet — leaves the gate off
+        (pre-#3658 parity, the fail-open-toward-alerting direction); that case
+        is reported by ``eligible_degraded`` as well.
 
         Known residual (bounded, documented in `docs/ops/registry-backup-dr.md`):
         while eligibility reads keep failing, an org that BECOMES eligible
@@ -369,25 +396,65 @@ class BackupWatcher:
             if value is None:
                 resolved = None
             else:
-                # A bare str/bytes is iterable and would silently become a set
-                # of characters — poisoning the last-known cache and silencing
-                # the WHOLE census (the masking #3658 removes). Reject any
-                # non-id-set shape so it degrades like any other unconfirmed
-                # read. The value is materialised ONCE: validating a one-shot
-                # iterator would exhaust it and cache an EMPTY confirmed set.
-                if isinstance(value, (str, bytes)):
+                # str/bytes and Mapping are iterable in ways that yield
+                # NON-ids (characters; keys). So is a mapping VIEW —
+                # `dict.keys()` is a MappingView, NOT a Mapping, and would slip
+                # past a Mapping-only check. Reject them explicitly rather than
+                # leaving it to the credibility check below, so the failure is
+                # named for what it is.
+                if isinstance(value, (str, bytes, Mapping, MappingView)):
                     raise TypeError(
                         f"eligibility provider returned {type(value).__name__}, not a str id set")
+                # Materialise ONCE: validating a one-shot iterator would
+                # exhaust it and cache an EMPTY confirmed set.
                 seq = list(value)
                 if not all(isinstance(v, str) for v in seq):
                     raise TypeError("eligibility provider returned non-str ids")
                 resolved = set(seq)
+                # CREDIBILITY, not shape (review cycles 3-5). The harmful
+                # reading of an eligibility set is a NON-EMPTY set that names
+                # no org we actually watch: every census org then reads
+                # `not_eligible` and the whole DR surface is resolved — total
+                # alerting silence, the one outcome this gate must never
+                # produce. No shape rule closes that class: `array('u',
+                # "team_a")`, `iter("team_a")`, a generator over a string, a
+                # Mapping's keys, a padded id and a foreign id ALL form a
+                # plausible-looking set while matching nothing. Requiring the
+                # set to overlap the CENSUS does close it, and it is the honest
+                # test — a set naming no org we are actually tracking is not
+                # usable evidence. (The census, not `census ∪ r2_orgs`: an R2
+                # prefix outlives a departed org, so an R2-only id must not be
+                # able to make a foreign read look healthy.) It degrades like
+                # any other unconfirmed read: last-known-good if there is one,
+                # else the gate stays OFF (fail open toward ALERTING). The cost
+                # is the mirror case — an all-free deployment, or a census read
+                # that misses the eligible orgs, keeps the gate off and
+                # re-alerts the non-eligible tail until a usable read arrives,
+                # which is the SAFE direction.
+                if not resolved or not (resolved & census_orgs):
+                    raise ValueError(
+                        "eligibility set is empty or names no known org "
+                        f"({len(resolved)} id(s), 0 matching the census)")
         except Exception as exc:  # never let the gate kill a poll
             logger.warning("eligibility enumeration failed (using last-known-good if any): %s", exc)
             resolved = None
         if resolved is None:
-            self._eligible_degraded = self._known_eligible is not None
-            return self._known_eligible
+            # `eligible_degraded` means THIS poll's eligibility is not
+            # confirmed — set it for a first-contact failure too, not only for
+            # a fallback: otherwise an operator cannot tell "no provider
+            # wired" from "the eligibility read is failing", and the second
+            # is the one that needs attention.
+            self._eligible_degraded = True
+            cached = self._known_eligible
+            # The CACHED set must also stay credible against the CURRENT census
+            # (review cycle 10): after a census turnover a stale cached set
+            # names none of the orgs we now watch, and returning it as the gate
+            # would `not_eligible` every one of them — the total-silence class
+            # the credibility check above exists to close. Fail OPEN instead
+            # (gate off ⇒ over-alerting).
+            if cached and not (cached & census_orgs):
+                return None
+            return cached
         self._known_eligible = resolved
         self._eligible_degraded = False
         return resolved
@@ -478,7 +545,15 @@ class BackupWatcher:
             orgs = list(self._last_status.get("per_team", {}).keys())
         else:
             orgs = list(raw_orgs)
-        eligible_orgs = self._eligible_set()
+            # Derived from the MATERIALISED list the classifier uses, not from
+            # `raw_orgs`: `str()`-coercing a separate view of it made the
+            # reference and `compute_status` disagree (a stringified reference
+            # credentialed an eligibility read while every raw id still read
+            # `not_eligible` — silence reported as healthy), and re-iterating a
+            # one-shot iterator left the reference EMPTY, permanently rejecting
+            # every later correct read (#3658 review, cycle 9).
+            self._last_confirmed_census = set(orgs)
+        eligible_orgs = self._eligible_set(self._last_confirmed_census)
 
         # ── #2313 per-graph surface (custom graphs; the default rides the
         # org surface). Scans R2 per seam graph; on R2 failure falls back to
@@ -617,13 +692,16 @@ class BackupWatcher:
                              "BACKUP_SET_MISSING"):
                     self._alerts.resolve_incident(kind, key)
             self._last_graph_keys = cur_graph_keys
-        prev_per_team = list(self._last_status.get("per_team", {}).keys())
+        prev_per_team = set(self._last_confirmed_per_team)
         status = dict(status)
         status["per_graph"] = per_graph
         status["eligible_degraded"] = self._eligible_degraded
         self._last_status = status
 
         # ── Drive the alert store (no graph writes anywhere here). ──
+        # Hoisted out of the grace/unknown gate: the shrink reference below is
+        # re-baselined even while in grace (review cycle 10).
+        r2_confirmed = r2_ok is True
         if not status.get("unknown") and not status.get("in_grace"):
             # #3658 review (P1). A DEGRADED poll does not MEASURE the archive
             # surface: `compute_status` evaluates from the last-known-good
@@ -638,7 +716,6 @@ class BackupWatcher:
             # direction stays ungated everywhere — opening is the conservative
             # direction. This is the per-org counterpart of the
             # `census_confirmed` / `graph_surface_confirmed` guards.
-            r2_confirmed = r2_ok is True
             for org, state in status["per_team"].items():
                 # Each state resolves the kinds it is NOT the current truth for,
                 # so a transition (e.g. `stamp_missing`→`stale`) cannot leave a
@@ -684,7 +761,7 @@ class BackupWatcher:
             # poll `per_team` is the census, not a faithful archive surface
             # (mirror of the per-graph `graph_surface_confirmed`).
             if census_confirmed and r2_confirmed:
-                for org in set(prev_per_team) - set(status["per_team"]):
+                for org in prev_per_team - set(status["per_team"]):
                     # SAFETY INVARIANT, relied on deliberately: `per_team` is
                     # `census ∪ r2_orgs`, so an org can leave it only by
                     # leaving the CENSUS *and* having no R2 archive listing.
@@ -695,8 +772,16 @@ class BackupWatcher:
                     # org whose data is present. Residual: a short read can
                     # still close a NO-ARCHIVE org's NEVER_BACKED_UP, which
                     # the next complete poll re-files (filed as a follow-up).
-                    for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST",
-                                 "BACKUP_SET_MISSING"):
+                    # NOTE: `BACKUP_SET_MISSING` is deliberately NOT in this
+                    # tuple. It is state/archive-derived, not census-derived:
+                    # `compute_status` re-lists a departed state-only org in
+                    # `backup_set_missing`, so resolving it here would be
+                    # immediately undone by the BSM open later in this same
+                    # poll — emitting a false "resolved" push and filing a
+                    # fresh incident for a still-active condition (review
+                    # cycle 3). Its own block (open + positive scan +
+                    # cross-poll diff) fully reconciles it.
+                    for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
                         self._alerts.resolve_incident(kind, org)
             if status.get("driver_down"):
                 self._alerts.open_incident("DRIVER_DOWN")
@@ -716,8 +801,18 @@ class BackupWatcher:
                     self._alerts.resolve_incident("NEVER_BACKED_UP", key)
                     self._alerts.resolve_incident("METADATA_LOST", key)
                     self._alerts.resolve_incident("BACKUP_SET_MISSING", key)
-            for org in status.get("backup_set_missing", []):
-                self._alerts.open_incident("BACKUP_SET_MISSING", org)
+            if r2_confirmed:
+                # The BACKUP_SET_MISSING OPEN is an ABSENCE claim ("this org's
+                # state exists and NO archive does"), so it needs a confirmed
+                # archive read for the same reason the resolves do: on a
+                # degraded poll `compute_status` substitutes the CENSUS for the
+                # archive surface, so an org whose archives are intact but
+                # which is absent from the live census would be paged as a
+                # data-loss condition. Opening is normally the conservative
+                # direction; this one is not, because the state it asserts was
+                # never measured.
+                for org in status.get("backup_set_missing", []):
+                    self._alerts.open_incident("BACKUP_SET_MISSING", org)
             # BACKUP_SET_MISSING resolves when the org's archives reappear OR
             # the org leaves the set. Gated on a confirmed archive read, like
             # every other resolve here.
@@ -743,6 +838,17 @@ class BackupWatcher:
                 self._alerts.open_incident("R2_DOWN")
             else:
                 self._alerts.resolve_incident("R2_DOWN")
+
+        # Re-baseline the universe-shrink reference ONLY on a confirmed poll (the
+        # `_last_graph_keys` convention) — and OUTSIDE the grace/unknown gate.
+        # Inside it, the reference would stay EMPTY for the whole grace window
+        # (120 min by default, restarted on every process boot), so an org that
+        # left the census across the grace boundary would never be shrunk out
+        # and its incidents would strand open forever — a regression against
+        # HEAD, whose `_last_status` was assigned before that gate (review
+        # cycle 10).
+        if census_confirmed and r2_confirmed:
+            self._last_confirmed_per_team = set(status["per_team"])
 
         # ── Heartbeat + pending-push retries (R2 writes — safe to skip when down). ──
         try:

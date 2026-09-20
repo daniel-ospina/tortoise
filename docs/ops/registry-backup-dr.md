@@ -86,8 +86,17 @@ false on every tier today). The driver cron (`registry-backup-cron.yml`,
   CONFIRMED: an unconfirmed eligibility read falls back to the last confirmed
   set and reports `eligible_degraded` on the watcher heartbeat; a first-contact
   failure fails OPEN (all orgs treated as targets), so a non-eligible org can
-  read `never` until the read recovers (residual: a persistent eligibility-only
-  read failure can likewise withhold a newly-eligible org's alarm). A SEPARATE
+  read `never` until the read recovers. An eligibility read is CREDIBLE only
+  if it names at least one org the watcher actually watches: an empty result,
+  or a set naming no known org (a padded, foreign, or character-iterated id),
+  counts as UNCONFIRMED — none of them can be told apart from a read that
+  answered with nothing, and treating any as confirmed would put every census
+  org in `not_eligible` and resolve the whole DR surface. The cost is the
+  mirror case — an all-free deployment, or a census read that misses the
+  eligible orgs, keeps the gate off (re-alerting the non-eligible tail), which
+  is the safe direction. (Residuals: a persistent eligibility-only read
+  failure can likewise withhold a newly-eligible org's alarm; and see #4315
+  below.) A SEPARATE
   residual is shared with the sweep itself: `enumerate_eligible_orgs` is a
   PostgREST row LIST with no pagination, so a silently SHORT read can classify
   an org that HAS archives as `not_eligible` and close its live incidents (#4315
