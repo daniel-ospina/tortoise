@@ -29,70 +29,73 @@ account — they are a memory graph inside the builder's account. Verified again
 `tortoise/pricing.py`: `tier_limits()` exposes `max_graphs_per_team`, whose value is
 **`None` = unlimited** on builder and team plans.
 
-**The audience labels used below:** *agent* (a model using the MCP surface), *builder* (code
-integrating the SDK for an app), *admin* (a person managing their own account).
+**The audience labels used below:** *agent* (a model using the MCP surface — it never constructs a
+client and never touches tenancy), *builder* (code integrating the SDK for an app), *admin* (a
+person managing their own account).
 
 ## The recommended surface
 
 | # | Name | Does | MCP twin | Who needs it |
 |---|---|---|---|---|
 | | **SETUP** | | | |
-| 1 | `Tortoise(...)` | Open a connection — the credential determines account and memory graph | — | agent, builder |
-| 2 | `close()` | Release connections and background work | — | agent, builder |
+| 1 | `Tortoise(...)` | Open a connection — the credential determines the account and the memory graph | — | builder |
+| 2 | `close()` | Release connections and background work | — | builder |
 | | **MEMORY — READ** | | | |
 | 3 | `search_knowledge` | Find things by text — full-text and hybrid. **Paged: returns a cursor** | `search_knowledge` | agent, builder |
-| 4 | `list_knowledge` | Browse and filter without text search. **Paged: cursor + limit** | `list_knowledge` | agent, builder |
+| 4 | `list_knowledge` | **One list method; `kind=` selects the kind** — claims, sources, questions, review batches. Browse and filter without text search. **Paged: cursor + limit** | `list_knowledge` | agent, builder |
 | 5 | `check_confidence` | How confident the graph is in each item, with the operators and mitigations behind it. **Returns the confidence view only** | `check_confidence` | agent |
 | 6 | `get_entity` | Fetch one node by id, any kind | `get_entity` | agent, builder |
 | 7 | `get_historical_knowledge` | **What a claim said on a given date.** Walks the revision chain to the version valid then | `get_historical_knowledge` | agent |
 | 8 | `explore_connections` | Walk outward from a node through its links. **Paged** | `explore_connections` | agent |
 | 9 | `graph_overview` | What is in this memory graph and how it is shaped. **Returns a named-section envelope**, not a flat dict | `graph_overview` | agent, builder |
-| 10 | `list_sources` | Enumerate this memory graph's sources, **each with its credibility tier**. **Paged** | `list_sources` | agent, builder |
-| 11 | `review_link_candidates` | Connections found but not made. Read-only. **Accept one by calling `link_entities` with its endpoints** | `review_link_candidates` | agent |
-| 12 | `poll_events` | Read the event log since a point in time. **Paged** | `poll_events` | agent, builder |
-| 13 | `list_questions` | **List filed questions and their state — open, or decided and by which choice.** This is what makes `record_decision` reachable | `list_questions` | agent, builder |
-| 14 | `inspect_batch` | **List the batches held for review** | `list_batches` | agent |
-| 15 | `get_batch` | **Read one batch's items in full** | `get_batch` | agent |
+| 10 | `review_link_candidates` | Connections found but not made. Read-only. **Accept one by calling `link_entities` with its endpoints** | `review_link_candidates` | agent |
+| 11 | `poll_events` | Read the event log since a point in time. **Paged** | `poll_events` | agent, builder |
 | | **MEMORY — WRITE** | | | |
-| 16 | `create_entity` | Add one node — a claim, or a referent (subject, object, event, document) | `create_entity` | agent, builder |
-| 17 | `write_knowledge_batch` | Write many interconnected things in one call — **claims, entities, sources and the links between them** — atomically | — | builder |
-| 18 | `register_source` | Declare a source exists. The URL is its identity. **Trust defaults from the source kind**; `tier=` overrides | `register_source` | agent, builder |
-| 19 | `index_sources_from_directory` | Read files off disk and register each as a source with its content in memory. **Nothing is extracted.** Batched, resumable | `index_sources_from_directory` | builder |
-| 20 | `mine_knowledge_from_session` | Extract claims, operators and entities from **one conversation**. The backend is the target graph's configuration | `mine_knowledge_from_session` | agent, builder |
-| 21 | `mine_knowledge_from_directory` | The same for a **folder of files**, each mined by its own content type | `mine_knowledge_from_directory` | builder |
-| 22 | `manage_source_trust` | Set how reliable a source is, and return the new score. **Reads come from `list_sources`** | `set_source_trust` | agent |
-| 23 | `link_entities` | Connect two nodes. An epistemic relation builds an operator, anything else a plain edge — the caller does not choose | `link_entities` | agent |
-| 24 | `write_question` | **File a question with its options and the evidence behind them.** Not a decision — a decision happens later or not at all | `write_question` | agent, builder |
-| 25 | `record_decision` | **Record that a question was resolved**, by this choice, at this time. Accepts a full question inline for a one-call shortcut | `record_decision` | agent, builder |
+| 12 | `create_entity` | Add one node — a claim, or a referent (subject, object, event, document) | `create_entity` | agent, builder |
+| 13 | `write_knowledge_batch` | Write many interconnected things in one call — **claims, entities, sources and the links between them** — atomically | — | builder |
+| 14 | `register_source` | Declare a source exists. The URL is its identity. **Trust defaults from the source kind**; `tier=` overrides | `register_source` | agent, builder |
+| 15 | `index_sources_from_directory` | Read files off disk and register each as a source with its content in memory. **Nothing is extracted.** Batched, resumable | `index_sources_from_directory` | builder |
+| 16 | `mine_knowledge_from_session` | Extract claims, operators and entities from **one conversation**. The backend is the target graph's configuration | `mine_knowledge_from_session` | agent, builder |
+| 17 | `mine_knowledge_from_directory` | The same for a **folder of files**, each mined by its own content type | `mine_knowledge_from_directory` | builder |
+| 18 | `manage_source_trust` | Set how reliable a source is, and return the new score. **Reads come from `list_knowledge(kind='source')`** | `manage_source_trust` | agent |
+| 19 | `link_entities` | Connect two nodes. An epistemic relation builds an operator, anything else a plain edge — the caller does not choose | `link_entities` | agent |
+| 20 | `write_question` | **File a question with its options and the evidence behind them.** Not a decision — a decision happens later, or not at all | `write_question` | agent, builder |
+| 21 | `record_decision` | **Record that a question was resolved**, by this choice, at this time. Accepts a full question inline for a one-call shortcut; **re-recording the same question is rejected, and the inline form on an already-filed question resolves it rather than filing a second** | `record_decision` | agent, builder |
 | | **MEMORY — REVISE** | | | |
-| 26 | `update_knowledge` | Change what a stored node says — **or retract it.** Carries `valid_until` / `invalid_at`: retraction is a temporal field on update, not a separate verb | `update_knowledge` | agent |
-| 27 | `supersede_knowledge` | Replace a node with a successor, keeping the history. **Carries an explicit link policy** — whether the old node's links follow the successor | `supersede_knowledge` | agent |
-| 28 | `delete_knowledge` | Remove knowledge — **a node or a link**. Hard removal; there is no undo | `delete_knowledge` | agent, builder |
-| 29 | `adjust_relationship` | Change an existing epistemic link's strength. **Annotating a link is `update_knowledge` on it** | `adjust_relationship` | agent |
-| 30 | `refresh_confidence` | Recompute confidence after changes. **Two scopes: the changed nodes, or the whole graph** — stated as a parameter, not chosen silently | `refresh_confidence` | agent |
-| 31 | `approve_merge` | Approve merging two things the system thinks are the same. **`reject_merge` is not covered — recorded below** | `approve_merge` | agent |
+| 22 | `update_knowledge` | Change what a stored thing says — **a node or a link** — **or retract it.** Carries `valid_until` / `invalid_at`: retraction is a temporal field on update, not a separate verb | `update_knowledge` | agent |
+| 23 | `supersede_knowledge` | Replace a node with a successor, keeping the history. **Carries an explicit link policy** — whether the old node's links follow the successor | `supersede_knowledge` | agent |
+| 24 | `delete_knowledge` | Remove knowledge — **a node or a link**. Hard removal; there is no undo | `delete_knowledge` | agent, builder |
+| 25 | `adjust_relationship` | Change an existing epistemic link's strength. **Annotating a link is `update_knowledge` on it** | `adjust_relationship` | agent |
+| 26 | `refresh_confidence` | Recompute confidence after changes. **Two scopes: the changed nodes, or the whole graph** — stated as a parameter, not chosen silently | `refresh_confidence` | agent |
+| 27 | `approve_merge` | Approve merging two things the system thinks are the same. **`reject_merge` is not covered — see below** | `approve_merge` | agent |
 | | **TENANCY — SDK and REST only. NOT on the MCP** | | | |
-| 32 | `get_organisation_account` | Read the account and the plan it is on | — | admin |
-| 33 | `create_memory_graph` | **Provision a memory graph — one per end-customer, or per agent.** Takes `name` and `backend` at creation | — | builder |
-| 34 | `list_memory_graphs` | List the account's memory graphs | — | admin, builder |
-| 35 | `delete_memory_graph` | Destroy a memory graph. **`purge=True` for irreversible erasure; the default is a recoverable delete** | — | builder |
-| 36 | `restore_memory_graph` | Undo a recoverable delete. **Refuses on a purged graph** | — | builder |
-| 37 | `create_key` | Mint a credential scoped to one memory graph. **The credential carries the tenant** — the client does not pass a graph id | — | builder |
-| 38 | `list_keys` | List a memory graph's credentials | — | builder |
-| 39 | `check_key` | **What does this credential reach?** Makes the isolation promise verifiable | — | builder |
-| 40 | `revoke_key` | Revoke a credential. **Rotation is mint-then-revoke — the new key is live before the old dies** | — | builder |
-| 41 | `add_member` | Grant a person access to the account | — | admin |
-| 42 | `list_members` | List who has access | — | admin |
-| 43 | `remove_member` | Revoke a person's access | — | admin |
+| 28 | `get_organisation_account` | Read the account and the plan it is on | — | admin |
+| 29 | `create_memory_graph` | **Provision a memory graph — one per end-customer, or per agent.** Takes `name` and `backend` at creation | — | builder |
+| 30 | `update_memory_graph` | **Rename a memory graph.** The one partial update the tenancy resource has — a graph is created with its fields and renamed here | — | builder |
+| 31 | `list_memory_graphs` | List the account's memory graphs | — | admin, builder |
+| 32 | `delete_memory_graph` | Destroy a memory graph. **`purge=True` for irreversible erasure; the default is a recoverable delete** | — | builder |
+| 33 | `restore_memory_graph` | Undo a recoverable delete. **Refuses on a purged graph** | — | builder |
+| 34 | `create_key` | Mint a credential scoped to one memory graph. **The credential carries the tenant** — the client does not pass a graph id | — | builder |
+| 35 | `list_keys` | List a memory graph's credentials | — | builder |
+| 36 | `check_key` | **What does this credential reach?** Makes the isolation promise verifiable | — | builder |
+| 37 | `revoke_key` | Revoke a credential. **Rotation is mint-then-revoke — the new key is live before the old dies** | — | builder |
+| 38 | `add_member` | Grant a person access to the account | — | admin |
+| 39 | `list_members` | List who has access | — | admin |
+| 40 | `remove_member` | Revoke a person's access | — | admin |
 | | **PLATFORM** | | | |
-| 44 | `verify_connection` | Check the credential works and report what it reaches. **Programmatic, returns a result — not a wizard** | `verify_connection` | agent, builder |
+| 41 | `verify_connection` | Check the credential works and report what it reaches. **Programmatic, returns a result — not a wizard** | `verify_connection` | builder |
 
-**44 methods** against **150** today. **MCP: 29 tools** — every row except the tenancy block
-(32–43), `write_knowledge_batch` (builder-only, 17) and the constructor/`close` (1–2).
+**41 methods** against **150** today. **MCP: 25 tools** — every row except the tenancy block
+(28–40), `write_knowledge_batch` (builder-only, 13) and the constructor/`close` (1–2).
+
+> **Every name here is a target, not a description of today.** Only five of the 41 exist in the
+> current SDK. The MCP column names the *target* tool; 24 of the 25 are not registered today.
+> The old→new mapping is in `docs/product/vision-mcp-sdk-surface.md`.
+
 
 ## Tenancy is not on the MCP
 
-The tenancy block (rows 32–43) is **SDK and REST only.** This follows the competitors: Zep and
+The tenancy block (rows 28–40) is **SDK and REST only.** This follows the competitors: Zep and
 Mem0 both put their admin surface on a **separate URL prefix** (`graph/*` vs `user/*`;
 `/api/v1/orgs/…` vs `/v1/memories/`) — it is a different API area, not a set of agent tools.
 MCP is the model-controlled surface by definition. A solo user has one memory graph and needs
@@ -155,8 +158,8 @@ It stores the **question** and calls it a decision. The fix is to split, not ren
 
 `write_question` leaves the question open until something resolves it, which makes the
 retrospective case natural. `record_decision` takes either an existing `question_id` **or** the
-full question inline. **`list_questions` (row 13) is what makes that reachable** — without it a
-filed question is invisible unless the caller kept the id out of band.
+full question inline. **`list_knowledge(kind='question')` (row 4) is what makes that reachable** —
+without it a filed question is invisible unless the caller kept the id out of band.
 
 ### The full range of decision processes
 
@@ -164,10 +167,23 @@ filed question is invisible unless the caller kept the id out of band.
 |---|---|
 | **Full epistemic** — options, criteria, findings, IMPL/NAND, mitigations | `write_question` → `create_entity` → `link_entities` → `adjust_relationship` → `refresh_confidence` → `check_confidence` → `record_decision` |
 | **Quick** — answer already known | `record_decision(question, options, evidence, choice)` — one call |
-| **Question now, decide later** | `write_question` → `list_questions` → `record_decision(question_id, choice)` |
+| **Question now, decide later** | `write_question` → `list_knowledge(kind='question')` → `record_decision(question_id, choice)` |
 | **Pairwise / A-B** | a case of Quick |
 | **Human-gated** | `write_question` → `record_decision` → an **approval record** ⚠️ *no approval method exists — see below* |
 | **Retrospective** | `record_decision` on an already-answered question |
+
+## Awaiting the owner
+
+Two items are settled in shape but not yet approved. Full analysis in
+`docs/product/vision-mcp-sdk-surface.md` § *Unsure*.
+
+- **U1 — the revise triangle.** `update_knowledge` (retract), `supersede_knowledge` and
+  `delete_knowledge` each end a claim's life and no row says when to pick which. **Proposed rule:
+  retract when nothing replaced it, supersede when a specific successor did, delete when it must
+  not be retained.** Needs the owner's confirmation before the rows carry it.
+- **U2 — `check_key` vs `verify_connection`.** Both answer "what does this credential reach."
+  **Proposed: collapse to `check_connection(key_id=None)`** — `key_id` selects the thing asked
+  about, not the operation.
 
 ## Named but not solved
 
@@ -228,7 +244,7 @@ Recorded so they are not silently dropped. None is required for beta:
 | `traverse`, `expand_relationships`, `get_org_structure` | 3 | → `explore_connections`. |
 | `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` | 5 | → `search_knowledge`. |
 | `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → `review_link_candidates`. |
-| `list_batch`, `list_batches` | 2 | → `inspect_batch` (list) and `get_batch` (read one). |
+| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`. The batch contents come back inline in the bounded, paged page. |
 | `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |
 | `complete_source` | 1 | **Cut.** Its entire body populates `contentHash`, `version`, `externalId` — fields `register_source` already writes — and it has **zero callers in the repo**. |
 | `ulid` | 1 | A ULID generator. Not a memory operation. |
@@ -240,18 +256,18 @@ Recorded so they are not silently dropped. None is required for beta:
 | `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` | 4 | **Our maintenance.** Never product surface. |
 | `index_sources` (bare) | 1 | Renamed → `index_sources_from_directory`, so the index/mine distinction is unmissable. |
 
-### Renamed, relocated, or re-homed — not discarded
+### Renamed, relocated, or re-homed — or deleted as a duplicate alias
 
 | Name | Disposition |
 |---|---|
-| `events_poll` | → row 12 `poll_events`. |
+| `events_poll` | → row 11 `poll_events`. |
 | `test_guard` | **Kept and relocated.** It guards the production-wipe incident, so the code must survive — but it is *test infrastructure* and moves out of the product SDK. |
 | `restore_point_at` | → row 7 **`get_historical_knowledge`**. A **read**, not a write — it returns the version of a claim valid on a date and mutates nothing. |
-| `file_decision` | → rows 24/25 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. |
-| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` | → rows 33–36 `*_memory_graph*`. |
+| `file_decision` | → rows 20/21 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. |
+| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` | → rows 30–33 `*_memory_graph*`. |
 | narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` | **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. |
-| `list_sources` | **Not discarded, not folded.** Present at `tortoise/sdk.py` with an MCP tool, a CLI command and its own test file. Row 10, and it gains the credibility tier. |
-| `capture_session` / `commit_session` | → row 20 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. |
+| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool, a CLI command and its own test file. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |
+| `capture_session` / `commit_session` | → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. |
 | `file_decision`'s `options`/`evidence`/`choice` | Preserved in `record_decision`'s inline shortcut form. |
 
 ## Contracts
@@ -266,7 +282,7 @@ Every method on this surface must state these. They are currently unstated for m
 - **Errors.** A typed error, not a string. A caller must be able to distinguish "not found",
   "denied", "invalid", and "temporarily unavailable" without parsing prose.
 
-Confirmed to state these in their signatures: rows 3, 4, 8, 10, 12, 14.
+Confirmed to state pagination in their signatures: rows 3, 4, 8 and 11. **Rows 31, 35 and 39 are lists that must state it too before implementation closes.** Truncation and typed errors are stated here as requirements and are not yet in any signature — that is Phase 2.4 of the plan.
 
 ## Not in beta
 
