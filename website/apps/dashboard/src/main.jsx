@@ -964,15 +964,22 @@ function wizardWorkflowsText(key, mode) {
 // "Compare plans" link. Other CTAs (header badge #4331; the error-banner and
 // Graphs-tab upgrade buttons) are out of scope here.
 function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost' }) {
+  const reasonId = React.useId()
   const cta = checkoutCtaFor(priceId)
   if (cta.disabled) {
+    // #4335 review: native `disabled` already conveys the state (a redundant
+    // aria-disabled would contradict it), and the reason is visible AND tied
+    // to the control via aria-describedby. The wrapper stacks button-over-
+    // reason so a two-element fragment cannot wedge the reason between the
+    // controls of a single-row flex container (.cap-notice), and no per-site
+    // hardcoded offset is needed.
     return (
-      <>
-        <button className={className} disabled aria-disabled="true" title={cta.reason}>
+      <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+        <button className={className} disabled title={cta.reason} aria-describedby={reasonId}>
           {cta.label}
         </button>
-        <span className="dim small" role="note" style={{ marginTop: 6 }}>{cta.reason}</span>
-      </>
+        <span id={reasonId} className="dim small">{cta.reason}</span>
+      </span>
     )
   }
   return (
@@ -2929,10 +2936,13 @@ function claimIntentInFlight() {
   // WIZARD_STEPS (wizardFlow.js) — 4 human steps.
   const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
   // #1997 (W1): ARCHIVED flag — the legacy #1643 wizard render JSX below
-  // stays byte-identical for the A0 gate's rollback path (partial revert
-  // restores it); it is NEVER rendered by the live wizard. Flipping this
-  // back to true + re-enabling the welcomeOriented gate restores the
-  // legacy surface (rollback drill, epic §8).
+  // is the A0 gate's rollback surface (partial revert restores it); it is
+  // NEVER rendered by the live wizard. #4335 intentionally edited its welcome
+  // plan-chooser fallback (marketing "See pricing" link → honest disabled CTA)
+  // so a rollback cannot resurrect the marketing link — the block is therefore
+  // no longer byte-identical end-to-end (see the overview.test.js line-count
+  // canary, kept in sync). Flipping this back to true + re-enabling the
+  // welcomeOriented gate restores the legacy surface (rollback drill, epic §8).
   const LEGACY_WIZARD_ARCHIVED = false
   // #1997 (W1): org-create + fork-card state for the 5-step wizard.
   const [wizardOrgName, setWizardOrgName] = React.useState('')
@@ -7753,7 +7763,10 @@ function claimIntentInFlight() {
                     A0 gate's rollback path restores it by re-enabling this
                     gate + the welcomeOriented pre-card (epic §8). DE2E-1: the
                     archived-not-deleted assertion greps this marker + the
-                    legacy wizardSteps labels. */}
+                    legacy wizardSteps labels. #4335 intentionally updated the
+                    welcome plan-chooser CTA here (honest disabled state), so
+                    the block is no longer byte-identical end-to-end; the
+                    line-count canary in overview.test.js is kept in sync. */}
                 {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (
                 <div className="wizard">
                   <div className="wizard-progress">

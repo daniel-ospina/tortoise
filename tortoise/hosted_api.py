@@ -24560,13 +24560,17 @@ def _log_checkout_catalog_failure(exc: Exception) -> None:
     _checkout_catalog_failure_logged = True
     try:  # the scrubber must never mask the warning it exists to make safe
         from tortoise.billing import _scrub_secrets
-        detail = _scrub_secrets(str(exc))
+        # Composite scrubber — the repo's established billing-log convention
+        # (_safe_log above): redact_error strips credentials-in-URI / paths and
+        # prefixes the exception class, _scrub_secrets redacts Stripe-shaped
+        # values. PriceCatalog errors quote the offending STRIPE_PRICE_IDS
+        # value, which can be a secret of either shape.
+        detail = _scrub_secrets(redact_error(exc))
     except Exception:  # noqa: BLE001
         detail = type(exc).__name__
     _logger.warning(
-        "checkout price catalog unavailable (%s: %s) — checkout price ids "
+        "checkout price catalog unavailable (%s) — checkout price ids "
         "will be empty until STRIPE_PRICE_IDS is fixed",
-        type(exc).__name__,
         detail,
     )
 

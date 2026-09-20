@@ -1190,29 +1190,32 @@ class TestTeamInfoBillingSurface:
     def test_team_info_catalog_failure_log_scrubs_secret_value(
             self, billing_client, monkeypatch, caplog):
         """#4335: a malformed catalog can carry a secret-shaped value (a Stripe
-        key pasted into a price-id slot). PriceCatalog quotes the offending id
-        in its error, so the WARNING must scrub it — the secret must never
-        reach the log."""
+        key — or credentials-in-URI — pasted into a price-id slot).
+        PriceCatalog quotes the offending id in its error, so the WARNING must
+        scrub it through the composite redactor — the secret must never reach
+        the log."""
         import logging
 
         import tortoise.hosted_api as hosted_api
 
-        bad = json.loads(json.dumps(VALID_CATALOG))
-        bad["solo"]["monthly"]["id"] = "sk_live_SUPERSECRET1234567890"
-        monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(bad))
-        monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
-                            raising=False)
-        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
-            r = billing_client["client"].get("/v1/team",
-                                             headers=billing_client["headers"])
-        assert r.status_code == 200, r.text
-        warnings = [rec.getMessage() for rec in caplog.records
-                    if "checkout price catalog unavailable" in rec.getMessage()]
-        assert len(warnings) == 1, warnings
-        msg = warnings[0]
-        assert "sk_live_SUPERSECRET" not in msg, msg
-        assert "***" in msg, msg
-        assert "BillingError" in msg, msg
+        for secret in ("sk_live_SUPERSECRET1234567890", "docker://user:pass@host"):
+            bad = json.loads(json.dumps(VALID_CATALOG))
+            bad["solo"]["monthly"]["id"] = secret
+            monkeypatch.setenv("STRIPE_PRICE_IDS", json.dumps(bad))
+            monkeypatch.setattr(hosted_api, "_checkout_catalog_failure_logged", False,
+                                raising=False)
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+                r = billing_client["client"].get("/v1/team",
+                                                 headers=billing_client["headers"])
+            assert r.status_code == 200, r.text
+            warnings = [rec.getMessage() for rec in caplog.records
+                        if "checkout price catalog unavailable" in rec.getMessage()]
+            assert len(warnings) == 1, warnings
+            msg = warnings[0]
+            assert secret not in msg, msg
+            assert "***" in msg, f"expected redaction for {secret!r}: {msg}"
+            assert "BillingError" in msg, msg
 
     def test_checkout_catalog_latch_clears_after_success(self, billing_client,
                                                          monkeypatch):

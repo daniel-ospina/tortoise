@@ -1,8 +1,10 @@
 // billingCta.test.js — #4335. EXECUTION tests for the honest billing CTA.
 //
-// The defect: when the server resolved no checkout price id, every dashboard
-// billing CTA silently rendered a marketing link ("See pricing"). A buyer was
-// routed to a brochure instead of being told checkout was unavailable.
+// The defect: when the server resolved no checkout price id, the three
+// dashboard billing CTAs in #4335's scope silently rendered a marketing link
+// ("See pricing"). A buyer was routed to a brochure instead of being told
+// checkout was unavailable. (Two further live CTAs no-op silently — #4386 —
+// and the header tier badge is #4331; neither is this change's scope.)
 //
 // These import and RUN checkoutCtaFor (./billingCta.js), so a behaviour-
 // identical reformat cannot flip them. The "must not be a link" property is
@@ -17,6 +19,7 @@ import {
   COMPARE_PLANS_URL,
   checkoutCtaFor,
 } from './billingCta.js'
+import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -62,19 +65,22 @@ test('#4335: the compare-plans destination is explicit and secondary', () => {
 // cannot satisfy this backstop.
 test('#4335 (wiring backstop): the fallbacks render the disabled CTA, never "See pricing"', () => {
   const src = readFileSync(join(here, 'main.jsx'), 'utf8')
-  assert.doesNotMatch(src, /See pricing/,
+  // Scan the STRIPPED source — a comment that quotes the old copy (e.g. the
+  // A0 contract note recording the #4335 departure) is not a rendered CTA.
+  const code = stripComments(src)
+  assert.doesNotMatch(code, /See pricing/,
     'no billing CTA may render the old marketing-link fallback')
-  const sites = (src.match(/<UpgradeCta\b/g) || []).length
+  const sites = (code.match(/<UpgradeCta\b/g) || []).length
   assert.ok(sites >= 3,
     `expected the cap notice + welcome chooser + billing cards, found ${sites}`)
   // Live site 1 — the API-keys cap notice (tab + create-key modal via CapNotice).
-  assert.match(src, /className="ghost small" \/>/,
+  assert.match(code, /className="ghost small" \/>/,
     'the cap-notice CTA must render through UpgradeCta')
   // Live site 2 — the Billing tab plan cards.
-  assert.match(src, /className="btn-primary" \/>/,
+  assert.match(code, /className="btn-primary" \/>/,
     'the billing plan-card CTA must render through UpgradeCta')
-  assert.match(src, /title=\{cta\.reason\}/,
+  assert.match(code, /title=\{cta\.reason\}/,
     'the disabled control must carry the honest reason as its title')
-  assert.match(src, />Compare plans<\/a>/,
+  assert.match(code, />Compare plans<\/a>/,
     'the secondary pricing link must be explicitly labelled "Compare plans"')
 })
