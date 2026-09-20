@@ -8155,11 +8155,13 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
 
-    SCOPE — the retry is closed to the CONVERGENT lanes (v2, and the keyless
-    "none" lane, #3892), and only for IN-PROCESS cancellation:
+    SCOPE — the retry is closed to the CONVERGENT lanes (v2, the keyless
+    "none" lane, and the setting-disabled "disabled" lane — #3892/#4258), and
+    only for IN-PROCESS cancellation:
 
-    * the TRUE-retry gate requires the prior lane to be convergent — v2, or the
-      keyless "none" lane (#3892) — AND the retrying request's
+    * the TRUE-retry gate requires the prior lane to be convergent — v2, the
+      keyless "none" lane, or the setting-disabled "disabled" lane
+      (#3892/#4258) — AND the retrying request's
       `TORTOISE_SESSION_EXTRACTOR != "m2"` (#2473), so an abandoned **m2**
       capture re-POSTed still replays, and so does an abandoned v2 capture
       re-POSTed after the deployment's lane was switched to m2. Both are the
@@ -8365,15 +8367,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
-    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
-    # content_hash resolution fold a re-attempt's partial claims onto the same
-    # nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, the
+    # keyless "none" lane, #3892, or the setting-disabled "disabled" lane,
+    # #4258 — content-addressed pt_<sha> ids + graph content_hash resolution
+    # fold a re-attempt's partial claims onto the same nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
     # replay skip closed). Retry fires only when the prior ran a CONVERGENT
-    # lane (v2, or the keyless "none" lane, #3892) AND this request runs v2
+    # lane (v2, the keyless "none" lane, or the setting-disabled "disabled"
+    # lane — #3892/#4258) AND this request runs v2
     # (env != m2) — otherwise replay (safe no-op).
     # #3892 / #4007: a keyless capture records lane "none" (no lane ran), and
     # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
@@ -8730,7 +8733,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # that could downgrade a succeeded prior to capture_ok=False.
             state["attempted"] = True
             state["proj"] = proj
-            state["lane"] = "none"
+            # #4258: when the setting is ALSO off, the DURABLE lane names the
+            # user setting rather than the transient key — both are
+            # retry-eligible, and the replay disclosure keys on this value.
+            state["lane"] = (
+                _CAPTURE_EXTRACTOR_LANE_DISABLED if not extract_enabled
+                else "none")
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": [],
@@ -9377,8 +9385,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # Non-fatal: a checkpoint hiccup never 500s a committed capture (mirrors
     # the receipt block).
     try:
-        legacy_mirror = bool(_get_onboarding_state(
-            org["org_id"]).get("onboarding_complete"))
+        legacy_mirror = bool(
+            _onboard_state.get("onboarding_complete"))
         _cd = _os.write_completed_step(
             proj, org["org_id"], "capture-disclosed",
             status_from_mirror=legacy_mirror)
@@ -9551,8 +9559,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # retry-eligible (see _CAPTURE_EXTRACTOR_LANES_RETRYABLE), so a later
     # re-capture with extraction back ON still converges (#2335 TRUE retry).
     _capture_extractor_record = (
-        "none" if no_provider
-        else _CAPTURE_EXTRACTOR_LANE_DISABLED if store_only
+        _CAPTURE_EXTRACTOR_LANE_DISABLED if not extract_enabled
+        else "none" if no_provider
         else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
               else "v2"))
     _record_session_state = (

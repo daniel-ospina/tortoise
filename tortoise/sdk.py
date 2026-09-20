@@ -1106,7 +1106,7 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     double-residual vs the effective escalation ceiling) is DIAGNOSABLE from
     the logs when the self-surfacing failure fires. Emitted at the shared
     resp/effective-mode assembly. NOTE the mode COVERAGE is v2/m2/replayed/
-    error/no-provider — an "empty" line can never fire here: the empty/blank conversation
+    error/no-provider/extraction-disabled — an "empty" line can never fire here: the empty/blank conversation
     gate RETURNS before the Session MERGE + shared emit point on both lanes
     (no Session is written, so there is no capture to observe; the empty
     population is not a GO candidate). Same for the 402/turn-cap raise paths
@@ -3339,8 +3339,9 @@ class TortoiseSDK:
         # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
         # None (legacy sessions, pre-#2335) replays — backward compat with
         # the #1727 invariant (a legacy session is presumed captured).
-        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or
-        # the keyless "none" lane, #3892). v2 point ids are content-addressed
+        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, the
+        # keyless "none" lane, #3892, or the setting-disabled "disabled" lane,
+        # #4258). v2 point ids are content-addressed
         # (pt_<sha>) and
         # its dedup resolves against the GRAPH (content_hash MATCH), so a
         # re-attempt folds the failed attempt's partial claims onto the same
@@ -3349,8 +3350,9 @@ class TortoiseSDK:
         # partial emissions live even on raise — a failed M2 attempt leaves
         # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
         # #1727 hole the replay skip closed). Retry fires only when the prior
-        # attempt ran a CONVERGENT lane (v2, or the keyless "none" lane —
-        # #3892) AND this request runs v2 (env != m2) — otherwise replay.
+        # attempt ran a CONVERGENT lane (v2, the keyless "none" lane —
+        # #3892 — or the setting-disabled "disabled" lane, #4258) AND this
+        # request runs v2 (env != m2) — otherwise replay.
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
         # #3892: a keyless capture records lane "none" (no lane ran), and a

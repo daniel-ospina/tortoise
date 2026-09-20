@@ -777,7 +777,7 @@ def test_capture_extract_defaults_on_and_registered():
     # capture_extract's membership here would be implied by the line above and
     # could never fail on its own. Assert the DERIVATION instead — that is the
     # property that actually keeps the PATCH writer from dropping the key.
-    assert _ALLOWED_STATE_KEYS == set(_ONBOARDING_DEFAULT_STATE.keys())
+    assert set(_ONBOARDING_DEFAULT_STATE.keys()) == _ALLOWED_STATE_KEYS
     assert "capture_extract" in OnboardingStatePatchRequest.model_fields
 
 
@@ -983,6 +983,15 @@ def test_capture_extract_off_with_no_provider_discloses_both(monkeypatch, client
     assert _CAPTURE_NO_PROVIDER_WARNING in body["warnings"], body["warnings"]
     assert _CAPTURE_EXTRACTION_DISABLED_WARNING in body["warnings"], (
         "the user's OFF setting must be disclosed even when the key is missing")
+
+    # the DURABLE lane names the setting, not the transient key (#4258): the
+    # replay disclosure reads this value, so a later key-added re-capture must
+    # still be diagnosed as setting-disabled, never as keyless.
+    sdk = ha_mod._make_sdk(namespace="test-team-722")
+    lane = sdk._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_extractor",
+        params={"sid": body["session_id"]}).result_set[0][0]
+    assert lane == "disabled", lane
 
     # control: extraction ON + still keyless ⇒ ONLY the no-provider reason.
     ha_mod._update_onboarding_state("test-team-722", capture_extract=True)
