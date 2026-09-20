@@ -14,10 +14,12 @@ there the substitution is a YAML scalar, not shell source.
 
 #4361 repaired every remaining site in ``blog-write-e2e.yml``,
 ``deploy-pages.yml``, ``attach-tortoise-domain.yml`` and
-``e2e-live-reconcile.yml``. This module is the standing guard for the class:
-no step in ANY workflow may interpolate a secret into its ``run:`` body, and
-the #4361 steps are pinned to the safe shape (bound in ``env:``, referenced
-quoted) so a partial revert fails loudly.
+``e2e-live-reconcile.yml``. This module is the standing guard for the class: no
+step in any ``.github/workflows/*.{yml,yaml}`` may interpolate a secret into its
+``run:`` body, and the #4361 steps are pinned to the safe shape (bound in
+``env:``, referenced quoted) so a partial revert fails loudly. The one deferral
+is the two ``deploy-hosted.yml`` steps pinned in ``_PENDING_FIX`` until the
+in-flight #4334 fix (PR #4357) lands.
 """
 from __future__ import annotations
 
@@ -33,31 +35,54 @@ import pytest
 
 _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
-# A GitHub Actions expression span: `${{ … }}`. Match the SPAN first (non-greedy,
-# DOTALL) and then test its contents, so indexed/wrapped spellings are caught —
-# `secrets['FOO']`, `secrets[matrix.name]`, `format('{0}', secrets.FOO)` all
-# interpolate exactly like `secrets.FOO` but a `secrets\.` regex misses them.
-_ACTION_EXPR = re.compile(r"\$\{\{.*?\}\}", re.DOTALL)
-_SECRET_CONTEXT = re.compile(r"\bsecrets\s*[.\[]")
+# A secret context inside an expression. The runner resolves context names
+# case-insensitively (OrdinalIgnoreCase), so `SECRETS.FOO`/`Secrets.FOO` are
+# matched too; indexed syntax (`secrets['FOO']`, `secrets[matrix.name]`) is
+# matched by the `[.\[]` class.
+_SECRET_CONTEXT = re.compile(r"\bsecrets\s*[.\[]", re.IGNORECASE)
 # A step env binding to a single secret: `KEY: ${{ secrets.KEY }}`.
-_ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}")
+_ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}", re.IGNORECASE)
 
 
 def _secret_interpolations(text: str) -> list[str]:
-    """Every ``${{ … }}`` span in ``text`` that reads a secret context."""
-    return [m.group(0) for m in _ACTION_EXPR.finditer(text) if _SECRET_CONTEXT.search(m.group(0))]
+    """Every ``${{ … }}`` span in ``text`` that reads a secret context.
+
+    Span extraction mirrors the Actions runner rather than a non-greedy regex:
+    a ``}}`` inside a single-quoted string literal does NOT terminate the
+    expression, so a secret following such a literal (e.g.
+    ``${{ fromJSON('{"a":{"b":1}}').x + secrets.BAR }}``) is still seen. The
+    non-greedy ``\\$\\{\\{.*?\\}\\}`` form truncated the span at the inner
+    ``}}`` and never re-scanned the remainder — a fail-open for that spelling.
+    """
+    found: list[str] = []
+    i = 0
+    while True:
+        start = text.find("${{", i)
+        if start == -1:
+            return found
+        j = start + 3
+        in_string = False
+        while j < len(text):
+            if text[j] == "'":
+                in_string = not in_string
+            elif not in_string and text.startswith("}}", j):
+                break
+            j += 1
+        span = text[start : j + 2] if j < len(text) else text[start:]
+        if _SECRET_CONTEXT.search(span):
+            found.append(span)
+        i = max(j + 2, start + 3)
 
 
 def _scrub_run(run: str) -> str:
     """Drop shell comment-only lines from a ``run:`` body.
 
-    Prose must not be able to satisfy the reference pin, nor desync the quote
-    scanner — a reviewer-verified evasion was a body whose only mention of the
-    variable was `# TODO: restore -H "Bearer $TOKEN"`, which passed every
-    assertion while the secret was never sent. Inline trailing comments are
-    deliberately not stripped: telling one from a `#` inside a string needs a
-    shell parser, and a variable on a line that also carries the consuming
-    command is exactly what the pin asserts.
+    A body whose only mention of a variable is a comment (e.g.
+    `# TODO: restore -H "Bearer $TOKEN"`) must not satisfy the reference pin,
+    and a stray quote or apostrophe in a comment line must not desync the quote
+    scanner. Inline trailing comments are deliberately not stripped: telling one
+    from a `#` inside a string needs a shell parser, and a variable on a line
+    that also carries the consuming command is exactly what the pin asserts.
     """
     return "\n".join(line for line in run.splitlines() if not line.lstrip().startswith("#"))
 
@@ -114,18 +139,20 @@ def _references_outside_double_quotes(run: str, var: str) -> list[str]:
 
 
 # ``deploy-hosted.yml`` is owned by the in-flight #4334 fix (PR #4357) and this
-# change deliberately does not touch it. The sweep shields ONLY the two pre-fix
-# steps that PR rewrites — a NEW interpolating step in that file is still
-# flagged, so the exemption cannot hide a fresh regression. Once #4357 lands the
-# file has no offenders and is checked by the general path like any other
-# workflow; the entries then become inert and are deleted by whichever PR lands
-# second. (#4357 also adds a dedicated step-level guard in
-# ``tests/test_deploy_workflow.py`` that walks deploy-hosted.yml's steps.)
-_PENDING_FIX: dict[str, frozenset[str]] = {
+# change deliberately does not touch it. The sweep defers only while that file's
+# offenders are EXACTLY these two steps — identified by (job, step-name) and
+# matched as an exact set AND count. A new interpolating step there, even one
+# reusing a pinned NAME, changes the identity set or the count and is flagged,
+# so the exemption cannot hide a fresh regression. Once #4357 lands the file has
+# no offenders and is checked by the general path like any other workflow; the
+# entry then becomes inert and is deleted by whichever PR lands second. (#4357
+# also adds a dedicated step-level guard in ``tests/test_deploy_workflow.py``
+# that walks deploy-hosted.yml's steps.)
+_PENDING_FIX: dict[str, frozenset[tuple[str, str]]] = {
     "deploy-hosted.yml": frozenset(
         {
-            "Verify secrets exist",
-            "Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)",
+            ("deploy-api", "Verify secrets exist"),
+            ("deploy-api", "Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)"),
         }
     ),
 }
@@ -182,17 +209,26 @@ def _step(doc: dict, prefix: str) -> dict:
 
 
 def _run_bodies(doc: dict):
-    """Yield ``(step_name, run_text)`` for every step that has a run body."""
-    for job in doc.get("jobs", {}).values():
+    """Yield ``(job_name, step_name, run_text)`` for every step with a run body."""
+    for job_name, job in doc.get("jobs", {}).items():
         for step in job.get("steps", []):
             run = step.get("run")
             if isinstance(run, str):
-                yield step.get("name") or "<unnamed>", run
+                yield job_name, step.get("name") or "<unnamed>", run
+
+
+def _offending_identities(doc: dict) -> list[tuple[str, str]]:
+    """``(job, step)`` for every step whose run body interpolates a secret."""
+    return [
+        (job, name)
+        for job, name, run in _run_bodies(doc)
+        if _secret_interpolations(run)
+    ]
 
 
 def _offending_steps(doc: dict) -> list[str]:
-    """Steps whose run body interpolates a secret into the shell text."""
-    return [name for name, run in _run_bodies(doc) if _secret_interpolations(run)]
+    """Step names whose run body interpolates a secret into the shell text."""
+    return [name for _job, name in _offending_identities(doc)]
 
 
 @pytest.fixture(scope="module")
@@ -228,6 +264,25 @@ def test_offender_scan_catches_indexed_and_wrapped_secret_spellings():
     assert not _secret_interpolations('x="$FOO"')
 
 
+def test_offender_scan_survives_a_brace_pair_inside_a_string_literal():
+    """#4361 re-review: a `}}` inside a single-quoted literal does not end the
+    expression for the Actions runner, so a secret after it must still be seen —
+    the non-greedy regex truncated the span and returned no offender."""
+    run = (
+        "curl -H \"Authorization: Bearer "
+        "${{ fromJSON('{\"a\":{\"b\":1}}').a.b + secrets.BAR }}\""
+    )
+    assert _secret_interpolations(run)
+    assert _offending_steps({"jobs": {"j": {"steps": [{"name": "off", "run": run}]}}}) == ["off"]
+
+
+def test_offender_scan_is_case_insensitive_on_the_secret_context():
+    """The runner resolves context names case-insensitively, so a mixed-case
+    `SECRETS.FOO` is a real interpolation the guard must not miss."""
+    for spelling in ("secrets.FOO", "SECRETS.FOO", "Secrets.FOO"):
+        assert _secret_interpolations(f'x="${{{{ {spelling} }}}}"'), spelling
+
+
 def test_sweep_enumerates_both_workflow_extensions(tmp_path):
     """GitHub executes `.yaml` too; globbing only `.yml` is an unscanned file."""
     (tmp_path / "a.yml").write_text("jobs: {}\n", encoding="utf-8")
@@ -235,39 +290,51 @@ def test_sweep_enumerates_both_workflow_extensions(tmp_path):
     assert set(_workflow_docs(tmp_path)) == {"a.yml", "b.yaml"}
 
 
-def test_pending_fix_shields_only_the_pinned_steps():
-    """The in-flight exemption must not become a shield for a NEW offender in
-    the same file — only the exact pre-fix step names are deferred."""
-    pinned = _PENDING_FIX["deploy-hosted.yml"]
-    shielded = {
-        "jobs": {"j": {"steps": [{"name": n, "run": 'x="${{ secrets.A }}"'} for n in pinned]}}
-    }
-    assert set(_offending_steps(shielded)) <= pinned
-    with_new = {
-        "jobs": {
-            "j": {
-                "steps": [{"name": n, "run": 'x="${{ secrets.A }}"'} for n in pinned]
-                + [{"name": "a brand new step", "run": "echo ${{ secrets.B }}"}]
+def test_pending_fix_defers_only_the_exact_pinned_steps():
+    """The in-flight exemption must not become a shield: it defers only when the
+    file's offenders are EXACTLY the pinned (job, step) identities — a new
+    offender, even one reusing a pinned name, changes the set/count and fails."""
+
+    def doc(job: str, names: list[str]) -> dict:
+        return {
+            "jobs": {
+                job: {"steps": [{"name": n, "run": 'x="${{ secrets.A }}"'} for n in names]}
             }
         }
-    }
-    assert not set(_offending_steps(with_new)) <= pinned
+
+    pinned = _PENDING_FIX["deploy-hosted.yml"]
+    exact = sorted(n for _job, n in pinned)
+    assert len(exact) == len(pinned)
+    good = _offending_identities(doc("deploy-api", exact))
+    assert len(good) == len(pinned) and set(good) == pinned
+    # A NEW offending step, a duplicate reusing a pinned name, and a pinned name
+    # moved to another job are all NOT the pinned identity set.
+    assert set(_offending_identities(doc("deploy-api", [*exact, "a brand new step"]))) != pinned
+    assert len(_offending_identities(doc("deploy-api", [*exact, exact[0]]))) != len(pinned)
+    assert set(_offending_identities(doc("other-job", exact))) != pinned
 
 
 def test_no_secret_interpolated_into_run_text(workflow_docs):
-    """No ``run:`` body in ANY workflow may interpolate ``${{ … secrets.X … }}``.
+    """No ``run:`` body may interpolate ``${{ … secrets.X … }}``.
 
     GitHub substitutes the value into the shell SOURCE before bash parses it: a
     JSON catalog's quotes are stripped (the #4334 outage) and ``$(…)`` /
     backticks execute. Bind the secret in ``env:`` and use ``"$VAR"`` instead.
+    The only deferral is the two ``deploy-hosted.yml`` steps pinned in
+    ``_PENDING_FIX`` (owned by in-flight PR #4357) — and only while that file's
+    offenders are exactly those steps.
     """
     offenders: dict[str, list[str]] = {}
     for filename, doc in workflow_docs.items():
         bad = _offending_steps(doc)
+        identities = _offending_identities(doc)
         pinned = _PENDING_FIX.get(filename)
-        # Skip only the file's pinned pre-fix steps (see _PENDING_FIX); a clean
-        # file needs no skip, and a new offender is never shielded.
-        if bad and pinned is not None and set(bad) <= pinned:
+        if (
+            pinned is not None
+            and identities
+            and len(identities) == len(pinned)
+            and set(identities) == pinned
+        ):
             continue
         if bad:
             offenders[filename] = bad
@@ -349,8 +416,8 @@ def test_quote_scanner_flags_unquoted_and_single_quoted_expansions():
 
 
 def test_comment_lines_cannot_satisfy_the_reference_pin():
-    """A comment-only mention is not a use — the reviewer-verified evasion where
-    a body whose only `$VAR` mention was a TODO comment passed every pin."""
+    """A comment-only mention is not a use — a body whose only `$VAR` mention is
+    a TODO comment must fail the reference pin, not satisfy it."""
     run = '# TODO restore -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"\ncurl -s "$URL"\n'
     assert "$CLOUDFLARE_API_TOKEN" not in _scrub_run(run)
     assert _references_outside_double_quotes(run, "CLOUDFLARE_API_TOKEN") == []
