@@ -1580,7 +1580,7 @@ durations:
   test_signup_form_safety.py: 0.2
   test_tool_registry.py: 0.2
   test_user_identity_authority.py: 0.2
-  test_ci_expected_manifests.py: 0.135
+  test_ci_expected_manifests.py: 0.157
   bench/test_bench_core.py: 0.1
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1
