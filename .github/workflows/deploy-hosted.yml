@@ -105,6 +105,20 @@ on:
         default: 'false'
         type: boolean
 
+      # #4126: an incident-time fix may require hand-setting a secret on Fly,
+      # which is by definition an UNDECLARED name and would otherwise hard-block
+      # the very deploy that fixes the incident. Mirrors skip-fly-machines-guard:
+      # the skip translates ONLY exit-1 (undeclared / stale declarations) and
+      # emits a warning — never silent. Exit-2 (missing or empty secret list,
+      # unparsable manifest) can NEVER be bypassed. Convention: set
+      # vars.SKIP_FLY_SECRET_PROVENANCE=true during the incident, CLEAR IT AFTER,
+      # and declare the secret in .github/scripts/fly-managed-secrets.txt.
+      skip-fly-secret-provenance:
+        description: 'Skip the Fly secret provenance guard (incident-fix deploys)'
+        required: false
+        default: 'false'
+        type: boolean
+
 concurrency:
   group: deploy-hosted
   cancel-in-progress: true
@@ -274,12 +288,34 @@ jobs:
       # — invisible to CI because a name no file mentions cannot be compared
       # against anything. Runs BEFORE the drift gate so its output is visible on
       # every deploy attempt, not only on a deploy that gets as far as Fly.
-      # Exit 2 (missing manifest / unreadable secret list) is fail-closed, like
-      # the migration gate; no `if:` guard.
+      #
+      # Incident-fix bypass: skip-fly-secret-provenance input /
+      # SKIP_FLY_SECRET_PROVENANCE var (the same convention as
+      # skip-fly-machines-guard) — it translates ONLY exit-1 (undeclared/stale
+      # declarations, which is what an operator hand-setting a secret mid-
+      # incident produces). Exit-2 (missing/empty secret list, unparsable
+      # manifest) can never be bypassed and always blocks the deploy.
       - name: Check Fly secret provenance (fail-closed)
-        run: python3 .github/scripts/check-fly-secret-drift.py
+        run: |
+          set +e
+          python3 .github/scripts/check-fly-secret-drift.py
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$RC" -eq 2 ]; then
+            echo "::error::Fly secret provenance could not determine state (exit-2) — deploy blocked. Exit-2 can never be bypassed." >&2
+            exit 2
+          fi
+          if [ "$RC" -eq 1 ] && [ "${{ inputs.skip-fly-secret-provenance || vars.SKIP_FLY_SECRET_PROVENANCE == 'true' }}" = "true" ]; then
+            echo "::warning::Fly secret provenance BYPASSED (skip-fly-secret-provenance) — an undeclared or stale secret declaration will NOT block this deploy. Clear the input/var after the incident, and declare the secret in .github/scripts/fly-managed-secrets.txt." >&2
+            exit 0
+          fi
+          exit "$RC"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: tortoise-y4mjjq
       # Migration drift gate (#1095): fail-closed check that repo migrations
       # are not ahead of prod before shipping app code. The #1001 P0 (code
       # reading teams.suspended_at/flagged_at whose migration never reached
