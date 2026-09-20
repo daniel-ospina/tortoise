@@ -156,13 +156,16 @@ def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
     models a capture, which always has one, and resolves to the run clock.
     An explicit ``now=None`` means the session records **NO** time, and that is
     enforced against the node, not merely against this write: any
-    ``created_at`` already on it is REMOVED — which is the whole job of the
-    ``_clear_recorded_time`` helper this replaces (#4154 → #4156). "Skip the
-    write" alone would have left a stale, possibly fabricated, date on a
-    re-seeded node, i.e. exactly the trap #4156 exists to remove. Any other
-    ``str`` is recorded verbatim (including ``""`` — silently coercing a falsy
-    string to the run clock is the conflation #4156 removes; the read path
-    renders a non-date as UNKNOWN).
+    ``created_at`` already on it is REMOVED. That is the SESSION half of the
+    job the deleted ``_clear_recorded_time`` helper did (#4154 → #4156); its
+    turn half lives in :func:`seed_capture_turn_store`, which sweeps every
+    stored ``CONTAINS`` Point. Calling this function ALONE with ``now=None``
+    therefore undates the session node only — it is not a drop-in replacement
+    for the helper. "Skip the write" alone would have left a stale, possibly
+    fabricated, date on a re-seeded node, i.e. exactly the trap #4156 exists
+    to remove. Any other ``str`` is recorded verbatim (including ``""`` —
+    silently coercing a falsy string to the run clock is the conflation #4156
+    removes; the read path renders a non-date as UNKNOWN).
 
     Shared by every ask-lane seeder so the Session side cannot drift either.
     Returns the ``now`` used (``None`` when no time was recorded), so a caller
@@ -225,8 +228,9 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     (``CAPTURE_CLOCK``) models a capture's own clock and is resolved ONCE so
     the session and every turn share it. An explicit ``now=None`` means the
     session records NO time, and that is enforced against the node — the
-    session's ``created_at`` and the time properties of every Point it
-    ``CONTAINS`` are REMOVED, not merely left unwritten (#4156).
+    session's ``created_at`` and the ``createdAt``/``updatedAt`` properties of
+    every Point it ``CONTAINS`` are REMOVED, not merely left unwritten
+    (#4156).
 
     ⚠️ The whole contract is contingent on the blank gate below ADMITTING the
     session: a degenerate conversation returns before any write, so a
