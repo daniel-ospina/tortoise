@@ -384,7 +384,10 @@ set_incident_identity() { # <is_prod>
   if [ "$1" = "1" ]; then
     # A per-target label is REQUIRED when more than one production target
     # exists: the title is the dedupe key. The workflow's auth step therefore
-    # passes PROBE_HOST_LABEL=tortoise.premiselabs.co explicitly.
+    # passes PROBE_HOST_LABEL=app.premiselabs.co explicitly — and the label MUST
+    # be the host the step actually probes, because an incident is found by
+    # EXACT title: a label that drifts from the URL retires the old incident
+    # instead of resolving it (the harness pins the pair, derived).
     PROBE_HOST_LABEL="${PROBE_HOST_LABEL:-api.premiselabs.co}"
     DOWN_MARKER="[monitor] PROD DOWN"
     DEGRADED_MARKER="[monitor] PROD DEGRADED"

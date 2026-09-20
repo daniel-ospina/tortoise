@@ -117,6 +117,13 @@ assert_not_contains() { # <haystack> <needle> <label>
     *) ok "$3" ;;
   esac
 }
+assert_not_empty() { # <value> <label>
+  # A DERIVED value that came back empty must FAIL: every assert_contains is a
+  # `case` glob, so an empty needle matches any haystack. Without this, a
+  # quoted/folded/anchored source value silently vacates the assertions built
+  # on it — the guard would pass while checking nothing (found in review).
+  if [ -n "$1" ]; then ok "$2"; else bad "$2 (derived an EMPTY value — the guard would be vacuous)"; fi
+}
 
 FIX="$(mktemp -d)"
 trap 'rm -rf "$FIX"' EXIT
@@ -2026,16 +2033,26 @@ assert_contains "$AUTH_STEP" "PROBE_REQUIRE_HEADER: 'code_challenge_method=s256'
 # exact drift that stranded the probe: #4054 moved the BFF to app.* and left all
 # three behind, so a literal pin would have had to be edited in three places and
 # the guard would have gone on passing while sign-in was unmonitored.
-AUTH_PROBE_URL_STEP="$(printf '%s\n' "$AUTH_STEP" | sed -n 's|.*PROBE_URL: \(https://[^ ]*\).*|\1|p' | head -1)"
+AUTH_PROBE_URL_STEP="$(printf '%s\n' "$AUTH_STEP" | sed -n "s|.*PROBE_URL:[[:space:]]*[\"']\{0,1\}\(https://[^ \"']*\)[\"']\{0,1\}.*|\1|p" | head -1)"
 AUTH_HOST="$(printf '%s' "$AUTH_PROBE_URL_STEP" | sed -n 's|https://\([^/]*\)/.*|\1|p')"
+# EMPTY DERIVATION MUST FAIL, not pass vacuously: assert_contains is a `case`
+# glob, so an empty needle matches ANY haystack — a quoted or folded PROBE_URL
+# would make both assertions below silently vacuous, which is the exact
+# silent-DRILL failure they exist to catch. (Found in review; reproduced with
+# the value quoted.)
+assert_not_empty "$AUTH_PROBE_URL_STEP" "the auth step's PROBE_URL is derivable (a quoted/folded value must not silently vacate these guards)"
+assert_not_empty "$AUTH_HOST" "the auth step's probe host is derivable from its PROBE_URL"
 assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: $AUTH_HOST" \
   "the auth step's host label matches the host it actually probes (its dedupe key)"
 # …and the script must classify that same URL as PRODUCTION. PROD_PROBE_URLS is
 # built from AUTH_PROBE_URL; if only the workflow moves, the step still runs but
 # is classified a DRILL — [DRILL]-titled, no page, self-heal disarmed — while
-# looking correct in the diff.
+# looking correct in the diff. Setting PROD_PROBE_URLS in the step would do the
+# same thing through another route, so it is refused too.
 assert_contains "$(grep '^AUTH_PROBE_URL=' "$WATCHDOG" || true)" "$AUTH_PROBE_URL_STEP" \
   "the watchdog script's AUTH_PROBE_URL matches the step's probe URL (else the run is silently a DRILL)"
+assert_not_contains "$AUTH_STEP" "PROD_PROBE_URLS" \
+  "the auth step does not set PROD_PROBE_URLS (a second route to a silent DRILL)"
 assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
