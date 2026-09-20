@@ -78,6 +78,7 @@ __all__ = [
     "EXIT_UNVERIFIABLE",
     "HARNESSES",
     "STATUS_FAIL",
+    "STATUS_INERT",
     "STATUS_PROVEN",
     "STATUS_UNVERIFIABLE",
     "render_report",
@@ -93,6 +94,11 @@ HARNESSES: tuple[str, ...] = tuple(capture_install.CAPTURE_SEAM)
 STATUS_PROVEN = "PROVEN"
 STATUS_FAIL = "FAIL"
 STATUS_UNVERIFIABLE = "UNVERIFIABLE-IN-CI"
+#: The seam is present, registered, and FIRED with rc=0 — but no downstream
+#: effect (no receipt advance, no retrievable session) was observed.  rc=0 is
+#: not evidence: a hook that resolves nothing takes its own silent ``exit 0``
+#: and captures nothing (#4314), so this verdict is deliberately NOT PROVEN.
+STATUS_INERT = "INERT"
 
 #: Exit codes.  0 = every link PROVEN; 1 = a link is BROKEN (the install is
 #: wrong, or the capture/memory leg failed); 2 = nothing is provably broken,
@@ -693,9 +699,14 @@ def verify_session_capture(harness: str,
                 STATUS_FAIL,
                 "not reachable — the capture was not observed on this run")
             return report
+        # rc=0 is NOT evidence of an effect. An install that resolves nothing
+        # exits 0 and captures nothing (the shipped hooks' own silent
+        # ``exit 0``, #4314), so ``installed`` stays INERT until a DOWNSTREAM
+        # EFFECT — a receipt advance or a retrievable probe session — lands.
         report["links"]["installed"] = _link(
-            STATUS_PROVEN,
-            f"present, registered, and fired: {fired.detail}")
+            STATUS_INERT,
+            f"fired (rc=0) but no downstream effect is proven yet: "
+            f"{fired.detail}")
 
         # ── link 2: captured ─────────────────────────────────────────────
         deadline = time.monotonic() + max(1.0, timeout)
@@ -745,6 +756,27 @@ def verify_session_capture(harness: str,
                     receipt_before=receipt_before, receipt_after=receipt_after,
                     turns=len(turn_points))
 
+        # `installed` may only be PROVEN on the DOWNSTREAM EFFECT that proves
+        # the seam did work — never on rc=0 alone (#4314). A receipt advance
+        # is an effect even when the session read failed to observe the
+        # session (the effect precedes the read); a retrievable session is one
+        # too. With neither, the install fired and did nothing: INERT, with
+        # the hook's own local breadcrumb surfaced when it left one.
+        effect = (detail is not None
+                  or (receipt_after is not None
+                      and receipt_after != receipt_before))
+        if effect:
+            report["links"]["installed"] = _link(
+                STATUS_PROVEN,
+                f"present, registered, and fired with a downstream effect: "
+                f"{fired.detail}")
+        else:
+            report["links"]["installed"] = _link(
+                STATUS_INERT,
+                f"fired (rc=0) but produced no downstream effect — the "
+                f"capture did not land ({fired.detail})",
+                breadcrumb=_local_capture_error(harness))
+
         # ── link 3: memory ───────────────────────────────────────────────
         if detail is None:
             report["links"]["memory"] = _link(
@@ -785,6 +817,11 @@ def verify_session_capture(harness: str,
         # `finally` delete what the fire may have written.  An unexpected
         # exception still runs the `finally` and then propagates to the CLI's
         # catch-all (exit 1) — cleanup is never skipped either way.
+        report["links"]["installed"] = _link(
+            STATUS_INERT,
+            f"fired with no observable effect: {fired.detail}; the downstream "
+            f"effect could not be read ({e}) — not PROVEN on rc=0 alone",
+            breadcrumb=_local_capture_error(harness))
         report["links"]["captured"] = _link(
             STATUS_FAIL, f"the session read failed after the seam fired: {e}")
         report["links"]["memory"] = _link(
@@ -800,6 +837,24 @@ def verify_session_capture(harness: str,
             api_url, api_key, probe_id, keep=keep, launch=launch)
         report["exit_code"] = _exit_code(report)
     return report
+
+
+def _local_capture_error(harness: str) -> dict[str, Any] | None:
+    """The local breadcrumb from a capture that never landed, or None.
+
+    Mirrors ``tortoise.__main__._capture_error_file`` — the same location and
+    the same ``TORTOISE_IMPORT_RECEIPT_DIR`` override — so an inert install's
+    own record is surfaced in this report instead of only sitting on disk.
+    """
+    path = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts"))) \
+        .parent / "capture-errors" / f"{harness}.json"
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _probe_id(harness: str) -> str:
@@ -893,7 +948,9 @@ def _local_import_receipt(probe_id: str) -> Path | None:
 
 def _exit_code(report: dict[str, Any]) -> int:
     statuses = [link["status"] for link in report["links"].values()]
-    if STATUS_FAIL in statuses:
+    # INERT is a BROKEN install: the seam fired yet captured nothing, which is
+    # exactly the failure `verify` exists to catch (#4314).
+    if STATUS_FAIL in statuses or STATUS_INERT in statuses:
         return EXIT_BROKEN
     # A leaked write is a BROKEN link, not an unverifiable one: exit 2 means
     # "nothing provably broken", and a failed DELETE proves the opposite.  A
@@ -920,6 +977,7 @@ def render_report(report: dict[str, Any]) -> str:
     icons = {
         STATUS_PROVEN: "✅",
         STATUS_FAIL: "❌",
+        STATUS_INERT: "⛔",
         STATUS_UNVERIFIABLE: "⚠️ ",
     }
     for link in ("installed", "captured", "memory"):

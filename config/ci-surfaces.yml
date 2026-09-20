@@ -275,6 +275,12 @@ surfaces:
   # `session verify` wiring in tortoise/__main__.py, which selects `api`.
   # Same dual registration as test_capture_install.py.
   - test_session_verify.py
+  # #4314: an inert harness install must not read as health — the shipped
+  # hooks resolve a recorded module dir (never `../..` alone), record a
+  # breadcrumb instead of silent-silence, and `session verify` reports INERT
+  # rather than PROVEN on rc=0 with no downstream effect. Same dual
+  # registration as test_session_verify.py (mechanism = core; CLI = api).
+  - test_4314_inert_hooks.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -473,6 +479,12 @@ surfaces:
   # `session verify` wiring in tortoise/__main__.py, which selects `api`.
   # Same dual registration as test_capture_install.py.
   - test_session_verify.py
+  # #4314: an inert harness install must not read as health — the shipped
+  # hooks resolve a recorded module dir (never `../..` alone), record a
+  # breadcrumb instead of silent-silence, and `session verify` reports INERT
+  # rather than PROVEN on rc=0 with no downstream effect. Same dual
+  # registration as test_session_verify.py (mechanism = core; CLI = api).
+  - test_4314_inert_hooks.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-

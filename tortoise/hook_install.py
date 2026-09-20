@@ -80,6 +80,12 @@ _HOOK_VERSION_RE = re.compile(
 #: Where the shipped hook scripts live inside this package.
 _HOOKS_SOURCE_DIR = Path(__file__).resolve().parent / "claude-hooks"
 
+#: Where the installer records the module dir it installed FROM, relative to
+#: ``$HOME``.  An installed hook sits under ``~/.codex`` / ``~/.cursor`` /
+#: ``~/.claude``, so ``$(dirname "$0")/../..`` is ``$HOME`` — not a checkout —
+#: and a hook that trusted it captured nothing while still exiting 0 (#4314).
+HOOK_SRC_DIR_RELPATH = Path(".tortoise") / "hook-src-dir"
+
 
 #: Substrings that identify a hook body as Tortoise's. Deliberately specific
 #: (a bare word ``tortoise`` would match a foreign hook that merely mentions
@@ -143,6 +149,31 @@ def _atomic_write_text(dst: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def _record_hook_src_dir(home: Path | None = None) -> None:
+    """Record this package's module dir for the installed hooks to resolve.
+
+    The module dir is the directory that CONTAINS the ``tortoise`` package —
+    the repo root for a checkout, ``site-packages`` for a wheel install.  A
+    hook accepts a candidate only when ``<candidate>/tortoise`` exists, so this
+    record is what keeps an installed hook from falling through to its silent
+    no-op (#4314).
+
+    Best-effort and idempotent: a read-only ``~/.tortoise`` must never fail an
+    install, and a re-run whose record is already correct does not rewrite
+    (and does not churn the file's mtime).
+    """
+    base = Path(home) if home is not None else Path.home()
+    target = base / HOOK_SRC_DIR_RELPATH
+    text = str(Path(__file__).resolve().parent.parent) + "\n"
+    try:
+        if target.is_file() and target.read_text(encoding="utf-8") == text:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(target, text)
+    except OSError:
+        pass
 
 
 def _looks_like_our_script(path: Path) -> bool:
@@ -2158,6 +2189,13 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
             "hooks upgrade` after fixing the filesystem"
         )
         return result
+
+    # ── record where this install came FROM (best-effort) ───────────────
+    # The installed hooks resolve their module dir from $TORTOISE_SRC_DIR, then
+    # this record, then `../..` — and `../..` from an installed hook is $HOME.
+    # Written last (only after every real write landed) so a refused or
+    # dry-run upgrade leaves no misleading breadcrumb.
+    _record_hook_src_dir()
 
     result.findings_after = detect_install(root, harness)
     return result

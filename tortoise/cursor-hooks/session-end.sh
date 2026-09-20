@@ -68,6 +68,33 @@
 
 set -uo pipefail
 
+# ── The local capture-error breadcrumb ───────────────────────────────────
+# Mirrors `tortoise.__main__._record_capture_error` (same file layout, same
+# `TORTOISE_IMPORT_RECEIPT_DIR` override) for the one case that helper cannot
+# cover: the module dir did not resolve, so the Python helper is unreachable.
+# A hook that captures nothing must leave EVIDENCE, never silence (#4314).
+# Best-effort: a breadcrumb write can never break the exit-0 contract.
+_record_breadcrumb() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
+import json, os, sys, time
+from pathlib import Path
+harness, detail = sys.argv[1], sys.argv[2]
+receipt_dir = Path(os.environ.get(
+    "TORTOISE_IMPORT_RECEIPT_DIR",
+    str(Path.home() / ".tortoise" / "import-receipts")))
+path = receipt_dir.parent / "capture-errors" / f"{harness}.json"
+try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "harness": harness,
+        "detail": detail,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }, indent=2), encoding="utf-8")
+except OSError:
+    pass
+PY
+}
+
 # Echo `$1` when it is a readable `.jsonl` transcript, or the same-stem
 # `.jsonl` sibling when `$1` names a `.txt` (or other extension) Cursor also
 # writes. Print NOTHING when no JSONL form exists: the caller then tries the
@@ -159,21 +186,41 @@ for pattern in cands:
   [ -n "$TRANSCRIPT_PATH" ] || exit 0
   [ -f "$TRANSCRIPT_PATH" ] || exit 0
 
-  # ── Resolve the capture entry (PATH install → repo .venv → module) ─────
-  TORTOISE_BIN="$(command -v tortoise || true)"
+  # ── Resolve the capture entry (PATH install → .venv → module) ─────────
+  # A candidate module dir is accepted ONLY when it actually holds a
+  # `tortoise/` package. Candidate order: $TORTOISE_SRC_DIR, the installer's
+  # recorded module dir, then `../..` — the LAST resort, because from an
+  # installed hook that is `$HOME`, which is not a checkout (#4314).
   TORTOISE_MODULE=""
-  if [ -z "$TORTOISE_BIN" ]; then
-    TORTOISE_MODULE="${TORTOISE_SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)}"
-    if [ -n "$TORTOISE_MODULE" ] && [ -x "$TORTOISE_MODULE/.venv/bin/tortoise" ]; then
-      TORTOISE_BIN="$TORTOISE_MODULE/.venv/bin/tortoise"
-    elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/tortoise" ]; then
-      TORTOISE_BIN="$VIRTUAL_ENV/bin/tortoise"
-    elif [ -z "$TORTOISE_MODULE" ] || [ ! -d "$TORTOISE_MODULE/tortoise" ]; then
-      exit 0  # no tortoise install or checkout — clean silence
+  for CANDIDATE in "${TORTOISE_SRC_DIR:-}" \
+                   "$(cat "${HOME:-/nonexistent}/.tortoise/hook-src-dir" 2>/dev/null || true)" \
+                   "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"; do
+    if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE/tortoise" ]; then
+      TORTOISE_MODULE="$CANDIDATE"
+      break
     fi
+  done
+
+  TORTOISE_BIN="$(command -v tortoise || true)"
+  if [ -z "$TORTOISE_BIN" ] && [ -n "$TORTOISE_MODULE" ] \
+     && [ -x "$TORTOISE_MODULE/.venv/bin/tortoise" ]; then
+    TORTOISE_BIN="$TORTOISE_MODULE/.venv/bin/tortoise"
+  fi
+  if [ -z "$TORTOISE_BIN" ] && [ -n "${VIRTUAL_ENV:-}" ] \
+     && [ -x "$VIRTUAL_ENV/bin/tortoise" ]; then
+    TORTOISE_BIN="$VIRTUAL_ENV/bin/tortoise"
+  fi
+  if [ -z "$TORTOISE_BIN" ] && [ -z "$TORTOISE_MODULE" ]; then
+    # No binary and no module dir: record the breadcrumb (the SAME shape and
+    # location `sessions import` writes) and exit 0 — an inert install must
+    # leave evidence instead of silence (#4314). This runs in the DETACHED
+    # worker, so Cursor's shutdown is still not delayed.
+    _record_breadcrumb cursor \
+      "the installed Cursor hook could not resolve a tortoise module dir (checked TORTOISE_SRC_DIR, \$HOME/.tortoise/hook-src-dir, and ../..), found no tortoise binary, and captured nothing"
+    exit 0
   fi
 
-  # Python fallback for a source checkout (mirrors volunteer-turn.sh).
+  # Python fallback: run the resolved checkout as `python -m tortoise`.
   PYTHON_BIN=""
   if [ -z "$TORTOISE_BIN" ]; then
     if [ -x "$TORTOISE_MODULE/.venv/bin/python" ]; then
@@ -197,20 +244,10 @@ for pattern in cands:
     [ -n "$SESSION_ID" ] && ARGS+=(--session-id "$SESSION_ID")
     "$TORTOISE_BIN" "${ARGS[@]}" >/dev/null 2>&1 || true
   else
-    TORTOISE_CURSOR_MODULE="$TORTOISE_MODULE" \
-    TORTOISE_CURSOR_FILE="$TRANSCRIPT_PATH" \
-    TORTOISE_CURSOR_SID2="$SESSION_ID" \
-    "$PYTHON_BIN" -c '
-import os, sys
-sys.path.insert(0, os.environ["TORTOISE_CURSOR_MODULE"])
-from tortoise.__main__ import main
-argv = ["sessions", "import", "--file", os.environ["TORTOISE_CURSOR_FILE"],
-        "--harness", "cursor"]
-sid = os.environ.get("TORTOISE_CURSOR_SID2")
-if sid:
-    argv += ["--session-id", sid]
-raise SystemExit(main(argv))
-' >/dev/null 2>&1 || true
+    ARGS=(sessions import --file "$TRANSCRIPT_PATH" --harness cursor)
+    [ -n "$SESSION_ID" ] && ARGS+=(--session-id "$SESSION_ID")
+    PYTHONPATH="$TORTOISE_MODULE" "$PYTHON_BIN" -m tortoise "${ARGS[@]}" \
+      >/dev/null 2>&1 || true
   fi
   exit 0
 fi
