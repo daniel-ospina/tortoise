@@ -484,18 +484,25 @@ def test_required_embedding_dim_follows_the_index_not_the_mode(sdk, monkeypatch)
     from tortoise.embeddings import EMBEDDING_DIM
 
     proj = sdk._get_proj()
-    assert proj._is_embedded is True
-    assert proj._vector_index_api is None
-    assert proj.required_embedding_dim is None, (
-        "an embedded store has no vector index — it must not declare a width")
 
-    # A NON-embedded store whose index never got created is still brute-force.
+    # (1) No index at all — the embedded lane. The state is FORCED rather than
+    #     read from the ambient store: under ``TORTOISE_DB_URI`` the SDK's
+    #     ``db_path`` construction is redirected to a server, so an assertion on
+    #     ``_is_embedded`` would itself be lane-dependent (#4280 re-review).
+    monkeypatch.setattr(proj, "_is_embedded", True)
+    monkeypatch.setattr(proj, "_vector_index_api", None)
+    assert proj.required_embedding_dim is None, (
+        "an index-less store must not declare a width — its read path "
+        "brute-force scans and any self-consistent width is storable")
+
+    # (2) NON-embedded, but no index exists either: an engine older than 4.x,
+    #     or both creation attempts failed. The read path is STILL the
+    #     dimension-agnostic brute-force branch.
     monkeypatch.setattr(proj, "_is_embedded", False)
-    assert proj._vector_index_api is None
     assert proj.required_embedding_dim is None, (
-        "no index exists on this store, so no width is enforceable")
+        "the width follows the INDEX, not the deployment mode (#4280 review)")
 
-    # Only a store that actually has the index constrains the width.
+    # (3) The index exists → the width it was created with.
     monkeypatch.setattr(proj, "_vector_index_api", "cypher")
     assert proj.required_embedding_dim == EMBEDDING_DIM
 
