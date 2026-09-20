@@ -61,24 +61,25 @@ set -uo pipefail
 # A hook that captures nothing must leave EVIDENCE, never silence (#4314).
 # Best-effort: a breadcrumb write can never break the exit-0 contract.
 _record_breadcrumb() {
-  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
-import json, os, sys, time
-from pathlib import Path
-harness, detail = sys.argv[1], sys.argv[2]
-receipt_dir = Path(os.environ.get(
-    "TORTOISE_IMPORT_RECEIPT_DIR",
-    str(Path.home() / ".tortoise" / "import-receipts")))
-path = receipt_dir.parent / "capture-errors" / f"{harness}.json"
-try:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "harness": harness,
-        "detail": detail,
-        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }, indent=2), encoding="utf-8")
-except OSError:
-    pass
-PY
+  # PURE SHELL, no python3: this is also the evidence path for the "resolved a
+  # module dir but found no interpreter" branch, which is reached BECAUSE
+  # python3 is missing — a python3-written breadcrumb could never run there.
+  # The ``install-inert`` kind marks this as the INSTALL leg's own evidence and
+  # keeps it distinguishable from a ``sessions import`` capture failure, which
+  # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
+  # a breadcrumb write can never break the exit-0 contract.
+  local harness="$1" detail="$2"
+  local receipt_dir crumb_dir stamp
+  receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
+  case "$receipt_dir" in
+    */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
+    *) crumb_dir="capture-errors" ;;
+  esac
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  mkdir -p "$crumb_dir" 2>/dev/null || true
+  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
+    "$harness" "$detail" "$stamp" \
+    > "$crumb_dir/$harness.json" 2>/dev/null || true
 }
 
 # ── The detached worker half ─────────────────────────────────────────────
@@ -180,9 +181,9 @@ print(d.get("session_id") or "")
     # not inject code) and never via ``-m``: CPython prepends the process CWD
     # ahead of PYTHONPATH for ``-m``, so a planted ``tortoise/`` package in
     # the agent's workspace would execute as the user (CWE-427, #4314).
-    TORTOISE_MODULE_DIR="$TORTOISE_MODULE" "$PYTHON_BIN" -c \
-      'import os,sys; sys.path.insert(0, os.environ["TORTOISE_MODULE_DIR"]); from tortoise.__main__ import main; raise SystemExit(main(sys.argv[1:]))' \
-      "${ARGS[@]}" >/dev/null 2>&1 || true
+    "$PYTHON_BIN" -c \
+      'import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]; sys.path.insert(0, sys.argv[1]); from tortoise.__main__ import main; raise SystemExit(main(sys.argv[2:]))' \
+      "$TORTOISE_MODULE" "${ARGS[@]}" >/dev/null 2>&1 || true
   fi
   exit 0
 fi

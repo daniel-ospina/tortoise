@@ -87,6 +87,25 @@ _HOOKS_SOURCE_DIR = Path(__file__).resolve().parent / "claude-hooks"
 #: and a hook that trusted it captured nothing while still exiting 0 (#4314).
 HOOK_SRC_DIR_RELPATH = Path(".tortoise") / "hook-src-dir"
 
+#: The ``kind`` marker on the local ``capture-errors/<harness>.json``
+#: breadcrumb.  Two writers share that ONE path, so the reader must be able to
+#: tell them apart in BOTH directions:
+#:
+#: * the shipped shell hooks write :data:`KIND_INSTALL_INERT` when the installed
+#:   hook resolved no module dir (its install leg is inert);
+#: * ``tortoise.__main__._record_capture_error`` writes
+#:   :data:`KIND_CAPTURE_FAILURE` when a ``sessions import`` capture attempt
+#:   failed (an API outage, a parse failure, zero turns).
+#:
+#: The write condition and the read condition are the SAME condition: session
+#: verify accepts a breadcrumb as install-inert evidence ONLY when this marker
+#: is present and equal to ``KIND_INSTALL_INERT``, so a capture outage can
+#: never read as an inert install.  Conversely a reader looking for a capture
+#: failure must exclude the install-inert kind, so an inert install can never
+#: read as a failed capture.
+KIND_INSTALL_INERT = "install-inert"
+KIND_CAPTURE_FAILURE = "capture-failure"
+
 
 #: Substrings that identify a hook body as Tortoise's. Deliberately specific
 #: (a bare word ``tortoise`` would match a foreign hook that merely mentions
@@ -160,10 +179,10 @@ def _hook_src_dir_base(home: Path | None) -> Path:
     machine's real ``~/.tortoise`` — under pytest the base is derived
     DETERMINISTICALLY from the test id, so every process of one test shares
     one directory and none of them touches the real home.  Whether to RECORD
-    at all is a SEPARATE decision that keys on a HOME-scoped home having been
-    resolved (see ``_record_hook_src_dir`` and ``_is_home_scoped_root``), not
-    on this fail-safe: ``upgrade_install`` at a repo-scoped ``--dir`` resolves
-    no home and records nothing.
+    at all is a SEPARATE decision that keys on whether the installed hook can
+    resolve on its own (see ``_record_hook_src_dir`` and
+    ``_hook_needs_src_dir_record``), not on this fail-safe: ``upgrade_install``
+    at a repo-scoped ``--dir`` that is a checkout records nothing.
 
     This is not hypothetical: the first cut of #4314 used ``Path.home()``
     unconditionally and a single test run created
@@ -231,23 +250,43 @@ def _record_hook_src_dir_best_effort(home: Path | None = None) -> None:
         pass
 
 
-def _is_home_scoped_root(layout: HarnessLayout, root: Path,
-                         home: Path) -> bool:
-    """True when ``root`` is the HOME-scoped install root for ``home``.
+def _hook_needs_src_dir_record(layout: HarnessLayout, root: Path) -> bool:
+    """True when the installed hook's OWN ``../..`` cannot resolve ``tortoise``.
 
-    The ``hook-src-dir`` record exists for hooks whose ``../..`` is ``$HOME``
-    (Codex's ``~/.codex/hooks``, Cursor's ``~/.cursor/hooks``).  A repo-scoped
-    ``--dir`` — Claude's project install, or a checkout that merely happens to
-    hold ``.codex/hooks`` — is NOT such a root, and an explicit ``--dir`` must
-    never cause a write under HOME (#4110).
+    The ``hook-src-dir`` record exists for exactly one reason: the installed
+    hook falls back to ``$(dirname "$0")/../..`` when ``$TORTOISE_SRC_DIR`` and
+    the record are both absent, and from ``~/.codex/hooks`` / ``~/.cursor/
+    hooks`` that fallback is ``$HOME`` — not a checkout.  So the record is
+    NEEDED iff that fallback directory does not itself contain a ``tortoise/``
+    package.  The directory is derived from the ACTUAL install layout
+    (``layout.hooks_dir``), never a hardcoded assumption, so it is correct for
+    a two-level ``.claude/hooks`` and a one-level ``hooks`` alike.
+
+    This is a NEED-based rule, not a layout-based one, and that is deliberate:
+    the write condition (this function) and the read condition (the hook's
+    candidate loop) are the SAME condition.  It fixes Claude's project install
+    and every ``--dir`` HOME install (``~/.codex``, ``~/.cursor``,
+    ``~/.claude``) while still writing NOTHING for a repo-scoped ``--dir`` whose
+    ``../..`` IS a checkout — the #4110 case, where a HOME side effect is both
+    unnecessary and unwanted.
     """
-    if layout.root_env is None and not layout.root_home_default:
+    implied = (Path(root) / layout.hooks_dir).parent.parent
+    return not (implied / "tortoise").is_dir()
+
+
+def record_hook_src_dir_for_install(harness: str, *, root: Path,
+                                    home: Path | None = None) -> bool:
+    """Write the ``hook-src-dir`` record iff the installed hook needs it.
+
+    The ONE shared helper both entry points call (``install_capture`` and
+    ``upgrade_install``), so the two call sites can never drift: they write the
+    record under the same need condition the installed hook reads it under.
+    Best-effort and idempotent.  Returns whether a write was attempted.
+    """
+    if not _hook_needs_src_dir_record(get_layout(harness), Path(root)):
         return False
-    try:
-        return (Path(root).resolve()
-                == default_root(layout, Path(home)).resolve())
-    except (OSError, ValueError):
-        return False
+    _record_hook_src_dir_best_effort(home)
+    return True
 
 
 def _looks_like_our_script(path: Path) -> bool:
@@ -2269,12 +2308,12 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
     # The installed hooks resolve their module dir from $TORTOISE_SRC_DIR, then
     # this record, then `../..` — and `../..` from an installed hook is $HOME.
     # Written last (only after every real write landed) so a refused or
-    # dry-run upgrade leaves no misleading breadcrumb.  ONLY a HOME-scoped root
-    # with a resolved home records: an explicit `--dir` (a repo install) must
-    # never cause a write under HOME (#4110, #4314).
-    if (result.ok and not dry_run and home is not None
-            and _is_home_scoped_root(layout, root, Path(home))):
-        _record_hook_src_dir_best_effort(home)
+    # dry-run upgrade leaves no misleading breadcrumb.  The ONE need-based rule
+    # (``record_hook_src_dir_for_install``) writes it for every harness whose
+    # installed hook cannot resolve `../..`, and writes NOTHING when `../..` is
+    # a checkout (#4110, #4314).
+    if result.ok and not dry_run:
+        record_hook_src_dir_for_install(harness, root=root, home=home)
 
     result.findings_after = detect_install(root, harness)
     return result

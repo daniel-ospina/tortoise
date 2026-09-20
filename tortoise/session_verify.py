@@ -10,9 +10,12 @@ whole chain for the four beta harnesses (claude, pi, cursor, codex):
    registered command is executed with the harness's documented event
    payload).  This link measures the INSTALL leg ONLY: present + registered +
    fired rc=0 is ``PROVEN``, and it is ``INERT`` only when the hook left its
-   own local breadcrumb proving the install leg resolved nothing.  An API
-   outage, a missing key, or a capture that files nothing (the ``captured``
-   link's business) must never rewrite a working install as INERT;
+   own local breadcrumb (``kind: install-inert``) proving the install leg
+   resolved nothing.  An API outage, a missing key, or a capture that files
+   nothing (the ``captured`` link's business) must never rewrite a working
+   install as INERT — those write ``kind: capture-failure``, which this link
+   ignores.  The record is cleared immediately BEFORE the fire, so only a
+   breadcrumb THIS fire produced can count;
 2. **captured** — a ``session_capture_receipt_<harness>`` advanced and the
    session is retrievable by id with the expected turns;
 3. **memory** — the session appears in the graph as a ``Source`` and its turns
@@ -75,6 +78,7 @@ from urllib.request import Request, urlopen
 
 from tortoise import capture_install, hook_install
 from tortoise.capture_receipts import capture_receipt_key
+from tortoise.hook_install import KIND_INSTALL_INERT
 
 __all__ = [
     "EXIT_BROKEN",
@@ -683,8 +687,18 @@ def verify_session_capture(harness: str,
     # cleanup reads as "unknown — assume it may have run" and never as proof.
     launch: LaunchOutcome | None = None
     detail: dict[str, Any] | None = None
+    # The env the installed hook RUNS under, resolved ONCE.  The fire and the
+    # breadcrumb read/write key on the SAME env: a caller passing a non-default
+    # HOME must have verify read the breadcrumb the hook wrote under that HOME,
+    # never this process's own home (#4314 P2).
+    fire_env = _fire_env(env)
+    # P1-B: clear the install-inert evidence IMMEDIATELY BEFORE the fire, so
+    # only a breadcrumb THIS fire produced can be read after it.  Without this,
+    # a hook that was inert ONCE leaves a permanent record and every later
+    # `session verify` reports INERT even after the install is repaired.
+    _clear_install_inert_breadcrumb(harness, fire_env)
     try:
-        fired = _fire(root, command, payload, _fire_env(env), timeout)
+        fired = _fire(root, command, payload, fire_env, timeout)
         launch = fired.outcome
         report["fire"] = fired.as_dict()
         if not fired.succeeded:
@@ -705,7 +719,7 @@ def verify_session_capture(harness: str,
         # resolved nothing (#4314). The capture outcome is the `captured`
         # link's business, never this one — an API outage must not rewrite a
         # working install as INERT.
-        report["links"]["installed"] = _install_link(harness, fired)
+        report["links"]["installed"] = _install_link(harness, fired, fire_env)
 
         # ── link 2: captured ─────────────────────────────────────────────
         deadline = time.monotonic() + max(1.0, timeout)
@@ -762,7 +776,7 @@ def verify_session_capture(harness: str,
         # API outage must not rewrite a working install as INERT. Re-reading
         # also catches a detached worker (Codex/Cursor) whose breadcrumb lands
         # asynchronously, after the synchronous hook already returned.
-        report["links"]["installed"] = _install_link(harness, fired)
+        report["links"]["installed"] = _install_link(harness, fired, fire_env)
 
         # ── link 3: memory ───────────────────────────────────────────────
         if detail is None:
@@ -806,7 +820,7 @@ def verify_session_capture(harness: str,
         # catch-all (exit 1) — cleanup is never skipped either way.  The
         # INSTALL leg is still decided by its own breadcrumb, never by the
         # read that failed.
-        report["links"]["installed"] = _install_link(harness, fired)
+        report["links"]["installed"] = _install_link(harness, fired, fire_env)
         report["links"]["captured"] = _link(
             STATUS_FAIL, f"the session read failed after the seam fired: {e}")
         report["links"]["memory"] = _link(
@@ -824,16 +838,21 @@ def verify_session_capture(harness: str,
     return report
 
 
-def _install_link(harness: str, fired: Any) -> dict[str, Any]:
+def _install_link(harness: str, fired: Any,
+                  env: dict[str, str]) -> dict[str, Any]:
     """The INSTALL leg's verdict: present + registered + fired rc=0.
 
-    ``PROVEN`` unless the hook left its OWN local breadcrumb, which is the
-    install leg's own evidence that it resolved nothing and captured nothing
-    (#4314).  The capture outcome belongs to the ``captured`` link, never
-    here — an API outage must not rewrite a working install as ``INERT``.
+    ``PROVEN`` unless the hook left its OWN install-inert breadcrumb, which is
+    the install leg's own evidence that it resolved nothing and captured
+    nothing (#4314).  Only a record whose ``kind`` is
+    :data:`hook_install.KIND_INSTALL_INERT` counts — the ``sessions import``
+    capture path writes the SAME file with ``kind: capture-failure``, and an
+    API outage must never rewrite a working install as ``INERT``.  The
+    breadcrumb is read under the SAME env the hook was fired with (a
+    non-default HOME reads what the hook wrote there).
     """
-    breadcrumb = _local_capture_error(harness)
-    if breadcrumb is not None:
+    breadcrumb = _local_capture_error(harness, env)
+    if breadcrumb is not None and breadcrumb.get("kind") == KIND_INSTALL_INERT:
         return _link(
             STATUS_INERT,
             f"fired (rc=0) but the hook's own breadcrumb shows the install "
@@ -844,22 +863,58 @@ def _install_link(harness: str, fired: Any) -> dict[str, Any]:
         f"present, registered, and fired with rc=0: {fired.detail}")
 
 
-def _local_capture_error(harness: str) -> dict[str, Any] | None:
-    """The local breadcrumb from a capture that never landed, or None.
+def _local_capture_error_file(harness: str,
+                              env: dict[str, str]) -> Path:
+    """The breadcrumb path for ``harness`` under the HOOK's env, not ours.
 
     Mirrors ``tortoise.__main__._capture_error_file`` — the same location and
-    the same ``TORTOISE_IMPORT_RECEIPT_DIR`` override — so an inert install's
-    own record is surfaced in this report instead of only sitting on disk.
+    the same ``TORTOISE_IMPORT_RECEIPT_DIR`` override — but resolves the
+    receipt dir and ``HOME`` from the env the hook was FIRED with (``env``),
+    never from this process's ``os.environ``: a caller passing a non-default
+    HOME must read the breadcrumb the hook wrote under that HOME (#4314 P2).
+    When ``env`` supplies neither, the fallback is this process's home.
     """
-    path = Path(os.environ.get(
-        "TORTOISE_IMPORT_RECEIPT_DIR",
-        str(Path.home() / ".tortoise" / "import-receipts"))) \
-        .parent / "capture-errors" / f"{harness}.json"
+    receipt_dir = env.get("TORTOISE_IMPORT_RECEIPT_DIR")
+    if receipt_dir:
+        base = Path(receipt_dir)
+    else:
+        home = env.get("HOME")
+        base = ((Path(home) if home else Path.home())
+                / ".tortoise" / "import-receipts")
+    return base.parent / "capture-errors" / f"{harness}.json"
+
+
+def _local_capture_error(harness: str,
+                         env: dict[str, str]) -> dict[str, Any] | None:
+    """The local breadcrumb from a capture that never landed, or None.
+
+    Any well-formed dict is returned so the report can show WHAT was found;
+    the caller (:func:`_install_link`) accepts it as install-inert evidence
+    only when its ``kind`` marker matches.
+    """
     try:
-        data = _json.loads(path.read_text(encoding="utf-8"))
+        data = _json.loads(
+            _local_capture_error_file(harness, env).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _clear_install_inert_breadcrumb(harness: str,
+                                    env: dict[str, str]) -> None:
+    """Remove a PRIOR fire's install-inert record, before the next fire.
+
+    The read condition after a fire is "a record produced by THIS fire".
+    Clearing the install-inert evidence immediately before the fire is what
+    makes that true: a hook that was inert once can no longer fail every later
+    ``session verify`` forever.  A ``capture-failure`` record is left alone —
+    it is different evidence and does not affect the install leg.
+    """
+    record = _local_capture_error(harness, env)
+    if record is None or record.get("kind") != KIND_INSTALL_INERT:
+        return
+    with contextlib.suppress(OSError):
+        _local_capture_error_file(harness, env).unlink()
 
 
 def _probe_id(harness: str) -> str:

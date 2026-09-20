@@ -20,6 +20,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from tortoise import hook_install as hi
 from tortoise.capture_install import install_capture
 
@@ -93,6 +95,16 @@ def _wait_for(predicate, timeout: float = 8.0) -> bool:
             return True
         time.sleep(0.05)
     return predicate()
+
+
+def _breadcrumb(home: Path, harness: str) -> dict:
+    """Wait for a COMPLETE breadcrumb (the writer truncates then writes) and
+    return its parsed body."""
+    path = home / ".tortoise" / "capture-errors" / f"{harness}.json"
+    assert _wait_for(lambda: path.is_file()
+                     and path.read_text(encoding="utf-8").strip() != ""), (
+        "an inert install left no breadcrumb — the failure is invisible")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _argv(log: Path) -> list[str]:
@@ -192,11 +204,9 @@ def test_hook_records_a_breadcrumb_when_nothing_resolves(tmp_path):
                            path=f"{tmp_path / 'bin'}:/usr/bin:/bin")
 
     assert proc.returncode == 0, "the fail-open exit-0 contract must hold"
-    breadcrumb = home / ".tortoise" / "capture-errors" / "codex.json"
-    assert _wait_for(breadcrumb.is_file), (
-        "an inert install left no breadcrumb — the failure is invisible")
-    body = json.loads(breadcrumb.read_text(encoding="utf-8"))
+    body = _breadcrumb(home, "codex")
     assert body["harness"] == "codex"
+    assert body["kind"] == "install-inert", body
     assert "could not resolve" in body["detail"], body
 
 
@@ -235,24 +245,10 @@ def test_verify_reports_inert_for_an_rc0_but_effectless_install(
 
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
-    # The breadcrumb the inert hook itself would have left.
-    crumbs = tmp_path / "capture-errors"
-    crumbs.mkdir()
-    (crumbs / "claude.json").write_text(json.dumps({
-        "harness": "claude", "detail": "could not resolve a tortoise module dir",
-        "recorded_at": "2026-09-19T00:00:00Z"}), encoding="utf-8")
-
-    monkeypatch.setattr(
-        sv, "_fire",
-        lambda *a, **k: sv.FireResult(
-            sv.LaunchOutcome.EXITED, "executed '…' (rc=0)", returncode=0))
-    monkeypatch.setattr(sv, "_read_receipt", lambda *a, **k: None)
-    monkeypatch.setattr(sv, "_session_detail", lambda *a, **k: None)
-
-    def _api(*_a, **_k):
-        raise sv._ApiError("no api (test)", status=404)
-
-    monkeypatch.setattr(sv, "_api", _api)
+    # The breadcrumb the inert hook leaves is written DURING the fire, with the
+    # install-inert kind (P1-A) — a pre-seeded record would be cleared by the
+    # before-fire clear (P1-B).
+    _stub_verify_fire(sv, monkeypatch, home=home, kind="install-inert")
 
     report = sv.verify_session_capture(
         "claude", api_key="tt_test", api_url="http://127.0.0.1:1",
@@ -265,6 +261,129 @@ def test_verify_reports_inert_for_an_rc0_but_effectless_install(
     assert installed["status"] != "PROVEN"
     assert installed["breadcrumb"]["harness"] == "claude", installed
     assert report["exit_code"] == sv.EXIT_BROKEN, report
+
+
+def _stub_verify_fire(sv, monkeypatch, *, home: Path,
+                      kind: str | None = None):
+    """Make ``verify_session_capture`` run without a real seam or API.
+
+    When ``kind`` is given, the stubbed fire WRITES that breadcrumb — as the
+    real hook (``install-inert``) or a failed ``sessions import``
+    (``capture-failure``) would DURING the fire.
+    """
+    def _fake_fire(*_a, **_k):
+        if kind is not None:
+            path = home / ".tortoise" / "capture-errors" / "claude.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "harness": "claude", "detail": f"stub {kind}",
+                "kind": kind}), encoding="utf-8")
+        return sv.FireResult(
+            sv.LaunchOutcome.EXITED, "executed '…' (rc=0)", returncode=0)
+
+    monkeypatch.setattr(sv, "_fire", _fake_fire)
+    monkeypatch.setattr(sv, "_read_receipt", lambda *a, **k: None)
+    monkeypatch.setattr(sv, "_session_detail", lambda *a, **k: None)
+
+    def _api(*_a, **_k):
+        raise sv._ApiError("no api (test)", status=404)
+
+    monkeypatch.setattr(sv, "_api", _api)
+
+
+def test_verify_ignores_a_capture_failure_breadcrumb(tmp_path, monkeypatch):
+    """The SAME ``capture-errors`` file is written by TWO writers, and the
+    install leg must key on the install-inert marker: a ``sessions import``
+    capture failure (an API outage) must read PROVEN, never INERT.
+
+    Mutation: drop the ``kind == KIND_INSTALL_INERT`` test in ``_install_link``
+    — the capture-failure record is accepted as install-inert evidence and the
+    PROVEN assertion REDs (the exact defect P1-A)."""
+    from tortoise import session_verify as sv
+
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "proj"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+
+    crumbs = home / ".tortoise" / "capture-errors"
+    crumbs.mkdir(parents=True)
+    _stub_verify_fire(sv, monkeypatch, home=home, kind="capture-failure")
+    report = sv.verify_session_capture(
+        "claude", api_key="tt_test", api_url="http://127.0.0.1:1",
+        home=home, install_dir=root, timeout=1.0,
+        env={"HOME": str(home)})
+
+    installed = report["links"]["installed"]
+    assert installed["status"] == "PROVEN", installed
+
+
+def test_verify_clears_a_stale_install_inert_breadcrumb(tmp_path, monkeypatch):
+    """A hook that was inert ONCE must not fail every later verify forever:
+    the install-inert evidence is cleared immediately BEFORE the fire, so only
+    a breadcrumb THIS fire produced can be read.
+
+    Mutation: drop the ``_clear_install_inert_breadcrumb`` call in
+    ``verify_session_capture`` — the stale record is read after a fire that
+    wrote nothing and ``installed`` reads INERT, REDding this."""
+    from tortoise import session_verify as sv
+
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "proj"
+    root.mkdir()
+    assert install_capture("claude", root=root, home=home).ok
+
+    crumbs = home / ".tortoise" / "capture-errors"
+    crumbs.mkdir(parents=True)
+    (crumbs / "claude.json").write_text(json.dumps({
+        "harness": "claude", "detail": "stale — a previous fire was inert",
+        "kind": "install-inert",
+        "recorded_at": "2026-09-19T00:00:00Z"}), encoding="utf-8")
+
+    _stub_verify_fire(sv, monkeypatch, home=home)
+    report = sv.verify_session_capture(
+        "claude", api_key="tt_test", api_url="http://127.0.0.1:1",
+        home=home, install_dir=root, timeout=1.0,
+        env={"HOME": str(home)})
+
+    installed = report["links"]["installed"]
+    assert installed["status"] == "PROVEN", installed
+    assert not (crumbs / "claude.json").exists(), (
+        "the stale install-inert record survived the fire")
+
+
+def test_local_capture_error_resolves_from_the_fire_env(tmp_path, monkeypatch):
+    """P2.2: the breadcrumb is read under the env the hook was FIRED with,
+    not this process's ``os.environ`` — a verify run with a non-default HOME
+    must read what the hook wrote under that HOME.
+
+    Mutation: restore ``_local_capture_error`` to read ``os.environ``/
+    ``Path.home()`` — it resolves the process home instead of the fire env and
+    this REDs."""
+    from tortoise import session_verify as sv
+
+    process_home = tmp_path / "process-home"
+    process_home.mkdir()
+    fire_home = tmp_path / "fire-home"
+    fire_home.mkdir()
+    monkeypatch.setenv("HOME", str(process_home))
+    monkeypatch.delenv("TORTOISE_IMPORT_RECEIPT_DIR", raising=False)
+
+    path = sv._local_capture_error_file("claude", {"HOME": str(fire_home)})
+    assert path == (fire_home / ".tortoise" / "capture-errors" / "claude.json"), path
+    assert str(process_home) not in str(path), path
+
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "harness": "claude", "detail": "inert",
+        "kind": "install-inert"}), encoding="utf-8")
+    found = sv._local_capture_error("claude", {"HOME": str(fire_home)})
+    assert found is not None and found["kind"] == "install-inert", found
+    # A different fire HOME sees nothing.
+    assert sv._local_capture_error(
+        "claude", {"HOME": str(process_home)}) is None
 
 
 def test_hook_src_dir_record_never_writes_the_real_home(tmp_path, monkeypatch):
@@ -317,11 +436,9 @@ def test_claude_hook_records_a_breadcrumb_when_nothing_resolves(tmp_path):
                             path=f"{tmp_path / 'bin'}:/usr/bin:/bin")
 
     assert proc.returncode == 0, proc.stderr
-    breadcrumb = home / ".tortoise" / "capture-errors" / "claude.json"
-    assert breadcrumb.is_file(), (
-        "the inert Claude seam left no breadcrumb — the failure is invisible")
-    body = json.loads(breadcrumb.read_text(encoding="utf-8"))
+    body = _breadcrumb(home, "claude")
     assert body["harness"] == "claude"
+    assert body["kind"] == "install-inert", body
     assert "could not resolve" in body["detail"], body
 
 
@@ -366,7 +483,10 @@ def test_claude_hook_resolves_the_installer_recorded_src_dir(tmp_path):
     assert log.is_file() and "DONE" in log.read_text(encoding="utf-8"), (
         "the recorded module dir did not resolve — the hook captured nothing")
     text = log.read_text(encoding="utf-8")
-    assert f"MODULE={src}" in text, text
+    # The module dir travels as argv[1] (never via ``-m``/PYTHONPATH); its
+    # presence in the logged argv proves it was the RECORD, not ``../..``
+    # (which is $HOME here and holds no checkout).
+    assert str(src) in text, text
     assert '"capture"' in text, text
 
 
@@ -470,28 +590,214 @@ def test_verify_reads_inert_when_the_hook_cannot_resolve(tmp_path, monkeypatch):
     assert report["exit_code"] == sv.EXIT_BROKEN, report
 
 
-def test_upgrade_install_never_records_without_a_home_scoped_root(
-        tmp_path, monkeypatch):
-    """A repo-scoped (``--dir``) upgrade must never consult HOME to write the
-    hook-src-dir record; a HOME-scoped root with a resolved home does.
+def _upgrade_root(harness: str, root: Path) -> None:
+    """Create a minimal, upgradeable install at ``root`` for ``harness``."""
+    layout = hi.get_layout(harness)
+    hooks = layout.hooks_root(root)
+    hooks.mkdir(parents=True, exist_ok=True)
+    for spec in layout.scripts:
+        (hooks / spec.name).write_text(
+            f"# {hi.HOOK_VERSION_TOKEN}: 0\n# tortoise\n", encoding="utf-8")
 
-    Mutation: call ``_record_hook_src_dir()`` unconditionally at the end of
-    ``upgrade_install`` — a ``--dir`` upgrade records into the real user home
-    and this REDs."""
+
+def test_upgrade_records_only_when_the_hook_cannot_resolve(
+        tmp_path, monkeypatch):
+    """The write condition is the READ condition: the record is written iff
+    the installed hook's own ``../..`` does not hold a ``tortoise/`` package.
+
+    * a repo-scoped ``--dir`` whose ``../..`` IS a checkout -> nothing (#4110);
+    * a Claude project install whose ``../..`` is NOT a checkout -> written
+      (the documented `tortoise hooks upgrade --dir` repair path, P1-C);
+    * a HOME-scoped Codex root (``~/.codex``, ``../..`` is ``$HOME``) ->
+      written.
+
+    Mutation: gate the write on the layout being HOME-scoped (the old
+    ``_is_home_scoped_root``) — the Claude project install records nothing and
+    this REDs."""
     monkeypatch.delenv("CODEX_HOME", raising=False)
     calls: list = []
     monkeypatch.setattr(
         hi, "_record_hook_src_dir", lambda home=None: calls.append(home))
 
-    repo = tmp_path / "repo"
-    (repo / ".claude" / "hooks").mkdir(parents=True)
-    result = hi.upgrade_install(repo, "claude")
+    # (1) repo-scoped --dir whose ../.. IS a checkout: writes nothing.
+    checkout = tmp_path / "checkout"
+    (checkout / "tortoise").mkdir(parents=True)
+    _upgrade_root("claude", checkout)
+    result = hi.upgrade_install(checkout, "claude", home=tmp_path / "home")
     assert result.ok, result.refused
-    assert calls == [], "a repo-scoped --dir upgrade recorded a home"
+    assert calls == [], "a --dir upgrade whose ../.. is a checkout wrote HOME state"
 
+    # (2) Claude project install whose ../.. is NOT a checkout: the repair
+    # path (tortoise/__main__.py prints `tortoise hooks upgrade --dir {root}`)
+    # MUST write the record or the hook stays inert.
+    project = tmp_path / "project"
+    _upgrade_root("claude", project)
+    result = hi.upgrade_install(project, "claude", home=tmp_path / "home")
+    assert result.ok, result.refused
+    assert calls == [tmp_path / "home"], calls
+
+    # (3) HOME-scoped Codex root: ../.. is $HOME, not a checkout.
+    calls.clear()
     home = tmp_path / "home"
     home.mkdir()
     codex_root = hi.default_root(hi.get_layout("codex"), home)
     result = hi.upgrade_install(codex_root, "codex", home=home)
     assert result.ok, result.refused
     assert calls == [home], calls
+
+
+def test_install_capture_and_upgrade_share_the_need_rule(
+        tmp_path, monkeypatch):
+    """P2.4: the sibling ``install_capture`` call site uses the SAME shared
+    need-based helper as ``upgrade_install`` — a Claude project install whose
+    ``../..`` is not a checkout writes the record; one whose ``../..`` IS a
+    checkout writes nothing.
+
+    Mutation: restore the unconditional
+    ``_record_hook_src_dir_best_effort`` at the end of ``install_capture`` —
+    the checkout case writes and the assertion REDs."""
+    calls: list = []
+    monkeypatch.setattr(
+        hi, "_record_hook_src_dir", lambda home=None: calls.append(home))
+
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    result = install_capture("claude", root=project, home=home)
+    assert result.ok, result.error
+    assert calls == [home], (
+        "a Claude project install whose ../.. is not a checkout recorded nothing")
+
+    calls.clear()
+    checkout = tmp_path / "checkout"
+    (checkout / "tortoise").mkdir(parents=True)
+    result = install_capture("claude", root=checkout, home=home)
+    assert result.ok, result.error
+    assert calls == [], (
+        "a repo-scoped install whose ../.. is a checkout wrote HOME state")
+
+
+def test_hook_never_imports_a_planted_prepath_os_module(tmp_path):
+    """CWE-427, the narrower vector: ``python -c`` puts the process cwd at
+    ``sys.path[0]``, so a planted ``./os.py`` in the agent workspace must not
+    execute. The bootstrap drops cwd from ``sys.path`` BEFORE importing any
+    non-builtin module. ``-S`` is used so the interpreter does not preload
+    ``os`` — otherwise the vector is invisible on modern CPython.
+
+    Mutation: restore ``import os, sys; sys.path.insert(0,
+    os.environ["TORTOISE_MODULE_DIR"])`` — the planted ``./os.py`` executes and
+    the sentinel assertion REDs."""
+    import shlex
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hooks = home / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    hook = hooks / "session-end.sh"
+    shutil.copy(CLAUDE_HOOK, hook)
+    hook.chmod(0o755)
+
+    src = _module_dir(tmp_path / "srcmod")
+    (src / "tortoise" / "__main__.py").write_text(
+        "import os\n"
+        "def main(argv):\n"
+        "    with open(os.environ['LEGIT_LOG'], 'a') as f:\n"
+        "        f.write(' '.join(argv) + '\\n')\n"
+        "    return 0\n",
+        encoding="utf-8")
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    # ``os`` is shadowed by the planted module, so the module cannot use
+    # ``os.environ`` — it writes a fixed cwd-relative marker instead.
+    sentinel = workdir / "PLANTED-OS-EXECUTED"
+    (workdir / "os.py").write_text(
+        "import sys\n"
+        "open('PLANTED-OS-EXECUTED', 'w').write('pwned')\n",
+        encoding="utf-8")
+
+    # The documented fallback is the system python3 3.9.x, whose ``os`` is NOT
+    # frozen — i.e. the interpreter on which the vector is real.  On an
+    # interpreter that freezes ``os`` the vector cannot be reproduced, so the
+    # guard is honestly skipped rather than passing vacuously.
+    system_py = "/usr/bin/python3"
+    if not Path(system_py).exists():
+        pytest.skip("no /usr/bin/python3 fallback interpreter")
+    subprocess.run(
+        [system_py, "-S", "-c", "import os"], cwd=workdir,
+        capture_output=True)
+    vulnerable = sentinel.exists()
+    if vulnerable:
+        sentinel.unlink()
+    if not vulnerable:
+        pytest.skip("fallback interpreter freezes os — vector not reproducible")
+
+    # An interpreter that does NOT preload ``os`` (no site), so the planted
+    # ./os.py is reachable exactly as it is for the shipped fallback.
+    wrapper = tmp_path / "bin" / "pyS"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        f"exec {shlex.quote(system_py)} -S \"$@\"\n",
+        encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    (home / ".tortoise").mkdir(parents=True, exist_ok=True)
+    (home / ".tortoise" / "hook-src-dir").write_text(str(src) + "\n")
+
+    legit = tmp_path / "legit.log"
+    transcript = _write_claude_transcript(tmp_path / "transcript.jsonl")
+    proc = _run_claude_hook(
+        hook, home, transcript=transcript,
+        path=f"{tmp_path / 'bin'}:/usr/bin:/bin",
+        extra_env={"PYTHON_BIN": str(wrapper), "LEGIT_LOG": str(legit)},
+        cwd=workdir)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _wait_for(lambda: legit.is_file()
+                     and "capture" in legit.read_text(encoding="utf-8")), (
+        "the resolved module never ran — the test proved nothing")
+    assert not sentinel.exists(), (
+        "a planted ./os.py in $PWD executed — the cwd is attacker-influenced")
+
+
+VOLUNTEER_HOOK = (REPO_ROOT / "tortoise" / "claude-hooks"
+                  / "volunteer-turn.sh")
+
+
+def test_no_interpreter_breadcrumb_is_written_without_python3(tmp_path):
+    """P2.1: the breadcrumb writer is PURE SHELL. The "resolved a module dir but
+    found no interpreter" branch is reached BECAUSE python3 is missing, so a
+    python3-written breadcrumb could never run there.
+
+    Mutation: restore the ``python3 - <<'PY'`` heredoc in ``_record_breadcrumb``
+    — with no python3 on PATH nothing is written and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    hooks = home / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    hook = hooks / "volunteer-turn.sh"
+    shutil.copy(VOLUNTEER_HOOK, hook)
+    hook.chmod(0o755)
+
+    # A module dir that resolves, with NO interpreter and NO tortoise binary.
+    src = _module_dir(tmp_path / "srcmod")
+
+    # A PATH with the shell plumbing the hook needs but NO python3.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ("cat", "tr", "head", "mkdir", "date", "dirname"):
+        real = shutil.which(tool)
+        assert real, tool
+        (bindir / tool).symlink_to(real)
+
+    env = {"HOME": str(home), "PATH": str(bindir), "TMPDIR": str(tmp_path),
+           "TORTOISE_SRC_DIR": str(src)}
+    proc = subprocess.run(
+        ["/bin/bash", str(hook), "codex"], input="a real prompt\n",
+        text=True, capture_output=True, env=env, cwd=str(home), timeout=20)
+
+    assert proc.returncode == 0, proc.stderr
+    body = _breadcrumb(home, "codex")
+    assert body["kind"] == "install-inert", body
+    assert "no python3 interpreter" in body["detail"], body

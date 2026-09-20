@@ -31,24 +31,25 @@ set -euo pipefail
 # A hook that injects nothing must leave EVIDENCE, never silence (#4314).
 # Best-effort: a breadcrumb write can never break the exit-0 contract.
 _record_breadcrumb() {
-  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
-import json, os, sys, time
-from pathlib import Path
-harness, detail = sys.argv[1], sys.argv[2]
-receipt_dir = Path(os.environ.get(
-    "TORTOISE_IMPORT_RECEIPT_DIR",
-    str(Path.home() / ".tortoise" / "import-receipts")))
-path = receipt_dir.parent / "capture-errors" / f"{harness}.json"
-try:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "harness": harness,
-        "detail": detail,
-        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }, indent=2), encoding="utf-8")
-except OSError:
-    pass
-PY
+  # PURE SHELL, no python3: this is also the evidence path for the "resolved a
+  # module dir but found no interpreter" branch, which is reached BECAUSE
+  # python3 is missing — a python3-written breadcrumb could never run there.
+  # The ``install-inert`` kind marks this as the INSTALL leg's own evidence and
+  # keeps it distinguishable from a ``sessions import`` capture failure, which
+  # writes the same file with ``kind: capture-failure`` (#4314). Best-effort:
+  # a breadcrumb write can never break the exit-0 contract.
+  local harness="$1" detail="$2"
+  local receipt_dir crumb_dir stamp
+  receipt_dir="${TORTOISE_IMPORT_RECEIPT_DIR:-${HOME:-/nonexistent}/.tortoise/import-receipts}"
+  case "$receipt_dir" in
+    */*) crumb_dir="${receipt_dir%/*}/capture-errors" ;;
+    *) crumb_dir="capture-errors" ;;
+  esac
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  mkdir -p "$crumb_dir" 2>/dev/null || true
+  printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "install-inert"\n}\n' \
+    "$harness" "$detail" "$stamp" \
+    > "$crumb_dir/$harness.json" 2>/dev/null || true
 }
 
 # Prefer a local install; fall back to the installer's recorded checkout.
@@ -82,16 +83,18 @@ if [ -z "$TORTOISE_BIN" ]; then
   # script, because the install-probe beacon below is independent of it.
   # `|| exit 0` here (before #3755) skipped the probe whenever the embedded
   # store was busy, silently dropping install telemetry. The resolved module
-  # dir travels via ENV and is prepended INSIDE ``-c`` — never via ``-m``
-  # (CPython prepends the process CWD ahead of PYTHONPATH for ``-m``, so a
-  # planted ``tortoise/`` package in the workspace would execute as the user,
-  # CWE-427) and never string-interpolated into the source.
-  TORTOISE_MODULE_DIR="$TORTOISE_MODULE" "$PYTHON_BIN" -c '
-import os, sys
-sys.path.insert(0, os.environ["TORTOISE_MODULE_DIR"])
+  # dir travels via ARGV and is prepended INSIDE ``-c`` AFTER the process cwd
+  # is dropped from sys.path — never via ``-m`` (CPython prepends the process
+  # CWD ahead of PYTHONPATH for ``-m``, so a planted ``tortoise/`` package in
+  # the workspace would execute as the user, CWE-427) and never
+  # string-interpolated into the source.
+  "$PYTHON_BIN" -c '
+import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+sys.path.insert(0, sys.argv[1])
 from tortoise.__main__ import main
 raise SystemExit(main(["context"]))
-' 2>/dev/null || true
+' "$TORTOISE_MODULE" 2>/dev/null || true
 else
   # #3755: same as above — a failed digest (busy/unreachable store) is
   # best-effort and must fall through to the probe, not exit the script.
@@ -117,11 +120,12 @@ if [ -n "$TORTOISE_BIN" ]; then
 else
   PYTHON_BIN="$(command -v python3 || true)"
   if [ -n "$PYTHON_BIN" ] && [ -d "$TORTOISE_MODULE/tortoise" ]; then
-    TORTOISE_MODULE_DIR="$TORTOISE_MODULE" "$PYTHON_BIN" -c '
-import os, sys
-sys.path.insert(0, os.environ["TORTOISE_MODULE_DIR"])
+    "$PYTHON_BIN" -c '
+import sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+sys.path.insert(0, sys.argv[1])
 from tortoise.__main__ import main
 raise SystemExit(main(["session", "probe", "--harness", "claude"]))
-' >/dev/null 2>&1 || true
+' "$TORTOISE_MODULE" >/dev/null 2>&1 || true
   fi
 fi

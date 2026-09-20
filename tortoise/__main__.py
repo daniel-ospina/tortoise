@@ -3533,15 +3533,24 @@ def _capture_error_file(harness: str) -> Path:
 
 def _record_capture_error(harness: str, detail: str) -> None:
     """Write the local capture-failure breadcrumb. Best-effort only — a
-    breadcrumb write must never break the capture path it observes."""
+    breadcrumb write must never break the capture path it observes.
+
+    The record carries ``kind: capture-failure`` (a DIFFERENT kind from the
+    shipped hook's ``kind: install-inert``) because both writers share the
+    ``capture-errors/<harness>.json`` path: session verify must never read a
+    capture outage as an inert install, and nothing may read an inert install
+    as a failed capture.
+    """
     import json as _json
     import time
     path = _capture_error_file(harness)
     try:
+        from tortoise.hook_install import KIND_CAPTURE_FAILURE
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_json.dumps({
             "harness": harness,
             "detail": detail,
+            "kind": KIND_CAPTURE_FAILURE,
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }, indent=2), encoding="utf-8")
     except OSError:

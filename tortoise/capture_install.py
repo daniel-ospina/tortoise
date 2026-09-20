@@ -1108,13 +1108,24 @@ def install_capture(
     # its module dir instead of falling through to its own silent no-op — from
     # `~/.codex/hooks/`, `$(dirname "$0")/../..` is `$HOME`, not a checkout
     # (#4314). Best-effort and only after a successful real write: a dry run or
-    # a refusal leaves no record to be misread.
+    # a refusal leaves no record to be misread.  The ONE need-based rule
+    # (``record_hook_src_dir_for_install``) writes it only when the installed
+    # hook cannot resolve `../..` on its own — the SAME condition the hook
+    # reads it under — so it fixes the Codex/Cursor HOME installs and a Claude
+    # project install, while a repo-scoped `--dir` whose `../..` IS a checkout
+    # writes nothing (#4110, #4314).
     if result.ok and not dry_run:
+        resolved_home = Path(home) if home is not None else Path.home()
+        effective_root = (
+            Path(root) if harness == "claude"
+            else hook_install.default_root(
+                hook_install.get_layout(harness), resolved_home))
         # Best-effort and unable to fail the install: a record-write raise
         # (``OSError``, ``UnicodeDecodeError``, …) must never turn a landed
         # install into a traceback (#3999, #4314).
-        hook_install._record_hook_src_dir_best_effort(
-            Path(home) if home is not None else None)
+        hook_install.record_hook_src_dir_for_install(
+            harness, root=effective_root,
+            home=Path(home) if home is not None else None)
     return result
 
 
