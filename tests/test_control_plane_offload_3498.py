@@ -211,24 +211,82 @@ def test_best_effort_leaves_helper_errors_visible():
         asyncio.run(_run())
 
 
+def test_best_effort_uses_a_separate_pool_from_auth():
+    """#3498 review P1: best-effort work must never occupy an auth slot — a
+    telemetry burst parking every auth worker is the same outage class."""
+    auth = monitoring.control_plane_worker("auth")
+    telemetry = monitoring.control_plane_worker("telemetry")
+    assert auth is not telemetry
+    assert auth.workers == monitoring.CONTROL_PLANE_WORKERS
+    assert telemetry.workers == monitoring.CONTROL_PLANE_TELEMETRY_WORKERS
+
+
+#: Ops whose helper is documented BEST-EFFORT / never-raise: an offload failure
+#: must be swallowed, never a 503. Keep in sync with the `best_effort=True`
+#: sites; the structural test below fails if one loses the flag.
+_NEVER_RAISE_OPS = frozenset({
+    "update_last_used", "analytics_event", "github_repos_count",
+})
+
+
+def test_never_raise_offload_sites_pass_best_effort():
+    """Structural guard for the review's "telemetry must not gate auth" fix:
+    every `_cp_offload` wrapping a never-raise helper carries
+    ``best_effort=True``, so a future edit cannot silently re-introduce a 503
+    on that lane."""
+    import ast
+
+    tree = ast.parse(Path(ha.__file__).read_text())
+    offenders = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        name = (func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else None)
+        if name != "_cp_offload":
+            continue
+        kwargs = {kw.arg: kw.value for kw in call.keywords}
+        op = kwargs.get("op")
+        if not (isinstance(op, ast.Constant) and op.value in _NEVER_RAISE_OPS):
+            continue
+        best_effort = kwargs.get("best_effort")
+        if not (isinstance(best_effort, ast.Constant) and best_effort.value is True):
+            offenders.append((call.lineno, op.value))
+    assert not offenders, (
+        "never-raise offload site(s) missing best_effort=True: "
+        f"{offenders} — telemetry must not be able to fail auth"
+    )
+
+
 def test_saturated_backlog_fails_closed(monkeypatch):
     """A wedged pool fails fast instead of buffering without bound.
 
     ``max_backlog=1``: the worker takes the first submission, one more fills
     the queue, and the third must fail fast rather than queue without bound.
+    The first submission signals an Event on entry so the wait is deterministic
+    (no sleep-race, #3498 review).
     """
     tiny = monitoring._SingleSlotWorker("test-cp-saturated", workers=1,
                                         max_backlog=1)
-    monkeypatch.setattr(monitoring, "control_plane_worker", lambda: tiny)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": tiny)
+    first_started = threading.Event()
     gate = threading.Event()
+
+    def _hold():
+        first_started.set()
+        gate.wait()
 
     async def _run():
         first = asyncio.ensure_future(
-            monitoring.run_control_plane_call(gate.wait, op="hold-1"))
-        await asyncio.sleep(0.05)  # let the single slot pick up `first`
+            monitoring.run_control_plane_call(_hold, op="hold-1"))
+        # Deterministic: wait until the single slot has DEQUEUED `first`,
+        # then its own Event wait blocks the slot.
+        await asyncio.get_running_loop().run_in_executor(None, first_started.wait)
         second = asyncio.ensure_future(
             monitoring.run_control_plane_call(gate.wait, op="hold-2"))
-        await asyncio.sleep(0.05)  # `second` now fills the one-slot queue
+        await asyncio.sleep(0)  # let `second` submit into the one-slot queue
         with pytest.raises(monitoring.ControlPlaneOffloadError):
             await monitoring.run_control_plane_call(lambda: None, op="full")
         gate.set()

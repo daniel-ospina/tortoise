@@ -456,6 +456,17 @@ def _is_transient_connect_error(exc: BaseException) -> bool:
     return type(exc).__name__ == "ConnectionError"
 
 
+class _WorkerBacklogFull(concurrent.futures.TimeoutError):
+    """A worker's bounded backlog refused a submission.
+
+    Subclass of ``concurrent.futures.TimeoutError`` so the historical
+    ``run_on_daemon_worker`` contract (a saturated backlog surfaces as
+    ``concurrent.futures.TimeoutError``) is unchanged, while
+    ``run_control_plane_call`` can tell a REFUSED submission apart from a
+    builtin ``TimeoutError`` raised by the callable itself (#3498 review).
+    """
+
+
 class _SingleSlotWorker:
     """ONE (or more) process-lifetime daemon threads running submitted callables.
 
@@ -546,7 +557,7 @@ class _SingleSlotWorker:
             self._queue.put_nowait((fn, future))
         except queue.Full:
             future.set_exception(
-                concurrent.futures.TimeoutError(
+                _WorkerBacklogFull(
                     f"{self._name} backlog full ({self._max_backlog}) — worker wedged"))
         return future
 
@@ -613,6 +624,19 @@ def daemon_worker(name: str, *, workers: int = 1,
         return worker
 
 
+async def _await_future(future, *, timeout: float | None):
+    """Await a concurrent Future, optionally bounded.
+
+    Shared by ``run_on_daemon_worker`` and ``run_control_plane_call`` so the
+    wrap/cancel/bound semantics have ONE implementation (#3498 review — the
+    two offload await paths must not drift).
+    """
+    awaitable = asyncio.wrap_future(future)
+    if timeout is None:
+        return await awaitable
+    return await asyncio.wait_for(awaitable, timeout)
+
+
 async def run_on_daemon_worker(fn, *, name: str, timeout: float | None = None):
     """Await blocking ``fn`` on a named daemon worker — never the shared pool.
 
@@ -630,10 +654,7 @@ async def run_on_daemon_worker(fn, *, name: str, timeout: float | None = None):
     inner bound (see the probe-bound ordering tests).
     """
     future = daemon_worker(name).submit(fn)
-    awaitable = asyncio.wrap_future(future)
-    if timeout is None:
-        return await awaitable
-    return await asyncio.wait_for(awaitable, timeout)
+    return await _await_future(future, timeout=timeout)
 
 
 # ── #3498: bounded multi-worker CONTROL-PLANE offload seam ────────────────
@@ -652,7 +673,17 @@ async def run_on_daemon_worker(fn, *, name: str, timeout: float | None = None):
 # an explicit wait bound and a fail-closed error. It is separate from the
 # probe workers (its own name) so the /health probe budget and the auth path
 # can never starve each other.
+#
+# #3498 review P1: it is ALSO split into two named pools. Best-effort work
+# (``update_last_used``, the analytics emit, the GitHub repo count) must not
+# occupy the auth slots — a telemetry burst or a hung display-only GitHub call
+# parking every auth worker is the same total-auth-outage blast radius this
+# issue is about. ``best_effort=True`` protects the CALLER; the separate pool
+# protects the AUTH CALLERS sharing capacity.
 CONTROL_PLANE_WORKER_NAME = "tortoise-control-plane"
+
+#: The best-effort pool's name — never shares slots with ``auth``.
+CONTROL_PLANE_TELEMETRY_WORKER_NAME = "tortoise-telemetry"
 
 #: Pool size. The calls are network-bound (PostgREST), so a small multiple of
 #: the loop's parallelism is what removes the serialisation a single slot
@@ -660,15 +691,28 @@ CONTROL_PLANE_WORKER_NAME = "tortoise-control-plane"
 #: pool buys no throughput, only parked threads.
 CONTROL_PLANE_WORKERS = 8
 
+#: Best-effort pool size — smaller: it is off the critical path.
+CONTROL_PLANE_TELEMETRY_WORKERS = 4
+
 #: Bounded backlog. A saturated queue means the pool is wedged; submissions
 #: fail fast (mapped to a 503) instead of buffering without bound.
 CONTROL_PLANE_BACKLOG = 128
 
+#: Best-effort backlog — larger, because best-effort submissions that are
+#: refused are simply dropped (never a user-visible failure).
+CONTROL_PLANE_TELEMETRY_BACKLOG = 256
+
 #: Wait bound for ONE offloaded control-plane resolution. Sits ABOVE a normal
-#: round-trip's several phases but well BELOW uvicorn's request budget, so a
+#: round-trip's several phases but below the edge/proxy budget, so a
 #: black-holed PostgREST call fails the ONE request closed instead of holding
 #: a slot (and the loop's await) indefinitely. Resolved at CALL time so it
 #: stays monkeypatchable.
+#: COMPOSITE NOTE (#3498 review): a single request can chain several offloads
+#: (``_session_user_org`` alone issues three), and the bound is PER CALL, so
+#: the worst case is N x bound. It is bounded and fail-fast — the FIRST leg
+#: that misses the bound ends the request with the structured 503 — but if the
+#: proxy budget is ever tightened, lower this rather than deriving a shared
+#: per-request deadline.
 CONTROL_PLANE_OFFLOAD_TIMEOUT_S = 10.0
 
 #: Bounded per-call ``(op, duration_s)`` record for the offload seam.
@@ -691,8 +735,17 @@ class ControlPlaneOffloadError(RuntimeError):
     """
 
 
-def control_plane_worker() -> _SingleSlotWorker:
-    """Lazy process-wide multi-worker control-plane pool."""
+def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
+    """Lazy process-wide multi-worker pool for the control-plane seam.
+
+    ``pool="auth"`` (default) is the AUTH-CRITICAL pool; ``pool="telemetry"``
+    is a SEPARATE pool for best-effort work, so telemetry can never park the
+    auth slots (#3498 review P1).
+    """
+    if pool == "telemetry":
+        return daemon_worker(CONTROL_PLANE_TELEMETRY_WORKER_NAME,
+                             workers=CONTROL_PLANE_TELEMETRY_WORKERS,
+                             max_backlog=CONTROL_PLANE_TELEMETRY_BACKLOG)
     return daemon_worker(CONTROL_PLANE_WORKER_NAME,
                          workers=CONTROL_PLANE_WORKERS,
                          max_backlog=CONTROL_PLANE_BACKLOG)
@@ -735,8 +788,9 @@ def reset_control_plane_records() -> None:
 
 
 async def run_control_plane_call(fn, *, op: str,
-                                 timeout: float | None = None):
-    """Offload ONE blocking control-plane helper to the bounded auth pool.
+                                 timeout: float | None = None,
+                                 pool: str = "auth"):
+    """Offload ONE blocking control-plane helper to a bounded pool.
 
     The unit of offload is the RESOLUTION, not an individual HTTP call:
     ``resolve_api_key`` is up to 8 dependent round-trips and
@@ -746,24 +800,33 @@ async def run_control_plane_call(fn, *, op: str,
     into the ladder; offloading the helper pays ONE hop and keeps the ladder's
     ordering intact inside one thread.
 
+    ``pool`` selects the worker: ``"auth"`` (default) for auth-critical
+    resolutions, ``"telemetry"`` for best-effort work that must never consume
+    auth capacity.
+
     Fail-closed: a missed bound or a saturated backlog raises
-    :class:`ControlPlaneOffloadError`. A ``TimeoutError`` escaping ``fn``
-    itself is treated the same way (the control-plane helpers wrap transport
-    errors in ``RuntimeError``, so this is not a path they take) — every
-    failure mode of this seam is the same fail-closed 503, never a hang.
-    The caller (the hosted seam) maps it to the repo-standard 503 — this
-    function never blocks past ``timeout``.
+    :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by
+    ``fn`` ITSELF is a DOMAIN error and propagates unchanged — the three cases
+    are disambiguated by inspecting the future, not conflated (#3498 review).
     """
     bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
-    future = control_plane_worker().submit(fn)
+    future = control_plane_worker(pool).submit(fn)
     started = time.monotonic()
     try:
-        result = await asyncio.wait_for(asyncio.wrap_future(future), bound)
+        result = await _await_future(future, timeout=bound)
     except TimeoutError as exc:
-        # Covers both the wait bound expiring AND the bounded backlog refusing
-        # the submission (`submit` completes the future with TimeoutError).
+        # Distinguish the three sources of TimeoutError that meet here:
+        #   1. `fn` raised it              -> a domain error, propagate
+        #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
+        #   3. `wait_for`'s bound expired  -> fail closed
+        future_exc = (future.exception()
+                      if future.done() and not future.cancelled() else None)
+        if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
+            raise
+        reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
+                  else f"exceeded its {bound}s bound")
         raise ControlPlaneOffloadError(
-            f"control-plane call {op!r} exceeded its {bound}s bound") from exc
+            f"control-plane call {op!r} {reason}") from exc
     record_control_plane_offload(op, time.monotonic() - started)
     return result
 

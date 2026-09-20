@@ -4607,7 +4607,8 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False):
     callers touch, and every routed site is covered by a behavioural test.
     """
     try:
-        return await run_control_plane_call(fn, op=op)
+        return await run_control_plane_call(
+            fn, op=op, pool="telemetry" if best_effort else "auth")
     except ControlPlaneOffloadError as exc:
         if best_effort:
             logging.getLogger("tortoise.api").warning(
@@ -7884,16 +7885,22 @@ async def toggle_api_key_enabled(
         # Explicit null for enabled is treated as absent (leave untouched) —
         # `None is not False` would silently RE-ENABLE a disabled key.
         if "enabled" in body.model_fields_set and body.enabled is not None:
-            _sb_set_enabled(cp, key_id, body.enabled)
+            await _cp_offload(
+                lambda: _sb_set_enabled(cp, key_id, body.enabled),
+                op="set_api_key_enabled")
             result["enabled"] = body.enabled
         # model_fields_set distinguishes explicit null (clear label) from
         # field-absent (don't touch) — JSON null must clear, not skip.
         if "name" in body.model_fields_set:
             cleaned = _clean_key_label(body.name)
-            _sb_set_name(cp, key_id, cleaned)
+            await _cp_offload(
+                lambda: _sb_set_name(cp, key_id, cleaned),
+                op="set_api_key_name")
             result["name"] = cleaned
         if "scopes" in body.model_fields_set:
-            _sb_set_scopes(cp, key_id, body.scopes or [])
+            await _cp_offload(
+                lambda: _sb_set_scopes(cp, key_id, body.scopes or []),
+                op="set_api_key_scopes")
             result["scopes"] = body.scopes or []
         return result
     # Registry mode (selfhost): no enabled column — enabled is a no-op echo
@@ -21797,7 +21804,8 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     # #3498 (the audit's §A1 item 9): _github_repos_count is a BLOCKING
     # httpx.Client call to api.github.com — off the loop.
     repos_count = await _cp_offload(
-        lambda: _github_repos_count(token), op="github_repos_count")
+        lambda: _github_repos_count(token), op="github_repos_count",
+        best_effort=True)
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
