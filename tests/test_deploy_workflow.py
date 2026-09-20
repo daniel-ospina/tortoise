@@ -63,9 +63,16 @@ _NON_SYNCED = {"FLY_API_TOKEN"}
 
 # Shell test against a variable in a run region: `[ -z "$KEY" ]` / `[ -n "$KEY" ]`.
 _SHELL_TEST = re.compile(r'\[ -[zn] "\$([A-Z0-9_]+)" \]')
-# A flyctl argv array: ARGS=( … ) / ARGS+=( … ) and each FLYVAR="$SHELLVAR" pair.
+# A flyctl argv array: ARGS=( … ) / ARGS+=( … ) and each FLYVAR="$SHELLVAR"
+# (or "${SHELLVAR}") pair. The brace spelling is accepted so an argv element
+# cannot hide from the coverage guards by using it (the workflow already uses
+# it for TORTOISE_GIT_SHA).
 _ARRAY_ELEMENT = re.compile(r"ARGS\+?=\(([^)]*)\)")
-_ARRAY_PAIR = re.compile(r'([A-Z0-9_]+)="\$([A-Z0-9_]+)"')
+_ARRAY_PAIR = re.compile(r'([A-Z0-9_]+)="\$\{?([A-Z0-9_]+)\}?"')
+# The one argv pair whose value is a GitHub BUILT-IN, not an env-bound secret.
+# Exempted by name, so the parser can accept the brace spelling without the
+# exemption depending on a regex that misses it.
+_NON_SECRET_PAIRS = {("TORTOISE_GIT_SHA", "GITHUB_SHA")}
 # A step env binding to a single secret: `KEY: ${{ secrets.KEY }}`.
 _ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}")
 # Any secret interpolation at all — the #4334 hazard.
@@ -108,6 +115,11 @@ def _array_pairs(run: str) -> dict[str, str]:
         for fly_name, shell_var in _ARRAY_PAIR.findall(group):
             pairs[fly_name] = shell_var
     return pairs
+
+
+def _secret_array_pairs(run: str) -> dict[str, str]:
+    """`_array_pairs` minus the argv pairs sourced from GitHub built-ins."""
+    return {k: v for k, v in _array_pairs(run).items() if (k, v) not in _NON_SECRET_PAIRS}
 
 
 def _prop_region(text: str) -> str:
@@ -187,7 +199,7 @@ def test_secrets_set_propagation_matches_runtime_registry(workflow_text, registr
     The gate and propagation must agree with the registry — a key gated on but
     never propagated ships a deploy that extracts nothing despite a passing gate."""
     prop = _prop_region(workflow_text)
-    pairs = _array_pairs(prop)
+    pairs = _secret_array_pairs(prop)
     prop_keys = set(pairs)
     assert prop_keys, (
         'no ARGS+=(KEY="$KEY") appends found in the secrets-set provider block '
@@ -230,7 +242,7 @@ def test_gate_and_propagation_agree_with_each_other(workflow_text, registry_keys
         "runtime registry — a key gated on but never propagated (or vice "
         "versa) is a deploy hazard"
     )
-    assert set(_array_pairs(prop)) == set(registry_keys) | _PROP_EXTRA_KEYS, (
+    assert set(_secret_array_pairs(prop)) == set(registry_keys) | _PROP_EXTRA_KEYS, (
         "verify-secrets gate and secrets-set propagation reference DIFFERENT key "
         "sets — a key gated on but not propagated (or vice versa) is a deploy hazard"
     )
@@ -245,8 +257,8 @@ def test_secrets_never_interpolated_into_run_text(workflow_text):
     text — the secret must be bound in ``env:`` and expanded as ``"$VAR"``,
     whose contents are data, never re-parsed."""
     steps = _steps()
-    for name in (_VERIFY_STEP, _SET_STEP):
-        run = steps[name].get("run", "")
+    for name, step in steps.items():
+        run = step.get("run", "")
         found = _SECRET_INTERP.findall(run)
         assert not found, (
             f"{name} interpolates {found} into the run script. GitHub substitutes "
@@ -265,9 +277,77 @@ def test_every_env_bound_secret_reaches_fly(workflow_text):
     the one exemption: flyctl consumes it from the environment, never as argv."""
     step = _steps()[_SET_STEP]
     bindings = set(_env_bindings(step))
-    shell_vars = set(_array_pairs(step.get("run", "")).values())
+    shell_vars = set(_secret_array_pairs(step.get("run", "")).values())
     assert shell_vars == bindings - _NON_SYNCED, (
         "the secrets-set step's env: bindings and its flyctl array diverge — "
         f"bound-but-not-sent: {sorted(bindings - _NON_SYNCED - shell_vars)}; "
         f"sent-but-not-bound: {sorted(shell_vars - bindings)}"
     )
+
+
+def test_env_bindings_use_the_same_named_secret(workflow_text):
+    """#4334 — an env binding must read the SAME-named GitHub secret.
+
+    `_env_bindings` records only that a name is bound to *some* secret; without
+    this check a copy-paste swap (`DR_ISSUES_PAT: ${{ secrets.TELEGRAM_BOT_TOKEN }}`)
+    would reach Fly as the wrong value and pass every other guard."""
+    for step_name in (_VERIFY_STEP, _SET_STEP):
+        for env_name, secret_name in _env_bindings(_steps()[step_name]).items():
+            assert env_name == secret_name, (
+                f"{step_name}: env {env_name} is bound to secrets.{secret_name} — a "
+                f"cross-wired value reaches Fly/the gate (#4334)"
+            )
+
+
+def test_optional_fly_appends_are_n_guarded(workflow_text):
+    """#4334 — every single-key `ARGS+=(K="$K")` append stays `[ -n "$K" ]`-guarded.
+
+    The guard is what keeps an unset optional secret OUT of the argv; dropping
+    it would push `K=` to Fly and clobber any out-of-band value. The two
+    unconditional appends (the base three-key array and the Stripe pair) carry
+    multiple pairs and are deliberately exempt."""
+    run = _steps()[_SET_STEP]["run"]
+    for line in run.splitlines():
+        m = re.search(r"ARGS\+=\(([^)]*)\)", line)
+        if not m:
+            continue
+        pairs = _ARRAY_PAIR.findall(m.group(1))
+        if len(pairs) != 1:
+            continue
+        if pairs[0] in _NON_SECRET_PAIRS:
+            continue  # GITHUB_SHA is always set by GitHub — deliberately unconditional
+        _fly, shell_var = pairs[0]
+        assert f'[ -n "${shell_var}" ]' in line, (
+            f"optional append ARGS+=({pairs[0][0]}=\u0022${shell_var}\u0022) is not "
+            f'guarded by [ -n "${shell_var}" ] — an unset secret would be pushed '
+            f"to Fly as an empty value, clobbering an out-of-band value (#4334)"
+        )
+
+
+def test_flyctl_receives_the_quoted_array(workflow_text):
+    """#4334 — the CALL SITE must expand the array, quoted.
+
+    Reverting `--stage "${ARGS[@]}"` to the pre-fix `--stage $ARGS` sends only
+    element 0 of a now-array ARGS (1 of 36 vars) while the construction guards
+    stay green — the silent partial-sync class this fix exists to close."""
+    run = _steps()[_SET_STEP]["run"]
+    assert 'flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq' in run, (
+        'the secrets-set step must end on flyctl secrets set --stage "${ARGS[@]}" '
+        "--app tortoise-y4mjjq"
+    )
+    assert "--stage $ARGS" not in run, "unquoted `$ARGS` would word-split / send 1 element (#4334)"
+    assert '--stage "${ARGS[*]}"' not in run, (
+        '"${ARGS[*]}" joins every element into ONE argv word — a malformed value (#4334)'
+    )
+
+
+def test_array_pair_parser_accepts_the_brace_spelling(workflow_text):
+    """#4334 regression — the parser must not be evadable via `${VAR}`.
+
+    A brace-spelled element reading an unbound variable would otherwise be
+    invisible to every coverage guard and send an empty value to Fly."""
+    assert _array_pairs('ARGS+=(EVIL="${EVIL}")') == {"EVIL": "EVIL"}
+    # The one non-secret pair is exempted BY NAME (not by the regex missing it).
+    step = _steps()[_SET_STEP]
+    assert "GITHUB_SHA" not in set(_secret_array_pairs(step["run"]).values())
+    assert _array_pairs(step["run"]).get("TORTOISE_GIT_SHA") == "GITHUB_SHA"

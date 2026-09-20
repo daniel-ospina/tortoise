@@ -345,7 +345,9 @@ jobs:
         # zero-quote string → PriceCatalog() raised BillingConfigError →
         # checkout_price_ids {} → checkout dead in prod), and a value
         # containing `$(…)`/backticks would have EXECUTED. An expanded
-        # variable's contents are data, never re-parsed.
+        # variable's contents are data, never re-parsed. The same anti-pattern
+        # remains in other workflows (blog-write-e2e, deploy-pages,
+        # attach-tortoise-domain, e2e-live-reconcile) — tracked in #4361.
         env:
           FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
