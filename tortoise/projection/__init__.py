@@ -1594,6 +1594,32 @@ def _journal_creating_point_id(ev) -> str | None:
     return None
 
 
+def _journal_creation_writes_derived(ev) -> bool:
+    """Does replaying ``ev`` write the CONDITIONAL ``content_hash``/``embedding``?
+
+    ``_upsert_point_props`` computes those two derived fields only for a
+    NON-operator Point with truthy ``content`` — the very carve-out its own
+    return value reports. A falsy-content (or operator) creation writes
+    NEITHER, so a live node that carries derived state anyway did not receive
+    it from that record.
+
+    ``rebuild_all`` reads this to decide whether the pre-wipe snapshot proves
+    an OUT-OF-JOURNAL creation (#4263 review P2): when every journaled
+    creation of an id is derived-blind but the live node carries derived
+    state, the id existed before the journal recorded any creation of it — so
+    a revision that precedes the id's first journaled creation can have bound
+    it live, and the pre-first-creation no-op proof must not stand.
+    """
+    if not isinstance(ev, dict):
+        return False
+    p = ev.get("point")
+    if not isinstance(p, dict):
+        return False
+    if isinstance(p.get("operator"), dict):
+        return False
+    return bool(p.get("content"))
+
+
 class FalkorProjection(
     _EntityHandlers,
     _EdgeHandlers,
@@ -2512,11 +2538,15 @@ class FalkorProjection(
         # wipe+replay cycle.
         synthetic_events: list[dict] = []
         capture_failed: list[str] = []
+        # #4263 review P2: hoisted out of the ``try`` so the pre-wipe snapshot
+        # is in scope for the pass-1b chronology anchors below (the
+        # out-of-journal creation proof). A failed capture leaves it empty,
+        # exactly as the synthetic path already assumes.
+        existing_points: dict = {}
         try:
             rows = self.g.query(
                 "MATCH (n:Point) RETURN properties(n)"
             ).result_set
-            existing_points = {}
             non_str_ids = []
             for r in rows:
                 props = r[0]
@@ -2973,6 +3003,32 @@ class FalkorProjection(
             create_sources_by_id.setdefault(cid, set()).add(src)
             if src is not None:
                 first_create_seq_by_source.setdefault((cid, src), seq)
+        # #4263 review P2: register the OUT-OF-JOURNAL creation source. A
+        # node created outside the journal (a seed / raw ``_upsert``) is
+        # recorded nowhere but the pre-wipe snapshot, so a revision that
+        # precedes the id's first journaled creation could still have bound
+        # it live — the no-op proof's premise is false. Evidence: the live
+        # node carries derived state that NO journaled creation of the id can
+        # write (``_journal_creation_writes_derived``). The sentinel is
+        # ``None`` — the SAME value a synthetic/pre-wipe-snapshot event gets,
+        # so the existing cross-source clause covers this axis without a new
+        # predicate. Deliberately NOT routed through the synthetic-event path:
+        # a synthetic ``PointAdded`` would carry this snapshot's
+        # ``content_hash`` into the pass-1b tail, which re-applies it AFTER
+        # the revision and would clobber the live-valid value the revision
+        # must write.
+        derived_written_by_creation: set[str] = set()
+        for ev in events:
+            cid = _journal_creating_point_id(ev)
+            if cid is not None and _journal_creation_writes_derived(ev):
+                derived_written_by_creation.add(cid)
+        for pid, props in existing_points.items():
+            if pid in derived_written_by_creation:
+                continue
+            if (props.get("content_hash") is None
+                    and props.get("embedding") is None):
+                continue
+            create_sources_by_id.setdefault(pid, set()).add(None)
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
             t = ev.get("type")

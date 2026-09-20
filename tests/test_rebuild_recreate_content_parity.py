@@ -36,6 +36,7 @@ Run (unique graph — a shared DB lets a concurrent lane wipe ours, #4026):
 from __future__ import annotations
 
 import ast
+import enum
 import inspect
 import json
 import sys
@@ -86,6 +87,24 @@ def _oracle(tmp_path, name: str, records: list[dict], pid: str) -> dict:
     """Replay ``records`` chronologically through the live ``apply()`` path."""
     oracle = TortoiseSDK(str(tmp_path / f"{name}.db"))
     try:
+        for r in records:
+            oracle._get_proj().apply(r)
+        return oracle.get_point(pid) or {}
+    finally:
+        oracle.close()
+
+
+def _oracle_seeded(tmp_path, name: str, seed: str, records: list[dict],
+                   pid: str) -> dict:
+    """Live oracle for a GRAPH-ONLY node: seed outside the journal, then apply.
+
+    ``_upsert`` is the raw projection write a seed / migration uses — it
+    bypasses the event log, which is exactly the shape under test (#4263).
+    """
+    oracle = TortoiseSDK(str(tmp_path / f"{name}.db"))
+    try:
+        oracle._get_proj()._upsert(
+            {"id": pid, "content": seed, "status": "live", "pointKind": ""})
         for r in records:
             oracle._get_proj().apply(r)
         return oracle.get_point(pid) or {}
@@ -502,6 +521,58 @@ def test_pre_first_creation_revision_writes_no_derived(sup, tmp_path):
         "the no-op revision's embedding leaked onto the first creation")
 
 
+def test_graph_only_pre_first_creation_keeps_revision_derived(
+        sup, tmp_path):
+    """#4263 review P2 — a revision that precedes the id's first JOURNALED
+    creation still bound an OUT-OF-JOURNAL (graph-only) node live, so its
+    ``content_hash``/``embedding`` are live-valid and must survive the rebuild.
+
+    ``_upsert`` seeds the node outside the journal (a seed / migration write).
+    A falsy ``PointAdded`` later in the file then names the id, so the #548
+    synthetic snapshot is withheld (``log_point_ids`` already covers it) even
+    though the id's first journaled creation FOLLOWS the revision. The
+    pre-first-creation no-op proof therefore declared the revision a live
+    no-op and suppressed the derived the live node carried: base `2381d8f88`
+    preserved the hash (it leaked only ``content``), the pre-fix head returned
+    ``content_hash=None`` + no embedding — the indexed dedup key dropped and
+    the dense vector lost.
+
+    RED before the out-of-journal creation source is registered (#4263);
+    GREEN after.
+    """
+    events, sdk = sup
+    pid = sdk.ulid()
+    revise = _revised(sdk, pid, new_content="R")
+    falsy_reemit = _added(sdk, pid, "")
+    _write_files(events, {"events.jsonl": [revise, falsy_reemit]})
+
+    with mock.patch("tortoise.embeddings.compute_embedding",
+                    return_value=[0.1] * 384):
+        applied = _oracle_seeded(tmp_path, "oracle_graphonly", "SEED",
+                                 [revise, falsy_reemit], pid)
+        assert applied["content"] == ""
+        assert applied.get("content_hash") == content_hash("R")
+        assert applied.get("embedding") is not None
+        sdk._get_proj()._upsert(
+            {"id": pid, "content": "SEED", "status": "live",
+             "pointKind": ""})
+        _rebuild(sdk, events)
+        post = sdk.get_point(pid)
+    assert post["content"] == "", (
+        "the falsy re-emit superseded the revision's content live; rebuild "
+        "must not resurrect it")
+    _assert_parity(post, applied)
+    assert post.get("content_hash") == content_hash("R"), (
+        "the revision bound the graph-only node live — its live-valid "
+        "content_hash was suppressed after rebuild (#4263)")
+    assert post.get("embedding") is not None, (
+        "the revision bound the graph-only node live — its live-valid "
+        "embedding was suppressed after rebuild (#4263)")
+    assert post.get("content_hash") != content_hash("SEED"), (
+        "rebuild wrote the SEED's derived instead of the revision's — the "
+        "out-of-journal snapshot clobbered the journal-derived value")
+
+
 def test_pre_first_creation_keeps_derived_when_created_elsewhere(
         sup, tmp_path):
     """#4260 fix-direction guard — the no-op proof is CROSS-SOURCE, not
@@ -618,6 +689,120 @@ def test_pre_first_creation_promote_created_elsewhere_keeps_derived(
         assert post.get("embedding") == applied.get("embedding")
 
 
+def _strings_from(obj, depth: int = 0) -> set[str]:
+    """Every string reachable inside a module-level/class-level value."""
+    if isinstance(obj, str):
+        return {obj}
+    if depth > 3:
+        return set()
+    if isinstance(obj, enum.Enum):
+        out = {obj.name}
+        if isinstance(obj.value, str):
+            out.add(obj.value)
+        return out
+    if isinstance(obj, type) and issubclass(obj, enum.Enum):
+        out = set()
+        for member in obj:
+            out |= _strings_from(member, depth + 1)
+        return out
+    if isinstance(obj, dict):
+        out = set()
+        for key, value in obj.items():
+            out |= _strings_from(key, depth + 1)
+            out |= _strings_from(value, depth + 1)
+        return out
+    if isinstance(obj, (frozenset, set, tuple, list)):
+        out = set()
+        for item in obj:
+            out |= _strings_from(item, depth + 1)
+        return out
+    return set()
+
+
+def _harvest_dispatch_vocab(module, cls, instance=None) -> set[str]:
+    """FORM-AGNOSTIC candidate event-type names for ``cls.apply``'s dispatch.
+
+    Three sources, unioned:
+
+      1. EVERY string literal in ``apply()``'s source — so a type named
+         inside a union ``_A | {"X"}``, a dict, or a ``frozenset({...})``
+         call is a candidate.
+      2. Every string reachable from a MODULE-level collection (the
+         ``t in _SOME_SET`` idiom).
+      3. #4263 review P2: every string reachable from the CLASS namespaces
+         (MRO) and from each ``self.<attr>`` the dispatcher reads — the
+         ``t in self._SOME_SET`` form names its type in NO module global and
+         NO literal, so sources 1-2 missed it entirely and the completeness
+         guard could pass VACUOUSLY (a class-attribute ``_GHOST_TYPES`` naming
+         a creating event absent from the constant was not even a candidate).
+
+    Over-collection is safe BY CONSTRUCTION: a harvested string that names no
+    creating branch never reaches ``_upsert_point_props``, so it cannot enlarge
+    ``created``. Returning MORE strings can only turn a vacuous PASS into a
+    true RED — never manufacture a false one.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cls.apply)))
+    vocab: set[str] = set()
+    self_attrs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            vocab.add(node.value)
+        elif (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"):
+            self_attrs.add(node.attr)
+
+    for name, value in vars(module).items():
+        if name.startswith("__"):
+            continue
+        vocab |= _strings_from(value)
+
+    namespaces = [vars(klass) for klass in cls.__mro__]
+    if instance is not None:
+        namespaces.append(vars(instance))
+    for namespace in namespaces:
+        for name, value in namespace.items():
+            if name.startswith("__"):
+                continue
+            vocab |= _strings_from(value)
+    # A `self.<attr>` bound on the instance (`self._SOME_SET = ...` in
+    # `__init__`) or by a descriptor is reached by name here.
+    for attr in self_attrs:
+        for namespace in namespaces:
+            if attr in namespace:
+                vocab |= _strings_from(namespace[attr])
+                break
+        if instance is not None and hasattr(instance, attr):
+            vocab |= _strings_from(getattr(instance, attr))
+    return vocab
+
+
+def _detect_node_creating_types(module, cls, proj):
+    """(harvested vocab, event types whose replay actually CREATES a node)."""
+    from tortoise.projection import FalkorProjection
+
+    vocab = _harvest_dispatch_vocab(module, cls, proj)
+    created: set[str] = set()
+    current: dict[str, str] = {}
+    real = FalkorProjection._upsert_point_props
+
+    def _spy(self, p):
+        created.add(current["type"])
+        return real(self, p)
+
+    with mock.patch.object(cls, "_upsert_point_props", _spy):
+        for type_ in sorted(vocab):
+            pid = f"complete-{type_}"
+            current["type"] = type_
+            proj.apply({
+                "type": type_, "id": pid,
+                "point": {"id": pid, "content": "x", "status": "live"},
+                "new_content": "y", "merge_ids": [], "op": "delete",
+                "projection_version": 2,
+            })
+    return vocab, created
+
+
 def test_journal_creating_event_types_is_complete_against_dispatch(sup):
     """#4260 review P2 — the node-creating set is enumerated from the
     dispatcher in CODE, never a hand-picked pair.
@@ -633,12 +818,16 @@ def test_journal_creating_event_types_is_complete_against_dispatch(sup):
 
     The candidate set is FORM-AGNOSTIC: EVERY string literal in ``apply()``'s
     source (so a type named inside a union ``_A | {"X"}``, a dict, or a
-    ``frozenset({...})`` call is a candidate) plus every string in a
-    module-level collection (the ``t in _SOME_SET`` idiom). Parsing the
-    comparison SHAPE instead was found to pass vacuously twice — a regex
-    missed ``t in _SOME_SET`` (review round 1) and an AST walk of
+    ``frozenset({...})`` call is a candidate), plus every string in a
+    module-level collection (the ``t in _SOME_SET`` idiom), plus (#4263 review
+    P2) every string in the CLASS namespace and behind each ``self.<attr>``
+    the dispatcher reads (the ``t in self._SOME_SET`` form). Parsing the
+    comparison SHAPE instead was found to pass vacuously three times — a regex
+    missed ``t in _SOME_SET`` (review round 1), an AST walk of
     ``t ==`` / ``t in <Name>`` missed a union operand ``_A | {"X"}`` (review
-    round 2). Harvesting literals removes the form dependency.
+    round 2), and harvesting only literals + module globals missed a
+    class-level collection (review round 3, #4263). Harvesting removes the
+    form dependency.
     """
     from tortoise.projection import (_JOURNAL_CREATING_EVENT_TYPES,
                                      FalkorProjection)
@@ -647,59 +836,69 @@ def test_journal_creating_event_types_is_complete_against_dispatch(sup):
     proj = sdk._get_proj()
     module = sys.modules[FalkorProjection.__module__]
 
-    vocab: set[str] = set()
-    for node in ast.walk(ast.parse(
-            textwrap.dedent(inspect.getsource(FalkorProjection.apply)))):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            vocab.add(node.value)
-
-    def _strings_from(obj, depth: int = 0) -> set[str]:
-        if isinstance(obj, str):
-            return {obj}
-        if depth > 3:
-            return set()
-        if isinstance(obj, dict):
-            out: set[str] = set()
-            for key, value in obj.items():
-                out |= _strings_from(key, depth + 1)
-                out |= _strings_from(value, depth + 1)
-            return out
-        if isinstance(obj, (frozenset, set, tuple, list)):
-            out = set()
-            for item in obj:
-                out |= _strings_from(item, depth + 1)
-            return out
-        return set()
-
-    for name, value in vars(module).items():
-        if name.startswith("__"):
-            continue
-        vocab |= _strings_from(value)
+    vocab, created = _detect_node_creating_types(module, FalkorProjection,
+                                                 proj)
     assert len(vocab) >= 15, (
         "apply() dispatch introspection found too few event types — the "
         "extraction is stale, not the vocabulary: %r" % (sorted(vocab),))
-
-    created: set[str] = set()
-    current: dict[str, str] = {}
-    real = FalkorProjection._upsert_point_props
-
-    def _spy(self, p):
-        created.add(current["type"])
-        return real(self, p)
-
-    with mock.patch.object(FalkorProjection, "_upsert_point_props", _spy):
-        for type_ in sorted(vocab):
-            pid = f"complete-{type_}"
-            current["type"] = type_
-            proj.apply({
-                "type": type_, "id": pid,
-                "point": {"id": pid, "content": "x", "status": "live"},
-                "new_content": "y", "merge_ids": [], "op": "delete",
-                "projection_version": 2,
-            })
-
     assert created == set(_JOURNAL_CREATING_EVENT_TYPES), (
         "_JOURNAL_CREATING_EVENT_TYPES no longer matches the node-creating "
         "records in apply()'s dispatch — a creating type was added or removed "
         "without updating the chronology anchors: dispatcher=%r constant=%r"
         % (sorted(created), sorted(_JOURNAL_CREATING_EVENT_TYPES)))
+
+
+def test_drift_guard_catches_class_attribute_dispatch_collection(sup):
+    """#4263 review P2 — the dispatch harvest must see a creating type named
+    ONLY in a class-level collection.
+
+    Injected shape (the reviewer's exact repro): a ``_GHOST_TYPES`` class
+    attribute plus ``elif t in self._GHOST_TYPES: ... self._upsert(p)``. The
+    type name is a module global to no one and a literal in no branch
+    comparison, so before the harvest covered class namespaces it never even
+    entered the candidate set — the completeness guard PASSED although
+    ``GhostAdded2`` is a node-creating record absent from the constant,
+    exactly the future regression the guard's docstring says will "fail
+    HERE".
+
+    RED before the harvest fix; GREEN after. The two controls that already
+    REDded (the same type as a literal, and widening the constant with a
+    non-creating type) are unaffected by this change.
+    """
+    from tortoise.projection import (_JOURNAL_CREATING_EVENT_TYPES,
+                                     FalkorProjection)
+
+    _, sdk = sup
+    proj = sdk._get_proj()
+    module = sys.modules[FalkorProjection.__module__]
+
+    class _GhostProjection(FalkorProjection):
+        _GHOST_TYPES = frozenset({"GhostAdded2"})
+
+        def apply(self, ev):
+            if (isinstance(ev, dict)
+                    and ev.get("type") in self._GHOST_TYPES):
+                p = ev.get("point")
+                if isinstance(p, dict) and p.get("id"):
+                    self._upsert(p)
+                return
+            return super().apply(ev)
+
+    original = proj.__class__
+    proj.__class__ = _GhostProjection
+    try:
+        vocab, created = _detect_node_creating_types(
+            module, _GhostProjection, proj)
+    finally:
+        proj.__class__ = original
+
+    assert "GhostAdded2" in vocab, (
+        "the harvest missed a creating event type named only in a CLASS "
+        "attribute — the completeness guard is not form-agnostic (#4263)")
+    assert "GhostAdded2" in created, (
+        "the guard applied the harvested type but it never reached "
+        "_upsert_point_props — the injection is stale, not the harvest")
+    assert created != set(_JOURNAL_CREATING_EVENT_TYPES), (
+        "the guard would still PASS with a class-attribute creating type "
+        "absent from the constant (#4263)")
+
