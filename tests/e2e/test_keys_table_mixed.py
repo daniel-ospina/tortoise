@@ -619,6 +619,133 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
     assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
 
 
+def test_rotate_plaintext_less_mint_latches_no_reveal(page: Page) -> None:
+    """#4342: a 2xx rotate mint that carries NO plaintext must not latch an
+    empty reveal. `regenerateKey` mints the replacement, revokes the OLD key,
+    then used to `setRotatedKey({plaintext: … || ''})` — unconditionally
+    truthy, so the reveal `{rotatedKey && (…)}` rendered an empty
+    `<code class="key-value">` box and its copy ran `writeText('')` (a silent
+    no-op) before clearing the only view. The old key is already revoked by
+    then, so the failure must be surfaced — never a blank box whose copy
+    writes the empty string.
+
+    Stateful harness (mirrors test_rotate_durable_key_replaces_in_place_without
+    _holding): the mint appends the replacement row and answers 2xx WITHOUT a
+    key/api_key; the DELETE stamps the old row revoked. A clipboard-write spy
+    pins the "no clipboard write" claim at the API seam as a guard against an
+    auto-write regression — the primary teeth are the ABSENT reveal/copy
+    controls (there is no control left to click) and the truthful banner."""
+    keys = _mixed_keys_fixture()
+    session_mints: list = []
+    key_authed: list = []
+    order: list = []
+
+    def handle(route):
+        url = route.request.url
+        if _is_bff_api(url):
+            path = _bff_path(url)
+            method = route.request.method
+            auth = (route.request.headers.get("authorization") or "")
+            if auth.startswith("Bearer tt_"):
+                key_authed.append(url)
+            if path.endswith("/v1/session/key") and method == "POST":
+                session_mints.append(route.request.post_data or "")
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/team/keys") and method == "POST":
+                order.append("mint")
+                row = _key_row("key_rot_4342", ROT_NEW_PREFIX, "residue row",
+                               created_via="provisioned")
+                keys.append(row)
+                # 2xx with NO plaintext — the secret is unrecoverable (#4342).
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"id": row["id"],
+                                               "key_prefix": row["key_prefix"]}))
+                return
+            if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
+                order.append("delete")
+                for k in keys:
+                    if k["id"] == ROT_HELD_ID:
+                        k["revoked_at"] = "2026-08-03T12:00:00.000Z"
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"revoked": True, "key_id": ROT_HELD_ID}))
+                return
+            if path.endswith("/v1/organizations") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([TEAM_ROW]))
+                return
+            if path.endswith("/v1/team/keys") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"keys": keys}))
+                return
+            if path.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"sessions": []}))
+                return
+            if path.endswith("/backups"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"backups": []}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(TEAM_ROW))
+                return
+            route.fulfill(status=401, content_type="application/json",
+                          body=json.dumps({"detail": "unauthorized"}))
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    _seed_local_session_cookie(page, "u-rot4342")
+    # #4342: record every clipboard write, so the "no clipboard write" claim is
+    # asserted against the real API rather than inferred from the DOM.
+    page.add_init_script(
+        "window.__clipWrites = [];"
+        "if (navigator.clipboard && navigator.clipboard.writeText) {"
+        "const _wt = navigator.clipboard.writeText.bind(navigator.clipboard);"
+        "navigator.clipboard.writeText = (t) => {"
+        "window.__clipWrites.push(String(t)); return _wt(t); };}"
+    )
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{LEGACY_RESIDUE}');")
+
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("tbody tr")).to_have_count(8, timeout=15_000)
+
+    row3 = page.locator("tbody tr", has_text=RESIDUE_PREFIX)
+    page.on("dialog", lambda d: d.accept())
+    row3.locator(".key-rotate").click()
+
+    # The rotate ran to completion (mint, then revoke) — but no reveal latched.
+    expect(row3.locator("span.revoked")).to_contain_text("revoked", timeout=15_000)
+    assert order == ["mint", "delete"], f"mint-before-revoke ordering: {order}"
+    # NO reveal, NO empty `.key-value` square, NO clipboard write.
+    expect(page.locator(".new-key")).to_have_count(0)
+    expect(page.locator("code.key-value")).to_have_count(0)
+    writes = page.evaluate("window.__clipWrites")
+    assert writes == [], f"#4342: the empty reveal must never write to the clipboard: {writes}"
+    # The failure is surfaced truthfully — naming the already-revoked old key
+    # (the rotate-specific remedy, distinct from the create path's).
+    banner = page.locator(".error.banner")
+    expect(banner).to_contain_text("has already been revoked", timeout=10_000)
+    expect(banner).to_contain_text("cannot be shown")
+    # The replacement row exists (the failure path still refreshes the table).
+    expect(page.locator("tbody tr", has_text=ROT_NEW_PREFIX)).to_have_count(1, timeout=10_000)
+    # Unchanged invariants: session-only, no key-authed request.
+    assert session_mints == [], f"zero-mint tripwire: {session_mints}"
+    assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
+
+
 def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
     """#2167 F2 (the plan's step-10 two-team CI case — structurally invisible
     to a single-team suite): with ZERO keys (no stored durable, no mint), a

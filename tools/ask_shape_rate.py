@@ -106,6 +106,7 @@ if _REPO_ROOT not in sys.path:
 # The ONE capture-shaped seeder (#3914) plus the shared leg primitives. Imported,
 # never mirrored: a local copy is exactly how the shape drifts.
 from tools.ask_spotcheck import (  # noqa: E402
+    SEED_TURNS_EMBEDDED_BY_DEFAULT,
     _gold_sessions_covered,
     _seed_memory,
     _to_iso_date,
@@ -808,6 +809,9 @@ def evaluate_question(sdk, question: dict, *, reader_mode: str,
         "gold_answer_span_words": (len(gold_span.split()) if gold_span else 0),
         "ctx_recall": _gold_sessions_covered(result.get("evidence") or "",
                                              question),
+        # W7A: the assembled context size (tokens of the ~8k ask-lane cap) —
+        # reported alongside, never a leg.
+        "context_tokens": result.get("context_tokens"),
         "retrieval_degraded": result.get("retrieval_degraded"),
         "pass": bool(l1 and l2 and l3),
     }
@@ -925,6 +929,36 @@ def _pn(records: list[dict], key: str) -> dict:
     hits = sum(1 for r in records if r.get(key))
     return {"passed": hits, "n": len(records),
             "rate": (hits / len(records)) if records else 0.0}
+
+
+def _assembly_budget(records: list[dict]) -> dict:
+    """W7A: the assembly budget the lane actually FILLED — median tokens of
+    the ask-lane ``context_token_cap`` (~8000) across the live questions.
+
+    Reported alongside, never a leg. Read from the lane's own
+    ``context_tokens`` (post-assembly), so it measures the real assembled
+    context the reader saw — not the retrieval pool.
+
+    Both median fields report the UPPER-MIDDLE element (the upper of the two
+    middles for an even n), so they can never disagree.
+    """
+    from tortoise.retrieval import resolve_ask_retrieval_caps
+    cap = resolve_ask_retrieval_caps()["context_token_cap"]
+    toks = [r.get("context_tokens") for r in records]
+    toks = [t for t in toks if isinstance(t, int)]
+    if not toks:
+        return {"context_token_cap": cap, "n": 0, "median_tokens": None,
+                "median_filled_pct": None, "min_pct": None, "max_pct": None}
+    pcts = sorted(round(100.0 * t / cap, 1) for t in toks)
+    # ONE statistic, two renderings: both median fields read the SAME
+    # upper-middle element, so ``100 * median_tokens / cap`` always equals
+    # ``median_filled_pct``. (Averaging only the percentage made the two
+    # fields disagree for an even n.)
+    med_tokens = sorted(toks)[len(toks) // 2]
+    return {"context_token_cap": cap, "n": len(toks),
+            "median_tokens": med_tokens,
+            "median_filled_pct": round(100.0 * med_tokens / cap, 1),
+            "min_pct": pcts[0], "max_pct": pcts[-1]}
 
 
 def _leg_map(records: list[dict]) -> dict:
@@ -1224,10 +1258,29 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         "instrument_sha256": _sha256_file(os.path.abspath(__file__)),
         "generated_at": datetime.now(UTC).isoformat(),
         "fixture": fixture_shape,
+        # W7A: NAME the seeding mode this receipt was produced in. Derived from
+        # the seeder's OWN default (never restated by hand), because the D3
+        # numbers are only comparable WITHIN one mode: the embedded seeder
+        # models the post-#4194 product (dense leg live), the un-embedded one
+        # models #4197's backlog and blinds the dense leg. A receipt that does
+        # not name its seeding mode is not evidence.
+        "seeding_mode": {
+            "mode": ("embedded" if SEED_TURNS_EMBEDDED_BY_DEFAULT
+                     else "un-embedded-backlog"),
+            "seeder": "tools.ask_spotcheck._seed_memory",
+            "embed": SEED_TURNS_EMBEDDED_BY_DEFAULT,
+            "note": ("embedded = turn Points carry the product's own vector "
+                     "via encode_batch_for_store/required_embedding_dim "
+                     "(#4194/#4304); un-embedded-backlog = #4197's pre-#4194 "
+                     "store, where the dense leg is inert"),
+        },
         # Which store the rate was measured against. The docker selector
         # (TORTOISE_ASK_SHAPE_DB_URI) is a substrate change the SDK branches
         # on, so it is recorded rather than implied by the command line —
         # REDACTED (the URI carries a password; the receipt is committed).
+        # Built ONLY through _substrate_label -> _parse_substrate, the single
+        # guarded parser (#4105 rounds 2-4); an inline mask here is the
+        # credential leak returning.
         "substrate": _substrate_label(),
         "decision_rule": {
             "shape_rate_min": SHAPE_RATE_ADOPT,
@@ -1467,7 +1520,9 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                   f"L3={int(bool(rec.get('l3_grounding')))} "
                   f"pass={int(bool(rec.get('pass')))} "
                   f"abs={int(bool(rec.get('abstained')))} "
+                  f"deg={int(bool(rec.get('retrieval_degraded')))} "
                   f"ctx={rec.get('ctx_recall')} "
+                  f"tokens={rec.get('context_tokens')} "
                   f"prov={rec.get('provider')} "
                   f"{rec.get('duration_ms')}ms "
                   f"{rec.get('error') or ''}")
@@ -1481,6 +1536,7 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             "provenance_pn": _pn(live, "l2_provenance"),
             "grounding_pn": _pn(live, "l3_grounding"),
             "ctx_recall_pn": _pn(live, "ctx_recall"),
+            "assembly_budget": _assembly_budget(live),
             "retrieval_degraded_pn": _pn(live, "retrieval_degraded"),
             "_abs_marker_agreement": [
                 {"question_id": r["question_id"],
@@ -1524,11 +1580,21 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
              "answer — a hedged answer whose phrasing is outside that "
              "vocabulary is not flagged. The receipt carries every "
              "answer_head so the field can be audited."),
-            ("The capture-shaped seed writes turn Points with NO stored "
-             "embedding (capture's turn store writes none either), so the "
-             "dense leg is inert (`no_embeddings`) and this rate is the "
-             "SPARSE (FTS+RRF) lane's answer-shape rate.") if degraded
-             else "no retrieval_degraded question observed",
+            (f"retrieval_degraded fired on {len(degraded)} question(s) in "
+             "seeding mode "
+             + ("'embedded': " if SEED_TURNS_EMBEDDED_BY_DEFAULT
+                else "'un-embedded-backlog': ")
+             + "this receipt records only the BOOLEAN `retrieval_degraded` — "
+             "it does NOT carry the leg reason, so a degraded read here is "
+             "NOT by itself evidence of a missing vector: in embedded mode "
+             "the seeder writes the product's own vector by default (#4194). "
+             "The reason taxonomy (`no_embeddings`/`no_embedder`/"
+             "`encode_failed`/`timeout`/`breaker_open`/`query_failed`/"
+             "`index_missing`) is visible in a "
+             "leg-trace diagnostic, e.g. docs/runbook/"
+             "w7a_gold_rank_diagnostic.py."
+             ) if degraded
+            else "no retrieval_degraded question observed",
             ("The reader is deepseek/deepseek-v4-flash at temperature 0, "
              "max_tokens 500. The historical 0.90 (2026-09-04) used a "
              "qwen3.8-max reader + gpt-4o judge — a different reader AND a "

@@ -75,12 +75,14 @@ from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     PROBE_HARD_TIMEOUT,
     PROBE_STALE_AFTER,
+    ControlPlaneOffloadError,
     HealthProbe,
     event_retention_interval,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
+    run_control_plane_call,
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
@@ -3264,7 +3266,15 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         update_last_used,
     )
     try:
-        org = resolve_api_key(get_control_plane(), token)
+        # #3498: the key resolution is 2-3 sequential PostgREST round-trips
+        # (api_keys + teams rung + the last_used_at PATCH) and is SYNCHRONOUS
+        # by construction — off the loop, or one slow dependency call delays
+        # every request in the process (including /health). The unit of
+        # offload is the RESOLUTION, not each round-trip: one thread hop keeps
+        # the ladder's ordering intact inside one worker.
+        org = await _cp_offload(
+            lambda: resolve_api_key(get_control_plane(), token),
+            op="resolve_api_key")
         if org is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
@@ -3283,7 +3293,13 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # (telemetry must never gate auth). Membership-only resolutions have
         # no api_keys row (key_id=None) → no write.
         if org.get("key_id"):
-            update_last_used(get_control_plane(), org["key_id"])
+            # #3498 review P1: best-effort by contract — an OFFLOAD failure
+            # (pool saturated / bound missed) must NOT become a new way for
+            # telemetry to gate auth. The helper already swallows its own
+            # transport errors; best_effort swallows the seam's too.
+            await _cp_offload(
+                lambda: update_last_used(get_control_plane(), org["key_id"]),
+                op="update_last_used", best_effort=True)
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
@@ -3358,8 +3374,8 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
 # the client tripwire (review-guarded, not test-provable by this file).
 
 
-def _session_pinned_org(cp: object, user_id: str, pinned: str | None, *,
-                         memberships: list[dict] | None = None) -> str | None:
+def _session_pinned_org(pinned: str | None, *,
+                        memberships: list[dict]) -> str | None:
     """#2230/#2299: membership-gate a truthy ?org_id= pin (session lane).
 
     A truthy pin must be one of the session user's ACTIVE memberships, else
@@ -3378,27 +3394,17 @@ def _session_pinned_org(cp: object, user_id: str, pinned: str | None, *,
     caller's intrinsic-org default governs — see the #2230 divergence note
     in toggle_api_key_enabled's docstring).
 
-    memberships: optional precomputed user_memberships rows. The DI seam
-    (_session_user_org) and the dashboard-login lane pass their list (they
-    queried it anyway for the empty-check + memberships[0] default — avoids
-    a second control-plane query); the toggle-PATCH lane omits it and the
-    helper queries lazily (only paid when a pin is actually present).
+    memberships: REQUIRED precomputed user_memberships rows. #3498: this used
+    to read ``user_memberships`` LAZILY when a caller omitted the list — a
+    SYNCHRONOUS control-plane call on the event loop, reachable from any
+    session handler that passed a pin. The lazy read is gone; every caller
+    must resolve the rows off-loop (``_cp_offload``) FIRST and pass them, so
+    the gate is a pure in-memory predicate and cannot re-introduce the block.
+    The gate is only consulted when ``pinned`` is truthy, so a caller with no
+    pin may pass an empty list.
     """
     if not pinned:
         return None
-    if memberships is None:
-        from tortoise.supabase_control import user_memberships
-
-        try:
-            memberships = user_memberships(cp, user_id)
-        except RuntimeError:
-            # #1719/#2299: the lazy membership read is a control-plane call —
-            # an outage/schema-cache failure degrades to the repo-standard
-            # 503 control_plane_unavailable (the mint-path map), never a raw
-            # 500 from the global handler. Only this lazy read is wrapped;
-            # the precomputed-membership callers (DI seam) run their own
-            # earlier read — pre-existing, left as-is.
-            raise _control_plane_unavailable() from None
     if pinned not in {m["org_id"] for m in memberships}:
         raise HTTPException(status_code=403, detail="No membership in team")
     return pinned
@@ -3449,7 +3455,12 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     if not is_supabase_enabled():
         raise HTTPException(status_code=401, detail="Session auth is hosted-mode only")
     cp = get_control_plane()
-    memberships = user_memberships(cp, user["user_id"])
+    # #3498: every control-plane read in this DI seam (reached by ~33
+    # session endpoints) runs OFF the loop. The membership read is sequential
+    # and dependent (empty-check → pin gate → the orgs ladder), so the unit of
+    # offload is the RESOLUTION.
+    memberships = await _cp_offload(
+        lambda: user_memberships(cp, user["user_id"]), op="user_memberships")
     if not memberships:
         raise HTTPException(status_code=403, detail="No team membership")
     # #1148 review P1 (gate-closing) + #2299 (consolidation): the session
@@ -3463,7 +3474,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # pin resolves through one implementation. The default (memberships[0])
     # is always a membership, so only a bad PIN can raise here.
     org_id = _session_pinned_org(
-        cp, user["user_id"], request.query_params.get("org_id"),
+        request.query_params.get("org_id"),
         memberships=memberships) or memberships[0]["org_id"]
     from tortoise.supabase_control import (
         _ORG_ADDITIVE_0015_TIER,
@@ -3474,19 +3485,21 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
     )
-    row = _orgs_row_fail_soft(
-        cp, org_id, select=_QUOTA_SELECT,
-        # #1832: the FULL additive ladder (newest migration tier dropped
-        # FIRST — 2040 marker, then import tier), same as resolve_api_key /
-        # recover_team_key. The #1230 import ledger + points-cap columns
-        # (last_import_sha256/max_points, migration 20260817000001) ride
-        # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
-        # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
-        # /v1/sessions, /v1/onboarding/state.
-        additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                         _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
-                         _ORG_ADDITIVE_0015_TIER,
-                         _ORG_ADDITIVE_BILLING_TIER])
+    row = await _cp_offload(
+        lambda: _orgs_row_fail_soft(
+            cp, org_id, select=_QUOTA_SELECT,
+            # #1832: the FULL additive ladder (newest migration tier dropped
+            # FIRST — 2040 marker, then import tier), same as resolve_api_key /
+            # recover_team_key. The #1230 import ledger + points-cap columns
+            # (last_import_sha256/max_points, migration 20260817000001) ride
+            # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
+            # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
+            # /v1/sessions, /v1/onboarding/state.
+            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                            _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
+                            _ORG_ADDITIVE_0015_TIER,
+                            _ORG_ADDITIVE_BILLING_TIER]),
+        op="orgs_row_fail_soft")
     if row is None:
         raise HTTPException(status_code=403, detail="Organization not found")
     # #1828 review P2: a suspended org must 403 on SESSION-authed
@@ -3516,7 +3529,8 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # default — it must never pass a bare None, because a PRESENT-and-None
     # limit means UNLIMITED to the quota gate (enforce_org_limit) and would
     # fail OPEN.
-    _gate_limits = _org_node_sync_limits(org_id)
+    _gate_limits = await _cp_offload(
+        lambda: _org_node_sync_limits(org_id), op="org_node_limits")
     org = {
         "org_id": org_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
@@ -4587,6 +4601,43 @@ def _control_plane_unavailable() -> HTTPException:
             "message": "Sign-in is temporarily unavailable — try again in a moment.",
         },
     )
+
+
+async def _cp_offload(fn, *, op: str, best_effort: bool = False):
+    """#3498: run ONE blocking control-plane helper off the event loop.
+
+    Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
+    an AUTH-CRITICAL call it owns the FAIL-CLOSED ERROR MAPPING: an offload
+    that misses its wait bound — or a saturated worker pool — becomes the
+    repo-standard 503 ``control_plane_unavailable`` the client already renders,
+    never a hang and never a silent pass-through. Domain errors raised by the
+    helper itself propagate UNCHANGED, so each caller's existing error mapping
+    is preserved (e.g. ``_get_current_org_supabase`` still raises a 500 ``Auth
+    error`` on an unexpected helper failure — the seam changes only WHERE the
+    call runs, not what its failure means).
+
+    ``best_effort=True`` is for calls whose CONTRACT is "this must never gate
+    the request path": an OFFLOAD failure (bound missed / pool saturated) is
+    logged and swallowed. Without it, routing a documented never-raise
+    telemetry write through the fail-closed seam would give telemetry a new way
+    to fail auth or an OAuth redirect. Only the OFFLOAD failure is swallowed —
+    an exception from the helper itself (e.g. the strict-mode
+    ``UnregisteredTelemetryKey``) still propagates.
+
+    The Auth/REST lane is the blast radius the issue names: a regression here
+    is a total auth outage, so this seam is deliberately the ONLY new thing
+    callers touch, and every routed site is covered by a behavioural test.
+    """
+    try:
+        return await run_control_plane_call(
+            fn, op=op, pool="telemetry" if best_effort else "auth")
+    except ControlPlaneOffloadError as exc:
+        if best_effort:
+            logging.getLogger("tortoise.api").warning(
+                "control-plane offload %r failed (best-effort, swallowed): %s",
+                op, exc)
+            return None
+        raise _control_plane_unavailable() from None
 
 
 def _dashboard_key_login_reason(org: dict) -> str | None:
@@ -5673,7 +5724,13 @@ async def _session_login_exchange(
 
     # Post-verify membership backstop (TOCTOU: creator removed mid-mint).
     try:
-        still_member = membership_for_user_org(cp, target, org_id) is not None
+        # #3498: blocking PostgREST read — off the loop. A missed bound/pool
+        # saturation maps to the repo-standard 503 inside _cp_offload; a
+        # helper RuntimeError keeps this lane's 503 mapping.
+        _membership = await _cp_offload(
+            lambda: membership_for_user_org(cp, target, org_id),
+            op="membership_for_user_org")
+        still_member = _membership is not None
     except RuntimeError:
         raise _control_plane_unavailable() from None
     if not still_member:
@@ -6005,7 +6062,9 @@ async def register_user(request: Request, response: Response):
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
-            set_dashboard_key_login(cp, org_id, True)
+            await _cp_offload(
+                lambda: set_dashboard_key_login(cp, org_id, True),
+                op="set_dashboard_key_login")
         except Exception as _provision_err:
             try:  # noqa: SIM105
                 _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name).delete()
@@ -6727,7 +6786,8 @@ async def send_onboarding_offer_email_endpoint(request: Request):
         return {"status": "skipped", "reason": "registry-mode"}
 
     try:
-        org = org_by_id(get_control_plane(), org_id)
+        org = await _cp_offload(
+            lambda: org_by_id(get_control_plane(), org_id), op="org_by_id")
         if org is None:
             _logger.warning("onboarding email: skipped (unknown team %s)",
                             org_id)
@@ -7581,7 +7641,9 @@ async def revoke_api_key(key_id: str, request: Request, org: dict = Depends(get_
     await _require_owner_admin_if_session(org)
     if is_supabase_enabled():
         try:
-            row = api_key_by_id(get_control_plane(), key_id)
+            row = await _cp_offload(
+                lambda: api_key_by_id(get_control_plane(), key_id),
+                op="api_key_by_id")
             if row is None:
                 raise HTTPException(status_code=404, detail="API key not found")
             # #2299: consolidated fail-closed — the DI-resolved org (pinned
@@ -7670,7 +7732,9 @@ async def toggle_dashboard_login(
     )
     if is_supabase_enabled():
         cp = get_control_plane()
-        memberships = user_memberships(cp, user["user_id"])
+        # #3498: membership read + the flag write are blocking PostgREST calls.
+        memberships = await _cp_offload(
+            lambda: user_memberships(cp, user["user_id"]), op="user_memberships")
         if not memberships:
             raise HTTPException(status_code=403, detail="No team membership")
         if org_id is None:
@@ -7681,12 +7745,13 @@ async def toggle_dashboard_login(
         # BEFORE the role gate — no org-state/key existence oracle. A
         # member-but-not-owner/admin pin still 403s at _require_owner_admin
         # below (the role gate is the pin's second enforcement layer).
-        _session_pinned_org(cp, user["user_id"], org_id,
-                             memberships=memberships)
+        _session_pinned_org(org_id, memberships=memberships)
         # verify this user is owner/admin of that org
         await _require_owner_admin(user["user_id"], org_id)
         from tortoise.supabase_control import set_dashboard_key_login as _set_flag
-        _set_flag(cp, org_id, body.enabled)
+        await _cp_offload(
+            lambda: _set_flag(cp, org_id, body.enabled),
+            op="set_dashboard_key_login")
         return {"org_id": org_id, "dashboard_key_login": body.enabled}
     # Registry mode: operators control access directly; flag is a no-op
     # (always true). Return success so the UI doesn't error.
@@ -7749,6 +7814,7 @@ async def toggle_api_key_enabled(
         api_key_by_id,
         get_control_plane,
         is_supabase_enabled,
+        user_memberships,
     )
     from tortoise.supabase_control import (
         set_api_key_enabled as _sb_set_enabled,
@@ -7776,9 +7842,24 @@ async def toggle_api_key_enabled(
         # (the deliberate #2230 divergence from DELETE's memberships[0]
         # default — see the function docstring). Registry lane below is
         # untouched (selfhost keys are org-scoped by the key itself).
-        pinned = _session_pinned_org(
-            cp, user["user_id"], request.query_params.get("org_id"))
-        row = api_key_by_id(cp, key_id)
+        pinned_param = request.query_params.get("org_id")
+        # #3498: the pin gate used to read memberships LAZILY inside
+        # _session_pinned_org — a synchronous control-plane read on the loop.
+        # Resolve them OFF-loop here (only paid when a pin is actually present,
+        # preserving the pre-#3498 cost shape) and keep the gate a pure
+        # in-memory predicate. A control-plane outage keeps the repo-standard
+        # 503 the lazy read mapped (#1719/#2299), not a raw 500.
+        memberships: list[dict] = []
+        if pinned_param:
+            try:
+                memberships = await _cp_offload(
+                    lambda: user_memberships(cp, user["user_id"]),
+                    op="user_memberships")
+            except RuntimeError:
+                raise _control_plane_unavailable() from None
+        pinned = _session_pinned_org(pinned_param, memberships=memberships)
+        row = await _cp_offload(
+            lambda: api_key_by_id(cp, key_id), op="api_key_by_id")
         if row is None:
             raise HTTPException(status_code=404, detail="API key not found")
         org_id = row.get("org_id")
@@ -7826,16 +7907,22 @@ async def toggle_api_key_enabled(
         # Explicit null for enabled is treated as absent (leave untouched) —
         # `None is not False` would silently RE-ENABLE a disabled key.
         if "enabled" in body.model_fields_set and body.enabled is not None:
-            _sb_set_enabled(cp, key_id, body.enabled)
+            await _cp_offload(
+                lambda: _sb_set_enabled(cp, key_id, body.enabled),
+                op="set_api_key_enabled")
             result["enabled"] = body.enabled
         # model_fields_set distinguishes explicit null (clear label) from
         # field-absent (don't touch) — JSON null must clear, not skip.
         if "name" in body.model_fields_set:
             cleaned = _clean_key_label(body.name)
-            _sb_set_name(cp, key_id, cleaned)
+            await _cp_offload(
+                lambda: _sb_set_name(cp, key_id, cleaned),
+                op="set_api_key_name")
             result["name"] = cleaned
         if "scopes" in body.model_fields_set:
-            _sb_set_scopes(cp, key_id, body.scopes or [])
+            await _cp_offload(
+                lambda: _sb_set_scopes(cp, key_id, body.scopes or []),
+                op="set_api_key_scopes")
             result["scopes"] = body.scopes or []
         return result
     # Registry mode (selfhost): no enabled column — enabled is a no-op echo
@@ -8593,9 +8680,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
     # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
     # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
-    # since #3914. It deliberately omits Source/extraction and — until
-    # #4197's backfill decision — the embedding, so it keeps modelling the
-    # un-backfilled / no-embedder store the shipping ask lane still reads.
+    # since #3914. It omits Source/extraction, but since W7A it EMBEDS every
+    # turn BY DEFAULT through the shared store seam (#4194/#4304) and retains
+    # `embed=False` for #4197's un-backfilled backlog.
     # #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
@@ -11067,7 +11154,10 @@ async def _user_memberships(user_id: str) -> list[dict]:
         user_memberships as _sb_memberships,
     )
     if is_supabase_enabled():
-        return _sb_memberships(get_control_plane(), user_id)
+        # #3498: the Supabase lane is a blocking PostgREST read — off the loop.
+        return await _cp_offload(
+            lambda: _sb_memberships(get_control_plane(), user_id),
+            op="user_memberships")
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -11093,7 +11183,12 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
         membership_for_user_org as _sb_membership,
     )
     if is_supabase_enabled():
-        return _sb_membership(get_control_plane(), user_id, org_id)
+        # #3498: blocking PostgREST read — off the loop. This seam is reached
+        # by every membership-gated session endpoint; the design's §B names it
+        # (`_membership_team`) as one of the ~six auth/REST seams.
+        return await _cp_offload(
+            lambda: _sb_membership(get_control_plane(), user_id, org_id),
+            op="membership_for_user_org")
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
@@ -11119,7 +11214,10 @@ async def _org_node(org_id: str) -> dict | None:
         org_by_id as _sb_org,
     )
     if is_supabase_enabled():
-        return _sb_org(get_control_plane(), org_id)
+        # #3498: blocking PostgREST read — off the loop (reached by ~10 session
+        # endpoints, and by _require_owner_admin's suspension-stamp check).
+        return await _cp_offload(
+            lambda: _sb_org(get_control_plane(), org_id), op="org_by_id")
     sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -13008,7 +13106,9 @@ async def _require_owner_admin(user_id: str, org_id: str) -> dict:
             # dashboard-login / create / revoke — all inherit 503 parity.
             # Non-outage exceptions propagate untouched (a schema/dialect
             # bug must stay loud, not masquerade as an outage).
-            membership = _sb_membership(get_control_plane(), user_id, org_id)
+            membership = await _cp_offload(
+                lambda: _sb_membership(get_control_plane(), user_id, org_id),
+                op="membership_for_user_org")
         except Exception as _exc:
             _raise_503_if_cp_outage(_exc)
             raise
@@ -13246,7 +13346,8 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
     if is_supabase_enabled():
         try:
             await _require_owner_admin(user["user_id"], org_id)
-            org = org_by_id(get_control_plane(), org_id)
+            org = await _cp_offload(
+                lambda: org_by_id(get_control_plane(), org_id), op="org_by_id")
             if org is None:
                 raise HTTPException(status_code=404, detail="Unknown organization")
             # #1875: tier gate matches pricing (free=1, solo=1, pro=2,
@@ -16554,22 +16655,26 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
 
     if is_supabase_enabled():
         cp = get_control_plane()
-        org_id = _resolve_signup_token(cp, signup_token)
+        org_id = await _cp_offload(
+            lambda: _resolve_signup_token(cp, signup_token),
+            op="resolve_signup_token")
         if org_id is None:
             raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
-        row = _orgs_row_fail_soft(
-            cp, org_id, select=_QUOTA_SELECT,
-            # #1709 fixer P2.6: the FULL additive ladder (same as
-            # resolve_api_key — newest migration tier dropped FIRST, incl.
-            # the #2040 marker tier) — the recovery emergency path must not
-            # 500 on migration skew (a schema one migration behind the
-            # newest additive drops that tier to safe defaults instead of
-            # raising).
-            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                            _ORG_ADDITIVE_IMPORT_TIER,
-                            _ORG_ADDITIVE_DKL_TIER,
-                            _ORG_ADDITIVE_0015_TIER,
-                            _ORG_ADDITIVE_BILLING_TIER])
+        row = await _cp_offload(
+            lambda: _orgs_row_fail_soft(
+                cp, org_id, select=_QUOTA_SELECT,
+                # #1709 fixer P2.6: the FULL additive ladder (same as
+                # resolve_api_key — newest migration tier dropped FIRST, incl.
+                # the #2040 marker tier) — the recovery emergency path must not
+                # 500 on migration skew (a schema one migration behind the
+                # newest additive drops that tier to safe defaults instead of
+                # raising).
+                additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                                _ORG_ADDITIVE_IMPORT_TIER,
+                                _ORG_ADDITIVE_DKL_TIER,
+                                _ORG_ADDITIVE_0015_TIER,
+                                _ORG_ADDITIVE_BILLING_TIER]),
+            op="orgs_row_fail_soft")
         if row is None or row.get("deleted_at") is not None:
             # soft-deleted org → uniform 422 (indistinguishable from
             # never-existed; the token path never mints on a deleted org).
@@ -16803,7 +16908,9 @@ async def agent_signup(request: Request):
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
-            set_dashboard_key_login(get_control_plane(), org_id, True)
+            await _cp_offload(
+                lambda: set_dashboard_key_login(get_control_plane(), org_id, True),
+                op="set_dashboard_key_login")
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
@@ -17233,7 +17340,8 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     # 1. key → org; must be an anon (unclaimed) org
     cp = get_control_plane()
     try:
-        org = resolve_api_key(cp, api_key)
+        org = await _cp_offload(
+            lambda: resolve_api_key(cp, api_key), op="resolve_api_key")
     except RuntimeError:
         # #1737: claim_email's direct resolve shares the control-plane
         # outage class — uniform 503, never a raw 500.
@@ -17331,7 +17439,9 @@ async def claim_status(request: Request):
         # JWKS + RPC) — the welcome guard is a no-op.
         return {"claimable": False, "unsupported": True}
     try:
-        org = resolve_api_key(get_control_plane(), api_key)
+        org = await _cp_offload(
+            lambda: resolve_api_key(get_control_plane(), api_key),
+            op="resolve_api_key")
     except Exception:
         # Fail-closed on control-plane errors: never report claimable.
         return {"claimable": False}
@@ -17350,8 +17460,12 @@ async def claim_status(request: Request):
         # Already claimed — distinguish this-user idempotency for the UI.
         from tortoise.supabase_control import membership_for_user_org
         try:
-            claimed_by_user = membership_for_user_org(
-                get_control_plane(), session["user_id"], org_id) is not None
+            claimed_by_user = (
+                await _cp_offload(
+                    lambda: membership_for_user_org(
+                        get_control_plane(), session["user_id"], org_id),
+                    op="membership_for_user_org")
+            ) is not None
         except RuntimeError:
             raise _control_plane_unavailable() from None
         if claimed_by_user:
@@ -18168,7 +18282,12 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     cp = get_control_plane()
     user_id = user["user_id"]
 
-    memberships = user_memberships(cp, user_id)
+    # #3498: the pre-lock reads are blocking PostgREST calls — off the loop.
+    # (The in-lock cap/revoke/recheck/insert calls below stay synchronous BY
+    # DESIGN: the section runs under the per-org in-process mint lock, which
+    # forbids awaits. That residual is tracked separately.)
+    memberships = await _cp_offload(
+        lambda: user_memberships(cp, user_id), op="user_memberships")
     if not memberships:
         raise HTTPException(status_code=403, detail="No team membership — create a team first")
     if len(memberships) > 1:
@@ -18178,10 +18297,14 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     else:
         tid = memberships[0]["org_id"]
 
-    if not membership_for_user_org(cp, user_id, tid):
+    _is_member = await _cp_offload(
+        lambda: membership_for_user_org(cp, user_id, tid),
+        op="membership_for_user_org")
+    if not _is_member:
         raise HTTPException(status_code=403, detail="No membership in team")
 
-    org_row = org_by_id(cp, tid)
+    org_row = await _cp_offload(
+        lambda: org_by_id(cp, tid), op="org_by_id")
     tier = (org_row or {}).get("tier") or "free"
     # #308 (R5): a suspended org cannot re-mint keys (scoping delta 12).
     if (org_row or {}).get("suspended_at") is not None:
@@ -19242,8 +19365,13 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
-        _track_analytics_event(org["org_id"], "artifact_copied",
-                               {"harness": harness, "section": section})
+        # #3498: the analytics write builds a fresh httpx.Client per event —
+        # a blocking PostgREST call; off the loop.
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                org["org_id"], "artifact_copied",
+                {"harness": harness, "section": section}),
+            op="analytics_event", best_effort=True)
     elif harness is not None or section is not None:
         # #3821: an enum-invalid beacon used to produce NO event and NO
         # observer — indistinguishable from a beacon that never fired. The
@@ -19955,9 +20083,9 @@ async def set_session_recording(body: dict, org: dict = Depends(get_current_org_
     # #1927 semantic drift: the off-switch fires question_answered for
     # continuity with existing analytics — toggle-off is NOT a consent
     # answer (the consent/re-ask machinery was removed).
-    _track_onboarding_event(org, "question_answered",
-                            question_id="session_recording",
-                            answer="yes" if enabled else "no")
+    await _track_onboarding_event(org, "question_answered",
+                                  question_id="session_recording",
+                                  answer="yes" if enabled else "no")
     return {"onboarding": state}
 
 
@@ -20026,15 +20154,19 @@ async def create_onboarding_org(body: dict,
                 status_code=402,
                 detail=_one_free_org_detail(_free_org_ids[0]),
             )
-        return _create_onboarding_org_lane(org, name, owner_user_id)
+        return await _create_onboarding_org_lane(org, name, owner_user_id)
 
 
-def _create_onboarding_org_lane(org: dict, name: str,
+async def _create_onboarding_org_lane(org: dict, name: str,
                                  owner_user_id: str) -> dict:
     """#1954: the onboarding sub-org lane — re-entry guard + provision +
     org_created write. MUST be called holding the caller's
     _org_create_lock (the guard is read-then-write; the lock is what makes
-    a concurrent double-call mint exactly one sub-org)."""
+    a concurrent double-call mint exactly one sub-org).
+
+    #3498: async so its analytics emit can be offloaded (the emit is a
+    blocking PostgREST write); the caller's ``asyncio.Lock`` is held across
+    the await, which is safe."""
     # NOTE (second-model P2, plan deviation): the plan's "reject non-UUID
     # created_by" step is NOT applied — the test fixtures use non-UUID ids
     # by design, and the provision RPC already maps a non-UUID uuid-column
@@ -20093,8 +20225,8 @@ def _create_onboarding_org_lane(org: dict, name: str,
                                     detail="Organization name already exists")
             raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
         _update_onboarding_state(org["org_id"], org_created=True)
-        _track_onboarding_event(org, "question_answered",
-                                question_id="create_team", answer="yes")
+        await _track_onboarding_event(org, "question_answered",
+                                      question_id="create_team", answer="yes")
         return {"org_id": org_id, "name": name, "graph_name": graph_name}
     # #1748: the registry-lane SDK must be the CANONICAL control plane
     # (namespace="registry" → registry_control_plane). The old
@@ -20113,8 +20245,8 @@ def _create_onboarding_org_lane(org: dict, name: str,
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
     _update_onboarding_state(org["org_id"], org_created=True)
-    _track_onboarding_event(org, "question_answered",
-                            question_id="create_team", answer="yes")
+    await _track_onboarding_event(org, "question_answered",
+                                  question_id="create_team", answer="yes")
     return {"org_id": result.get("id"), "name": name,
             "graph_name": result.get("graph_name")}
 
@@ -20139,8 +20271,8 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     ).result_set
     if existing:
         _update_onboarding_state(org["org_id"], demo_created=True)
-        _track_onboarding_event(org, "first_memory_created",
-                                source="demo", point_count=15)
+        await _track_onboarding_event(org, "first_memory_created",
+                                      source="demo", point_count=15)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
     # #1922: quota-gate the seed like the MCP twin
@@ -21253,16 +21385,25 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     }
 
 
-def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
+async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     """Convenience: track with the current org, swallowing errors.
 
     #3821: the ONE exception that must escape this swallow is
     ``UnregisteredTelemetryKey`` — strict mode exists precisely so a
     misregistered prop cannot be silently swallowed by this wrapper.
     Everything else is still swallowed (analytics must never break the
-    onboarding flow)."""
+    onboarding flow).
+
+    #3498: async because the write it wraps is a blocking PostgREST call —
+    ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
+    event, which used to run ON the event loop from every async caller. The
+    strict-mode ``UnregisteredTelemetryKey`` still escapes (it is raised in the
+    worker thread and re-raised through ``await``)."""
     try:
-        _track_analytics_event(org["org_id"], event_name, props or None)
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                org["org_id"], event_name, props or None),
+            op="analytics_event", best_effort=True)
     except UnregisteredTelemetryKey:
         raise
     except Exception:
@@ -21472,8 +21613,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
     welcome_url = f"{email_link_base()}/welcome.html"
 
     if error:
-        _track_analytics_event("", "onboarding_error",
-                               {"step": "github_connect", "error_type": "oauth_denied"})
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                "", "onboarding_error",
+                {"step": "github_connect", "error_type": "oauth_denied"}),
+            op="analytics_event", best_effort=True)
         return RedirectResponse(f"{welcome_url}?github=denied", status_code=302)
 
     # Validate state — 404 on missing/invalid (don't leak existence)
@@ -21548,8 +21692,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
             _run_indexing(job_id, org_id, org, None))
-    _track_analytics_event(org_id, "question_answered",
-                           {"question_id": "github_connect", "answer": "yes"})
+    await _cp_offload(
+        lambda: _track_analytics_event(
+            org_id, "question_answered",
+            {"question_id": "github_connect", "answer": "yes"}),
+        op="analytics_event", best_effort=True)
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
@@ -21676,7 +21823,11 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     except ValueError:
         return {"connected": False, "org": None, "repos_count": None}
     gh_org = await _heal_github_org(_org_id, encrypted, gh_org)
-    repos_count = _github_repos_count(token)
+    # #3498 (the audit's §A1 item 9): _github_repos_count is a BLOCKING
+    # httpx.Client call to api.github.com — off the loop.
+    repos_count = await _cp_offload(
+        lambda: _github_repos_count(token), op="github_repos_count",
+        best_effort=True)
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
@@ -25083,9 +25234,11 @@ async def webhooks_stripe(request: Request):
                 request, org_id, notify_kind,
                 resource_type="team", resource_id=org_id,
             )
-            _track_analytics_event(org_id, notify_kind, {
-                "plan": tier, "tier": tier, "status": etype,
-            })
+            await _cp_offload(
+                lambda: _track_analytics_event(org_id, notify_kind, {
+                    "plan": tier, "tier": tier, "status": etype,
+                }),
+                op="analytics_event", best_effort=True)
             notify_billing_event(
                 notify_kind, {"org_id": org_id, "tier": tier},
                 {"subscription_status": etype},
