@@ -79,9 +79,19 @@ function literalCallPaths(src) {
     out.push({ call: 'fetch', raw: m[1], method: methodFor(src, m.index + m[0].length) })
   }
   // Drop the dynamic tail (`${…}`) and the query string: what must resolve to a
-  // route is the static prefix.
+  // route is the static prefix. `tailIsSegment` records whether that tail is a
+  // PATH segment (`/v1/graphs/${id}`) or just a query/path-less value
+  // (`/v1/backups${q}`) — only the former may be satisfied by a route that has
+  // segments beyond the prefix. Without this, a static `/v1/x` would be
+  // certified by a route that only serves `/v1/x/{param}`, which a real request
+  // for `/v1/x` does not match.
   return out
-    .map(({ call, raw, method }) => ({ call, method, path: raw.split('$')[0].split('?')[0] }))
+    .map(({ call, raw, method }) => ({
+      call,
+      method,
+      path: raw.split('$')[0].split('?')[0],
+      tailIsSegment: raw.includes('/${') && /\$\{[^}]*\}/.test(raw.slice(raw.indexOf('/$'))),
+    }))
     .filter(({ path }) => path.startsWith('/'))
 }
 
@@ -103,16 +113,20 @@ const segments = (p) => p.split('/').filter(Boolean)
 
 // A client prefix is covered by a server route when the METHOD matches and every
 // segment of the CLIENT prefix matches the route's segment at that position
-// (`{param}` matches anything) with the route at least as long. This tolerates the
-// client's static prefix ending mid-path (`/v1/graphs/` for `/v1/graphs/${id}`)
-// without letting an unrelated route satisfy it.
-function matchesServerRoute(path, method, routes) {
+// (`{param}` matches anything).
+//
+// LENGTH: exact, unless the call site's tail is a PATH segment (`/v1/graphs/${id}`
+// → prefix `/v1/graphs/`), in which case the route may be longer, since the
+// dropped tail occupies those segments. `/v1/backups${q}` is a QUERY tail — the
+// request path is exactly `/v1/backups`, so a route that only serves
+// `/v1/backups/{param}` must NOT satisfy it.
+function matchesServerRoute(path, method, routes, tailIsSegment = false) {
   const p = segments(path)
   if (p.length === 0) return false
   return routes.some((route) => {
     if (route.method !== method) return false
     const r = segments(route.path)
-    if (r.length < p.length) return false
+    if (tailIsSegment ? r.length < p.length : r.length !== p.length) return false
     return p.every((seg, i) => r[i] === seg || /^\{[^}]+\}$/.test(r[i]))
   })
 }
@@ -130,7 +144,19 @@ test('the server-route matcher is not vacuous (it rejects a path that does not e
   assert.equal(
     matchesServerRoute('/v1/backups', 'DELETE', routes),
     false,
-    'the matcher ignored the HTTP method — a GET-only call would be certified by a POST-only route',
+    'the matcher ignored the HTTP method — a DELETE call was certified by a route that does not serve DELETE (only GET/POST exist for this path)',
+  )
+  // Length-aware: a QUERY tail means the request path is exactly this, so a route
+  // that only serves a longer param path must not be accepted.
+  assert.equal(
+    matchesServerRoute('/v1/session', 'GET', [{ method: 'GET', path: '/v1/session/{token}' }]),
+    false,
+    'a static client path was certified by a longer param-only route, which the real request would not match',
+  )
+  // …while a dropped PATH-segment tail legitimately spans those extra segments.
+  assert.equal(
+    matchesServerRoute('/v1/graphs/', 'GET', [{ method: 'GET', path: '/v1/graphs/{graph_id}' }], true),
+    true,
   )
 })
 
@@ -142,11 +168,11 @@ test('every literal call path resolves — client route AND upstream server rout
   const bad = []
   let total = 0
   for (const file of SOURCES) {
-    for (const { call, path, method } of literalCallPaths(readFileSync(join(HERE, file), 'utf8'))) {
+    for (const { call, path, method, tailIsSegment } of literalCallPaths(readFileSync(join(HERE, file), 'utf8'))) {
       total += 1
       if (path.startsWith('/v1/')) {
         // Forwarded by the proxy — so the SERVER must serve it, with that METHOD.
-        if (!matchesServerRoute(path, method, routes)) {
+        if (!matchesServerRoute(path, method, routes, tailIsSegment)) {
           bad.push(
             `${file}: ${call}('${path}', ${method}) → the proxy would forward to ${path} on the API, `
             + `but tortoise/hosted_api.py has no ${method} route matching it (this is the #4144 shape)`,
