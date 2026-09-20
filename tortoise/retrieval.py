@@ -142,10 +142,13 @@ MAX_ASK_CONTEXT_BYTE_CAP = 1 << 40
 #: 16,000 x 8) the recorded runs put shape_rate at 10-11/21 with abstain and
 #: grounding at 15-16/21 (the reader is stochastic: 4 of the 21 questions
 #: flip on byte-identical code, so a single run is not a rate) — the
-#: deterministic property this default buys is that FOUR of the five
-#: window-miss answer-bearing turns (ranks 67/84/89/93) now reach the reader,
-#: while 0a995998's ranks 147/153 stay out (its own pool-depth decision,
-#: #4105). The 32k option remains one env var away and is reported.
+#: deterministic property this default buys is that ALL FIVE of the
+#: window-miss answer-bearing turns (fused ranks 67/84/89/93, plus
+#: 0a995998's rank-147 turn) now reach the reader. 0a995998's THIRD gold
+#: turn stays out, and the reason is a BUDGET bound, not a pool-depth one:
+#: it is rank 153, inside the 200-wide window, but the resolved 16k TOKEN
+#: budget fills first (97 hits admitted, ~15,981 estimated tokens).
+#: The 32k option remains one env var away and is reported.
 #: Metered cost stays under the documented $0.01/query structural target
 #: (16k prompt tokens x $0.21/M = $0.0034 + output).
 DEFAULT_ASK_RETRIEVAL_LIMIT = 200
