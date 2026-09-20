@@ -33,15 +33,22 @@
 //      path, a wrong verb, a short path covered only by a longer param route, and
 //      a renamed segment after a `${…}` hole.
 //   3. The backups call site specifically asks for `/v1/backups` (the regression).
+//   4. The scanned counts cannot silently drop, and every `fetch()` literal in the
+//      source is CLASSIFIED — checked, another origin's URL, or a `${API_BASE}`
+//      template whose path is computed. A shape the classifier does not know is
+//      reported, so a bug in a shape nobody thought of cannot stay green.
 //
-// Call shapes scanned: `api('…')`, `api(\`…\`)`, `fetch(\`${API_BASE}/…\`)`,
-// `url: '…'` (the bounded-poll field consumed as `api(url)`) and `authAction('…')`
-// (a same-origin `fetch`). Shapes reached only through a runtime-computed variable
-// are out of scope and listed as such in the PR body.
+// Call shapes scanned: `api('…')`, `api(\`…\`)`, `fetch()` with a same-origin
+// literal (`\`${API_BASE}/…\``, or a plain `'/…'` / `'/api/…'`), `url: '…'` (the
+// bounded-poll field consumed as `api(url)`) and `authAction('…')` (a same-origin
+// `fetch`). Shapes reached only through a runtime-computed variable are out of
+// scope and listed as such in the PR body.
 //
 // Mutations that must fail: revert the client to `/backups`; delete
 // `@app.get("/v1/backups")`; rename the `/accept` suffix of the invites route;
-// typo a `url:` poll path; delete `functions/api/profile.ts`; comment out an alias.
+// typo a `url:` poll path; delete `functions/api/profile.ts`; comment out an alias;
+// park an alias in a docstring; add a bogus literal `fetch()`; name the bare
+// `/v1` directory.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
@@ -70,12 +77,106 @@ function requestPrefix(call) {
   return call === 'authAction' ? '' : '/api'
 }
 
-// The method a call site uses: a literal `method: '…'` within a short window after
-// the path, else GET (the default for `api()`, `fetch()` and the poll).
-function methodFor(src, index) {
-  const window = src.slice(index, index + 160)
-  const m = /method:\s*['"]([A-Za-z]+)['"]/.exec(window)
-  return m ? m[1].toUpperCase() : 'GET'
+// The method a call site uses: a literal `method: '…'` field of the same options
+// object, else GET (the default for `api()`, `fetch()` and the poll). Bounded by the
+// call's matching close paren, not a fixed character window: a long comment or
+// options object could otherwise push the real `method:` past the window and grade a
+// POST as a GET — fail-open whenever only the POST route exists.
+//
+// The depth test is what keeps this honest. A `method:` at ANY depth is not enough:
+// the bounded-poll descriptor's `onDone` handler contains an API call of its OWN, and
+// reading that call's `method: 'PATCH'` graded the GET poll as a PATCH (a false
+// finding on a correct tree). So the field is read only where the shape puts it —
+// `api`/`fetch`/`authAction` take the next argument object, `url:` is a field of the
+// object it already sits in.
+function methodFor(src, index, kind) {
+  const text = stripComments(callArgs(src, index))
+  const want = kind === 'url:' ? 1 : 2
+  let depth = 1
+  let inString = null
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (inString) {
+      if (ch === '\\') i += 1
+      else if (ch === inString) inString = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') inString = ch
+    else if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
+    else if (depth === want && text.startsWith('method:', i)) {
+      const m = /^method:\s*['"]([A-Za-z]+)['"]/.exec(text.slice(i))
+      if (m) return m[1].toUpperCase()
+    }
+  }
+  return 'GET'
+}
+
+// Comments are whitespace as far as this guard is concerned: a `method:` after a
+// comment on the previous line is still the call's method, while a COMMENTED-OUT
+// `method:` is not.
+function stripComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
+}
+
+// The text of a call's argument list, given the index just AFTER the literal that
+// opened it. Paren-depth aware, string-aware and comment-aware, so a nested call, an
+// object literal inside the options, or an apostrophe in a comment (which would
+// otherwise open a phantom string and swallow the closing paren) cannot end the scan
+// early or run it long.
+function callArgs(src, from) {
+  let depth = 1
+  let inString = null
+  for (let i = from; i < src.length; i += 1) {
+    const ch = src[i]
+    if (inString) {
+      if (ch === '\\') i += 1
+      else if (ch === inString) inString = null
+      continue
+    }
+    if (ch === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i)
+      if (nl === -1) break
+      i = nl
+      continue
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i)
+      if (end === -1) break
+      i = end + 1
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') inString = ch
+    else if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      depth -= 1
+      if (depth === 0) return src.slice(from, i)
+    }
+  }
+  return src.slice(from)
+}
+
+// A `fetch()` literal, classified. SCANNED is a path this origin would receive;
+// EXTERNAL is another origin's URL; COMPUTED is a `${API_BASE}` template whose path
+// is a runtime variable (the `api` helper's own call — the call sites it serves are
+// scanned directly by `apiRe`); anything else is UNKNOWN and must be reported:
+// scanning only the exact `fetch(\`${API_BASE}…\`)` shape left a class invisible —
+// a plain `fetch('/api/v1/bogus')` was neither checked nor counted, so a regression
+// in that shape stayed green while the file claimed to cover every literal.
+function classifyFetchLiteral(raw) {
+  if (raw.includes('://')) return { kind: 'external' }
+  if (raw.startsWith('${API_BASE}')) {
+    const rest = raw.slice('${API_BASE}'.length)
+    if (!rest.startsWith('/')) return { kind: 'computed', rest }
+    return { kind: 'scanned', path: rest, prefix: '/api' }
+  }
+  // A hard-coded `/api/…` is the same request as `\`${API_BASE}…\`` — it goes through
+  // the BFF proxy, so its UPSTREAM path is what has to exist. Treating it as a bare
+  // Pages path let the proxy's own wildcard certify any `/api/v1/…` literal, including
+  // a fabricated one (a mutation check found exactly that).
+  if (raw.startsWith('/api/')) return { kind: 'scanned', path: raw.slice('/api'.length), prefix: '/api' }
+  if (raw.startsWith('/')) return { kind: 'scanned', path: raw, prefix: '' }
+  return { kind: 'unknown', raw }
 }
 
 // Every literal path a data call can name. The dynamic tail is NOT dropped: it is
@@ -84,27 +185,31 @@ function methodFor(src, index) {
 // cutting the string at the first `$` made the guard blind to a renamed suffix.
 function literalCallPaths(src) {
   const out = []
-  const push = (call, raw, index) => out.push({ call, raw, method: methodFor(src, index) })
+  const push = (call, raw, index, prefix = requestPrefix(call)) =>
+    out.push({ call, raw, index, prefix })
   const apiRe = /\bapi\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
-  const fetchRe = /fetch\(\s*`\$\{API_BASE\}([^`]*)`/g
+  const fetchRe = /fetch\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
   const urlRe = /\burl:\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
   const authRe = /\bauthAction\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g
   let m
   while ((m = apiRe.exec(src)) !== null) push('api', m[1] ?? m[2] ?? m[3], m.index + m[0].length)
-  while ((m = fetchRe.exec(src)) !== null) push('fetch', m[1], m.index + m[0].length)
+  while ((m = fetchRe.exec(src)) !== null) {
+    const c = classifyFetchLiteral(m[1] ?? m[2] ?? m[3])
+    if (c.kind === 'scanned') push('fetch', c.path, m.index + m[0].length, c.prefix)
+  }
   while ((m = urlRe.exec(src)) !== null) push('url:', m[1] ?? m[2] ?? m[3], m.index + m[0].length)
   while ((m = authRe.exec(src)) !== null) push('authAction', m[1] ?? m[2] ?? m[3], m.index + m[0].length)
   return out
-    .map(({ call, raw, method }) => {
+    .map(({ call, raw, index, prefix, method: _m }) => {
       // A literal `?` starts the query string; a `${…}` before it is a path hole.
       const pathPart = raw.split('?')[0]
       return {
         call,
-        method,
+        method: methodFor(src, index, call),
         raw,
         path: pathPart,
         // What the browser actually requests from this origin (prefix applied).
-        requestPath: `${requestPrefix(call)}${pathPart}`,
+        requestPath: `${prefix}${pathPart}`,
         pattern: clientPathPattern(pathPart),
       }
     })
@@ -124,13 +229,17 @@ function clientPathPattern(pathPart) {
     })
 }
 
-// The routes the hosted API actually serves, from its decorators. Comment lines are
-// skipped: a decorator that is commented out is not a route, and treating it as one
-// would let a disabled endpoint keep the guard green.
+// The routes the hosted API actually serves, from its decorators. Comment lines and
+// multi-line string literals are stripped first: a decorator that is commented out —
+// or parked inside a docstring — is not a route, and treating it as one would let a
+// disabled endpoint keep the guard green.
 function serverRoutes() {
   const routes = []
+  const src = readFileSync(SERVER, 'utf8')
+    .replace(/"""[\s\S]*?"""/g, '')
+    .replace(/'''[\s\S]*?'''/g, '')
   const re = /^\s*@app\.(get|post|put|patch|delete)\(\s*"([^"]+)"/gm
-  for (const line of readFileSync(SERVER, 'utf8').split('\n')) {
+  for (const line of src.split('\n')) {
     if (line.trimStart().startsWith('#')) continue
     const m = re.exec(line)
     if (m) routes.push({ method: m[1].toUpperCase(), path: m[2] })
@@ -161,8 +270,12 @@ function matchesServerRoute(pattern, method, routes) {
   })
 }
 
-// The Pages side: a path is served when a Function file exists at it, or a
-// `[[path]]` wildcard exists at it or at an ancestor of it.
+// The Pages side: a path is served when a Function file exists at it, a directory
+// index exists at it, or a `[[path]]` wildcard exists at an ANCESTOR of it. A
+// wildcard at the path's own depth is NOT coverage: it would capture an empty
+// remainder — and for the proxy that is exactly `${API_ORIGIN}/v1/${rest}` with
+// nothing after `/v1/`, which the API 404s. (`/v1` alone therefore needs a real
+// file, not the `v1/[[path]].ts` that serves `/v1/...`.)
 function pagesRouteExists(path) {
   const segs = segments(path)
   for (let i = segs.length; i >= 1; i -= 1) {
@@ -170,7 +283,7 @@ function pagesRouteExists(path) {
     const atFullPath = i === segs.length
     if (atFullPath && existsSync(join(FUNCTIONS_DIR, `${dir}.ts`))) return true
     if (atFullPath && existsSync(join(FUNCTIONS_DIR, dir, 'index.ts'))) return true
-    if (existsSync(join(FUNCTIONS_DIR, dir, '[[path]].ts'))) return true
+    if (!atFullPath && existsSync(join(FUNCTIONS_DIR, dir, '[[path]].ts'))) return true
   }
   return false
 }
@@ -269,6 +382,20 @@ test('the guard still finds the shapes it exists to cover (scanned counts cannot
   assert.ok(count('fetch') >= 10, `fetch(\`\${API_BASE}/…\`) call sites dropped to ${count('fetch')}`)
   assert.ok(count('url:') >= 3, `bounded-poll url: paths dropped to ${count('url:')}`)
   assert.ok(count('authAction') >= 2, `authAction() paths dropped to ${count('authAction')}`)
+  // Accounting: every `fetch()` whose first argument is a literal must be SCANNED,
+  // another origin's URL, or a `${API_BASE}` template whose path is computed. A
+  // shape the classifier does not know is reported rather than skipped — a literal
+  // that matched nothing used to be neither checked nor counted, so a regression in
+  // it stayed green while this file claimed to cover every literal path.
+  const fetchLiterals = [...src.matchAll(/fetch\(\s*(?:`([^`]*)`|'([^']*)'|"([^"]*)")/g)]
+  const classes = fetchLiterals.map((m) => classifyFetchLiteral(m[1] ?? m[2] ?? m[3]))
+  const unknown = classes.filter((c) => c.kind === 'unknown')
+  assert.deepEqual(
+    unknown,
+    [],
+    `fetch() literals the guard cannot classify (checked ${count('fetch')} of ${fetchLiterals.length}): `
+    + JSON.stringify(unknown),
+  )
   // Every path WITH a `${…}` hole must produce a pattern that still carries the
   // literal segments after the hole — the regression this file's P2 finding fixed.
   const accepting = calls.find((c) => c.raw.includes('/invites/pending/') && c.raw.includes('/accept'))

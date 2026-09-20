@@ -12,9 +12,12 @@
 #
 # WHAT IS PINNED
 # --------------
-# 1. Each `/v1/backups*` alias EXISTS, with the same HTTP methods as its bare
-#    counterpart — and the bare path still exists (the alias is ADDITIVE, so
-#    CLI/ops callers posting to `api.premiselabs.co/backups` are unaffected).
+# 1. EVERY public backups route — derived from the app, not from a list — has a
+#    `/v1/…` alias with the same HTTP methods as its bare counterpart, and the bare
+#    path still exists (the alias is ADDITIVE, so CLI/ops callers posting to
+#    `api.premiselabs.co/backups` are unaffected). A hardcoded pair list would have
+#    stayed green when a NEW public route was added without an alias — the exact
+#    failure this file exists to prevent, one route later.
 # 2. The alias resolves to the SAME handler function object. A second, copied
 #    handler would satisfy a naive "the route exists" check while the two paths
 #    silently drift apart; identity is the property that actually matters.
@@ -24,11 +27,21 @@ from fastapi.routing import APIRoute
 
 from tortoise.hosted_api import app
 
-# (bare path, the /v1 alias the BFF proxy can reach)
-_PAIRS = [
-    ("/backups", "/v1/backups"),
-    ("/backups/restore", "/v1/backups/restore"),
-]
+
+def _public_backup_paths() -> list[str]:
+    """The public backups family, DERIVED from the app: a bare path (so excluded are
+    the `/v1/…` aliases themselves, which must not be required to have aliases of
+    their own, and the internal `/v1/internal/backups/*` family)."""
+    found = {
+        r.path
+        for r in app.routes
+        if isinstance(r, APIRoute) and (r.path == "/backups" or r.path.startswith("/backups/"))
+    }
+    return sorted(found)
+
+
+def _alias_for(bare: str) -> str:
+    return f"/v1{bare}"
 
 
 def _routes(path: str) -> list[APIRoute]:
@@ -39,8 +52,22 @@ def _methods(path: str) -> set[str]:
     return {m for r in _routes(path) for m in (r.methods or ())}
 
 
+def test_the_derived_family_is_the_public_backups_family() -> None:
+    """Non-vacuity of the derivation above: a scan that found nothing would make every
+    test below pass over an empty set, and an internal path leaking in would demand an
+    alias for something the proxy must never reach."""
+    bare = _public_backup_paths()
+    assert "/backups" in bare, bare
+    assert "/backups/restore" in bare, bare
+    assert not any(p.startswith("/v1") for p in bare), bare
+    assert not any("/internal/" in p for p in bare), bare
+
+
 def test_every_public_backup_route_has_a_v1_alias() -> None:
-    for bare, alias in _PAIRS:
+    bare_paths = _public_backup_paths()
+    assert bare_paths, "the public backups family was not found — the scan, not the app, is broken"
+    for bare in bare_paths:
+        alias = _alias_for(bare)
         assert _routes(bare), (
             f"{bare} disappeared — the /v1 alias must be additive, never a move: "
             "existing callers (CLI, ops scripts) post to the bare path."
@@ -62,7 +89,8 @@ def test_every_public_backup_route_has_a_v1_alias() -> None:
 
 
 def test_the_alias_is_the_same_handler_object_not_a_copy() -> None:
-    for bare, alias in _PAIRS:
+    for bare in _public_backup_paths():
+        alias = _alias_for(bare)
         by_methods = {frozenset(r.methods or ()): r.endpoint for r in _routes(bare)}
         assert by_methods, f"{bare} has no APIRoute"
         for r in _routes(alias):
@@ -104,6 +132,11 @@ def _contract(route: APIRoute) -> tuple:
         route.response_model,
         tuple(getattr(d.call, "__name__", repr(d.call)) for d in route.dependant.dependencies),
         tuple(sorted((route.responses or {}).keys())),
+        # Also observable on the wire, and also settable per-decorator: a stacked
+        # decorator could ship `include_in_schema=False` (the alias vanishes from the
+        # published API) or a different response_class without touching the handler.
+        getattr(route.response_class, "__name__", repr(route.response_class)),
+        route.include_in_schema,
     )
 
 
@@ -115,7 +148,8 @@ def test_the_alias_preserves_the_bare_route_contract() -> None:
     alias could answer 200 where the bare path answers 201, or (worse) be registered
     without the dependency the bare path carries.
     """
-    for bare, alias in _PAIRS:
+    for bare in _public_backup_paths():
+        alias = _alias_for(bare)
         bare_by_methods = {frozenset(r.methods or ()): r for r in _routes(bare)}
         assert bare_by_methods, f"{bare} has no APIRoute"
         for route in _routes(alias):

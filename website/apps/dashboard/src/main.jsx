@@ -5588,8 +5588,10 @@ function claimIntentInFlight() {
     // predates the #3501/#4054 migration to the proxy and was the one call site left
     // without the prefix, so it asked `/api/backups` — a path with no Pages Function
     // — and the Backups card silently read as empty (404 in the console). Every other
-    // call site in this file passes `/v1/…`; a guard test now enforces that for all of
-    // them (src/apiPathResolvesToARoute.test.js).
+    // call site in this file that reaches the HOSTED API goes through `/v1/…` (paths
+    // like `/session` and `/profile` are Pages Functions and are served directly). A
+    // guard test now requires every literal path in this file to resolve on whichever
+    // side serves it (src/apiPathResolvesToARoute.test.js).
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
       const b = await api(`/v1/backups${q}`, { useSession: true })
