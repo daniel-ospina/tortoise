@@ -1052,47 +1052,73 @@ class TestBootReconcile:
         with pytest.raises(bl.StripeAPIError):
             bl.reconcile_org(billing_client["sdk"], org_id)
 
-    def test_boot_reconcile_hanging_stripe_never_blocks_boot(self, monkeypatch, billing_client):
-        """review fix 3: the reconcile thread is daemon + budgeted — lifespan
-        yields immediately even if Stripe hangs."""
-        import threading  # noqa: I001
+class TestLifespanStartup:
+    def test_lifespan_startup_returns_without_blocking(self, monkeypatch, tmp_path):
+        """The lifespan's startup half is cheap and synchronous, so it must
+        RETURN well inside the join window — a startup that blocks would hold
+        uvicorn's bind.
+
+        NOTE(#4262): this replaces `test_boot_reconcile_hanging_stripe_never_
+        blocks_boot`, which asserted a boot billing-reconcile daemon thread that
+        no longer exists (nothing creates a `billing-reconcile` thread and
+        `reconcile_org` has no production caller). The old test called
+        `_lifespan(None)`, which crashed immediately in `_start_liveness(None)`,
+        so its assertion could never fail; it then nested a second lifespan
+        inside the shared TestClient's. This runs the lifespan against its own
+        stub app instead, and guards the whole thread body so an in-thread crash
+        cannot read as a successful return.
+        """
+        import asyncio
+        import threading
         import time
-        import tortoise.hosted_api as ha
-        from tortoise import billing as bl
+        from types import SimpleNamespace
 
-        # Simulate a hanging Stripe client inside the real daemon-thread pass.
-        monkeypatch.setattr(bl.StripeClient, "get_subscription",
-                            lambda self, sid: time.sleep(999))
-        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
-                            lambda self, cid: time.sleep(999))
-        # point _iter_registered_teams at ONE team
-        org_id = billing_client["org_id"]
-        billing_client["sdk"]._get_registry().query(
-            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_1', "
-            "t.stripe_customer_id='cus_1'", params={"id": org_id})
-        monkeypatch.setattr(ha, '_iter_registered_orgs',
-                            lambda: [{"org_id": org_id, "name": "x"}])
+        from tortoise.hosted_api import _lifespan
 
-        started = time.monotonic()
-        threads_before = threading.active_count()  # noqa: F841
-        # invoke the boot-reconcile closure directly (as the lifespan does)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "lifespan.db"))
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+
+        app = SimpleNamespace(state=SimpleNamespace())
+        thread_error: list[BaseException] = []
+
         def _run():
-            from tortoise.hosted_api import _lifespan  # noqa: I001
-            import asyncio
-            # simulate lifespan startup: create the thread, don't await it
-            ha_threads = [t for t in threading.enumerate() if t.name == "billing-reconcile"]  # noqa: F841
-            # Call the internal closure via a fresh lifespan run in a thread.
-            async def _lifespan_quick():
-                async with _lifespan(None):
-                    return
-            asyncio.run(_lifespan_quick())
+            # The WHOLE body is guarded: an exception before `asyncio.run`
+            # (e.g. a broken import) would otherwise kill the thread and read
+            # as a successful return.
+            try:
+                async def _quick():
+                    async with _lifespan(app):
+                        return
 
-        t = threading.Thread(target=_run)
+                asyncio.run(_quick())
+            except BaseException as exc:
+                thread_error.append(exc)
+
+        # daemon=True: a regression that BLOCKS startup must fail the assertion
+        # below, not pin interpreter shutdown.
+        started = time.monotonic()
+        t = threading.Thread(target=_run, daemon=True)
         t.start()
-        t.join(timeout=5)
+        t.join(timeout=10)
         elapsed = time.monotonic() - started
-        assert elapsed < 5, "lifespan must not block on a hanging Stripe client"
-        assert not t.is_alive() or True  # lifespan returned
+        try:
+            # `join` only bounds the WAIT — assert the startup half itself is
+            # prompt, not merely "under the timeout".
+            assert elapsed < 5, f"lifespan startup took {elapsed:.1f}s"
+            assert not t.is_alive(), "lifespan startup did not return within 10s"
+            assert not thread_error, f"lifespan raised in its thread: {thread_error!r}"
+        finally:
+            # `_lifespan` arms the process-lifetime /healthz listener and
+            # `_stop_liveness` deliberately does not tear it down — release it so
+            # this test leaves no bound socket (repo convention:
+            # tests/test_monitoring.py::_clean_heartbeat_and_listeners,
+            # tests/test_hosted_api.py::TestBootOrder).
+            import tortoise.monitoring as monitoring
+
+            server = getattr(app.state, "_healthz_server", None)
+            if server is not None:
+                monitoring.stop_health_listener(server)
 
 
 class TestTeamInfoBillingSurface:
