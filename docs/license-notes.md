@@ -189,25 +189,31 @@ MIT repo* is silent: a rewritten body passes as long as those three markers
 survive. The BSL scan has two marker classes, because a licence *declaration*
 and a prose *mention* look different and only one of them is a regression:
 
-- a **`BUSL` token** (with or without `-1.1`, case-insensitive) counts
-  **anywhere**, prose included — an artifact that names BUSL anywhere is
-  claiming it. The bare acronym `BSL` is deliberately not a token: the served
-  `how-to-use-tortoise` skill discusses `BSL` in prose.
+- a **`BUSL` token** (with or without `-1.1`, case-insensitive) or the
+  versioned short form **`BSL 1.1`** (how vendored notices and
+  `mariadb.com/bsl11` abbreviate it) counts **anywhere**, prose included — an
+  artifact that names BUSL anywhere is claiming it. The *unversioned* acronym
+  `BSL` is deliberately not a token: the served `how-to-use-tortoise` skill
+  writes `BSL` in prose, and the version is what separates a claim from a
+  mention.
 - the **canonical name** (`business source license [1.1]`) counts in a file's
   first 20 lines (frontmatter + header comment, where a licence header lives)
-  **or anywhere** in a licence/notice file — `LICENSE*`, `COPYING*`, `NOTICE*`,
-  `*.license`-style sidecars (`MIT.license`), suffixed forms
-  (`third_party_licenses.txt`), and `LICENSES/`/`LICENCES/` directories. The
-  whole-file rule exists because the engine's own BSL text carries the name at
-  line 2 *and* line 28 and never carries the `BUSL` token, so a composite file
-  that keeps the MIT markers and appends the BSL terms would otherwise pass.
+  **or anywhere** in a licence/notice file — `LICENSE*`, `COPYING*`,
+  `NOTICE*`/`NOTICES*`, `*.license`-style sidecars (`MIT.license`), suffixed
+  forms (`third_party_licenses.txt`, `THIRD-PARTY-NOTICES.txt`), and
+  `LICENSES/`/`LICENCES/`/`NOTICES/` directories. The whole-file rule exists
+  because the engine's own BSL text carries the name at line 2 *and* line 28 and
+  never carries the `BUSL` token, so a composite file that keeps the MIT markers
+  and appends the BSL terms would otherwise pass.
 
 Symlinked directories **are** followed (a skill dir symlinked into the surface
-is still served by the Pages copy, so it is still asserted). **Reach limits,
-stated rather than implicit:** a canonical-name declaration buried past the
-first 20 lines of a file that is *not* named as a licence/notice file is out of
-reach; and a file that is not valid UTF-8 carries no assertion (the licence
-file itself is reported as an explicit error in that case, not a traceback).
+is still served by the Pages copy, so it is still asserted). Reads are
+UTF-8-pinned, so a C/POSIX locale cannot silently skip every non-ASCII file (all
+four served skills are heavily non-ASCII). **Reach limits, stated rather than
+implicit:** a canonical-name declaration buried past the first 20 lines of a
+file that is *not* named as a licence/notice file is out of reach; and a file
+that is not valid UTF-8 carries no assertion (the licence file itself is
+reported as an explicit error in that case, not a traceback).
 
 **Backstop (enforced in CI):** `validation/check-license-surface.py` asserts
 (1) the per-directory licence exists and declares MIT, and (2) **no file under

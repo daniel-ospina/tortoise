@@ -120,7 +120,15 @@ CONSUMER_SURFACES = {
 # ordinary content file is out of reach — the `BUSL` token is not, wherever it
 # appears.
 DECLARATION_WINDOW = 20
-BSL_TOKENS = (re.compile(r"\bbusl(-1\.1)?\b", re.I),)
+# `busl` / `BUSL-1.1` (the SPDX id, with or without its version) and the
+# versioned short form `BSL 1.1` (how vendored notices and mariadb.com/bsl11
+# abbreviate it). The UNVERSIONED acronym `BSL` is deliberately not a token —
+# the served how-to-use-tortoise skill writes "BSL is OSI-approved" and
+# "BSL+AGPL" in prose, and a version is what separates a claim from a mention.
+BSL_TOKENS = (
+    re.compile(r"\bbusl(-1\.1)?\b", re.I),
+    re.compile(r"\bbsl\s*1\.1\b", re.I),
+)
 BSL_NAMES = (re.compile(r"business\s+source\s+license(\s+1\.1)?", re.I),)
 # A file whose whole body IS (or carries) a licence/notice is scanned whole-file
 # for the canonical NAME, not just in its first lines: the real BSL text carries
@@ -131,8 +139,10 @@ BSL_NAMES = (re.compile(r"business\s+source\s+license(\s+1\.1)?", re.I),)
 # code-review gate — the dashed/suffixed forms `LICENSE-BSL`, `LICENSE-2.0.txt`
 # and `third_party_licenses.txt`, which a prefix-only pattern missed while the
 # comment (and §7) claimed the `LICENSE*` glob.
-LICENCE_FILE_RE = re.compile(r"(^|[._-])(licen[cs]es?|copying|notice)([._-].*)?$", re.I)
-LICENCE_DIRS = ("LICENSES", "LICENCES")
+LICENCE_FILE_RE = re.compile(
+    r"(^|[._-])(licen[cs]es?|copying|notices?)([._-].*)?$", re.I
+)
+LICENCE_DIRS = ("LICENSES", "LICENCES", "NOTICES")
 
 
 def is_licence_file(path: Path) -> bool:
@@ -220,7 +230,7 @@ def check_consumer_surface(name: str, spec: dict) -> list[str]:
         # "not UTF-8 → no assertion" limit applies to it as to the rest of the
         # surface, so it cannot fail open silently either).
         try:
-            licence_text = licence.read_text()
+            licence_text = licence.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             errors.append(f"{name}: {_display(licence)} is not UTF-8 text — cannot assert its licence")
     if licence_text is not None:
@@ -234,12 +244,18 @@ def check_consumer_surface(name: str, spec: dict) -> list[str]:
     # exemption: a composite LICENSE that keeps the MIT markers and appends BSL
     # terms is the same copy-paste accident class, and a presence-only MIT check
     # would pass it (verified bypass, review cycle 2).
+    # The reads pin UTF-8 explicitly: `Path.read_text()` without an encoding
+    # decodes in the PROCESS LOCALE, so under a C/POSIX locale every non-ASCII
+    # file would raise UnicodeDecodeError and be silently skipped — silently
+    # vacating the assertion for exactly the served skills (all four are
+    # heavily non-ASCII). `encoding="utf-8"` makes the except branch mean what
+    # it says (found by the code-review gate).
     for path in _surface_files(spec["path"]):
         if not path.is_file():
             continue
         rel = _display(path)
         try:
-            body = path.read_text()
+            body = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue  # documented limit: only UTF-8 text is asserted
         declared = bsl_declaration(body, whole_file_names=is_licence_file(path))

@@ -8,18 +8,20 @@ own prose about licensing — which is how a required check gets taught to be
 ignored. Both directions are pinned here against ``tmp_path`` fixtures: no repo
 file is mutated, and no network/DB/FalkorDB is used.
 
-The load-bearing cases (each verified RED against the implementation it
-replaced):
+The load-bearing cases (each pins a bypass that was real at some point in this
+change's review history, or a behaviour that must not regress):
 
 * a missing / non-MIT / non-UTF-8 / composite (MIT + appended BSL) licence file;
-* a BSL declaration inside a served file or a licence/notice file — SPDX header,
-  bare ``BUSL`` token, column-aligned canonical name — including the name forms
-  a prefix-only pattern missed (``*.license`` sidecars, ``LICENSE-BSL``,
-  ``LICENSE-2.0.txt``, ``third_party_licenses.txt``, ``LICENSES/``);
+* a BSL declaration inside a served file or a licence/notice file — `BUSL`,
+  `BUSL-1.1`, the versioned short form `BSL 1.1`, SPDX headers, column-aligned
+  canonical names — under every name form the guard recognises (`*.license`
+  sidecars, `LICENSE-BSL`, `LICENSE-2.0.txt`, `third_party_licenses.txt`,
+  `THIRD-PARTY-NOTICES.txt`, `LICENSES/`);
 * a skill directory SYMLINKED into the surface (``Path.rglob`` does not descend
   into one, so it used to be served-but-unasserted);
-* prose: the served ``how-to-use-tortoise`` skill discusses BSL, and a skill
-  saying "Business Source License" in its body must NOT red the check.
+* prose: the served ``how-to-use-tortoise`` skill discusses BSL — unversioned —
+  and a skill saying "Business Source License" in its body must NOT red the
+  check.
 """
 from __future__ import annotations
 
@@ -206,6 +208,54 @@ def test_canonical_name_in_body_prose_is_not_a_declaration(tmp_path: Path) -> No
         + "\nThe options compared were AGPLv3-dual, the Business Source License, and SSPL.\n"
     )
     assert module.check_consumer_surface("surface", _spec(module, surface)) == []
+
+
+def test_versioned_short_form_is_a_declaration(tmp_path: Path) -> None:
+    """`BSL 1.1` (mariadb.com/bsl11's own abbreviation, and what vendored
+    notices carry) is a declaration; the UNVERSIONED acronym is not."""
+    module = _load()
+    assert module.bsl_declaration("This software is also available under the BSL 1.1.\n") == "BSL 1.1"
+    assert module.bsl_declaration("released under BSL1.1\n") == "BSL1.1"
+    assert module.bsl_declaration("BSL is OSI-approved\n") is None
+    surface = _make_surface(tmp_path)
+    (surface / "LICENSE").write_text(MIT_TEXT)
+    (surface / "some-skill" / "SKILL.md").write_text(
+        MIT_TEXT + "\n\nThis software is also available under the BSL 1.1.\n"
+    )
+    errors = module.check_consumer_surface("surface", _spec(module, surface))
+    assert any("declares BSL" in e for e in errors), errors
+
+
+def test_plural_notice_names_are_scanned_whole_file(tmp_path: Path) -> None:
+    """`NOTICES.txt` / `THIRD-PARTY-NOTICES.txt` — the standard name for the
+    composite licence-list file the whole-file rule exists to catch."""
+    module = _load()
+    for name in ("NOTICES.txt", "THIRD-PARTY-NOTICES.txt", "THIRD_PARTY_NOTICES.md"):
+        assert module.is_licence_file(Path(name)), name
+        surface = tmp_path / name.replace(".", "-")
+        surface.mkdir()
+        (surface / "LICENSE").write_text(MIT_TEXT)
+        (surface / name).write_text("filler\n" * 30 + BSL_TEXT)
+        errors = module.check_consumer_surface("surface", _spec(module, surface))
+        assert any(name in e for e in errors), (name, errors)
+    assert module.is_licence_file(Path("NOTICES") / "terms.txt") is True
+
+
+def test_non_ascii_skill_is_still_scanned(tmp_path: Path, monkeypatch) -> None:
+    """The reads are UTF-8-pinned, so a C/POSIX locale must not silently skip
+    every non-ASCII file (all four served skills are heavily non-ASCII) — the
+    locale-decoding hole found by the code-review gate."""
+    module = _load()
+    monkeypatch.setenv("LC_ALL", "C")
+    monkeypatch.setenv("PYTHONCOERCECLOCALE", "0")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    surface = _make_surface(tmp_path)
+    (surface / "LICENSE").write_text(MIT_TEXT)
+    (surface / "some-skill" / "SKILL.md").write_text(
+        "# \u2014 em-dash and non-ASCII \u2014\n\nSPDX-License-Identifier: BUSL-1.1\n"
+    )
+    errors = module.check_consumer_surface("surface", _spec(module, surface))
+    assert any("declares BSL" in e for e in errors), errors
 
 
 def test_marker_matcher_is_case_and_whitespace_insensitive() -> None:
