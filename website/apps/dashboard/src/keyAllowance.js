@@ -105,12 +105,15 @@ export function capLimitFrom(message, team) {
 // SINGLE revoke always suffices (an over-cap org stays at/over the gate until
 // enough rows are revoked), and does NOT promise the upgrade frees a key
 // immediately.
-export function upgradeNoticeFrom(message, team) {
+export function upgradeNoticeFrom(message, team, hasUpgrade = true) {
   const limit = capLimitFrom(message, team)
-  if (limit === null) {
-    return "You've reached your plan's API key limit. Revoke an existing key to free a slot — or upgrade to add more."
-  }
-  return `You've reached your plan's limit of ${limit} API keys. Revoke an existing key to free a slot — or upgrade to add more.`
+  const head = limit === null
+    ? "You've reached your plan's API key limit"
+    : `You've reached your plan's limit of ${limit} API keys`
+  // #4335: the "or upgrade" tail is only truthful when an upgrade path exists
+  // (a configured higher tier, or one temporarily unavailable). Callers pass
+  // hasUpgrade=false for the top tier / a deployment selling no higher tier.
+  return `${head}. Revoke an existing key to free a slot${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
 }
 
 // #2229: rotate-path cap notice. Rotate mints the REPLACEMENT before revoking
@@ -119,10 +122,10 @@ export function upgradeNoticeFrom(message, team) {
 // (the replacement needs a free slot before the old key is revoked) — that
 // mechanism clause is what keeps rotate's notice its own string (#2699 left
 // it byte-identical). Truthful escape: revoke an unused key first, or upgrade.
-export function rotateCapNoticeFrom(message, team) {
+export function rotateCapNoticeFrom(message, team, hasUpgrade = true) {
   const limit = capLimitFrom(message, team)
-  if (limit === null) {
-    return "You're at your plan's API key limit. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more."
-  }
-  return `You're at your plan's limit of ${limit} API keys. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more.`
+  const head = limit === null
+    ? "You're at your plan's API key limit"
+    : `You're at your plan's limit of ${limit} API keys`
+  return `${head}. Rotating creates the replacement before revoking this one, so revoke an unused key first${hasUpgrade ? ' — or upgrade to add more.' : '.'}`
 }

@@ -126,6 +126,10 @@ function createEnv(overrides = {}) {
     mintKey: async () => ({ key: 'tt_ok', expires_at: '2026-10-20T00:00:00+00:00' }),
     loadAll: async () => { calls.loadAll++ },
     upgradeNoticeFrom,
+    // #4335: the cap-notice copy's upgrade-tail gate; the sandbox must provide
+    // it because createKey passes it. `true` keeps the existing tail asserted
+    // below (`/limit of 2 API keys/`).
+    teamHasUpgrade: () => true,
     setCapNotice: (v) => calls.capNotice.push(v),
     setKeyModalCapNotice: (v) => calls.keyModalCapNotice.push(v),
     setError: (v) => calls.error.push(v),

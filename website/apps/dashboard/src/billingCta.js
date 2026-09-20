@@ -18,7 +18,7 @@ export const CHECKOUT_UNAVAILABLE_REASON =
 export const CHECKOUT_NOT_OFFERED_REASON = 'Not offered on this deployment'
 
 // The one permanent, explicitly-secondary destination. It is never the CTA.
-export const COMPARE_PLANS_URL = 'https://tortoise.premiselabs.co/product.html#pricing'
+export const COMPARE_PLANS_URL = 'https://tortoise.premiselabs.co/#pricing-section'
 
 /**
  * Derive the billing CTA for a tier from the server-resolved price id.
@@ -61,4 +61,24 @@ export function nextUpgradeTier(currentTier, priceIds, orderedTiers) {
     if (priceId) return { tier, priceId }
   }
   return null
+}
+
+/**
+ * The cap-notice upgrade decision, derived from the server-resolved map.
+ *
+ * - `target`   → the next configured paid tier strictly above the org, or null
+ * - `outage`   → a higher tier exists positionally but the catalog resolved
+ *                nothing, so the honest DISABLED control must show (never the
+ *                marketing link as the substitute CTA)
+ * - `hasUpgrade` → whether the "or upgrade to add more" copy is truthful: an
+ *                offered upgrade, or one temporarily unavailable; false when
+ *                the deployment sells no higher tier (top tier / solo-only).
+ */
+export function capNoticeUpgrade(team, orderedTiers) {
+  const anyConfigured = Object.keys(team?.checkout_price_ids || {}).length > 0
+  const target = nextUpgradeTier(team?.tier, team?.checkout_price_ids, orderedTiers)
+  const idx = orderedTiers.indexOf(team?.tier)
+  const hasHigherTier = idx !== -1 && idx < orderedTiers.length - 1
+  const outage = !target && !anyConfigured && hasHigherTier
+  return { target, outage, hasUpgrade: Boolean(target) || outage }
 }

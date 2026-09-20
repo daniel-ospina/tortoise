@@ -43,7 +43,7 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from 
 import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom } from './keyAllowance.js'
 // #4335: the billing CTA's honest-unavailable derivation — one pure source so
 // the three render sites cannot drift (see billingCta.js).
-import { COMPARE_PLANS_URL, checkoutCtaFor, nextUpgradeTier } from './billingCta.js'
+import { COMPARE_PLANS_URL, checkoutCtaFor, capNoticeUpgrade } from './billingCta.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -996,21 +996,31 @@ function UpgradeCta({ priceId, onUpgrade, pending, className = 'ghost', block = 
 // stage (an empty `.key-value` box, and a clipboard write of the literal
 // "null") while the notice sat on the tab BEHIND the modal, invisible.
 function CapNotice({ text, team, checkoutPending, onUpgrade }) {
-  // A cap-notice "Upgrade" must be a real upgrade: the next configured paid
-  // tier STRICTLY above the org's current tier. When the deployment sells no
-  // higher tier (top tier, or solo-only), render no CTA — never a
-  // current/downgrade plan behind an "Upgrade" label.
-  const target = nextUpgradeTier(team?.tier, team?.checkout_price_ids,
-    planOptions().map((p) => p.tier))
+  // A cap-notice "Upgrade" must be a REAL upgrade: the next configured paid
+  // tier strictly above the org's current tier. When a higher tier exists but
+  // the catalog is entirely down, show the honest DISABLED control (never the
+  // marketing link as the substitute CTA); when the deployment sells no higher
+  // tier, render no CTA at all — never a current/downgrade plan.
+  const { target, outage } = capNoticeUpgrade(team, planOptions().map((p) => p.tier))
   return (
     <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
       <span className="dim small">{text}</span>
-      {target && (
+      {target ? (
         <UpgradeCta priceId={target.priceId} onUpgrade={() => onUpgrade(target.priceId)} pending={checkoutPending} className="ghost small" />
-      )}
+      ) : outage ? (
+        <UpgradeCta priceId="" onUpgrade={onUpgrade} pending={checkoutPending} className="ghost small" />
+      ) : null}
       <a className="ghost small" href={COMPARE_PLANS_URL} target="_blank" rel="noreferrer">Compare plans</a>
     </div>
   )
+}
+
+// #4335: whether the cap-notice copy's "or upgrade to add more" is truthful
+// for this org (a real offered upgrade, or one temporarily unavailable due to
+// a catalog outage) — false for the top tier or a deployment selling no higher
+// tier.
+function teamHasUpgrade(team) {
+  return capNoticeUpgrade(team, planOptions().map((p) => p.tier)).hasUpgrade
 }
 
 function App() {
@@ -5896,7 +5906,7 @@ function claimIntentInFlight() {
         // learns the reason without dismissing it; the tab banner still shows
         // after a dismiss.
         if (e.status === 402) {
-          const notice = upgradeNoticeFrom(e.message, team)
+          const notice = upgradeNoticeFrom(e.message, team, teamHasUpgrade(team))
           setCapNotice(notice)
           setKeyModalCapNotice(notice)
           setError('')
@@ -6068,7 +6078,7 @@ function claimIntentInFlight() {
       if (orgIdRef.current === currentOrgId) {
         if (e.status === 402) {
           // #2229: rotate-specific cap copy — see rotateCapNoticeFrom.
-          setCapNotice(rotateCapNoticeFrom(e.message, team))
+          setCapNotice(rotateCapNoticeFrom(e.message, team, teamHasUpgrade(team)))
           setError('')
         } else {
           setError(e.message)

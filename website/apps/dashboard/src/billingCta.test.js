@@ -18,6 +18,7 @@ import {
   CHECKOUT_NOT_OFFERED_REASON,
   CHECKOUT_UNAVAILABLE_REASON,
   COMPARE_PLANS_URL,
+  capNoticeUpgrade,
   checkoutCtaFor,
   nextUpgradeTier,
 } from './billingCta.js'
@@ -49,12 +50,30 @@ test('#4335: the reason is the honest unavailability copy, not a pricing pitch',
   assert.doesNotMatch(CHECKOUT_UNAVAILABLE_REASON, /see pricing|learn more/i)
 })
 
-test('#4335: the compare-plans destination is explicit and secondary', () => {
-  assert.equal(COMPARE_PLANS_URL, 'https://tortoise.premiselabs.co/product.html#pricing')
+test('#4335: the compare-plans destination is the canonical pricing anchor', () => {
+  // product.html 301s to '/' on the tortoise host; '#pricing' is a dead
+  // fragment — the canonical, test-pinned anchor is '#pricing-section'.
+  assert.equal(COMPARE_PLANS_URL, 'https://tortoise.premiselabs.co/#pricing-section')
   // No checkoutCtaFor state ever routes the primary CTA off-product.
   for (const priceId of ['price_x', '']) {
     assert.equal(checkoutCtaFor(priceId).href, null)
   }
+})
+
+test('#4335: cap-notice upgrade decision distinguishes outage from not-sold', () => {
+  const order = ['free', 'solo', 'pro', 'team']
+  // A configured higher tier → real target.
+  assert.deepEqual(capNoticeUpgrade({ tier: 'solo', checkout_price_ids: { pro: 'p_pro' } }, order),
+    { target: { tier: 'pro', priceId: 'p_pro' }, outage: false, hasUpgrade: true })
+  // Empty catalog + a higher tier exists → outage control, "or upgrade" still true.
+  assert.deepEqual(capNoticeUpgrade({ tier: 'solo', checkout_price_ids: {} }, order),
+    { target: null, outage: true, hasUpgrade: true })
+  // No higher tier sold (solo-only) → no CTA, copy must not promise upgrade.
+  assert.deepEqual(capNoticeUpgrade({ tier: 'solo', checkout_price_ids: { solo: 'p_solo' } }, order),
+    { target: null, outage: false, hasUpgrade: false })
+  // Top tier → no CTA, no upgrade copy.
+  assert.deepEqual(capNoticeUpgrade({ tier: 'team', checkout_price_ids: { team: 'p_team' } }, order),
+    { target: null, outage: false, hasUpgrade: false })
 })
 
 test('#4335: a not-offered tier reads as not-offered, not as a retryable outage', () => {
