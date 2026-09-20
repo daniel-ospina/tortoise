@@ -243,10 +243,14 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             # nothing about liveness (#3060). Waiting on the fake's own
             # `entered` marker makes the probe land inside the freeze window by
             # construction, so both assertions measure what they claim to.
-            # Bounded, so a capture that never reaches the extraction fails on
-            # the `"entered" in state` assertion below instead of hanging.
+            # Bounded, and it also stops as soon as the capture has SETTLED
+            # without reaching the extraction (a fast endpoint error), so a
+            # failure here stays fast instead of burning the whole bound before
+            # the `"entered" in state` assertion reports it.
             _stall_deadline = time.perf_counter() + STALL_START_WAIT_S
-            while "entered" not in state and time.perf_counter() < _stall_deadline:
+            while ("entered" not in state
+                   and not capture.done()
+                   and time.perf_counter() < _stall_deadline):
                 await asyncio.sleep(0.05)
             health = await ac.get("/health")
             health_done = time.perf_counter()
