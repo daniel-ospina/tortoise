@@ -80,11 +80,15 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     // The app project USED to carry `/welcome / 200` — a rewrite for the
     // in-app first-run wizard (#1287, #1566) — and re-requesting
     // `/welcome?reset=1` then answered with the SPA document, so the recovery
-    // landing rendered the dashboard shell with no panel in it. That rule is
-    // gone (#4104), but naming the file is what makes this branch immune to a
-    // rewriting rule being added back: the intent is "serve welcome.html", and
-    // this asks for exactly that rather than depending on the router resolving
-    // the path and on nothing rewriting it.
+    // landing rendered the dashboard shell with no panel in it.
+    //
+    // The protection is that the rule is GONE and this Function owns
+    // `/welcome` — NOT that the file is named here. Measured: with the rewrite
+    // present, `ASSETS.fetch("/welcome.html")` still resolved to the rewrite
+    // target, because Pages 308-normalizes a `.html` URL back to `/welcome`
+    // and the rewrite then applies. Naming the file is defence in depth (it
+    // states the intent, "serve welcome.html", instead of depending on the
+    // router resolving the path) and it cannot be relied on alone.
     return env.ASSETS.fetch(new URL("/welcome.html", url.origin).toString());
   }
 

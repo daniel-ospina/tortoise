@@ -76,9 +76,19 @@ the token regardless of which subdomain presented it.
   `website/apps/dashboard/functions/_shared/auth/session.ts`
   (`SESSION_COOKIE = "__Host-session"`, `buildCookie`).
 - **Session store:** the opaque handle keys a D1 row (`SESSIONS` binding) holding
-  `user_id`, the refresh token and the expiry. The access token is minted/
-  refreshed in-process by the Function (`_shared/auth/token.ts`) and is never
-  sent to the browser; the cookie is revocable immediately (delete the row).
+  `user_id`, the refresh token, the **session** expiry (`expires_at` — the session's own
+  TTL, not the refresh token's), and a cache of the access token (`access_token`,
+  `access_token_expires_at`) plus a refresh-cooldown stamp (`token_rejected_at`) — the
+  last three added by `_shared/auth/token.ts`, so a read path reuses the cached token
+  instead of calling GoTrue per request. The access token never leaves the server: it is
+  minted/refreshed in-process by the Function and is never sent to the browser; the cookie
+  is revocable immediately (the row is marked `revoked = 1`; nothing deletes it).
+- **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
+  every subdomain (§1.3) — is **rejected**. It is JS-reachable from any subdomain and forfeits the
+  `__Host-` prefix. One session-bearing origin is worth the extra 301. The recorded ruling is the
+  auth-topology decision on **#3501 / #4054**; the full rationale lives in the private `premise-labs`
+  repo (`engineering/auth/SCOPE.md` §3, §4 W6, §13), which this repo's Functions also cite — named
+  here because it is outside this repository and cannot be opened from it.
 - **Legacy cohort:** the JS-readable parent-domain bridge
   (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token` on
   `.premiselabs.co`) is RETAINED but no BFF page loads it — it survives as the
@@ -88,29 +98,57 @@ the token regardless of which subdomain presented it.
 
 ### 2.2 The auth surfaces
 
-- **One auth page** at `app.premiselabs.co/auth` — `functions/auth/index.ts`
+> **Functions root:** every `functions/…` path in this doc is relative to
+> `website/apps/dashboard/functions/` — the BFF moved with the session to the app project (#4054).
+> `website/functions/` (the marketing project) now holds only `_middleware.ts` and `blog/**`, so an
+> unqualified path read as "the marketing Functions" points at the wrong tree.
+
+- **One auth page** at `app.premiselabs.co/auth` — `website/apps/dashboard/functions/auth/index.ts`
   rewrites `/auth` to the `/signup` asset, preserving the query string (invite
-  tokens, `?error=`, `?next=`). The marketing origins converge on the app
-  origin, though not all in one hop (`website/functions/_middleware.ts`,
-  `website/_redirects`): the middleware 301s `/auth`, `/signup`, `/welcome` and
-  `/invite-accept` to `app.premiselabs.co` directly, but `/signin*` is a legacy
-  alias with no route on the app origin — `_redirects` maps it to `/auth` **on
-  the tortoise host**, which the middleware then 301s to the app origin
-  (`tortoise.premiselabs.co/signin` → `/auth` → `app.premiselabs.co/auth`); on
-  the company host there is one extra hop first
-  (`premiselabs.co/signin` → `tortoise.premiselabs.co/signin`). The card offers
-  GitHub/Google OAuth, API key and email/password.
-- **Protected pages:** `/welcome` (post-auth landing, decided server-side) and
-  the dashboard — both on `app.premiselabs.co`.
+  tokens, `?error=`, `?next=`). The marketing origins converge on the app origin, and **which layer
+  does the 301 depends on the host** (`website/functions/_middleware.ts`, `website/_redirects`):
+  `/auth` 301s **unconditionally** in the middleware (so it covers `tortoise.*` and previews/dev),
+  while `/signup`, `/welcome` and `/invite-accept` are 301'd by the middleware's `APP_ONLY` branch
+  **only on the exact `premiselabs.co` host** and, on the tortoise host, by the static `_redirects`.
+  `/signin*` is a legacy alias with no route on the app origin — `_redirects` maps it to `/auth` **on
+  the tortoise host** (`tortoise.premiselabs.co/signin` → `/auth` → `app.premiselabs.co/auth`); on the
+  company host there is one extra hop first
+  (`premiselabs.co/signin` → `tortoise.premiselabs.co/signin`), and on the app origin it 404s. The
+  card offers GitHub/Google OAuth, API key and email/password.
+- **Protected pages:** `/welcome` (decided server-side) and the dashboard — both on
+  `app.premiselabs.co`. `/welcome` is **not** a provisioning page: it renders only the recovery
+  reset panel. Team + API-key provisioning is the dashboard's first-run onboarding.
 
 ### 2.3 The gates (server-side, #4054)
 
 | Surface | Gate | Timing |
 |---|---|---|
-| `/auth` | `functions/auth/index.ts` serves the page; no client cookie check | server render |
-| `/welcome` | `functions/welcome.ts`: signed in → 302 to the app; no cookie/dead session → 302 `/auth?next=…&stale=1`; store unreachable → 503 (never a redirect) | server, before the page is served |
-| Dashboard | `functions/api/session.ts` is the single source of session truth (200 `{user}` / 401 not-signed-in / 503 store-unreachable); the SPA asks it instead of reading a cookie | server round-trip |
+| `/auth` | `website/apps/dashboard/functions/auth/index.ts` serves the page; no client cookie check | server render |
+| `/welcome` | `website/apps/dashboard/functions/welcome.ts`, four session outcomes (below) | server, before the page is served |
+| Dashboard | `website/apps/dashboard/functions/api/session.ts` is the single source of session truth (200 `{user}` / 401 not-signed-in / 503 store-unreachable); the SPA asks it instead of reading a cookie | server round-trip |
 | API | Bearer-token validation per request (the BFF holds the token) | authoritative |
+
+`/welcome`'s four session outcomes — the first three answer without rendering a page; the fourth
+is the only case that renders one:
+
+The table is grouped by outcome, not by the order `welcome.ts` evaluates them in (`?reset` is
+tested at :74, before the signed-in redirect at :100).
+
+| Case | Response |
+|---|---|
+| signed in | 302 `APP_ORIGIN[/?claim=1]` |
+| no cookie / dead session | 302 `/auth?next=…&stale=1` |
+| store unreachable (`!env.SESSIONS`, or the D1 read fails) | 503, terminal — **never** a redirect |
+| **any `reset` parameter present** **and** signed in | serves the reset-panel asset — **the ONE rendered case** (503 `assets unavailable` instead, if `env.ASSETS` is unbound) |
+
+The reset condition is **presence, not value** — `welcome.ts` tests
+`url.searchParams.get("reset") !== null`, so a bare `?reset` renders the panel too.
+
+The last two rows are the ones that bite. Omitting the reset case makes `/welcome` look like a pure
+redirect — and that is how the panel's corruption stayed invisible: the Function serves the panel via
+`env.ASSETS.fetch`, which **re-enters the asset router**, where `_redirects` *does* apply (unlike
+inbound routing, which a Function intercepts first). Redirecting on a D1 blip is the other: it reports
+a database outage to the user as "you are signed out".
 
 > **Historical (#1498/#1506 era, REMOVED by #4054):** the gates below were
 > synchronous client-side head-gate cookie checks (`readValidSession()` +
@@ -121,6 +159,9 @@ the token regardless of which subdomain presented it.
 > #3485 loop.
 
 ### 2.4 What was wrong (the user report)
+
+> ⚠️ **Historical (pre-BFF, superseded by #4054).** The report below describes the client-side
+> design that the BFF replaced; it is kept as the problem statement, not as current behaviour.
 
 1. **The dashboard checked the session asynchronously** via
    `supabaseClient.auth.getSession()` inside the React mount effect — which
@@ -174,6 +215,10 @@ the token regardless of which subdomain presented it.
    security boundary (server-side revocation governs).
 
 ## 5. #1511 — auth unification: one page, strict validity, key→session exchange
+
+> ⚠️ **Historical (§5.1–§5.4, pre-BFF, superseded by #4054).** These four sections record the
+> 2026-08-19 client-side unification — parent-domain cookie transport included. They describe the
+> design of their time; §5.5 is the one part still current (see this doc's §2 preamble).
 
 Issue #1511 (2026-08-19/20) closed the remaining gaps: the dashboard could
 strand users on a key-only card, `/auth` lacked "Last used" labels, browser
@@ -250,7 +295,7 @@ graph credential; it can't be written cross-origin — SOP). Instead:
   and redirects to `/auth`. Non-401 failures keep the retry-once +
   contact-support error state.
 
-### 5.5 Shared client helpers (historical — superseded by the BFF, #4054)
+### 5.5 Shared client helpers (retained; the dashboard copy was removed by #4054)
 
 The shared bridge `website/assets/supabase-session.js` exposed one validity
 predicate + clear + last-used + bounce helpers, and was copied into the
@@ -265,15 +310,17 @@ from `functions/api/session.ts` and its bounce is a local same-origin
 
 ### 5.6 Test coverage
 
-- `tests/test_session_login.py` (18) — exchange contract, evaluation order, error tree, rate limit, TOCTOU, expires_at injection, transport 502, session-identity backstop, session-attribution.
-- `tests/test_session_login_helpers.py` (6) — mint-target resolution.
+- `tests/test_session_login.py` (28) — exchange contract, evaluation order, error tree, rate limit, TOCTOU, expires_at injection, transport 502, session-identity backstop, session-attribution.
+- `tests/test_session_login_helpers.py` (7) — mint-target resolution.
 - `tests/e2e/test_session_login_flow.py` — two-origin loop regression
   (exchange → cookie → dashboard renders; no cookie → instant redirect;
   ANON → claim funnel) via prod-domain route interception.
 - `tests/e2e/test_dashboard_gate.py`, `test_welcome_page.py` (401 →
-  clear → `/auth`, no welcome↔/auth loop), `test_cross_subdomain_cookie_sync.py`
-  (helper presence + cookie-contract parity), `test_writer_inventory.py` /
-  `TestCreateApiKeySessionAttribution` (created_by = session UUID).
+  clear → `/auth`, no welcome↔/auth loop); `tests/test_cross_subdomain_cookie_sync.py`
+  (helper presence + cookie-contract parity — note it is NOT under `tests/e2e/`),
+  `test_writer_inventory.py` (`TestGraphSurface` — the session-mint `created_by` /
+  `created_by_key_id` assertions) and `tests/test_session_login.py::TestCreateApiKeySessionAttribution`
+  (created_by = session UUID).
 
 ## 6. The machine-credential model: unified scoped keys (epic #2083)
 
