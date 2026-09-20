@@ -69,15 +69,43 @@ DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 
 # `NAME=…` tokens on a line that builds the secrets payload.
 _ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=")
-# The shell accumulator that builds the payload is not itself a Fly secret.
-_PAYLOAD_VARS = frozenset({"ARGS"})
+# The shell accumulator that builds the payload is not itself a Fly secret; its
+# NAME is read from the `flyctl secrets set` invocation rather than hardcoded, so
+# renaming the accumulator cannot silently empty the scan.
+_PAYLOAD_CMD_RE = re.compile(r"\bflyctl\s+secrets\s+set\b")
+_SHELL_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 # A propagation line that only fires when the GitHub secret is non-empty:
 #   [ -n "${{ secrets.X }}" ] && ARGS="$ARGS Y=…"
 _CONDITIONAL_RE = re.compile(r'\[\s*-n\s+"\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"\s*\]\s*&&')
-# The same guard opened as a multi-line block:
+# An `if` whose condition reads a GitHub secret, opened as a block:
 #   if [ -n "${{ secrets.X }}" ] && [ -n "${{ secrets.Y }}" ]; then
-_BLOCK_GUARD_RE = re.compile(r'^if\s+\[\s*-n\s+"\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"')
+#   if [ "${{ secrets.X }}" != "" ]; then
+_GUARD_COND_RE = re.compile(r"secrets\.[A-Za-z0-9_]+")
+_FI_RE = re.compile(r"^fi(\s*;.*)?$")
+
+
+def payload_variable(text: str) -> str:
+    """The shell variable the `flyctl secrets set` command is built from.
+
+    Raises ValueError when it cannot be determined — including when the payload
+    is not a single accumulated variable (``flyctl secrets set NEWKEY=1`` alone
+    on a line). Fail-closed: an unreadable payload scope makes every assignment
+    invisible, which would silently disable the Fly half of the contract.
+    """
+    candidates: list[str] = []
+    for raw in text.splitlines():
+        if raw.strip().startswith("#"):
+            continue
+        if _PAYLOAD_CMD_RE.search(raw):
+            candidates.extend(_SHELL_VAR_RE.findall(raw))
+    unique = sorted(set(candidates))
+    if len(unique) != 1:
+        raise ValueError(
+            "cannot determine the flyctl-secrets-set payload variable "
+            f"(found {unique or 'none'}) — the assignment scope is unreadable"
+        )
+    return unique[0]
 
 
 def _err(msg: str) -> None:
@@ -145,33 +173,38 @@ def workflow_secret_refs(text: str) -> set[str]:
     return set(_SECRET_REF_RE.findall(text))
 
 
-def workflow_assignments(text: str) -> tuple[set[str], set[str]]:
+def workflow_assignments(text: str, payload_var: str) -> tuple[set[str], set[str]]:
     """``(unconditional, conditional)`` Fly names the workflow assigns.
 
-    Only lines that build the Fly secrets payload count — a name mentioned in a
-    comment or a gate is not propagation. A name is CONDITIONAL when the line
-    that assigns it is either guarded inline (``[ -n "${{ secrets.X }}" ] &&
-    ARGS=…``) or sits inside an ``if [ -n "${{ secrets.X }}" ] …; then`` block:
-    the Fly value is only overwritten while those GitHub secrets exist.
+    Only lines that build the Fly secrets payload (referencing ``payload_var``)
+    count, and a full-line comment never counts — a name mentioned in one is not
+    propagation. A name is CONDITIONAL when the line that assigns it is guarded
+    inline (``[ -n "${{ secrets.X }}" ] && ARGS=…``) or sits inside an ``if``
+    block whose condition reads a GitHub secret: the Fly value is only
+    overwritten while those secrets exist. Nesting is tracked as a stack, so an
+    inner ``fi`` cannot end an enclosing guard early.
     """
     unconditional: set[str] = set()
     conditional: set[str] = set()
-    # Depth of enclosing `if [ -n "${{ secrets.… }}" …]` blocks. A multi-line
-    # guard is the real shape in deploy-hosted.yml (BACKUP_SWEEP_ENABLED), and a
-    # same-line-only detector read it as managed.
-    guarded_depth = 0
-    for line in text.splitlines():
-        stripped = line.strip()
-        if _BLOCK_GUARD_RE.match(stripped):
-            guarded_depth += 1
-        if "ARGS" in line:
-            names = set(_ASSIGN_RE.findall(line)) - _PAYLOAD_VARS
-            if guarded_depth or _CONDITIONAL_RE.search(line):
+    guard_stack: list[bool] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            continue
+        # A one-liner (`if …; then …; fi`) opens and closes on the same line and
+        # must not push a frame that is never popped.
+        one_liner = bool(re.search(r";\s*fi\s*(;.*)?$", stripped))
+        if (stripped.startswith("if ") or stripped == "if") and not one_liner:
+            guard_stack.append(bool(_GUARD_COND_RE.search(raw)))
+        elif _FI_RE.match(stripped) and guard_stack:
+            guard_stack.pop()
+        if payload_var in raw:
+            # The accumulator itself (`ARGS=…`) is not a Fly secret.
+            names = set(_ASSIGN_RE.findall(raw)) - {payload_var}
+            if any(guard_stack) or _CONDITIONAL_RE.search(raw):
                 conditional |= names
             else:
                 unconditional |= names
-        if stripped == "fi":
-            guarded_depth = max(0, guarded_depth - 1)
     return unconditional, conditional
 
 
@@ -229,7 +262,18 @@ def main() -> int:
         return 2
 
     secret_refs = workflow_secret_refs(workflow_text)
-    assigned, assigned_conditionally = workflow_assignments(workflow_text)
+    try:
+        payload_var = payload_variable(workflow_text)
+    except ValueError as exc:
+        _err(f"cannot determine secret provenance: {exc}")
+        return 2
+    assigned, assigned_conditionally = workflow_assignments(workflow_text, payload_var)
+    if not assigned and not assigned_conditionally:
+        _err(
+            "cannot determine secret provenance: the flyctl secrets set payload is "
+            f"built from ${payload_var} but no assignment to it was found"
+        )
+        return 2
 
     print(
         f"check-fly-secret-drift: Fly app {app} vs {manifest_path.name} "

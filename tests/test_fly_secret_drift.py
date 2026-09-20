@@ -321,6 +321,88 @@ def test_duplicate_declaration_is_exit_2():
     assert "duplicate declaration" in r.stderr
 
 
+def test_payload_not_a_single_variable_is_exit_2():
+    """A payload the scan cannot scope must fail closed, not scan nothing.
+
+    `flyctl secrets set NEWKEY=1` on its own line makes the assignment scope
+    unreadable; scanning no lines would silently disable the Fly half.
+    """
+    wf = _fixture(
+        "off-args.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          flyctl secrets set NEWKEY=1 --app fixture-app --stage
+""",
+    )
+    r = _run(_secrets_file(["FASTAPI_INTERNAL_KEY"], "off-args.json"), workflow=wf)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "payload variable" in r.stderr
+
+
+def test_comment_lines_are_not_propagation():
+    """A commented `ARGS="$ARGS X=…"` is documentation, not propagation.
+
+    The real step is comment-dense and its own comment block carries `NAME=`
+    tokens; reading them as assignments false-blocks an otherwise correct deploy.
+    """
+    wf = _fixture(
+        "commented.yml",
+        _WORKFLOW.replace(
+            "          flyctl secrets set --stage $ARGS",
+            '          # ARGS="$ARGS COMMENTED_KEY=1"\n'
+            "          # fly secrets set REGISTRY_STREAM_KEY=… --app fixture-app\n"
+            "          flyctl secrets set --stage $ARGS",
+        ),
+    )
+    r = _run(_secrets_file(_ALL_DECLARED, "commented.json"), workflow=wf)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "COMMENTED_KEY" not in r.stdout
+
+
+def test_nested_guard_does_not_end_the_enclosing_guard():
+    """An inner `fi` must not close the outer guard (stack, not a pop-on-any-fi)."""
+    wf = _fixture(
+        "nested.yml",
+        """name: w
+jobs:
+  j:
+    steps:
+      - run: |
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }}"
+          if [ -n "${{ secrets.A_KEY }}" ]; then
+            if [ -n "${{ secrets.B_KEY }}" ]; then
+              ARGS="$ARGS INNER_KEY=1"
+            fi
+            ARGS="$ARGS OUTER_KEY=1"
+          fi
+          if [ "${{ secrets.GH_CLIENT_ID }}" != "" ]; then
+            ARGS="$ARGS ALT_FORM_KEY=1"
+          fi
+          flyctl secrets set --stage $ARGS
+""",
+    )
+    manifest = _fixture(
+        "nested-manifest.txt",
+        "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+        "INNER_KEY  workflow\nOUTER_KEY  workflow\nALT_FORM_KEY  workflow\n",
+    )
+    r = _run(
+        _secrets_file(
+            ["FASTAPI_INTERNAL_KEY", "INNER_KEY", "OUTER_KEY", "ALT_FORM_KEY"], "nested.json"
+        ),
+        manifest=manifest,
+        workflow=wf,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    conditional_block = r.stdout.split("CONDITIONAL PROPAGATION")[1].split("OK:")[0]
+    for name in ("INNER_KEY", "OUTER_KEY", "ALT_FORM_KEY"):
+        assert name in conditional_block, f"{name} must be conditional, not managed"
+    assert "3 conditionally propagated" in r.stdout
+
+
 def test_malformed_manifest_is_exit_2_not_clean():
     """Fail-closed: an unreadable state is never reported as clean."""
     manifest = _fixture("malformed.txt", "FASTAPI_INTERNAL_KEY\n")
