@@ -49,10 +49,6 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import API_KEY_PREFIXES, hash_api_key
-from tortoise.file_indexer import (  # #4005 shared identity primitives
-    derive_session_source_url,
-    provenance_basename,
-)
 from tortoise.capture_receipts import (  # #3809: ONE key definition
     capture_last_error_key as _capture_last_error_key,
 )
@@ -60,6 +56,10 @@ from tortoise.capture_receipts import (
     capture_receipt_key as _capture_receipt_key,
 )
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+from tortoise.file_indexer import (  # #4005 shared identity primitives
+    derive_session_source_url,
+    provenance_basename,
+)
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
