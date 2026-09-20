@@ -444,17 +444,41 @@ def _substrate_label() -> str:
     slash, ``docker:/:pw@host:6379/g``) puts the userinfo in
     ``urlparse(...).path`` instead, so echoing the path leaks too.
 
-    The label therefore echoes the SCHEME (the substrate class) and the
-    validated numeric PORT only — never the host, never the userinfo, never
-    the path. A URI with no host is refused by name, and so is a
-    non-numeric port.
+    The label therefore echoes the SCHEME (validated against the product's
+    own ``SUPPORTED_URI_SCHEMES``) and the validated numeric PORT only —
+    never the host, never the userinfo, never the path. A URI with no host
+    is refused by name, and so is a host/port the parser cannot validate.
+
+    ⚠️ ``urlparse`` itself is NOT safe to call outside a guard: it raises
+    eagerly, and its message EMBEDS the netloc (hence the password) —
+    measured at review:
+    ``docker://:p＠ssword@host:6379/g`` -> ``ValueError: netloc
+    ':p＠ssword@host:6379' contains invalid characters under NFKC
+    normalization`` and ``docker://:pw@[S3cret-Pa55w0rd]:6379/g`` ->
+    ``ValueError: 'S3cret-Pa55w0rd' does not appear to be an IPv4 or IPv6
+    address``. The parse, the ``hostname`` read and the ``port`` read all sit
+    inside ONE guard whose message quotes nothing.
     """
     base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
     if not base:
         return "embedded"
     from urllib.parse import urlparse
-    u = urlparse(base)
-    if not u.netloc or not u.hostname:
+    try:
+        u = urlparse(base)
+        hostname = u.hostname
+        # ``urlparse``/``.hostname``/``.port`` all raise eagerly on a
+        # malformed value, and every one of those messages can carry the
+        # netloc — which is where the userinfo password lives. Refuse BY NAME
+        # behind a single guard; never let a library exception carry the
+        # value into stderr (the C1 finding of this review round).
+        port = f":{u.port}" if u.port else ""
+    except ValueError:
+        raise SystemExit(
+            "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI is not a usable "
+            "connection URI (malformed userinfo/host, or a non-numeric or "
+            "out-of-range port) — expected a form like "
+            "docker://:pw@host:6379/<graph>") from None
+    if not u.netloc or not hostname:
         # Fail LOUD here: a value this malformed is about to be used as a
         # connection base too, and the label must never be the thing that
         # discovers it. Name the problem, never the value.
@@ -462,23 +486,21 @@ def _substrate_label() -> str:
             "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI is not a usable "
             "connection URI (no host) — expected a form like "
             "docker://:pw@host:6379/<graph>")
-    try:
-        # ``urlparse`` validates the port LAZILY: reading ``u.port`` on a
-        # non-numeric value raises, and the exception text carries the
-        # offending fragment — which, on the pathological URIs above, can be
-        # a password. Refuse it BY NAME here instead of letting a raw
-        # ValueError carry the value into stderr.
-        port = f":{u.port}" if u.port else ""
-    except ValueError:
+    # A credential can occupy the SCHEME slot (``<secret>://…``) and would
+    # then be echoed by a blind ``u.scheme``. Validate it against the
+    # product's own scheme set, and emit the canonical (lower-cased) value.
+    from tortoise.config import SUPPORTED_URI_SCHEMES
+    scheme = u.scheme.lower()
+    if scheme not in SUPPORTED_URI_SCHEMES:
         raise SystemExit(
-            "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI has a non-numeric "
-            "port — expected a form like docker://:pw@host:6379/<graph>") \
-            from None
+            "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI has an unsupported "
+            "scheme (expected one of " +
+            "/".join(SUPPORTED_URI_SCHEMES) + "://)")
     # The graph segment is deliberately NOT echoed (it is part of the path,
     # which is where a malformed userinfo can land). The receipt records
     # WHERE the rate was measured, not the scratch graph's name — and, per
-    # the docstring, not the host either.
-    return f"{u.scheme}://<redacted>{port}/<graph>"
+    # the docstring, not the host or the userinfo either.
+    return f"{scheme}://<redacted>{port}/<graph>"
 
 
 def _drop_docker_graph(base: str, name: str) -> None:

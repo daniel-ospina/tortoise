@@ -55,6 +55,16 @@ def test_no_credential_reaches_the_receipt_label(monkeypatch, secret):
         f"docker://:{secret}#frag@host:6379/g",
         f"docker://user:{secret}@host:6379/g",
         f"docker://:{secret}@host:6379/g/../x",
+        # The parser itself raises EAGERLY on these two, and its message
+        # embeds the netloc — the credential must not ride that out either.
+        f"docker://:{secret}\uff20tail@host:6379/g",
+        f"docker://:pw@[{secret}]:6379/g",
+        # a credential occupying the SCHEME slot would be echoed by a blind
+        # ``u.scheme`` — the label validates the scheme against the product's
+        # own set instead.
+        f"{secret}://:pw@host:6379/g",
+        f"docker://:{secret}@host:99999/g",
+        f"docker://:{secret}@host:notaport/g",
     ]
     for uri in forms:
         monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI", uri)
@@ -86,16 +96,28 @@ def test_unset_names_the_embedded_lane(monkeypatch):
     assert _substrate_label() == "embedded"
 
 
-def test_a_non_numeric_port_is_refused_by_name_without_the_value(monkeypatch):
-    """``urlparse`` validates the port lazily, so reading ``u.port`` used to
-    raise a raw ValueError whose message carried the offending fragment. The
-    refusal must be ours and must not quote the value."""
+def test_a_bad_port_or_a_non_ask_scheme_is_refused_by_name(monkeypatch):
+    """Every refusal is OUR named ``SystemExit`` and quotes nothing — in
+    particular the library's eager ``ValueError`` (whose message carries the
+    netloc, hence a password) must never reach the caller."""
+    for bad in ("docker://:pw@host:hunter2secret/g",
+                "docker://:pw@host:99999/g",
+                "docker://:p\uff20ssword@host:6379/g",
+                "docker://:pw@[hunter2secret]:6379/g"):
+        monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI", bad)
+        with pytest.raises(SystemExit) as exc:
+            _substrate_label()
+        assert "hunter2secret" not in str(exc.value).lower()
+        assert "ssword" not in str(exc.value).lower()
+
+
+def test_a_credential_in_the_scheme_slot_is_refused(monkeypatch):
     monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
-                       "docker://:pw@host:hunter2secret/g")
+                       "S3cret-Pa55w0rd://:pw@host:6379/g")
     with pytest.raises(SystemExit) as exc:
         _substrate_label()
-    assert "non-numeric port" in str(exc.value)
-    assert "hunter2secret" not in str(exc.value)
+    assert "unsupported" in str(exc.value).lower()
+    assert "s3cret-pa55w0rd" not in str(exc.value).lower()
 
 
 def test_a_uri_without_a_host_is_refused_by_name(monkeypatch):
