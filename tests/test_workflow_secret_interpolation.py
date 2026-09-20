@@ -113,37 +113,30 @@ def _env_refs(text: str) -> list[str]:
 
 
 def _resolve_secret_env_keys(
-    *envs: dict | None, secret_outputs: frozenset[tuple[str, str]] = frozenset()
+    *envs: dict | None, secret_outputs: set[tuple[str, str]] = frozenset()
 ) -> set[str]:
     """Env keys bound, directly or transitively, to a secret in the given maps.
 
-    A key is secret-bound when its value contains a ``secrets`` context,
-    ``${{ env.OTHER }}`` where OTHER is itself secret-bound, or
-    ``${{ needs.<job>.outputs.<name> }}`` naming a secret-derived output — a
-    fixpoint, so chains of any length resolve. ``envs`` should carry every scope
-    visible to the step (workflow root, job, step): the ``env`` context unions
-    them. Scopes are unioned conservatively (fail-closed): a narrower scope that
-    shadows a secret-bound key with a plain value is still treated as
-    secret-bound.
+    A key is secret-bound when its value carries a secret through ANY of the
+    declared carriers (``_span_reads_secret``), including a whole-context dump
+    (``toJSON(env)``) — a fixpoint, so chains of any length resolve. ``envs``
+    should carry every scope visible to the step (workflow root, job, step): the
+    ``env`` context unions them. Scopes are unioned conservatively (fail-closed):
+    a narrower scope that shadows a secret-bound key with a plain value is still
+    treated as secret-bound.
     """
     keys: set[str] = set()
-    for env in envs:
-        for name, value in (env or {}).items():
-            if _SECRET_CONTEXT.search(str(value)):
-                keys.add(str(name))
-    lowered_out = {(job.lower(), name.lower()) for job, name in secret_outputs}
     changed = True
     while changed:
         changed = False
-        lowered = {k.lower() for k in keys}
         for env in envs:
             for name, value in (env or {}).items():
                 if str(name) in keys:
                     continue
-                text = str(value)
-                via_env = any(r.lower() in lowered for r in _env_refs(text))
-                via_out = bool(_needs_output_refs(text) & lowered_out)
-                if via_env or via_out:
+                if any(
+                    _span_reads_secret(s, keys, secret_outputs)
+                    for s in _expression_spans(str(value))
+                ):
                     keys.add(str(name))
                     changed = True
     return keys
@@ -152,12 +145,12 @@ def _resolve_secret_env_keys(
 def _secret_output_keys(doc: dict) -> set[tuple[str, str]]:
     """``(job, output_name)`` whose job-output definition reads a secret.
 
-    A definition reads a secret directly (``secrets`` context), through a
-    secret-bound ``env`` key visible to the job (workflow-root + job scope), or
-    through another secret-derived job output. Env keys and outputs are MUTUALLY
-    recursive (an output defined from an env key that is itself bound to an
-    output), so they are resolved in one joint fixpoint. A ``steps.<id>.outputs``
-    chain is outside the guard's scope.
+    A definition reads a secret through ANY of the declared carriers
+    (``_span_reads_secret``): the ``secrets`` context, a secret-bound ``env``
+    key visible to the job, a whole-context dump, or another secret-derived job
+    output. Env keys and outputs are MUTUALLY recursive (an output defined from
+    an env key that is itself bound to an output), so they are resolved in one
+    joint fixpoint. A ``steps.<id>.outputs`` chain is outside the guard's scope.
     """
     root_env = doc.get("env")
     jobs = {str(n): (j or {}) for n, j in (doc.get("jobs") or {}).items()}
@@ -166,24 +159,16 @@ def _secret_output_keys(doc: dict) -> set[tuple[str, str]]:
     changed = True
     while changed:
         changed = False
-        lowered_out = frozenset((j.lower(), n.lower()) for j, n in outputs)
         for job_name, job in jobs.items():
-            keys = _resolve_secret_env_keys(
-                root_env, job.get("env"), secret_outputs=lowered_out
-            )
+            keys = _resolve_secret_env_keys(root_env, job.get("env"), secret_outputs=outputs)
             if keys != job_keys[job_name]:
                 job_keys[job_name] = keys
                 changed = True
-            env_lower = {k.lower() for k in keys}
             for name, value in (job.get("outputs") or {}).items():
                 if (job_name, str(name)) in outputs:
                     continue
-                text = str(value)
-                via_env = any(r.lower() in env_lower for r in _env_refs(text))
-                if (
-                    _SECRET_CONTEXT.search(text)
-                    or via_env
-                    or bool(_needs_output_refs(text) & lowered_out)
+                if any(
+                    _span_reads_secret(s, keys, outputs) for s in _expression_spans(str(value))
                 ):
                     outputs.add((job_name, str(name)))
                     changed = True
@@ -199,6 +184,43 @@ def _needs_output_refs(span: str) -> set[tuple[str, str]]:
     return {(j.lower(), o.lower()) for j in jobs for o in outs}
 
 
+def _span_reads_secret(
+    span: str,
+    secret_env_keys: set[str] | frozenset[str],
+    secret_outputs: set[tuple[str, str]] | frozenset[tuple[str, str]],
+) -> bool:
+    """Does this single ``${{ … }}`` span carry a secret value into its text?
+
+    The single definition of the declared carriers, shared by all three layers
+    (run bodies, env values, job-output definitions) so a dump at a DEFINITION
+    layer resolves exactly like one at the point of consumption:
+
+    - the ``secrets`` context (bare/member/indexed/wrapped/case);
+    - a secret-bound ``env`` key, dot or index form;
+    - a secret-derived job output via ``needs.<job>.outputs.<name>``;
+    - a whole-context dump of a carrier that holds a secret (``env``,
+      ``toJSON(env)``, ``toJSON(needs)``, ``needs.<job>.outputs``).
+    """
+    if _SECRET_CONTEXT.search(span):
+        return True
+    lowered_env = {k.lower() for k in secret_env_keys}
+    lowered_out = {(job.lower(), name.lower()) for job, name in secret_outputs}
+    if any(r.lower() in lowered_env for r in _env_refs(span)):
+        return True
+    if _needs_output_refs(span) & lowered_out:
+        return True
+    if _ENV_BARE_REF.search(span) and secret_env_keys:
+        return True
+    if _NEEDS_BARE_REF.search(span) and secret_outputs:
+        return True
+    if _OUTPUTS_BARE_REF.search(span):
+        job_refs = {j.lower() for j in _NEEDS_JOB_DOT_REF.findall(span)}
+        job_refs |= {m[1].lower() for m in _NEEDS_JOB_INDEX_REF.findall(span)}
+        if job_refs & {job for job, _name in lowered_out}:
+            return True
+    return False
+
+
 def _run_secret_uses(
     run: str,
     secret_env_keys: set[str],
@@ -206,31 +228,13 @@ def _run_secret_uses(
 ) -> list[str]:
     """Expressions in ``run`` that put a secret into the shell SOURCE.
 
-    Three known carriers: a direct ``secrets`` context; ``${{ env.KEY }}`` for
-    an env key bound directly or transitively to a secret; and
-    ``${{ needs.<job>.outputs.<name> }}`` for a job output defined from a
-    secret. Each re-interpolates the secret into the run text exactly like the
-    direct form (the #4334 hazard), and the env form is one token away from the
-    fix shape this repo prescribes.
+    Each re-interpolates the secret into the run text exactly like the direct
+    form (the #4334 hazard); the env form is one token away from the fix shape
+    this repo prescribes.
     """
-    uses = _secret_interpolations(run)
-    lowered_env = {k.lower() for k in secret_env_keys}
-    lowered_out = {(job.lower(), name.lower()) for job, name in secret_outputs}
-    jobs_with_secret_outputs = {job for job, _name in lowered_out}
+    uses: list[str] = []
     for span in _expression_spans(run):
-        via_env = any(r.lower() in lowered_env for r in _env_refs(span))
-        via_out = bool(_needs_output_refs(span) & lowered_out)
-        # Whole-context / bare dumps of a carrier that holds a secret.
-        if _ENV_BARE_REF.search(span) and secret_env_keys:
-            via_env = True
-        if _NEEDS_BARE_REF.search(span) and secret_outputs:
-            via_out = True
-        if _OUTPUTS_BARE_REF.search(span):
-            job_refs = {j.lower() for j in _NEEDS_JOB_DOT_REF.findall(span)}
-            job_refs |= {m[1].lower() for m in _NEEDS_JOB_INDEX_REF.findall(span)}
-            if job_refs & jobs_with_secret_outputs:
-                via_out = True
-        if (via_env or via_out) and span not in uses:
+        if _span_reads_secret(span, secret_env_keys, secret_outputs) and span not in uses:
             uses.append(span)
     return uses
 
@@ -759,6 +763,37 @@ def test_offender_scan_covers_hyphenated_env_keys_and_whole_context_dumps():
         }
     }
     assert _offending_steps(plain) == []
+
+    # A whole-context dump at a DEFINITION layer must resolve too.
+    dump_defs = {
+        "env": {"S": "${{ secrets.DEPLOY_TOKEN }}"},
+        "jobs": {
+            "prep": {
+                "outputs": {"dump": "${{ toJSON(env) }}"},
+                "steps": [{"run": "echo ok"}],
+            },
+            "use": {
+                "needs": "prep",
+                "steps": [
+                    {"name": "leak", "run": 'curl "${{ needs.prep.outputs.dump }}"'},
+                ],
+            },
+        },
+    }
+    assert _offending_steps(dump_defs) == ["leak"]
+
+    env_from_dump = {
+        "env": {"S": "${{ secrets.DEPLOY_TOKEN }}"},
+        "jobs": {
+            "j": {
+                "env": {"K": "${{ toJSON(env) }}"},
+                "steps": [{"name": "leak", "run": 'echo "${{ env.K }}"'},
+                          {"name": "plain", "run": 'echo "${{ env.OTHER }}"'},
+                ],
+            }
+        },
+    }
+    assert _offending_steps(env_from_dump) == ["leak"]
 
 
 def test_sweep_enumerates_both_workflow_extensions(tmp_path):
