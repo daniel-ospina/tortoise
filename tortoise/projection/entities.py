@@ -296,12 +296,21 @@ class _EntityHandlers:
             )
         return extra
 
-    def _upsert_point_props(self, p: dict) -> None:
+    def _upsert_point_props(self, p: dict) -> tuple[bool, bool]:
         """Write all Point node properties (no edges).
 
         Single source of truth for Point property parity between apply() and
         rebuild_all() (#330): rebuild pass 1a calls this so a rebuilt graph can
         never drift from the incrementally-applied graph on node properties.
+
+        Returns ``(embedding_written, content_hash_written)`` — the two
+        CONDITIONAL derived writes. The fixed SET list writes them as
+        ``n.embedding = CASE WHEN $embedding IS NOT NULL … ELSE n.embedding
+        END`` and ``n.content_hash = coalesce($ch, …)``, and computes neither
+        for an operator, falsy content, an unavailable embedder, or a raising
+        ``_content_hash`` — so in those cases the existing value is PRESERVED.
+        #4042's pass-1b content boundary needs that outcome exactly, never a
+        ``bool(content)`` guess. Every other caller ignores the return.
         """
         op = p.get("operator")
         if not isinstance(op, dict):
@@ -486,6 +495,10 @@ class _EntityHandlers:
             logger.warning(
                 "Point list prop %r dropped — undeclared list props are never "
                 "written raw (#2795); not restorable from the payload", key)
+        # #4042: report which conditional derived writes actually landed (see
+        # the docstring). `embedding`/`point_content_hash` are exactly the
+        # values the `CASE`/`coalesce` clauses above gate on.
+        return embedding is not None, point_content_hash is not None
 
     def _upsert_point_edges(self, p: dict, contains_session: str | None = None) -> None:
         """Wire all Point edges (provenance + about + operator + session).

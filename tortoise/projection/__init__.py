@@ -2683,10 +2683,15 @@ class FalkorProjection(
         # final `events` (synthetic first, so their nodes exist before JSONL
         # events that may reference them).
         journal_events: list[dict] = []
-        for fname in sorted(os.listdir(log_dir)):
+        # #4042: per-journal-file ordinal, parallel to ``journal_events`` —
+        # the same-source-file chronology key the pass-1b content boundary
+        # needs (see ``event_source`` at the assembly below).
+        journal_source: list[int] = []
+        for file_idx, fname in enumerate(sorted(os.listdir(log_dir))):
             if fname.endswith('.jsonl'):
-                journal_events.extend(
-                    EventLog(os.path.join(log_dir, fname)).read_all())
+                chunk = EventLog(os.path.join(log_dir, fname)).read_all()
+                journal_events.extend(chunk)
+                journal_source.extend([file_idx] * len(chunk))
 
         # ── #2943: durable pre-wipe snapshot (crash-safe wipe+replay) ───
         # A leftover sidecar means a previous rebuild died after the wipe
@@ -2740,6 +2745,14 @@ class FalkorProjection(
         session_snapshot = merged["session_snapshot"]
         session_point_links = merged["session_point_links"]
         events = list(synthetic_events) + journal_events
+        # #4042: per-event source-file ordinal, parallel to ``events``.
+        # ``None`` marks a synthetic / pre-wipe-snapshot event (it came from
+        # no journal file), which never forms a same-source boundary. Built
+        # HERE, not at the read loop above: ``synthetic_events`` is
+        # reassigned by ``_union_prewipe_snapshot`` just before this line and
+        # its length can change on the #2943 recovery path.
+        event_source: list[int | None] = (
+            [None] * len(synthetic_events) + journal_source)
 
         # Guard the wipe BEFORE persisting the sidecar: a REFUSED wipe (a
         # non-test graph in server mode) must not leave a sidecar behind, or a
@@ -2877,6 +2890,25 @@ class FalkorProjection(
         # annotation (``update_entity``/raw-producer duplicate snapshot).
         last_recreate_seq: dict[str, int] = {}
         last_ann_drop_seq: dict[str, int] = {}
+        # #4042: same-journal-file chronology anchors for the pass-1b content
+        # boundary. Keyed ``(id, source-file ordinal)`` because within one
+        # append-only JSONL position IS chronology, while across files it is
+        # not (#21 pins that a revision in an earlier-sorted file must still
+        # fold onto a creation in a later file). All four are filled in the
+        # pass-1a creation branch below.
+        #   ``last_create_seq_by_source``      — the id's last creation
+        #     (``n.content``/``n.updatedAt`` are written unconditionally, so
+        #     any later creation supersedes a revision's content).
+        #   ``last_recreate_seq_by_source``    — the id's last creation that
+        #     followed a hard delete; live that node was FRESH, so both
+        #     conditional derived fields were cleared.
+        #   ``last_embed_write_by_source`` / ``last_hash_write_by_source`` —
+        #     the last creation that actually WROTE each conditional derived
+        #     field (from ``_upsert_point_props``'s reported outcome).
+        last_create_seq_by_source: dict[tuple[str, int], int] = {}
+        last_recreate_seq_by_source: dict[tuple[str, int], int] = {}
+        last_embed_write_by_source: dict[tuple[str, int], int] = {}
+        last_hash_write_by_source: dict[tuple[str, int], int] = {}
         # ids hard-deleted since their last creation — a following creation is
         # a RE-creation (new incarnation), not a bare upsert.
         pending_deleted: set[str] = set()
@@ -2927,17 +2959,51 @@ class FalkorProjection(
                     last_recreate_seq[p["id"]] = seq
                 # #3689 review P2: the annotator folds' drop boundary is a
                 # REAL delete→recreate, not a bare upsert (see above).
-                if p["id"] in pending_deleted:
+                is_recreate = p["id"] in pending_deleted
+                if is_recreate:
                     last_ann_drop_seq[p["id"]] = seq
                     pending_deleted.discard(p["id"])
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
                 if ev.get("projection_version", 0) >= 2:
                     p.pop("context", None)
+                # #4042: a re-creation is a FRESH node live — the delete
+                # removed it, so `_upsert_point_props`'s conditional derived
+                # writers (`n.embedding = CASE WHEN $embedding IS NOT NULL …
+                # ELSE n.embedding END`, `n.content_hash = coalesce($ch, …)`)
+                # preserve NOTHING. The pass-1a hoist MERGEs onto the
+                # still-present node instead, so without this wipe the
+                # pre-delete incarnation's embedding/content_hash survive a
+                # recreate that writes none (falsy content, an operator, or
+                # an unavailable embedder). Targeted SET — the
+                # `_GuardedGraph` bulk-wipe guard is DETACH DELETE-only.
+                if is_recreate:
+                    self.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.embedding = NULL, n.content_hash = NULL",
+                        params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,
                 # embedding, validFrom/To, extractedFrom, provenanceSource.
-                self._upsert_point_props(p)
+                # #4042: it also reports which of the two CONDITIONAL derived
+                # fields it actually wrote — the pass-1b content boundary
+                # needs the outcome, never a `bool(content)` guess (the
+                # embedder can be unavailable while the hash still computes).
+                wrote_embedding, wrote_content_hash = (
+                    self._upsert_point_props(p))
+                # #4042: record this creation's per-source-file chronology
+                # anchors (see their declaration above). A synthetic event
+                # has `src is None` and never forms a boundary.
+                src = event_source[seq]
+                if src is not None:
+                    key = (p["id"], src)
+                    last_create_seq_by_source[key] = seq
+                    if is_recreate:
+                        last_recreate_seq_by_source[key] = seq
+                    if wrote_embedding:
+                        last_embed_write_by_source[key] = seq
+                    if wrote_content_hash:
+                        last_hash_write_by_source[key] = seq
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
         # #2488: ONE cross-family deferred list for point re-stamp folds —
@@ -3098,10 +3164,41 @@ class FalkorProjection(
                 ann_anchor = (
                     last_ann_drop_seq.get(rid)
                     if isinstance(rid, str) else None)
+                # #4042: the CONTENT/derived boundary is the id's last creation
+                # in the SAME journal file. Position IS chronology inside one
+                # append-only JSONL, so a later same-file creation
+                # demonstrably superseded this revision live:
+                # `_upsert_point_props` writes `n.content`/`n.updatedAt`
+                # UNCONDITIONALLY (content boundary), and writes
+                # `embedding`/`content_hash` conditionally — so each derived
+                # field is suppressed only when a later same-file creation
+                # actually wrote it, or when a re-creation cleared it. Cross-
+                # file order is NOT chronology (#21 pins that a revision in an
+                # earlier-sorted file must still fold), hence the same-source
+                # key and no cross-file gate. The annotator dims keep their
+                # OWN boundary above (a bare re-emit never clears a dim).
+                src = event_source[seq]
+                superseded = False
+                skip_embedding = False
+                skip_hash = False
+                if isinstance(rid, str) and src is not None:
+                    key = (rid, src)
+                    create_seq = last_create_seq_by_source.get(key)
+                    superseded = create_seq is not None and create_seq > seq
+                    if superseded:
+                        skip_embedding = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_embed_write_by_source.get(key, -1) > seq)
+                        skip_hash = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_hash_write_by_source.get(key, -1) > seq)
                 self._revise_point(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
-                        ann_anchor is not None and seq <= ann_anchor))
+                        ann_anchor is not None and seq <= ann_anchor),
+                    skip_content=superseded,
+                    skip_embedding=skip_embedding,
+                    skip_hash=skip_hash)
             elif t == "OperatorAnnotated":
                 # #3689 pass-1b rebuild parity: apply() folds the explicit
                 # annotation record, and the rebuild chain needs the SAME
@@ -4536,7 +4633,10 @@ class FalkorProjection(
         return len(res.result_set or [])
 
     def _revise_point(self, ev: dict, set_updated_at: bool = False,
-                      skip_annotator_dims: bool = False) -> None:
+                      skip_annotator_dims: bool = False,
+                      skip_content: bool = False,
+                      skip_embedding: bool = False,
+                      skip_hash: bool = False) -> None:
         """Apply PointRevised event — update content, context, and re-compute embedding.
 
         ``skip_annotator_dims`` (#3689): suppress ONLY the annotator-dim
@@ -4546,6 +4646,19 @@ class FalkorProjection(
         re-created node). A bare same-id re-emit is NOT such a boundary, so it
         never suppresses a live-valid dim. Chronological callers (``apply()``)
         leave it False. Content/embedding replay is unaffected.
+
+        ``skip_content`` / ``skip_embedding`` / ``skip_hash`` (#4042): the
+        CONTENT/derived half of the same class, with a DIFFERENT boundary.
+        ``rebuild_all`` sets them for a revision that a creation LATER IN THE
+        SAME JOURNAL FILE superseded. `_upsert_point_props` writes
+        ``n.content``/``n.updatedAt`` UNCONDITIONALLY, so any later same-file
+        creation is a content boundary (``skip_content``). The two derived
+        fields are written CONDITIONALLY (``CASE``/``coalesce``), so each is
+        suppressed independently — only when a later same-file creation
+        actually wrote it, or when a re-creation cleared it (``skip_embedding``
+        / ``skip_hash``); a bare re-emit that wrote neither leaves the
+        revision's value live-valid. Chronological callers leave all three
+        False.
         """
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")  # noqa: F841
@@ -4566,40 +4679,49 @@ class FalkorProjection(
             # strand the rebuilt graph after the wipe and block every retry
             # (#3689 review P1; same parameter-writability class as the dims).
             new_content = None
-        params: dict = {"id": pid, "c": new_content}
+        params: dict = {"id": pid}
+        set_clauses: list[str] = []
 
-        # Re-compute embedding when content changes (even to empty — wipe stale).
-        # Always set params["embedding"] so SET overwrites any stale value;
-        # on compute failure, set to None rather than preserving old embedding (#19).
-        if new_content is not None:
-            try:
-                from tortoise.embeddings import compute_embedding
-                emb = compute_embedding(new_content) if new_content else None
-                params["embedding"] = emb  # None = wipe stale embedding for empty content
-            except Exception:
-                params["embedding"] = None  # wipe stale embedding on failure (#19)
+        # #4042: `n.content` is written UNCONDITIONALLY by
+        # `_upsert_point_props`, so a creation that superseded this revision
+        # already set it — `skip_content` omits the clause (and its
+        # `updatedAt` stamp below).
+        if not skip_content:
+            params["c"] = new_content
+            set_clauses.append("n.content = coalesce($c, n.content)")
 
-        set_clauses = ["n.content = coalesce($c, n.content)"]
         if new_content is not None:
-            # #2795: content_hash is derived from content — mirror the live
-            # update_point #1904 recompute so a replayed PointRevised cannot
-            # leave a STALE indexed dedup key behind (the writer now sets a
-            # hash on PointAdded, so a missed recompute here would be worse
-            # than the prior NULL). #2958 review: `is not None` is not a type
-            # gate — a non-str new_content from a corrupt/hand-edited JSONL
-            # line would raise inside sha256(text.encode) and kill the rebuild
-            # pass (the recovery path). NULL degrades to create_point's
-            # content-equality fallback; a stale present-but-wrong hash does
-            # not — so NULL is the correct failure value.
-            set_clauses.append("n.content_hash = $content_hash")
-            try:
-                params["content_hash"] = _content_hash(new_content)
-            except Exception:
-                params["content_hash"] = None
+            # Re-compute embedding when content changes (even to empty — wipe
+            # stale). Always set params["embedding"] so SET overwrites any
+            # stale value; on compute failure, set to None rather than
+            # preserving old embedding (#19). #4042: omitted when a later
+            # same-journal-file creation already wrote this field.
+            if not skip_embedding:
+                try:
+                    from tortoise.embeddings import compute_embedding
+                    emb = compute_embedding(new_content) if new_content else None
+                    params["embedding"] = emb  # None = wipe stale embedding for empty content
+                except Exception:
+                    params["embedding"] = None  # wipe stale embedding on failure (#19)
+                set_clauses.append("n.embedding = $embedding")
+            if not skip_hash:
+                # #2795: content_hash is derived from content — mirror the live
+                # update_point #1904 recompute so a replayed PointRevised cannot
+                # leave a STALE indexed dedup key behind (the writer now sets a
+                # hash on PointAdded, so a missed recompute here would be worse
+                # than the prior NULL). #2958 review: `is not None` is not a type
+                # gate — a non-str new_content from a corrupt/hand-edited JSONL
+                # line would raise inside sha256(text.encode) and kill the rebuild
+                # pass (the recovery path). NULL degrades to create_point's
+                # content-equality fallback; a stale present-but-wrong hash does
+                # not — so NULL is the correct failure value.
+                set_clauses.append("n.content_hash = $content_hash")
+                try:
+                    params["content_hash"] = _content_hash(new_content)
+                except Exception:
+                    params["content_hash"] = None
         # Phase 2 #49: context removed — new_context no longer written
-        if "embedding" in params:
-            set_clauses.append("n.embedding = $embedding")
-        if set_updated_at:
+        if set_updated_at and not skip_content:
             set_clauses.append("n.updatedAt = $now")
             params["now"] = _now_iso()
         # #3689: fold the annotator dims carried as PointRevised extras
@@ -4612,6 +4734,14 @@ class FalkorProjection(
             for key, val in _annotator_dims(ev).items():
                 set_clauses.append(f"n.{key} = ${key}")
                 params[key] = val
+
+        # #4042: every clause can now be suppressed at once (a superseded
+        # props-only revision carrying no dims). FalkorDB rejects a `SET` with
+        # an empty clause list — and this is the RECOVERY path, so that abort
+        # would strand the rebuilt graph after the wipe. Nothing to write is a
+        # no-op, not a crash.
+        if not set_clauses:
+            return
 
         self.g.query(
             f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)}",
