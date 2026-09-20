@@ -143,6 +143,11 @@ surfaces:
   # REPLACES the `core` fallback, so a core-only registration would never run
   # on an api-only PR. Same #2938 dual-membership convention.
   - test_cohort_cost_cap.py
+  # #4194: the turn-write embedding path. Dual-registered with `core` (the
+  # SDK capture loop owns there) and `eval` (tortoise/embeddings.py selects
+  # eval) because the hosted copy of the same loop lives in the api-owned
+  # tortoise/hosted_api.py — a hosted-only tweak must run this file.
+  - test_turn_embedding_write_path_4194.py
   - test_hosted_auth.py
   - test_cross_tenant_read_isolation.py  # #3663: capture->read cross-tenant READ isolation (hosted api: search/sessions/detail/export + backups + MCP list_graphs + namespace opener)
   - test_hosted_backup.py
@@ -411,6 +416,15 @@ surfaces:
   - test_canonical.py
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
+  # #4194: captured turn Points must carry the embedding the dense leg
+  # searches. Registered here because this file pins the unpatterned engine
+  # module `tortoise/search_engine.py` (run_vector_query /
+  # declared_degraded_read), which matches no SOURCE_PATTERNS entry and so
+  # falls to the `core` fallback. Dual-registered with `api` (the hosted copy of
+  # the loop in `tortoise/hosted_api.py`) and `eval`
+  # (`tortoise/embeddings.py`). Note `tortoise/sdk.py` is a SHARED_MODULE, so an
+  # sdk.py-only change already runs the full matrix.
+  - test_turn_embedding_write_path_4194.py
   - test_capture_session_supersession_e2e.py
   - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api
   - test_rebuild_turn_points_3947.py
@@ -698,6 +712,15 @@ surfaces:
   - test_suspension_parity.py
   - test_taxonomy.py
   - test_tool_registry.py
+  # #4282 (Node A scoreboard): every registered tool + SDK binding must RESOLVE to a
+  # live callable. The test executes the resolution (getattr / mcp._list_tools), never
+  # greps source. The five known-dead entries are carried as xfail(strict=True) bound
+  # to #4282, the implementation epic for the owner-approved canonical list
+  # (docs/product/canonical-mcp-tools.md, merged 8375c7921): a SIXTH dead entry is not
+  # in that ledger and fails the build, and repairing one XPASSes to red. RED BY
+  # DESIGN — it is the instrument that keeps the surface measurable until #4282
+  # repairs these declarations.
+  - test_surface_resolution.py
   - test_topic_summarization.py
   - test_tortoise_search.py
   - test_trash_quota.py            # #2467 restore respects the max_graphs quota (fake CP)
@@ -1015,6 +1038,11 @@ surfaces:
   - eval/write_path/test_write_path_operator_lane.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
+  # #4194: the write path now embeds turns via tortoise/embeddings.py's
+  # compute_embeddings (the batch form of compute_embedding); a change to
+  # that module selects `eval`, so this file is dual-registered here and in
+  # `core`/`api`.
+  - test_turn_embedding_write_path_4194.py
   - test_battery_retrieval_preflight.py  # #2985: pins tortoise/embeddings.py EmbeddingModel.get probe + recall_state leg_trace provenance (also battery)
   - test_calibrate_thresholds.py
   # #2938: direct unit tests of eval-mapped sources — tortoise/embeddings.py
