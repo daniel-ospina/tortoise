@@ -94,9 +94,9 @@ def test_billing_tab_renders_plan_and_usage(page: Page) -> None:
 
 
 def test_upgrade_posts_checkout_with_tier_price_id(page: Page) -> None:
-    """Clicking Upgrade on the Pro card POSTs /v1/billing/checkout with the
-    Pro monthly price id from the mock checkout_price_ids (the contract — a
-    free team has no active subscription, so checkout is the path)."""
+    """Clicking Upgrade on the Builder card POSTs /v1/billing/checkout with
+    the `pro` tier's monthly price id from the mock checkout_price_ids (the
+    contract — a free team has no active subscription, so checkout is the path)."""
     _open_billing(page)
     with page.expect_request(lambda r: r.url.endswith("/v1/billing/checkout")) as req_info:
         # The Builder card's Upgrade button (the Builder card contains 'Builder' + 'Upgrade').

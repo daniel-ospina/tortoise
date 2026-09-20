@@ -254,6 +254,9 @@ def test_account_menu_identity_block_single_team(page: Page):
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
     # #4336: the badge renders the DISPLAY label, never the raw tier key.
     expect(page.locator(".account-menu .tier-badge")).to_have_text("Free")
+    # #4336: the header upgrade badge routes through the same label map
+    # (catches a re-lowercased display name).
+    expect(page.locator("header a.tier-badge")).to_have_text("Free tier · Upgrade")
     expect(page.locator(".account-menu").get_by_role("button", name="Profile")).to_be_visible()
     expect(page.locator(".account-menu").get_by_role("button", name="Log out")).to_be_visible()
     expect(page.locator(".account-menu").get_by_text("Switch organization")).to_have_count(0)
@@ -315,7 +318,7 @@ def test_members_heading_and_nav(page: Page):
 
 def test_billing_team_context(page: Page):
     """#1876: Billing names its team; multi-team can switch in-tab AND the
-    plan data re-hydrates (pinned via team_reads + the Pro-plan badge)."""
+    plan data re-hydrates (pinned via team_reads + the Builder-plan badge)."""
     _seed(page)
     teams = [
         {"org_id": "team_a", "org_name": "Alpha", "tier": "free",
@@ -674,6 +677,9 @@ def test_account_menu_two_sections(page: Page):
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
     # #4336: the badge renders the DISPLAY label, never the raw tier key.
     expect(page.locator(".account-menu .tier-badge")).to_have_text("Free")
+    # #4336: the header upgrade badge routes through the same label map
+    # (catches a re-lowercased display name).
+    expect(page.locator("header a.tier-badge")).to_have_text("Free tier · Upgrade")
 
 
 def test_account_menu_org_block_single_team(page: Page):
