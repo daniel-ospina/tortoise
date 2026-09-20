@@ -32,7 +32,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.ask_shape_rate import _substrate_label
+from tools.ask_shape_rate import _fresh_db, _substrate_label
 
 #: Distinctive secrets that do NOT appear in the function's static example
 #: text (``docker://:pw@host:6379/<graph>``), so a match is a real leak.
@@ -99,16 +99,42 @@ def test_unset_names_the_embedded_lane(monkeypatch):
 def test_a_bad_port_or_a_non_ask_scheme_is_refused_by_name(monkeypatch):
     """Every refusal is OUR named ``SystemExit`` and quotes nothing — in
     particular the library's eager ``ValueError`` (whose message carries the
-    netloc, hence a password) must never reach the caller."""
-    for bad in ("docker://:pw@host:hunter2secret/g",
-                "docker://:pw@host:99999/g",
-                "docker://:p\uff20ssword@host:6379/g",
-                "docker://:pw@[hunter2secret]:6379/g"):
+    netloc, hence a password) must never reach the caller. Each cause is
+    pinned by its OWN expected text, so a guard that reports the wrong cause
+    fails here."""
+    cases = [
+        # (value, must-not-appear, must-appear)
+        ("docker://:pw@host:hunter2secret/g", ["hunter2secret"], "port"),
+        ("docker://:pw@host:99999/g", [], "out-of-range"),
+        ("docker://:p\uff20ssword@host:6379/g", ["ssword"], "malformed"),
+        ("docker://:pw@[hunter2secret]:6379/g", ["hunter2secret"],
+         "malformed"),
+        ("Bogus-Scheme://:pw@host:6379/g", ["bogus-scheme"],
+         "unsupported"),
+    ]
+    for bad, forbidden, expected in cases:
         monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI", bad)
         with pytest.raises(SystemExit) as exc:
             _substrate_label()
-        assert "hunter2secret" not in str(exc.value).lower()
-        assert "ssword" not in str(exc.value).lower()
+        text = str(exc.value)
+        assert expected in text.lower(), (bad, text)
+        for frag in forbidden:
+            assert frag not in text.lower(), (bad, text)
+
+
+def test_fresh_db_shares_the_guard(monkeypatch):
+    """``--mode seed-timing`` reaches ``_fresh_db`` WITHOUT building a
+    receipt, so the guard must live on the shared parser rather than on the
+    label alone (round-4 P1: the same two eager-parse forms leaked there)."""
+    for bad, frag in (("docker://:p\uff20ssword@host:6379/g", "ssword"),
+                      ("docker://:pw@[hunter2secret]:6379/g",
+                       "hunter2secret"),
+                      ("docker://:@S3cret-Pa55w0rd?@host:6379/g",
+                       "s3cret-pa55w0rd")):
+        monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI", bad)
+        with pytest.raises(SystemExit) as exc:
+            _fresh_db("phase")
+        assert frag not in str(exc.value).lower(), (bad, str(exc.value))
 
 
 def test_a_credential_in_the_scheme_slot_is_refused(monkeypatch):
