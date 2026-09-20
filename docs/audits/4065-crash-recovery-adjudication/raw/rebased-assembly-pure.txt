@@ -1,0 +1,128 @@
+# cmd: TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_assembly_pure.py -v -p no:cacheprovider -m 'not track_b and not live' -r fEs
+# revision: c0c1ed4dd9a717258289ae1986f4c929223ae0fa (PR #4065 rebased onto origin/main)
+# lane: EMBEDDED
+# purpose: the rebase must PRESERVE the PR's own tests (they are the PR's whole test delta)
+
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /Users/danielospina/Documents/GitHub/tortoise/.venv/bin/python
+rootdir: /private/tmp/j3-4065/rebased
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 101 items
+
+tests/test_assembly_pure.py::test_ordering_fires[Which event happened first, my cousin's wedding or Michael's engagement party?-ordering] PASSED [  0%]
+tests/test_assembly_pure.py::test_ordering_fires[Which device did I get first, the Samsung Galaxy S22 or the Dell XPS 13?-ordering] PASSED [  1%]
+tests/test_assembly_pure.py::test_ordering_fires[Who became a parent first, Rachel or Alex?-ordering] PASSED [  2%]
+tests/test_assembly_pure.py::test_ordering_fires[Which vehicle did I take care of first in February, the bike or the car?-ordering] PASSED [  3%]
+tests/test_assembly_pure.py::test_ordering_fires[Which book did I finish reading first, 'The Hate U Give' or 'The Nightingale'?-ordering] PASSED [  4%]
+tests/test_assembly_pure.py::test_ordering_fires[Which seeds were started first, the tomatoes or the marigolds?-ordering] PASSED [  5%]
+tests/test_assembly_pure.py::test_ordering_fires[Which event happened first, the meeting with Rachel or the pride parade?-ordering] PASSED [  6%]
+tests/test_assembly_pure.py::test_ordering_fires[which came first - the couch or the dog bed?-ordering] PASSED [  7%]
+tests/test_assembly_pure.py::test_ordering_fires[which came first - buying the couch or the dog bed getting chewed?-ordering] PASSED [  8%]
+tests/test_assembly_pure.py::test_interval_fires[How many days passed between the day I bought my new tennis racket and the day I received it?-interval] PASSED [  9%]
+tests/test_assembly_pure.py::test_interval_fires[How many weeks passed between the time I sold homemade baked goods at the Farmers' Market for the last time and the day I stopped?-interval] PASSED [ 10%]
+tests/test_assembly_pure.py::test_interval_fires[How many months passed between the completion of my undergraduate degree and the submission of my master's thesis?-interval] PASSED [ 11%]
+tests/test_assembly_pure.py::test_interval_fires[How many days had passed between the 'Walk for Hunger' event and the 'Coastal Cleanup' event?-interval] PASSED [ 12%]
+tests/test_assembly_pure.py::test_interval_fires[How many days had passed since I finished reading 'The Seven Husbands of Evelyn Hugo' when I attended the book club meeting?-interval] PASSED [ 13%]
+tests/test_assembly_pure.py::test_interval_fires[how many days between buying the couch and selling the couch?-interval] PASSED [ 14%]
+tests/test_assembly_pure.py::test_interval_fires[How many days had passed between the day I bought a gift for my brother's graduation ceremony and the day I bought a birthday gift for my best friend?-interval] PASSED [ 15%]
+tests/test_assembly_pure.py::test_interval_fires[How many days were there between buying the couch and selling the couch?-interval] PASSED [ 16%]
+tests/test_assembly_pure.py::test_interval_fires[Between buying the couch and selling it, how many days passed?-interval] PASSED [ 17%]
+tests/test_assembly_pure.py::test_interval_fires[How much time passed between buying the couch and selling it?-interval] PASSED [ 18%]
+tests/test_assembly_pure.py::test_interval_fires[How long passed between buying the couch and selling it?-interval] PASSED [ 19%]
+tests/test_assembly_pure.py::test_interval_fires[How many days passed between the day before Christmas and New Year's Day?-interval] PASSED [ 20%]
+tests/test_assembly_pure.py::test_interval_fires[How many days passed between the day I could walk again and the day I ran my first 5K?-interval] PASSED [ 21%]
+tests/test_assembly_pure.py::test_interval_fires[How many days passed between the day I started playing along to my favorite songs on my old keyboard and the day I bought a new one?-interval] PASSED [ 22%]
+tests/test_assembly_pure.py::test_current_state_fires[what is the current status of the couch?-current-state] PASSED [ 23%]
+tests/test_assembly_pure.py::test_current_state_fires[What is the current state of the sofa?-current-state] PASSED [ 24%]
+tests/test_assembly_pure.py::test_current_state_fires[is the couch still live?-current-state] PASSED [ 25%]
+tests/test_assembly_pure.py::test_census_negative_set_precision_floor PASSED [ 26%]
+tests/test_assembly_pure.py::test_census_in_scope_recall_and_shape_rejections PASSED [ 27%]
+tests/test_assembly_pure.py::test_ago_relative_never_fires_even_with_state_morphology PASSED [ 28%]
+tests/test_assembly_pure.py::test_misfire_preference_with_two_named_options PASSED [ 29%]
+tests/test_assembly_pure.py::test_duration_frequency_never_fire PASSED   [ 30%]
+tests/test_assembly_pure.py::test_nary_and_recency_never_fire PASSED     [ 31%]
+tests/test_assembly_pure.py::test_empty_and_garbage_input PASSED         [ 32%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Which event happened first, my cousin's wedding or Michael's engagement party?-expected0] PASSED [ 33%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Which device did I get first, the Samsung Galaxy S22 or the Dell XPS 13?-expected1] PASSED [ 34%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Who became a parent first, Rachel or Alex?-expected2] PASSED [ 35%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Which book did I finish reading first, 'The Hate U Give' or 'The Nightingale'?-expected3] PASSED [ 36%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Who did I meet first, Mark and Sarah or Tom?-expected4] PASSED [ 37%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[which came first - the couch or the dog bed?-expected5] PASSED [ 38%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Which event happened first, the meeting with Rachel or the pride parade?-expected6] PASSED [ 39%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Which book did I finish first, 'Before the Fall' or 'The Watchman'?-expected7] PASSED [ 40%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Which event happened first, the event in May or the party in June?-expected8] PASSED [ 41%]
+tests/test_assembly_pure.py::test_ordering_subject_extraction[Which came first, the summer I would spend in Spain or the year I moved to Madrid?-expected9] PASSED [ 42%]
+tests/test_assembly_pure.py::test_interval_subject_extraction[How many days passed between the day I bought my new tennis racket and the day I received it?-expected0] PASSED [ 43%]
+tests/test_assembly_pure.py::test_interval_subject_extraction[How many days had passed since I finished reading 'The Seven Husbands of Evelyn Hugo' when I attended the book club meeting?-expected1] PASSED [ 44%]
+tests/test_assembly_pure.py::test_interval_subject_extraction[how many days between buying the couch and selling the couch?-expected2] PASSED [ 45%]
+tests/test_assembly_pure.py::test_interval_subject_extraction[How many weeks passed between my visit to the Museum of Modern Art (MoMA) and the 'Ancient Civilizations' exhibit?-expected3] PASSED [ 46%]
+tests/test_assembly_pure.py::test_interval_subject_extraction[Between buying the couch and selling it, how many days passed?-expected4] PASSED [ 47%]
+tests/test_assembly_pure.py::test_interval_subject_extraction[How many months passed between the month of my engagement and the month of my wedding?-expected5] PASSED [ 48%]
+tests/test_assembly_pure.py::test_current_state_subject_extraction PASSED [ 49%]
+tests/test_assembly_pure.py::test_extraction_matches_classification_consistency PASSED [ 50%]
+tests/test_assembly_pure.py::test_resolver_exact_probe_dict_stub PASSED  [ 51%]
+tests/test_assembly_pure.py::test_resolver_one_half_unresolved_fires_nothing PASSED [ 52%]
+tests/test_assembly_pure.py::test_resolver_collision_returns_both_with_ids PASSED [ 53%]
+tests/test_assembly_pure.py::test_resolver_fts_missing_degrades_to_empty PASSED [ 54%]
+tests/test_assembly_pure.py::test_resolver_alias_amplifier_low_confidence PASSED [ 55%]
+tests/test_assembly_pure.py::test_resolver_interval_same_subject_both_indexes PASSED [ 56%]
+tests/test_assembly_pure.py::test_resolver_edge_terms_never_raise PASSED [ 57%]
+tests/test_assembly_pure.py::test_resolver_empty_candidates_never_fire_current_state PASSED [ 58%]
+tests/test_assembly_pure.py::test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set PASSED [ 59%]
+tests/test_assembly_pure.py::test_resolver_docker_exact_and_both_halves SKIPPED [ 60%]
+tests/test_assembly_pure.py::test_resolver_docker_fts_paraphrase SKIPPED [ 61%]
+tests/test_assembly_pure.py::test_resolver_docker_unresolved_keeps_legacy SKIPPED [ 62%]
+tests/test_assembly_pure.py::test_resolver_docker_alias_leg SKIPPED      [ 63%]
+tests/test_assembly_pure.py::test_resolver_docker_excludes_retracted_object SKIPPED [ 64%]
+tests/test_assembly_pure.py::test_walker_explicit_id_renders_retracted_status_verbatim SKIPPED [ 65%]
+tests/test_assembly_pure.py::test_resolver_docker_shipped_hybrid_leg_leaves_nothing_unresolved SKIPPED [ 66%]
+tests/test_assembly_pure.py::test_walker_state_slice_single_statement_and_statuses PASSED [ 67%]
+tests/test_assembly_pure.py::test_walker_date_ladder_tiers_and_undated_last PASSED [ 68%]
+tests/test_assembly_pure.py::test_walker_malformed_when_falls_through_ladder PASSED [ 69%]
+tests/test_assembly_pure.py::test_walker_events_hosted_variant_started_tier SKIPPED [ 70%]
+tests/test_assembly_pure.py::test_walker_base_graph_zero_event_rows SKIPPED [ 71%]
+tests/test_assembly_pure.py::test_walker_hub_cap_binds_at_query PASSED   [ 72%]
+tests/test_assembly_pure.py::test_norm_date_utc_truncation_host_independent PASSED [ 73%]
+tests/test_assembly_pure.py::test_walker_as_of_window_excludes_post_d_keeps_boundary PASSED [ 74%]
+tests/test_assembly_pure.py::test_walker_terminal_points_retained_distinct_from_object_tuple PASSED [ 75%]
+tests/test_assembly_pure.py::test_walker_same_date_tiebreak_deterministic PASSED [ 76%]
+tests/test_assembly_pure.py::test_walker_torn_read_interleave_no_crash PASSED [ 77%]
+tests/test_assembly_pure.py::test_walker_cap_backstop_on_faithful_port PASSED [ 78%]
+tests/test_assembly_pure.py::test_walker_docker_state_round_trip_superseded_at SKIPPED [ 79%]
+tests/test_assembly_pure.py::test_walker_docker_hub_cap_binds_per_subject SKIPPED [ 80%]
+tests/test_assembly_pure.py::test_render_current_state_header_and_spine PASSED [ 81%]
+tests/test_assembly_pure.py::test_render_state_row_superseded_by_dict_shaped PASSED [ 82%]
+tests/test_assembly_pure.py::test_render_ordering_line_and_sections PASSED [ 83%]
+tests/test_assembly_pure.py::test_render_interval_diff_via_shared_helper PASSED [ 84%]
+tests/test_assembly_pure.py::test_render_same_name_collision_two_sections PASSED [ 85%]
+tests/test_assembly_pure.py::test_render_live_state_header_label PASSED  [ 86%]
+tests/test_assembly_pure.py::test_render_successor_absent_name_only_annotation PASSED [ 87%]
+tests/test_assembly_pure.py::test_render_torn_row_empty_superseded_by PASSED [ 88%]
+tests/test_assembly_pure.py::test_render_terminal_point_retained_with_status PASSED [ 89%]
+tests/test_assembly_pure.py::test_render_superseded_by_truncated_not_fabricated PASSED [ 90%]
+tests/test_assembly_pure.py::test_render_ordering_near_midnight_full_iso_shared_helper PASSED [ 91%]
+tests/test_assembly_pure.py::test_render_interval_expected_through_shared_helper PASSED [ 92%]
+tests/test_assembly_pure.py::test_render_interval_single_dated_instance_no_line PASSED [ 93%]
+tests/test_assembly_pure.py::test_render_order_shuffle_matched_control PASSED [ 94%]
+tests/test_assembly_pure.py::test_render_superseded_state_matched_delta PASSED [ 95%]
+tests/test_assembly_pure.py::test_render_same_subject_duplicate_id_deduped PASSED [ 96%]
+tests/test_assembly_pure.py::test_render_cross_subject_dedupe_per_section_not_global PASSED [ 97%]
+tests/test_assembly_pure.py::test_render_honest_key_passthrough_session_speaker PASSED [ 98%]
+tests/test_assembly_pure.py::test_render_recall_excluded_successor_name_only PASSED [ 99%]
+tests/test_assembly_pure.py::test_render_headers_follow_candidate_order_not_state_rows PASSED [100%]
+
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_assembly_pure.py:608: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:624: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:653: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:677: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:699: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:797: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:821: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:1005: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:1026: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:1226: docker lane unavailable (pure tests unaffected)
+SKIPPED [1] tests/test_assembly_pure.py:1245: docker lane unavailable (pure tests unaffected)
+================== 90 passed, 11 skipped in 272.96s (0:04:32) ==================

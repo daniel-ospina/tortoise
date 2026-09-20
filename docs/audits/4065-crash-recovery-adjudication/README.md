@@ -13,6 +13,11 @@ does not touch them; no shared fixture, journal, or `_embedded.py` helper connec
 behind**, and the recorded CI run measured a tree on which those tests had been stale since before
 this PR existed.
 
+**State:** `fix/3317-object-resolver-status` was rebased onto `origin/main f2b3e91b2` and pushed with a
+pinned lease — new head **`c0c1ed4dd`** (was `1fb955511`). The 11 flagged tests are green there
+(§7). Nothing was marked ready; the PR was **not** merged. No test was weakened, skipped, or
+`xfail`ed anywhere in this work.
+
 ---
 
 ## 1. The lane — measured, not assumed
@@ -103,6 +108,7 @@ collection** — that import is the whole trigger; running its tests adds nothin
 | **order-paired** | **pre-PR base `d7c102559`** | **11 failed**, 15 passed, 66 deselected | `raw/base-orderpaired.txt` |
 | stand-alone | origin/main `f2b3e91b2` | **16 passed** | `raw/main-once-standalone.txt` |
 | **order-paired** | origin/main `f2b3e91b2` | **26 passed**, 0 failed, 66 deselected | `raw/main-run2-orderpaired.txt` |
+| **order-paired** | head **rebased** onto origin/main `c0c1ed4dd` | **26 passed**, 0 failed, 66 deselected | `raw/rebased-orderpaired.txt` |
 
 `d7c102559` is `git merge-base origin/main 1fb955511` — the branch point. It is the PR's tree
 **minus all three of its commits**, so the result there is attributable to the PR's *base*, not to
@@ -186,6 +192,66 @@ defect in the PR. Options, in order of strength:
 No test was weakened, skipped, or `xfail`ed to produce this result, and nothing here is an
 exemption: the five tests are red on the base and green on main, and the branch needs main's fix.
 
-## 7. Rebase and re-measure
+## 7. Rebase and re-measure — the remedy
 
-_Appended after the rebase measurement — see `raw/rebased-orderpaired.txt`._
+Done, published, and measured.
+
+```
+$ git rebase origin/main     # in a worktree at 1fb955511, from origin/main f2b3e91b2
+Rebasing (1/3)...(2/3)...(3/3)
+Successfully rebased and updated detached HEAD.
+$ git log --oneline -4
+c0c1ed4dd fix(tests): pin the resolver's excluded set to exactly {retracted} (#3317)
+4d8b1c8c6 fix(assembly): address code-review round 2 on the resolver status guard (#3317)
+081ebd9d4 fix(assembly): exclude retracted Objects from every resolver leg (#3317)
+f2b3e91b2 fix(dr): the eligibility gate and the archive listing must report what they MEASURED ... (#4321)
+```
+
+The rebase is **content-faithful**: `git diff origin/main HEAD` over the PR's two files is
+`253 insertions(+), 7 deletions(-)` — exactly the PR's own `+152 / +101 / −7`. No conflict markers.
+The three PR commits are intact (`git log f2b3e91b2..HEAD`).
+
+Pushed with a pinned lease:
+
+```
+git push --force-with-lease=refs/heads/fix/3317-object-resolver-status:1fb9555112dabb8e0026c8d032ce752275981f0c \
+  origin HEAD:refs/heads/fix/3317-object-resolver-status
+ + 1fb955511...c0c1ed4dd HEAD -> fix/3317-object-resolver-status (forced update)
+```
+
+Re-measured, same lane and same command as every other leg:
+
+```
+26 passed, 66 deselected in 176.33s          # raw/rebased-orderpaired.txt
+```
+
+All 11 flagged tests are green. `test_crash_recovery_e2e.py` is green too (same root cause).
+
+**The PR's own test delta survives the rebase** (`raw/rebased-assembly-pure.txt`):
+`tests/test_assembly_pure.py` → **90 passed, 11 skipped**, including
+`test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set PASSED`. The two *new*
+docker-lane tests (`test_resolver_docker_excludes_retracted_object`,
+`test_walker_explicit_id_renders_retracted_status_verbatim`) **SKIP** in this lane — see §8.
+
+**State:** `fix/3317-object-resolver-status` is now at **`c0c1ed4dd`** (rebased onto
+`origin/main f2b3e91b2`). Not marked ready; not merged. The rail can re-measure at that head, where
+the main-side baseline now exists by construction (the branch contains main).
+
+## 8. What could NOT be verified here
+
+* **The PR's two new docker-lane tests** (`test_resolver_docker_excludes_retracted_object`,
+  `test_walker_explicit_id_renders_retracted_status_verbatim`) — they require the docker lane
+  (`docker://:falkordb@localhost:6379/tortoise_test_matrix`); in the embedded lane they skip with
+  `docker lane unavailable`. They are the PR's decisive new coverage and are **unverified by this
+  lane**. The stale-base failures adjudicated above are pure tests and are unaffected by this gap.
+* **The `test (a)` half** — this adjudication covered the `test (b)` half, which is the half that
+  carried the failures. `test (a)` was green in the same CI run.
+* The order-paired invocation is a **reduction** of the CI half (300+ files) to the minimal prefix
+  that reproduces the collection condition. It matches CI's *shape* (embedded lane, the trigger
+  module imported first, same `-m`/`-p`/`--timeout` flags) but is not the full half; the identical
+  failing node ids and messages against CI's own log are the check that the reduction is faithful.
+* Two order-paired attempts (one on main, one on head) hit `pytest-timeout` on conftest's embedded
+  hygiene sweep at 300 s under this box's ~237 embedded servers. Both are retained
+  (`raw/main-run1-orderpaired-FAILED-hygiene-timeout.txt`,
+  `raw/head-run0-orderpaired-FAILED-hygiene-timeout.txt`) and the measurement was re-taken with
+  `TORTOISE_REAPER_MIN_UPTIME=86400`.
