@@ -964,6 +964,12 @@ class TestDrRebaseline:
         """
         import tortoise.hosted_backup as hb
 
+        if os.environ.get("TORTOISE_DB_URI"):
+            from tortoise.config import is_loopback_uri
+            if not is_loopback_uri(os.environ["TORTOISE_DB_URI"]):
+                pytest.skip("RESULTSET_SIZE is server-global — never lower it "
+                            "on a non-loopback/shared server")
+
         db = _held_proj_db()
         conn = db.connection
         g = db.select_graph("org_settle_source")
@@ -981,8 +987,13 @@ class TestDrRebaseline:
             # ... but the aggregate is not: full data-node count survives.
             assert hb.count_data_nodes(db, "org_settle_source") == 6
         finally:
-            conn.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE",
-                                 int(prev[1]))
+            # Never leave the shared server's cap lowered, even if the body or
+            # the restore raised — a stuck cap poisons every later
+            # non-aggregate read in the session.
+            import contextlib
+            with contextlib.suppress(Exception):
+                conn.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE",
+                                     int(prev[1]))
 
 
 class TestDrDrill:
@@ -2420,6 +2431,42 @@ class TestRestoreSwapReadBound:
             hb._graph_copy_with_restore_bound(
                 db, "org_settle_source", "org_settle_target",
                 role="test swap", intact_name="test intact")
+
+    def test_settle_never_creates_a_missing_destination(self, client,
+                                                        monkeypatch):
+        """#4233 — a failed settle leaves an ABSENT destination absent.
+
+        `_restore_copy_settled` reads `GRAPH.LIST` FIRST because a Cypher read
+        on a missing graph CREATES an empty one — on the swap's freshly deleted
+        live graph that would be the wipe-then-empty class. A copy that times
+        out and never lands must leave the destination absent.
+
+        RED (mutation): drop the `dst_name not in names` guard from
+        `_restore_copy_settled` — the probe read creates `org_settle_target`
+        and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.5")
+        db = _held_proj_db()
+        src = db.select_graph("org_settle_source")
+        src.query("MATCH (n) DETACH DELETE n")
+        src.query("CREATE (p:Point {id:'pt-0'})")
+        if "org_settle_target" in db.list_graphs():
+            db.select_graph("org_settle_target").delete()
+
+        def timeout_only(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_only)
+        with pytest.raises(hb.RestoreCopyTimeoutError):
+            hb._graph_copy_with_restore_bound(
+                db, "org_settle_source", "org_settle_target",
+                role="test swap", intact_name="test intact")
+        assert "org_settle_target" not in db.list_graphs()
 
     def test_graph_present_fails_closed(self):
         """#4233 — an unreadable listing must never authorize a settle.

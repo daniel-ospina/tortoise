@@ -2084,11 +2084,18 @@ def _graph_present(db, name: str) -> bool:
 
     Used only to decide whether a timed-out copy's destination could have been
     produced by that copy: an unreadable listing must never authorize treating
-    a pre-existing graph as the copy's output.
+    a pre-existing graph as the copy's output. A probe failure is LOGGED so a
+    refusal it causes is distinguishable from a genuinely pre-existing
+    destination (both otherwise surface as the same timeout).
     """
     try:
         return name in set(db.list_graphs() or [])
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "_graph_present(%s): graph listing failed (%s) — treating it as "
+            "PRESENT so an unreadable probe can never authorize a settle",
+            name, e,
+        )
         return True
 
 
