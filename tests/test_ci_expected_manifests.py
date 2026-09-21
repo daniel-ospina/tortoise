@@ -31,6 +31,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "config" / "ci-expected-nodeids"
@@ -100,19 +101,23 @@ def _strip_comments(text: str) -> str:
 
 
 def _shell_commands(workflow: str) -> list[str]:
-    """The shell commands in a workflow, with `\\` continuations JOINED and
-    comment-only lines dropped.
+    """The shell commands in a run: block, with `\\` continuations JOINED and every
+    comment removed — a full-line comment AND a TRAILING one.
 
-    A pin that matches inside a fixed 3-line window is wrong in both directions: it
-    reds an honest reformat that moves the flag to an earlier continuation line, and
-    it is satisfied by a *comment* on the following line mentioning the flag
-    (cycle-5 finding). Both directions need the command, not a window of text.
+    A pin that matches inside a fixed window of text is wrong in both directions: it
+    reds an honest reformat that moves the flag to an earlier continuation line, and it
+    is satisfied by a comment mentioning the flag. Dropping only comment-ONLY lines
+    left the second half open — `--manifest FILE  # note: deliberately NOT
+    --manifest-only here` stripped to a command that really runs WITHOUT the flag, while
+    the pin matched the comment (cycle-6 finding).
     """
     commands: list[str] = []
     pending: list[str] = []
     for raw in workflow.splitlines():
-        line = raw.rstrip()
-        if line.lstrip().startswith("#"):
+        line = _strip_comments(raw).rstrip()
+        if not line.strip():
+            if pending:
+                continue
             continue
         if line.endswith("\\"):
             pending.append(line[:-1].strip())
@@ -125,6 +130,23 @@ def _shell_commands(workflow: str) -> list[str]:
     if pending:
         commands.append(" ".join(p for p in pending if p))
     return commands
+
+
+def _workflow_steps() -> list[dict]:
+    """Every step of the workflow, so a pin can read a step's own SCRIPT and its own
+    keys — not every line of the YAML file.
+
+    Scanning the raw file treated a non-shell mention of the manifest (an artifact
+    `path:`, an `env:` entry) as a consumer and red a correct tree, and it could not see
+    whether the step it pins is even able to fail (cycle-6 findings).
+    """
+    doc = yaml.safe_load(WORKFLOW.read_text())
+    steps: list[dict] = []
+    for job in (doc.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            if isinstance(step, dict):
+                steps.append(step)
+    return steps
 
 
 def _module_dotted(file: str) -> str:
@@ -245,7 +267,15 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     # Pin the CLAIM, not a substring of it: `"collection" in header.lower()` was
     # satisfied by the regenerate paragraph alone, so the sentence stating what a
     # marker asserts could be deleted (cycle-3 finding).
-    assert "still aborts at collection" in header.lower(), (
+    # Pin the FACTS with tolerant wording, not one spelling of them: requiring the exact
+    # phrase red a fact-preserving reword ("still aborts during collection", "37 are
+    # actual test nodeids") while the docstring claimed to pin the claim (cycle-6 finding).
+    # But the anchor must be the ASSERTION, not any mention: a bare
+    # `aborts?[^\n]*collection` was satisfied by the REGENERATE paragraph ("…for a module
+    # that aborts at collection…"), so deleting the sentence that states the weaker claim
+    # stayed green — the vacuity cycle 3 fixed, re-created by cycle 6's tolerance
+    # (caught by a mutation check, not by review).
+    assert re.search(r"(?:pins?|asserts?|means)\b[\s\S]{0,160}?\baborts?\b[\s\S]{0,160}?\bcollection", header, re.I), (
         "the header must state what a marker asserts (a weaker claim than a collected test)"
     )
     # The RECORDED count must be the actual one, and no other count may be stated.
@@ -257,12 +287,19 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     assert recorded and all(n == len(markers) for n in recorded), (
         f"the header records {recorded} markers but the manifest has {len(markers)}"
     )
+    # The headline TOTAL is the most prominent number in the file, and it was pinned by
+    # nothing: three nodeids could be deleted and the total left at 69 (cycle-6 finding).
+    total = [int(n) for n in re.findall(r"(\d+)\s+entries", header, re.I)]
+    assert total and all(n == len(nodeids) for n in total), (
+        f"the header says {total} entries but the manifest has {len(nodeids)} — a narrowed "
+        "manifest must not be able to keep claiming its old size"
+    )
     # The OTHER count was unchecked, and it is the one that can hide a silent
     # NARROWING: `--manifest-only` compares expected-minus-observed, so a manifest
     # whose real-test entries were deleted is still satisfied by its own junit. The
     # header's real-test count is the only written record of how many there were,
     # so it is pinned against the manifest (cycle-3 finding).
-    recorded_tests = [int(n) for n in re.findall(r"(\d+)\s+are\s+real test", header)]
+    recorded_tests = [int(n) for n in re.findall(r"(\d+)\s+are\s+(?:\w+\s+)?test nodeids", header)]
     assert recorded_tests and all(n == len(tests) for n in recorded_tests), (
         f"the header records {recorded_tests} real test nodeids but the manifest has {len(tests)}"
     )
@@ -383,17 +420,45 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     """
     text = WORKFLOW.read_text()
     rel = str(manifest.relative_to(ROOT))
-    assert any(rel in cmd for cmd in _shell_commands(text)), (
-        f"{rel} is not referenced by any command in {WORKFLOW.name} — nothing consumes it"
+    # Read the STEP, not the file: a non-shell mention of the path (an artifact `path:`,
+    # an `env:` entry) is not a consumer, and reading raw lines red a correct tree.
+    consumers = [s for s in _workflow_steps() if isinstance(s.get("run"), str) and rel in s["run"]]
+    assert consumers, (
+        f"no step RUNS a command consuming {rel} — nothing consumes it (a mention in a "
+        "comment, a `path:`, or an artifact upload is not an invocation)"
     )
-    consumers = [cmd for cmd in _shell_commands(text) if rel in cmd]
-    assert consumers, f"{rel} appears only in comments in {WORKFLOW.name}"
-    for cmd in consumers:
-        # A TOKEN, of that command — not a substring anywhere in a window of text.
-        assert re.search(r"(?<![\w-])--manifest-only(?![\w-])", cmd), (
-            f"{WORKFLOW.name} consumes {rel} without --manifest-only as a token of that same "
-            "command — in a URI-less lane that false-reds on the EXPECTED skips (the "
-            f"docker-calibrated matchers).\n{cmd}"
+    for step in consumers:
+        # Present is not enough: a step disabled by `continue-on-error` or a false `if:`
+        # can never red the job, so the frozen set would be enforced by nothing while
+        # every pin stayed green (cycle-6 finding). `if: always()` is fine (the carve-out
+        # guard uses it); a literal false is not.
+        name = step.get("name") or step.get("uses") or "<unnamed step>"
+        assert not step.get("continue-on-error"), (
+            f"{WORKFLOW.name}: the step consuming {rel} is `continue-on-error`, so its exit "
+            f"status cannot fail the job — the check would be decorative. Step: {name!r}"
+        )
+        condition = str(step.get("if", "")).strip().lower()
+        assert condition not in ("false", "${{ false }}"), (
+            f"{WORKFLOW.name}: the step consuming {rel} has `if: {condition}` — it never runs. "
+            f"Step: {name!r}"
+        )
+        # …and the flag must be a TOKEN of the command that consumes the manifest, with
+        # comments already removed, so a trailing `# note: NOT --manifest-only` is not read
+        # as the flag. A pure ASSIGNMENT (`M=config/…`) is excluded, so an honest
+        # `M=<path>` plus `--manifest "$M" --manifest-only` refactor does not red; in that
+        # case the flag only has to be present in the step.
+        flag_re = re.compile(r"(?<![\w-])--manifest-only(?![\w-])")
+        commands = _shell_commands(step["run"])
+        literal_consumers = [c for c in commands if rel in c and not re.match(r"^[A-Za-z_]\w*=", c)]
+        for cmd in literal_consumers:
+            assert flag_re.search(cmd), (
+                f"{WORKFLOW.name}: step {name!r} consumes {rel} without --manifest-only as a "
+                "token of that same command — in a URI-less lane that false-reds on the "
+                f"EXPECTED skips (the docker-calibrated matchers).\n{cmd}"
+            )
+        assert literal_consumers or any(flag_re.search(c) for c in commands), (
+            f"{WORKFLOW.name}: step {name!r} reads {rel} but no command in it passes "
+            "--manifest-only (any mention in a comment does not count)"
         )
     assert len(consumers) >= 1
 
@@ -418,7 +483,7 @@ def test_the_frozen_set_passes_against_a_junit_that_contains_it() -> None:
 def test_a_single_vanished_nodeid_fails_and_is_named() -> None:
     """The #4207 bite, exactly: one test subtracted from a 69-test run.
 
-    The step's `passed >= 30` floor cannot see this (35 would remain), and the
+    The step's `passed >= 30` floor cannot see this (34 would remain), and the
     step's text pin cannot see a flag passed through a shell variable. The frozen
     set can, because the vanished test is absent from the run's own report.
     """
