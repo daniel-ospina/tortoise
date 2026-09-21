@@ -335,33 +335,41 @@ def _after_invocation(command: str) -> tuple[str, str]:
 def _manifest_values(cmd: str) -> list[str]:
     """The (quote-stripped) value given to each `--manifest` in one command, in order.
 
-    A duplicate is deliberately NOT collapsed here: the guard's `_parse_args` assigns
-    each `--manifest` it sees, so the LAST one wins, and a pin that reads the first (or
-    any mention) asserts something the guard does not do (cycle-12 finding).
+    BOTH spellings count. The guard's `_parse_args` accepts `--manifest <path>` and
+    `--manifest=<path>` (`tools/skip-guard.py:538`) and the LAST assignment wins, so a
+    reader that counts only the space form re-opens the duplicate escape one level over:
+    `--manifest <frozen> --manifest=<other>` read as ONE value while the guard took the
+    other (cycle-13 finding). A duplicate is therefore never collapsed here.
     """
     values: list[str] = []
     for segment in _shell_segments(cmd):
         words = _shell_words(segment)
-        for position, word in enumerate(words[:-1]):
-            if word == "--manifest":
+        for position, word in enumerate(words):
+            if word == "--manifest" and position + 1 < len(words):
                 values.append(words[position + 1])
+            elif word.startswith("--manifest="):
+                values.append(word.split("=", 1)[1])
     return values
 
 
 def _step_assignments(commands: list[str]) -> dict[str, list[str]]:
     """Every variable a step assigns and EVERY value it assigns it, in order.
 
-    The documented indirection is `M=<manifest path>` on its own line and then
-    `--manifest "$M"`. Recording all assignments (not just a set of names) is what a
-    reassignment needs to be visible: `M=<embedded>` followed by `M=<platform-gated>`
-    leaves a command that still MENTIONS the right manifest while the guard enforces
-    the other one (cycle-12 finding).
+    The documented indirection is `M=<manifest path>` and then `--manifest "$M"`.
+    Recording all assignments (not just a set of names) is what a reassignment needs to
+    be visible: `M=<embedded>` followed by `M=<platform-gated>` leaves a command that
+    still MENTIONS the right manifest while the guard enforces the other one (cycle-12
+    finding) — and the reassignment does not have to be a bare line, so the `export` /
+    `env` / `declare` / `typeset` prefixes are read too (cycle-13 finding).
     """
+    prefixes = {"export", "env", "declare", "typeset"}
     assignments: dict[str, list[str]] = {}
     for cmd in commands:
         words = _shell_words(cmd)
         # a bare assignment line, or an env prefix on the front of a command
         candidates = [cmd.strip()] if len(words) <= 1 else [words[0]]
+        if len(words) > 1 and words[0] in prefixes:
+            candidates.append(words[1])
         for candidate in candidates:
             if match := re.fullmatch(r"([A-Za-z_]\w*)=(.*)", candidate):
                 assignments.setdefault(match.group(1), []).append(
@@ -768,10 +776,14 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     passing, and the message names the two forms it accepts). An EARLY `exit` placed
     before the invocation in the same step is the same class: the pin reads the step's
     commands in order but does not model reachability, so a step that exits on line 2
-    still reads as having a consumer (cycle-12 P3, residual — see #4463). The
-    end-to-end proof — a lane that mutates the manifest and shows the job reds, which
-    is what a construct hiding a command's position from a text scanner cannot survive
-    — is #4463.
+    still reads as having a consumer (cycle-12 P3, residual — see #4463). Shell
+    REDIRECTIONS are not modelled either: a flag that is an argument of a redirect
+    (`<<< --manifest-only`, a here-string) reads as an argv token here while the guard
+    never receives it — the lane then reds LOUDLY in CI (the guard exits 2 on an
+    unknown argument), so it is a pin/CI disagreement, not a silent pass (cycle-13 P3).
+    The end-to-end proof — a lane that mutates the manifest and shows the job reds,
+    which is what a construct hiding a command's position from a text scanner cannot
+    survive — is #4463.
     """
     jobs = _workflow_jobs()
     rel = str(manifest.relative_to(ROOT))
