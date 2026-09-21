@@ -152,6 +152,15 @@ def _shell_segments(command: str) -> list[str]:
     """One run-block command split into its simple commands, quote-aware.
 
     A separator inside quotes is TEXT, not a separator: `echo "a; b"` is one command.
+
+    Parens are NOT separators: `echo $(python3 tools/skip-guard.py …)` runs the guard
+    inside an ARGUMENT, and splitting on `(` would hand the substitution's inner command
+    a command position it does not have — the enclosing `echo` owns the step's status
+    and DISCARDS the captured one, so the frozen set is enforced by nothing while every
+    consumer pin is satisfied (cycle-11 finding; the `|| guard_rc=1` variant is worse —
+    the accumulator is set in the SUBSHELL, so the step's later `exit $guard_rc` still
+    exits 0). Keeping the substitution attached leaves the head word `echo`, which is
+    not an interpreter, so the step is refused as having no consumer at all.
     """
     segments: list[str] = []
     current: list[str] = []
@@ -174,7 +183,7 @@ def _shell_segments(command: str) -> list[str]:
             current = []
             i += 2
             continue
-        if ch in ";|&()\n":
+        if ch in ";|&\n":
             segments.append("".join(current))
             current = []
             i += 1
@@ -299,6 +308,11 @@ def _after_invocation(command: str) -> tuple[str, str]:
     `|| true` / `; echo …` / `| tee` / `&` is visible at all (the same pin could not see
     it before, so those mutations passed while making the guard unable to fail the
     step — cycle-9 finding). `2>&1` is a redirection, not a separator.
+
+    `(` and `)` are separators too: `echo $(python3 … --manifest-only)` runs the guard
+    inside an ARGUMENT, so the command in command position is `echo` and the step
+    reports ECHO's status — the guard's own status is discarded. The closing paren has
+    to terminate the invocation for the status check to see that (cycle-11 finding).
     """
     marker = "tools/skip-guard.py"
     rest = command[command.index(marker) + len(marker) :]
@@ -312,7 +326,7 @@ def _after_invocation(command: str) -> tuple[str, str]:
             quote = ch
         elif rest.startswith("||", i) or rest.startswith("&&", i):
             return rest[i : i + 2], rest[i + 2 :].strip()
-        elif ch in ";|" or (ch == "&" and (i == 0 or rest[i - 1] != ">")):
+        elif ch in ";|()" or (ch == "&" and (i == 0 or rest[i - 1] != ">")):
             return ch, rest[i + 1 :].strip()
         i += 1
     return "", ""
@@ -690,8 +704,16 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     '<script>'` wrapper (the last two RED rather than pass: the head word is not an
     interpreter, which is the fail-closed direction), or a `$VAR` holding the FLAG or
     the SCRIPT PATH (the #4207 class a text pin cannot see; a variable FLAG is refused
-    loudly instead of passing it). The end-to-end proof — a lane that mutates the
-    manifest and shows the job reds — is #4463.
+    loudly instead of passing it). A step whose shell does not PARSE (`bash -n` fails —
+    e.g. `python3 -c print('tools/skip-guard.py')`) is not modelled either: CI reds on
+    the parse error, which is louder than this pin. A command SUBSTITUTION in command
+    position (`X=$(python3 …)`, or a bare subshell `( python3 … )`) is refused rather
+    than read: the capture only reaches the step through an explicit `exit`, and the
+    pin's two blessed forms are the invocation itself as the last command or `||
+    <var>=1` plus a later `exit` (fail closed — a safe capture form reds instead of
+    passing, and the message names the two forms it accepts). The end-to-end proof — a
+    lane that mutates the manifest and shows the job reds, which is what a construct
+    hiding a command's position from a text scanner cannot survive — is #4463.
     """
     jobs = _workflow_jobs()
     rel = str(manifest.relative_to(ROOT))
