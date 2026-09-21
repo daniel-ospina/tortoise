@@ -41,6 +41,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from tortoise import hosted_api as ha
+from tortoise import mcp_auth as ma
 from tortoise.mcp_auth import ERR_TIMEOUT
 
 # ── a minimal ASGI harness ────────────────────────────────────────────────
@@ -132,8 +133,14 @@ async def _drive(mw, scope, recorder=None):
 
 @pytest.fixture
 def fast_bound(monkeypatch):
-    """A bound small enough to breach in a test without a 10 s wall-clock wait."""
-    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 0.05)
+    """A bound small enough to breach in a test without a 10 s wall-clock wait.
+
+    Patches the CANONICAL constant's single home (#3834 F7): both surfaces — the
+    REST middleware in ``hosted_api`` and the MCP seam in ``mcp_server`` — read
+    ``mcp_auth``'s attribute, so one patch reaches both. There is no second copy
+    to forget.
+    """
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", 0.05)
     return 0.05
 
 
@@ -141,9 +148,36 @@ def fast_bound(monkeypatch):
 
 def test_bound_and_retry_signal_are_the_recorded_values():
     """The number is the owner's (10 s under the 15 s client budget), and the
-    advertised back-off is the single source the message deliberately omits."""
-    assert ha._TRANSPORT_WAIT_BOUND_S == 10.0
-    assert ha._TRANSPORT_WAIT_RETRY_AFTER_S == 2
+    advertised back-off GREW with the bound (#3834 F3) rather than inviting a
+    re-entry into the abandoned work. The constants live in ``mcp_auth`` (#3834
+    F7) — both surfaces read ONE home.
+    """
+    assert ma._TRANSPORT_WAIT_BOUND_S == 10.0
+    assert ma._TRANSPORT_WAIT_RETRY_AFTER_S == 10
+    # No second copy: hosted_api reads the SAME module, not an imported snapshot.
+    assert ha._mcp_auth is ma
+
+
+def test_retry_signal_is_never_shorter_than_the_bound():
+    """#3834 F3: the retry signal must not invite overlap.
+
+    Every breach is caused by work that EXCEEDED the bound, so an advertised
+    delay shorter than the bound tells a compliant caller to re-enter the SAME
+    slow operation while the abandoned attempt is still running: at
+    bound/retry = 10/2 the steady-state concurrent copies of ONE logical
+    operation are 5 (measured at 1/50 scale: refusals=5,
+    dispatches_started=5, peak_concurrent=5), and for a non-idempotent tool the
+    abandoned original can still commit AFTER the caller was told to retry —
+    duplicate side effects. A prose caveat cannot discharge this: retry
+    middleware acts on status/code/header, not on the body. Pinned so a future
+    edit cannot quietly re-open the window.
+    """
+    assert ma._TRANSPORT_WAIT_RETRY_AFTER_S >= ma._TRANSPORT_WAIT_BOUND_S, (
+        f"advertised back-off {ma._TRANSPORT_WAIT_RETRY_AFTER_S!r}s is shorter "
+        f"than the {ma._TRANSPORT_WAIT_BOUND_S!r}s bound — a compliant retry "
+        "re-enters the abandoned operation while it still runs")
+    from tortoise import mcp_server as ms
+    assert ms._mcp_auth is ma  # the MCP seam reads the same one source
 
 
 def test_the_only_exemption_is_post_context_and_it_is_method_scoped():
@@ -158,7 +192,7 @@ def test_refusal_message_is_readable_and_digit_free():
     """What happened / whether to retry / how long — and no literal number, so
     the advertised delay has exactly one source (`_TRANSPORT_WAIT_RETRY_AFTER_S`)
     and the message stays true on a surface that carries no header."""
-    msg = ha._TRANSPORT_WAIT_BOUND_MESSAGE
+    msg = ma._TRANSPORT_WAIT_BOUND_MESSAGE
     assert not re.search(r"\d", msg), f"message carries a literal number: {msg!r}"
     lowered = msg.lower()
     assert "wait budget" in lowered          # what happened
@@ -177,13 +211,32 @@ async def test_fast_request_is_untouched(fast_bound):
 
 
 @pytest.mark.asyncio
+async def test_handler_timeout_error_is_not_rewritten_as_a_wait_breach(fast_bound):
+    """A handler that ITSELF raises ``TimeoutError`` must surface to the caller,
+    not be converted into a 504 refusal.
+
+    ``asyncio.TimeoutError`` IS builtin ``TimeoutError`` (3.11+), so the
+    ``wait_for`` timeout branch is indistinguishable from the awaited dispatch
+    raising unless it checks that the task actually finished. Pinned because the
+    ``wait_for`` + ``shield`` primitive made the two collide (``asyncio.wait``
+    did not propagate the child's exception through the deadline branch).
+    """
+    async def app(scope, receive, send):
+        raise TimeoutError("handler's own deadline")
+
+    mw = ha.WaitBoundMiddleware(app)
+    with pytest.raises(TimeoutError, match="handler's own deadline"):
+        await _drive(mw, _scope())
+
+
+@pytest.mark.asyncio
 async def test_breach_is_a_504_with_retry_after_and_a_readable_body(fast_bound):
     mw = ha.WaitBoundMiddleware(_slow_app(5.0))
     rec = await _drive(mw, _scope())
     assert rec.status == 504
-    assert rec.headers()["retry-after"] == str(ha._TRANSPORT_WAIT_RETRY_AFTER_S)
+    assert rec.headers()["retry-after"] == str(ma._TRANSPORT_WAIT_RETRY_AFTER_S)
     # Reuses the §6.1 shape — NOT a parallel `{"error": {...}}` vocabulary.
-    assert rec.json == {"detail": ha._TRANSPORT_WAIT_BOUND_MESSAGE}
+    assert rec.json == {"detail": ma._TRANSPORT_WAIT_BOUND_MESSAGE}
 
 
 @pytest.mark.asyncio
@@ -199,12 +252,12 @@ async def test_mcp_surface_gets_the_jsonrpc_refusal(fast_bound):
     mw = ha.WaitBoundMiddleware(_slow_app(5.0))
     rec = await _drive(mw, _scope("/mcp/", method="POST"))
     assert rec.status == 504
-    assert rec.headers()["retry-after"] == str(ha._TRANSPORT_WAIT_RETRY_AFTER_S)
+    assert rec.headers()["retry-after"] == str(ma._TRANSPORT_WAIT_RETRY_AFTER_S)
     body = rec.json
     assert body["jsonrpc"] == "2.0"
     assert body["error"]["code"] == ERR_TIMEOUT
-    assert body["error"]["data"]["retry_after"] == ha._TRANSPORT_WAIT_RETRY_AFTER_S
-    assert body["error"]["message"] == ha._TRANSPORT_WAIT_BOUND_MESSAGE
+    assert body["error"]["data"]["retry_after"] == ma._TRANSPORT_WAIT_RETRY_AFTER_S
+    assert body["error"]["message"] == ma._TRANSPORT_WAIT_BOUND_MESSAGE
 
 
 @pytest.mark.asyncio
@@ -314,7 +367,7 @@ async def test_cancellation_propagates_into_the_handler(monkeypatch):
     Cancelling (and awaiting) is correct on THIS path only; the breach path
     above still abandons on purpose.
     """
-    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", 30.0)
     entered = asyncio.Event()
     saw_cancel: list = []
 
@@ -345,7 +398,7 @@ async def test_cancellation_cleanup_error_propagates(monkeypatch):
     failure, where the direct await this middleware replaced surfaced it — so
     the suppression's narrowness is load-bearing and is pinned here.
     """
-    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", 30.0)
     entered = asyncio.Event()
 
     async def app(scope, receive, send):
@@ -366,7 +419,7 @@ async def test_cancellation_cleanup_error_propagates(monkeypatch):
 async def test_an_already_started_response_is_never_replaced(monkeypatch):
     """A response that has already begun streaming cannot be substituted — we
     let it finish rather than emit a second, contradictory status."""
-    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 0.05)
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", 0.05)
 
     async def app(scope, receive, send):
         await send({"type": "http.response.start", "status": 200,
@@ -441,7 +494,7 @@ def test_real_app_liveness_route_is_unaffected():
 def test_real_app_breach_refusal_is_the_same_shape(monkeypatch):
     """End-to-end through the real stack: a route that breaches returns the same
     §6.1 504 shape and carries the retry signal, CORS included."""
-    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 0.05)
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", 0.05)
 
     async def _slow_route(request):
         await asyncio.sleep(0.3)
@@ -452,9 +505,9 @@ def test_real_app_breach_refusal_is_the_same_shape(monkeypatch):
     with TestClient(app) as client:
         r = client.get("/slow", headers={"Origin": "https://app.premiselabs.co"})
     assert r.status_code == 504
-    assert r.headers["retry-after"] == str(ha._TRANSPORT_WAIT_RETRY_AFTER_S)
+    assert r.headers["retry-after"] == str(ma._TRANSPORT_WAIT_RETRY_AFTER_S)
     assert r.headers["access-control-allow-origin"] == "https://app.premiselabs.co"
-    assert r.json() == {"detail": ha._TRANSPORT_WAIT_BOUND_MESSAGE}
+    assert r.json() == {"detail": ma._TRANSPORT_WAIT_BOUND_MESSAGE}
 
 
 # ── the MCP surface: the bound is enforced at the DISPATCH ────────────────
@@ -527,8 +580,8 @@ async def test_mcp_dispatch_is_bounded_with_the_shipped_refusal(
     assert result.meta == {ms._WAIT_BOUND_META_KEY: True}
     payload = result.structured_content["error"]
     assert payload["code"] == ERR_TIMEOUT
-    assert payload["message"] == ha._TRANSPORT_WAIT_BOUND_MESSAGE
-    assert payload["data"]["retry_after"] == ha._TRANSPORT_WAIT_RETRY_AFTER_S
+    assert payload["message"] == ma._TRANSPORT_WAIT_BOUND_MESSAGE
+    assert payload["data"]["retry_after"] == ma._TRANSPORT_WAIT_RETRY_AFTER_S
     # Abandoned, never cancelled: the handler runs to completion.
     for _ in range(100):
         if mcp_slow_tool:
@@ -575,8 +628,142 @@ def test_mcp_http_sse_path_delivers_the_refusal(
     assert payload["_meta"][ms._WAIT_BOUND_META_KEY] is True
     err = payload["structuredContent"]["error"]
     assert err["code"] == ERR_TIMEOUT
-    assert err["message"] == ha._TRANSPORT_WAIT_BOUND_MESSAGE
-    assert err["data"]["retry_after"] == ha._TRANSPORT_WAIT_RETRY_AFTER_S
+    assert err["message"] == ma._TRANSPORT_WAIT_BOUND_MESSAGE
+    assert err["data"]["retry_after"] == ma._TRANSPORT_WAIT_RETRY_AFTER_S
+
+
+def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
+        mcp_slow_tool, monkeypatch):
+    """#3834 F1: ONE deadline, not two.
+
+    The middleware's deadline is abandoned the moment ``http.response.start``
+    is on the wire (the SSE refusal can no longer be substituted), and the MCP
+    seam used to start its OWN fresh bound at that point — so every pre-SSE cost
+    (org resolution, rate limit, routing) went uncounted and the caller-visible
+    wait was the SUM. Measured with the real layering (pre-SSE 0.2 s, bound
+    0.3 s, tool 0.3 s) the total was 0.522 s for an advertised 0.3 s; a 6 s org
+    resolution plus an 11 s tool would exceed the 15 s client budget with NO
+    legible refusal — the exact failure this unit exists to eliminate.
+
+    This mounts the REAL parent app (``WaitBoundMiddleware`` included) over the
+    MCP sub-app and injects a 0.2 s pre-SSE cost, then asserts the caller only
+    waits the bound (+ε). The sibling SSE test mounts the MCP app with NO parent
+    middleware, which is precisely why it could not see this.
+    """
+    from contextlib import asynccontextmanager
+
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from starlette.testclient import TestClient
+
+    from tortoise import mcp_server as ms
+
+    bound = 0.3
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", bound)
+    monkeypatch.setattr(ha, "_track_analytics_event", lambda *a, **k: None)
+
+    mcp_app = ms.create_http_app(auth_mode="none")
+
+    @asynccontextmanager
+    async def _lifespan(parent_app):
+        async with mcp_app.lifespan(mcp_app):
+            yield
+
+    class _PreSseCost:
+        """A realistic pre-SSE cost (org resolution / rate limit / routing)."""
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http":
+                await asyncio.sleep(0.2)
+            await self.app(scope, receive, send)
+
+    parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
+    parent.add_middleware(_PreSseCost)
+    # Registered LAST → OUTERMOST, so it wraps _PreSseCost (add_middleware
+    # inserts at index 0).
+    parent.add_middleware(ha.WaitBoundMiddleware)
+    try:
+        with TestClient(parent) as client:
+            t0 = time.perf_counter()
+            # `/mcp/` (trailing slash) on purpose: posting `/mcp` makes Starlette
+            # answer 307 → `/mcp/`, and the followed redirect would run this
+            # pre-SSE cost TWICE — measuring the redirect, not the deadline.
+            r = client.post("/mcp/", headers=_MCP_HEADERS, json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "_bound_slow", "arguments": {}}})
+            elapsed = time.perf_counter() - t0
+    finally:
+        ms._pending_mcp_wait_bound.clear()
+
+    assert r.status_code == 200, r.text
+    body = _parse_sse(r.text)
+    assert body is not None, r.text
+    assert body["result"]["isError"] is True, (
+        "the tool returned success — the seam did not spend the transport's "
+        "remaining deadline (or the pre-SSE middleware did not run)")
+    assert elapsed <= bound + 0.15, (
+        f"caller-visible wait {elapsed:.3f}s exceeded the {bound}s bound+ε — "
+        "pre-SSE cost is being added to a FRESH MCP deadline (two deadlines)")
+
+
+@pytest.mark.asyncio
+async def test_mcp_wait_bound_fast_path_overhead_is_bounded(monkeypatch):
+    """#3834 F2 guard: the seam wraps EVERY tool call, so its fast-path cost
+    must stay small.
+
+    The CI-visible budget is
+    ``tests/test_mcp_telemetry.py::TestOverhead::test_p95_under_5ms``; this pins
+    the seam's OWN incremental cost next to the code that would regress it, by
+    comparing the real dispatch against the unwrapped ``_original_call_tool``
+    on the same tool. The ``asyncio.wait`` primitive F2 caught added +1.8–2.0 ms
+    (reddening the budget test); ``wait_for`` + ``shield`` must stay well under
+    that. Median, not mean, so one scheduler spike cannot decide the verdict.
+    """
+    import statistics
+
+    from fastmcp.tools import FunctionTool
+
+    from tortoise import mcp_server as ms
+
+    def _bound_fast() -> dict:
+        return {"ok": True}
+
+    ms.mcp.add_tool(FunctionTool.from_function(
+        _bound_fast, name="_bound_fast", description="wait-bound test: fast"))
+    monkeypatch.setattr(ha, "_track_analytics_event", lambda *a, **k: None)
+    # No-op the telemetry emitter so the delta is the SEAM's cost alone —
+    # ``_wrapped_call_tool`` emits one event per call and that is not the seam.
+    monkeypatch.setattr(ms, "_emit_mcp_tool_call_telemetry",
+                        lambda *a, **k: None)
+    try:
+        async def _samples(fn, n=80):
+            out = []
+            for _ in range(n):
+                t = time.perf_counter()
+                await fn()
+                out.append((time.perf_counter() - t) * 1000.0)
+            return out
+
+        wrapped = await _samples(lambda: ms.mcp.call_tool("_bound_fast"))
+        raw = await _samples(lambda: ms._original_call_tool("_bound_fast"))
+        delta = statistics.median(wrapped) - statistics.median(raw)
+        # The ``asyncio.wait`` primitive F2 caught measured +1.8–2.0 ms; the
+        # ``wait_for`` + ``shield`` pair must stay clearly under that. 1.5 ms is
+        # the guard's ceiling — median (not mean) so one scheduler spike cannot
+        # decide it.
+        assert delta < 1.5, (
+            f"the wait-bound seam added {delta:.3f} ms per fast call "
+            f"(median wrapped {statistics.median(wrapped):.3f} ms, raw "
+            f"{statistics.median(raw):.3f} ms) — the primitive got expensive "
+            "again (``asyncio.wait`` measured +1.8–2.0 ms)")
+    finally:
+        try:  # noqa: SIM105
+            ms.mcp.local_provider.remove_tool("_bound_fast")
+        except Exception:
+            pass
 
 
 @pytest.mark.asyncio
@@ -642,7 +829,7 @@ async def test_mcp_cancellation_propagates_into_the_tool(monkeypatch):
     ms.mcp.add_tool(FunctionTool.from_function(
         _bound_cancel_probe, name="_bound_cancel",
         description="wait-bound test: cancellation probe"))
-    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", 30.0)
     monkeypatch.setattr(ha, "_track_analytics_event",
                         lambda *a, **k: None)
     events: list = []
@@ -696,7 +883,7 @@ async def test_mcp_cancellation_cleanup_error_propagates(monkeypatch):
     ms.mcp.add_tool(FunctionTool.from_function(
         _bound_cleanup_boom, name="_bound_cleanup_boom",
         description="wait-bound test: raising cancellation cleanup"))
-    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", 30.0)
     monkeypatch.setattr(ha, "_track_analytics_event", lambda *a, **k: None)
     try:
         job = asyncio.ensure_future(ms.mcp.call_tool("_bound_cleanup_boom"))

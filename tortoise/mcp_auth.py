@@ -131,6 +131,68 @@ ERR_SUSPENDED = -32006
 ERR_TIMEOUT = -32009
 
 
+# ── #3834: the transport-level wait bound's VALUE and refusal vocabulary ───
+# The bound is enforced at two seams — ``hosted_api.WaitBoundMiddleware`` for
+# the REST routes and ``mcp_server._await_under_mcp_wait_bound`` for the MCP
+# tool dispatch — and this module is the only place both can share without an
+# import cycle (``hosted_api`` imports ``mcp_server``, which imports this
+# module). It is also the transport-NEUTRAL home: these three constants carry no
+# REST- or MCP-specific behaviour, unlike ``hosted_api._TRANSPORT_WAIT_BOUND_
+# EXEMPT``, which is a REST-only route exemption and stays there.
+#
+# The number is not chosen here: it is the value the owner pinned for this
+# question (10 s, under the 15 s flat budget of the narrowest uncontrolled
+# client, D-12) and it is re-homed unchanged. It is a module constant rather
+# than an env knob on purpose — once a caller codes to the number, a silent
+# env change is a client-visible contract change (owner's own framing).
+#
+# Why the bound is justified even though the tail it cuts is small: the measured
+# maximum MCP tool-call latency sits ABOVE the 15 s client budget, so for that
+# tail the bound does not abandon work that would otherwise have succeeded — it
+# converts an opaque client-side timeout into a legible refusal. Measured on the
+# TRANSPORT-wide population (the 7,795 `mcp_tool_call` events in
+# `~/.tortoise/analytics_fallback.jsonl`; 22,510 events in the file at this
+# measurement, nearest-rank quantiles on `latency_ms`): p50 26 ms, p95 2,213 ms,
+# p99 22,476 ms, max 157,116 ms; 162 calls (2.1%) exceed the bound. ⚠️ Caveat
+# that travels with these numbers: this is the MCP transport PER TOOL CALL, not
+# the REST HTTP request wait — the best available proxy, not the same quantity.
+# The 10 s value itself was derived from the ask lane's distribution at
+# derivation time (n=573, 1 call > 10 s) and re-homed onto this wider one; the
+# breach event exists so that the difference is measurable in production rather
+# than assumed.
+_TRANSPORT_WAIT_BOUND_S = 10.0
+
+#: Seconds advertised as the back-off on a breach. Ships WITH the bound as one
+#: unit — a bound alone turns an invisible failure into a visible one with no
+#: recovery. This is the single source for the number: the message below carries
+#: no literal, and the REST ``Retry-After`` header and the JSON-RPC
+#: ``error.data.retry_after`` both read it.
+#:
+#: ⚠️ It MUST NOT be shorter than ``_TRANSPORT_WAIT_BOUND_S``. Every breach was
+#: caused by work that exceeded the bound, so a shorter advertised delay tells a
+#: compliant caller to re-enter the SAME slow operation while the abandoned
+#: attempt is still running: at bound/retry = 10/2 the steady-state concurrent
+#: copies of one logical operation are 5 (measured at 1/50 scale: refusals=5,
+#: dispatches_started=5, peak_concurrent=5 for ONE logical operation), and for a
+#: non-idempotent tool the abandoned original can still commit AFTER the caller
+#: was told to retry — duplicate side effects. A prose caveat does not discharge
+#: this: retry middleware acts on status/code/header, not on the body. Pinned by
+#: ``tests/test_transport_wait_bound.py::
+#: test_retry_signal_is_never_shorter_than_the_bound``.
+_TRANSPORT_WAIT_RETRY_AFTER_S = 10
+
+#: The readable refusal. Static and digit-free (the advertised delay has exactly
+#: one source, above) and transport-neutral (it also ships on the MCP surface,
+#: which has no header). Answers the three things a caller must be able to read
+#: at the call site: what happened, whether to retry, and how long to wait.
+_TRANSPORT_WAIT_BOUND_MESSAGE = (
+    "The server's wait budget for this request was exceeded before a response "
+    "was ready. The work may still complete on the server. Wait for the "
+    "advertised delay before retrying, and retry only if repeating the "
+    "operation is safe."
+)
+
+
 # ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────
 # An org-resolution outage (control plane or registry unreachable) is a
 # RETRYABLE dependency condition, not a hard outage. Before this the 503

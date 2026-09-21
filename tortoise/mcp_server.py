@@ -28,6 +28,11 @@ from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_graph_id, _transport_mode, _tool_group,
                                _get_org_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
                                ERR_EXCLUDED, ERR_TIMEOUT, SELFHOST_ORG_ID)
+# #3834: the transport wait-bound vocabulary is read as a MODULE attribute
+# (``tortoise.mcp_auth`` is its single home), so the fast path pays no
+# ``hosted_api`` import — that import is ~1.7 s and builds the whole hosted
+# FastAPI app — and a patch of the canonical constant reaches this surface.
+from tortoise import mcp_auth as _mcp_auth
 
 _log = logging.getLogger(__name__)
 
@@ -275,15 +280,63 @@ def _hold_mcp_dispatch_after_request(task) -> None:
 # through untouched so exactly ONE event is emitted per client tool call.
 _original_call_tool = mcp.call_tool
 
+#: The key ``hosted_api.WaitBoundMiddleware`` writes the transport arrival time
+#: under, on the shared ASGI ``scope["state"]`` dict (the same dict the auth
+#: dependency writes ``org_id`` into).
+_WAIT_BOUND_ARRIVAL_KEY = "_wait_bound_t0"
+
+
+def _wait_bound_arrival() -> float | None:
+    """When the HTTP request arrived at the transport, or None off-HTTP.
+
+    The stamp is written by ``hosted_api.WaitBoundMiddleware`` and is what makes
+    the bound ONE deadline instead of two (#3834 F1). The middleware cannot
+    bound an MCP *tool call* — Streamable-HTTP starts the SSE response BEFORE
+    dispatching the tool — so it hands this seam the SAME arrival time and the
+    seam waits only the REMAINING part of the bound. Without it the
+    caller-visible wait is pre-SSE cost + bound (measured: 0.522 s for an
+    advertised 0.3 s bound) and a slow org resolution can push the total past
+    the 15 s client budget with no legible refusal.
+
+    HTTP-only by construction: on stdio there is no request, so this returns
+    None and the full bound applies. It deliberately never raises — a missing
+    stamp means "use the full bound", never "fail the tool call".
+    ``get_http_request`` is tried first because it is the public API, but its
+    MCP-SDK ``request_ctx`` branch can return a protocol object rather than the
+    Starlette request, so FastMCP's HTTP ContextVar is the reliable fallback.
+    """
+    candidates: list = []
+    try:
+        from fastmcp.server.dependencies import get_http_request
+        candidates.append(get_http_request())
+    except Exception:
+        pass
+    try:
+        from fastmcp.server.http import _current_http_request
+        candidates.append(_current_http_request.get())
+    except Exception:
+        pass
+    for request in candidates:
+        scope = getattr(request, "scope", None)
+        if not isinstance(scope, dict):
+            continue
+        state = scope.get("state")
+        if isinstance(state, dict):
+            stamp = state.get(_WAIT_BOUND_ARRIVAL_KEY)
+            if isinstance(stamp, (int, float)):
+                return float(stamp)
+    return None
+
 
 async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
                                      task_meta):
     """Await the real tool dispatch under the transport wait bound (#3834).
 
     On breach the caller gets a legible refusal that REUSES the shipped
-    vocabulary: the message and the advertised delay are hosted_api's single
-    source for the REST 504 (``_TRANSPORT_WAIT_BOUND_MESSAGE`` /
-    ``_TRANSPORT_WAIT_RETRY_AFTER_S``), and ``retry_after`` rides the result.
+    vocabulary: the message and the advertised delay come from the SINGLE module
+    both surfaces read (``mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE`` /
+    ``mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S``), and ``retry_after`` rides the
+    result.
 
     ⚠️ Why the refusal is a ``CallToolResult(isError=True)`` and NOT a JSON-RPC
     ``error`` object: the MCP SDK's ``tools/call`` handler wraps every handler
@@ -301,14 +354,30 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     the dispatch, as the direct await this wrapper replaced did, so the tool's
     own cancellation cleanup runs.
     """
-    from tortoise import hosted_api as _ha  # late: keeps import order acyclic
-
     t0 = _time.perf_counter()
+    # #3834 F1: spend the TRANSPORT's REMAINING deadline, not a fresh one. The
+    # caller-visible wait is pre-SSE cost + bound; a fresh bound here makes it a
+    # SUM, and a slow org resolution can push the total past the client budget
+    # with no legible refusal. ``_time.monotonic()`` matches the middleware's
+    # clock (``time.monotonic``), NOT this function's ``perf_counter`` t0.
+    arrival = _wait_bound_arrival()
+    if arrival is None:
+        remaining = float(_mcp_auth._TRANSPORT_WAIT_BOUND_S)  # stdio / no HTTP request
+    else:
+        remaining = max(
+            0.0, _mcp_auth._TRANSPORT_WAIT_BOUND_S - (_time.monotonic() - arrival))
     task = asyncio.ensure_future(
         _original_call_tool(name, arguments, version=version,
                             run_middleware=True, task_meta=task_meta))
     try:
-        done, _ = await asyncio.wait({task}, timeout=_ha._TRANSPORT_WAIT_BOUND_S)
+        # ``wait_for`` + ``shield`` rather than ``asyncio.wait`` — the same
+        # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``, and
+        # for the same measured reason (+1.8–2.0 ms p95, which reddened
+        # ``test_mcp_telemetry.py::test_p95_under_5ms``). The ``shield`` is what
+        # preserves ABANDON-don't-cancel: ``wait_for`` alone cancels the awaited
+        # future on timeout, and cancelling here would run the SDK-closing
+        # ``finally`` under work still using it (#2988 / #3718).
+        return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
     except asyncio.CancelledError:
         # Outer cancellation (client disconnect, server shutdown, transport
         # teardown). Propagate it INTO the dispatch and await it, so the tool's
@@ -319,14 +388,27 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         with contextlib.suppress(asyncio.CancelledError):
             await task
         raise
-    if task in done:
-        return task.result()  # re-raises exactly as a plain await would
+    except TimeoutError:
+        if task.done():
+            # The dispatch finished as the deadline expired: surface its own
+            # result/exception. A handler's ``TimeoutError`` is NOT a wait
+            # breach (``asyncio.TimeoutError`` IS builtin ``TimeoutError``).
+            return task.result()
+        # ``shield`` kept the inner dispatch RUNNING; the breach path below
+        # abandons it on purpose.
+        pass
 
     _hold_mcp_dispatch_after_request(task)
     try:
         # The SAME breach writer the REST arm uses — one emit site, one prop
         # vocabulary. Fire-and-forget off the request path (it submits to the
         # daemon telemetry pool); "tool_name" is already allowlisted there.
+        #
+        # Late and GUARDED, on the BREACH path only: ``hosted_api`` imports
+        # ``mcp_server`` at module scope, so this module cannot import it back at
+        # module scope, and the fast path must not pay a hosted_api import that
+        # stalls the loop while it builds the hosted FastAPI app.
+        from tortoise import hosted_api as _ha
         _ha._emit_wait_bound_breach(
             _current_org_id.get() or "", "/mcp", "POST",
             int((_time.perf_counter() - t0) * 1000), tool_name=name)
@@ -334,15 +416,15 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
     _log.warning(
         "transport wait bound (%.0fs) exceeded: MCP tools/call %s — refusing "
-        "legibly", _ha._TRANSPORT_WAIT_BOUND_S, name)
-    retry_after = _ha._TRANSPORT_WAIT_RETRY_AFTER_S
+        "legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, name)
+    retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
     return ToolResult(
-        content=_ha._TRANSPORT_WAIT_BOUND_MESSAGE,
+        content=_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
         # The REST JSON-RPC error payload, carried on the channel this surface
         # has: same code, same message, same `data.retry_after`.
         structured_content={"error": {
             "code": ERR_TIMEOUT,
-            "message": _ha._TRANSPORT_WAIT_BOUND_MESSAGE,
+            "message": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
             "data": {"retry_after": retry_after},
         }},
         meta={_WAIT_BOUND_META_KEY: True},

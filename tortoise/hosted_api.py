@@ -40,6 +40,11 @@ from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: bi
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import tortoise
+
+# #3834: the wait-bound vocabulary's single home — read as a module attribute so
+# a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
+# of leaving a stale copy in this module.
+from tortoise import mcp_auth as _mcp_auth
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
@@ -2171,60 +2176,31 @@ app.add_middleware(InFlightMiddleware)
 # cold-half verification in `tests/test_transport_wait_bound.py`); the busy half
 # is bounded here.
 #
+# The bound's VALUE and refusal vocabulary are NOT defined here: they live in
+# ``tortoise/mcp_auth.py`` (``_TRANSPORT_WAIT_BOUND_S`` /
+# ``_TRANSPORT_WAIT_RETRY_AFTER_S`` / ``_TRANSPORT_WAIT_BOUND_MESSAGE``), because
+# the MCP seam (``mcp_server._await_under_mcp_wait_bound``) needs them and
+# ``mcp_auth`` is the only module both surfaces can import without a cycle. This
+# module owns only the REST-only exemption below.
+#
 # OVERRIDES: uniform per-route timeout bounds (the common server practice) — we
 # apply ONE bound at the transport and deliberately EXEMPT `POST /v1/context`,
 # which keeps its recorded 300ms-p95 / 2.4s-ceiling / reduced-answer-on-breach
-# behaviour (`tortoise/volunteer.py:77` SLO_MS, the hard ceiling in the POST
-# handler below). That fallback-instead-of-error is a RECORDED DECISION, not an
-# oversight, and a uniform bound would silently reverse it. The exemption is
-# intentional — do not "fix" it by making the bounds uniform.
+# behaviour. Cited by SYMBOL, never by line number (line numbers re-stale — an
+# earlier citation of this exemption had already gone wrong): the exempt handler
+# is ``@app.post("/v1/context")`` in this module, its hard ceiling is the
+# ``asyncio.wait_for(..., timeout=SLO_MS * 8 / 1000.0)`` call inside it, and the
+# p95 budget is ``tortoise.volunteer.SLO_MS``. That fallback-instead-of-error is
+# a RECORDED DECISION, not an oversight, and a uniform bound would silently
+# reverse it. The exemption is intentional — do not "fix" it by making the
+# bounds uniform.
 #
-# The number is not chosen here: it is the value the owner pinned for this
-# question (10 s, under the 15 s flat budget of the narrowest uncontrolled
-# client, D-12) and it is re-homed unchanged. It is a module constant rather
-# than an env knob on purpose — once a caller codes to the number, a silent
-# env change is a client-visible contract change (owner's own framing).
-#
-# Why the bound is justified even though the tail it cuts is small: the measured
-# maximum MCP tool-call latency sits ABOVE the 15 s client budget, so for that
-# tail the bound does not abandon work that would otherwise have succeeded — it
-# converts an opaque client-side timeout into a legible refusal. Measured on the
-# TRANSPORT-wide population (the 7,795 `mcp_tool_call` events in
-# `~/.tortoise/analytics_fallback.jsonl`; 22,510 events in the file at this
-# measurement, nearest-rank quantiles on `latency_ms`): p50 26 ms, p95 2,213 ms,
-# p99 22,476 ms, max 157,116 ms; 162 calls (2.1%) exceed the bound. ⚠️ Caveat
-# that travels with
-# these numbers: this is the MCP transport PER TOOL CALL, not the REST HTTP
-# request wait — the best available proxy, not the same quantity. The 10 s value
-# itself was derived from the ask lane's distribution at derivation time
-# (n=573, 1 call > 10 s) and re-homed onto this wider one; the breach event below exists so that the
-# difference is measurable in production rather than assumed.
-_TRANSPORT_WAIT_BOUND_S = 10.0
-
-#: Seconds advertised as the back-off on a breach. Ships WITH the bound as one
-#: unit — a bound alone turns an invisible failure into a visible one with no
-#: recovery. This is the single source for the number: the message below carries
-#: no literal, and the REST ``Retry-After`` header and the JSON-RPC
-#: ``error.data.retry_after`` both read it.
-_TRANSPORT_WAIT_RETRY_AFTER_S = 2
-
 #: The one deliberate exemption, METHOD-scoped: the ruling exempts
 #: `POST /v1/context` because that handler's fail-open ceiling is a recorded
 #: decision. `GET /v1/context` (`session_context`, a different handler with no
 #: recorded fallback) is NOT exempt — exempting it would widen the ruling past
 #: its record.
 _TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
-
-#: The readable refusal. Static and digit-free (the advertised delay has exactly
-#: one source, above) and transport-neutral (it also ships on the MCP surface,
-#: which has no header). Answers the three things a caller must be able to read
-#: at the call site: what happened, whether to retry, and how long to wait.
-_TRANSPORT_WAIT_BOUND_MESSAGE = (
-    "The server's wait budget for this request was exceeded before a response "
-    "was ready. The work may still complete on the server. Wait for the "
-    "advertised delay before retrying, and retry only if repeating the "
-    "operation is safe."
-)
 
 #: Analytics event name for a breach. Recorded through the EXISTING writer (no
 #: new table, no new metric endpoint). The `org_id` comes from
@@ -2339,7 +2315,7 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
     ``Retry-After`` through. Both responses are rendered by those existing
     builders and only transported here as raw ASGI messages.
     """
-    retry_after = _TRANSPORT_WAIT_RETRY_AFTER_S
+    retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
     if _is_jsonrpc_surface(route_path):
         # Function-local: mcp_auth reaches back into this module (late, from a
         # function body), so a module-level edge here would be a needless
@@ -2347,13 +2323,13 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
         from tortoise.mcp_auth import ERR_TIMEOUT, _jsonrpc_error
 
         resp = _jsonrpc_error(
-            ERR_TIMEOUT, _TRANSPORT_WAIT_BOUND_MESSAGE,
+            ERR_TIMEOUT, _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
             data={"retry_after": retry_after}, status=504,
             headers={"Retry-After": str(retry_after)})
     else:
         resp = JSONResponse(
             status_code=504,
-            content={"detail": _TRANSPORT_WAIT_BOUND_MESSAGE},
+            content={"detail": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE},
             headers={"Retry-After": str(retry_after)})
     headers = [(k.lower().encode("latin-1"), v.encode("latin-1"))
                for k, v in resp.headers.items()]
@@ -2444,8 +2420,14 @@ class WaitBoundMiddleware:
     one recorded exemption.
 
     Pure ASGI and OUTERMOST (registered last): it must see the request before
-    any middleware can short-circuit it, and it must cost no request/response
-    wrapping on the hot path.
+    any middleware can short-circuit it. It is deliberately NOT wrapping-free
+    (unlike ``InFlightMiddleware``, whose docstring this class no longer
+    inherits): on every non-exempt request ``__call__`` re-binds ``send`` to a
+    guarded closure and runs the app as a child task. Owning ``send`` is what
+    lets it substitute a refusal for a response that has not started, so that
+    cost is the bound's price, not an accident — and it is measured (see the
+    overhead guard in ``tests/test_mcp_telemetry.py`` and the sibling seam's
+    comment in ``tortoise/mcp_server.py``).
 
     ⚠️ What it does NOT bound is MCP *tool calls*, and the earlier claim that
     it "covers the mounted MCP app by construction" was false: FastMCP's
@@ -2513,10 +2495,38 @@ class WaitBoundMiddleware:
             await send(message)
 
         t0 = time.monotonic()
+        # #3834 F1: stamp the TRANSPORT arrival so the MCP dispatch seam —
+        # ``mcp_server._await_under_mcp_wait_bound``, which is what actually
+        # bounds a tool call because Streamable-HTTP starts the SSE response
+        # BEFORE dispatching the tool — spends the SAME deadline instead of
+        # starting a fresh one. Without this the caller-visible wait is
+        # pre-SSE cost + bound (measured: 0.522 s for an advertised 0.3 s), and
+        # a slow org resolution pushes the total past the 15 s client budget
+        # with NO legible refusal — the exact failure #3834 exists to eliminate.
+        # ``scope["state"]`` is the dict the auth dependency already writes
+        # ``org_id`` into, and Starlette's ``Mount`` passes the same mapping
+        # through to the sub-app, so the MCP seam can read it via
+        # ``fastmcp.server.http._current_http_request``.
+        state = scope.get("state")
+        if not isinstance(state, dict):
+            state = {}
+            scope["state"] = state
+        state["_wait_bound_t0"] = t0
+
         task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
         try:
-            done, _ = await asyncio.wait({task},
-                                         timeout=_TRANSPORT_WAIT_BOUND_S)
+            # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
+            # ``wait_for`` is a single deadline around ``await fut``, while
+            # ``asyncio.wait`` builds a waiter Future plus per-future
+            # done-callbacks on EVERY call — measured at +1.8–2.0 ms p95 on the
+            # MCP seam, the difference that reddened
+            # ``test_mcp_telemetry.py::test_p95_under_5ms``. The ``shield`` is
+            # REQUIRED: ``wait_for`` alone CANCELS the awaited future on
+            # timeout, and this bound must ABANDON, never cancel (the SDK-closing
+            # ``finally`` doctrine below).
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_mcp_auth._TRANSPORT_WAIT_BOUND_S)
         except asyncio.CancelledError:
             # The caller was cancelled (client disconnect, server shutdown).
             # Propagate the cancellation INTO the handler and await it: the
@@ -2536,9 +2546,15 @@ class WaitBoundMiddleware:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
             raise
-        if task in done:
-            task.result()  # re-raises exactly as a plain await would
-            return
+        except TimeoutError:
+            if task.done():
+                # The dispatch finished as the deadline expired. Surface its
+                # result/exception exactly as a plain await would — a handler's
+                # OWN ``TimeoutError`` must not be rewritten into a wait-bound
+                # refusal (``asyncio.TimeoutError`` IS builtin ``TimeoutError``).
+                return task.result()
+            # The deadline fired with the dispatch still running: ``shield``
+            # kept the inner task ALIVE and the breach path below abandons it.
         if response_started:
             # The response already began; a refusal can no longer be
             # substituted, so the request is allowed to finish.
@@ -2562,7 +2578,7 @@ class WaitBoundMiddleware:
                                 int((time.monotonic() - t0) * 1000))
         _logger.warning(
             "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
-            _TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
+            _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
         # The task has already outlived the refusal decision, so register it
         # BEFORE the send: the send happens 10 s in, where a client that has
         # already gone makes uvicorn raise (ConnectionResetError /
