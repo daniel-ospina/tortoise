@@ -15,9 +15,9 @@
 # them).
 #
 # Installs `python -m tortoise.embedded_reaper --no-dry-run --only-safe`
-# every 10 minutes:
+# every 20 minutes:
 #   - macOS  -> a launchd LaunchAgent (StartInterval 1200)
-#   - Linux  -> a cron entry (*/10 * * * *)
+#   - Linux  -> a cron entry (*/20 * * * *)
 # The reaper's singleton lock (<tempdir>/.tortoise-reaper-<uid>/.reaper.lock, fcntl;
 # tempdir-scoped since #1658 — NOT ~/.tortoise) makes concurrent runs safe,
 # so the periodic run can overlap a suite-end sweep.
@@ -39,7 +39,8 @@
 #   TORTOISE_REPO   repo root (default: this script's repo)
 #   PYTHON_BIN      interpreter for the sweep (default: <repo>/.venv/bin/python
 #                   if present, else `command -v python3`)
-#   REAPER_INTERVAL interval seconds (launchd) / minutes (cron); default 1200/20
+#   REAPER_INTERVAL interval in SECONDS on BOTH platforms (launchd uses it
+#                   directly; cron divides by 60), default 1200 (= 20 min)
 #   REAPER_TIMEOUT  sweep budget in seconds; default 900
 #   REAPER_JOBS     parallel CLIENT LIST probe workers; default 16
 #   AGENTS_DIR      launchd install dir (default $HOME/Library/LaunchAgents)
@@ -82,7 +83,7 @@ REAPER_JOBS="${REAPER_JOBS:-16}"
 REAPER_CMD="$PYTHON_BIN -m tortoise.embedded_reaper --no-dry-run --only-safe --timeout $REAPER_TIMEOUT --jobs $REAPER_JOBS"
 
 usage() {
-    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 render_plist() {
@@ -115,7 +116,8 @@ PLIST
 }
 
 cron_line() {
-    # run every REAPER_INTERVAL minutes (default 10)
+    # every REAPER_INTERVAL SECONDS (default 1200 = 20 min); cron takes
+    # interval/60 minutes, so a non-multiple-of-60 floors to the minute
     local interval="${REAPER_INTERVAL:-1200}"
     local minutes=$(( interval / 60 ))
     [ "$minutes" -lt 1 ] && minutes=1

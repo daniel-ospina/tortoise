@@ -2699,7 +2699,8 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     resolved = [phase1_probe(r) for r in reapables]
     acted = reap(resolved, dry_run=dry_run, batch_size=batch_size,
                  kill_pacing=kill_pacing, only_safe=only_safe,
-                 sigterm_timeout=sigterm_timeout, deadline=deadline)
+                 sigterm_timeout=sigterm_timeout, jobs=jobs,
+                 deadline=deadline)
     # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
     try:
         quarantine = _sweep_quarantine_dirs(dry_run=dry_run)

@@ -4572,3 +4572,38 @@ def test_socketless_binding_never_resolves_the_candidate_path(
         {"dbdir": str(decoy), "socket_path": str(decoy / "redis.socket"),
          "pid": os.getpid()})
     assert refusal is not None, "planted symlink forged the socket-less binding"
+
+
+def test_run_sweep_forwards_jobs_to_reap(monkeypatch):
+    """`--jobs N` must reach reap()'s parallel CLIENT LIST pre-probe.
+
+    #4299: `_run_sweep` forwards `jobs` to discover() but called reap()
+    WITHOUT it, so reap fell back to its own default (jobs=8) and the flag
+    that exists to parallelize the dominant cost silently did half its job.
+
+    Mutation: delete `jobs=jobs` from the reap() call in `_run_sweep` and
+    this test fails.
+    """
+    import tortoise.embedded_reaper as R
+
+    captured: dict = {}
+
+    monkeypatch.setattr(R, "discover", lambda jobs=1, **kw: [])
+    monkeypatch.setattr(R, "_mark_orphan_confirmation", lambda records: None)
+    monkeypatch.setattr(R, "_sweep_quarantine_dirs", lambda dry_run=False: [])
+
+    def _fake_reap(records, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(R, "reap", _fake_reap)
+
+    R._run_sweep(dry_run=True, batch_size=None, only_safe=True, jobs=16,
+                 sweep_pid_files=False)
+
+    assert captured.get("jobs") == 16, (
+        f"jobs not forwarded to reap(): {captured.get('jobs')!r} "
+        "(the flag would silently no-op)")
+    # The other kwargs the caller owns must still be forwarded unchanged.
+    assert captured.get("only_safe") is True
+    assert captured.get("dry_run") is True
