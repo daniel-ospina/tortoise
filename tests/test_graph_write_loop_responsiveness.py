@@ -62,13 +62,16 @@ assertion in the worker test pin that at the thread level. Still OUT of scope
 here (separate, tracked residuals — all filed as #4451): the post-write
 `_record_write_op(org, ...)` metering MERGE still runs on the loop in
 create_object/create_subject/create_point (and elsewhere); the sibling READ
-handlers (`GET /v1/points`, `GET /v1/points/{id}`, `/v1/dream/health`) plus
-~30 other `async def` routes in this file still run sync FalkorDB I/O inline
-(#4451 / #3718 — NOT #3086/#4350, which cover the capture and control-plane
-lanes); and the capture path's `_apply_capture_ingest_ep` still runs a
-`sdk.dream(mode="local")` pass on the loop (tracked by #3086) — which is also
-why the production `_dream_lock` serializes only the two POOLED pass sites. So
-a tick count here certifies the OFF-LOADED CALL, not the whole request.
+handlers (`GET /v1/points`, `GET /v1/points/{id}`, `/v1/dream/health`, the
+session and registry reads) were off-loaded in the #3718 residual-2 change —
+their behavioural and AST-inventory guards live in
+`tests/test_read_routes_loop_responsiveness.py` — while ~30 other `async def`
+routes in this file still run sync FalkorDB I/O inline (the named residual in
+that file's `_KNOWN_INLINE_ROUTE_RESIDUAL`); and the capture path's
+`_apply_capture_ingest_ep` still runs a `sdk.dream(mode="local")` pass on the
+loop (tracked by #3086) — which is also why the production `_dream_lock`
+serializes only the two POOLED pass sites. So a tick count here certifies the
+OFF-LOADED CALL, not the whole request.
 """
 from __future__ import annotations
 
@@ -104,11 +107,11 @@ MIN_TICKS_IN_STALL = 10
 # `points` case's `create_point`, driven by the `about_object` field, and its edge
 # is asserted by
 # `tests/test_hosted_api.py::TestTeamInfo::test_point_with_about_object_wires_edge`),
-# and the `/v1/dream` default branch's own queued-roots `_mark_dirty` is NOT
-# covered by loop affinity at all — it only runs when `_DREAM_QUEUES` holds a
-# root, which no case here pre-seeds, so a refactor that moved THAT call back on
-# the loop would pass. Covering it needs a pre-seeded queue. `url` (not `path`)
-# is the httpx request kwarg.
+# and the `/v1/dream` default branch's own queued-roots `_mark_dirty` is covered
+# (without a stall — the observation is thread affinity, not tick count) by
+# `test_dream_default_branch_marks_queued_roots_off_loop`, which pre-seeds a
+# `_DREAM_QUEUES` root so the branch executes at all. `url` (not `path`) is the
+# httpx request kwarg.
 _ENDPOINTS = [
     ("points", "create_point",
      {"method": "POST", "url": "/v1/points",
@@ -695,3 +698,75 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
         f"the event loop completed only {len(in_stall)} tick(s) during the "
         f"{STALL_S:.1f}s dream drain (need {MIN_TICKS_IN_STALL}) — the worker's "
         f"graph pass is blocking the event loop (#3718)")
+
+
+def test_dream_default_branch_marks_queued_roots_off_loop(client, monkeypatch):
+    """#3718 residual 3: ``/v1/dream``'s queued-roots ``_mark_dirty`` is off-loop.
+
+    The default branch (neither ``mode=`` nor ``full=``) drains
+    ``_DREAM_QUEUES`` ON the loop (``asyncio.Queue`` is not thread-safe) and
+    then calls ``sdk._mark_dirty(queued_roots)`` — a synchronous reverse-BFS
+    graph write. It lives inside the closure handed to ``_run_dream_on_pool``,
+    so it runs ON THE POOL, not the loop; but nothing asserted that, because
+    the branch only executes when the queue is non-empty and no other case
+    pre-seeds it. This one does.
+
+    The pass itself (``sdk.dream``) is stubbed: this test pins the MARK's
+    thread affinity, not a pass — a real pass against the temp DB is slow and
+    is covered by the parametrized ``dream`` cases above.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    state: dict = {}
+    real_mark = TortoiseSDK._mark_dirty
+
+    def _observe_mark(self, *args, **kwargs):
+        state["mark_called"] = True
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        # AGGREGATED: a later off-loop mark must not erase an earlier on-loop
+        # one (the same rationale as `_record_loop_thread_of`).
+        state["mark_on_loop"] = state.get("mark_on_loop", False) or on_loop
+        state["mark_thread"] = threading.current_thread().name
+        return real_mark(self, *args, **kwargs)
+
+    monkeypatch.setattr(TortoiseSDK, "_mark_dirty", _observe_mark)
+
+    def _stub_dream(self, *args, **kwargs):
+        return {"ok": True, "stubbed": True}
+
+    monkeypatch.setattr(TortoiseSDK, "dream", _stub_dream)
+
+    key = ha_mod._dream_key(TEST_ORG_ID, None)
+    ha_mod._DREAM_QUEUES.pop(key, None)
+    ha_mod._DREAM_TASKS.pop(key, None)
+
+    async def _run():
+        # The queue must be created on the loop that serves the request.
+        q = asyncio.Queue()
+        q.put_nowait("dream-queue-root-3718")
+        ha_mod._DREAM_QUEUES[key] = q
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.post("/v1/dream")
+
+    try:
+        response = asyncio.run(_run())
+    finally:
+        ha_mod._DREAM_QUEUES.pop(key, None)
+        ha_mod._DREAM_TASKS.pop(key, None)
+
+    assert response.status_code == 200, response.text
+    assert state.get("mark_called") is True, (
+        "the default branch never reached sdk._mark_dirty — the pre-seeded "
+        "queue root was not drained, so this run proves nothing (#3718)")
+    assert state.get("mark_on_loop") is False, (
+        "sdk._mark_dirty ran ON the event loop "
+        f"(thread={state.get('mark_thread')!r}) — the queued-roots reverse-BFS "
+        "write is synchronous FalkorDB work, so it freezes every concurrent "
+        "request (#3718 residual 3)")

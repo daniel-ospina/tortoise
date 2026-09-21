@@ -469,6 +469,7 @@ surfaces:
   # REPLACES the `core` fallback: a core-only entry would never run this guard
   # on a hosted_api.py-only (api) or onboarding/state.py-only change.
   - test_onboarding_telemetry_w11.py
+  - test_read_routes_loop_responsiveness.py
   # #4194: captured turn Points must carry the embedding the dense leg
   # searches. Registered here because this file pins the unpatterned engine
   # module `tortoise/search_engine.py` (run_vector_query /

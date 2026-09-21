@@ -5841,7 +5841,6 @@ async def list_points(
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
     _require_scope(org, "graphs:read", "list_points")
     sdk = _data_sdk(org)
-    proj = sdk._get_proj()
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
@@ -5865,7 +5864,14 @@ async def list_points(
         + " AND ".join(conditions)
         + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
     )
-    rows = proj.g.query(query, params=params).result_set
+    # #3718 residual 2: the projection is SYNCHRONOUS FalkorDB (a blocking
+    # socket client) — `_get_proj()` opens/attaches it and `g.query` is the
+    # round trip — so BOTH ride one worker hand-off. Nothing between the two
+    # touches thread-unsafe state, and the query string/params were already
+    # built on the loop. Same `asyncio.to_thread` pattern the write handlers
+    # and /v1/search use.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_proj().g.query(query, params=params).result_set)
     results = []
     for r in rows:
         d = r[0]
@@ -5880,13 +5886,14 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     """Get a single Point by ID."""
     _require_scope(org, "graphs:read", "get_point")
     sdk = _data_sdk(org)
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (p:Point {id: $id}) "
-        "WHERE p.status IS NULL OR p.status <> 'retracted' "
-        "RETURN properties(p)",
-        params={"id": point_id},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_proj().g.query(
+            "MATCH (p:Point {id: $id}) "
+            "WHERE p.status IS NULL OR p.status <> 'retracted' "
+            "RETURN properties(p)",
+            params={"id": point_id},
+        ).result_set)
     if not rows:
         raise HTTPException(status_code=404, detail="Point not found")
     props = dict(rows[0][0])
@@ -6018,7 +6025,12 @@ async def dream_health(
     _require_scope(org, "graphs:read", "dream_health")
     sdk = _data_sdk(org)
     try:
-        return sdk.dream_health_check()
+        # #3718 residual 2: `dream_health_check` hydrates graph-persisted dirty
+        # roots first (#1163) — a synchronous FalkorDB read — then evaluates the
+        # in-memory alarm. The whole call is short and sync, so it rides one
+        # worker hand-off (the /v1/search precedent); `close()` stays on the loop
+        # in the finally below, as it does for every other read surface here.
+        return await asyncio.to_thread(sdk.dream_health_check)
     finally:
         sdk.close()
 
@@ -6125,10 +6137,12 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     point_count = 0
     graph_ready = True
     try:
-        point_count = sdk._get_proj().g.query(
-            "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
-            params={"demo_ids": list(_DEMO_POINT_IDS)},
-        ).result_set[0][0]
+        # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+        point_count = await asyncio.to_thread(
+            lambda: sdk._get_proj().g.query(
+                "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
+                params={"demo_ids": list(_DEMO_POINT_IDS)},
+            ).result_set[0][0])
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -8233,25 +8247,30 @@ async def list_api_keys(graph_id: str | None = None,
     sdk = _make_sdk(namespace="registry")
     try:
         if graph_id is not None:
-            keys = sdk._get_registry().query(
-                "MATCH (k:APIKey {org_id: $tid, graph_id: $gid}) "
-                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
-                "k.revoked_at, k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
-                "k.created_by "
-                "ORDER BY k.created_at DESC",
-                params={"tid": org["org_id"], "gid": graph_id},
-            )
+            # #3718 residual 2: `_get_registry()` attaches the SYNC FalkorDB
+            # client (`_get_proj`) and `.query` is a blocking round trip — both
+            # ride one worker hand-off.
+            keys = await asyncio.to_thread(
+                lambda: sdk._get_registry().query(
+                    "MATCH (k:APIKey {org_id: $tid, graph_id: $gid}) "
+                    "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
+                    "k.revoked_at, k.name, k.created_via, k.expires_at, "
+                    "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                    "k.created_by "
+                    "ORDER BY k.created_at DESC",
+                    params={"tid": org["org_id"], "gid": graph_id},
+                ))
         else:
-            keys = sdk._get_registry().query(
-                "MATCH (k:APIKey {org_id: $tid}) "
-                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
-                "k.name, k.created_via, k.expires_at, "
-                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
-                "k.created_by "
-                "ORDER BY k.created_at DESC",
-                params={"tid": org["org_id"]},
-            )
+            keys = await asyncio.to_thread(
+                lambda: sdk._get_registry().query(
+                    "MATCH (k:APIKey {org_id: $tid}) "
+                    "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
+                    "k.name, k.created_via, k.expires_at, "
+                    "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id, "
+                    "k.created_by "
+                    "ORDER BY k.created_at DESC",
+                    params={"tid": org["org_id"]},
+                ))
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -11194,9 +11213,12 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
             "s.machine_id, s.model "
             "ORDER BY s.created_at DESC LIMIT 50"
         )
-        rows = sdk._get_proj().g.query(
-            query, params={"uid": actor_filter} if actor_filter else None
-        ).result_set
+        # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
+        rows = await asyncio.to_thread(
+            lambda: sdk._get_proj().g.query(
+                query,
+                params={"uid": actor_filter} if actor_filter else None,
+            ).result_set)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -11286,7 +11308,10 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     _require_scope(org, "graphs:read", "get_session_detail")
     sdk = _data_sdk(org)
     try:
-        proj = sdk._get_proj()
+        # #3718 residual 2: `_get_proj()` opens/attaches the SYNC FalkorDB
+        # client — off-load the attach as well as the reads below, so the
+        # first (connect) request is not the one that blocks the loop.
+        proj = await asyncio.to_thread(sdk._get_proj)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").warning(
@@ -11297,12 +11322,13 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # Session node — #2600: actor_user_id/harness APPENDED at the END so
     # the existing sess[0..2] (id/created_at/turns) mapping is unchanged.
     # #2599: machine_id and model appended after harness — sess[4]/sess[5].
-    sess_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
-        "s.turn_count, s.actor_user_id, s.harness, "
-        "s.machine_id, s.model",
-        params={"sid": session_id},
-    ).result_set
+    sess_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
+            "s.turn_count, s.actor_user_id, s.harness, "
+            "s.machine_id, s.model",
+            params={"sid": session_id},
+        ).result_set)
     if not sess_rows:
         raise HTTPException(status_code=404, detail="Session not found")
     sess = sess_rows[0]
@@ -11321,20 +11347,22 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # pointKind is NULL for M2 conversation extraction — so the legacy
     # decision/statement filter would report 0; count every non-turn Point
     # wired to the session instead).
-    ext_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
-        "RETURN count(p)",
-        params={"sid": session_id},
-    ).result_set
+    ext_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN count(p)",
+            params={"sid": session_id},
+        ).result_set)
     extracted_count = ext_rows[0][0] if ext_rows else 0
 
     # Turn points (events) — ordered by turn index embedded in the id
-    turn_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-        "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
-        params={"sid": session_id},
-    ).result_set
+    turn_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+            params={"sid": session_id},
+        ).result_set)
     turns = []
     for tr in turn_rows:
         tid = tr[0]
@@ -11353,13 +11381,14 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
-    ext_points_rows = proj.g.query(
-        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
-        "RETURN p.id, p.content, p.pointKind, p.createdAt "
-        "ORDER BY p.createdAt",
-        params={"sid": session_id},
-    ).result_set
+    ext_points_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN p.id, p.content, p.pointKind, p.createdAt "
+            "ORDER BY p.createdAt",
+            params={"sid": session_id},
+        ).result_set)
     extracted = []
     for er in ext_points_rows:
         extracted.append({
@@ -11376,11 +11405,12 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # capture that never materialized the Source reports `source: null`,
     # never a fabricated stub.
     source = None
-    source_rows = proj.g.query(
-        "MATCH (src:Source {url:$url}) "
-        "RETURN src.url, src.sourceKind, src.eventId",
-        params={"url": f"session:{session_id}"},
-    ).result_set
+    source_rows = await asyncio.to_thread(
+        lambda: proj.g.query(
+            "MATCH (src:Source {url:$url}) "
+            "RETURN src.url, src.sourceKind, src.eventId",
+            params={"url": f"session:{session_id}"},
+        ).result_set)
     if source_rows:
         source = {
             "url": source_rows[0][0],
@@ -15214,17 +15244,18 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
         return {"invites": pending_invitations_for_email(
             get_control_plane(), email)}
     sdk = _make_sdk(namespace="registry")
-    reg = sdk._get_registry()
     from datetime import datetime as _dt
     now = _dt.now(UTC).isoformat()
-    rows = reg.query(
-        "MATCH (i:Invitation {email:$email}) "
-        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
-        "AND (i.expires_at IS NULL OR i.expires_at > $now) "
-        "MATCH (t:Team {id:i.org_id}) "
-        "RETURN i.id, i.org_id, t.name, i.role, i.inviter_email, i.expires_at",
-        params={"email": email, "now": now},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB (registry graph) read off the loop.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_registry().query(
+            "MATCH (i:Invitation {email:$email}) "
+            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) "
+            "MATCH (t:Team {id:i.org_id}) "
+            "RETURN i.id, i.org_id, t.name, i.role, i.inviter_email, i.expires_at",
+            params={"email": email, "now": now},
+        ).result_set)
     return {"invites": [{
         "invitation_id": r[0], "org_id": r[1],
         "org_name": r[2] or r[1], "role": r[3],
@@ -15499,11 +15530,13 @@ async def list_members(org_id: str, user: dict = Depends(get_current_user)):  # 
         except Exception:
             raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     sdk = _make_sdk(namespace="registry")
-    rows = sdk._get_registry().query(
-        "MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
-        "RETURN m.user_id, m.role, m.status, m.invited_email",
-        params={"tid": org_id},
-    ).result_set
+    # #3718 residual 2: sync FalkorDB (registry graph) read off the loop.
+    rows = await asyncio.to_thread(
+        lambda: sdk._get_registry().query(
+            "MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
+            "RETURN m.user_id, m.role, m.status, m.invited_email",
+            params={"tid": org_id},
+        ).result_set)
     return [{"user_id": r[0], "role": r[1], "status": r[2],
              "email": r[3] or ""} for r in rows]
 
@@ -20141,8 +20174,11 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             _node_sdk = (_open_org_graph_sdk(org["org_id"])
                          or _make_sdk(namespace=org["org_id"]))
             try:
-                _node = _os.read_onboarding_node(
-                    _node_sdk._get_proj(), org["org_id"])
+                # #3718 residual 2: the read touches the graph (`_get_proj`
+                # attach + node read) on the hot PATCH path — off-load both.
+                _node = await asyncio.to_thread(
+                    lambda: _os.read_onboarding_node(
+                        _node_sdk._get_proj(), org["org_id"]))
             finally:
                 _node_sdk.close()
         except Exception:
