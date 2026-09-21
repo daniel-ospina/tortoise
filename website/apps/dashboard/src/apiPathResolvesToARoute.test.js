@@ -106,6 +106,11 @@ function methodFor(src, index, kind) {
   if (shape === 'unreadable') return '?'
   let depth = 1
   let inString = null
+  // The LAST `method` key wins, because that is what javascript does. Returning the
+  // first meant `{ method: 'GET', method: 'DELETE' }` was graded GET while the real
+  // call is a DELETE — a silent false pass of the same class (found by verification
+  // of the cycle-7 fix, not by review).
+  let result = 'GET'
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i]
     if (inString) {
@@ -113,15 +118,31 @@ function methodFor(src, index, kind) {
       else if (ch === inString) inString = null
       continue
     }
-    if (ch === "'" || ch === '"' || ch === '`') inString = ch
-    else if (ch === '(' || ch === '[' || ch === '{') depth += 1
-    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
-    else if (depth === want && text.startsWith('method:', i)) {
-      const m = /^method:\s*['"]([A-Za-z]+)['"]/.exec(text.slice(i))
-      if (m) return m[1].toUpperCase()
+    if (depth === want) {
+      const rest = text.slice(i)
+      const prev = text.slice(0, i).replace(/\s+$/, '')
+      const keyPos = prev === '' || prev.endsWith('{') || prev.endsWith(',')
+      if (keyPos) {
+        // A getter/setter named `method` is an accessor, not a data property: it
+        // returns something this scan cannot see.
+        if (/^(?:get|set)\s+method\b/.test(rest)) result = '?'
+        const key = /^(?:method\b|['"]method['"]|\[\s*['"]method['"]\s*\])/.exec(rest)
+        if (key) {
+          const lit = /^(?:method|['"]method['"]|\[\s*['"]method['"]\s*\])\s*:\s*['"]([A-Za-z]+)['"]/.exec(rest)
+          result = lit ? lit[1].toUpperCase() : '?'
+        } else if (rest[0] === '[') {
+          // A COMPUTED key this scan cannot evaluate — `{ [method]: 'DELETE' }`,
+          // `{ ['me' + 'thod']: … }`. It MIGHT be `method`, so fail closed rather than
+          // assume GET: the alternative is exactly the silent false pass above.
+          result = '?'
+        }
+      }
     }
+    if (ch === "'" || ch === '"' || ch === '`') inString = ch
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
   }
-  return 'GET'
+  return result
 }
 
 // What the call's options are, statically: `none` (no options at all — GET is correct),
@@ -334,7 +355,11 @@ function literalCallPaths(rawSrc) {
   const paths = out
     .map(({ call, raw, index, prefix }) => {
       // A literal `?` starts the query string; a `${…}` before it is a path hole.
-      const pathPart = raw.split('?')[0]
+      // A `?` or `#` ends the path: the browser sends neither fragment nor query to the
+      // router, so `api(`/v1/backups#frag`)` requests the same route as `/v1/backups`.
+      // Splitting on `?` alone made a fragment-bearing but otherwise correct call a
+      // FALSE RED (#4345 cycle 7).
+      const pathPart = raw.split(/[?#]/)[0]
       return {
         call,
         method: methodFor(src, index, call),
@@ -375,11 +400,20 @@ function literalCallPaths(rawSrc) {
 // hole must not be satisfied by a literal route segment, or deleting the real
 // `/v1/x/{id}` route would stay green behind a literal `/v1/x/trash`.
 function clientPathPattern(pathPart) {
-  return pathPart
-    .split('/')
-    .filter(Boolean)
-    .map((seg) => {
+  const parts = pathPart.split('/').filter(Boolean)
+  return parts.map((seg, i) => {
       if (!/\$\{[^}]*\}/.test(seg)) return { literal: seg }
+      // A TRAILING hole on the LAST segment is a QUERY TAIL, not a path extension:
+      // `/v1/backups${q}` with `q = '?limit=5'` requests `/v1/backups`, but the old
+      // `^backups.*$` also certified `/v1/backupsXXX` — so renaming `/v1/sessions` to
+      // `/v1/sessions-list` would have left the guard GREEN while every call 404s, in
+      // the very class this PR exists to catch (#4345 cycle 7; ~27 live call sites use
+      // this shape). Every trailing-hole variable in the tree is a query builder, so
+      // requiring the route segment to EQUAL the literal prefix is correct today and
+      // fail-closed for a genuine path suffix — which must then be written literally.
+      if (i === parts.length - 1 && /^[^$]+\$\{[^}]*\}(?:\$\{[^}]*\})*$/.test(seg)) {
+        return { literal: seg.split('${')[0], queryTail: true }
+      }
       const body = seg.split(/\$\{[^}]*\}/).map(escapeRe).join('.*')
       // A segment that is ONLY holes — `${a}` AND `${a}${b}` — must require a route
       // PARAMETER. Testing `body === '.*'` recognised only the single-hole spelling, so
@@ -411,11 +445,26 @@ function serverRoutes() {
   // Whole-text, anchored at line start, so a decorator whose arguments wrap onto the
   // next line is still read (a line-by-line regex reported it as a MISSING route — a
   // false red on a correct tree), and so a decorator parked on a `#` line is excluded.
-  const re = /^[ \t]*@app\.(get|post|put|patch|delete|head|options)\(\s*['"]([^'"]+)['"]/gm
+  // A BACKSLASH continuation (`@app.get \` newline `("/v1/x")`) is valid python and was
+  // invisible to BOTH this parser and the completeness count, so a real route read as
+  // one the server had lost (#4345 cycle 7).
+  const re = /^[ \t]*@app\.(get|post|put|patch|delete|head|options)\s*(?:\\\s*)?\(\s*['"]([^'"]+)['"]/gm
   let m
   while ((m = re.exec(src)) !== null) routes.push({ method: m[1].toUpperCase(), path: m[2] })
   for (const entry of apiRouteEntries(src).entries) routes.push(entry)
+  // `app.mount("/mcp", …)` serves EVERYTHING under its prefix, for every method. It is
+  // a live registration form in this file, so ignoring it would read a mounted client
+  // path as unserved.
+  for (const prefix of mountPrefixes(src)) routes.push({ method: '*', path: prefix, mount: true })
   return routes
+}
+
+// `app.mount("<prefix>", …)` prefixes — a registration form that is neither a
+// decorator nor a route path, and serves an entire subtree.
+function mountPrefixes(src = serverSource()) {
+  const out = []
+  for (const m of src.matchAll(/^[ \t]*app\.mount\(\s*['"]([^'"]+)['"]/gm)) out.push(m[1])
+  return out
 }
 
 // `@app.api_route("/x", methods=["GET", "POST"])` is a first-class FastAPI form: not
@@ -440,7 +489,7 @@ function apiRouteEntries(src = serverSource()) {
 // as a PARSER gap rather than as a missing route.
 function declaredDecoratorForms() {
   const forms = new Map()
-  for (const m of serverSource().matchAll(/^[ \t]*@app\.([A-Za-z_]+)\s*\(/gm)) {
+  for (const m of serverSource().matchAll(/^[ \t]*@app\.([A-Za-z_]+)\s*(?:\\\s*)?\(/gm)) {
     forms.set(m[1], (forms.get(m[1]) ?? 0) + 1)
   }
   return forms
@@ -511,6 +560,17 @@ const segments = (p) => p.split('/').filter(Boolean)
 function matchesServerRoute(pattern, method, routes, wantTrailing = false) {
   if (pattern.length === 0) return false
   return routes.some((route) => {
+    // A MOUNT serves its whole subtree, for every method: the prefix's segments must
+    // match the leading segments of the request, and anything below is served.
+    if (route.mount) {
+      const r = segments(route.path)
+      if (r.length > pattern.length) return false
+      return r.every((seg, i) => {
+        const p = pattern[i]
+        if (p.hole) return true
+        return p.literal !== undefined ? seg === p.literal : p.re.test(seg)
+      })
+    }
     if (route.method !== method) return false
     // `/v1/x` and `/v1/x/` are different routes to FastAPI, which answers the mismatch
     // with a 307 the proxy will not follow.
@@ -574,6 +634,12 @@ function matchesRewritePattern(path) {
 // call site: the proxy prefix itself (`/api/v1`) is refused there, because that
 // function forwards an EMPTY remainder to `${API_ORIGIN}/v1/` and the API 404s.
 function pagesRouteExists(path) {
+  // A DOUBLE SLASH is not collapsed. The browser requests `/api//v1/x` verbatim, the
+  // proxy route (`functions/api/v1/[[path]].ts`) does not match it, and an ancestor
+  // `[[path]].ts` DOES — so filtering the empty segment out of `segments()` certified a
+  // path this guard's own proxy branch had just refused, two branches contradicting
+  // each other about the same call (#4345 cycle 7). Fail closed on the shape instead.
+  if (path.includes('//')) return false
   if (rewrittenPaths().has(path) || rewrittenPaths().has(path.replace(/\/$/, ''))) return true
   if (matchesRewritePattern(path)) return true
   const segs = segments(path)
@@ -596,12 +662,14 @@ test('the server-route matcher is not vacuous (it rejects what must not resolve)
   const routes = serverRoutes()
   assert.ok(routes.length > 50, `expected to read many routes from hosted_api.py, got ${routes.length}`)
   // The extraction must be COMPLETE — see the per-verb and unknown-form checks below.
-  assert.equal(
-    serverSource().includes('add_api_route('),
-    false,
-    'this file registers routes via add_api_route(), which serverRoutes() cannot read — teach it that '
-    + 'form (or use the decorator) before trusting this guard',
-  )
+  for (const form of ['add_api_route(', 'include_router(', 'APIRouter(']) {
+    assert.equal(
+      serverSource().includes(form),
+      false,
+      `this file registers routes via ${form}, which serverRoutes() cannot read — teach it that `
+      + 'form (or use the decorator) before trusting this guard',
+    )
+  }
   // …and the same for every OTHER decorator form. Counting only the verbs the parser
   // already knows made this net blind to exactly the forms it exists to catch:
   // `@app.head(...)` and `@app.api_route(..., methods=[...])` were invisible to BOTH the
@@ -684,11 +752,36 @@ test('the server-route matcher is not vacuous (it rejects what must not resolve)
     true,
     'the matcher rejected the real invite-accept route',
   )
-  // A query-only tail (`/v1/backups${q}`) is not a path segment: no extra segment.
+  // A query-only tail (`/v1/backups${q}`) is not a path segment: no extra segment. And
+  // it must not certify a route that merely STARTS with the literal — that
+  // over-permissive `^backups.*$` was the cycle-7 false pass at ~27 live call sites.
   assert.equal(
     matchesServerRoute(asPattern('/v1/backups${q}'), 'GET', [{ method: 'GET', path: '/v1/backups' }]),
     true,
     'a query tail was treated as a path segment',
+  )
+  assert.equal(
+    matchesServerRoute(asPattern('/v1/backups${q}'), 'GET', [{ method: 'GET', path: '/v1/backupsXXX' }]),
+    false,
+    'a query tail certified a route that only PREFIX-matches the literal — a renamed route '
+    + '(/v1/backups -> /v1/backups-list) would stay green while every call 404s',
+  )
+  assert.equal(
+    matchesServerRoute(asPattern('/v1/graphs${q}'), 'GET', [{ method: 'GET', path: '/v1/graphs-list' }]),
+    false,
+    'the trailing-hole rule did not apply to a second live shape',
+  )
+  // A ${…} hole that is NOT a trailing hole is still a hole: `/v1/x/${id}` must be
+  // certified by a {param} route and NOT by a literal one.
+  assert.equal(
+    matchesServerRoute(asPattern('/v1/x/${id}'), 'GET', [{ method: 'GET', path: '/v1/x/{rid}' }]),
+    true,
+    'a whole-segment hole stopped matching a route parameter',
+  )
+  assert.equal(
+    matchesServerRoute(asPattern('/v1/x/${id}'), 'GET', [{ method: 'GET', path: '/v1/x/trash' }]),
+    false,
+    'a whole-segment hole was satisfied by a literal route segment',
   )
 })
 
@@ -720,11 +813,23 @@ test('every literal call path resolves — client route AND upstream server rout
         // Forwarded by the proxy — so the SERVER must serve it, with that METHOD.
         // The proxy route `functions/api/v1/[[path]].ts` strips its own prefix and
         // rebuilds `${API_ORIGIN}/v1/${rest}`, so the upstream path is `path`.
+        // The proxy route `functions/api/v1/[[path]].ts` strips its own prefix and
+        // rebuilds `${API_ORIGIN}/v1/${rest}`, so the upstream path is `path`.
         if (!matchesServerRoute(pattern, method, routes, trailingSlash)) {
+          // A trailing `${…}` on the last segment is read as a QUERY TAIL, so the route
+          // segment must equal the literal prefix. That is deliberate (the alternative
+          // certified any route merely PREFIX-matching the literal), but for a genuine
+          // path PARAMETER (`/v1/backups-${id}` vs a route `/v1/backups-{id}`) it fails
+          // closed — so say which rule bit, instead of implying the server lost a route.
+          const tailNote = pattern.some((p) => p.queryTail)
+            ? ' — note: a trailing `${…}` is read as a QUERY TAIL here, so the route segment must EQUAL '
+              + 'the literal prefix; if this is a path parameter, this guard cannot tell the two apart '
+              + 'and fails closed'
+            : ''
           bad.push(
             `${file}: ${call}('${path}') [${method}] (requests ${requestPath}) → the BFF proxy would forward to `
             + `${path} on the API, but tortoise/hosted_api.py has no route of that method whose segments match `
-            + '(this is the #4144 shape)',
+            + `(this is the #4144 shape)${tailNote}`,
           )
         }
         continue
