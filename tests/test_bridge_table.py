@@ -246,7 +246,6 @@ def test_part_a_exists_column_is_derived_from_the_ast() -> None:
     """
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
     part_a = doc.split("## Part A")[1].split("## Part B")[0]
-    from tools.bridge_table import C1_REF
     defs = _sdk_defs_independently()
 
     rows = re.findall(
@@ -286,6 +285,18 @@ def test_c1_blockers_are_exactly_the_targets_without_a_method() -> None:
         targets.add(dest[len(ns):] if ns else dest)
     targets.discard("REMOVED")
 
+    # The backing map is load-bearing authored data and MUST NOT be imported as
+    # its own oracle: mutating it to `graph_set_recording: graph_set_recording`
+    # silently dropped the `update_memory_graph` finding (26 rows -> 25) and the
+    # suite stayed green. The independent oracle is the two docs that state the
+    # same design fact.
+    from tools.bridge_table import MCP_BACKING as _backing
+    assert _backing == {"graph_set_recording": "update_memory_graph"}, (
+        f"MCP_BACKING is {_backing!r}; docs/product/beta-sdk-surface.md row 30 and "
+        "docs/product/canonical-mcp-tools.md:137 both state the override folds into "
+        "`update_memory_graph`"
+    )
+
     expected = {t for t in targets if t not in defs}
     assert expected, "no target lacks a method - the artifact may be stale"
 
@@ -322,7 +333,11 @@ def test_c1_blockers_are_exactly_the_targets_without_a_method() -> None:
     # The Finding column is prose, but it is the section's whole claim: rewriting
     # it to "method exists but is not exported" -- the OPPOSITE of the heading --
     # left every row misstated with the suite green.
-    from tools.bridge_table import C1_FINDING
+    # Assert the LITERAL, NOT `from tools.bridge_table import C1_FINDING`: the
+    # generator renders that constant, so importing it makes the assertion
+    # self-referential -- editing the constant moved both sides together and
+    # stated the OPPOSITE of the section heading with the suite green.
+    C1_FINDING = "no `def` on TortoiseSDK"
     findings = re.findall(r"^\| `[a-z_][a-z0-9_]*` \| [A-Za-z-]+ \| (.+?) \|$", c1, re.M)
     assert findings, "Part C1's Finding column did not parse - the surface is unguarded"
     assert len(findings) == len(listed), (
@@ -359,7 +374,8 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     assert merged, "the merged set is empty -- every destination has one source, which cannot be right"
     # Every merged target must appear in Part A, and nothing else may.
     part_a = doc.split("## Part A")[1].split("## Part B")[0]
-    from tools.bridge_table import C1_REF
+    # LITERAL again -- see the C1 Finding note below.
+    C1_REF = "**no — Part C1**"
     listed = set(re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| \d+ \|", part_a, re.M))
     assert listed, "Part A rendered no rows - did its table shape change?"
     assert listed == merged, (
@@ -523,17 +539,32 @@ def test_vision_doc_buckets_match_generated_doc() -> None:
         r"The MCP has \*\*(\d+)\*\* tools; "
         r"\*\*(\d+)\*\* current tools retire, \*\*(\d+)\*\* are tenancy-only, "
         r"\*\*(\d+)\*\* is absorbed into a builder-only SDK method that is not on the MCP, "
-        r"and \*\*(\d+)\*\* are absorbed into those",
+        r"and \*\*(\d+)\*\* are absorbed into those "
+        r"(\d+) — many-to-one\. "
+        r'Writing "(\d+) minus (\d+) equals (\d+) retired"',
         doc,
     )
     assert m2, "could not parse the headline's second sentence; did its wording change?"
-    mcp2, retired2, tenancy2, sdk_only2, on_mcp2 = (int(g) for g in m2.groups())
+    mcp2, retired2, tenancy2, sdk_only2, on_mcp2, those2, tot3, minus3, eq3 = (
+        int(g) for g in m2.groups()
+    )
     assert (mcp2, retired2, tenancy2, sdk_only2, on_mcp2) == (
         mcp_targets, retired, tenancy, sdk_only, mcp
     ), (
         "the headline's second sentence disagrees with its first: "
         f"got {(mcp2, retired2, tenancy2, sdk_only2, on_mcp2)}, "
         f"expected {(mcp_targets, retired, tenancy, sdk_only, mcp)}"
+    )
+    # The sentence's TAIL restates the target count a third time, and its worked
+    # "X minus Y equals Z" example is computed arithmetic in prose -- `Z` was
+    # free: bumping it rendered "98 minus 26 equals 73", contradicting the same
+    # sentence's own 14, green.
+    assert those2 == mcp_targets, (
+        f"the sentence's tail says {those2} targets, the headline says {mcp_targets}"
+    )
+    assert (tot3, minus3, eq3) == (total, mcp_targets, total - mcp_targets), (
+        f'the worked example says "{tot3} minus {minus3} equals {eq3}"; expected '
+        f'"{total} minus {mcp_targets} equals {total - mcp_targets}"'
     )
 
     # Labels carry a number that the owner's rulings can change. Match the shape,
