@@ -720,6 +720,18 @@ CONTROL_PLANE_OAUTH_WORKER_NAME = "tortoise-oauth"
 CONTROL_PLANE_OAUTH_WORKERS = 8
 CONTROL_PLANE_OAUTH_BACKLOG = 64
 
+#: #3773: a FOURTH pool, for the DATA-PLANE (FalkorDB) offload. The write
+#: handlers' per-request graph helpers (``_data_sdk``'s connect / embedded
+#: anchor probe, ``_check_org_limit``'s count query) ran inline on the loop
+#: immediately before an already off-loaded write, so a blocked loop still
+#: stalled every concurrent request for their duration. They reuse this seam's
+#: bounded multi-worker pool, wait bound and fail-closed error, on a pool of
+#: their OWN: a burst of graph writes must never park a single auth slot (the
+#: #3498 review P1 isolation argument, applied to the data plane).
+CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
+CONTROL_PLANE_GRAPH_WORKERS = 8
+CONTROL_PLANE_GRAPH_BACKLOG = 128
+
 #: Wait bound for ONE offloaded control-plane resolution. Sits ABOVE a normal
 #: round-trip's several phases but below the edge/proxy budget, so a
 #: black-holed PostgREST call fails the ONE request closed instead of holding
@@ -760,13 +772,19 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     is a SEPARATE pool for best-effort work, so telemetry can never park the
     auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
-    flood cannot park the auth slots either.
+    flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
+    DATA-PLANE pool for the write handlers' short synchronous graph helpers,
+    kept off auth capacity for the same isolation reason.
 
     An UNKNOWN selector raises rather than falling back to auth: the pool
     choice is the only thing keeping best-effort or attacker-reachable work
     off the auth-critical capacity, so a typo must fail closed, not silently
     revert the split.
     """
+    if pool == "graph":
+        return daemon_worker(CONTROL_PLANE_GRAPH_WORKER_NAME,
+                             workers=CONTROL_PLANE_GRAPH_WORKERS,
+                             max_backlog=CONTROL_PLANE_GRAPH_BACKLOG)
     if pool == "oauth":
         return daemon_worker(CONTROL_PLANE_OAUTH_WORKER_NAME,
                              workers=CONTROL_PLANE_OAUTH_WORKERS,
@@ -834,7 +852,8 @@ async def run_control_plane_call(fn, *, op: str,
     ``pool`` selects the worker: ``"auth"`` (default) for auth-critical
     resolutions, ``"telemetry"`` for best-effort work that must never consume
     auth capacity, ``"oauth"`` (#3669) for the attacker-reachable OAuth
-    client-resolution lane.
+    client-resolution lane, or ``"graph"`` (#3773) for the DATA-PLANE graph
+    helpers — a separate pool for the same isolation reason.
 
     Fail-closed: a missed bound or a saturated backlog raises
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by

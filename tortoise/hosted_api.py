@@ -1562,11 +1562,8 @@ _DREAM_QUEUE_TTL_S = 600
 # waiting item holds no live connection: `_data_sdk` returns a fresh
 # `TortoiseSDK` whose projection opens LAZILY on first `_get_proj()` (sdk.py),
 # and on this path that first call now happens INSIDE the pool worker — so a
-# queued dream costs a Future and a dict, not a socket. (The pre-off-load shape
-# never held a set of open SDKs "behind a frozen loop" either: the handler ran
-# `_data_sdk` → `sdk.dream` with no intervening await, so the single loop could
-# not dispatch a second request into that window.) Queueing is therefore a
-# latency cost for the dream surface, not an OOM path. This endpoint is
+# queued dream costs a Future and a dict, not a socket. Queueing is therefore
+# a latency cost for the dream surface, not an OOM path. This endpoint is
 # documented as background maintenance ("Fast-path queries never block on
 # this"), so "your dream waits behind other dreams" is the correct behaviour
 # rather than a new failure mode.
@@ -1726,8 +1723,15 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
         if not roots:
             return
         gns = key.split("::", 1)[1] if "::" in key else None
-        sdk = (_make_sdk(graph_name=gns) if gns is not None
-               else _make_sdk(namespace=org_id))
+
+        # #3773: build the SDK OFF the loop. `_make_sdk` can run the embedded
+        # keepalive anchor's probe query, so building it inline froze the loop
+        # before the off-loaded drain below had even started.
+        def _open_sdk() -> TortoiseSDK:
+            return (_make_sdk(graph_name=gns) if gns is not None
+                    else _make_sdk(namespace=org_id))
+
+        sdk = await _graph_offload(_open_sdk, op="dream_sdk")
 
         def _drain() -> None:
             # #3718: mark → dream on the DEDICATED dream pool, serialized per
@@ -3679,9 +3683,29 @@ def _assert_graph_owned(org: dict, graph_id: str,
                     "message": "graph not found for key"})
 
 
+def _bind_actor_context(org: dict) -> None:
+    """#2600: bind the server-resolved human actor for this request, LOOP-side.
+
+    Cheap by construction — one ContextVar write, no I/O — so it must NOT move
+    off the loop: the value has to be in the LOOP's context for the off-loaded
+    write's own ``asyncio.to_thread`` context copy to carry it (the off-loaded
+    graph work itself runs under a context copy — see ``_graph_offload``).
+    ``_data_sdk``'s own graph work is off the loop (#3773), so this stays its
+    own function rather than a line inside it: a bind executed on a
+    process-lifetime pool thread would leak into the NEXT request that worker
+    serves.
+    """
+    from tortoise.sdk import _current_actor_user_id
+    _actor = org.get("actor_user_id")
+    if _actor is not None:
+        _current_actor_user_id.set(_actor)
+
+
 def _data_sdk(org: dict) -> TortoiseSDK:
-    """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the ONE entry
-    every org-data surface uses to open its SDK.
+    """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the sync entry
+    every org-data surface uses to open its SDK. Off-loop callers use its async
+    twin ``_data_sdk_offloaded`` (#3773), which binds the actor on the loop and
+    routes this graph work through the #3498 seam.
 
     #2600: the server-resolved human actor ContextVar is set HERE (the single
     REST set-site) — CONDITIONALLY, only when the dict carries a gated
@@ -3701,10 +3725,7 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     """
     # #2600: single REST ContextVar set-site — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
-    from tortoise.sdk import _current_actor_user_id
-    _actor = org.get("actor_user_id")
-    if _actor is not None:
-        _current_actor_user_id.set(_actor)
+    _bind_actor_context(org)
     org_id = org["org_id"]
     gid = org.get("graph_id")
     if gid:
@@ -3717,6 +3738,24 @@ def _data_sdk(org: dict) -> TortoiseSDK:
         _assert_graph_owned(org, gid, ns)
         return _make_sdk(graph_name=ns)
     return _make_sdk(namespace=org_id)
+
+
+async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
+    """#3773: ``_data_sdk`` off the event loop (context-isolated).
+
+    The write handlers built their per-request SDK inline, so in embedded mode
+    the keepalive anchor's probe query (and, for a graph-bound key,
+    ``_assert_graph_owned``'s ownership query) ran ON the loop immediately
+    before the already off-loaded write — the residual #3718 left. Routing it
+    through the #3498 bounded offload seam (``_graph_offload``) removes that
+    on-loop work without changing what ``_data_sdk`` returns or raises.
+
+    The #2600 actor bind runs LOOP-side first: the off-loaded call executes
+    under a context COPY, so its own bind does not reach the loop — and the
+    later off-loaded write's ``asyncio.to_thread`` copies the LOOP's context.
+    """
+    _bind_actor_context(org)
+    return await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
 
 
 def _require_scope(org: dict, scope: str, surface: str) -> None:
@@ -3977,6 +4016,12 @@ def _record_write_op(org: dict, nodes_written: int = 0) -> None:
     value-first commit cost driver, epic #909 §4.4/W-4/PL4 — the commit
     endpoint passes the reconciled net-new delta; hold commits bill 0 and
     skip this entirely).
+
+    ⚠️ CALLER NOTE (#4451): this is SYNCHRONOUS — in registry/embedded mode
+    ``record_write_ops`` runs a blocking ``MERGE (m:MeteringRecord …)`` plus a
+    ``MATCH``, and in Supabase mode a blocking control-plane RPC, on whatever
+    thread calls it. The write handlers call it inline on the event loop (a
+    post-write residual #3773 out-scoped); off-loading it is tracked by #4451.
     """
     org_id = org.get("org_id", "")
     try:
@@ -4626,9 +4671,11 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     an exception from the helper itself (e.g. the strict-mode
     ``UnregisteredTelemetryKey``) still propagates.
 
-    ``pool`` (#3669) selects the worker pool: ``"auth"`` (default),
-    ``"telemetry"`` for best-effort work, or ``"oauth"`` for the
-    attacker-reachable OAuth client-resolution lane.
+    ``pool`` (#3669, #3773) selects the worker pool: ``"auth"`` (default),
+    ``"telemetry"`` for best-effort work, ``"oauth"`` for the
+    attacker-reachable OAuth client-resolution lane, or ``"graph"`` for the
+    DATA-PLANE graph helpers (kept off auth capacity; see
+    ``_graph_offload``, which passes its own ``unavailable`` factory).
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
@@ -4664,6 +4711,57 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
         if unavailable is not None:
             raise unavailable() from None
         raise _control_plane_unavailable() from None
+
+
+def _graph_unavailable() -> HTTPException:
+    """#3773: fail-closed 503 for a saturated / bound-missed data-plane offload.
+
+    Deliberately NOT ``_control_plane_unavailable``: that body's copy is
+    sign-in specific and would mislead a client retrying a graph write. A
+    graph helper that could not get a worker is a service-capacity failure,
+    and the write did not happen — retryable.
+
+    Deliberately distinct from ``org_graph_unavailable`` (a TENANCY/access
+    failure on the activation scorecard, activation_scorecard.py): this one
+    means only that the offload could not get a worker, so the request is
+    retryable. The code is body-only today — no client maps it yet (the REST
+    write lane is consumed by agents/SDKs, which treat any 5xx as retryable);
+    the dashboard renders a 503 on the auth lane, not this one.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "graph_unavailable",
+            "message": "The graph service is temporarily unavailable — try again in a moment.",
+        },
+    )
+
+
+async def _graph_offload(fn, *, op: str):
+    """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
+
+    Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
+    ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
+    The off-loaded unit is a SHORT graph helper (``_data_sdk``'s connect /
+    embedded anchor probe, ``_check_org_limit``'s count query, the dream
+    worker's ``_make_sdk``) that used to run inline immediately before an
+    already off-loaded write; the pool, the wait bound and the fail-closed
+    error are the seam's, not a second mechanism.
+
+    Context isolation: the callable runs under a COPY of the caller's context.
+    ``_data_sdk`` sets the #2600 actor ContextVar, and a pool thread is
+    process-lifetime — a var set at that thread's top level would survive into
+    the NEXT request the worker serves. The copy confines any such write to the
+    submission (the same reason ``_submit_off_loop`` copies).
+
+    Telemetry: graph ops land in the seam's offload records under graph-specific
+    op names (``data_sdk``, ``check_org_limit.points``, ``dream_sdk``), so they
+    stay separable from PostgREST resolutions despite sharing the record buffer.
+    """
+    ctx = contextvars.copy_context()
+    return await _cp_offload(
+        functools.partial(ctx.run, fn), op=op, pool="graph",
+        unavailable=_graph_unavailable)
 
 
 async def _oauth_offload(fn, *, op: str, no_wait_bound: bool = False):
@@ -5010,18 +5108,19 @@ async def create_object(body: CreateObjectRequest, request: Request,
     returns the canonical node). objectKind/status/… ride the props.
     """
     _require_scope(org, "graphs:write", "create_object")
-    _check_org_limit(org, "points")
-    sdk = _data_sdk(org)
+    # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
+    # go through the #3498 offload seam (graph pool) instead of running on the
+    # loop before the off-loaded write below.
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
+    sdk = await _data_sdk_offloaded(org)
     try:
         props = {}
         if body.status:
             props["status"] = body.status
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
-        # while it runs. NOT a handler-level guarantee: `_check_org_limit`
-        # (a per-org count query on its own SDK) and `_data_sdk`'s connect still
-        # run on the loop before this point — a tracked residual, see the test
-        # module's SCOPE note. Same asyncio.to_thread pattern as /v1/search;
+        # while it runs. Same asyncio.to_thread pattern as /v1/search;
         # response and error semantics are unchanged.
         node = await asyncio.to_thread(
             sdk.create_object, body.name, objectKind=body.objectKind, **props)
@@ -5061,8 +5160,10 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     as the first graph entities.
     """
     _require_scope(org, "graphs:write", "create_subject")
-    _check_org_limit(org, "points")
-    sdk = _data_sdk(org)
+    # #3773: same off-load of the quota count + SDK open as create_object above.
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
         # create_object above for the pattern and rationale).
@@ -5087,17 +5188,19 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 async def create_point(body: CreatePointRequest, request: Request, org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """Create a Point in the org's graph."""
     _require_scope(org, "graphs:write", "create_point")
-    _check_org_limit(org, "points")
-    sdk = _data_sdk(org)
+    # #3773: the quota count and the SDK open are SYNC FalkorDB work too — they
+    # go through the #3498 offload seam (graph pool) instead of running on the
+    # loop before the off-loaded write below.
+    await _graph_offload(lambda: _check_org_limit(org, "points"),
+                         op="check_org_limit.points")
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #3718: sdk.create_point + the about edge are SYNC FalkorDB socket
         # I/O — both run in ONE worker thread (a single hand-off keeps the
         # write-then-edge ordering and the error semantics identical) so this
         # pinned call cannot freeze the event loop while it runs.
         # `_get_proj()` is inside the worker because its FIRST call opens the
-        # projection — though `_check_org_limit` above has already built its
-        # own SDK on the loop, so the handler as a whole is NOT on-loop-free
-        # (tracked residual, see the test module's SCOPE note).
+        # projection.
         def _write_point() -> dict:
             out = sdk.create_point(
                 content=body.content,
@@ -5163,7 +5266,7 @@ async def events_poll(
     namespace — never client input.
     """
     _require_scope(org, "graphs:read", "events_poll")
-    sdk = _data_sdk(org)
+    sdk = await _data_sdk_offloaded(org)
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop so a slow
@@ -5309,7 +5412,7 @@ async def dream(
             )
         bucket.append(now_ts)
 
-    sdk = _data_sdk(org)
+    sdk = await _data_sdk_offloaded(org)
 
     # The graph key is needed for the per-graph dream lock on EVERY branch.
     _dk = _dream_key(org["org_id"],

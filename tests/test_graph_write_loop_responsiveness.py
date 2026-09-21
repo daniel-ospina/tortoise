@@ -48,19 +48,24 @@ tracked (#3653, #3685): the untouched sibling
 harness noise, not a property of the off-load these tests pin. Re-run before
 treating such a failure as a regression.
 
-SCOPE — what these tests do NOT cover, deliberately: the handlers still do
-synchronous work on the loop OUTSIDE the pinned SDK call window —
-`_data_sdk(org)` (SDK open/connect) and `_check_org_limit(org, ...)` (a
-per-org count query) both run before the off-load, and `_dream_worker` still
-BUILDS its SDK on the loop (`_make_sdk`, which in embedded mode can run the
-keepalive anchor's probe query there). The sibling READ handlers
-(`GET /v1/points`, `GET /v1/points/{id}`, `/v1/dream/health`) plus ~30 other
-`async def` routes in this file still run sync FalkorDB I/O inline, and the
-capture path's `_apply_capture_ingest_ep` still runs a `sdk.dream(mode="local")`
-pass on the loop (tracked by #3086) — which is also why the production
-`_dream_lock` serializes only the two POOLED pass sites. All of that is a
-separate, tracked residual (see the issue), so a tick count here certifies the
-OFF-LOADED CALL, not the whole request.
+SCOPE — #3773 closed the residual this note used to record: the #3718
+handlers' PRE-WRITE graph helpers (`_data_sdk`'s SDK open/connect — including
+the graph-bound ownership probe and the embedded keepalive anchor's probe
+query — and `_check_org_limit`'s per-org count query) and `_dream_worker`'s SDK
+build now go through the #3498 bounded offload seam (`_graph_offload` →
+`_cp_offload` → the dedicated `graph` pool);
+`test_write_preamble_graph_helpers_run_off_the_loop` and the `_make_sdk`
+assertion in the worker test pin that at the thread level. Still OUT of scope
+here (separate, tracked residuals — all filed as #4451): the post-write
+`_record_write_op(org, ...)` metering MERGE still runs on the loop in
+create_object/create_subject/create_point (and elsewhere); the sibling READ
+handlers (`GET /v1/points`, `GET /v1/points/{id}`, `/v1/dream/health`) plus
+~30 other `async def` routes in this file still run sync FalkorDB I/O inline
+(#4451 / #3718 — NOT #3086/#4350, which cover the capture and control-plane
+lanes); and the capture path's `_apply_capture_ingest_ep` still runs a
+`sdk.dream(mode="local")` pass on the loop (tracked by #3086) — which is also
+why the production `_dream_lock` serializes only the two POOLED pass sites. So
+a tick count here certifies the OFF-LOADED CALL, not the whole request.
 """
 from __future__ import annotations
 
@@ -205,6 +210,67 @@ def _record_loop_thread_of(monkeypatch, method_name: str, state: dict,
         return real(self, *args, **kwargs)
 
     monkeypatch.setattr(TortoiseSDK, method_name, _observe)
+
+
+def _record_site(monkeypatch, name: str, records: list) -> None:
+    """Record whether ANY call to ``ha.<name>`` ran ON the event loop (#3773).
+
+    ``asyncio.get_running_loop()`` succeeds only on the loop thread; a worker
+    thread has no running loop. That is the direct, BEHAVIOURAL discriminator
+    for the handlers' per-request graph helpers (``_data_sdk`` /
+    ``_check_org_limit`` / the dream worker's ``_make_sdk``) — a source-grep for
+    ``_graph_offload`` would pass even if the call moved back onto the loop.
+    Records every call ``(on_loop, thread_name)``: the aggregate is what makes
+    the assertion strict (a later off-loop call must not erase an earlier
+    on-loop one), and the thread name names the offender on failure.
+    """
+    import tortoise.hosted_api as ha_mod
+    real = getattr(ha_mod, name)
+
+    def _observe(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        records.append((on_loop, threading.current_thread().name))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, name, _observe)
+
+
+def test_offloaded_data_sdk_binds_the_actor_for_the_write(monkeypatch):
+    """#3773/#2600: the offload must not lose the server-resolved actor.
+
+    ``_data_sdk_offloaded`` binds the actor LOOP-side and runs ``_data_sdk``
+    under a CONTEXT COPY (``_graph_offload``); the write's own
+    ``asyncio.to_thread`` then copies the LOOP's context. So the actor must be
+    visible on the loop AND inside the worker the write runs in — exactly the
+    property a naive offload (which set the ContextVar only on a
+    process-lifetime pool thread) would silently break, and would leak into
+    the next request that worker served.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.sdk import _current_actor_user_id
+
+    actor = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setattr(ha_mod, "_data_sdk",
+                        lambda org: {"opened": org["org_id"]})
+
+    async def _run():
+        _current_actor_user_id.set(None)  # clean slate for THIS loop's context
+        sdk = await ha_mod._data_sdk_offloaded(
+            {"org_id": "team-actor", "actor_user_id": actor})
+        return (sdk, _current_actor_user_id.get(),
+                await asyncio.to_thread(_current_actor_user_id.get))
+
+    sdk, on_loop, in_worker = asyncio.run(_run())
+    assert sdk == {"opened": "team-actor"}
+    assert on_loop == actor, (
+        "the #2600 actor was not bound on the LOOP — the off-loaded write's "
+        "to_thread context copy would carry no actor")
+    assert in_worker == actor, (
+        "the actor did not reach the worker thread the write runs in")
 
 
 async def _quiesce_dream_drain() -> None:
@@ -381,6 +447,96 @@ def test_graph_write_does_not_freeze_the_event_loop(
         f"({response.status_code}: {response.text[:200]})")
 
 
+# #3773: the handlers #3718 off-loaded still ran their per-request graph
+# helpers INLINE on the loop before the off-loaded call. `label` selects the
+# request; the first three also run the per-org quota count.
+_PREAMBLE_ENDPOINTS = [
+    ("points", {"method": "POST", "url": "/v1/points",
+                "json": {"content": "the release needs a normalization pass"}}),
+    ("objects", {"method": "POST", "url": "/v1/objects",
+                 "json": {"name": "3773-object"}}),
+    ("subjects", {"method": "POST", "url": "/v1/subjects",
+                  "json": {"name": "3773-subject"}}),
+    ("events", {"method": "GET", "url": "/v1/events"}),
+    ("dream", {"method": "POST", "url": "/v1/dream"}),
+]
+
+#: The handlers whose preamble ALSO runs the per-org quota count.
+_PREAMBLE_QUOTA_LABELS = frozenset({"points", "objects", "subjects"})
+
+
+def _run_request(request_kwargs: dict):
+    """Fire ONE request on a fresh loop, quiescing the enqueued dream drain.
+
+    Mirrors ``_drive``'s loop ownership (the drain task is bound to THIS loop),
+    without the tick/health instrumentation — this test measures thread
+    affinity, not loop responsiveness.
+    """
+    from tortoise.hosted_api import app
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.request(**request_kwargs)
+        finally:
+            await _quiesce_dream_drain()
+
+    return asyncio.run(_run())
+
+
+@pytest.mark.parametrize("label,request_kwargs", _PREAMBLE_ENDPOINTS,
+                         ids=[e[0] for e in _PREAMBLE_ENDPOINTS])
+def test_write_preamble_graph_helpers_run_off_the_loop(
+        client, monkeypatch, label, request_kwargs):
+    """#3773: the handlers' per-request graph helpers must leave the loop.
+
+    #3718 off-loaded the pinned SDK call, but every handler still ran its
+    per-request preamble INLINE: ``_data_sdk`` (the SDK open — and, for a
+    graph-bound key, its ownership probe; in embedded mode the keepalive
+    anchor's probe query) and, on the write handlers, ``_check_org_limit`` (a
+    per-org count query). A blocked loop therefore still stalled a concurrent
+    request for their duration — the same defect #3718 fixed, just smaller.
+
+    This is the falsifier. ``_record_site`` wraps the module helper and asks
+    ``asyncio.get_running_loop()``: a loop-thread call succeeds (``on_loop``
+    True), a pool-worker call raises ``RuntimeError`` (``on_loop`` False).
+    Remove the offload and every recorded call flips to True.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    # The write enqueues a dream drain bound to this loop; park it so
+    # `_quiesce_dream_drain` cancels it before it can touch the temp DB.
+    monkeypatch.setattr(ha_mod, "_DREAM_DEBOUNCE_S", 3600.0)
+    data_records: list = []
+    limit_records: list = []
+    _record_site(monkeypatch, "_data_sdk", data_records)
+    _record_site(monkeypatch, "_check_org_limit", limit_records)
+
+    response = _run_request(request_kwargs)
+    assert response.status_code == 200, (
+        f"[{label}] the request failed before the assertions could run "
+        f"({response.status_code}: {response.text[:200]})")
+
+    assert data_records, (
+        f"[{label}] _data_sdk was never reached — the request failed before "
+        f"the handler's SDK open, so this run proves nothing")
+    assert not any(on_loop for on_loop, _t in data_records), (
+        f"[{label}] _data_sdk ran ON the event loop ({data_records}) — its "
+        f"synchronous FalkorDB connect / ownership probe freezes every "
+        f"concurrent request for the round trip (#3773)")
+
+    if label in _PREAMBLE_QUOTA_LABELS:
+        assert limit_records, (
+            f"[{label}] _check_org_limit was never reached — the run proves "
+            f"nothing about the quota count")
+        assert not any(on_loop for on_loop, _t in limit_records), (
+            f"[{label}] _check_org_limit ran ON the event loop "
+            f"({limit_records}) — the per-org count query freezes every "
+            f"concurrent request (#3773)")
+
+
 def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
         client, monkeypatch):
     """#3718: the write-enqueued dream drain must not run inline either.
@@ -410,6 +566,11 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
     _record_loop_thread_of(monkeypatch, "_mark_dirty", state,
                            "mark_dirty_on_loop")
     _install_blocking_graph_call(monkeypatch, "dream", state, delegate=False)
+    # #3773: the drain's SDK build was the third on-loop graph call — record
+    # whether ANY `_make_sdk` (the handler's `_data_sdk` open AND the worker's)
+    # ran on the loop.
+    make_records: list = []
+    _record_site(monkeypatch, "_make_sdk", make_records)
 
     # The queue/task dicts are module globals shared across tests AND across
     # event loops. A task left pending by an earlier test in this file is not
@@ -469,6 +630,13 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
         "a _mark_dirty call ran ON the event loop — the worker's reverse-BFS "
         "pair is synchronous FalkorDB work, so it freezes every concurrent "
         "request just as the dream pass does (#3718)")
+    assert make_records, (
+        "_make_sdk was never reached — the request and its enqueued drain "
+        "both failed before SDK construction, so this run proves nothing")
+    assert not any(on_loop for on_loop, _t in make_records), (
+        f"_make_sdk ran ON the event loop ({make_records}) — in embedded mode "
+        f"its keepalive anchor probe is synchronous FalkorDB work, so the SDK "
+        f"build freezes every concurrent request (#3773)")
     assert state.get("ran_on_loop") is False, (
         "_dream_worker's sdk.dream ran ON the event loop — one user write can "
         "enqueue a multi-second synchronous graph pass that freezes every "
