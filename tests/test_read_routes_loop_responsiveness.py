@@ -449,20 +449,27 @@ def _callee_name(func: ast.expr) -> str | None:
 
 
 def _graph_bound_names(node: ast.AST) -> set[str]:
-    """Names bound to a graph handle via a ``_get_proj()`` / ``_get_registry()``
-    (or ``dream_health_check``) call ANYWHERE in the assigned expression —
-    including the offload-wrapped shape ``proj = await asyncio.to_thread(
-    sdk._get_proj)`` that ``get_session_detail`` uses. Matching the Call only
-    when it is the direct ``Assign.value`` (the first revision) missed that
-    shape, so a later inline call on the handle was invisible (#3718 review).
+    """Names bound to a graph handle — when the assigned expression uses a
+    ``_get_proj()`` / ``_get_registry()`` / ``dream_health_check`` seam either as
+    a CALL (``proj = sdk._get_proj()``) or as a bare ATTRIBUTE REFERENCE
+    (``proj = await asyncio.to_thread(sdk._get_proj)``, the shape
+    ``get_session_detail`` uses, where the seam is the callable argument and has
+    no call parens of its own). The first revision matched only the Call form,
+    so the offload-wrapped handle was invisible to the ``base.id in bound`` rule
+    and a later inline ``proj.query(...)`` (no ``.g``) could not be flagged
+    (#3718 review, reproduced with a mutation).
     """
     names: set[str] = set()
     for n in ast.walk(node):
         if not isinstance(n, ast.Assign):
             continue
-        if any(isinstance(sub, ast.Call)
-               and _callee_name(sub.func) in _GRAPH_SEAM_CALLEES
-               for sub in ast.walk(n.value)):
+        if any(
+            (isinstance(sub, ast.Call)
+             and _callee_name(sub.func) in _GRAPH_SEAM_CALLEES)
+            or (isinstance(sub, ast.Attribute)
+                and sub.attr in _GRAPH_SEAM_CALLEES)
+            for sub in ast.walk(n.value)
+        ):
             for target in n.targets:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
@@ -522,6 +529,43 @@ def _inline_graph_io_bodies() -> dict[str, list[int]]:
         if isinstance(node, ast.AsyncFunctionDef)
         and (lines := _has_inline_graph_io(node))
     }
+
+
+def test_graph_handle_binding_rule_detects_offload_wrapped_binding():
+    """The offload-wrapped handle binding must be recorded, so a later INLINE
+    call on it that is not spelled ``.g.query`` (e.g. ``proj.query(...)`` or
+    ``proj.db.list_graphs()``) is still flagged — the round-1 revision matched
+    only the Call form and missed it (#3718 review, mutation-reproduced).
+    """
+    node = ast.parse(
+        "async def _probe():\n"
+        "    proj = await asyncio.to_thread(sdk._get_proj)\n"
+        "    _rows = proj.query('MATCH (n) RETURN n')\n"
+    ).body[0]
+    assert _graph_bound_names(node) == {"proj"}, (
+        "the offload-wrapped `_get_proj` binding was not recorded as a graph "
+        "handle — a later inline call on it would be invisible (#3718 review)")
+    assert _has_inline_graph_io(node) == [3], (
+        "an inline `proj.query(...)` on an offload-wrapped binding was not "
+        "flagged (#3718 review)")
+
+    # The direct and lambda-wrapped forms must keep working.
+    direct = ast.parse(
+        "async def _probe():\n"
+        "    proj = sdk._get_proj()\n"
+        "    _rows = proj.query('MATCH (n) RETURN n')\n"
+    ).body[0]
+    assert _graph_bound_names(direct) == {"proj"}
+    # The direct form ALSO has the seam call itself inline (line 2); the
+    # offload forms have it inside a boundary, so only the read is flagged.
+    assert _has_inline_graph_io(direct) == [2, 3]
+    wrapped = ast.parse(
+        "async def _probe():\n"
+        "    proj = await asyncio.to_thread(lambda: sdk._get_proj())\n"
+        "    _rows = proj.g.query('MATCH (n) RETURN n')\n"
+    ).body[0]
+    assert _graph_bound_names(wrapped) == {"proj"}
+    assert _has_inline_graph_io(wrapped) == [3]
 
 
 def test_async_body_inventory_is_visible():

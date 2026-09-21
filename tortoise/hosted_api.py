@@ -20220,28 +20220,22 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             # unchanged. Closed in the finally below either way.
             _node_sdk = (_open_org_graph_sdk(org["org_id"])
                          or _make_sdk(namespace=org["org_id"]))
-            # #3718 residual 2 (review): the read touches the graph
-            # (`_get_proj` attach + node read) on the hot PATCH path — off-load
-            # both, and gate the close on the WORKER FINISHING (the
-            # `volunteer_context` precedent at :18686): a loop-side
-            # `finally: close()` after the await would tear the projection down
-            # under a worker that is still inside the read whenever the request
-            # is cancelled (CPython #87185 — cancelling the await stops the
-            # awaitable, not the thread).
-            _node_done = False
-            try:
-                def _read_node():
-                    nonlocal _node_done
-                    try:
-                        return _os.read_onboarding_node(
-                            _node_sdk._get_proj(), org["org_id"])
-                    finally:
-                        _node_done = True
-
-                _node = await asyncio.to_thread(_read_node)
-            finally:
-                if _node_done:
+            # The WORKER owns the close: it runs in the worker's own
+            # ``finally``, so the SDK is closed exactly once there whether the
+            # read succeeds, raises, or the request is cancelled (the worker
+            # keeps running — CPython #87185). A loop-side ``finally: close()``
+            # after the await would instead tear the projection down under a
+            # worker still inside the read on cancellation, and gating that
+            # close on a completion flag would leak the connection on the
+            # cancel path (both regression shapes caught in #3718 review).
+            def _read_node():
+                try:
+                    return _os.read_onboarding_node(
+                        _node_sdk._get_proj(), org["org_id"])
+                finally:
                     _node_sdk.close()
+
+            _node = await asyncio.to_thread(_read_node)
         except Exception:
             _node = None
         if _node is not None:
