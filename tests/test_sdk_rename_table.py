@@ -1326,3 +1326,22 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
     assert "partitions the surface into **32 groups** over **149** named members" in doc
     assert "`backfill_v25` is in its Archived table instead" in doc
     assert "150 = the 150-method surface" in doc
+
+
+def test_table_header_rows_are_read() -> None:
+    """The six table header rows are labels, and every one was mutable unread.
+
+    A header that no longer names its column makes the table ambiguous while every
+    parser — which reads data rows, not labels — stays green. Pinned verbatim.
+    """
+    doc = _doc()
+    headers = [
+        "| # | Method | Source | Group | Target | Basis | Citation |",
+        "| Destination | Current methods | Count |",
+        "| Target method | Status |",
+        "| Method | Source | Why it has no destination |",
+        "| Method | Part A carries | The other doc implies | Other doc's grouping |",
+        "| Doc's name | Real method (if any) | Where the doc uses it |",
+    ]
+    missing = [h for h in headers if h not in doc]
+    assert not missing, f"a table header row changed or was dropped: {missing}"
