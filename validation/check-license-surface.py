@@ -10,9 +10,12 @@ the mechanical backstop.
 Also asserts the NON-BSL surfaces that must stay permissive, because a
 per-directory licence is otherwise invisible to CI and an artifact can
 silently inherit the repo default — the #526 client dist (Apache-2.0) and,
-since #4366, the served consumer skills surface (MIT). See
-`docs/license-notes.md` — the "Client/Server Split" section (#526) and §7
-(#4366).
+since #4366, the served consumer skills surface (MIT). Since #4398 the served
+`install-tortoise-skills.sh` is a consumer surface of its OWN (MIT, carried
+IN-BAND — a served licence never attaches to a downloaded script), and since
+#4399 the `/license` page must DISCLOSE the permissive surfaces instead of
+stating BSL-only. See `docs/license-notes.md` — the "Client/Server Split"
+section (#526) and §7 (#4366/#4398/#4399).
 
 Repo-local by design: `scripts/` is an agent-infra symlink; this lives in
 `validation/` per AGENTS.md. Wired into `.github/workflows/ci.yml` at T5.3
@@ -184,6 +187,50 @@ def bsl_declaration(text: str, *, whole_file_names: bool = False) -> str | None:
     return None
 
 
+# #4398 — the served installer is a FILE surface, not a directory, and the
+# #4366 decision ("MIT covers every artifact a `curl | bash` user receives")
+# cannot be met for it by the served `skills/LICENSE`: that file covers the
+# skills TREE, and a licence served next to a script never travels with a piped
+# download. Contrast #526's client dist, where `client/LICENSE` ships INSIDE the
+# wheel — the notice is packaged with the artifact it covers. A single-file
+# script has no package, so the only copy the recipient gets is the script's own
+# bytes and the notice must be IN it. Two fail-closed assertions, mirroring the
+# consumer-skills surface: (1) the MIT notice is present — a bare
+# `SPDX-License-Identifier: MIT` with no copyright/permission text does NOT
+# satisfy MIT's notice condition and REDs; and (2) the file declares no BSL.
+SERVED_SCRIPTS = {
+    "website/apps/dashboard/public/install-tortoise-skills.sh": {
+        "path": (ROOT / "website" / "apps" / "dashboard" / "public"
+                 / "install-tortoise-skills.sh"),
+        "required": [
+            "SPDX-License-Identifier: MIT",
+            "Copyright (c) 2026 Premise Labs",
+            "Permission is hereby granted, free of charge",
+            'THE SOFTWARE IS PROVIDED "AS IS"',
+        ],
+    },
+}
+
+# #4399 — the `/license` page is a customer-consumed DISCLOSURE surface. It was
+# the fourth disagreeing licensing surface named in #4366: it stated the
+# engine's BSL and named no permissive surface, so a customer reading it would
+# conclude the whole project is source-available. It legitimately DECLARES the
+# engine's BSL, so the no-BSL scan does not apply here; what is asserted is the
+# opposite — each permissive surface must still be named. This is a MARKER check,
+# not a copy check: the page's prose is free to change as long as every surface
+# remains disclosed.
+LICENCE_DISCLOSURE_SURFACES = {
+    "website/license.html": {
+        "path": ROOT / "website" / "license.html",
+        "required": [
+            ("Business Source License 1.1", "the engine's BSL scope"),
+            ("Apache-2.0", "the #526 client distribution"),
+            ("MIT License", "the served skills + installer"),
+        ],
+    },
+}
+
+
 def _surface_files(root: Path) -> list[Path]:
     """Every regular file under `root`, following DIRECTORY symlinks.
 
@@ -276,6 +323,57 @@ def check_consumer_surface(name: str, spec: dict) -> list[str]:
     return errors
 
 
+def check_served_script(name: str, spec: dict) -> list[str]:
+    """The served script carries the MIT notice in-band and declares no BSL."""
+    errors: list[str] = []
+    path = spec["path"]
+    if not path.exists():
+        errors.append(f"{name}: file missing ({_display(path)})")
+        return errors
+    try:
+        body = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        errors.append(
+            f"{name}: {_display(path)} is not UTF-8 text — cannot assert its licence"
+        )
+        return errors
+    for needle in spec["required"]:
+        if needle not in body:
+            errors.append(
+                f"{name}: missing '{needle}' — a `curl | bash` user receives this "
+                "script's bytes and nothing else, so the MIT notice must travel "
+                "in-band (#4398)"
+            )
+    # whole_file_names=True: the script is the artifact under assertion (it is
+    # not a licence FILE, but the whole body is its declaration surface — the
+    # notice it carries IS the licence header).
+    declared = bsl_declaration(body, whole_file_names=True)
+    if declared is not None:
+        errors.append(
+            f"{name}: {_display(path)} declares BSL (matched {declared!r}) — a "
+            "consumer-consumed artifact must not carry the engine's licence (#4398)"
+        )
+    return errors
+
+
+def check_disclosure_surface(name: str, spec: dict) -> list[str]:
+    """The customer-facing licence page still names every permissive surface."""
+    errors: list[str] = []
+    path = spec["path"]
+    if not path.exists():
+        errors.append(f"{name}: file missing ({_display(path)})")
+        return errors
+    body = path.read_text(encoding="utf-8")
+    for needle, what in spec["required"]:
+        if needle not in body:
+            errors.append(
+                f"{name}: {_display(path)} does not disclose {what} (missing "
+                f"{needle!r}) — the page misdescribes the licence a consumer "
+                "receives (#4399)"
+            )
+    return errors
+
+
 def check() -> list[str]:
     errors: list[str] = []
     for name, spec in SURFACES.items():
@@ -298,6 +396,10 @@ def check() -> list[str]:
                 errors.append(f"{name} (#526 client dist): missing '{needle}'")
     for name, spec in CONSUMER_SURFACES.items():
         errors.extend(check_consumer_surface(name, spec))
+    for name, spec in SERVED_SCRIPTS.items():
+        errors.extend(check_served_script(name, spec))
+    for name, spec in LICENCE_DISCLOSURE_SURFACES.items():
+        errors.extend(check_disclosure_surface(name, spec))
     return errors
 
 
@@ -316,9 +418,13 @@ def main() -> int:
         print("   Client (#526): client/LICENSE, client/pyproject.toml, client/README.md must declare Apache-2.0.")
         print("   Consumer skills (#4366): website/apps/dashboard/public/skills/LICENSE must declare MIT, and")
         print("   no file under that surface may declare BSL 1.1/BUSL-1.1.")
+        print("   Served installer (#4398): website/apps/dashboard/public/install-tortoise-skills.sh must carry")
+        print("   the MIT notice in-band (SPDX id + copyright + permission notice) and no BSL declaration.")
+        print("   Licence page (#4399): website/license.html must disclose the engine's BSL AND the permissive")
+        print("   surfaces (tortoise-client Apache-2.0; served skills + installer MIT).")
         return 1
     print("✅ License surfaces consistent: engine BSL 1.1 ($5M AUG + MPL 2.0); tortoise-client Apache-2.0; "
-          "served skills surface MIT.")
+          "served skills surface MIT; served installer MIT (in-band notice); /license page discloses all.")
     return 0
 
 

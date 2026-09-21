@@ -332,3 +332,113 @@ def test_licence_file_name_detection() -> None:
     assert module.is_licence_file(Path("licenses") / "terms.txt") is True
     assert module.is_licence_file(Path("licences") / "terms.txt") is True
     assert module.is_licence_file(Path("NOTICES") / "terms.txt") is True
+
+
+# ── the served installer surface, in-band MIT notice (#4398) ────────────────
+
+SERVED_SCRIPT_KEY = "website/apps/dashboard/public/install-tortoise-skills.sh"
+
+
+def _script_spec(module, path: Path) -> dict:
+    return {"path": path, "required": module.SERVED_SCRIPTS[SERVED_SCRIPT_KEY]["required"]}
+
+
+def test_served_installer_notice_is_registered_and_in_band() -> None:
+    """The shipped installer is asserted, and its MIT notice sits in the PRELUDE
+    — the bytes a `curl … | bash` user receives before the script does anything.
+    A served `LICENSE` sidecar would never travel with a piped download, so the
+    notice must be in the file itself (#4398)."""
+    module = _load()
+    assert SERVED_SCRIPT_KEY in module.SERVED_SCRIPTS
+    assert module.check() == []
+    spec = module.SERVED_SCRIPTS[SERVED_SCRIPT_KEY]
+    body = spec["path"].read_text(encoding="utf-8")
+    assert module.check_served_script(SERVED_SCRIPT_KEY, spec) == []
+    assert body.index("Permission is hereby granted, free of charge") < body.index(
+        "set -euo pipefail"), "the notice must precede the first executed command"
+    assert "SPDX-License-Identifier: MIT" in body.splitlines()[1], body.splitlines()[:3]
+
+
+def test_served_script_without_the_notice_is_an_error(tmp_path: Path) -> None:
+    """MUTATION: delete the in-band MIT notice block (the script names no
+    licence). This is the #4398 acceptance criterion — it must RED."""
+    module = _load()
+    stub = tmp_path / "install.sh"
+    stub.write_text("#!/usr/bin/env bash\nset -euo pipefail\necho hi\n", encoding="utf-8")
+    errors = module.check_served_script("script", _script_spec(module, stub))
+    assert any("Permission is hereby granted" in e for e in errors), errors
+    assert any("SPDX-License-Identifier: MIT" in e for e in errors), errors
+
+
+def test_served_script_with_only_an_spdx_id_is_an_error(tmp_path: Path) -> None:
+    """MUTATION: reduce the notice to a bare `SPDX-License-Identifier: MIT`.
+    An SPDX id is machine-readable metadata, not the copyright + permission
+    notice MIT's condition requires — so the texted markers must still RED."""
+    module = _load()
+    stub = tmp_path / "install.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n# SPDX-License-Identifier: MIT\nset -euo pipefail\n",
+        encoding="utf-8",
+    )
+    errors = module.check_served_script("script", _script_spec(module, stub))
+    assert any("Copyright (c) 2026 Premise Labs" in e for e in errors), errors
+    assert any("Permission is hereby granted" in e for e in errors), errors
+
+
+def test_served_script_declaring_bsl_is_an_error(tmp_path: Path) -> None:
+    """MUTATION: add a `SPDX-License-Identifier: BUSL-1.1` header to the served
+    script — a consumer artifact must not carry the engine's licence."""
+    module = _load()
+    stub = tmp_path / "install.sh"
+    stub.write_text(MIT_TEXT.replace("MIT License\n", "MIT License\n# SPDX-License-Identifier: BUSL-1.1\n"),
+                    encoding="utf-8")
+    errors = module.check_served_script("script", _script_spec(module, stub))
+    assert any("declares BSL" in e for e in errors), errors
+
+
+def test_served_script_missing_is_an_error(tmp_path: Path) -> None:
+    module = _load()
+    errors = module.check_served_script("script", _script_spec(module, tmp_path / "absent.sh"))
+    assert any("file missing" in e for e in errors), errors
+
+
+# ── the /license disclosure page (#4399) ────────────────────────────────────
+
+LICENCE_PAGE_KEY = "website/license.html"
+
+
+def _page_spec(module, path: Path) -> dict:
+    return {"path": path,
+            "required": module.LICENCE_DISCLOSURE_SURFACES[LICENCE_PAGE_KEY]["required"]}
+
+
+def test_licence_page_discloses_every_permissive_surface() -> None:
+    """The shipped page is asserted and names all three surfaces."""
+    module = _load()
+    assert LICENCE_PAGE_KEY in module.LICENCE_DISCLOSURE_SURFACES
+    assert module.check() == []
+    spec = module.LICENCE_DISCLOSURE_SURFACES[LICENCE_PAGE_KEY]
+    assert module.check_disclosure_surface(LICENCE_PAGE_KEY, spec) == []
+
+
+def test_licence_page_dropping_a_permissive_surface_is_an_error(tmp_path: Path) -> None:
+    """MUTATION: delete the Apache-2.0 / MIT disclosure rows, leaving the page
+    in its pre-#4399 BSL-only state — the exact #4399 defect."""
+    module = _load()
+    page = tmp_path / "license.html"
+    page.write_text(
+        "<p>Tortoise is licensed under the Business Source License 1.1.</p>",
+        encoding="utf-8",
+    )
+    errors = module.check_disclosure_surface("page", _page_spec(module, page))
+    assert any("Apache-2.0" in e for e in errors), errors
+    assert any("MIT License" in e for e in errors), errors
+
+
+def test_licence_page_missing_is_an_error(tmp_path: Path) -> None:
+    """MUTATION: delete the page entirely — a missing disclosure surface must
+    not pass silently."""
+    module = _load()
+    errors = module.check_disclosure_surface("page", {"path": tmp_path / "absent.html",
+                                                       "required": []})
+    assert any("file missing" in e for e in errors), errors

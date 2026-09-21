@@ -1,4 +1,42 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Premise Labs
+#
+# ── Licence: MIT (in-band, not a served sidecar) ───────────────────────────
+# This installer is part of the Tortoise CONSUMER surface and is licensed under
+# MIT — it does NOT inherit the repository's BSL, which governs the engine.
+#
+# The notice is reproduced INSIDE this file on purpose. A `curl … | bash` user
+# receives this script's bytes and nothing else: a licence file served next to
+# the script (or next to the skills) never travels with a piped download, so
+# MIT's "included in all copies" condition can only be met for a single-file
+# script by carrying the notice in the file itself. (Contrast #526's client
+# dist, where client/LICENSE ships INSIDE the wheel — the notice is packaged
+# with the artifact.) The same MIT text is served beside the skills at
+# https://app.premiselabs.co/skills/LICENSE.
+#
+# MIT License
+#
+# Copyright (c) 2026 Premise Labs
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ───────────────────────────────────────────────────────────────────────────
 # install-tortoise-skills.sh — install the official Tortoise agent skills.
 #
 # The skills are downloaded from the Tortoise product site
