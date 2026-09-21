@@ -378,7 +378,7 @@ def test_rebuild_recomputes_the_turn_embedding(tmp_path, embedder, monkeypatch):
         before = _turn_rows(s, "sess-4194-rebuild")
         assert before and all(r[2] is not None for r in before), before
 
-        s._get_proj().rebuild(EventLog(log_path))
+        s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
 
         after = _turn_rows(s, "sess-4194-rebuild")
         assert [r[0] for r in after] == [r[0] for r in before]

@@ -138,7 +138,7 @@ def test_s13_rebuild_drops_session_meeting_edges_doc_survives(tmp_path):
         log = EventLog(events)
         assert len(log.read_all()) >= 3
         proj = sdk._get_proj()
-        counts = proj.rebuild_all(str(events_dir))  # noqa: F841
+        counts = proj.rebuild_all(str(events_dir), confirm_destructive=True)  # noqa: F841
         # node survival: 3 Sources, 2 Events (session+meeting), 1 Document
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 2
@@ -181,7 +181,7 @@ def test_s13_post_rebuild_version_equality_and_sweep(tmp_path):
                for u in [x[0] for x in
                          g.query("MATCH (s:Source) RETURN s.url").result_set]}
         proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         # re-index repair oracle restores edges; versions land at the
         # converged values (the hash-diff-gated bump replays journaled states)
         sdk.index_directory(str(corpus), extract_metadata=False)
@@ -222,7 +222,7 @@ def test_s15_torn_tail_journal_rebuilds_to_crash_free_state(tmp_path):
         assert len(events) >= 3
         # rebuild survives the torn tail (parse-all-then-wipe)
         proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == n_sources
         assert _required_sweep(g) == 0
     finally:
@@ -283,7 +283,7 @@ def test_s15_restore_drill_end_to_end(tmp_path):
     sdk2 = TortoiseSDK(_db(tmp_path, "restored.db"), namespace="e2e-900")
     try:
         proj = sdk2._get_proj()
-        counts = proj.rebuild_all(str(backup / "events"))  # noqa: F841
+        counts = proj.rebuild_all(str(backup / "events"), confirm_destructive=True)  # noqa: F841
         g = sdk2._get_proj().g
         # nodes survive; session/meeting edges dropped per S13
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
@@ -328,7 +328,7 @@ def test_t12_backfill_rebuild_wipe_semantics(tmp_path):
         assert g.query("MATCH (e:Event {eventId:'docA.md'}) RETURN count(e)"
                        ).result_set[0][0] == 1
         proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         # the UNJOURNALED legacy DocumentCreated Event node is DROPPED
         assert g.query("MATCH (e:Event {eventId:'docA.md'}) RETURN count(e)"
                        ).result_set[0][0] == 0
@@ -360,7 +360,8 @@ def test_t12_old_logic_skips_unknown_record_types(tmp_path):
             f.write(json.dumps({"type": "FutureRecordKind2027",
                                 "id": "future-1", "payload": {"x": 1}}) + "\n")
         proj = sdk._get_proj()
-        counts = proj.rebuild_all(str(events_dir))   # must NOT raise  # noqa: F841
+        counts = proj.rebuild_all(  # noqa: F841
+            str(events_dir), confirm_destructive=True)   # must NOT raise
         g = sdk._get_proj().g
         # known kinds replayed; the unknown kind skipped silently
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
@@ -393,7 +394,7 @@ def test_t12_instantiates_edges_rebuild_drop_and_restore(tmp_path):
             "RETURN count(o)").result_set[0][0]
         assert n_live >= 2, f"expected issue/PR edges live, got {n_live}"
         proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir))
+        proj.rebuild_all(str(events_dir), confirm_destructive=True)
         # the aboutObject edges are DROPPED (indexer-side, unjournaled)
         assert g.query(
             "MATCH ()-[:aboutObject]->() RETURN count(*)").result_set[0][0] == 0

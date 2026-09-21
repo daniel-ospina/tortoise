@@ -402,7 +402,7 @@ def test_tortoise_ep_determinism():
         proj2 = FalkorProjection(db_path, graph_name="tortoise_test")
         api2 = EventAPI(EventLog(log_path), initiated_by="extractor",
                         agent_id="test", projection=proj2)
-        proj2.rebuild(api2.log)
+        proj2.rebuild(api2.log, confirm_destructive=True)
 
         # Run 2
         ep2 = TortoiseEP(proj2, damping=0.5, n_quad=8, max_iter=50, tol=1e-3)

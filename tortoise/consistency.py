@@ -159,8 +159,13 @@ def recover_from_log(events_dir: str, projection) -> dict:
                                f"{type(projection).__name__} does not "
                                "provide — refusing to replay the JSONL "
                                "alone (#2943)")}
+        #        #2944 L1: rebuild_all is destructive, so the caller opts in at
+        #        this call site. Safe here because this branch is reached only
+        #        with db_count == 0 (the early return above) — the wipe is a
+        #        no-op on an empty graph, but the token is still required.
         try:
-            counts = projection.rebuild_all(events_dir)
+            counts = projection.rebuild_all(events_dir,
+                                            confirm_destructive=True)
             nodes = int(counts.get("nodes") or 0)
             events = int(counts.get("events") or 0)
             edges = int(counts.get("edges") or 0)

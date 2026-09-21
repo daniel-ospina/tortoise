@@ -314,7 +314,7 @@ def test_inmemory_rebuild():
     api = EventAPI(log, initiated_by="extractor", agent_id="test")
     a, b, op = _build(api)
     proj = InMemoryProjection()
-    proj.rebuild(log)
+    proj.rebuild(log)  # in-memory: no graph to wipe, no destructive-op token
     assert a in proj.points
     assert b in proj.points
     assert op in proj.points
@@ -610,7 +610,7 @@ def test_falkor_rebuild_from_log():
     _build(api)
     proj = _shared_proj()
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         n = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert n == 3  # 2 statements + 1 operator
     finally:
@@ -625,7 +625,7 @@ def test_falkor_rebuild_then_apply():
     a, b, op = _build(api)  # noqa: RUF059
     proj = _shared_proj()
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         # Apply a new event incrementally
         c = api.add_point("third statement", provenance("doc.txt", [20, 30], "extra"))  # noqa: F841
         proj.apply(log.read_all()[-1])  # the newly appended event
@@ -647,7 +647,7 @@ def test_falkor_rebuild_preserves_unknown_point_prop():
                         custom_keep="yes")
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.custom_keep", id=pid
         ).result_set
@@ -666,7 +666,7 @@ def test_falkor_rebuild_dict_prop_not_persisted_no_crash():
                         custom_map={"nested": 1})
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.custom_map", id=pid
         ).result_set
@@ -685,7 +685,7 @@ def test_falkor_rebuild_recomputes_content_hash():
     pid = api.add_point("hash me", provenance("d.txt", [0, 5], "q"))
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
             id=pid,
@@ -708,7 +708,7 @@ def test_falkor_rebuild_operator_has_no_content_hash():
     op = api.add_operator("IMPL", [a, b], provenance("d.txt", [0, 10], "q"))
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.is_operator",
             id=op,
@@ -751,7 +751,7 @@ def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
     try:
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(str(log.path.parent))
+            proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
         ).result_set
@@ -777,7 +777,7 @@ def test_falkor_point_deny_list_drop_is_reported(caplog):
     try:
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(str(log.path.parent))
+            proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
                    for r in caplog.records), caplog.text
     finally:
@@ -799,7 +799,7 @@ def test_falkor_rebuild_preserves_nested_list_prop_on_object_layer():
                    custom_nested=[[1, 2], [3, 4]])
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)
         row = proj.query(
             "MATCH (o:Object {name:'Nested Co'}) RETURN o.custom_nested"
         ).result_set
@@ -818,7 +818,7 @@ def test_falkor_rebuild_nested_dict_in_list_not_persisted_no_crash():
     api.add_object("Mixed Co", "organization", custom_mixed=[1, {"a": 1}])
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))  # must not raise
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)  # must not raise
         row = proj.query(
             "MATCH (o:Object {name:'Mixed Co'}) RETURN o.custom_mixed"
         ).result_set
@@ -860,7 +860,7 @@ def test_falkor_rebuild_malformed_revised_content_does_not_crash():
                 "agent_id": "test"})
     proj = _shared_proj()
     try:
-        proj.rebuild_all(str(log.path.parent))  # must not raise
+        proj.rebuild_all(str(log.path.parent), confirm_destructive=True)  # must not raise
         row = proj.query(
             "MATCH (n:Point {id:$id}) RETURN n.content_hash", id=pid
         ).result_set
@@ -907,7 +907,7 @@ def test_falkor_rebuild_deny_warning_emitted_once_per_key(caplog):
                 params={"id": pid})
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_once_"))
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_once_"), confirm_destructive=True)
         hits = [r.getMessage() for r in caplog.records
                 if "deny-listed" in r.getMessage()
                 and "posterior_alpha" in r.getMessage()]
@@ -946,7 +946,7 @@ def test_falkor_rebuild_resets_deny_warning_between_passes(caplog):
             "is_operator:false, status:'live', reason:'r'})")
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
-            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_reset_"))
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_reset_"), confirm_destructive=True)
         hits = [r.getMessage() for r in caplog.records
                 if "deny-listed" in r.getMessage()
                 and "reason" in r.getMessage()]
@@ -1252,7 +1252,7 @@ def test_falkor_rebuild_all():
 
         proj = FalkorProjection(_tmp("g_rebuild_all.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             # 2 builds × 6 events each (IngestStarted + 2 PointAdded + OperatorAdded)
             # Actually _build does 4 things: add_point a, add_point b,
             # add_operator. Plus begin_ingest = IngestStarted.
@@ -1274,7 +1274,7 @@ def test_falkor_rebuild_all_empty_dir():
     try:
         proj = FalkorProjection(_tmp("g_rebuild_empty.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["events"] == 0
             assert result["nodes"] == 0
             assert result["edges"] == 0
@@ -1301,7 +1301,7 @@ def test_falkor_rebuild_all_ignores_non_dict_point():
                                           "context": "ctx"}}) + "\n")
         proj = FalkorProjection(_tmp("g_badpoint.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] == 1, f"expected 1 valid node, got {result['nodes']}"
             rows = proj.g.query(
                 "MATCH (n:Point {id:'ok-1'}) RETURN count(n)"
@@ -1329,7 +1329,7 @@ def test_falkor_rebuild_all_with_retractions():
 
         proj = FalkorProjection(_tmp("g_retract.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)  # noqa: F841
+            result = proj.rebuild_all(d, confirm_destructive=True)  # noqa: F841
             # b was retracted — leaves a tombstone (#689)
             node_count = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
             assert node_count == 3  # a + op + b tombstone
@@ -1764,7 +1764,7 @@ def test_check_consistency_matches():
     _build(api)
     proj = FalkorProjection(_tmp("g_consistency_ok.db"), graph_name="test")
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         from tortoise.consistency import check_consistency
         result = check_consistency(log.path, proj)
         assert result["ok"], f"expected ok, got {result}"
@@ -1781,7 +1781,7 @@ def test_check_consistency_mismatch():
     _build(api)
     proj = FalkorProjection(_tmp("g_consistency_bad.db"), graph_name="test")
     try:
-        proj.rebuild(log)
+        proj.rebuild(log, confirm_destructive=True)
         # Inject a stray node directly into DB (bypassing the log)
         proj._upsert({"id": "ghost", "content": "not in log", "context": "ctx"})
         from tortoise.consistency import check_consistency
@@ -2297,7 +2297,7 @@ def test_falkor_rebuild_all_parity_with_apply():
         try:
             for ev in log.read_all():
                 projA.apply(ev)
-            projB.rebuild_all(d)
+            projB.rebuild_all(d, confirm_destructive=True)
 
             def node_map(proj):
                 rows = proj.g.query("MATCH (n:Point) RETURN n.id, properties(n)").result_set
@@ -2409,7 +2409,7 @@ def test_falkor_rebuild_all_revision_before_add():
 
         proj = FalkorProjection(_tmp("g_rebuild_21.db"), graph_name="test")
         try:
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
             r = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content",
                 params={"id": pid},
@@ -2504,7 +2504,7 @@ def test_falkor_rebuild_all_with_sdk_points():
         proj = FalkorProjection(
             os.path.join(d, "rebuilt.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] >= 4, (
                 f"Expected at least 4 nodes (3 points + 1 operator), "
                 f"got {result['nodes']}")
@@ -2590,7 +2590,7 @@ def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
         # Must use the same graph_name as the SDK ("tortoise" is default).
         proj = FalkorProjection(db_path, graph_name="tortoise")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
 
             # Should have 4+ nodes: p1, p2, op, evt-001
             assert result["nodes"] >= 4, (
@@ -2675,7 +2675,7 @@ def test_falkor_rebuild_all_eventapi_regression():
         try:
             for ev in log.read_all():
                 projA.apply(ev)
-            result = projB.rebuild_all(d)
+            result = projB.rebuild_all(d, confirm_destructive=True)
 
             # p-reg-1 survives, p-reg-2 was retracted (tombstone per #689)
             assert result["nodes"] >= 1, (
@@ -3219,7 +3219,7 @@ def test_rebuild_all_tolerates_malformed_events():
                                 "point": {"id": ["x"], "content": "bad id"}}) + "\n")
         proj = FalkorProjection(_tmp("g_rebuild_331.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d, confirm_destructive=True)
             assert result["nodes"] >= 1
             rows = proj.g.query(
                 "MATCH (n:Point {id:'p1'}) RETURN n.status").result_set
@@ -3307,7 +3307,7 @@ def _interrupted_rebuild(prefix: str, *, fail_on: int = 1,
     try:
         with mock.patch.object(FalkorProjection, "_upsert_point_props", _boom), \
                 pytest.raises(RuntimeError, match="injected mid-replay"):
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
     except BaseException:
         proj.close()
         shutil.rmtree(d, ignore_errors=True)
@@ -3346,7 +3346,7 @@ def test_falkor_rebuild_all_survives_mid_replay_failure():
         assert ctx["op_id"] in recorded, "operator snapshot lost"
 
         # 3. Re-running the rebuild restores everything.
-        result = proj.rebuild_all(d)
+        result = proj.rebuild_all(d, confirm_destructive=True)
         for pid, content in ctx["points"]:
             rows = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content",
@@ -3368,7 +3368,7 @@ def test_falkor_rebuild_all_survives_mid_replay_failure():
         # 5. ... and rebuilding again duplicates nothing: the count is the
         # same 4 the snapshot+journal union replays (not `again["nodes"]`,
         # which would make this assertion compare a value to itself).
-        again = proj.rebuild_all(d)
+        again = proj.rebuild_all(d, confirm_destructive=True)
         assert again["events"] == 4, again
         assert again["nodes"] == 4, again
         assert proj.g.query(
@@ -3456,7 +3456,7 @@ def test_prewipe_snapshot_corrupt_aborts_before_wipe():
 
                 with pytest.raises(RuntimeError,
                                    match="wipe the graph"):
-                    proj.rebuild_all(d)
+                    proj.rebuild_all(d, confirm_destructive=True)
 
                 # The wipe never ran — the graph is untouched.
                 rows = proj.g.query(
@@ -3702,7 +3702,7 @@ def test_prewipe_snapshot_written_before_wipe_and_cleared_after():
                 return real_query(gself, cypher, *args, **kwargs)
 
             with mock.patch.object(type(proj.g), "query", spy):
-                result = proj.rebuild_all(d)
+                result = proj.rebuild_all(d, confirm_destructive=True)
             assert seen.get("sidecar_at_wipe") is True, (
                 "the durable snapshot must exist BEFORE MATCH (n) DETACH "
                 "DELETE n — otherwise a kill in the wipe window loses every "
@@ -3731,7 +3731,7 @@ def test_prewipe_snapshot_write_failure_aborts_before_wipe():
                             side_effect=OSError("disk full")), \
                     pytest.raises(RuntimeError,
                                    match="aborted BEFORE the graph wipe"):
-                proj.rebuild_all(d)
+                proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
             assert rows[0][0] == 1, (
@@ -3770,7 +3770,7 @@ def test_prewipe_snapshot_capture_failure_aborts_before_wipe():
             with mock.patch.object(type(proj.g), "query", spy), \
                     pytest.raises(RuntimeError,
                                    match="could not be captured"):
-                proj.rebuild_all(d)
+                proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
             assert rows[0][0] == 1, (
@@ -3804,7 +3804,7 @@ def test_prewipe_snapshot_retry_dedups_against_partial_replay():
         assert partial == 1, (
             "the injected failure must leave exactly one re-created node")
 
-        result = proj.rebuild_all(d)
+        result = proj.rebuild_all(d, confirm_destructive=True)
         assert result["events"] == 4, (
             "3 snapshot events + 1 journal event — a duplicate prepend means "
             f"the union dedup failed (got {result['events']})")
@@ -3842,7 +3842,7 @@ def test_prewipe_snapshot_restores_quarantined_batch():
         assert payload["batch_snapshot"], "quarantine marker not snapshotted"
         assert payload["batch_point_links"], "batch_id link not snapshotted"
 
-        proj.rebuild_all(d)
+        proj.rebuild_all(d, confirm_destructive=True)
         rows = proj.g.query(
             "MATCH (b:Batch {id:'batch-1'}) RETURN b.status").result_set
         assert rows and rows[0][0] == "quarantined", (
@@ -3931,7 +3931,7 @@ def test_prewipe_snapshot_non_str_id_aborts_before_wipe():
                          " status:'live'})")
             with pytest.raises(RuntimeError,
                                match="could not be captured"):
-                proj.rebuild_all(d)
+                proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point) RETURN count(n)").result_set
             assert rows[0][0] == 1, (
@@ -3968,7 +3968,7 @@ def test_prewipe_snapshot_clear_is_atomic_against_a_failed_unlink():
             proj.g.query("CREATE (n:Point {id:'g1', content:'graph-only',"
                          " status:'live', pointKind:'statement'})")
             sidecar = os.path.join(d, ".tortoise-prewipe-snapshot.json")
-            proj.rebuild_all(d)          # completes → sidecar retired
+            proj.rebuild_all(d, confirm_destructive=True)          # completes → sidecar retired
             # Re-plant the pre-wipe payload to stand in for the unlink having
             # failed, then prove a retirement write makes it inert.
             with open(sidecar, "w", encoding="utf-8") as fh:
@@ -3987,7 +3987,7 @@ def test_prewipe_snapshot_clear_is_atomic_against_a_failed_unlink():
             # A legitimate delete AFTER the completed rebuild must not come
             # back: the retired (entry-less) sidecar has nothing to merge.
             proj.g.query("MATCH (n:Point {id:'g1'}) DETACH DELETE n")
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point {id:'g1'}) RETURN count(n)").result_set
             assert rows[0][0] == 0, (
@@ -4120,7 +4120,7 @@ def test_prewipe_snapshot_restores_replay_gap_properties():
                 "status:'live', pointKind:'statement', outdated:true, "
                 "expiredAt:'2026-01-01T00:00:00Z', posterior_alpha:0.5, "
                 "posterior_beta:2.5, content_hash:'deadbeef'})")
-            proj.rebuild_all(d)
+            proj.rebuild_all(d, confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (n:Point {id:'g1'}) RETURN n.outdated, n.expiredAt, "
                 "n.posterior_alpha, n.posterior_beta, n.content_hash"

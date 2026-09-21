@@ -124,7 +124,7 @@ def test_rebuild_restores_turn_points_and_session_link(captured):
     assert before == [f"{SESSION_ID}_t{i}" for i in range(3)]
     assert set(before) <= set(_contains(proj))
 
-    proj.rebuild(EventLog(log_path))
+    proj.rebuild(EventLog(log_path), confirm_destructive=True)
 
     assert _turn_ids(proj) == before, "turn Points must survive the rebuild"
     assert set(before) <= set(_contains(proj)), \
@@ -154,7 +154,7 @@ def test_rebuild_all_restores_turn_points_and_session_link(captured):
     before = _turn_ids(proj)
     assert set(before) <= set(_contains(proj))
 
-    proj.rebuild_all(os.path.dirname(log_path))
+    proj.rebuild_all(os.path.dirname(log_path), confirm_destructive=True)
 
     assert _turn_ids(proj) == before
     assert set(before) <= set(_contains(proj))
@@ -176,7 +176,7 @@ def test_replayed_point_keeps_is_episodic(tmp_path):
         assert proj.g.query("MATCH (n:Point {id:$id}) RETURN n.is_episodic",
                             params={"id": pid}).result_set[0][0] is True
 
-        proj.rebuild(EventLog(log_path))
+        proj.rebuild(EventLog(log_path), confirm_destructive=True)
 
         assert proj.g.query("MATCH (n:Point {id:$id}) RETURN n.is_episodic",
                             params={"id": pid}).result_set[0][0] is True
@@ -197,7 +197,7 @@ def test_rebuild_raises_when_turn_points_are_unjournaled(unjournaled):
 
     empty_journal = EventLog(os.path.join(tmp, "nope.jsonl"))
     with pytest.raises(RebuildDroppedEpisodicPoints) as ei:
-        proj.rebuild(empty_journal)
+        proj.rebuild(empty_journal, confirm_destructive=True)
 
     msg = str(ei.value)
     assert SESSION_ID + "_t0" in msg and SESSION_ID + "_t2" in msg
@@ -264,7 +264,7 @@ def test_every_node_creating_journal_type_counts_as_recreatable(tmp_path):
             "t.pointKind='event', t.is_episodic=true, t.status='live'",
             params={"id": pid},
         )
-        proj.rebuild(EventLog(str(tmp / "sdk.jsonl")))  # must NOT raise
+        proj.rebuild(EventLog(str(tmp / "sdk.jsonl")), confirm_destructive=True)  # must NOT raise
         assert _turn_ids(proj) == [pid], (
             "the promoted snapshot recreates the node — refusing it is a "
             "false block on a healthy rebuild")
@@ -307,7 +307,7 @@ def test_capture_gate_refuses_before_the_coverage_proof(tmp_path):
             params={"id": pid},
         )
         with pytest.raises(RuntimeError):
-            proj.rebuild_all(str(tmp))
+            proj.rebuild_all(str(tmp), confirm_destructive=True)
         # Pre-wipe ⇒ the store still holds the turn.
         assert _turn_ids(proj) == [pid]
     finally:
@@ -338,7 +338,7 @@ def test_recapture_journals_the_stored_status_not_a_literal_draft(tmp_path):
             "the journal must carry the STORED status; a literal 'draft' "
             "regresses the promoted turn on replay")
 
-        proj.rebuild(EventLog(log_path))
+        proj.rebuild(EventLog(log_path), confirm_destructive=True)
         after = proj.g.query("MATCH (t:Point {id:$id}) RETURN t.status",
                              params={"id": pid}).result_set[0][0]
         assert after == "live", "replay must not downgrade a promoted turn"
@@ -367,7 +367,7 @@ def test_forged_payload_contains_session_cannot_create_a_link(tmp_path):
     try:
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")
-        proj.rebuild(EventLog(str(tmp / "sdk.jsonl")))
+        proj.rebuild(EventLog(str(tmp / "sdk.jsonl")), confirm_destructive=True)
         # The forged prop must NOT have become a graph fact.
         assert proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN count(s)",
@@ -401,7 +401,7 @@ def test_rebuild_all_restores_graph_only_session_container(unjournaled):
         "MATCH (s:Session {id:$sid}) SET s.capture_ok=true, s.turn_count=3",
         params={"sid": SESSION_ID})
 
-    counts = proj.rebuild_all(_tmp)  # a directory with no journal at all
+    counts = proj.rebuild_all(_tmp, confirm_destructive=True)  # a directory with no journal at all
 
     assert counts["nodes"] >= 3
     assert _turn_ids(proj) == before
@@ -442,7 +442,7 @@ def test_rebuild_all_tolerates_a_journaled_hard_delete(tmp_path):
             "t.pointKind='event', t.is_episodic=true, t.status='draft'",
             params={"id": pid},
         )
-        counts = proj.rebuild_all(str(tmp))  # must NOT raise
+        counts = proj.rebuild_all(str(tmp), confirm_destructive=True)  # must NOT raise
         assert counts["events"] >= 1
         assert proj.g.query("MATCH (n:Point {id:$id}) RETURN count(n)",
                             params={"id": pid}).result_set[0][0] == 0
@@ -517,7 +517,7 @@ def test_sidecar_recovery_with_a_consistent_journal_proceeds(tmp_path):
     try:
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
-        counts = proj.rebuild_all(str(tmp))        # must NOT raise
+        counts = proj.rebuild_all(str(tmp), confirm_destructive=True)        # must NOT raise
         assert counts["nodes"] >= 1
         assert _turn_ids(proj) == [turn]
         # The journaled `contains_session` envelope still rebuilds the link.
@@ -573,7 +573,7 @@ def test_sidecar_recovery_refuses_a_turn_the_replay_cannot_recreate(tmp_path):
             "s.pointKind='note', s.status='live'",
             params={"id": sentinel})
         with pytest.raises(RebuildDroppedEpisodicPoints) as ei:
-            proj.rebuild_all(str(tmp))
+            proj.rebuild_all(str(tmp), confirm_destructive=True)
         assert turn in str(ei.value)
         assert "NOT touched" in str(ei.value)
         # #2943 "No loss without proof": the proof is PRE-wipe, so the
@@ -616,7 +616,7 @@ def test_sidecar_recovery_restores_the_session_container_and_link(tmp_path):
     try:
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
-        counts = proj.rebuild_all(str(tmp))        # must NOT raise
+        counts = proj.rebuild_all(str(tmp), confirm_destructive=True)        # must NOT raise
         assert counts["nodes"] >= 1
         assert _turn_ids(proj) == [turn]
         assert _contains(proj) == [turn], (
@@ -663,7 +663,7 @@ def test_non_episodic_session_links_do_not_enter_the_roster(tmp_path):
     try:
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
-        counts = proj.rebuild_all(str(tmp))        # must NOT raise
+        counts = proj.rebuild_all(str(tmp), confirm_destructive=True)        # must NOT raise
         assert counts["nodes"] >= 0
         # The container is still restored from the sidecar, non-episodic.
         rows = proj.g.query(
@@ -721,7 +721,7 @@ def test_prewipe_writer_refuses_an_over_cap_payload_without_wiping(
             params={"id": pid, "c": "x" * 4000})
 
         with pytest.raises(RuntimeError) as ei:
-            proj.rebuild_all(str(tmp))
+            proj.rebuild_all(str(tmp), confirm_destructive=True)
         assert "aborted BEFORE the graph wipe" in str(ei.value)
         assert "over the" in str(ei.value)
         # … and rebuild_all turns that into a refusal that wipes NOTHING and
@@ -758,7 +758,7 @@ def test_session_only_sidecar_write_failure_aborts_before_the_wipe(captured):
                    side_effect=OSError("read-only log dir")),
         pytest.raises(RuntimeError) as ei,
     ):
-        proj.rebuild_all(os.path.dirname(log_path))
+        proj.rebuild_all(os.path.dirname(log_path), confirm_destructive=True)
 
     msg = str(ei.value)
     assert "aborted BEFORE the graph wipe" in msg

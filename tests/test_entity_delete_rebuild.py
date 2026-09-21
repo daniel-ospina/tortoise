@@ -105,7 +105,7 @@ class TestDeleteSurvivesRebuild:
         assert sdk._delete_entity(oid) is True, "node must be deleted"
         assert not _subject(proj, name), "live node must be gone after delete"
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _subject(proj, name), (
             "deleted Subject resurrected on rebuild_all — #3299")
 
@@ -127,7 +127,7 @@ class TestDeleteSurvivesRebuild:
         assert sdk._delete_entity(oid) is True
         assert not _object(proj, name)
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _object(proj, name), (
             "deleted Object resurrected on rebuild_all — #3299")
 
@@ -144,7 +144,7 @@ class TestDeleteSurvivesRebuild:
         assert sdk._delete_entity(pid) is True
         assert not _point(proj, pid)
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _point(proj, pid), (
             "deleted Point resurrected on rebuild_all — #3299")
 
@@ -163,7 +163,7 @@ class TestDeleteSurvivesRebuild:
         assert sdk._delete_entity(eid) is True
         assert not _event(proj, eid)
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _event(proj, eid), (
             "deleted Event resurrected on rebuild_all — #3299")
 
@@ -186,7 +186,7 @@ class TestDeleteSurvivesRebuild:
         assert not _rows(proj, "MATCH (d:Document {title:$t}) RETURN d.id",
                          t=title)
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _rows(proj, "MATCH (d:Document {title:$t}) RETURN d.id",
                          t=title), (
             "deleted Document resurrected on rebuild_all — #3299/#3860")
@@ -207,7 +207,7 @@ class TestDeleteSurvivesRebuild:
         assert sdk._delete_entity(sid) is True
         assert not _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.id", u=url)
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.id", u=url), (
             "deleted Source resurrected on rebuild_all — #3299")
 
@@ -233,7 +233,7 @@ class TestRebuildFidelity:
         drop_id = _entity_name_id("Subject", "drop-subject")
         assert sdk._delete_entity(drop_id) is True
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert _subject(proj, "keep-subject"), (
             "un-deleted Subject must survive rebuild_all")
         assert _object(proj, "keep-object"), (
@@ -265,7 +265,7 @@ class TestRebuildFidelity:
         assert live and live[0][0] == adds[1]["createdAt"], (
             "live node carries the SECOND registration's createdAt")
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         rebuilt = _rows(proj, "MATCH (s:Subject {name:$n}) RETURN s.createdAt",
                         n=name)
         assert rebuilt, "recreated Subject must survive rebuild_all"
@@ -289,7 +289,7 @@ class TestRebuildFidelity:
         sdk.create_point("statement", "second-incarnation", id=pid)
         assert _point(proj, pid)
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert _point(proj, pid), (
             "re-created Point lost on rebuild_all (pass-1a/pass-1b ordering "
             "inversion) — #3299 P0")
@@ -330,7 +330,7 @@ class TestRebuildFidelity:
                 },
             }) + "\n")
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert _point(proj, oid), (
             "re-created Operator lost on rebuild_all (pass-1a/pass-1b "
             "ordering inversion) — #3299 P0")
@@ -367,7 +367,7 @@ def test_deleted_entity_absent_after_rebuild_dispatch(env):
     oid = _entity_name_id("Object", "dispatch-delete")
     assert sdk._delete_entity(oid) is True
 
-    proj.rebuild(EventLog(str(events / "events.jsonl")))
+    proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
     assert not _object(proj, "dispatch-delete"), (
         "rebuild(EventLog) dispatch resurrected the deleted Object")
 
@@ -444,7 +444,7 @@ class TestIdentityIsKindPlusId:
         sdk.create_point("statement", "collide-point", id=sid)
         assert _point(proj, sid)
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _subject(proj, name), (
             "deleted Subject resurrected: the bare-id survivor anchor let a "
             "foreign-kind (Point) creation suppress its delete — #3860")
@@ -468,7 +468,7 @@ class TestIdentityIsKindPlusId:
         sdk.create_point("statement", "collide-point", id=url)
         assert _point(proj, url)
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url), (
             "deleted Source (id == URL) resurrected — #3860")
         assert _point(proj, url), (
@@ -501,7 +501,7 @@ class TestIdentityIsKindPlusId:
                 "label": "Source",
             }) + "\n")
 
-        proj.rebuild(EventLog(str(events / "events.jsonl")))
+        proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
         assert not _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url), (
             "rebuild(EventLog) resurrected the deleted Source — #3860")
         assert _point(proj, pid), (
@@ -543,7 +543,7 @@ class TestIdentityIsKindPlusId:
                 "label": "Point) DETACH DELETE (n",
             }) + "\n")
 
-        proj.rebuild_all(str(events))
+        proj.rebuild_all(str(events), confirm_destructive=True)
         assert not _point(proj, pid), (
             "unknown-label delete did not survive replay (legacy id-wide "
             "fallback expected)")
@@ -588,7 +588,7 @@ def test_foreign_kind_delete_does_not_advance_point_annotator_boundary(env):
             "projection_version": 2, "point": duplicate,
         }) + "\n")
 
-    proj.rebuild_all(str(events))
+    proj.rebuild_all(str(events), confirm_destructive=True)
     rebuilt = {k: (sdk.get_point(op) or {}).get(k) for k in dims}
     assert rebuilt == pre, (
         "a foreign-kind (Subject) delete advanced the POINT annotator "

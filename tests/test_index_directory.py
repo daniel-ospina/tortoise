@@ -2643,7 +2643,7 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
     # structural state is the NODE set, restored by a re-index)
     proj = TortoiseSDK(os.path.join(str(tmp_path), "rebuild.db"),
                        namespace="e2e-900")._get_proj()
-    counts = proj.rebuild_all(str(log_dir))
+    counts = proj.rebuild_all(str(log_dir), confirm_destructive=True)
     # the journal replay re-ran the recorded events without raising
     # (line-tolerant) and materialized graph structure
     assert counts.get("events", 0) >= 24

@@ -75,7 +75,7 @@ def _write_files(events, files: dict[str, list[dict]]) -> None:
 
 
 def _rebuild(sdk: TortoiseSDK, events) -> None:
-    sdk._get_proj().rebuild_all(str(events))
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
 
 def _oracle(tmp_path, name: str, records: list[dict], pid: str) -> dict:

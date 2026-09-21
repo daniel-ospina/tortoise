@@ -188,7 +188,7 @@ class TestProjectionFold:
             journaled = [ev for ev in
                          EventLog(str(events / "events.jsonl")).read_all()
                          if ev.get("type") == "ObjectSuperseded"]
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, "
                 "o.supersededBy, o.supersededAt",
@@ -246,7 +246,7 @@ class TestProjectionFold:
                                             "ObjectSuperseded")]
             assert jtypes.index("ObjectSuperseded") < jtypes.index(
                 "ObjectRegistered"), jtypes
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
                 params={"n": "strategy-A"}).result_set
@@ -288,7 +288,7 @@ class TestProjectionFold:
                  "supersedes_by": "strategy-D", "evidence": ""},
                 id=oid,
             )
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
                 params={"n": "strategy-C"}).result_set
@@ -362,7 +362,7 @@ class TestProjectionFold:
             assert ev["supersedes_by"] == successor, ev
             assert ev["id"] != legacy_reg_id, \
                 "the synthesized id must differ from the legacy registration id"
-            sdk._get_proj().rebuild_all(str(events))
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
             rows = proj.g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
                 params={"n": name}).result_set
