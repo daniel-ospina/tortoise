@@ -908,10 +908,12 @@ class TestS3:
         assert "object" in types and "event" in types
 
     def test_turn_echo_is_never_an_s3_prior(self, monkeypatch):
-        """#2552: the capture's own episodic turn echo (``{sid}_t{i}``) is
-        transcript, not memory — S3 must not return it as a link-before-create
-        prior, or the extracted claim NOOP-folds onto the echo and its
-        operators resolve to a turn id (invisible to the memory layer)."""
+        """#2552: a capture's own turn echoes are transcript, not memory.
+
+        On a fresh capture the session's turn Points (``{sid}_t{i}``) are the
+        only content in the graph, so S3 used to return them as the
+        link-before-create prior set: the extracted claim NOOP-folded onto its
+        own transcript echo and never became a memory Point."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
@@ -920,18 +922,91 @@ class TestS3:
                     return []
                 return [
                     {"id": "s1_t3", "content": "[user] the lease makes that "
-                     "impossible no matter how we roll out",
+                     "impossible no matter how we roll out", "kind": "event"},
+                    {"id": "s1_t4", "content": "[assistant] then we re-plan",
                      "kind": "event"},
                     {"id": "pt_real", "content": "a real claim",
                      "kind": "statement"},
                 ]
 
-        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY")
-        ids = [p["id"] for p in res["points"]]
-        assert "s1_t3" not in ids
-        assert "pt_real" in ids
-        assert v2._is_turn_echo_id("wp06_quarry_rollout_t8")
-        assert not v2._is_turn_echo_id("pt_e3f831d86cf073e2af58d9b542c5ca7be19ec7c114d307f675fce08b1672a8")
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+
+    def test_turn_echo_filter_is_anchored_not_shape_based(self):
+        """The predicate is ``^{session_id}_t\\d+$``, never a shape-only guess.
+
+        ``create_point`` accepts explicit caller ids and ``retrieval.py``
+        records the D3 decision that "the shape of an id is not evidence that a
+        capture happened", so an unanchored ``_t\\d+$`` would silently drop a
+        real, caller-minted memory Point from every prior set."""
+        # this capture's own echoes
+        assert v2._is_turn_echo_id("s1", "s1_t0")
+        assert v2._is_turn_echo_id("wp06_quarry_rollout",
+                                   "wp06_quarry_rollout_t8")
+        # another session's turn is not ours to drop
+        assert not v2._is_turn_echo_id("s1", "s2_t8")
+        # a session id that PREFIXES another's must not over-match
+        assert not v2._is_turn_echo_id("s1", "s10_t3")
+        # caller-minted ids that merely LOOK like the shape — the class
+        # tests/test_d3_session_identity.py:387 documents as reachable
+        assert not v2._is_turn_echo_id("s1", "acme_t5")
+        assert not v2._is_turn_echo_id("s1", "note_t12")
+        assert not v2._is_turn_echo_id("s1", "pt_foo_t3")
+        # content-addressed memory ids
+        assert not v2._is_turn_echo_id(
+            "s1",
+            "pt_e3f831d86cf073e2af58d9b542c5ca7be19ec7c114d307f675fce08b1672a8")
+        # no session named -> never drop (an unanchored match would be a guess)
+        assert not v2._is_turn_echo_id(None, "s1_t8")
+        assert not v2._is_turn_echo_id("", "s1_t8")
+        assert not v2._is_turn_echo_id("s1", None)
+
+    def test_turn_echo_filter_is_point_only(self, monkeypatch):
+        """An echo-shaped id on the event leg is untouched — the drop is
+        confined to ``entity_type == "point"``."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type == "event":
+                    return [{"id": "s1_t3", "content": "[user] owner paused",
+                             "kind": "core:decision"}]
+                return []
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "The story. First para.",
+                              session_id="s1")
+        assert [e["id"] for e in res["events"]] == ["s1_t3"]
+        assert res["points"] == []
+
+    def test_turn_echo_drop_refills_the_prior_window(self, monkeypatch):
+        """The drop runs AFTER the SDK's own ``[:limit]`` truncation (#898's
+        filter-before-truncation contract, applied here by hand), so the point
+        leg over-fetches and refills — a window full of echoes must not starve a
+        real prior ranked below them."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                if entity_type != "point":
+                    return []
+                # echoes own the top of the fused window
+                return ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
+                          "kind": "event"} for i in range(5)]
+                        + [{"id": "pt_real", "content": "a real claim",
+                            "kind": "statement"}])
+
+        sdk = MockSDK()
+        res = v2.search_graph(sdk, S2_FIXTURE, "STORY", session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+        # the point leg asked for a window wider than `limit` (the refill pool);
+        # every other leg kept the exact window it always had
+        assert sdk.asked, "no queries ran"
+        assert all(l > 3 for t, l in sdk.asked if t == "point"), sdk.asked
+        assert all(l == 3 for t, l in sdk.asked if t != "point"), sdk.asked
 
     def test_degrades_on_backend_error(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")

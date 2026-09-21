@@ -1765,39 +1765,75 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     return queries
 
 
-# #2552: the capture's own episodic turn echo is TRANSCRIPT, not memory.
+# #2552: a capture's OWN turn echoes are TRANSCRIPT, not memory.
 # capture_session writes the turn Points (deterministic ids ``{session_id}_t{i}``,
-# is_episodic=true) BEFORE extraction runs — the SAME distinction the graded
-# memory layer encodes (snapshot_session's ``_turn_id_pattern`` / grading's
-# is_turn_echo). On a fresh capture those echoes are the ONLY content in the
-# graph, so S3 returned them as the link-before-create prior set; the newly
-# extracted claim then NOOP-folded onto its own transcript echo
-# (classify_consolidation), never became a memory Point, and every operator
-# referencing it resolved (via execute_embed's point_ids) to the turn id —
-# an endpoint invisible to the memory layer, so the planted-operator audit
-# graded it from_content_missing / to_content_missing / edge_missing. S3 must
-# never dedup the extraction against the transcript it is extracting.
-_TURN_ECHO_ID_RE = re.compile(r"_t\d+$")
+# ``is_episodic=true``) BEFORE extraction runs, so on a fresh capture they are the
+# ONLY content in the graph — S3 returned them as the link-before-create prior
+# set, the freshly extracted claim NOOP-folded onto its own transcript echo
+# (``classify_consolidation``), never became a memory Point, and every operator
+# referencing it resolved (via ``execute_embed``'s ``point_ids``) to a turn id —
+# an endpoint invisible to the memory layer, so the planted-operator audit graded
+# it from_content_missing / to_content_missing / edge_missing. S3 must never
+# dedup the extraction against the transcript it is extracting.
+#
+# The predicate is ANCHORED on the capture's ``session_id`` (the same
+# ``^{session_id}_t\d+$`` identity the graded memory layer's
+# ``_turn_id_pattern`` uses), deliberately NOT on id shape alone: ``create_point``
+# accepts explicit caller ids, and ``retrieval.py`` records the D3 decision that
+# the ``{session_id}_t{i}`` prefix "is unverifiable — ANY caller id ending in
+# ``_t<digits>`` would be read as a session … the shape of an id is not evidence
+# that a capture happened". A shape-only ``_t\d+$`` would silently drop a real,
+# caller-minted memory Point from every prior set — memory loss, which is worse
+# than the missed dedup it would avoid. With no session id the filter is a NO-OP.
+#
+# Scope: this covers the capture's own echoes for the session being extracted. It
+# does NOT cover other ingest lanes' transcript rows with different id shapes
+# (e.g. the longmem lane's ``lme:{qid}:s{si}:t{ti}`` episodic points), which
+# remain a separate, unfixed NOOP-fold source for those lanes.
+#
+# Over-fetch, because ``tortoise_fts_query`` truncates to ``limit`` internally —
+# i.e. BEFORE this drop runs — so asking for exactly ``limit`` lets the echoes
+# consume every slot and hide a real prior ranked below them. That is the same
+# "filtering after the limit cut silently shrinks the result" defect epic #898
+# fixed for ``exclude_status``; here the filter is applied and then refilled to
+# ``limit`` over the wider window.
+_PRIOR_OVERFETCH = 12
 
 
-def _is_turn_echo_id(point_id) -> bool:
-    """True for a capture turn-echo Point id (``{session_id}_t{i}``)."""
-    return bool(point_id) and bool(_TURN_ECHO_ID_RE.search(str(point_id)))
+def _is_turn_echo_id(session_id, point_id) -> bool:
+    r"""True for one of ``session_id``'s own turn echoes (``{session_id}_t{i}``).
+
+    Anchored — ``^{session_id}_t\d+$`` — never a shape-only guess (see the block
+    above). False whenever the session id is unknown, so a caller that cannot
+    name its session never drops a row."""
+    sid = str(session_id or "")
+    pid = str(point_id or "")
+    prefix = f"{sid}_t"
+    if not sid or not pid.startswith(prefix):
+        return False
+    return pid[len(prefix):].isdigit()
 
 
-def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3) -> list[dict]:
-    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit)
+def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
+              session_id: str | None = None) -> list[dict]:
+    # Only the point leg over-fetches (it is the only leg with a drop); every
+    # other entity_type keeps the exact ``limit`` window it always had.
+    fetch = limit + _PRIOR_OVERFETCH if (entity_type == "point" and limit > 0) \
+        else limit
+    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
     out = []
     for r in rows or []:
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
                         "kind": r.get("kind", "")})
-        elif entity_type == "point" and _is_turn_echo_id(r.get("id")):
-            # #2552: transcript echo — never a memory prior.
+        elif entity_type == "point" and _is_turn_echo_id(session_id, r.get("id")):
+            # #2552: this capture's transcript echo — never a memory prior.
             continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
                         "kind": r.get("kind", "")})
+        if limit > 0 and len(out) >= limit:
+            break
     return out
 
 
@@ -1843,7 +1879,8 @@ def _enrich_point_priors(sdk, points: list[dict]) -> None:
 
 
 def search_graph(sdk, embed_list: dict, story: str, *,
-                 max_queries: int = 15, limit: int = 3) -> dict:
+                 max_queries: int = 15, limit: int = 3,
+                 session_id: str | None = None) -> dict:
     """S3: search the REAL graph for existing entities/points/events.
 
     - Resolves the active backend from the environment (design doc §3 owner
@@ -1852,6 +1889,11 @@ def search_graph(sdk, embed_list: dict, story: str, *,
       topic, events by entity (tortoise_fts_query, batch).
     - Graceful degradation: unreachable graph (connection error/timeout)
       returns partial results + ``degraded`` — the pipeline proceeds.
+
+    ``session_id`` is the capture being extracted: it is the anchor that lets
+    the point leg drop the capture's OWN turn echoes from the prior set
+    (#2552 — see ``_is_turn_echo_id``). Callers that cannot name their session
+    pass nothing and get the unfiltered priors.
 
     Returns:
         {"mode": str, "degraded": bool, "reason": str|None,
@@ -1885,7 +1927,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                     break
                 q_run += 1
                 try:
-                    for row in _fts_rows(sdk, entity_type, q, limit=limit):
+                    for row in _fts_rows(sdk, entity_type, q, limit=limit,
+                                         session_id=session_id):
                         rid = row.get("id")
                         if not rid or rid in results[bucket[entity_type]]:
                             continue
@@ -4543,7 +4586,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census_class(error_census, "classify_error")
 
     # ── S3: search the graph (real backend, graceful degradation) ──────────
-    search = search_graph(sdk, embed_list, story)
+    search = search_graph(sdk, embed_list, story, session_id=session_id)
 
     # ── S4: review gaps → complete embed list (E4: merges-not-replaces) ───
     complete_list: dict = embed_list
