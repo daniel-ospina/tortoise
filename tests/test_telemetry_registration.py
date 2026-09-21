@@ -564,10 +564,13 @@ class _Collector(ast.NodeVisitor):
         self.helper_returns = helper_returns
         self.calls: list[_Call] = []
         self.scopes: list[dict[str, set[str]]] = []
+        self.func_stack: list[str] = []
 
     def visit_FunctionDef(self, node):
         self.scopes.append(_dict_assignments(node, self.helper_returns))
+        self.func_stack.append(node.name)
         self.generic_visit(node)
+        self.func_stack.pop()
         self.scopes.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -580,9 +583,50 @@ class _Collector(ast.NodeVisitor):
         self.calls.append(_Call(self.path, node.lineno, func, event,
                                 _resolve_keys(props_arg, self.scopes)))
 
+    def _is_entry_point_passthrough(self, node) -> bool:
+        """True only for the verbatim forward inside ``_emit_analytics_off_loop``.
+
+        The call must sit in that function AND pass the caller's
+        ``org_id``/``event_name``/``properties`` through by name. Keying the
+        skip on the enclosing function alone would also hide any other call
+        written into the helper (#4015 review); keying it on the exact
+        argument names leaves such a call recorded, where the count pin
+        catches it.
+        """
+        if not self.func_stack \
+                or self.func_stack[-1] != "_emit_analytics_off_loop":
+            return False
+        if len(node.args) < 3:
+            return False
+        return [a.id for a in node.args[:3] if isinstance(a, ast.Name)] == \
+            ["org_id", "event_name", "properties"]
+
     def visit_Call(self, node):
         callee = _callee_name(node.func)
-        if callee == "_track_analytics_event":
+        # ``_emit_analytics_off_loop`` (#4015) is the off-loop entry point whose
+        # signature mirrors ``_track_analytics_event``'s first three positional
+        # parameters, so the SAME resolver walks its emit sites — otherwise
+        # rerouting a site through the seam would silence this allowlist gate
+        # for that site's props (the review the count pin exists to force).
+        if callee == "_track_analytics_event" \
+                and self._is_entry_point_passthrough(node):
+            # The entry point's own pass-through call (#4015): it forwards the
+            # callers' ``properties`` VERBATIM, so the calls TO it (recorded
+            # below) carry the real props — counting this one too would
+            # double-count and leave the inventory with a phantom unresolved
+            # site. Skip it; count the call sites.
+            #
+            # The skip is CALL-shaped, never merely function-scoped (#4015
+            # review): a skip keyed only on the enclosing function would also
+            # silence any OTHER call written into the helper — e.g. injecting
+            # a key (`{**(properties or {}), "unregistered_key": 1}`) would
+            # keep `len(calls)` at 11 and pass the allowlist while the key
+            # reached the sink from all five routed sites. Anything that is
+            # not the verbatim pass-through is therefore RECORDED, and the
+            # count pin below fails on it.
+            self.generic_visit(node)
+            return
+        if callee in ("_track_analytics_event", "_emit_analytics_off_loop"):
             event_arg = node.args[1] if len(node.args) >= 2 else None
             props_arg = node.args[2] if len(node.args) >= 3 else None
             for kw in node.keywords:
@@ -635,6 +679,10 @@ def test_every_emitted_prop_key_is_allowlisted():
     # be resolved would otherwise be filtered out by `if c.keys` and pass the
     # subset check. Any addition must update this inventory (and register its
     # props), which is exactly the review the gate exists to force.
+    # #4015: routing the five analytics sites through ``_emit_analytics_off_loop``
+    # does NOT change the count — the collector resolves that helper's args
+    # exactly like the direct calls it replaced. main's #3773 added a sixth
+    # emitter, hence 12 here (11 before it).
     assert len(calls) == 12, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
