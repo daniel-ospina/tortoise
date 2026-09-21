@@ -73,6 +73,7 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S,
     PROBE_HARD_TIMEOUT,
     PROBE_STALE_AFTER,
     ControlPlaneOffloadError,
@@ -1587,10 +1588,16 @@ _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="activation-scorecard")
 
 
-async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
-    """Run one long dream pass on the dream pool; the helper owns ``sdk.close()``.
+async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
+    """Run one long dream pass on the dream pool; the helper owns the close.
 
-    #3718 (code review): the pass AND ``sdk.close()`` are ONE worker hand-off.
+    #3773: ``sdk_factory`` builds the SDK INSIDE the worker thread — building
+    it on the loop made its connect / embedded anchor probe on-loop work
+    immediately before the pass. ``fn`` receives the built SDK as its FIRST
+    argument. (The REST ``dream`` handler already holds an SDK it built through
+    the #3773 graph-pool seam, and passes ``lambda: sdk``.)
+
+    #3718 (code review): the pass AND the close are ONE worker hand-off.
     Letting the coroutine's ``finally`` close instead runs the close on the
     LOOP while the worker is still inside the pass whenever the request is
     cancelled — cancelling the await stops the AWAITABLE, not the thread
@@ -1618,16 +1625,13 @@ async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
     both cases are safe.
     """
     def _pass_and_close():
+        sdk = sdk_factory()
         try:
-            return fn(*args, **kwargs)
+            return fn(sdk, *args, **kwargs)
         finally:
             sdk.close()
 
-    try:
-        cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
-    except BaseException:
-        sdk.close()
-        raise
+    cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
     return await asyncio.wrap_future(cfut)
 
 
@@ -1724,16 +1728,18 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
             return
         gns = key.split("::", 1)[1] if "::" in key else None
 
-        # #3773: build the SDK OFF the loop. `_make_sdk` can run the embedded
-        # keepalive anchor's probe query, so building it inline froze the loop
-        # before the off-loaded drain below had even started.
         def _open_sdk() -> TortoiseSDK:
+            # #3773: built INSIDE the dream-pool item, never on the loop —
+            # `_make_sdk` can run the embedded keepalive anchor's probe query.
+            # Deliberately NOT routed through the fail-closed request-path seam
+            # (`_graph_offload`): this is a background drain with no client to
+            # fail closed to, and its roots are already drained — an offload
+            # failure there would DROP them (until a later sweep) while logging
+            # a capacity signal as a graph failure.
             return (_make_sdk(graph_name=gns) if gns is not None
                     else _make_sdk(namespace=org_id))
 
-        sdk = await _graph_offload(_open_sdk, op="dream_sdk")
-
-        def _drain() -> None:
+        def _drain(sdk: TortoiseSDK) -> None:
             # #3718: mark → dream on the DEDICATED dream pool, serialized per
             # graph against a concurrent manual /v1/dream (see `_dream_lock`).
             # `_run_dream_on_pool` owns the SDK's close, so a cancelled request
@@ -1747,7 +1753,7 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 # /v1/dream with mode="stale-first" explicitly).
                 sdk.dream(dirty_only=True, mode="local")
 
-        await _run_dream_on_pool(_drain, sdk)
+        await _run_dream_on_pool(_drain, _open_sdk)
     except Exception as exc:
         import logging
         _log = logging.getLogger("tortoise.api")
@@ -3686,14 +3692,16 @@ def _assert_graph_owned(org: dict, graph_id: str,
 def _bind_actor_context(org: dict) -> None:
     """#2600: bind the server-resolved human actor for this request, LOOP-side.
 
-    Cheap by construction — one ContextVar write, no I/O — so it must NOT move
-    off the loop: the value has to be in the LOOP's context for the off-loaded
-    write's own ``asyncio.to_thread`` context copy to carry it (the off-loaded
-    graph work itself runs under a context copy — see ``_graph_offload``).
-    ``_data_sdk``'s own graph work is off the loop (#3773), so this stays its
-    own function rather than a line inside it: a bind executed on a
-    process-lifetime pool thread would leak into the NEXT request that worker
-    serves.
+    Cheap by construction — one ContextVar write, no I/O — so its LOOP-SIDE
+    invocation must stay on the loop: the value has to be in the LOOP's context
+    for the off-loaded write's own ``asyncio.to_thread`` context copy to carry
+    it (the off-loaded graph work itself runs under a context copy — see
+    ``_graph_offload``). ``_data_sdk``'s graph work is off the loop (#3773) and
+    still calls this for its direct sync callers; that call is deliberately
+    INERT on the offloaded path (it writes into the discarded context copy),
+    and MUST NOT be relied on — ``_data_sdk_offloaded`` makes the loop-side
+    call that matters. A bind executed at a process-lifetime pool thread's top
+    level would otherwise leak into the NEXT request that worker serves.
     """
     from tortoise.sdk import _current_actor_user_id
     _actor = org.get("actor_user_id")
@@ -3707,10 +3715,13 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     twin ``_data_sdk_offloaded`` (#3773), which binds the actor on the loop and
     routes this graph work through the #3498 seam.
 
-    #2600: the server-resolved human actor ContextVar is set HERE (the single
-    REST set-site) — CONDITIONALLY, only when the dict carries a gated
+    #2600: the server-resolved human actor ContextVar is written by
+    ``_bind_actor_context`` — CONDITIONALLY, only when the dict carries a gated
     actor_user_id, so a hand-built actor-less dict (the MCP capture tool's
-    org dict) never ERASES a value the auth seams set (cycle-2 P0).
+    org dict) never ERASES a value the auth seams set (cycle-2 P0). There are
+    TWO REST call paths (this sync one, and ``_data_sdk_offloaded`` which binds
+    loop-side first); the bind below serves the direct sync callers and is
+    inert on the offloaded path (see ``_bind_actor_context``).
     - graph-bound key (graph_id set): ownership pre-check THEN open the
       resolved FULL graph name (custom org_{tid}_{gid} or a bound default)
       via the explicit graph-name seam — cross-graph denied at the app
@@ -3723,7 +3734,7 @@ def _data_sdk(org: dict) -> TortoiseSDK:
       (sdk.org_create org_{name}, #2023) diverges and flipping would
       silently move those orgs' data access.
     """
-    # #2600: single REST ContextVar set-site — CONDITIONAL (only when the
+    # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
     _bind_actor_context(org)
     org_id = org["org_id"]
@@ -4742,25 +4753,39 @@ async def _graph_offload(fn, *, op: str):
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
     ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
-    The off-loaded unit is a SHORT graph helper (``_data_sdk``'s connect /
-    embedded anchor probe, ``_check_org_limit``'s count query, the dream
-    worker's ``_make_sdk``) that used to run inline immediately before an
-    already off-loaded write; the pool, the wait bound and the fail-closed
-    error are the seam's, not a second mechanism.
+    The off-loaded unit is a graph helper (``_data_sdk``'s connect / embedded
+    anchor probe, ``_check_org_limit``'s count query) that used to run inline
+    immediately before an already off-loaded write. (The REST ``dream``
+    handler's ``_data_sdk`` is routed here too; the write-triggered
+    ``_dream_worker`` builds its SDK inside the dream-pool item instead — see
+    ``_run_dream_on_pool``.)
+
+    Wait bound: the graph lane has its OWN bound,
+    ``CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S``, deliberately ABOVE the probe
+    lane's ``PROBE_SETUP_TIMEOUT`` — a cold projection open is a legitimate
+    ~28-round-trip phase the seam's PostgREST-derived 10 s default would
+    false-degrade into a retryable 503. A bound miss abandons the worker
+    (CPython #87185), which keeps holding its pool slot until it returns; the
+    bound is therefore set for a genuinely wedged graph, not a cold one.
 
     Context isolation: the callable runs under a COPY of the caller's context.
     ``_data_sdk`` sets the #2600 actor ContextVar, and a pool thread is
     process-lifetime — a var set at that thread's top level would survive into
     the NEXT request the worker serves. The copy confines any such write to the
-    submission (the same reason ``_submit_off_loop`` copies).
+    submission (the same reason ``_submit_off_loop`` copies). Because this is
+    the only place the copy is applied, callers must reach the graph pool
+    THROUGH this wrapper, never ``_cp_offload(pool="graph")`` directly.
 
-    Telemetry: graph ops land in the seam's offload records under graph-specific
-    op names (``data_sdk``, ``check_org_limit.points``, ``dream_sdk``), so they
-    stay separable from PostgREST resolutions despite sharing the record buffer.
+    Telemetry: graph ops land in the seam's SHARED offload-record buffer under
+    graph-specific op names (``data_sdk``, ``check_org_limit.points``), so they
+    are identifiable by op — but they share the 512-entry buffer, so a graph
+    burst can evict PostgREST records. Splitting the buffer per pool is a
+    follow-up, not part of #3773.
     """
     ctx = contextvars.copy_context()
     return await _cp_offload(
         functools.partial(ctx.run, fn), op=op, pool="graph",
+        timeout=CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S,
         unavailable=_graph_unavailable)
 
 
@@ -5451,7 +5476,7 @@ async def dream(
         sdk.close()
         raise
 
-    def _run_dream():
+    def _run_dream(sdk):
         # #3718: sdk.dream is a long, CPU-heavy SYNCHRONOUS graph pass — the
         # worst on-loop blocker on this surface (seconds, not the ~35ms of a
         # point write). All three branches run on the DEDICATED dream pool (see
@@ -5467,7 +5492,7 @@ async def dream(
                 sdk._mark_dirty(queued_roots)
             return sdk.dream(dirty_only=True)
 
-    return await _run_dream_on_pool(_run_dream, sdk)
+    return await _run_dream_on_pool(_run_dream, lambda: sdk)
 
 
 @app.get("/v1/dream/health")

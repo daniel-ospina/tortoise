@@ -728,9 +728,30 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: bounded multi-worker pool, wait bound and fail-closed error, on a pool of
 #: their OWN: a burst of graph writes must never park a single auth slot (the
 #: #3498 review P1 isolation argument, applied to the data plane).
+#:
+#: Occupancy disclosure (the #3669-cycle-2 "not hidden" rule): each WRITE
+#: consumes TWO sequential submissions here (the quota count, then the SDK
+#: open), the write-triggered ``_dream_worker`` shares the same slots, and the
+#: graph-bound ``_data_sdk`` path reaches a blocking CONTROL-plane PostgREST
+#: read (``_assert_graph_owned`` -> ``get_control_plane().query("graphs")``), so
+#: a control-plane stall parks a graph slot here and a bound miss on that read
+#: reports ``graph_unavailable``. Routing the ownership probe through the
+#: control-plane pool is a follow-up; the shared-capacity shape is accepted.
 CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
 CONTROL_PLANE_GRAPH_WORKERS = 8
 CONTROL_PLANE_GRAPH_BACKLOG = 128
+
+#: Wait bound for ONE offloaded DATA-PLANE graph helper (#3773). Deliberately
+#: ABOVE the probe lane's own projection cold-start allowance
+#: (``PROBE_SETUP_TIMEOUT``): ``_data_sdk``'s embedded anchor probe and
+#: ``_check_org_limit``'s count query can each open a COLD projection (connect +
+#: version probe + ``_ensure_indexes()`` — ~28 sequential round trips), which
+#: the repo already budgets at ``PROBE_SETUP_TIMEOUT`` precisely so a normal
+#: round-trip bound does not false-degrade it (#3143). The seam's PostgREST-
+#: derived 10 s default would 503-retry a merely-cold first write. Still
+#: bounded and fail-fast for a genuinely wedged graph; the ordering against
+#: ``PROBE_SETUP_TIMEOUT`` is pinned by a test.
+CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S = PROBE_SETUP_TIMEOUT + 10.0
 
 #: Wait bound for ONE offloaded control-plane resolution. Sits ABOVE a normal
 #: round-trip's several phases but below the edge/proxy budget, so a
@@ -773,8 +794,13 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
     flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
-    DATA-PLANE pool for the write handlers' short synchronous graph helpers,
-    kept off auth capacity for the same isolation reason.
+    DATA-PLANE pool for the write handlers' graph helpers, kept off auth
+    capacity for the same isolation reason. The graph pool's callables SET
+    ContextVars (the #2600 actor bind), so it must be reached ONLY through the
+    hosted ``_graph_offload`` wrapper, which runs them under a copy of the
+    caller's context — a bare ``run_control_plane_call(..., pool="graph")``
+    would write into the process-lifetime pool thread's own context and leak
+    that value into the NEXT request the worker serves.
 
     An UNKNOWN selector raises rather than falling back to auth: the pool
     choice is the only thing keeping best-effort or attacker-reachable work

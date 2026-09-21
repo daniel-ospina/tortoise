@@ -294,15 +294,34 @@ def test_oauth_offload_maps_failure_to_the_oauth_503(monkeypatch):
     assert excinfo.value.error == "temporarily_unavailable"
 
 
-def test_graph_pool_is_separate_from_auth_and_telemetry():
+def test_graph_pool_is_separate_from_all_other_pools():
     """#3773: a graph (data-plane) burst must not park an auth slot — the
     #3498 review P1 isolation argument applied to the write handlers'
-    per-request graph helpers (``_data_sdk`` / ``_check_org_limit``)."""
+    per-request graph helpers (``_data_sdk`` / ``_check_org_limit``). Asserted
+    against all three sibling pools (the claim names auth, telemetry AND
+    oauth)."""
     auth = monitoring.control_plane_worker("auth")
     graph = monitoring.control_plane_worker("graph")
     telemetry = monitoring.control_plane_worker("telemetry")
-    assert graph is not auth and graph is not telemetry
+    oauth = monitoring.control_plane_worker("oauth")
+    assert len({auth, graph, telemetry, oauth}) == 4, (
+        "a graph submission shared a pool with a control-plane lane")
     assert graph.workers == monitoring.CONTROL_PLANE_GRAPH_WORKERS
+
+
+def test_graph_bound_sits_above_the_projection_cold_start_allowance():
+    """#3773: the graph lane's wait bound must sit ABOVE the probe lane's own
+    projection cold-start allowance. ``_make_sdk`` / ``_get_proj()`` can open a
+    COLD projection (~28 sequential round trips), which the repo budgets at
+    ``PROBE_SETUP_TIMEOUT`` precisely so a round-trip bound does not
+    false-degrade it (#3143). The seam's PostgREST-derived 10 s default would
+    503-retry a merely-cold first write — so the graph lane has its own bound
+    and this pins the ordering (the CIMD sibling is
+    ``test_fetch_deadline_sits_below_the_offload_bound``)."""
+    assert (monitoring.CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S
+            > monitoring.PROBE_SETUP_TIMEOUT), (
+        "the graph offload bound fell to/below the projection cold-start "
+        "allowance — a cold first write would be abandoned and 503'd (#3143)")
 
 
 def test_graph_offload_routes_to_the_graph_pool(monkeypatch):
@@ -332,8 +351,9 @@ def test_graph_offload_maps_failure_to_the_graph_503(monkeypatch):
     """#3773: a saturated / bound-missed data-plane offload is a 503 the
     client can retry — NOT the sign-in-specific ``control_plane_unavailable``
     body the auth/REST lane uses, which would mislead a client retrying a
-    graph write."""
-    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.05)
+    graph write. The graph lane's OWN bound is what applies (not the seam's
+    PostgREST default), so patch that constant."""
+    monkeypatch.setattr(ha, "CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S", 0.05)
 
     async def _run():
         await ha._graph_offload(lambda: time.sleep(0.4), op="graph-slow")

@@ -51,9 +51,12 @@ treating such a failure as a regression.
 SCOPE — #3773 closed the residual this note used to record: the #3718
 handlers' PRE-WRITE graph helpers (`_data_sdk`'s SDK open/connect — including
 the graph-bound ownership probe and the embedded keepalive anchor's probe
-query — and `_check_org_limit`'s per-org count query) and `_dream_worker`'s SDK
-build now go through the #3498 bounded offload seam (`_graph_offload` →
-`_cp_offload` → the dedicated `graph` pool);
+query — and `_check_org_limit`'s per-org count query) now go through the #3498
+bounded offload seam (`_graph_offload` → `_cp_offload` → the dedicated `graph`
+pool), and `_dream_worker` builds its SDK inside the off-loaded dream-pool item
+(`_run_dream_on_pool`'s factory — off the loop, but deliberately NOT the
+fail-closed request-path seam: a background drain has no client to fail closed
+to, and an offload failure there would drop its already-drained roots).
 `test_write_preamble_graph_helpers_run_off_the_loop` and the `_make_sdk`
 assertion in the worker test pin that at the thread level. Still OUT of scope
 here (separate, tracked residuals — all filed as #4451): the post-write
