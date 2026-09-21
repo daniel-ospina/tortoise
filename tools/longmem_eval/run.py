@@ -1939,8 +1939,11 @@ def _load_checkpoint(path: str | None,
 
     M7 (#1527, D7): the loaded checkpoint's fingerprint must match the
     effective run config — a mismatch raises ``CheckpointStaleError`` naming
-    the differing fields (refuse stale resume). A legacy v1 checkpoint
-    (no ``fingerprint`` key) is refused too. #1349: the checkpoint also
+    the differing fields (refuse stale resume). A markerless legacy
+    checkpoint (no ``format``/``run_key`` markers, hence no ``fingerprint``
+    key) is refused too; a fingerprintless checkpoint that carries the
+    ``format`` marker plus a matching ``run_key`` (the #1349 vector-arm path)
+    falls through the fingerprint gate and resumes. #1349: the checkpoint also
     carries the per-model ``run_key`` (``{surface}__{retriever}__{model}__
     {prompt}``) — a cross-surface (embedded↔hnsw) or cross-model resume is
     impossible by construction. The read happens under an exclusive flock
