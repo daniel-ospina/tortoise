@@ -40,7 +40,7 @@
 #   PYTHON_BIN      interpreter for the sweep (default: <repo>/.venv/bin/python
 #                   if present, else `command -v python3`)
 #   REAPER_INTERVAL interval in SECONDS on BOTH platforms (launchd uses it
-#                   directly; cron divides by 60), default 1200 (= 20 min)
+#                   directly; cron divides by 60), default REAPER_TIMEOUT + 300
 #   REAPER_TIMEOUT  sweep budget in seconds; default 900
 #   REAPER_JOBS     parallel CLIENT LIST probe workers; default 16
 #   AGENTS_DIR      launchd install dir (default $HOME/Library/LaunchAgents)
@@ -68,22 +68,53 @@ if [ -z "$PYTHON_BIN" ]; then
     echo "ERROR: no python3 found (set PYTHON_BIN)" >&2
     exit 1
 fi
-# #4299: `--timeout 300` aborted every sweep before it could act on a real
-# backlog — the sweep's own log carried `reaper timeout (300s) exceeded —
-# aborting sweep` against 298 live servers, so the backlog never drained and
-# the box stayed at load ~140. The budget must exceed the realistic sweep time
-# on a host running many concurrent suites. The interval is kept ABOVE the
-# budget so a sweep always finishes before the next fire, instead of being
-# refused on the singleton lock mid-sweep (those refusals were the issue's
-# 212 "already running" lines — legitimate, not a stale lock).
-# `--jobs` parallelizes the per-candidate CLIENT LIST probes — the dominant
-# cost at hundreds of leaked servers (see _run_sweep's docstring).
+# #4299: this raises the sweep's ceiling (`--timeout`) and widens the probe
+# pool (`--jobs`). The measured reason the backlog did NOT drain on this host
+# is NOT the budget (a manual run at timeout 900 finished in ~4 min and acted
+# on 1): an INSTRUMENTED orphan is unconfirmable under `--only-safe` while any
+# suite is live (#4487), and an UNINSTRUMENTED spawn produced no owner record
+# at all (#4500). State the parameters only — do not restate a cause the
+# issues' own records refute (the #1224 re-staling lesson).
+#   - `--timeout`: the SIGALRM sweep budget. `_ReaperLock` serializes sweeps,
+#     so the interval must EXCEED the budget or a fire is refused mid-sweep.
+#     `REAPER_INTERVAL` defaults to `REAPER_TIMEOUT + 300` and a warning is
+#     emitted when it is not greater.
+#   - `--jobs`: parallel CLIENT LIST probe workers. `_run_sweep` used to drop
+#     the flag before `reap()`, so it reached discovery only; forwarding it is
+#     the #4438 fix. The pool size is a probe-pool setting, not a claim that
+#     probing dominates wall time.
 REAPER_TIMEOUT="${REAPER_TIMEOUT:-900}"
 REAPER_JOBS="${REAPER_JOBS:-16}"
+case "$REAPER_TIMEOUT" in
+    ''|*[!0-9]*)
+        echo "ERROR: REAPER_TIMEOUT must be a whole number of seconds, got '$REAPER_TIMEOUT'" >&2
+        exit 2 ;;
+esac
+# #4438 review: derive the interval from the budget so the
+# "interval > budget" invariant holds by construction, and warn (never
+# silently) when a hand-set value violates it.
+REAPER_INTERVAL="${REAPER_INTERVAL:-$((REAPER_TIMEOUT + 300))}"
+case "$REAPER_INTERVAL" in
+    ''|*[!0-9]*)
+        echo "ERROR: REAPER_INTERVAL must be a whole number of seconds, got '$REAPER_INTERVAL'" >&2
+        exit 2 ;;
+esac
+if [ "$REAPER_INTERVAL" -le "$REAPER_TIMEOUT" ]; then
+    echo "WARNING: REAPER_INTERVAL ($REAPER_INTERVAL) must exceed REAPER_TIMEOUT ($REAPER_TIMEOUT); a fire may be refused mid-sweep" >&2
+fi
+case "$REAPER_INTERVAL" in
+    *[!0-9]*|'') : ;;
+    *)
+        if [ "$REAPER_INTERVAL" -lt 60 ] || [ $((REAPER_INTERVAL % 60)) -ne 0 ]; then
+            echo "WARNING: cron takes REAPER_INTERVAL in whole minutes; $REAPER_INTERVAL s floors to $(( REAPER_INTERVAL / 60 < 1 ? 1 : REAPER_INTERVAL / 60 )) min" >&2
+        fi ;;
+esac
 REAPER_CMD="$PYTHON_BIN -m tortoise.embedded_reaper --no-dry-run --only-safe --timeout $REAPER_TIMEOUT --jobs $REAPER_JOBS"
 
 usage() {
-    sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
+    # #4438 review: terminate on a marker, not a hard-coded line number —
+    # `2,48p` silently truncated `--help` whenever the header grew.
+    sed -n '2,/^# Exit codes:/p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 render_plist() {
@@ -118,6 +149,7 @@ PLIST
 cron_line() {
     # every REAPER_INTERVAL SECONDS (default 1200 = 20 min); cron takes
     # interval/60 minutes, so a non-multiple-of-60 floors to the minute
+    # (a warning is emitted at install time — see REAPER_INTERVAL).
     local interval="${REAPER_INTERVAL:-1200}"
     local minutes=$(( interval / 60 ))
     [ "$minutes" -lt 1 ] && minutes=1

@@ -1,8 +1,28 @@
+---
+title: "Embedded Reaper — Periodic Execution (cron / launchd)"
+type: engineering
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+created: 2026-08-23
+ownedBy: epistemic-team
+aboutSubjects: tortoise
+aboutObjects: tortoise-embedded-reaper
+---
+
 # Embedded Reaper — Periodic Execution (cron / launchd)
 
 The reaper is a **safety net**: it cleans orphaned redislite redis-server
 processes that accumulate when parent processes are SIGKILL'd. Run it
 periodically (every 20 minutes).
+
+> **Reclamation latency (measured trade, #4438 review):** the `#1642 FIX 3`
+> 0-client window is observed ACROSS sweeps (`ZERO_CLIENT_CONFIRM_MINUTES =
+> 10`), so a 20-min cadence means a 20–40 min minimum confirmation latency
+> for an *uninstrumented* orphan (the `#3599` per-server owner signal and
+> `#4487`'s constructor instrumentation confirm on the FIRST sweep, which is
+> what makes this cadence acceptable). Do not raise the interval further
+> without re-checking that trade.
 
 > **#1642 (2026-08-23):** the reaper was designed to be scheduled (Task 3 of
 > #176) but the schedule was never installed — suites that are
@@ -106,11 +126,16 @@ rendered plist changes, which is why an upgrade off the old
 
 - Default is **dry-run** — only `--no-dry-run` actually mutates.
 - `--timeout` (default 120s, env `TORTOISE_REAPER_TIMEOUT`) bounds each sweep.
-  The install script schedules with `--timeout 900 --jobs 16` (a 20-min
-  cadence has room for a 15-min sweep; the 120s default is too tight for a
-  multi-hundred orphan backlog on a loaded box — observed abort mid-cleanup).
-  `--jobs` parallelizes the per-candidate CLIENT LIST probes, which dominate
-  the cost at hundreds of leaked servers.
+  The install script schedules with `--timeout 900 --jobs 16`. The interval is
+  derived from the budget (`REAPER_INTERVAL`, default `REAPER_TIMEOUT + 300`)
+  so a fire is never refused mid-sweep; the script warns if a hand-set
+  `REAPER_INTERVAL` is not greater than `REAPER_TIMEOUT`. The 120s default is
+  too tight for a multi-hundred orphan backlog on a loaded box (observed abort
+  mid-cleanup).
+  `--jobs` sets the parallel per-candidate CLIENT LIST probe pool; it is a
+  pool-size setting, not a claim that probing dominates wall time. Note the
+  measured reason a backlog did NOT drain is the orphan-confirmation signal
+  (`#4487` / `#4500`), not the budget.
 - Singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`) prevents cron/manual overlap.
 - Only **no-path tempdir orphans** are killed; path-based servers (stable
   singleton, CWD leaks) are NEVER touched (that's Child 2's migration job).
