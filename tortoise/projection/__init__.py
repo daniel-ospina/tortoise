@@ -3447,11 +3447,16 @@ class FalkorProjection(
                 continue
             _sd_rid = ev.get("id")
             # Mirror ``_fold_point_superseded``'s applicability guard
-            # (``if not oid or not new_id: return 0``): the sweep fold IGNORES
-            # an event that lacks ``new_id``, so the inline decay must not fire
-            # for one either — live never decayed for such an event, and a
-            # decay here would be a belief write the graph never received.
-            if not isinstance(_sd_rid, str) or not ev.get("new_id"):
+            # (``if not oid or not new_id: return 0``) EXACTLY: the sweep fold
+            # IGNORES an event that lacks ``new_id``, so the inline decay must
+            # not fire for one either — live never decayed for such an event,
+            # and a decay here would be a belief write the graph never
+            # received. The falsy-id test matters as much as the type test: an
+            # EMPTY-STRING id passes ``isinstance(..., str)`` (and
+            # ``_writable_id``) but is skipped by the fold, so a type-only gate
+            # would decay a node the fold ignores.
+            if (not isinstance(_sd_rid, str) or not _sd_rid
+                    or not ev.get("new_id")):
                 continue
             _sd_drop = last_ann_drop_seq.get(("Point", _sd_rid))
             if _sd_drop is not None and seq <= _sd_drop:
