@@ -427,6 +427,17 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
         by_reason[r["reason"]] = by_reason.get(r["reason"], 0) + 1
 
     out: list[str] = []
+    out.append("---")
+    out.append('title: "4408 — Worktree/branch reaper dry-run report"')
+    out.append("type: operations")
+    out.append("domain: operations")
+    out.append("doc_status: live")
+    out.append("created: 2026-09-20")
+    out.append("ownedBy: organisation-design-team")
+    out.append("aboutSubjects: organisation-design-team")
+    out.append("aboutObjects: tortoise")
+    out.append("---")
+    out.append("")
     out.append("# branch-reaper dry-run report — #4408\n")
     out.append(f"Generated: {_fmt_ts(now)} · repo `{repo_root}` · slug `{slug or 'n/a'}` · "
                f"main ref `{main_ref_used}`\n")

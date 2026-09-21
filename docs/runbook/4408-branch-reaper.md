@@ -1,3 +1,14 @@
+---
+title: "4408 — Worktree/branch reaper dry-run report"
+type: operations
+domain: operations
+doc_status: live
+created: 2026-09-20
+ownedBy: organisation-design-team
+aboutSubjects: organisation-design-team
+aboutObjects: tortoise
+---
+
 # branch-reaper dry-run report — #4408
 
 Generated: 2026-09-21 · repo `/Users/danielospina/Documents/GitHub/tortoise/.worktrees/4408-branch-reaper` · slug `daniel-ospina/tortoise` · main ref `origin/main`
