@@ -24499,11 +24499,15 @@ def _drill_execute(
         pass
     within_rto = duration_s <= _DRILL_RTO_S
     # #3845: surface a wedge distinctly — "fork slot wedged" must never be
-    # readable as a plain "copy failed". Absent on the clean path, so a healthy
-    # drill record is unchanged.
+    # readable as a plain "copy failed". #4233: surface a swap copy that
+    # outlived the restore's read bound the same way, so an RTO breach caused
+    # by it is attributable from the PERSISTED record/incident, not only the
+    # immediate response. Both absent on the clean path, so a healthy drill
+    # record is unchanged.
     detail = {k: v for k, v in (
         ("restored", result.get("restored")),
         ("fork_slot", result.get("fork_slot")),
+        ("copy_read_bound_overrun", result.get("copy_read_bound_overrun")),
     ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",

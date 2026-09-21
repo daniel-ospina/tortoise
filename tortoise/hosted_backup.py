@@ -2044,13 +2044,13 @@ _RESTORE_SWAP_SETTLE_POLL_S = 0.25
 def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
     """True when a timed-out copy's DESTINATION holds the SOURCE's content.
 
-    ``GRAPH.COPY`` publishes the destination only once the whole source graph
-    has been loaded, so for the restore's two copies — whose destination is
-    either freshly deleted (the swap) or brand new (the pre-restore safety
-    copy) — a destination the copy itself created, holding the source's
-    counts, IS the operation's success condition (#4233). Both halves are
-    re-read LIVE, so a partial or torn install can never be accepted: node AND
-    edge counts are compared.
+    For the restore's two copies — whose destination is either freshly deleted
+    (the swap) or brand new (the pre-restore safety copy) — a destination the
+    copy itself created, holding the source's counts, IS the operation's
+    success condition (#4233). Both halves are re-read LIVE, so a partial or
+    torn install can never be accepted: node AND edge counts are compared.
+    (The comparison is what makes the check sound; nothing here relies on the
+    engine's install ordering.)
 
     Deliberately never QUERIES a graph ``GRAPH.LIST`` does not name: a Cypher
     read on a missing graph CREATES an empty one (verified on FalkorDB
@@ -2139,9 +2139,11 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
                                    settled: list[bool] | None = None) -> None:
     """Run a long GRAPH.COPY for the restore over its own read bound (#3813).
 
-    Raises ``RestoreCopyTimeoutError`` when that bound expires, keeping the
-    originating timeout as ``__cause__``, so callers report a TIMEOUT rather
-    than a dead connection or a failed copy.
+    Runs over the restore's own read bound (#3813). Raises
+    ``RestoreCopyTimeoutError`` when that bound expires and the copy's outcome
+    is NOT proven complete (see ``settled`` below); keeping the originating
+    timeout as ``__cause__`` means callers report a TIMEOUT rather than a dead
+    connection or a failed copy.
 
     ``settled`` (#4233): optional out-param. ``True`` is appended when the
     bound expired but the copy's OUTCOME proved it completed, so a caller can
@@ -2214,8 +2216,12 @@ def count_data_nodes(db, graph_name: str) -> int:
     non-aggregate ``MATCH (n) RETURN labels(n), properties(n)`` read and would
     silently DEFLATE the count for a larger graph. Its skip classes are built
     from the SAME ``_EXPORT_SKIP_LABELS`` / ``_EXPORT_SKIP_META_KEYS``
-    constants :func:`_is_export_skip_node` uses, so a new skip class cannot
-    drift this count away from the dump's node set.
+    constants :func:`_is_export_skip_node` uses, and the Meta branch is
+    NULL-SAFE (``n.key IS NOT NULL AND n.key IN …``) to match the predicate's
+    Python semantics: a ``:Meta`` node with NO ``key`` is CONTENT there, and
+    Cypher three-valued logic would otherwise drop it from the count. The
+    parity is pinned by
+    ``tests/test_dr_endpoints.py::TestDrRebaseline::test_count_data_nodes_matches_the_dump_node_set``.
     """
     from tortoise.hosted_api import (
         _EXPORT_SKIP_LABELS,
@@ -2223,7 +2229,8 @@ def count_data_nodes(db, graph_name: str) -> int:
     )
     return int(db.select_graph(graph_name).query(
         "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
-        "AND NOT ('Meta' IN labels(n) AND n.key IN $meta_keys) "
+        "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
+        "AND n.key IN $meta_keys) "
         "RETURN count(n)",
         params={
             "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741

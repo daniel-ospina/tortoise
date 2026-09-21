@@ -895,6 +895,48 @@ class TestDrRebaseline:
         state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
         assert state["node_count"] == 3
 
+    def test_count_data_nodes_matches_the_dump_node_set(self, client):
+        """#4233 — ``count_data_nodes`` and ``dump_graph`` count the SAME nodes.
+
+        The count is re-expressed as a cap-immune server-side aggregate, so it
+        must stay semantically identical to ``_is_export_skip_node`` at every
+        boundary: each label-wide skip class, each key-scoped Meta marker, a
+        Meta with a NON-skip key (DATA), and — the subtle one — a Meta with NO
+        ``key`` (also DATA: Cypher three-valued logic would otherwise drop it
+        from the aggregate while ``dump_graph`` keeps it).
+
+        RED (mutation): drop ``n.key IS NOT NULL`` (or any skip class) from the
+        aggregate — the parity assertion below fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+        from tortoise.hosted_api import (
+            _EXPORT_SKIP_LABELS,
+            _EXPORT_SKIP_META_KEYS,
+            _is_export_skip_node,
+        )
+
+        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        g = db.select_graph("org_settle_source")
+        g.query("MATCH (n) DETACH DELETE n")
+        g.query("CREATE (p:Point {id:'data-1'})")           # content
+        g.query("CREATE (m:Meta {key:'calibration_milestone'})")  # DATA
+        g.query("CREATE (m:Meta {v:true})")                 # no key — DATA
+        g.query("CREATE (m:Meta)")                          # no key — DATA
+        for label in sorted(_EXPORT_SKIP_LABELS):            # skipped
+            g.query(f"CREATE (n:{label} {{x:1}})")
+        for key in sorted(_EXPORT_SKIP_META_KEYS):           # skipped
+            g.query("CREATE (m:Meta {key:$k})", params={"k": key})
+
+        expected = sum(
+            1 for labels, props in g.query(
+                "MATCH (n) RETURN labels(n), properties(n)").result_set
+            if not _is_export_skip_node(
+                [str(l) for l in (labels or [])],  # noqa: E741
+                dict(props or {}))
+        )
+        assert hb.count_data_nodes(db, "org_settle_source") == expected
+        assert expected == 4, expected  # 1 Point + 3 content Meta nodes
+
 
 class TestDrDrill:
     def test_drill_requires_params(self, client, dr_env, mem_storage):

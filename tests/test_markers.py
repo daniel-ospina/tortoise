@@ -182,7 +182,7 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
         # both lanes; the endpoint resolves graph_name from organizations.graph_name
         'f"org_{tid}"': "endpoint-constrained",  # Supabase-lane sweep seed write
-        '"org_team_x"': "read-only",                  # post-drill count assert
+        '"org_team_x"': "endpoint-constrained",  # post-drill count assert + #4233 marker write (drill/backup resolve org_{id})
         # #2313 custom-graph drill seeds (per-graph sweep/restore E2E); the
         # server-lane _clean_team_graphs fixture drops team_* graphs per test
         '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
