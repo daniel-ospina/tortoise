@@ -328,6 +328,19 @@ class _EntityHandlers:
         ``_content_hash`` — so in those cases the existing value is PRESERVED.
         #4042's pass-1b content boundary needs that outcome exactly, never a
         ``bool(content)`` guess. Every other caller ignores the return.
+
+        #4457: when a NEW embedding is written, the ``REMOVE n.embedding``
+        clause rides in the SAME query ahead of the SET list. A ``VectorF32``
+        overwrite is a SILENT NO-OP on the embedded engine
+        (falkordblite/redislite): leaving the node's already-VectorF32
+        ``embedding`` in place and re-issuing the conditional write kept the
+        OLD vector, so a rebuilt Point's ``embedding`` no longer derived from
+        its ``content`` (the server lane lands the same write, which is why
+        only the embedded lane reddened). ``REMOVE``-first is the workaround
+        this repo already documents (``tests/test_precision_leak_4028.py``);
+        on the server lane the final state is unchanged, and because the
+        clause is emitted ONLY when a new vector is being written, the
+        preserve-on-None semantics above are untouched. See the query below.
         """
         op = p.get("operator")
         if not isinstance(op, dict):
@@ -435,8 +448,16 @@ class _EntityHandlers:
             set_clauses.append("n.is_episodic=$episodic")
             params["episodic"] = bool(p["is_episodic"])
         # Phase 2 #49: context removed — never written
+        # #4457: clear the property FIRST, in the same atomic query, so the
+        # conditional `vecf32` write below actually lands on the embedded
+        # engine (a `VectorF32` overwrite there is a silent no-op — see the
+        # docstring). Only emitted when a new embedding is being written, so
+        # the CASE's preserve-the-existing-value branch is unaffected, and
+        # `MERGE`-created nodes simply have nothing to remove.
+        embed_clear = "REMOVE n.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
+            "MERGE (n:Point {id:$id}) " + embed_clear
+            + "SET " + ", ".join(set_clauses),
             params=params,
         )
         # Ontology v2.1: also store extractedFrom as property for query convenience.
