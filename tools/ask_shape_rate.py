@@ -485,10 +485,12 @@ def _parse_substrate(base: str) -> tuple[str, str, int | None, str]:
 def _substrate_label() -> str:
     """A receipt-safe label for the store the run measured against.
 
-    NEVER echoes the raw ``TORTOISE_ASK_SHAPE_DB_URI``, and never echoes the
-    URI's PATH OR ANY PART OF ITS AUTHORITY: the documented form embeds a
-    password in the userinfo, and a receipt is a TRACKED file that gets
-    committed.
+    NEVER echoes the raw ``TORTOISE_ASK_SHAPE_DB_URI``, the URI's PATH, its
+    HOST or its USERINFO: the documented form embeds a password in the
+    userinfo, and a receipt is a TRACKED file that gets committed. (It DOES
+    echo the validated scheme and the validated numeric port — the port is
+    part of the URI authority but is not a credential, and it is the one
+    element that makes the recorded substrate identifiable.)
 
     ⚠️ Masking on ``u.username``/``u.password`` is NOT sufficient —
     ``urlparse`` splits userinfo at the LAST ``@``, so a password containing
@@ -809,7 +811,9 @@ def evaluate_question(sdk, question: dict, *, reader_mode: str,
         "gold_answer_span_words": (len(gold_span.split()) if gold_span else 0),
         "ctx_recall": _gold_sessions_covered(result.get("evidence") or "",
                                              question),
-        # W7A: the assembled context size (tokens of the ~8k ask-lane cap) —
+        # W7A: the assembled context size (tokens of the RESOLVED ask-lane
+        # cap — never a literal: #4105 raised it 8000 -> 16000, so a stated
+        # number here would be false the moment the cap moves) —
         # reported alongside, never a leg.
         "context_tokens": result.get("context_tokens"),
         "retrieval_degraded": result.get("retrieval_degraded"),
@@ -933,7 +937,10 @@ def _pn(records: list[dict], key: str) -> dict:
 
 def _assembly_budget(records: list[dict]) -> dict:
     """W7A: the assembly budget the lane actually FILLED — median tokens of
-    the ask-lane ``context_token_cap`` (~8000) across the live questions.
+    the RESOLVED ask-lane ``context_token_cap`` across the live questions
+    (read from ``resolve_ask_retrieval_caps()`` below, never a literal: the
+    cap is 16000 since #4105 and a stated number would be false the moment
+    it moves).
 
     Reported alongside, never a leg. Read from the lane's own
     ``context_tokens`` (post-assembly), so it measures the real assembled
