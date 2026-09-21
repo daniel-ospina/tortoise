@@ -85,6 +85,10 @@ case "$REAPER_TIMEOUT" in
         echo "ERROR: REAPER_TIMEOUT must be a whole number of seconds, got '$REAPER_TIMEOUT'" >&2
         exit 2 ;;
 esac
+if [ "$REAPER_TIMEOUT" -lt 1 ]; then
+    echo "ERROR: REAPER_TIMEOUT must be >= 1, got '$REAPER_TIMEOUT'" >&2
+    exit 2
+fi
 case "$REAPER_JOBS" in
     ''|*[!0-9]*)
         echo "ERROR: REAPER_JOBS must be a whole number, got '$REAPER_JOBS'" >&2
