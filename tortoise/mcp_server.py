@@ -184,7 +184,10 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
     - ``ok`` — the call completed.
     - ``validation_error`` / ``auth_error`` / ``exec_error`` — mapped by
       ``_classify_mcp_call_error`` (``error_kind`` = the offending field, the
-      exception class, or the unwrapped cause's class name, respectively).
+      exception class, or the unwrapped cause's class name, respectively);
+      the #236 stdio auth gate is the OTHER ``auth_error`` producer, with
+      ``error_kind = "stdio_auth_gate"`` — it is not an exception class, so it
+      is not produced by that classifier.
     - ``timeout`` — the transport wait bound fired at this seam
       (``error_kind = "wait_bound"``).
     - ``cancelled`` — the caller cancelled the dispatch
