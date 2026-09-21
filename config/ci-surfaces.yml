@@ -424,6 +424,7 @@ surfaces:
   - test_canonical.py
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
+  - test_onboarding_telemetry_w11.py
   # #4194: captured turn Points must carry the embedding the dense leg
   # searches. Registered here because this file pins the unpatterned engine
   # module `tortoise/search_engine.py` (run_vector_query /

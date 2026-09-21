@@ -1,7 +1,8 @@
 """Server-side PostHog analytics events (#528) — account/usage telemetry.
 
 Consent framing: the events emitted here (tenant_provisioned,
-api_key_created, first_api_call) are account/usage telemetry for the
+api_key_created, first_api_call, onboarding_seed_complete,
+onboarding_decide_complete) are account/usage telemetry for the
 tenant lifecycle — covered by the privacy policy, with PostHog as a
 disclosed data processor (US Cloud project, see website/privacy.html +
 website/dpa.html). They are NOT gated by the web consent banner: the
@@ -22,6 +23,18 @@ Identity: distinct_id is the Supabase user UUID wherever it is resolvable
 (created_by on provision, key creator on first_api_call), falling back to
 the org id — this joins the web funnel (user_signed_up with
 distinct_id = user UUID) to server events.
+
+Once-only events have TWO shapes here, and which one applies is a property
+of the DOMAIN fact, not of this module:
+  * ``first_api_call`` — no durable once-only fact exists in the graph, so
+    it keeps an in-process set (the single-worker caveat above).
+  * ``onboarding_seed_complete`` / ``onboarding_decide_complete`` (#2006
+    W11) — the durable once-only fact ALREADY exists: the ``COMPLETED_STEP``
+    edge's new creation, returned as ``created`` by
+    ``onboarding.state.write_completed_step``. The CALLER emits only when it
+    observed that ``created=True``, so these are exact-once per org by
+    construction — restart-safe and multi-worker-safe, with no second dedup
+    store, no threshold and no in-process set.
 """
 from __future__ import annotations
 
@@ -124,4 +137,48 @@ def first_api_call(
         "first_api_call",
         distinct_id,
         {"org_id": org_id, "endpoint": endpoint, "method": method},
+    )
+
+
+def onboarding_seed_complete(
+    distinct_id: str, org_id: str, source: str
+) -> None:
+    """Onboarding funnel: the seed step completed (#2006 W11).
+
+    EMIT ONLY when the caller observed the ``first-points-filed``
+    ``COMPLETED_STEP`` edge being NEWLY created — i.e. gated on
+    ``onboarding.state.write_completed_step(...)["created"]``. That
+    edge-creation transition IS the once-per-org fact, so this event is
+    exact-once by construction (restart-safe, multi-worker-safe). There is
+    deliberately NO in-process dedup set here (unlike ``first_api_call``)
+    and no threshold: a replay that reports ``created=False`` must emit
+    nothing.
+
+    ``source`` names the write path that observed the creation
+    ('seed' | 'starter_seed' | 'checkpoint' | 'mcp_auto' | 'state_router')
+    so the funnel read can attribute the entry point.
+    """
+    capture(
+        "onboarding_seed_complete",
+        distinct_id,
+        {"org_id": org_id, "source": source},
+    )
+
+
+def onboarding_decide_complete(
+    distinct_id: str, org_id: str, source: str
+) -> None:
+    """Onboarding funnel: the decide step completed (#2006 W11).
+
+    EMIT ONLY when the caller observed the ``decide-completed``
+    ``COMPLETED_STEP`` edge being NEWLY created — the same structural gate
+    as ``onboarding_seed_complete`` (see it for the full contract).
+    ``decide-completed`` is the self-fork display row; the build fork's
+    ``catalog-presented`` carries no W11 event, and ``harness-connected`` is
+    deliberately uninstrumented.
+    """
+    capture(
+        "onboarding_decide_complete",
+        distinct_id,
+        {"org_id": org_id, "source": source},
     )
