@@ -1204,8 +1204,16 @@ def get_write_tool_names() -> frozenset[str]:
     """Derive the write-tool name set from each entry's declared `writes`.
 
     Replaces the hand-maintained parallel list: the permission lives on the
-    tool entry, so a rename or a merge cannot leave it behind (#4170)."""
-    return frozenset(t.name for t in TOOL_REGISTRY if t.writes)
+    tool entry, so a rename or a merge cannot leave it behind (#4170).
+
+    Covers the SERVED set (#3883): a retired name still answers through the
+    warning shim, so a write served under a retired name must not be recorded as
+    a read. No retired entry is a writer today, so the census is unchanged — the
+    derivation is stated over the served set so it cannot silently shrink when
+    one is."""
+    return frozenset(
+        t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
+    )
 
 
 _TOOL_BY_NAME: dict[str, ToolDefinition] | None = None

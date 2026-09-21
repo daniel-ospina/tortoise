@@ -683,7 +683,6 @@ class TestIntrospection:
             NON_SDK_WRITER_TOOLS, quota_gated_wrap_sites, registry_entries_by_method,
         )
         from tortoise.mcp_server import WRITE_TOOL_NAMES
-        from tortoise.tool_registry import TOOL_REGISTRY
         # every _quota_gated wrap site's (HTTP) tool is write-classified
         by_method = registry_entries_by_method()
         wrapped = {m for m, _, _ in quota_gated_wrap_sites().sites}
@@ -692,9 +691,12 @@ class TestIntrospection:
             for entry in by_method.get(method, []):
                 if entry.http_policy:
                     assert entry.name in WRITE_TOOL_NAMES, (entry.name, method)
-        # non-SDK (empty-binding) writers are a declared, write-classified set
+        # non-SDK (empty-binding) writers are a declared, write-classified set.
+        # Derived from the SERVED set (#3883): a retired empty-binding writer is
+        # still callable by name, so it belongs in the declared set too.
+        from tool_surface_capabilities import served_registry as _served
         assert NON_SDK_WRITER_TOOLS <= WRITE_TOOL_NAMES
-        empty_writers = {e.name for e in TOOL_REGISTRY
+        empty_writers = {e.name for e in _served()
                          if not e.sdk_method and e.name in WRITE_TOOL_NAMES}
         assert empty_writers == set(NON_SDK_WRITER_TOOLS)
 
