@@ -1704,15 +1704,15 @@ jobs:
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
           # widened. The floor is 30 and the number is NOT arbitrary: the four
           # marked files that are ALREADY carve-out registered (precision_leak
-          # 6 + test_hosted_api 5 + fork_slot_wedge 11 + fork_safety 4 = 26)
+          # 6 + test_hosted_api 5 + fork_slot_wedge 12 + fork_safety 4 = 27)
           # pass on their own, so a floor at 25 would still be met by a hook
           # broadened to skip exactly the class #4164 exists for. 30 sits above
           # that baseline and below the measured total, so losing the rescued
           # class reds the job while a few legitimate removals do not.
-          # Measured 2026-09-19 on this tree: 36 passed / 35 skipped (each skip
-          # exogenous — docker-lane files that also carry the marker, RUN_*_E2E
-          # suites, an absent optional dep). The contract is that the marks
-          # RUN; the exact count is free to grow.
+          # Measured 2026-09-20 on this tree (run 35518962357, head fd23a4033): 35
+          # passed / 34 skipped (each skip exogenous — the module-level gates, an
+          # absent optional dep, the two darwin-gated #3845 fork tests). The
+          # contract is that the marks RUN; the exact count is free to grow.
           passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
           echo "embedded_only-marked tests passed: $passed"
           [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }

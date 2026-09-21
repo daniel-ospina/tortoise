@@ -24,6 +24,16 @@
 #     so the marker vanishes and the run reds. Both counts on this line and the
 #     per-family split are pinned by tests/test_ci_expected_manifests.py.
 #
+# allow-skipped: tests/test_fork_safety_3845.py=2
+#   The OUTCOME half of the same check (issue #4215): a nodeid that is still
+#   COLLECTED but only SKIPPED satisfies "every frozen nodeid is present" while the
+#   test never ran — the shape a test-level `if …: pytest.skip(…)` produces, which
+#   no source scan closes. This file's two darwin-gated tests skip by design off
+#   darwin (the registry states the same boundary); a THIRD skip here is a gate
+#   evasion and reds, naming the nodeids. The module-level markers above are exempt
+#   by class (their skip IS their expected state), so only a real test counts
+#   against the budget.
+#
 # PROVENANCE (regenerate, never hand-edit): the 69 entries are the junitxml
 # <testcase> set of CI run 35518962357 (head fd23a4033), job
 # test-d14-hosted-api, artifact junit-d14.xml — reconstructed with

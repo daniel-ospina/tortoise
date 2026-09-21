@@ -421,12 +421,22 @@ def _read_manifest(path: str) -> tuple[set[str], list[str]] | None:
     return expected, invalid
 
 
-def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], list[str], str | None]:
+def _read_junitxml(
+    path: str,
+) -> tuple[set[str], list[str], list[str], list[str], str | None, set[str]]:
     """Parse a junitxml (xunit1) into observed nodeids + reason violations.
 
     Returns (observed, falkor_violations, embedder_violations,
-    collection_violations, contract_error).
+    collection_violations, contract_error, skipped_tests).
     Raises OSError/ET.ParseError when the file is missing or malformed.
+
+    skipped_tests (#4215's OUTCOME half): the REAL test nodeids whose <testcase>
+    carries a <skipped> child. The nodeid comparison cannot see these — a test
+    that is collected and then skips is present in the junit — so a platform gate
+    spelled as a test-level `pytest.skip(…)` is invisible to both the source scan
+    and the coverage check. Module-level collection-abort markers are excluded:
+    their skip IS the expected state (pytest writes them with an empty
+    classname).
 
     The collection-skip class is STRUCTURAL (pytest's constant "collection
     skipped" message on a whole-module <testcase>) — see
@@ -439,6 +449,7 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], list[str]
     still complete and meaningful; only the nodeid set is unusable.
     """
     observed: set[str] = set()
+    skipped_tests: set[str] = set()
     falkor_violations: list[str] = []
     embedder_violations: list[str] = []
     collection_violations: list[str] = []
@@ -487,9 +498,15 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], list[str]
                 "attrs nodeid reconstruction needs only exist under xunit1)"
             )
             continue
-        observed.add(reconstruct_nodeid(file, classname, name))
+        nodeid = reconstruct_nodeid(file, classname, name)
+        observed.add(nodeid)
+        # `classname == ""` is pytest's module-level collection-abort marker (its
+        # <testcase> IS the module). Such a skip is a marker's expected state, so
+        # it is never an outcome violation — only a real test's skip is.
+        if skipped is not None and classname:
+            skipped_tests.add(nodeid)
     return (observed, falkor_violations, embedder_violations,
-            collection_violations, contract_error)
+            collection_violations, contract_error, skipped_tests)
 
 
 def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
@@ -532,11 +549,47 @@ def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
     return log_path, manifest_path, junit_path
 
 
+def _parse_skip_allowances(text: str) -> tuple[dict[str, int], list[str]]:
+    """Read `# allow-skipped: <repo-relative-path>=<n>` directives from a manifest.
+
+    #4215: the frozen set asserts COLLECTION, but a test-level
+    `if …: pytest.skip(…)` keeps a nodeid collected and never runs it — the shape
+    the issue names as its acceptance example. The allowance is the manifest's own
+    written record of how many skips a file legitimately absorbs (off-darwin, the
+    two #3845 fork tests), so the runtime check can red on the rest without
+    scanning source for spellings.
+
+    Returns (allowances, invalid). An unparsable directive is RETURNED, never
+    ignored: a typo must not silently leave the budget at the default (0, i.e.
+    the strict reading) while the reader believes an allowance was declared.
+    """
+    allowances: dict[str, int] = {}
+    invalid: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        body = stripped.lstrip("#").strip()
+        if not body.lower().startswith("allow-skipped:"):
+            continue
+        rest = body.split(":", 1)[1].strip()
+        spec = rest.split()[0] if rest else ""
+        file, _, count = spec.rpartition("=")
+        if not file or not count.isdigit():
+            invalid.append(stripped)
+            continue
+        allowances[file] = int(count)
+    return allowances, invalid
+
+
 def _report(violations: list[str], falkor_violations: list[str],
             embedder_violations: list[str],
-            collection_violations: list[str]) -> int:
+            collection_violations: list[str],
+            outcome_violations: list[str] | None = None) -> int:
+    outcome_violations = outcome_violations or []
     if (not violations and not falkor_violations
-            and not embedder_violations and not collection_violations):
+            and not embedder_violations and not collection_violations
+            and not outcome_violations):
         return 0
 
     if violations:
@@ -572,6 +625,17 @@ def _report(violations: list[str], falkor_violations: list[str],
             print(f"   - {nodeid}")
         print(f"{len(collection_violations)} module-level collection skip(s) "
               "matching the vacancy class.")
+    if outcome_violations:
+        print("❌ frozen-set tests SKIPPED beyond their declared allowance — the "
+              "nodeid is still COLLECTED, so the coverage check above is "
+              "satisfied, but the test did not RUN (issue #4215):")
+        for line in outcome_violations:
+            print(f"   - {line}")
+        print("A platform gate spelled as a test-level `pytest.skip(…)` is invisible "
+              "to a source scan and to the nodeid comparison; the file's budget is "
+              "its `# allow-skipped:` directive. Raise it deliberately (and say why "
+              "in the header) — never to make this pass."
+              )
     return 1
 
 
@@ -713,19 +777,24 @@ def main(argv: list[str]) -> int:
     manifest_only = "--manifest-only" in argv
     if manifest_only:
         argv = [a for a in argv if a != "--manifest-only"]
+    log_path, manifest_path, junit_path = _parse_args(argv)
+    if manifest_only and manifest_path is None:
         # Fail CLOSED without a manifest: the flag's whole meaning is "assert the
         # frozen expected set", so `--manifest-only` with nothing to expect would
         # silently skip every matcher instead of erroring (cycle-5 finding — a
         # no-op that looks like a passing check).
-        if not any(a == "--manifest" or a.startswith("--manifest=") for a in argv):
-            print(
-                f"❌ {argv[0]}: --manifest-only requires --manifest <expected-nodeids.txt> "
-                "— with no manifest there is nothing to compare, and silently asserting "
-                "nothing is worse than failing.",
-                file=sys.stderr,
-            )
-            return 2
-    log_path, manifest_path, junit_path = _parse_args(argv)
+        #
+        # The check must run AFTER parsing, on the PARSED value (cycle-7 finding):
+        # `--junitxml --manifest` makes `--manifest` the junit path, so a textual
+        # scan of argv saw the flag present and let the invocation through as a
+        # silent pass — the same no-op class, one spelling over.
+        print(
+            f"❌ {argv[0]}: --manifest-only requires --manifest <expected-nodeids.txt> "
+            "— with no manifest there is nothing to compare, and silently asserting "
+            "nothing is worse than failing.",
+            file=sys.stderr,
+        )
+        return 2
     if log_path is None:
         print(
             f"usage: {argv[0]} <path-to-pytest.log> "
@@ -766,6 +835,7 @@ def main(argv: list[str]) -> int:
                   file=sys.stderr)
             return 1
         observed: set[str] = set()
+        skipped_tests: set[str] = set()
         falkor_violations: list[str] = []
         embedder_violations: list[str] = []
         collection_violations: list[str] = []
@@ -773,7 +843,8 @@ def main(argv: list[str]) -> int:
         if junit_path is not None:
             try:
                 (observed, falkor_violations, embedder_violations,
-                 collection_violations, contract_error) = _read_junitxml(junit_path)
+                 collection_violations, contract_error,
+                 skipped_tests) = _read_junitxml(junit_path)
             except (OSError, ET.ParseError) as exc:
                 print(f"❌ junitxml {junit_path!r} missing or unreadable "
                       f"({exc}) — no observed testcases, so every one of the "
@@ -784,21 +855,56 @@ def main(argv: list[str]) -> int:
             if contract_error:
                 print(f"❌ {contract_error}", file=sys.stderr)
                 observed = set()  # reconstruction impossible → all absent
+        outcome_violations: list[str] = []
         if manifest_only:
             # In a lane whose skips are expected, the ONLY property asserted is
-            # that the frozen expected set is still collected (#4207).
+            # that the frozen expected set is still collected (#4207) … plus
+            # #4215's OUTCOME half below. The reason matchers stay off: they are
+            # calibrated for the docker lane and would false-red every e2e module
+            # here (24, measured).
             falkor_violations = []
             embedder_violations = []
             collection_violations = []
+            # The coverage comparison above cannot see a test that is collected and
+            # then SKIPPED — `expected ⊆ observed` still holds while the test never
+            # ran, and a test-level `if …: pytest.skip(…)` is invisible to a source
+            # scan of the gate's spelling. That is #4215's acceptance example, and
+            # it is why this mode (whose whole contract is "skips are expected")
+            # owes a written budget: each file's `# allow-skipped: <file>=<n>`
+            # declares how many skips it legitimately absorbs, and anything above it
+            # reds, naming the nodeids. Module-level markers are exempt by class
+            # (`_read_junitxml` never counts them), so only a real test consumes
+            # budget. Scoped to this mode because the GENERATED manifest (the
+            # docker/carve-out lane) has no allowances to declare — there the
+            # reason matchers above are live instead.
+            allowances, invalid_allowances = _parse_skip_allowances(
+                open(manifest_path, encoding="utf-8", errors="replace").read())  # noqa: SIM115
+            if invalid_allowances:
+                print(f"❌ manifest {manifest_path!r} contains an unreadable "
+                      f"`# allow-skipped:` directive {invalid_allowances} — the skip "
+                      "budget is unknowable, and an unknowable budget must not be "
+                      "defaulted to 'allow' (fail-closed).", file=sys.stderr)
+                return 1
+            skipped_per_file: dict[str, list[str]] = {}
+            for nodeid in sorted(skipped_tests & expected):
+                skipped_per_file.setdefault(nodeid.split("::", 1)[0], []).append(nodeid)
+            for file, nodeids in sorted(skipped_per_file.items()):
+                budget = allowances.get(file, 0)
+                if len(nodeids) > budget:
+                    outcome_violations.append(
+                        f"{file}: {len(nodeids)} of its frozen tests SKIPPED, declared "
+                        f"budget {budget}")
+                    outcome_violations.extend(nodeids)
         missing = sorted(expected - observed)
         return _report(missing, falkor_violations, embedder_violations,
-                       collection_violations)
+                       collection_violations, outcome_violations)
 
     if junit_path is not None:
         # ── junitxml mode without a manifest: reason matcher only ────────
         try:
             (_, falkor_violations, embedder_violations,
-             collection_violations, contract_error) = _read_junitxml(junit_path)
+             collection_violations, contract_error,
+             _) = _read_junitxml(junit_path)
         except (OSError, ET.ParseError):
             falkor_violations = []
             embedder_violations = []

@@ -16,18 +16,24 @@ skipped) in the lane that runs it. This file pins three things:
    violations in the d14 job);
 3. the platform-gated manifest still covers every file `tests/test_markers.py`
    registers, so the source scan and the runtime check cannot drift apart;
+4. a frozen test that is collected and then SKIPPED reds, unless its file's
+   declared `# allow-skipped:` budget covers it — the OUTCOME half of #4215,
+   which is the shape a test-level `if …: pytest.skip(…)` produces;
 
-and it BITES: a junit missing one expected nodeid must fail, and a junit
-containing all of them must pass. A pin that cannot fail is not a pin.
+and it BITES: a junit missing one expected nodeid must fail, a junit whose only
+skip exceeds the declared budget must fail and name it, and a junit containing all
+of them must pass. A pin that cannot fail is not a pin.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -132,21 +138,34 @@ def _shell_commands(workflow: str) -> list[str]:
     return commands
 
 
-def _workflow_steps() -> list[dict]:
-    """Every step of the workflow, so a pin can read a step's own SCRIPT and its own
-    keys — not every line of the YAML file.
+def _workflow_jobs() -> dict[str, dict]:
+    """The workflow's jobs, by name.
 
-    Scanning the raw file treated a non-shell mention of the manifest (an artifact
-    `path:`, an `env:` entry) as a consumer and red a correct tree, and it could not see
-    whether the step it pins is even able to fail (cycle-6 findings).
+    A pin must be able to read the JOB a step lives in: `continue-on-error` is legal
+    at JOB level, where GitHub reports the job's `result` as `success` even when a
+    step inside it failed — so `python-ci-gate`, which greps `needs.*.result`, would
+    never see a guard that never bit (cycle-7 finding).
     """
     doc = yaml.safe_load(WORKFLOW.read_text())
-    steps: list[dict] = []
-    for job in (doc.get("jobs") or {}).values():
+    return {
+        name: job for name, job in (doc.get("jobs") or {}).items() if isinstance(job, dict)
+    }
+
+
+def _workflow_steps() -> list[tuple[str, dict]]:
+    """Every (job name, step) pair, so a pin can read a step's own SCRIPT and its own
+    keys — not every line of the YAML file — and can see the job that owns it.
+
+    Scanning the raw file treated a non-shell mention of the manifest (an artifact
+    `path:`, an `env:` entry) as a consumer and red a correct tree; and reading only
+    the step left the job-level escape invisible (cycle-6 and cycle-7 findings).
+    """
+    pairs: list[tuple[str, dict]] = []
+    for job_name, job in _workflow_jobs().items():
         for step in job.get("steps") or []:
             if isinstance(step, dict):
-                steps.append(step)
-    return steps
+                pairs.append((job_name, step))
+    return pairs
 
 
 def _module_dotted(file: str) -> str:
@@ -155,7 +174,7 @@ def _module_dotted(file: str) -> str:
     return file[: -len(".py")].replace("/", ".")
 
 
-def _junit_for(nodeids: list[str], path: Path) -> None:
+def _junit_for(nodeids: list[str], path: Path, skipped: Iterable[str] = ()) -> None:
     """Write a junit (xunit1 shape) that contains exactly `nodeids`.
 
     pytest's own junit is the only writer in CI, so the attributes that
@@ -166,7 +185,12 @@ def _junit_for(nodeids: list[str], path: Path) -> None:
     Both shapes are reproduced here — writing only the first made 32 of the 69
     entries a shape pytest never emits, so the marker reconstruction the guard
     depends on went untested (cycle-4 finding).
+
+    `skipped` emits a `<skipped>` child on those testcases — the OUTCOME half of
+    #4215: pytest writes the reason in `message` (and the repr in the element text),
+    but the check reads only whether the child is there.
     """
+    skipped = set(skipped)
     suite = ET.Element("testsuite", {"name": "pytest", "tests": str(len(nodeids))})
     for nodeid in nodeids:
         file, *parts = nodeid.split("::")
@@ -178,11 +202,13 @@ def _junit_for(nodeids: list[str], path: Path) -> None:
             name = _module_dotted(file)
         elif len(parts) > 1:
             classname = f"{classname}." + ".".join(parts[:-1])
-        ET.SubElement(
+        case = ET.SubElement(
             suite,
             "testcase",
             {"file": file, "classname": classname, "name": name, "time": "1.0"},
         )
+        if nodeid in skipped:
+            ET.SubElement(case, "skipped", {"message": "guarded by the platform gate"})
     ET.ElementTree(suite).write(path)
 
 
@@ -195,6 +221,24 @@ def _run_guard(manifest: Path, junit: Path) -> subprocess.CompletedProcess[str]:
          f"--junitxml={junit}", f"--manifest={manifest}", "--manifest-only"],
         capture_output=True, text=True, cwd=ROOT,
     )
+
+
+def _load_guard():
+    """`tools/skip-guard.py` is not importable by name (the hyphen), so load it by
+    path: a test that re-implemented the manifest's directive parsing could drift
+    from the guard's and certify a budget the guard does not honour."""
+    spec = importlib.util.spec_from_file_location("_skip_guard_under_test", SKIP_GUARD)
+    assert spec is not None and spec.loader is not None, f"cannot load {SKIP_GUARD}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _skip_budget(path: Path) -> dict[str, int]:
+    """The manifest's own `# allow-skipped:` budget, parsed by the GUARD's parser."""
+    allowances, invalid = _load_guard()._parse_skip_allowances(path.read_text())
+    assert not invalid, f"{path.name}: unreadable allow-skipped directive(s) {invalid}"
+    return allowances
 
 
 # ── the manifests themselves ──────────────────────────────────────────────
@@ -310,20 +354,27 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     # named, and require the stated per-family counts to add up to every marker, so
     # the numbers are load-bearing rather than decorative.
     families = {
-        "hosted E2E": "skip_unless_hosted_e2e",
-        "opt-in e2e": "RUN_",
-        "docker-lane": "TORTOISE_DB_URI",
+        "hosted E2E": (r"(\d+)\s+hosted E2E", "skip_unless_hosted_e2e"),
+        "opt-in e2e": (r"(\d+)\s+opt-in", "RUN_"),
+        "docker-lane": (r"(\d+)\s+docker-lane", "TORTOISE_DB_URI"),
     }
     stated: dict[str, int] = {}
-    for label, token in families.items():
-        line = next((l for l in header.splitlines() if token in l), None)
-        assert line is not None, (
+    for label, (pattern, token) in families.items():
+        assert token in header, (
             f"the header does not name the {label} gate family ({token!r}) — a marker whose "
             "mechanism is unnamed reads as spurious"
         )
-        nums = [int(n) for n in re.findall(r"\b(\d+)\b", line)]
-        assert nums, f"the header names {label} but records no marker count for it"
-        stated[label] = nums[0]
+        # Each family's count is read from ITS OWN clause. Resolving the family to the
+        # first line containing its token and taking that line's first integer meant an
+        # honest rewrite that merged the three bullets into one line red the tree with a
+        # bogus split (all three tokens resolve to that line) — cycle-7 finding.
+        counts = [int(n) for n in re.findall(pattern, header)]
+        assert counts, f"the header names {label} but records no marker count for it"
+        assert all(n == counts[0] for n in counts), (
+            f"the header states the {label} marker count more than once, with conflicting "
+            f"values {counts} — the per-family split must be unambiguous"
+        )
+        stated[label] = counts[0]
     # …and the numbers must be TRUE, not merely consistent: three counts that add up
     # are satisfied by a wrong split (20/6/6 passed — cycle-4 finding), and the split
     # is the fat a maintainer acts on ("this marker is spurious, clean it up").
@@ -418,29 +469,53 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     calibrated for the docker lane — measured at 24 collection violations in the
     d14 job before the flag existed.
     """
-    text = WORKFLOW.read_text()
+    jobs = _workflow_jobs()
     rel = str(manifest.relative_to(ROOT))
-    # Read the STEP, not the file: a non-shell mention of the path (an artifact `path:`,
-    # an `env:` entry) is not a consumer, and reading raw lines red a correct tree.
-    consumers = [s for s in _workflow_steps() if isinstance(s.get("run"), str) and rel in s["run"]]
+    # Read the step's own SHELL COMMANDS, not its raw text: a mention in a comment is
+    # not a consumer. Cycle 6 stopped the per-command window from reading comments but
+    # left this lookup reading the raw `run:`, so a comment naming the manifest in an
+    # UNRELATED step's shell block red the tree (cycle-7 finding).
+    consumers = [
+        (job_name, step)
+        for job_name, step in _workflow_steps()
+        if isinstance(step.get("run"), str)
+        and any(rel in cmd for cmd in _shell_commands(step["run"]))
+    ]
     assert consumers, (
         f"no step RUNS a command consuming {rel} — nothing consumes it (a mention in a "
         "comment, a `path:`, or an artifact upload is not an invocation)"
     )
-    for step in consumers:
-        # Present is not enough: a step disabled by `continue-on-error` or a false `if:`
-        # can never red the job, so the frozen set would be enforced by nothing while
-        # every pin stayed green (cycle-6 finding). `if: always()` is fine (the carve-out
-        # guard uses it); a literal false is not.
+    for job_name, step in consumers:
+        # Present is not enough: the step must be ABLE TO FAIL ITS JOB, or the frozen
+        # set is enforced by nothing while every pin stays green (cycle-6 finding).
+        # `continue-on-error` is legal at JOB level too, where GitHub reports the job's
+        # `result` as `success` even when a step failed — and `python-ci-gate` reads
+        # `needs.*.result` — so a job-level key made this pin decorative one level up
+        # (cycle-7 finding).
         name = step.get("name") or step.get("uses") or "<unnamed step>"
-        assert not step.get("continue-on-error"), (
-            f"{WORKFLOW.name}: the step consuming {rel} is `continue-on-error`, so its exit "
-            f"status cannot fail the job — the check would be decorative. Step: {name!r}"
+        disabled_by = [
+            where
+            for where, obj in (("the step", step), (f"job {job_name!r}", jobs[job_name]))
+            if obj.get("continue-on-error")
+        ]
+        assert not disabled_by, (
+            f"{WORKFLOW.name}: the step consuming {rel} is `continue-on-error` (on "
+            f"{disabled_by[0]}), so its exit status cannot fail the job — the check would "
+            f"be decorative. Step: {name!r}"
         )
+        # …and it must be able to RUN on a GREEN job. A denylist of two literal falses
+        # let every failure-only condition through (`if: failure()` never runs the guard,
+        # so its exit status is not what reds anything — cycle-7 finding). A status
+        # function that is false on a green job, or a literal false/never, is refused;
+        # `always()` (the carve-out guard's condition) and event/matrix expressions are
+        # fine.
         condition = str(step.get("if", "")).strip().lower()
-        assert condition not in ("false", "${{ false }}"), (
-            f"{WORKFLOW.name}: the step consuming {rel} has `if: {condition}` — it never runs. "
-            f"Step: {name!r}"
+        assert not re.search(
+            r"\bfalse\b|\bnever\b|\bfailure\s*\(|\bcancelled\s*\(", condition
+        ), (
+            f"{WORKFLOW.name}: the step consuming {rel} has `if: {condition}` — that "
+            "condition is false on a green job, so the guard never runs and cannot fail "
+            f"it. Step: {name!r}"
         )
         # …and the flag must be a TOKEN of the command that consumes the manifest, with
         # comments already removed, so a trailing `# note: NOT --manifest-only` is not read
@@ -507,8 +582,100 @@ def test_a_single_vanished_nodeid_fails_and_is_named() -> None:
     # reader to diff junits — the thing this message exists to prevent (cycle-4
     # finding). Exactly ONE nodeid may be listed as missing, and it must be the
     # victim; `   - <nodeid>` is the guard's missing-list bullet.
-    listed = [l for l in result.stdout.splitlines() if l.startswith("   - ")]
+    listed = [line for line in result.stdout.splitlines() if line.startswith("   - ")]
     assert listed == [f"   - {victim}"], (
         f"the check must LIST exactly the vanished nodeid {victim!r} as missing, so the "
         f"reader does not have to diff junits; it listed {listed}.\n{result.stdout}"
+    )
+
+
+def test_a_frozen_test_that_only_skips_fails_and_is_named() -> None:
+    """#4215's acceptance shape: the gate spelled as a test-level `pytest.skip(…)`.
+
+    `if os.name == "posix" and sys.platform != "darwin": pytest.skip(…)` keeps the
+    nodeid COLLECTED, so the coverage comparison is satisfied while the test never
+    ran — and every scan for the gate's spelling loses that race. The manifest's
+    OUTCOME half closes it from the run's own report: a file's declared budget is the
+    only skips it may absorb, and anything above that reds, naming the nodeids.
+    """
+    nodeids = _nodeids(EMBEDDED)
+    markers = {n for n in nodeids if n.partition("::")[2] == _module_dotted(n.split("::")[0])}
+    budget = _skip_budget(EMBEDDED)
+    victims = [
+        n for n in sorted(nodeids) if n not in markers and budget.get(n.split("::", 1)[0], 0) == 0
+    ]
+    assert victims, (
+        "every real nodeid in the manifest belongs to a file with a skip budget — this "
+        "test needs one with none, or it exercises the allowance instead of the check"
+    )
+    victim = victims[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        junit = Path(tmp) / "junit.xml"
+        _junit_for(nodeids, junit, skipped={victim})
+        result = _run_guard(EMBEDDED, junit)
+    assert result.returncode != 0, (
+        f"a frozen test ({victim}) was COLLECTED and then SKIPPED and the check stayed "
+        "green — the coverage half cannot see it, and the outcome half must (#4215).\n"
+        f"{result.stdout}"
+    )
+    assert victim in result.stdout, (
+        f"the check must NAME the skipped nodeid {victim!r}; it said:\n{result.stdout}"
+    )
+
+
+def test_the_declared_skip_budget_is_honoured() -> None:
+    """The other direction: the manifest's written budget must not false-red.
+
+    Off darwin the two #3845 fork tests skip by design, and #4215's acceptance
+    requires the check to be able to express exactly that. The budget is READ from the
+    manifest (never pinned here), so this test moves with the declaration instead of
+    becoming a second copy of it.
+    """
+    for manifest in (EMBEDDED, PLATFORM_GATED):
+        nodeids = _nodeids(manifest)
+        budget = _skip_budget(manifest)
+        assert budget, (
+            f"{manifest.name} declares no `# allow-skipped:` budget — the outcome half "
+            "would then red the darwin-gated tests that legitimately skip off darwin "
+            "(#4215's acceptance), so the budget has to be written down"
+        )
+        skipped: set[str] = set()
+        for file, count in budget.items():
+            pinned = [n for n in nodeids if n.split("::", 1)[0] == file]
+            assert len(pinned) >= count, (
+                f"{manifest.name}: the budget for {file} is {count} but only {len(pinned)} "
+                "of its nodeids are pinned — the allowance would be absorbed by tests "
+                "this manifest does not expect"
+            )
+            skipped.update(pinned[:count])
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            _junit_for(nodeids, junit, skipped=skipped)
+            result = _run_guard(manifest, junit)
+        assert result.returncode == 0, (
+            f"{manifest.name}: the manifest's own declared skip budget false-reds. #4215 "
+            f"requires the check to express 'this file legitimately loses {budget} tests "
+            f"off darwin'.\n{result.stdout}\n{result.stderr}"
+        )
+
+
+def test_a_malformed_skip_budget_fails_closed() -> None:
+    """A directive the guard cannot parse must not silently mean 'no budget'.
+
+    The fail-closed direction of the same rule: an unreadable allowance would leave
+    the strict reading in force while the reader believes a budget was declared, so
+    the two disagreeing artifacts would both look fine.
+    """
+    nodeids = _nodeids(EMBEDDED)
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest = Path(tmp) / "manifest.txt"
+        manifest.write_text(
+            "# allow-skipped: tests/test_fork_safety_3845.py = two\n" + "\n".join(nodeids) + "\n"
+        )
+        junit = Path(tmp) / "junit.xml"
+        _junit_for(nodeids, junit)
+        result = _run_guard(manifest, junit)
+    assert result.returncode != 0 and "allow-skipped" in result.stderr, (
+        "an unreadable `# allow-skipped:` directive was ignored — an unknowable budget "
+        f"must not default to 'allow' (fail-closed).\nrc={result.returncode}\n{result.stderr}"
     )
