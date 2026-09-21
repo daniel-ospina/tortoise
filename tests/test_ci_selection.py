@@ -458,6 +458,20 @@ def test_collision_preflight_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_finding_provenance_tool_change_fails_closed_to_full():
+    # #4290: tools/finding_provenance.py owns tests/test_finding_provenance.py.
+    # Same silent-drop class as the collision-preflight carve-out above — the
+    # flat "tools/" NON_PYTHON_PREFIXES entry swallows a tool-only change, so
+    # without a TOOL_CARVEOUTS entry `changed` is empty and the docs-only
+    # return runs tier-1 smoke only: the gate's own falsification suite would
+    # never run on the PR that changes the gate. No SOURCE_PATTERNS entry
+    # matches, so it lands in the unknown-path fail-closed branch -> FULL.
+    r = _sel(["tools/finding_provenance.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_embedded_evidence_tool_change_fails_closed_to_full():
     # #3827: tools/embedded_evidence.py owns tests/test_embedded_evidence.py.
     # Same silent-drop class as the preflight carve-out above: the flat "tools/"
