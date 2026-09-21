@@ -73,12 +73,12 @@ from tortoise.hosted_backup import (
 )
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
-    CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S,
     PROBE_HARD_TIMEOUT,
     PROBE_STALE_AFTER,
     ControlPlaneOffloadError,
     HealthProbe,
     event_retention_interval,
+    graph_offload_timeout_s,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
@@ -1588,14 +1588,16 @@ _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="activation-scorecard")
 
 
-async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
+async def _run_dream_on_pool(fn, sdk_factory, /, *args,
+                             on_submit_failure=None, **kwargs):
     """Run one long dream pass on the dream pool; the helper owns the close.
 
     #3773: ``sdk_factory`` builds the SDK INSIDE the worker thread — building
     it on the loop made its connect / embedded anchor probe on-loop work
     immediately before the pass. ``fn`` receives the built SDK as its FIRST
     argument. (The REST ``dream`` handler already holds an SDK it built through
-    the #3773 graph-pool seam, and passes ``lambda: sdk``.)
+    the #3773 graph-pool seam, and passes ``lambda: sdk`` plus
+    ``on_submit_failure=sdk.close``.)
 
     #3718 (code review): the pass AND the close are ONE worker hand-off.
     Letting the coroutine's ``finally`` close instead runs the close on the
@@ -1607,22 +1609,25 @@ async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
     reading.
 
     The close therefore travels WITH THE WORK ITEM rather than with the
-    future: the submitted closure closes ``sdk`` in its own ``finally``, so
-    whoever ends up running the pass closes the SDK exactly once — on the
-    worker thread, so a cancellation can no longer tear the SDK down mid-pass,
-    and no caller can forget it (``TortoiseSDK.close()`` is idempotent —
-    ``_t_closed``).
+    future: the submitted closure builds and closes the SDK in its own
+    ``finally``, so whoever runs the pass closes it exactly once — on the
+    worker thread, so a cancellation cannot tear the SDK down mid-pass
+    (``TortoiseSDK.close()`` is idempotent — ``_t_closed``).
+
+    ``on_submit_failure`` is the one path the item's close cannot cover: if
+    ``_submit_off_loop`` raises BEFORE the item is enqueued (executor shutdown,
+    "can't start new thread"), the factory never runs — fine for the factory
+    caller — but a PRE-BUILT-SDK caller (``lambda: sdk``) would strand that
+    SDK. The caller that owns the SDK passes its ``close``, so the close is
+    still owned end-to-end. It must NOT be used to close on cancellation (that
+    is the loop-side close under a running pass this design removes).
 
     Why not ``add_done_callback`` on the future — the first shape of this
     change, corrected in review: ``ThreadPoolExecutor.submit`` puts the work
     item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't start
     new thread", so a submit ``RuntimeError`` does NOT prove the pass never
-    ran. Closing there could tear the SDK down under a pass the pool had
-    already picked up, and the never-attached callback would leak the SDK if
-    the worker re-opened the projection. Attaching the close to the ITEM makes
-    the submit outcome irrelevant; the ``except BaseException`` below covers
-    the other half (item never enqueued), and a duplicate close is a no-op, so
-    both cases are safe.
+    ran. ``on_submit_failure`` fires only when ``_submit_off_loop`` itself
+    raises (the item was never accepted); a duplicate close is a no-op.
     """
     def _pass_and_close():
         sdk = sdk_factory()
@@ -1631,7 +1636,12 @@ async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
         finally:
             sdk.close()
 
-    cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
+    try:
+        cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
+    except BaseException:
+        if on_submit_failure is not None:
+            on_submit_failure()
+        raise
     return await asyncio.wrap_future(cfut)
 
 
@@ -4760,13 +4770,16 @@ async def _graph_offload(fn, *, op: str):
     ``_dream_worker`` builds its SDK inside the dream-pool item instead — see
     ``_run_dream_on_pool``.)
 
-    Wait bound: the graph lane has its OWN bound,
-    ``CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S``, deliberately ABOVE the probe
-    lane's ``PROBE_SETUP_TIMEOUT`` — a cold projection open is a legitimate
-    ~28-round-trip phase the seam's PostgREST-derived 10 s default would
-    false-degrade into a retryable 503. A bound miss abandons the worker
-    (CPython #87185), which keeps holding its pool slot until it returns; the
-    bound is therefore set for a genuinely wedged graph, not a cold one.
+    Wait bound: the graph lane's bound is resolved at CALL time as
+    ``graph_offload_timeout_s()`` = ``probe_setup_timeout()`` + a margin,
+    deliberately ABOVE the probe lane's own projection cold-start allowance —
+    a cold projection open is a legitimate ~28-round-trip phase the seam's
+    PostgREST-derived 10 s default would false-degrade into a retryable 503.
+    Resolving it at call time (not from the frozen default) means raising
+    ``TORTOISE_PROBE_SETUP_TIMEOUT`` cannot invert the ordering. A bound miss
+    abandons the worker (CPython #87185), which keeps holding its pool slot
+    until it returns; the bound is therefore set for a genuinely wedged graph,
+    not a cold one.
 
     Context isolation: the callable runs under a COPY of the caller's context.
     ``_data_sdk`` sets the #2600 actor ContextVar, and a pool thread is
@@ -4785,7 +4798,7 @@ async def _graph_offload(fn, *, op: str):
     ctx = contextvars.copy_context()
     return await _cp_offload(
         functools.partial(ctx.run, fn), op=op, pool="graph",
-        timeout=CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S,
+        timeout=graph_offload_timeout_s(),
         unavailable=_graph_unavailable)
 
 
@@ -5492,7 +5505,8 @@ async def dream(
                 sdk._mark_dirty(queued_roots)
             return sdk.dream(dirty_only=True)
 
-    return await _run_dream_on_pool(_run_dream, lambda: sdk)
+    return await _run_dream_on_pool(_run_dream, lambda: sdk,
+                                    on_submit_failure=sdk.close)
 
 
 @app.get("/v1/dream/health")

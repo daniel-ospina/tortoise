@@ -731,27 +731,40 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #:
 #: Occupancy disclosure (the #3669-cycle-2 "not hidden" rule): each WRITE
 #: consumes TWO sequential submissions here (the quota count, then the SDK
-#: open), the write-triggered ``_dream_worker`` shares the same slots, and the
-#: graph-bound ``_data_sdk`` path reaches a blocking CONTROL-plane PostgREST
-#: read (``_assert_graph_owned`` -> ``get_control_plane().query("graphs")``), so
-#: a control-plane stall parks a graph slot here and a bound miss on that read
-#: reports ``graph_unavailable``. Routing the ownership probe through the
-#: control-plane pool is a follow-up; the shared-capacity shape is accepted.
+#: open), and the REST ``/v1/dream`` handler's SDK open also submits here. The
+#: write-triggered ``_dream_worker`` does NOT (it builds inside the
+#: ``_DREAM_EXECUTOR`` item). The graph-bound ``_data_sdk`` path reaches a
+#: blocking CONTROL-plane PostgREST read (``_assert_graph_owned`` ->
+#: ``get_control_plane().query("graphs")``), so a control-plane stall parks a
+#: graph slot here and a bound miss on that read reports ``graph_unavailable``.
+#: Routing the ownership probe through the control-plane pool is a follow-up;
+#: the shared-capacity shape is accepted.
 CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
 CONTROL_PLANE_GRAPH_WORKERS = 8
 CONTROL_PLANE_GRAPH_BACKLOG = 128
 
-#: Wait bound for ONE offloaded DATA-PLANE graph helper (#3773). Deliberately
-#: ABOVE the probe lane's own projection cold-start allowance
-#: (``PROBE_SETUP_TIMEOUT``): ``_data_sdk``'s embedded anchor probe and
-#: ``_check_org_limit``'s count query can each open a COLD projection (connect +
-#: version probe + ``_ensure_indexes()`` — ~28 sequential round trips), which
-#: the repo already budgets at ``PROBE_SETUP_TIMEOUT`` precisely so a normal
-#: round-trip bound does not false-degrade it (#3143). The seam's PostgREST-
-#: derived 10 s default would 503-retry a merely-cold first write. Still
-#: bounded and fail-fast for a genuinely wedged graph; the ordering against
-#: ``PROBE_SETUP_TIMEOUT`` is pinned by a test.
-CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S = PROBE_SETUP_TIMEOUT + 10.0
+#: Margin added to the projection cold-start allowance for the DATA-PLANE graph
+#: lane (#3773). The bound is resolved at CALL time (``graph_offload_timeout_s``)
+#: from ``probe_setup_timeout()``, NOT from the frozen import-time default: an
+#: operator who raises ``TORTOISE_PROBE_SETUP_TIMEOUT`` for a large/cold graph
+#: must not make the graph lane fall BELOW the allowance it is meant to cover
+#: (which would 503-retry a merely-cold first write — the #3143 false-degrade
+#: class). The ordering is pinned by a test against the RESOLVED value.
+CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S = 10.0
+
+
+def graph_offload_timeout_s() -> float:
+    """#3773: the DATA-PLANE graph lane's wait bound, resolved at CALL time.
+
+    ``_data_sdk``'s embedded anchor probe and ``_check_org_limit``'s count query
+    can each open a COLD projection (connect + version probe +
+    ``_ensure_indexes()`` — ~28 sequential round trips), which the probe lane
+    already budgets via ``probe_setup_timeout()``. The graph lane's bound is
+    that resolved allowance PLUS a margin, so a cold first write is never
+    abandoned and 503'd. Still bounded and fail-fast for a genuinely wedged
+    graph.
+    """
+    return probe_setup_timeout() + CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S
 
 #: Wait bound for ONE offloaded control-plane resolution. Sits ABOVE a normal
 #: round-trip's several phases but below the edge/proxy budget, so a

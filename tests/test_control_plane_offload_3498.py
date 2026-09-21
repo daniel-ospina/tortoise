@@ -309,19 +309,22 @@ def test_graph_pool_is_separate_from_all_other_pools():
     assert graph.workers == monitoring.CONTROL_PLANE_GRAPH_WORKERS
 
 
-def test_graph_bound_sits_above_the_projection_cold_start_allowance():
+def test_graph_bound_sits_above_the_projection_cold_start_allowance(monkeypatch):
     """#3773: the graph lane's wait bound must sit ABOVE the probe lane's own
     projection cold-start allowance. ``_make_sdk`` / ``_get_proj()`` can open a
-    COLD projection (~28 sequential round trips), which the repo budgets at
-    ``PROBE_SETUP_TIMEOUT`` precisely so a round-trip bound does not
-    false-degrade it (#3143). The seam's PostgREST-derived 10 s default would
-    503-retry a merely-cold first write — so the graph lane has its own bound
-    and this pins the ordering (the CIMD sibling is
+    COLD projection (~28 sequential round trips), which the repo budgets via
+    ``probe_setup_timeout()`` precisely so a round-trip bound does not
+    false-degrade it (#3143). The graph bound is derived from the RESOLVED
+    allowance at call time, so raising ``TORTOISE_PROBE_SETUP_TIMEOUT`` cannot
+    invert the ordering (the CIMD sibling is
     ``test_fetch_deadline_sits_below_the_offload_bound``)."""
-    assert (monitoring.CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S
-            > monitoring.PROBE_SETUP_TIMEOUT), (
+    assert (monitoring.graph_offload_timeout_s()
+            > monitoring.probe_setup_timeout()), (
         "the graph offload bound fell to/below the projection cold-start "
         "allowance — a cold first write would be abandoned and 503'd (#3143)")
+    monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "120")
+    assert (monitoring.graph_offload_timeout_s()
+            > monitoring.probe_setup_timeout())
 
 
 def test_graph_offload_routes_to_the_graph_pool(monkeypatch):
@@ -352,8 +355,8 @@ def test_graph_offload_maps_failure_to_the_graph_503(monkeypatch):
     client can retry — NOT the sign-in-specific ``control_plane_unavailable``
     body the auth/REST lane uses, which would mislead a client retrying a
     graph write. The graph lane's OWN bound is what applies (not the seam's
-    PostgREST default), so patch that constant."""
-    monkeypatch.setattr(ha, "CONTROL_PLANE_GRAPH_OFFLOAD_TIMEOUT_S", 0.05)
+    PostgREST default), so patch the resolver."""
+    monkeypatch.setattr(ha, "graph_offload_timeout_s", lambda: 0.05)
 
     async def _run():
         await ha._graph_offload(lambda: time.sleep(0.4), op="graph-slow")

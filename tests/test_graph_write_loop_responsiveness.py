@@ -276,6 +276,39 @@ def test_offloaded_data_sdk_binds_the_actor_for_the_write(monkeypatch):
         "the actor did not reach the worker thread the write runs in")
 
 
+def test_dream_pool_submit_failure_closes_a_prebuilt_sdk(monkeypatch):
+    """#3773 (code-review round 2): the REST dream path passes a PRE-BUILT SDK.
+
+    If the dream-pool submit raises BEFORE the item is enqueued, the item's own
+    ``finally`` close cannot run — so the caller that owns the SDK must supply
+    ``on_submit_failure`` or the SDK (and its projection) is stranded. The
+    factory path is safe without it (the factory never runs).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    class _Sdk:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    sdk = _Sdk()
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(ha_mod, "_submit_off_loop", _boom)
+
+    async def _run():
+        await ha_mod._run_dream_on_pool(
+            lambda _s: None, lambda: sdk, on_submit_failure=sdk.close)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(_run())
+    assert sdk.closed == 1, "a submit failure stranded the pre-built SDK"
+
+
 async def _quiesce_dream_drain() -> None:
     """Cancel and drop this org's dream drain INSIDE the loop that owns it.
 
