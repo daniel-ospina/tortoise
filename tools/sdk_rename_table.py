@@ -34,11 +34,13 @@ Derived (computed, never typed):
 Authored (a design decision, reviewed once):
   * which target each group collapses to, and the handful of per-method exceptions;
   * the citation for each row — a `(doc, quote)` pair whose quote is **verified to be a
-    substring of the cited doc at build time**, so a citation cannot drift either.
+    substring of the cited doc AND to be a maximal one at build time**: a quote may not
+    stop mid-clause, because that is where a truncation can drop the very clause that
+    contradicts it (`… → `manage_source_trust`` used to drop `; reads via `list_sources``).
 
 The generator **FAILS** (it does not paper over) if the map and the SDK disagree, if the
 canonical partition does not cover the public surface exactly, or if a citation's quote
-is no longer in the doc it names.
+is no longer in the doc it names **or is a truncation of it**.
 
 USAGE
     uv run python tools/sdk_rename_table.py            # write the doc
@@ -89,7 +91,8 @@ UNBACKED_REASON = {
 # ─────────────────────────────────────────────────────────────────────
 # CITATIONS. A citation is only real if the doc still says it, so each
 # `quote` is verified as a literal substring of the named doc at build time
-# (`_validate`). A row is *stated* when its quote NAMES the method and *derived*
+# (`_validate`) AND required to be MAXIMAL — not a right-truncation of a longer match
+# (`_maximal`). A row is *stated* when its quote NAMES the method and *derived*
 # otherwise — the basis is COMPUTED from the quote by `_names`, never authored
 # beside it. An authored `named` set was the earlier design and let a row claim
 # `stated` while its quote named a different method; the two can no longer diverge
@@ -105,22 +108,33 @@ CITES: dict[str, tuple[str, str]] = {
                         "`suggest_entry_points`, `search_sessions`, `issue_insight`, "
                         "`topic_summarize`, `annotate_ask_hits` |"),
     "r3": (BETA, "| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, "
-                 "`calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence`"),
+                 "`calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence` "
+                 "for the confidence view; **`recall_subgraph` is dropped, not folded** "
+                 "— `explore_connections` answers that question. The gaps question is "
+                 "flagged in \"Named but not solved\". |"),
     "r3_restore": (BETA, "| `restore_point_at` | → row 7 **`get_historical_knowledge`**."),
-    "r3_drop_subgraph": (BETA, "**`recall_subgraph` is dropped, not folded**"),
+    "r3_drop_subgraph": (BETA, "**`recall_subgraph` is dropped, not folded** — "
+                                "`explore_connections` answers that question. The gaps "
+                                "question is flagged in \"Named but not solved\". |"),
     "r3_context": (BETA, "| `provenance`, `belief_timeline`, `session_context`, "
-                         "`volunteer_context` | 4 | → `check_confidence`"),
+                         "`volunteer_context` | 4 | → `check_confidence` where they are "
+                         "confidence context; `poll_events` where they are a timeline. |"),
     "r3_canon": (CANON, "| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, "
                         "`recall_subgraph`, `retrieval_legs`, `volunteer_context`, "
-                        "`session_context`, `get_confidence`"),
+                        "`session_context`, `get_confidence`, `calibrate_summary`, "
+                        "`calibration_passed`, `get_provenance_chain`, `provenance`, "
+                        "`belief_timeline`, `restore_point_at` |"),
     "r4": (BETA, "| narrow readers (`get_session`, `get_events`, `get_owned_entities`, "
-                 "`get_provenance_chain`, …) | ~8 | → `get_entity`"),
+                 "`get_provenance_chain`, …) | ~8 | → `get_entity`, except where a "
+                 "genuinely different shape is returned. |"),
     "r4_canon": (CANON, "| R4 | `get_entity` | #4 | `get_point`, `get_entity`, "
                         "`get_session`, `get_events`, `resolve_id` |"),
     "r5": (BETA, "| `traverse`, `expand_relationships`, `get_org_structure` | 3 | "
                  "→ `explore_connections`. |"),
     "r6": (BETA, "| `audit`, `validate_domain`, `summarize_structure`, "
-                 "`dream_health_check`, `dream_health_state` | ~5 | → `graph_overview`"),
+                 "`dream_health_check`, `dream_health_state` | ~5 | → `graph_overview` "
+                 "where they are orientation. The diagnostics are the held question "
+                 "above. |"),
     "r6_aliases": (BETA, "narrow aliases absorbed by `graph_overview` — `taxonomy`, "
                          "`list_pointkinds`, `list_tags`, `list_namespaces`, "
                          "`list_graphs`, `status`, `stale`, `check_structure`, "
@@ -128,7 +142,10 @@ CITES: dict[str, tuple[str, str]] = {
     "r6_test_guard": (BETA, "| `test_guard` | **Kept and relocated.**"),
     "r6_canon": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "
                         "`list_pointkinds`, `list_sources`, `list_tags`, "
-                        "`list_namespaces`, `list_relations`"),
+                        "`list_namespaces`, `list_relations`, `list_topics`, "
+                        "`list_graphs`, `stale_points`, `summarize_structure`, "
+                        "`check_structure`, `audit`, `validate_domain`, "
+                        "`dream_health_check`, `dream_health_state`, `test_guard` |"),
     "r6_list_sources": (BETA, "| `list_sources` | **Not discarded.** Present at "
                               "`tortoise/sdk.py` with an MCP tool and a CLI command "
                               "(`tortoise/__main__.py`), and it is covered by "
@@ -155,8 +172,12 @@ CITES: dict[str, tuple[str, str]] = {
     "w4": (BETA, "| `ingest_corpus`, `index_file`, `session_index_health` | 3 | "
                  "→ `index_sources_from_directory`. |"),
     "w4_rename": (BETA, "| `index_sources` (bare) | 1 | Renamed → "
-                        "`index_sources_from_directory`"),
-    "w4_canon": (CANON, "| W4 | `index_files` | #12 | `index_file`, `index_directory`"),
+                        "`index_sources_from_directory`, so the index/mine distinction "
+                        "is unmissable. |"),
+    "w4_canon": (CANON, "| W4 | `index_files` | #12 | `index_file`, `index_directory`, "
+                        "`ingest_corpus`, `index_sessions`, `mine_corpus`, "
+                        "`reconcile_sessions`, `session_index_health`, "
+                        "`backfill_about_entities` |"),
     "w4_mine": (BETA, "| `mine_corpus` | 1 | → `mine_knowledge_from_directory`."),
     "w4_index_sessions": (CANON, "| `index_sessions` / `ingest_corpus` → "
                                  "`index_directory` |"),
@@ -164,24 +185,31 @@ CITES: dict[str, tuple[str, str]] = {
     "w6": (BETA, "| `capture_session` / `commit_session` | → row 16 "
                  "`mine_knowledge_from_session`, one method."),
     "w8": (BETA, "| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | "
-                 "→ `manage_source_trust`"),
+                 "→ `manage_source_trust` for the setter; reads via `list_sources`. |"),
     "w8_backfill": (BETA, "| `backfill_v25`, `backfill_sources`, "
                           "`backfill_about_entities`, `reconcile_sessions` | 4 | "
                           "One-shot migrations."),
     "w9": (BETA, "| `create_operator`, `create_direct_edge`, `create_derivation`, "
-                 "`link_source_to_entity` | 4 | → `link_entities`"),
-    "w9_canon": (CANON, "| W9 | `link_entities` | #15 | `create_edge`,"),
+                 "`link_source_to_entity` | 4 | → `link_entities`, which dispatches on "
+                 "the relation. |"),
+    "w9_canon": (CANON, "| W9 | `link_entities` | #15 | `create_edge`, "
+                        "`create_derivation`, `link_source_to_entity`, `create_operator`, "
+                        "`create_direct_edge` |"),
     "w10": (BETA, "| `file_human_approval` | 1 | → `record_decision`. |"),
     "w10_file_decision": (BETA, "| `file_decision` | → rows 20/21 **`write_question`** "
                                 "+ **`record_decision`**."),
     "w11": (BETA, "| `update_point`, `update_entity` | 2 | → `update_knowledge`. |"),
-    "w11_canon": (CANON, "| W11 | `revise_knowledge` | #17 | `update`,"),
+    "w11_canon": (CANON, "| W11 | `revise_knowledge` | #17 | `update`, "
+                         "`update_point`, `update_entity`, `supersede`, `supersede_point`, "
+                         "`invalidate_point`, `retract_point`, `promote_point`, "
+                         "`set_point_baseline`, `list_drafts`, `quarantine_batch` |"),
     "w11_supersede": (BETA, "| `supersede`, `supersede_point` | 2 | "
                             "→ `supersede_knowledge`."),
     "w11_retract": (BETA, "| `retract_point`, `invalidate_point` | 2 | → fields on "
                           "`update_knowledge`."),
     "w11_lifecycle": (BETA, "| `promote_point`, `set_point_baseline`, `list_drafts`, "
-                            "`quarantine_batch` | 4 | Lifecycle and confidence wrangling"),
+                            "`quarantine_batch` | 4 | Lifecycle and confidence wrangling "
+                            "— reachable through the canonical two. |"),
     "w12": (BETA, "| `delete_point`, `delete_point_wrapped` | 2 | "
                   "→ `delete_knowledge`. |"),
     "w12_canon": (CANON, "| W12 | `delete_knowledge` | #18 | `delete`, "
@@ -191,10 +219,17 @@ CITES: dict[str, tuple[str, str]] = {
                         "`compute_confidence`, `compute_reputation`, "
                         "`record_calibration` |"),
     "w15": (BETA, "| `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | "
-                  "→ `adjust_relationship`"),
+                  "→ `adjust_relationship` for strength, `update_knowledge` for "
+                  "annotation. `operator_action(**kwargs)` currently **accepts and "
+                  "silently ignores** `credibility` — a bug. |"),
     "w17_ulid": (BETA, "| `ulid` | 1 | A ULID generator. Not a memory operation. |"),
     "unchanged4": (BETA, "current SDK (`create_entity`, `get_entity`, `approve_merge`, "
-                         "`close`)"),
+                         "`close`). The MCP column names the *target* tool. None of the "
+                         "26 exists verbatim — every registered MCP tool carries a "
+                         "`tortoise_` prefix — and only **4** (`create_entity`, "
+                         "`get_entity`, `approve_merge`, `graph_set_recording`) have a "
+                         "prefixed equivalent. So it is **26 of 26 by name**, or **22 of "
+                         "26** if you normalise the prefix."),
     # ── Control plane ───────────────────────────────────────────────
     "n1_console": (BETA, "| `org_update`, `org_delete`, `membership_get`, "
                          "`membership_update_role`, `apikey_verify` | 5 | "
@@ -222,7 +257,8 @@ CITES: dict[str, tuple[str, str]] = {
                       "graph."),
     "n5_invite": (BETA, "| `invitation_*` (6) | 6 | The invite **UX** belongs to the "
                         "console, where a human clicks it. |"),
-    "n6_signup": (BETA, "| `signup_token_*` (3) | 3 | Operator-side agent self-signup"),
+    "n6_signup": (BETA, "| `signup_token_*` (3) | 3 | Operator-side agent self-signup — "
+                        "our provisioning, not product surface. |"),
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -315,8 +351,13 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "index_sessions": ("index_sources_from_directory", "w4_index_sessions"),
     "backfill_about_entities": (DISCARDED, "w8_backfill"),
     "reconcile_sessions": (DISCARDED, "w8_backfill"),
-    # W8
+    # W8 — the beta row splits the group: the setter and the assessment fold into
+    # `manage_source_trust`, the *read* goes to `list_sources` (which the beta doc
+    # folds into `list_knowledge(kind='source')`). The canonical W8 grouping puts all
+    # three under `manage_source_trust` and calls `get_source_reliability` a writer;
+    # that conflict is recorded in C3.
     "backfill_sources": (DISCARDED, "w8_backfill"),
+    "get_source_reliability": ("list_knowledge", "w8"),
     # W9 — the one member the beta collapse row does not name.
     "create_edge": ("link_entities", "w9_canon"),
     # W10
@@ -340,6 +381,11 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "compute_confidence": ("refresh_confidence", "w13_canon"),
     "compute_reputation": (UNBACKED, ""),
     "record_calibration": (UNBACKED, ""),
+    # W15 — the beta collapse row splits by clause: strength to `adjust_relationship`,
+    # annotation to `update_knowledge` (and beta's target row 25 repeats it: “Annotating
+    # a link is `update_knowledge` on it”). The canonical W15 grouping puts all three
+    # under `adjust_relationship`; that conflict is recorded in C3.
+    "annotate_operator": ("update_knowledge", "w15"),
     # W17
     "close": (UNCHANGED, "unchanged4"),
     # N1 — the five the beta doc files as console plumbing.
@@ -389,6 +435,12 @@ TENSIONS: list[tuple[str, str, str]] = [
     ("list_sources", "`graph_overview`", "t_r6"),
     ("test_guard", "`graph_overview`", "t_r6"),
     ("graph_set_recording", "kept, inside the control-plane block", "t_n2"),
+    # The beta row 258 splits W8: reads go to `list_sources`; the canonical W8 row keeps
+    # `get_source_reliability` on `manage_source_trust`. Part A carries beta's read.
+    ("get_source_reliability", "`manage_source_trust`", "t_w8"),
+    # The beta row 244 splits W15: annotation goes to `update_knowledge`; the canonical
+    # W15 row keeps `annotate_operator` on `adjust_relationship`. Part A carries beta.
+    ("annotate_operator", "`adjust_relationship`", "t_w15"),
 ]
 TENSION_CITES: dict[str, tuple[str, str]] = {
     "t_r3": (CANON, "| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, "
@@ -408,6 +460,11 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
                     "`graph_restore`, `trash_graphs`, `graph_set_name`, "
                     "`graph_set_recording`, `graph_key_ids`, "
                     "`graph_active_key_count` |"),
+    "t_w8": (CANON, "| W8 | `manage_source_trust` | #14 | `assess_source`, "
+                    "`set_source_tier`, `get_source_reliability`, `backfill_sources` | "
+                    "keep — **`get_source_reliability` writes** |"),
+    "t_w15": (CANON, "| W15 | `adjust_relationship` | #21 | `operator_action`, "
+                     "`mitigate_operator`, `annotate_operator` | keep, collapse |"),
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -433,7 +490,8 @@ PHANTOM_CITES: dict[str, tuple[str, str]] = {
                             "for any real N. |"),
     "p_set_name": (BETA, "| `set_memory_graph_name`, `set_memory_graph_backend`, "
                          "`count_memory_graphs` | 3 | See \"Provisioning\" above. |"),
-    "p_withdraw": (BETA, "| `withdraw_knowledge` | 1 | **Never existed**"),
+    "p_withdraw": (BETA, "| `withdraw_knowledge` | 1 | **Never existed** — removed from "
+                         "the plan. Retraction is a field on `update_knowledge`. |"),
 }
 
 
@@ -523,6 +581,36 @@ def _names(quote: str, method: str) -> bool:
     """
     return re.search(rf"(?<![A-Za-z0-9_]){re.escape(method)}(?![A-Za-z0-9_])",
                      quote) is not None
+
+
+# A quote is MAXIMAL when it stops at a region boundary rather than mid-clause. The
+# failure this guards against is a quote cut off exactly where the source contradicts
+# it: `… → `manage_source_trust`` keeping the target and dropping `; reads via
+# `list_sources``. `quote in text` cannot see that — a truncated prefix of a real
+# sentence is still a real substring — so the citation check passes while the evidence
+# has been edited to agree with the row.
+_REGION_END = re.compile(r"[.!?][\"')\]\u201d`*_]*$")
+
+
+def _maximal(quote: str, text: str) -> bool:
+    """Is `quote` a maximal region of `text` — not a right-truncation of one?
+
+    True when the match ends at a table-cell/row boundary (`|`), at a line end, at the
+    end of the document, or at a sentence boundary. A quote that stops mid-clause is
+    rejected, because the cut is exactly where a contradiction can hide.
+
+    Sentence boundaries count on purpose: the rule exists to stop a quote MID-clause,
+    not to force every quote to span a whole table row.
+    """
+    idx = text.find(quote)
+    if idx < 0:
+        return True  # absent text is CITATION DRIFT, reported by its own check
+    after = text[idx + len(quote):]
+    if after == "" or after.startswith("\n"):
+        return True
+    if quote.endswith("|"):
+        return True
+    return _REGION_END.search(quote) is not None
 
 
 def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
@@ -624,6 +712,14 @@ def _validate(methods: dict[str, int], groups: dict[str, list[str]],
         if quote not in text:
             errs.append(f"CITATION DRIFT: {key} quotes {doc} but that text is gone: "
                         f"{quote[:70]!r}")
+        elif not _maximal(quote, text):
+            after = text[text.find(quote) + len(quote):][:60]
+            errs.append(
+                f"CITATION TRUNCATED: {key}'s quote stops mid-clause — the source "
+                f"continues {after!r}, which can contradict the row this quote backs. "
+                f"A quote must end at a cell/row boundary, a line end, the document "
+                f"end, or a sentence end."
+            )
 
     # 5. A phantom must NOT have a def — that is the whole finding.
     for name, _referent, _key in PHANTOMS:
@@ -664,8 +760,9 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "`docs/product/beta-sdk-surface.md`** (owner-approved 2026-09-21), and the "
         "R/W/N group partition out of `docs/product/canonical-sdk-methods.md`; every "
         "count below is arithmetic over those, never a typed number. Each row's citation "
-        "quote is **verified to still be in the doc it names** — a citation that no "
-        "longer resolves fails the build.",
+        "quote is **verified to still be in the doc it names** and to be **maximal** — a "
+        "citation that no longer resolves, or that stops mid-clause (where a truncation "
+        "can drop the clause that contradicts the row), fails the build.",
         "",
         "**This is the SDK half of the rename table.** The MCP half (current tool → "
         "target tool) is `docs/product/bridge-table.md` (Phase 0.1), plus a sibling "
