@@ -867,6 +867,25 @@ def _git(*args: str, cwd: Path | None = None) -> str:
     return proc.stdout.strip()
 
 
+def _worktree_at(ref: str, run_root: Path, name: str) -> tuple[Path, bool]:
+    """Materialize `ref` for measurement, WITHOUT disturbing the invoking checkout.
+
+    Returns `(root, added)`. When `ref` is already this checkout's HEAD the tree
+    itself is measured (`added=False`); otherwise a detached worktree is created
+    under `run_root`. Two callers need this: the `--ref` measurement and the
+    `--pairing-ref` baseline red re-run (D16) — both must measure a ref that may
+    not be checked out, and neither may touch the tree it is comparing against.
+    """
+    if ref == _git("rev-parse", "HEAD"):
+        return REPO_ROOT, False
+    wt = run_root / name
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(wt), ref],
+        capture_output=True, text=True, cwd=str(REPO_ROOT), check=True,
+    )
+    return wt, True
+
+
 def _porcelain_digest(cwd: Path, exclude: Path | None = None) -> tuple[str, bool]:
     status = _git("status", "--porcelain=v2", cwd=cwd)
     diff = _git("diff-index", "HEAD", cwd=cwd)
@@ -1149,15 +1168,7 @@ def _build_record(args: argparse.Namespace) -> dict:
     worktree_added = False
     if args.ref:
         requested_ref = _git("rev-parse", f"{args.ref}^{{commit}}")
-        head = _git("rev-parse", "HEAD")
-        if requested_ref != head:
-            wt = run_root / "worktree"
-            subprocess.run(
-                ["git", "worktree", "add", "--detach", str(wt), requested_ref],
-                capture_output=True, text=True, cwd=str(REPO_ROOT), check=True,
-            )
-            measured_root = wt
-            worktree_added = True
+        measured_root, worktree_added = _worktree_at(requested_ref, run_root, "worktree")
     commit = _git("rev-parse", "HEAD", cwd=measured_root)
     tree = _git("rev-parse", "HEAD^{tree}", cwd=measured_root)
 
