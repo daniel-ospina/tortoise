@@ -586,13 +586,28 @@ def _install_redacting_excepthook() -> None:
     ``sys.excepthook`` and print the traceback themselves (measured at review:
     the credential reached stderr verbatim from a thread and from an atexit
     callback with only ``sys.excepthook`` installed). All THREE are replaced
-    here, sharing one redactor — so this really does cover every uncaught path
+    here, sharing one redactor — so every uncaught EXCEPTION path is covered
     (today's ``seed_timing``, any future one, an off-main-thread fault, and a
-    teardown fault), not one call site. The hooks' METADATA lines (a thread
-    name, an unraisable ``err_msg``) are redacted too, not just the traceback.
+    teardown fault), not one call site. ``SystemExit`` is NOT routed here —
+    CPython prints it itself — so a ``SystemExit`` message must be static (every
+    one this tool raises is) or redacted at its raise site.
+
+    The hooks' METADATA lines are redacted too, not just the traceback: a
+    thread NAME, an unraisable ``err_msg``, and the unraisable object ``repr``
+    the default hook prints when ``err_msg`` is absent (the ``__del__`` path).
+
+    ⚠️ NOT redacted, deliberately: the substrate URI's PATH / QUERY / FRAGMENT.
+    The path is the documented GRAPH-NAME slot, not a credential slot, and
+    registering a leaf such as ``g`` would substitute every ``g`` in every
+    receipt string and every diagnostic line. Documented limitation: a value
+    that puts a credential in the graph-name slot is not registered as its own
+    token, so text quoting ONLY that leaf would not be redacted. No carrier in
+    this tool echoes the leaf alone (measured: the SDK's connection and auth
+    errors name the endpoint, not the graph, and the seed/ask path never names
+    the scratch graph).
 
     Installed by :func:`main`. The traceback SHAPE is preserved — type, frames
-    and message — so the diagnostic survives; only the credential tokens are
+    and message — so the diagnostic survives; only credential tokens are
     substituted.
     """
     def _emit(exc_type, exc, tb) -> None:
@@ -604,19 +619,30 @@ def _install_redacting_excepthook() -> None:
 
     def _thread_hook(args) -> None:
         name = getattr(getattr(args, "thread", None), "name", None) or "?"
-        # The METADATA line goes through the redactor too: a worker thread can
-        # be named after the substrate (a ``thread_name_prefix`` derived from a
-        # graph leaf), and a raw interpolation would put it on stderr while the
-        # traceback beneath it was redacted.
+        # The METADATA line goes through the redactor too: a thread can be
+        # named after a substrate-derived value (a ``thread_name_prefix`` built
+        # from anything the URI carried), and a raw interpolation would put it
+        # on stderr while the traceback beneath it was redacted.
         sys.stderr.write(_redact_substrate_text(
             f"Exception in thread {name}:\n"))
         _emit(args.exc_type, args.exc_value, args.exc_traceback)
 
     def _unraisable_hook(unraisable) -> None:
-        # ``err_msg`` embeds an object ``repr`` — redact it for the same reason.
+        # MIRROR THE DEFAULT HOOK's metadata line, which has TWO forms: it
+        # prints ``err_msg`` when that is set, and otherwise
+        # ``Exception ignored in: <object repr>`` (the ``__del__``/GC path —
+        # the teardown class this hook exists for). Emitting only the
+        # ``err_msg`` form silently dropped a whole diagnostic line; and the
+        # repr lives on ``unraisable.object``, NOT in ``err_msg``. The repr is
+        # redacted, because an object repr can name the endpoint.
         if unraisable.err_msg:
-            sys.stderr.write(_redact_substrate_text(
-                f"{unraisable.err_msg}\n"))
+            meta = unraisable.err_msg
+        elif unraisable.object is not None:
+            meta = f"Exception ignored in: {unraisable.object!r}"
+        else:  # pragma: no cover — CPython always supplies ``object``
+            meta = ""
+        if meta:
+            sys.stderr.write(_redact_substrate_text(f"{meta}\n"))
         _emit(unraisable.exc_type, unraisable.exc_value,
               unraisable.exc_traceback)
 
@@ -1933,10 +1959,12 @@ def _write_receipt(args, receipt: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # FIRST statement: every uncaught path from here on (seed_timing, an SDK
-    # connection failure, any future one) emits a REDACTED traceback — the
-    # round-5 finding was this channel leaking the substrate credential into
-    # stderr / CI logs.
+    # FIRST statement: every uncaught EXCEPTION path from here on (seed_timing,
+    # an SDK connection failure, any future one) emits a REDACTED traceback —
+    # the round-5 finding was this channel leaking the substrate credential
+    # into stderr / CI logs. ``SystemExit`` is not routed here (CPython prints
+    # it itself); every ``SystemExit`` this tool raises carries a static,
+    # credential-free message.
     _install_redacting_excepthook()
     ap = argparse.ArgumentParser(
         description="B6/objective-4 D3 answer-shape instrument (shape_rate). "

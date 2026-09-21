@@ -434,6 +434,7 @@ def test_the_hook_redacts_its_metadata_lines_too(monkeypatch, capsys):
             exc_type = ConnectionError
             exc_value = ConnectionError("boom")
             exc_traceback = None
+            object = None
             err_msg = f"Exception ignored in: <redis connection to {secret}>"
 
         sys.unraisablehook(_Unraisable())
@@ -445,3 +446,38 @@ def test_the_hook_redacts_its_metadata_lines_too(monkeypatch, capsys):
     # redacted, not suppressed — the metadata shape survives
     assert "Exception in thread graph-" in err
     assert "Exception ignored in:" in err
+
+
+def test_the_hook_keeps_the_unraisable_object_repr_line(monkeypatch, capsys):
+    """The default ``sys.unraisablehook`` has TWO metadata forms: ``err_msg``
+    when set, and ``Exception ignored in: <object repr>`` otherwise (the
+    ``__del__``/GC path — the teardown class the hook exists for). Emitting
+    only the ``err_msg`` form silently DROPPED a whole diagnostic line, which
+    is more than the "only credential tokens are substituted" claim allows."""
+    secret = "S3cret-Pa55w0rd"
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+    saved = sys.unraisablehook
+    try:
+        _install_redacting_excepthook()
+
+        class _DelProbe:
+            def __repr__(self):
+                return f"<redis connection to {secret}:16379>"
+
+        class _Unraisable:
+            exc_type = ConnectionError
+            exc_value = ConnectionError("boom")
+            exc_traceback = None
+            err_msg = None                 # the __del__/GC path
+            object = _DelProbe()
+
+        sys.unraisablehook(_Unraisable())
+    finally:
+        sys.unraisablehook = saved
+    err = capsys.readouterr().err
+    assert secret not in err
+    assert secret.lower() not in err.lower()
+    # the default hook's line SURVIVES — redacted, not dropped
+    assert "Exception ignored in: <redis connection to" in err
+    assert "ConnectionError: boom" in err
