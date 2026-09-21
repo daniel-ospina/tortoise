@@ -172,13 +172,15 @@ installed copy — the artifact most consumers actually receive. The installer
 half of this is **closed below (#4398)**; the installed-copy half remains open.
 The remaining mechanisms are: have the installer also fetch `LICENSE` into the
 harness dir (a write-logic change, owned by #4327's lane); add the notice once
-**upstream** in the MIT repo's per-file content; inject the
-notice into the **served output only** (a build-time rewrite of
-`dist/skills/*/SKILL.md`, which leaves the in-tree bytes — and so the
+**upstream** in the MIT repo's per-file content; or inject the notice into the
+**served output only** (a build-time rewrite of `dist/skills/*/SKILL.md`, which
+leaves the in-tree bytes — and so the
 onboarding byte-identity contract — untouched and reaches every installed copy,
-including `tortoise-onboarding`, which has no upstream counterpart); or keep
-the installer as the notice-bearing channel. Tracked on **#4398**, not absorbed
-here; the first upstream-side move is the notice in the MIT
+including `tortoise-onboarding`, which has no upstream counterpart). The
+mechanism adopted for the *installer* half — the notice in the script's own
+header — does **not** close this residual: an installed `SKILL.md` still holds
+no notice of its own. Tracked on **#4398**, not absorbed here; the first
+upstream-side move is the notice in the MIT
 repo, because a per-file notice added *here* would diverge this tree from the
 tree it mirrors.
 
@@ -221,13 +223,17 @@ diagnosis into a traceback. **Reach limits, stated rather than implicit:** a can
 buried past the first 20 lines of a file that is *not* named as a licence/notice
 file is out of reach (including a name with no separator at all, `LICENSEBSL`);
 and a file that is not valid UTF-8 carries no assertion (the licence file itself
-is reported as an explicit error in that case, not a traceback).
+is reported as an explicit error in that case, not a traceback). One deliberate
+exception to the window: the SERVED SCRIPT (#4398) is scanned **whole-body**
+even though its name is not a licence token — the whole content IS the notice the
+consumer receives, so a canonical-name claim cannot hide past the window there
+(the `whole_body` argument of `bsl_declaration`).
 
-**OVERRIDES (carried for the installer, #4398):** the repo-default
-inheritance of BSL 1.1 over every file with no licence header of its own — the
-served installer is MIT with its notice **in-band**, so the boundary stays at
-the network for the script a `curl | bash` customer runs, exactly as for the
-served skills tree.
+**OVERRIDES:** the repo-default inheritance of BSL 1.1 over every file with
+no licence header of its own — the served installer is MIT with its notice
+**in-band**, so the boundary stays at the network for the script a
+`curl | bash` customer runs, exactly as for the served skills tree. (The same
+line is posted on **#4398** as its issue-side marker, per AGENTS.md.)
 
 **Backstop (enforced in CI):** `validation/check-license-surface.py` asserts
 (1) the per-directory licence exists and declares MIT, and (2) **no file under
@@ -287,3 +293,12 @@ researched and implemented it — back up once, then merge, preserving foreign
 frontmatter keys and foreign banner/trailer seam blocks
 (`tests/test_installer_preserves_foreign_skill_content.py` records the owner
 ruling). This licence change does not re-open it.
+
+**Found while closing #4399, filed rather than absorbed — `website/tos.html`
+§15.3 ("License Boundary") still states the whole-project claim** ("Tortoise is
+a source-available project. The self-hosted version … is licensed under the
+Business Source License 1.1") with no mention of the Apache-2.0 client or the
+MIT skills/installer. It is a *contractually binding* page, so it is the
+highest-consequence version of the defect #4399 fixed on `/license`, and no
+issue covered it. Filed as **#4442**; any edit there must keep the `legal-e2e`
+constraints (`business source license` present; exactly one `$N` figure).

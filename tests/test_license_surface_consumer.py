@@ -402,6 +402,17 @@ def test_served_script_missing_is_an_error(tmp_path: Path) -> None:
     assert any("file missing" in e for e in errors), errors
 
 
+def test_served_script_directory_is_a_named_error(tmp_path: Path) -> None:
+    """MUTATION: point the served-script surface at a DIRECTORY. It must yield
+    the same named error the disclosure surface gives, not an
+    `IsADirectoryError` traceback (review finding, round 2)."""
+    module = _load()
+    d = tmp_path / "install-tortoise-skills.sh"
+    d.mkdir()
+    errors = module.check_served_script("script", _script_spec(module, d))
+    assert any("is not a file" in e for e in errors), errors
+
+
 # ── the /license disclosure page (#4399) ────────────────────────────────────
 
 LICENCE_PAGE_KEY = "website/license.html"
@@ -442,3 +453,65 @@ def test_licence_page_missing_is_an_error(tmp_path: Path) -> None:
     errors = module.check_disclosure_surface("page", {"path": tmp_path / "absent.html",
                                                        "required": []})
     assert any("file missing" in e for e in errors), errors
+
+
+def test_non_utf8_licence_page_is_a_named_error(tmp_path: Path) -> None:
+    """MUTATION: re-save the page as non-UTF-8. It must be a NAMED error, not a
+    `UnicodeDecodeError` traceback — the same fail-closed contract the other
+    surfaces carry (review finding, round 1)."""
+    module = _load()
+    page = tmp_path / "license.html"
+    page.write_bytes(b"\xff\xfe\x00<\x00h\x00t\x00")
+    errors = module.check_disclosure_surface("page", _page_spec(module, page))
+    assert any("not UTF-8" in e for e in errors), errors
+
+
+def test_licence_page_directory_is_a_named_error(tmp_path: Path) -> None:
+    """MUTATION: point the surface at a DIRECTORY — an `IsADirectoryError`
+    traceback would red the required check for an unexplainable reason."""
+    module = _load()
+    d = tmp_path / "license.html"
+    d.mkdir()
+    errors = module.check_disclosure_surface("page", _page_spec(module, d))
+    assert any("is not a file" in e for e in errors), errors
+
+
+# ── check() must actually WIRE the new surfaces ─────────────────────────────
+# A test that only calls the helpers directly passes even if the two loops in
+# `check()` are deleted, so the required CI job could stop enforcing the
+# surfaces while every unit test stayed green (review finding, round 1). These
+# two pin the wiring by mutating the module-level surface to a non-conforming
+# tmp file and asserting `check()` — not the helper — reports it.
+
+
+def test_check_wires_the_served_script_surface(tmp_path: Path) -> None:
+    """MUTATION: delete the `SERVED_SCRIPTS` loop from `check()`."""
+    module = _load()
+    stub = tmp_path / "install.sh"
+    stub.write_text("#!/usr/bin/env bash\nset -euo pipefail\n", encoding="utf-8")
+    original = dict(module.SERVED_SCRIPTS[SERVED_SCRIPT_KEY])
+    module.SERVED_SCRIPTS[SERVED_SCRIPT_KEY]["path"] = stub
+    try:
+        errors = module.check()
+    finally:
+        module.SERVED_SCRIPTS[SERVED_SCRIPT_KEY].clear()
+        module.SERVED_SCRIPTS[SERVED_SCRIPT_KEY].update(original)
+    assert any("Permission is hereby granted" in e for e in errors), errors
+
+
+def test_check_wires_the_disclosure_surface(tmp_path: Path) -> None:
+    """MUTATION: delete the `LICENCE_DISCLOSURE_SURFACES` loop from `check()`."""
+    module = _load()
+    page = tmp_path / "license.html"
+    page.write_text(
+        "<p>Tortoise is licensed under the Business Source License 1.1.</p>",
+        encoding="utf-8",
+    )
+    original = dict(module.LICENCE_DISCLOSURE_SURFACES[LICENCE_PAGE_KEY])
+    module.LICENCE_DISCLOSURE_SURFACES[LICENCE_PAGE_KEY]["path"] = page
+    try:
+        errors = module.check()
+    finally:
+        module.LICENCE_DISCLOSURE_SURFACES[LICENCE_PAGE_KEY].clear()
+        module.LICENCE_DISCLOSURE_SURFACES[LICENCE_PAGE_KEY].update(original)
+    assert any("Apache-2.0" in e for e in errors), errors

@@ -166,20 +166,28 @@ def is_licence_file(path: Path) -> bool:
     )
 
 
-def bsl_declaration(text: str, *, whole_file_names: bool = False) -> str | None:
+def bsl_declaration(text: str, *, whole_body: bool = False) -> str | None:
     """The first BSL DECLARATION in `text`, or None.
 
     Returns the MATCHED TEXT — the evidence a maintainer needs — not the regex.
     A `BUSL` token counts anywhere, prose included; the canonical NAME counts
-    only in the declaration window unless `whole_file_names` (a licence/notice
-    file), which is what keeps the served skills' licensing prose from reding a
-    required check.
+    only in the declaration window unless `whole_body` is set, which is what
+    keeps the served skills' licensing prose from reding a required check.
+
+    `whole_body=True` is for a file whose ENTIRE content is its declaration
+    surface, so a canonical-name claim cannot hide past the window: a
+    licence/notice file (where the file NAME marks it as a declaration — see
+    `is_licence_file`) and a SERVED SCRIPT whose in-band licence header IS the
+    artifact's notice (`check_served_script`, #4398 — deliberately stricter
+    than the window, because the whole body is the thing the consumer
+    receives). It is NOT the same test as "the file's name is a licence token",
+    which is why the parameter is named for what it does.
     """
     for pattern in BSL_TOKENS:
         hit = pattern.search(text)
         if hit is not None:
             return hit.group(0)
-    scope = text if whole_file_names else "\n".join(text.splitlines()[:DECLARATION_WINDOW])
+    scope = text if whole_body else "\n".join(text.splitlines()[:DECLARATION_WINDOW])
     for pattern in BSL_NAMES:
         hit = pattern.search(scope)
         if hit is not None:
@@ -268,27 +276,46 @@ def _display(path: Path) -> Path:
         return path
 
 
+def _read_assertable_file(
+    name: str, path: Path, *, what: str, missing_message: str | None = None
+) -> tuple[str | None, list[str]]:
+    """The shared fail-closed preamble for EVERY surface checker.
+
+    `exists → is_file → UTF-8 read`, each failure a NAMED error rather than a
+    traceback or a silent skip. Factored so the four surface checkers cannot
+    drift apart on the same input (a directory path used to raise
+    `IsADirectoryError` from the served-script checker but return a named error
+    from the disclosure one — found by the code-review gate, round 2). The
+    required `license-surface` job must always be able to say WHY it red.
+    """
+    if not path.exists():
+        return None, [missing_message or f"{name}: file missing ({_display(path)})"]
+    if not path.is_file():
+        return None, [f"{name}: {_display(path)} is not a file"]
+    try:
+        return path.read_text(encoding="utf-8"), []
+    except UnicodeDecodeError:
+        return None, [f"{name}: {_display(path)} is not UTF-8 text — cannot assert {what}"]
+
+
 def check_consumer_surface(name: str, spec: dict) -> list[str]:
     """MIT licence present + no BSL declaration anywhere under the surface."""
     errors: list[str] = []
     licence = spec["licence"]
-    licence_text: str | None = None
-    if not licence.exists():
-        errors.append(
+    # The licence is the one file the assertion is centred on: a missing,
+    # non-file or undecodable one is a NAMED error, never a traceback and never
+    # a silent skip (the same "not UTF-8 → no assertion" limit applies to it as
+    # to the rest of the surface, so it cannot fail open silently either).
+    licence_text, read_errors = _read_assertable_file(
+        name,
+        licence,
+        what="its licence",
+        missing_message=(
             f"{name}: no per-directory licence at {_display(licence)} — the "
             "surface inherits the repo's BSL 1.1 by default (#4366)"
-        )
-    elif not licence.is_file():
-        errors.append(f"{name}: {_display(licence)} is not a file")
-    else:
-        # The licence is the one file the assertion is centred on: an
-        # undecodable one must be a NAMED error, not a traceback (the same
-        # "not UTF-8 → no assertion" limit applies to it as to the rest of the
-        # surface, so it cannot fail open silently either).
-        try:
-            licence_text = licence.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            errors.append(f"{name}: {_display(licence)} is not UTF-8 text — cannot assert its licence")
+        ),
+    )
+    errors.extend(read_errors)
     if licence_text is not None:
         for needle in spec["required"]:
             if needle not in licence_text:
@@ -314,7 +341,7 @@ def check_consumer_surface(name: str, spec: dict) -> list[str]:
             body = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue  # documented limit: only UTF-8 text is asserted
-        declared = bsl_declaration(body, whole_file_names=is_licence_file(path))
+        declared = bsl_declaration(body, whole_body=is_licence_file(path))
         if declared is not None:
             errors.append(
                 f"{name}: {rel} declares BSL 1.1 (matched {declared!r}) — a consumer-consumed "
@@ -327,15 +354,9 @@ def check_served_script(name: str, spec: dict) -> list[str]:
     """The served script carries the MIT notice in-band and declares no BSL."""
     errors: list[str] = []
     path = spec["path"]
-    if not path.exists():
-        errors.append(f"{name}: file missing ({_display(path)})")
-        return errors
-    try:
-        body = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        errors.append(
-            f"{name}: {_display(path)} is not UTF-8 text — cannot assert its licence"
-        )
+    body, read_errors = _read_assertable_file(name, path, what="its licence")
+    errors.extend(read_errors)
+    if body is None:
         return errors
     for needle in spec["required"]:
         if needle not in body:
@@ -344,10 +365,11 @@ def check_served_script(name: str, spec: dict) -> list[str]:
                 "script's bytes and nothing else, so the MIT notice must travel "
                 "in-band (#4398)"
             )
-    # whole_file_names=True: the script is the artifact under assertion (it is
-    # not a licence FILE, but the whole body is its declaration surface — the
-    # notice it carries IS the licence header).
-    declared = bsl_declaration(body, whole_file_names=True)
+    # whole_body=True: the script is the artifact under assertion. It is not a
+    # licence FILE, but the whole body is its declaration surface — the notice
+    # it carries IS the licence header — so a canonical-name claim cannot hide
+    # past the declaration window.
+    declared = bsl_declaration(body, whole_body=True)
     if declared is not None:
         errors.append(
             f"{name}: {_display(path)} declares BSL (matched {declared!r}) — a "
@@ -360,10 +382,10 @@ def check_disclosure_surface(name: str, spec: dict) -> list[str]:
     """The customer-facing licence page still names every permissive surface."""
     errors: list[str] = []
     path = spec["path"]
-    if not path.exists():
-        errors.append(f"{name}: file missing ({_display(path)})")
+    body, read_errors = _read_assertable_file(name, path, what="its disclosure")
+    errors.extend(read_errors)
+    if body is None:
         return errors
-    body = path.read_text(encoding="utf-8")
     for needle, what in spec["required"]:
         if needle not in body:
             errors.append(
@@ -377,20 +399,18 @@ def check_disclosure_surface(name: str, spec: dict) -> list[str]:
 def check() -> list[str]:
     errors: list[str] = []
     for name, spec in SURFACES.items():
-        path = spec["path"]
-        if not path.exists():
-            errors.append(f"{name}: file missing ({path})")
+        text, read_errors = _read_assertable_file(name, spec["path"], what="its licence")
+        errors.extend(read_errors)
+        if text is None:
             continue
-        text = path.read_text(encoding="utf-8")
         for needle in spec["required"]:
             if needle not in text:
                 errors.append(f"{name}: missing '{needle}'")
     for name, spec in CLIENT_SURFACES.items():
-        path = spec["path"]
-        if not path.exists():
-            errors.append(f"{name}: file missing ({path})")
+        text, read_errors = _read_assertable_file(name, spec["path"], what="its licence")
+        errors.extend(read_errors)
+        if text is None:
             continue
-        text = path.read_text(encoding="utf-8")
         for needle in spec["required"]:
             if needle not in text:
                 errors.append(f"{name} (#526 client dist): missing '{needle}'")

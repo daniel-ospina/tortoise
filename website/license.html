@@ -141,7 +141,7 @@
         </div>
         <div>
           <span class="label">Effective date</span>
-          <span class="value">2026-09-21</span>
+          <span class="value">Effective date: 2026-09-21</span>
         </div>
         <div>
           <span class="label">Version</span>
@@ -175,8 +175,12 @@
             <td><strong>Apache-2.0</strong> — the network driver you install to connect to the engine</td>
           </tr>
           <tr>
-            <th>Agent skills + installer (served consumer surface)</th>
-            <td><strong>MIT License</strong> — the skills served at <code>app.premiselabs.co/skills/</code> and <code>install-tortoise-skills.sh</code></td>
+            <th>Agent skills (served consumer surface)</th>
+            <td><strong>MIT License</strong> — the skills served at <code>app.premiselabs.co/skills/</code></td>
+          </tr>
+          <tr>
+            <th>Skills installer (<code>install-tortoise-skills.sh</code>)</th>
+            <td><strong>MIT License</strong> — carried in the script's own header, so a <code>curl … | bash</code> run receives it</td>
           </tr>
         </tbody>
       </table>
@@ -234,7 +238,8 @@
       <ul>
         <li><strong>Engine</strong> (Business Source License 1.1) — <a href="https://github.com/daniel-ospina/tortoise/blob/main/LICENSE">github.com/daniel-ospina/tortoise/blob/main/LICENSE</a></li>
         <li><strong>Thin client</strong> (Apache-2.0) — <a href="https://github.com/daniel-ospina/tortoise/blob/main/client/LICENSE">github.com/daniel-ospina/tortoise/blob/main/client/LICENSE</a></li>
-        <li><strong>Served skills + installer</strong> (MIT License) — <a href="https://app.premiselabs.co/skills/LICENSE">app.premiselabs.co/skills/LICENSE</a>; the installer additionally carries the MIT notice inside the script itself, so a <code>curl … | bash</code> run receives it.</li>
+        <li><strong>Served skills</strong> (MIT License) — <a href="https://app.premiselabs.co/skills/LICENSE">app.premiselabs.co/skills/LICENSE</a></li>
+        <li><strong>Skills installer</strong> (MIT License) — the <code>SPDX-License-Identifier: MIT</code> header and permission notice carried inside <a href="https://app.premiselabs.co/install-tortoise-skills.sh">install-tortoise-skills.sh</a> itself, so a <code>curl … | bash</code> run receives it. It is served alongside <code>skills/LICENSE</code>, but that file covers the skills tree, not the script.</li>
       </ul>
       <p>If you have questions about the license, open an issue at <a href="https://github.com/daniel-ospina/tortoise/issues">https://github.com/daniel-ospina/tortoise/issues</a>.</p>
 
