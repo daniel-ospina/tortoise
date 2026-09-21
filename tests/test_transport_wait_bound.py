@@ -188,9 +188,14 @@ async def test_breach_is_a_504_with_retry_after_and_a_readable_body(fast_bound):
 
 @pytest.mark.asyncio
 async def test_mcp_surface_gets_the_jsonrpc_refusal(fast_bound):
-    """The mounted MCP app is bounded too — that is what makes the bound apply
-    to the tools with no per-tool edit. Its refusal is #3851's JSON-RPC shape,
-    because the MCP surface has no HTTP body of its own to hang words on."""
+    """A `/mcp/…` request that stalls BEFORE its SSE response begins gets the
+    #3851 JSON-RPC refusal shape (504 + `error.data.retry_after`).
+
+    ⚠️ This does NOT mean the middleware bounds MCP tool calls — it cannot.
+    For a real tool call the SDK has already started the SSE response, so the
+    middleware's `response_started` branch lets it finish; that bound lives in
+    `mcp_server._await_under_mcp_wait_bound` and is pinned by
+    `test_mcp_http_sse_path_delivers_the_refusal`."""
     mw = ha.WaitBoundMiddleware(_slow_app(5.0))
     rec = await _drive(mw, _scope("/mcp/", method="POST"))
     assert rec.status == 504
@@ -512,6 +517,41 @@ def test_mcp_http_sse_path_delivers_the_refusal(
     assert err["data"]["retry_after"] == ha._TRANSPORT_WAIT_RETRY_AFTER_S
 
 
+@pytest.mark.asyncio
+async def test_mcp_abandonment_holds_the_2850_workload_gauge(
+        fast_bound, mcp_slow_tool, monkeypatch):
+    """#2850 invariant on the MCP seam. Round 1 moved InFlightMiddleware inside
+    WaitBoundMiddleware so an abandoned REST handler keeps the gauge non-idle
+    until it genuinely finishes. That ordering does NOT cover this seam: the
+    abandoned dispatch is a task created inside the MCP app, while the HTTP POST
+    the gauge wraps ends as soon as the SSE refusal is written. Without an
+    explicit hold, workload_is_idle() reads True while the abandoned tail
+    (p99 22.5 s) still runs — the exact #2850 self-kill mis-read, on the
+    population this unit measures."""
+    from tortoise import mcp_server as ms
+    from tortoise import monitoring
+
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: None)
+    baseline = monitoring.workload_in_flight()
+    result = await ms.mcp.call_tool("_bound_slow")
+    assert result.meta == {ms._WAIT_BOUND_META_KEY: True}
+    assert monitoring.workload_in_flight() > baseline, (
+        "the abandoned MCP dispatch released the gauge — the #2850 self-kill "
+        "predicate reads idle while it still runs")
+    for _ in range(100):
+        if mcp_slow_tool:
+            break
+        await asyncio.sleep(0.02)
+    assert mcp_slow_tool == [True]
+    for _ in range(100):
+        if monitoring.workload_in_flight() == baseline:
+            break
+        await asyncio.sleep(0.02)
+    assert monitoring.workload_in_flight() == baseline, (
+        "the gauge leaked after the abandoned dispatch finished")
+
+
 # ── the cold half: a VERIFICATION, not a build ────────────────────────────
 
 def test_cold_half_readiness_gate_holds_or_is_reported():
@@ -557,14 +597,17 @@ async def test_breach_path_is_sanitized_before_the_log_and_the_sink(
     `/v1/x/%0d%0aFORGED` arrives with embedded CR/LF — logged verbatim that
     forges log lines, and stored verbatim it reaches the analytics sink. The
     refusal path sanitizes ONCE, for both. The class is not CR/LF alone
-    (code-review round 2): VT/FF/ESC/NUL and U+2028/U+2029 forge lines or inject
-    terminal escapes too, so the full C0 range is escaped (`tortoise/schemas.py`
-    is the repo's control-char convention)."""
+    (code-review round 2): VT/FF/ESC/NUL, DEL, the C1 range (U+0085 NEL and
+    U+009B CSI — line-break and escape introducers to Unicode-aware readers)
+    and U+2028/U+2029 forge lines or inject terminal escapes too, so the full
+    C0/C1 + DEL range is escaped (`tortoise/schemas.py` is the repo's
+    control-char convention)."""
     seen = []
     monkeypatch.setattr(ha, "_track_analytics_event",
                         lambda org, ev, props: seen.append(props))
     mw = ha.WaitBoundMiddleware(_slow_app(5.0))
-    raw = "/v1/points/foo\r\nFORGED\x1b[31m\x0b\x0c\x00\u2028\u2029"
+    raw = ("/v1/points/foo\r\nFORGED\x1b[31m\x0b\x0c\x00\u2028\u2029"
+           "\u0085NEL\u009bCSI\x7f")
     rec = await _drive(mw, _scope(raw))
     assert rec.status == 504
     for _ in range(200):
@@ -573,12 +616,13 @@ async def test_breach_path_is_sanitized_before_the_log_and_the_sink(
         await asyncio.sleep(0.02)
     assert seen, "breach telemetry never fired"
     stored = seen[0]["path"]
-    for ch in ("\r", "\n", "\x1b", "\x0b", "\x0c", "\x00", "\u2028", "\u2029"):
+    for ch in ("\r", "\n", "\x1b", "\x0b", "\x0c", "\x00", "\u2028",
+               "\u2029", "\u0085", "\u009b", "\x7f"):
         assert ch not in stored, (
             f"raw control char {ch!r} reached the analytics sink: {stored!r}")
     assert stored == (
-        "/v1/points/foo\\r\\nFORGED\\x1b[31m\\x0b\\x0c\\x00\\u2028\\u2029"), (
-            f"unexpected sanitized form: {stored!r}")
+        "/v1/points/foo\\r\\nFORGED\\x1b[31m\\x0b\\x0c\\x00\\u2028\\u2029"
+        "\\x85NEL\\x9bCSI\\x7f"), (f"unexpected sanitized form: {stored!r}")
 
 
 @pytest.mark.asyncio

@@ -123,10 +123,11 @@ ERR_SUSPENDED = -32006
 # advertised delay is ``error.data.retry_after`` (#3851's shape).
 #
 # -32009, NOT -32007: the ERR_* namespace is split across this module and
-# ``mcp_server.py``, and -32007 is already ``ERR_QUOTA_SERVER`` there (the
-# namespace note at ``mcp_server.py:697-704`` already tracks the ``-32006``
-# quota/suspended collision as a known defect). Reusing -32007 would make a
-# wait-bound refusal indistinguishable from a server-quota refusal.
+# ``mcp_server.py``, and -32007 is already ``ERR_QUOTA_SERVER`` there (see the
+# ``#329`` namespace note above ``ERR_QUOTA_SERVER`` in ``mcp_server.py``, which
+# already tracks the ``-32006`` quota/suspended collision as a known defect).
+# Reusing -32007 would make a wait-bound refusal indistinguishable from a
+# server-quota refusal.
 ERR_TIMEOUT = -32009
 
 

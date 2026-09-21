@@ -2212,10 +2212,12 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
 )
 
 #: Analytics event name for a breach. Recorded through the EXISTING writer (no
-#: new table, no new metric endpoint). At this layer an org has usually NOT yet
-#: resolved — auth runs INSIDE the middleware stack — so the event is written
-#: with an empty `org_id` on the MCP surface and the pre-auth REST path alike.
-#: The `path` prop is what makes "which routes breach" answerable.
+#: new table, no new metric endpoint). The REST arm writes an empty `org_id`:
+#: this middleware is OUTSIDE the auth middleware, so no org has resolved yet.
+#: The MCP arm (`mcp_server._await_under_mcp_wait_bound`) passes the resolved
+#: `_current_org_id` — MCP auth runs inside the mounted app, before dispatch.
+#: The `path` (and the MCP `tool_name`) prop is what makes "which routes
+#: breach" answerable.
 _TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
 
 #: Handlers abandoned past the bound, held only so their late exception is
@@ -2254,11 +2256,11 @@ def _sanitize_for_log(value: str) -> str:
 
     The ASGI server percent-DECODES the path, so ``/v1/x/%0d%0aFORGED`` arrives
     with embedded CR/LF; escaped verbatim it forges log lines. CR/LF alone is
-    not the whole class (code-review round 2): VT/FF/ESC/NUL and the Unicode
-    line separators U+2028/U+2029 do the same, and ESC additionally injects
-    terminal control sequences. The C0 range is the repo's own control-char
-    convention (``tortoise/schemas.py``); CR/LF/TAB keep their readable
-    backslash escapes so existing log greps still match.
+    not the whole class (code-review round 2): VT/FF/ESC/NUL, DEL, the C1 range
+    (U+0085 NEL and U+009B CSI are line-break / escape introducers to Unicode-
+    aware readers) and U+2028/U+2029 all do the same. The C0/C1 + DEL ranges are
+    the repo's own control-char convention (``tortoise/schemas.py``); CR/LF/TAB
+    keep their readable backslash escapes so existing log greps still match.
     """
     out = []
     for ch in value:
@@ -2268,7 +2270,7 @@ def _sanitize_for_log(value: str) -> str:
             out.append("\\n")
         elif ch == "\t":
             out.append("\\t")
-        elif ch < " " or ch == "\x7f":
+        elif ch < " " or "\x7f" <= ch <= "\x9f":
             out.append(f"\\x{ord(ch):02x}")
         elif ch in ("\u2028", "\u2029"):
             out.append(f"\\u{ord(ch):04x}")
@@ -2378,20 +2380,40 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
         _logger.debug("wait-bound telemetry schedule failed", exc_info=True)
         return
     _pending_wait_bound_telemetry.add(fut)
-    fut.add_done_callback(_pending_wait_bound_telemetry.discard)
+
+    def _telemetry_done(f) -> None:
+        _pending_wait_bound_telemetry.discard(f)
+        # `submit` returns a PRE-FAILED future when the seam's bounded backlog
+        # is full (`_WorkerBacklogFull`). Observing it turns a silent drop into
+        # a traceable one — a telemetry storm under the overload that causes
+        # breaches is exactly when the drop rate matters.
+        if not f.cancelled() and f.exception() is not None:
+            _logger.debug("wait-bound telemetry dropped: %r", f.exception())
+
+    fut.add_done_callback(_telemetry_done)
 
 
-def _abandon_wait_bound_request(task) -> None:
-    """Let a breached request's handler run to completion; consume its result.
+def _track_wait_bound_request(task) -> None:
+    """Track a bounded dispatch so no escape path can orphan it.
 
-    Deliberately NOT ``task.cancel()``. This module's own doctrine (#2988,
-    #3718) is that cancelling the await stops the AWAITABLE, not the worker
-    thread, while running every ``finally`` the handler owns — and 14 handlers
-    here close their SDK in a ``finally``, so a cancel would tear the projection
-    down under work that is still using it (exactly the #3718 P1). Unwinding
-    normally keeps the handler's own bookkeeping (and the ``InFlightMiddleware``
-    gauge the #2850 self-kill predicate reads) consistent.
+    Registered at task CREATION, not only on breach, because there are two ways
+    the middleware can stop awaiting a running handler: the timeout (the
+    breach), and an outer cancellation (server shutdown, transport teardown).
+    The second is easy to miss and the worst of the two: the handler keeps
+    running while its task drops out of every bookkeeping structure, so its
+    late exception is never retrieved and its late ``send`` is not dropped.
+
+    Deliberately NOT ``task.cancel()`` on the breach path. This module's own
+    doctrine (#2988, #3718) is that cancelling the await stops the AWAITABLE,
+    not the worker thread, while running every ``finally`` the handler owns —
+    and 14 handlers here close their SDK in a ``finally``, so a cancel would
+    tear the projection down under work that is still using it (exactly the
+    #3718 P1). Unwinding normally keeps the handler's own bookkeeping (and the
+    ``InFlightMiddleware`` gauge the #2850 self-kill predicate reads)
+    consistent. Idempotent, so a task is never double-registered.
     """
+    if task in _pending_wait_bound_requests:
+        return
     _pending_wait_bound_requests.add(task)
 
     def _done(t) -> None:
@@ -2410,9 +2432,9 @@ class WaitBoundMiddleware:
     any middleware can short-circuit it, and it must cost no request/response
     wrapping on the hot path.
 
-    ⚠️ Its scope is the REST routes ONLY. It does NOT bound MCP tool calls, and
-    the earlier claim that it "covers the mounted MCP app by construction" was
-    false: FastMCP's Streamable-HTTP transport runs in SSE mode and starts the
+    ⚠️ What it does NOT bound is MCP *tool calls*, and the earlier claim that
+    it "covers the mounted MCP app by construction" was false: FastMCP's
+    Streamable-HTTP transport runs in SSE mode and starts the
     ``EventSourceResponse`` BEFORE dispatching the tool
     (``mcp/server/streamable_http.py`` — "Start the SSE response (this will send
     headers immediately)"), so ``http.response.start`` is already on the wire
@@ -2421,6 +2443,14 @@ class WaitBoundMiddleware:
     nothing is why the MCP half lives in ``tortoise/mcp_server.py``'s dispatch
     (``_await_under_mcp_wait_bound``), where it is enforced across the registry
     rather than per tool.
+
+    The middleware still owns the ``/mcp`` refusal for a request that stalls
+    BEFORE its SSE response begins (``_is_jsonrpc_surface`` /
+    ``mcp_auth._jsonrpc_error``) — e.g. a slow org resolution that consumes the
+    bound. That arm answers a standard HTTP 504 with a JSON-RPC error body and
+    ``Retry-After``: a client that raises on the status still has the HTTP-level
+    retry signal, while the guaranteed legible-per-tool-call refusal is the
+    post-SSE one from the MCP dispatch.
 
     On breach the caller gets a readable refusal (what happened, whether to
     retry, how long) and the handler is left running rather than cancelled. The
@@ -2469,6 +2499,10 @@ class WaitBoundMiddleware:
 
         t0 = time.monotonic()
         task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
+        # Track from CREATION, so the timeout path AND an outer cancellation
+        # both drain the task and retrieve its late exception (the send-guard
+        # above drops its late response). See ``_track_wait_bound_request``.
+        _track_wait_bound_request(task)
         done, _ = await asyncio.wait({task},
                                      timeout=_TRANSPORT_WAIT_BOUND_S)
         if task in done:
@@ -2484,10 +2518,13 @@ class WaitBoundMiddleware:
         state = scope.get("state")
         org_id = state.get("org_id") if isinstance(state, dict) else None
         # The ASGI server percent-DECODES the path, so `/v1/x/%0d%0a…` arrives
-        # with embedded CR/LF; logged verbatim that forges log lines. Same fix
-        # the unhandled-exception handler already carries (#1591 class) — and
-        # the sanitized form also reaches the analytics prop, so neither the log
-        # nor the sink can be forged.
+        # with embedded CR/LF; logged verbatim that forges log lines. This is
+        # the FULLER form of the CR/LF fix the unhandled-exception handler at
+        # ``_unhandled_exception_handler`` (#1591 class) carries — the C0 range
+        # plus DEL/C1 and the Unicode line separators — and the sanitized form
+        # also reaches the analytics prop, so neither the log nor the sink can
+        # be forged. (That handler still carries the CR/LF-only form; a shared
+        # helper there is a separate change, not asserted here.)
         safe_route_path = _sanitize_for_log(route_path)
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
@@ -2495,14 +2532,9 @@ class WaitBoundMiddleware:
         _logger.warning(
             "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
             _TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
-        # Register for abandonment BEFORE the refusal send. The send happens
-        # 10 s in, where a client that has already gone makes uvicorn raise
-        # (ConnectionResetError / ClientDisconnected); if that raise skipped
-        # this call the still-running handler task would never be registered,
-        # its late exception never retrieved, and it would leak. So abandonment
-        # comes first and the send is then best-effort — the client is gone,
-        # but the abandoned handler must still be drained.
-        _abandon_wait_bound_request(task)
+        # The task is already tracked (registration happens at creation, so a
+        # client that has gone by the time the refusal is written cannot skip
+        # it). The send is best-effort: the handler is drained regardless.
         try:
             await _send_wait_bound_refusal(send, scope, route_path)
         except Exception:

@@ -229,14 +229,46 @@ async def _flush_mcp_telemetry() -> None:
 # surface rebuild (#4282) cannot throw it away.
 
 #: Tool dispatches abandoned past the bound, held only so their late
-#: result/exception is retrieved (never "exception was never retrieved") and so
-#: a test can await them. Entries remove themselves on completion.
+#: result/exception is retrieved (never "exception was never retrieved"), so the
+#: #2850 workload gauge stays non-idle while they run, and so a test can await
+#: them. Entries remove themselves on completion.
 _pending_mcp_wait_bound: set = set()
 
 #: The breach marker on a refused result's ``_meta``. A client can branch on it
 #: without parsing prose; ``_wrapped_call_tool`` reads it to classify the
 #: accompanying ``mcp_tool_call`` telemetry as ``timeout`` rather than ``ok``.
 _WAIT_BOUND_META_KEY = "tortoise_wait_bound"
+
+
+def _hold_mcp_dispatch_after_request(task) -> None:
+    """Keep an abandoned MCP dispatch tracked, and hold the #2850 gauge for it.
+
+    The round-1 fix moved ``InFlightMiddleware`` inside ``WaitBoundMiddleware``
+    so an abandoned REST handler keeps counting until it finishes — else the
+    watchdog's idle predicate reads idle while abandoned work still runs. That
+    ordering does NOT cover this seam: the abandoned MCP dispatch is a task
+    created inside the MCP app, and the HTTP POST (which the gauge wraps) ends
+    as soon as the SSE refusal is written. So this seam holds the gauge itself
+    for the life of the abandoned dispatch.
+
+    Called on BOTH escape paths — the timeout and an outer cancellation — and is
+    idempotent, so a task is never double-counted. The gauge exits in a
+    ``finally`` so a raising abandoned dispatch cannot leak a slot permanently.
+    """
+    if task in _pending_mcp_wait_bound:
+        return
+    monitoring.workload_enter()
+    _pending_mcp_wait_bound.add(task)
+
+    def _done(t) -> None:
+        _pending_mcp_wait_bound.discard(t)
+        try:
+            if not t.cancelled():
+                t.exception()  # retrieve, so it is never un-retrieved
+        finally:
+            monitoring.workload_exit()
+
+    task.add_done_callback(_done)
 
 
 # Captured before wrapping — the middleware chain re-dispatches
@@ -273,18 +305,19 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     task = asyncio.ensure_future(
         _original_call_tool(name, arguments, version=version,
                             run_middleware=True, task_meta=task_meta))
-    done, _ = await asyncio.wait({task}, timeout=_ha._TRANSPORT_WAIT_BOUND_S)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=_ha._TRANSPORT_WAIT_BOUND_S)
+    except BaseException:
+        # Outer cancellation (server shutdown, transport teardown) must not
+        # orphan the dispatch: it would escape the request's structured
+        # concurrency, drop out of the gauge, and never have its exception
+        # retrieved. Track it, then propagate the cancellation unchanged.
+        _hold_mcp_dispatch_after_request(task)
+        raise
     if task in done:
         return task.result()  # re-raises exactly as a plain await would
 
-    _pending_mcp_wait_bound.add(task)
-
-    def _done(t) -> None:
-        _pending_mcp_wait_bound.discard(t)
-        if not t.cancelled():
-            t.exception()  # retrieve, so it is never reported as un-retrieved
-
-    task.add_done_callback(_done)
+    _hold_mcp_dispatch_after_request(task)
     try:
         # The SAME breach writer the REST arm uses — one emit site, one prop
         # vocabulary. Fire-and-forget off the request path (it submits to the

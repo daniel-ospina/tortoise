@@ -46,7 +46,9 @@ surfaces:
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   # #3834: the transport-level wait bound. Dual-registered for the same reason as
   # the loop-responsiveness guards above — the file it guards is
-  # tortoise/hosted_api.py (and fly.toml), which selects the `api` surface.
+  # tortoise/hosted_api.py, which selects the `api` surface. (fly.toml is not
+  # used to justify the api entry: it matches no SOURCE_PATTERNS rule and an
+  # unmapped-path change already fails closed to the full matrix.)
   - test_transport_wait_bound.py
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -1411,10 +1413,10 @@ durations:
   # #3834: NEW file (this PR) — never sampled by a CI run yet, so it starts at
   # the flat default (`2.0 == DEFAULT_FAST_WEIGHT`, so it changes no LPT
   # packing weight) until the next durations refresh replaces it with the
-  # measured value. Kept EXPLICIT for hygiene, not necessity: with the entry
-  # the #3400 ratio floor is 515/571 (~0.19% over); the entry REMOVED is the
-  # 514/571 counterfactual (~0.02% over), so listing the file is what holds the
-  # committed margin this high.
+  # measured value. Kept EXPLICIT for hygiene: the #3400 floor is a ratio over a
+  # pool main grows on every merge, so a hard-coded margin here would re-stale;
+  # the invariant is only that both forms clear the 0.90 floor, and listing the
+  # file holds the margin higher than removing it.
   test_transport_wait_bound.py: 2.0
   test_collision_preflight.py: 3.0
   test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
