@@ -441,9 +441,6 @@ def test_platform_gated_manifest_covers_the_registry() -> None:
     )
 
 
-# ── the CI wiring ─────────────────────────────────────────────────────────
-
-
 # ── the check bites (non-vacuity) ─────────────────────────────────────────
 
 def test_the_frozen_set_passes_against_a_junit_that_contains_it() -> None:
