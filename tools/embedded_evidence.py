@@ -858,6 +858,14 @@ def _junit_test_files(path: Path) -> _JunitObservation:
     return _JunitObservation(tuple(sorted(observed)), tuple(sorted(failing)), str(path))
 
 
+class UsageError(Exception):
+    """A usage error ⇒ exit 2 with NO record written (D8 precedence 2).
+
+    Distinct from `RuntimeError`, which `main()` reports as an environment error:
+    both exit 2, but a usage error is a property of the INVOCATION, not of the host.
+    """
+
+
 def _git(*args: str, cwd: Path | None = None) -> str:
     proc = subprocess.run(
         ["git", *args], capture_output=True, text=True, cwd=str(cwd or REPO_ROOT)
@@ -865,6 +873,32 @@ def _git(*args: str, cwd: Path | None = None) -> str:
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def _git_returncode(args: list[str]) -> int:
+    """Run a git predicate whose NON-ZERO rc is an ANSWER, not a failure.
+
+    `_git` raises on rc≠0, which is right for a read whose absence is an error but
+    wrong for `merge-base --is-ancestor`, where rc 1 is the "no" of a well-formed
+    question. This is the rc-bearing counterpart, kept separate so the raising
+    semantics of `_git` are not weakened.
+    """
+    proc = subprocess.run(
+        ["git", *args], capture_output=True, text=True, cwd=str(REPO_ROOT)
+    )
+    return proc.returncode
+
+
+def _strict_ancestor(ancestor: str, descendant: str) -> bool:
+    """True iff `ancestor` is a STRICT ancestor of `descendant` (D16/C1).
+
+    `git merge-base --is-ancestor` is true for an EQUAL pair, which D16 does not
+    accept as a pairing ref — a ref equal to the measured commit cannot be "before
+    the fix" — so equality is excluded explicitly.
+    """
+    if ancestor == descendant:
+        return False
+    return _git_returncode(["merge-base", "--is-ancestor", ancestor, descendant]) == 0
 
 
 def _worktree_at(ref: str, run_root: Path, name: str) -> tuple[Path, bool]:
@@ -889,14 +923,21 @@ def _worktree_at(ref: str, run_root: Path, name: str) -> tuple[Path, bool]:
 def _porcelain_digest(cwd: Path, exclude: Path | None = None) -> tuple[str, bool]:
     status = _git("status", "--porcelain=v2", cwd=cwd)
     diff = _git("diff-index", "HEAD", cwd=cwd)
-    blob = (status + "\n" + diff + "\n").encode()
+    status_lines = status.splitlines()
+    diff_lines = diff.splitlines()
     if exclude is not None:
-        # The record-out path is excluded from the pin (M5): strip its line.
+        # The resolved `--record-out` path is excluded from the pin (M5/D6): the
+        # tool's own receipt must not dirty the tree it measures. The filter has to
+        # apply to the `dirty` half too, not only to the digest blob — with `dirty`
+        # read from the UNFILTERED status, the previously written receipt (an
+        # untracked entry) made `pin.post_review_dirty` true on every documented
+        # re-run, so `certificate-not-bound-to-review-head` failed on exactly the
+        # re-run the check exists for.
         ex = str(exclude.relative_to(cwd)) if exclude.is_relative_to(cwd) else str(exclude)
-        blob = b"\n".join(
-            ln for ln in blob.splitlines() if ex.encode() not in ln
-        ) + b"\n"
-    return "sha256:" + hashlib.sha256(blob).hexdigest(), bool(status.strip())
+        status_lines = [ln for ln in status_lines if ex not in ln]
+        diff_lines = [ln for ln in diff_lines if ex not in ln]
+    blob = ("\n".join(status_lines) + "\n" + "\n".join(diff_lines) + "\n").encode()
+    return "sha256:" + hashlib.sha256(blob).hexdigest(), bool("\n".join(status_lines).strip())
 
 
 def _snapshot_redis_logs(run_root: Path) -> list[Path]:
