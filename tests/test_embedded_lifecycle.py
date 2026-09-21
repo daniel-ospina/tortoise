@@ -1381,21 +1381,26 @@ def test_raw_construction_abnormal_exit_leaves_a_confirmable_record(tmp_path):
 
     `os._exit` skips every atexit/close seam (the SIGKILL analogue that
     stays deterministic under pytest). Pre-fix the child writes no record at
-    all, so the parent would read ``None`` and never confirm."""
+    all, so the parent would read ``None`` and never confirm.
+
+    The child's DATA dir is the parent's ``tmp_path`` (passed as argv) so the
+    DB dir is reclaimed by pytest; the child's own redislite SOCKET dir is
+    removed below. A child-side ``mkdtemp`` would leak one dir per run."""
     import shutil
 
     from tortoise.embedded_reaper import _owner_records
 
+    dbdir = tmp_path / "killdb"
+    dbdir.mkdir()
     child = (
-        "import os, tempfile\n"
+        "import os, sys\n"
         "import tortoise\n"  # installs the RedisMixin owner-record patch
         "from redislite.falkordb_client import FalkorDB\n"
-        "d = tempfile.mkdtemp(prefix='p4487kill_')\n"
-        "db = FalkorDB(os.path.join(d, 'kill.db'))\n"
+        "db = FalkorDB(os.path.join(sys.argv[1], 'kill.db'))\n"
         "print(db.client.socket_file, flush=True)\n"
         "os._exit(0)\n"  # no close seam: exactly the abnormal-exit generator
     )
-    proc = _subprocess.Popen([sys.executable, "-c", child],
+    proc = _subprocess.Popen([sys.executable, "-c", child, str(dbdir)],
                              stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
                              text=True)
     try:
