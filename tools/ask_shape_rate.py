@@ -588,7 +588,8 @@ def _install_redacting_excepthook() -> None:
     callback with only ``sys.excepthook`` installed). All THREE are replaced
     here, sharing one redactor — so this really does cover every uncaught path
     (today's ``seed_timing``, any future one, an off-main-thread fault, and a
-    teardown fault), not one call site.
+    teardown fault), not one call site. The hooks' METADATA lines (a thread
+    name, an unraisable ``err_msg``) are redacted too, not just the traceback.
 
     Installed by :func:`main`. The traceback SHAPE is preserved — type, frames
     and message — so the diagnostic survives; only the credential tokens are
@@ -603,12 +604,19 @@ def _install_redacting_excepthook() -> None:
 
     def _thread_hook(args) -> None:
         name = getattr(getattr(args, "thread", None), "name", None) or "?"
-        sys.stderr.write(f"Exception in thread {name}:\n")
+        # The METADATA line goes through the redactor too: a worker thread can
+        # be named after the substrate (a ``thread_name_prefix`` derived from a
+        # graph leaf), and a raw interpolation would put it on stderr while the
+        # traceback beneath it was redacted.
+        sys.stderr.write(_redact_substrate_text(
+            f"Exception in thread {name}:\n"))
         _emit(args.exc_type, args.exc_value, args.exc_traceback)
 
     def _unraisable_hook(unraisable) -> None:
+        # ``err_msg`` embeds an object ``repr`` — redact it for the same reason.
         if unraisable.err_msg:
-            sys.stderr.write(f"{unraisable.err_msg}\n")
+            sys.stderr.write(_redact_substrate_text(
+                f"{unraisable.err_msg}\n"))
         _emit(unraisable.exc_type, unraisable.exc_value,
               unraisable.exc_traceback)
 

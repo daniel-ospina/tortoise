@@ -408,3 +408,40 @@ def test_a_bare_relative_receipt_path_can_be_written(monkeypatch, tmp_path):
     _write_receipt(SimpleNamespace(receipt="receipt.json"),
                    {"instrument": "x"})
     assert json.loads((tmp_path / "receipt.json").read_text())["instrument"] == "x"
+
+
+def test_the_hook_redacts_its_metadata_lines_too(monkeypatch, capsys):
+    """The traceback was redacted but the METADATA around it was written raw:
+    a worker thread named after the substrate (a ``thread_name_prefix`` built
+    from a graph leaf) or an unraisable ``err_msg`` carrying an object repr
+    reached stderr verbatim."""
+    secret = "S3cret-Pa55w0rd"
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+    saved = (sys.excepthook, threading.excepthook, sys.unraisablehook)
+    try:
+        _install_redacting_excepthook()
+
+        def _boom():
+            raise ConnectionError("boom")
+
+        thread = threading.Thread(target=_boom,
+                                  name=f"graph-{secret}")  # a credential NAME
+        thread.start()
+        thread.join()
+
+        class _Unraisable:
+            exc_type = ConnectionError
+            exc_value = ConnectionError("boom")
+            exc_traceback = None
+            err_msg = f"Exception ignored in: <redis connection to {secret}>"
+
+        sys.unraisablehook(_Unraisable())
+    finally:
+        (sys.excepthook, threading.excepthook, sys.unraisablehook) = saved
+    err = capsys.readouterr().err
+    assert secret not in err
+    assert secret.lower() not in err.lower()
+    # redacted, not suppressed — the metadata shape survives
+    assert "Exception in thread graph-" in err
+    assert "Exception ignored in:" in err
