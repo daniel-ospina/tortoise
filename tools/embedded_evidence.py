@@ -1020,7 +1020,11 @@ def _run_once(
         "executed": counts["executed"],
         "skipped": counts["skipped"],
         "load": {"before": before, "after": after, "band": load_band(after)},
-        "tree_moved": False,
+        # `tree_moved` is deliberately NOT set here. A literal `False` written by the
+        # runner is a value no code path can ever make `True`, so the conjunct that
+        # reads it (`pin-not-airtight`'s per-run half) read as protection while
+        # supplying none. `_build_record` measures it from the tree's own porcelain
+        # digest between runs and writes it onto every run.
         "redis_log_cause": cause,
         "cause_evidence": evidence,
         "timed_out": timed_out,
@@ -1178,6 +1182,7 @@ def _build_record(args: argparse.Namespace) -> dict:
         raise RuntimeError(args.environment_error)
 
     runs: list[dict] = []
+    tree_states: list[tuple[str, bool]] = []
     porcelain = ""
     dirty = False
     try:
@@ -1186,18 +1191,40 @@ def _build_record(args: argparse.Namespace) -> dict:
         for i in range(1, args.n + 1):
             runs.append(_run_once(files, measured_root, run_root, i, args.marker,
                                   args.run_timeout))
-        # The cleanliness digest MUST be taken while the measured tree still
-        # EXISTS. It used to run after this `finally`, which removes the detached
-        # worktree — so a --ref measurement stat'd a path that was already gone
-        # and died with FileNotFoundError, losing the one field that says the tree
-        # did not move. Read state before the code that deletes it.
-        porcelain, dirty = _porcelain_digest(measured_root, exclude=args.record_out)
+            # The per-run tree state. The cleanliness digest MUST be taken while the
+            # measured tree still EXISTS (see below) — and it is taken once per run so
+            # `tree_moved` is MEASURED: a run whose tree digest differs from the first
+            # run's is a moved tree, which `pin-not-airtight` refuses. The previous
+            # producer wrote a literal `False` here, so the per-run half of that
+            # conjunct could never fail.
+            tree_states.append(_porcelain_digest(measured_root, exclude=args.record_out))
+        # `tree_moved` is per-run: True iff this run's tree state differs from run
+        # 1's. Run 1 is compared with itself, so it is always False by construction.
+        base_digest = tree_states[0][0] if tree_states else ""
+        for r, (digest, _d) in zip(runs, tree_states):
+            r["tree_moved"] = digest != base_digest
+        # The pin's own cleanliness is the FINAL state, read before the `finally`
+        # that removes the worktree. (It used to run after the `finally`, which
+        # removed the detached worktree — so a --ref measurement stat'd a path that
+        # was already gone and died with FileNotFoundError, losing the field that
+        # says the tree did not move.)
+        porcelain, dirty = tree_states[-1] if tree_states else ("", False)
     finally:
         if worktree_added:
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(measured_root)],
                 capture_output=True, text=True, cwd=str(REPO_ROOT),
             )
+
+    # R2/D24: the certificate binds to the REVIEWED head SHA. `commit` is the
+    # MEASURED commit (which may be a detached `--ref`); `head_sha` is the invoking
+    # checkout's HEAD, read independently — not the same variable copied into the
+    # field it is later compared against. A `--ref` re-run after the branch moved,
+    # or a checkout carrying uncommitted post-review edits, is refused by
+    # `certificate-not-bound-to-review-head`. A literal (`head_sha = commit`,
+    # `post_review_dirty = False`) made that conjunct unfailable.
+    reviewed_head = _git("rev-parse", "HEAD")
+    _, review_dirty = _porcelain_digest(REPO_ROOT, exclude=args.record_out)
 
     red_run = next((r for r in runs if r["bucket"] in BUCKETS_RED), None)
     bands = {r["load"]["band"] for r in runs}
@@ -1229,9 +1256,9 @@ def _build_record(args: argparse.Namespace) -> dict:
         "manifest": mrec,
         "pin": {
             "commit": commit,
-            "head_sha": commit,
+            "head_sha": reviewed_head,
             "head_sha_verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "post_review_dirty": False,
+            "post_review_dirty": review_dirty,
             "tree_object": tree,
             "requested_ref": requested_ref,
             "pairing_ref": None,
