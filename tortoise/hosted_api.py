@@ -108,12 +108,11 @@ from tortoise.sdk import (
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
-    _content_hash,
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
-    _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
+    _write_capture_turns,  # #3086: the ONE batched turn-stream writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
@@ -1654,13 +1653,29 @@ def _dream_key(org_id: str, graph_namespace: str | None) -> str:
 # `Dreamer._lock` cannot serve here: it is per-SDK-instance and every request
 # builds its own SDK.
 #
-# NOT covered by this lock, recorded so it is not read as process-wide: the
-# capture path's `_apply_capture_ingest_ep` (sdk.py:1232) still runs
-# `sdk.dream(mode="local", ...)` on the EVENT LOOP, from
-# `_capture_session_impl` (hosted_api.py:9166). It is on the loop, so taking a
-# `threading.Lock` there would freeze the loop for a whole pass — the very
-# thing #3718 removes; moving that pass to the pool is the capture-path
-# residual tracked by #3086, not this change.
+# Threads are expected to wait; the WAIT happens off the loop.
+#
+# ⚠️ One coupling this lock introduces that the pooled sites did not have:
+# since #3086 the capture path's `_apply_capture_ingest_ep` also takes this
+# lock, and it runs on `_CAPTURE_EXECUTOR` (4 workers by default, process-wide).
+# A same-graph long `/v1/dream` full pass can therefore park capture workers
+# while it holds the lock — and because that pool is GLOBAL, it delays captures
+# of ANY org, not only the org whose dream holds the lock. The admission cap
+# does NOT bound this stage: `_CaptureSlot` is released when the EXTRACTION
+# future completes, after which the ep pass still occupies a worker. It is
+# strictly better than the pre-#3086 shape (which froze the event loop for the
+# whole pass) and there is no deadlock (a dream pass never needs the capture
+# pool); recorded here so the coupling is visible rather than discovered.
+#
+# Covered since #3086: the capture path's `_apply_capture_ingest_ep` — which
+# runs `sdk.dream(mode="local", ...)` — is now off the event loop on
+# `_CAPTURE_EXECUTOR` and takes this lock, so a hosted capture and `/v1/dream`
+# can no longer interleave on one graph's `ep_dirty` roots. NOT covered, and
+# recorded so it is not read as process-wide: the SDK lane's own
+# `capture_session` still calls `_apply_capture_ingest_ep` inline on its caller's
+# thread without this lock — it is synchronous and cannot import this module,
+# and every capture on that lane uses its OWN `TortoiseSDK`, so the pool-crossing
+# hazard this lock exists for does not arise there.
 #
 # A `threading.Lock`, NOT an `asyncio.Lock`, is deliberate: it is acquired and
 # released INSIDE the worker thread, and asyncio primitives bind to the first
@@ -8733,25 +8748,21 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     minted_event = False
     event_id = None
 
-    # NOTE: this per-turn loop (episodic turn Points) is duplicated from
-    # tortoise/sdk.py capture_session — the shared primitives #1532 D1/D2
-    # (_capture_turn_window / _normalize_turn_role) keep the two loops
-    # byte-identical for identical input: same stored-window truncation, same
-    # role normalization (None -> "unknown", truthy non-strings -> str()), and
-    # the same `speaker` property write (delta 5 — hosted previously wrote no
-    # speaker tag). Hosted additionally adds quota/auth bounds + a pre-write
-    # estimate. Keep the two in sync — and note the THIRD copy:
-    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
-    # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
-    # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
-    # since #3914. It omits Source/extraction, but since W7A it EMBEDS every
-    # turn BY DEFAULT through the shared store seam (#4194/#4304) and retains
-    # `embed=False` for #4197's un-backfilled backlog.
-    # #3551 tracks collapsing all three onto one shared
-    # primitive. The LLM extraction that follows the
-    # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    # #3086: the episodic turn stream is written by the ONE shared writer
+    # (`sdk._write_capture_turns`), also called by `sdk.capture_session` — so
+    # this lane and the SDK lane can no longer drift (the #1532 duplicated-loop
+    # class). Hosted additionally adds quota/auth bounds + a pre-write
+    # estimate. NOTE the THIRD, still-separate copy:
+    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors the same store
+    # shape to seed the ask fixtures (#3910) — the ONE copy every ask seeder
+    # writes through since #3914. It omits Source/extraction, but since W7A it
+    # EMBEDS every turn BY DEFAULT through the shared store seam (#4194/#4304)
+    # and retains `embed=False` for #4197's un-backfilled backlog.
+    # #3551 tracks collapsing it onto the shared primitive too. The LLM
+    # extraction that follows the write is shared via
+    # sdk._extract_session_llm/_extract_session_v2 (#822).
     #
-    # #3892: metering truth. The turn loop below runs for EVERY request, so a
+    # #3892: metering truth. The turn write below runs for EVERY request, so a
     # re-capture of a GROWN transcript writes NEW turn Points even when the
     # branch taken extracts nothing (a keyless re-capture, or a keyless retry
     # on the M2 lane). The write-op/abuse meter keys on the ACTUAL write — the
@@ -8788,109 +8799,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # impaired. The write's own MERGE reads the node's pre-write content_hash
     # to decide preserve-vs-clear, so no external probe can fail.
     #
-    # #4194/#3086: the encode runs OFF the event loop on the capture pool. The
-    # turn loop itself is a tracked on-loop residual (#3086); the local-model
-    # encode over a capture window must not add to it. SDK `capture_session`
-    # is synchronous (there is no loop to free) and calls the same helper
-    # inline — the two share the helper, not the scheduling.
+    # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
+    # `capture_session` is synchronous (there is no loop to free) and calls
+    # the same helper inline — the two share the helper, not the scheduling.
     _turn_texts = _capture_turn_texts(windowed)
     _turn_embs = await _run_off_loop(
         _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
         proj.required_embedding_dim)
-    for i, turn in enumerate(windowed):
-        role = _normalize_turn_role(turn.get("role"))
-        # P1 #1529 (D10, #721 parity): the stored text (and its isinstance-first
-        # coercion — a non-string content can NEVER crash the loop into a raw
-        # 500 after the Session MERGE) comes from the shared
-        # `_capture_turn_texts`, one definition shared with the embedding batch
-        # above (#4194), so the vector is always computed over the string
-        # actually stored.
-
-        # #490: turn Points are the episodic turn stream OF THIS SESSION —
-        # keyed deterministically by {session_id}_t{i} so re-capturing the
-        # same session is idempotent, but turns from different sessions never
-        # conflate (content-hash dedup would share an empty "[user] " or
-        # repeated "ok" turn org-wide, destroying per-session turn identity
-        # — #490 review P2-2). Node MERGEs run BEFORE the edge MERGE: a full-
-        # path MERGE (s)-[:CONTAINS]->(t) with a missing edge makes FalkorDB
-        # create the whole path from scratch, duplicating the Point node.
-        turn_id = f"{session_id}_t{i}"
-        turn_text = _turn_texts[i]
-        turn_embedding = _turn_embs[i]
-        _turn_rows = proj.g.query(
-            "MERGE (t:Point {id:$id}) "
-            # #4194: capture the node's PRE-write content_hash before the SET
-            # reassigns it (capture-time read, no external probe that can
-            # fail). prior_ch NULL => a new turn, nothing to preserve.
-            "WITH t, t.content_hash AS prior_ch "
-            "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
-            "    t.speaker=$speaker, "
-            "    t.is_episodic=true, "
-            "    t.status=coalesce(t.status, $s), "
-            "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch, "
-            # #4194: three-way guard. New vector if we encoded one; else
-            # PRESERVE the stored vector only when the content is UNCHANGED;
-            # else CLEAR it, because a preserved vector for changed text
-            # would rank the turn by text no longer on the node (the
-            # dense-leg lie).
-            "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
-            "        WHEN prior_ch = $ch THEN t.embedding ELSE NULL END "
-            "RETURN t.createdAt AS createdAt, t.status AS status",
-            params={"id": turn_id, "c": turn_text, "k": "event",
-                    "speaker": role, "s": "draft", "now": now,
-                    "ch": _content_hash(turn_text),
-                    "emb": turn_embedding},
-        ).result_set
-        # #3947 review (F4 + parity): the write's COALESCE owns the stored
-        # timestamp and status — a RE-capture keeps the original createdAt and
-        # any promoted status, so journal what the graph holds. Emitting the
-        # literal `now`/`draft` regresses a promoted turn to draft and drifts
-        # createdAt on every replay (parity with sdk.py's loop, #1532).
-        turn_created_at = (
-            _turn_rows[0][0]
-            if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
-            else now)
-        turn_status = (
-            _turn_rows[0][1]
-            if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
-            else "draft")
-        proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-            "MERGE (s)-[:CONTAINS]->(t)",
-            params={"sid": session_id, "tid": turn_id},
-        )
-        # #3947: journal the turn write so a rebuild can recreate it (parity
-        # with sdk.capture_session's loop — the two are kept identical by
-        # design, #1532). The raw Cypher writes above are unchanged; this is
-        # the missing RECORD. `contains_session` rides the event envelope so
-        # the projection's edge fold restores the CONTAINS link without a
-        # node property the live write never sets.
-        #
-        # #3947 review (cycle 2, #3086): gated on a configured journal, exactly
-        # as in sdk.py — on this lane `_make_sdk`/`_data_sdk` pass no
-        # `event_log_path`, so the JSONL half is a no-op and the `:GraphEvent`
-        # half is not a rebuild source (the wipe takes it with the graph). The
-        # per-turn `ensure_event_schema` + `next_seq` + `append_event` cost was
-        # pure overhead on the lane #3086 measures as already blocking the
-        # event loop. The residual — hosted captures have no rebuild-durable
-        # turn record until a journal is wired here — is unchanged by this PR.
-        if sdk._get_event_log() is not None:
-            sdk._emit_event(
-                "PointAdded",
-                {"id": turn_id, "kind": "event",
-                 "content_hash": _content_hash(turn_text)},
-                point={
-                    "id": turn_id,
-                    "content": turn_text,
-                    "pointKind": "event",
-                    "speaker": role,
-                    "is_episodic": True,
-                    "status": turn_status,
-                    "createdAt": turn_created_at,
-                },
-                contains_session=session_id,
-            )
+    # #3086: the turn WRITE runs OFF the event loop on the capture pool, in ONE
+    # batched `UNWIND $turns` transaction, through the SAME shared writer the
+    # SDK lane calls (`_write_capture_turns`). The per-turn loop this replaced
+    # issued two FalkorDB round-trips per turn straight on the loop (~1000 for
+    # a 500-turn capture — the ~4.75 s single-loop freeze #3086 measures).
+    # Node shape, per-row idempotency (`{session_id}_t{i}`), the stale-vector
+    # guard and the rebuild journal all live in that one definition, so this
+    # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
+    await _run_off_loop(
+        _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
+        windowed, now=now, turn_embs=_turn_embs)
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -8991,7 +8917,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             tenant_master = None
             try:
                 from tortoise.extractor_v2 import build_master_list
-                tenant_master = build_master_list(sdk=sdk)
+                # #3086: the tenant vocab compile walks the pack manifests and
+                # is a documented cold-start cost (`extractor_v2` — ~12.2 s
+                # cold on the manifest path). It ran INLINE on the event loop,
+                # stalling every concurrent request; it belongs on the capture
+                # pool with the rest of the capture residual.
+                tenant_master = await _run_off_loop(
+                    _CAPTURE_EXECUTOR, build_master_list, sdk=sdk)
             except Exception as e:  # noqa: BLE001, RUF100
                 _logger.warning(
                     "tenant vocabulary compile failed for %s — capture "
@@ -9574,10 +9506,36 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # FIRST calibration here.
     ep_ids = _capture_ep_target_ids(extracted, proj)
     if ep_ids:
-        _apply_capture_ingest_ep(
-            sdk, ep_ids,
-            warn=extraction_warnings.append,
-        )
+        # #3086: this pass runs `sdk.dream(mode="local", ...)`, which is
+        # KNOWN loop-unsafe — the whole reason `/v1/dream` is async and pooled
+        # (#3718). It ran INLINE here, ON the event loop, freezing every
+        # concurrent request for the whole pass. Two things are required to
+        # move it:
+        #
+        #   1. Off the loop, onto the dedicated capture pool.
+        #   2. UNDER the same per-graph dream lock the two pooled pass sites
+        #      take. Before the off-load the single event loop made both
+        #      bodies atomic (no await before `sdk.dream`); now the pass runs
+        #      in a pool, so two same-graph passes (this one and `/v1/dream`,
+        #      or two HOSTED captures) could otherwise read and clear the SAME
+        #      `ep_dirty` roots and interleave `warm_start` writes — the exact
+        #      exclusion #3718's review made explicit for the pooled sites.
+        #      (The SDK lane's own inline `capture_session` call is unchanged
+        #      and takes no lock — it is synchronous on its caller's thread and
+        #      cannot import this module; that is pre-existing, not widened.)
+        #      The lock is a `threading.Lock` taken INSIDE the worker, never on
+        #      the loop (an `asyncio.Lock` binds to the first loop, which breaks
+        #      across the per-test loops — the `_CAPTURE_IN_FLIGHT` rationale).
+        _dk = _dream_key(org["org_id"],
+                         (org.get("graph_namespace")
+                          if org.get("graph_id") else None))
+
+        def _capture_ep_pass() -> None:
+            with _dream_lock(_dk):
+                _apply_capture_ingest_ep(
+                    sdk, ep_ids, warn=extraction_warnings.append)
+
+        await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
     # verb (memory_write_v1) — protocol_version REQUIRED, provenance
     # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy

@@ -540,6 +540,162 @@ def _capture_turn_embeddings(
         return [None] * len(turn_texts)
 
 
+# ── #3086: ONE turn-stream writer, shared by both capture lanes ────────────
+# The per-turn store used to be a loop duplicated between
+# `TortoiseSDK.capture_session` and hosted `_capture_session_impl` (kept in
+# sync by convention — the drift class #2813 exists to delete), and that loop
+# issued TWO FalkorDB round-trips per turn ON the event loop: a node `MERGE`
+# then a `CONTAINS` edge `MERGE`. For a 500-turn capture that is ~1000
+# blocking calls — the ~4.75s single-loop freeze #3086 measures.
+#
+# This is the ONE implementation both lanes call. The batch is a single
+# `UNWIND $turns` statement, i.e. ONE transaction per capture: a runtime error
+# anywhere in `$turns` rolls the WHOLE batch back, so a failed batch leaves no
+# turn written without its CONTAINS edge (never a partially-wired session).
+# Per-row idempotency is what makes a RETRY of a failed batch safe, and it is
+# free here — the turn ids are already deterministic
+# (`{session_id}_t{i}`), so a retried batch MERGEs the same rows and converges.
+# (Precondition, stated in the docstring: the Session must already exist — the
+# statement MATCHes it, so a missing Session leaves the batch's nodes
+# unwired. Both callers MERGE it immediately before.)
+_TURN_WRITE_CYPHER = (
+    "UNWIND $turns AS turn "
+    # `MERGE (t:Point {id:...})` binds the node FIRST: a full-path
+    # `MERGE (s)-[:CONTAINS]->(t)` with a missing edge makes FalkorDB create
+    # the whole path from scratch, duplicating the Point (#490 review P2-2).
+    "MERGE (t:Point {id: turn.id}) "
+    # `prior_ch` is read per row BEFORE the SET reassigns it, so the
+    # stale-vector decision (#4194) is sound on a matched node and on a
+    # just-created one (prior_ch NULL => nothing to preserve).
+    "WITH t, turn, t.content_hash AS prior_ch "
+    "SET t.content=turn.c, t.pointKind=turn.k, t.is_operator=false, "
+    "    t.speaker=turn.speaker, t.is_episodic=true, "
+    "    t.status=coalesce(t.status, turn.s), "
+    "    t.createdAt=coalesce(t.createdAt, $now), "
+    "    t.updatedAt=$now, t.content_hash=turn.ch, "
+    # Three-way guard: new vector if we encoded one; else PRESERVE the stored
+    # vector only when the content is UNCHANGED; else CLEAR it — a preserved
+    # vector for changed text would rank the turn by text no longer on the
+    # node (the dense-leg lie).
+    "    t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) "
+    "        WHEN prior_ch = turn.ch THEN t.embedding ELSE NULL END "
+    "WITH t, turn "
+    "MATCH (s:Session {id:$sid}) "
+    "MERGE (s)-[:CONTAINS]->(t) "
+    # Read back what the graph HOLDS (the COALESCE owns createdAt/status) so
+    # the journal records the stored values, never the literal `now`/`draft`
+    # — emitting those regresses a promoted turn to draft on replay and
+    # drifts createdAt on every re-capture (#3947 review F4).
+    "RETURN turn.id AS id, t.createdAt AS createdAt, t.status AS status"
+)
+
+
+def _write_capture_turns(
+    proj,
+    sdk,
+    session_id: str,
+    windowed: list[dict],
+    *,
+    now: str,
+    turn_embs: list[list[float] | None],
+) -> None:
+    """Write a capture's episodic turn stream — ONE batched statement (#3086).
+
+    Called from BOTH capture lanes: ``TortoiseSDK.capture_session`` (sync, no
+    loop to free) and hosted ``_capture_session_impl`` (off the event loop, on
+    ``_CAPTURE_EXECUTOR``). It replaces the per-turn loop the two lanes each
+    kept, so the turn store can no longer fork.
+
+    ``turn_embs`` must be the batch from ``_capture_turn_embeddings`` over
+    ``_capture_turn_texts(windowed)``. The writer recomputes the stored text
+    from that same helper, so the vector can never describe different text
+    than the node holds (#4194); a length mismatch (unreachable from both
+    callers) drops the whole batch's vectors with an error log rather than
+    misaligning them.
+
+    The Session MUST already exist (both callers MERGE it immediately before)
+    — the statement both node- and edge-writes, and a missing Session would
+    leave nodes unwired. ``proj`` is the caller's projection (the SDK lane
+    passes ``self._get_proj()``); ``sdk`` supplies the journal seam.
+    """
+    turn_texts = _capture_turn_texts(windowed)
+    if not turn_texts:
+        return
+    if len(turn_embs) != len(turn_texts):
+        # Unreachable from both callers (each derives `turn_embs` from this
+        # same helper over this same `windowed`) and deliberately NOT a raise:
+        # this helper runs after the caller's Session MERGE, so raising would
+        # 500 a capture whose Session is already committed. Drop the whole
+        # batch's vectors rather than misaligning them — the turns are still
+        # stored and the read path declares the vector leg impaired (the
+        # file's fail-soft posture), with the error audible in the log.
+        _logger.error(
+            "turn embedding batch has %d rows for %d turns — storing all %d "
+            "turn(s) with no vector (the dense leg degrades to keyword-only)",
+            len(turn_embs), len(turn_texts), len(turn_texts))
+        turn_embs = [None] * len(turn_texts)
+    turn_rows: list[dict] = []
+    turn_hashes: list[str] = []
+    for i, turn in enumerate(windowed):
+        text = turn_texts[i]
+        text_hash = _content_hash(text)
+        turn_hashes.append(text_hash)
+        turn_rows.append({
+            "id": f"{session_id}_t{i}",
+            "c": text,
+            "k": "event",
+            # `_normalize_turn_role` is the isinstance-first pattern (#721):
+            # None -> "unknown", truthy non-strings -> str() — a raw
+            # non-string stored as `speaker` contradicts the ontology row and
+            # a dict role could fail the write mid-batch.
+            "speaker": _normalize_turn_role(turn.get("role")),
+            "s": "draft",
+            "ch": text_hash,
+            "emb": turn_embs[i],
+        })
+
+    rows = proj.g.query(
+        _TURN_WRITE_CYPHER,
+        params={"turns": turn_rows, "sid": session_id, "now": now},
+    ).result_set
+    stored = {r[0]: (r[1], r[2]) for r in (rows or [])}
+
+    # #3947: journal the turn writes so a rebuild can recreate them.
+    # `contains_session` rides the EVENT ENVELOPE, not the point payload —
+    # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
+    # restored by the projection's edge fold without inventing a node
+    # property the live write never sets. Gated on a configured journal: on a
+    # lane with no `event_log_path` (`_make_sdk`/`_data_sdk` pass none) the
+    # JSONL half is a no-op and the `:GraphEvent` half is not a rebuild
+    # source — `ensure_event_schema` + `next_seq` + `append_event` per turn
+    # there buys no durability on the very lane #3086 measures.
+    if sdk._get_event_log() is None:
+        return
+    for i, turn in enumerate(windowed):
+        turn_id = f"{session_id}_t{i}"
+        created_at, status = stored.get(turn_id, (None, None))
+        sdk._emit_event(
+            # Parity with `create_point`'s emission (#3947 review F5): the
+            # PAYLOAD carries `content_hash`. It belongs here and NOT in the
+            # `point` snapshot, which `_emit_event` strips it from
+            # (`content_hash` is derived, and the replay recomputes it in
+            # `_upsert_point_props`).
+            "PointAdded",
+            {"id": turn_id, "kind": "event",
+             "content_hash": turn_hashes[i]},
+            point={
+                "id": turn_id,
+                "content": turn_texts[i],
+                "pointKind": "event",
+                "speaker": _normalize_turn_role(turn.get("role")),
+                "is_episodic": True,
+                "status": status if status is not None else "draft",
+                "createdAt": created_at if created_at is not None else now,
+            },
+            contains_session=session_id,
+        )
+
+
 # #1352: minimal stopword set for the cheap session-Source topic derivation —
 # content-word frequency over the transcript (the metadata extractor's LLM
 # path is not available on the capture path; this is the deterministic
@@ -3433,29 +3589,24 @@ class TortoiseSDK:
             _session_record["actor_user_id"] = _mirror_actor
         self._emit_event("SessionRecorded", **_session_record)
 
-        # NOTE: this per-turn loop (episodic turn Points) is duplicated from
-        # tortoise/hosted_api.py POST /v1/sessions — the shared primitives
-        # #1532 D1/D2 (_capture_turn_window / _normalize_turn_role) keep the
-        # two loops byte-identical for identical input: same stored-window
-        # truncation, same role normalization (None -> "unknown", truthy
-        # non-strings -> str()), same `speaker` property write (delta 5).
-        # Hosted additionally adds quota/auth bounds; the extraction that
-        # follows the loop is shared via _extract_session_llm/_extract_session_v2
-        # (#822). Keep the two in sync when touching either — and note the
-        # THIRD copy: tools/ask_spotcheck.py::seed_capture_turn_store
-        # mirrors this same per-turn store (id, `[role] ` framing, prop set,
-        # CONTAINS edge) to seed the ask fixtures — the ONE copy every ask
-        # seeder writes through since #3914 (#3910 had it in `_seed_memory`,
-        # which is now a delegating caller). It omits Source/extraction, but
-        # since W7A it EMBEDS every turn BY DEFAULT through the shared store
-        # seam (`_capture_turn_embeddings` + `required_embedding_dim`,
+        # #3086: the episodic turn stream is written by the ONE shared writer
+        # (`_write_capture_turns`), also called by hosted POST /v1/sessions —
+        # so this lane and that one can no longer drift (the #1532/#2813
+        # duplicated-loop class). Node shape, per-row idempotency
+        # (`{session_id}_t{i}`), the stale-vector guard and the rebuild journal
+        # all live in that definition. NOTE the THIRD, still-separate copy:
+        # tools/ask_spotcheck.py::seed_capture_turn_store mirrors the same
+        # store shape to seed the ask fixtures — the ONE copy every ask seeder
+        # writes through since #3914. It omits Source/extraction, but since W7A
+        # it EMBEDS every turn BY DEFAULT through the shared store seam
+        # (`_capture_turn_embeddings` + `required_embedding_dim`,
         # #4194/#4304) and retains `embed=False` for #4197's un-backfilled
-        # backlog; the turn write shape itself (id, `[role] ` framing, prop
-        # set, CONTAINS edge) must stay identical, or the fixtures teach a
-        # shape capture no longer produces (#3910). #3551 tracks collapsing
-        # all three onto one shared primitive.
-        # #4194: embed the window BEFORE the loop — the stored text of each
-        # turn, exactly as the loop writes it — in ONE local-model call.
+        # backlog; that shape must stay identical, or the fixtures teach a
+        # shape capture no longer produces (#3910). #3551 tracks collapsing it
+        # onto the shared primitive too.
+        #
+        # #4194: embed the window BEFORE the write — the stored text of each
+        # turn, exactly as the writer stores it — in ONE local-model call.
         # Batched so the added work on this already-hot synchronous path (#3086
         # measures ~4.75 s for a 500-turn capture) is one model call rather
         # than one per turn. The vector is the same one `create_point` stores,
@@ -3463,126 +3614,17 @@ class TortoiseSDK:
         # turn is re-encoded on every capture, so a model rotation self-heals
         # on re-capture (no model fingerprint is stored on the node, so a
         # "skip unchanged" optimisation would silently keep old-space vectors).
-        # The write's own MERGE reads the node's pre-write content_hash to
-        # decide preserve-vs-clear, so no external probe can fail. Fail-soft:
-        # `None` per turn when no embedder is available — the turn is still
-        # stored and the read path declares its vector leg impaired.
+        # The writer reads the node's pre-write content_hash to decide
+        # preserve-vs-clear, so no external probe can fail. Fail-soft: `None`
+        # per turn when no embedder is available — the turn is still stored
+        # and the read path declares its vector leg impaired.
         _turn_texts = _capture_turn_texts(windowed)
         _turn_embs = _capture_turn_embeddings(
             _turn_texts, proj.required_embedding_dim)
-        for i, turn in enumerate(windowed):
-            # #721: _normalize_turn_role is the isinstance-first pattern — an
-            # `or "unknown"` fallback only fixes falsy roles, but TRUTHY
-            # non-string roles (123, {"a": 1}) would pass raw and be stored as
-            # a non-string `speaker` (contradicting the `speaker | string`
-            # ontology row) — and a dict role could fail the Cypher write
-            # mid-loop, leaving a partial session. Coerce via str() so the
-            # speaker property is always a string; only None maps to "unknown".
-            role = _normalize_turn_role(turn.get("role"))
-            # #4194: the stored text comes from the shared `_capture_turn_texts`
-            # (one definition, shared with the embedding batch above), so the
-            # vector is always computed over the string actually stored. The
-            # old inline coercion (isinstance-first: None -> "", truthy
-            # non-strings -> str(), #721) and the idempotent [:5000] cap now
-            # live in that one helper.
-            turn_text = _turn_texts[i]
-            turn_embedding = _turn_embs[i]
-
-            # Episodic turn point — deterministic id, structured speaker tag
-            # (delta 5), content hash, session-scoped (never conflated across
-            # sessions — #490).
-            turn_id = f"{session_id}_t{i}"
-            _turn_rows = proj.g.query(
-                "MERGE (t:Point {id:$id}) "
-                # #4194: capture the node's PRE-write content_hash before the
-                # SET reassigns it. Reading it here (not from the SET) is what
-                # makes the stale-vector decision sound on BOTH a matched node
-                # and a just-created one (prior_ch NULL => a new turn, nothing
-                # to preserve) — and there is no external probe that can fail
-                # and leave the prior unknown.
-                "WITH t, t.content_hash AS prior_ch "
-                "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
-                "    t.speaker=$speaker, "
-                "    t.is_episodic=true, "
-                "    t.status=coalesce(t.status, $s), "
-                "    t.createdAt=coalesce(t.createdAt, $now), "
-                "    t.updatedAt=$now, t.content_hash=$ch, "
-                # #4194: three-way guard. New vector if we encoded one; else
-                # PRESERVE the stored vector only when the content is
-                # UNCHANGED; else CLEAR it, because a preserved vector for
-                # changed text would rank the turn by text no longer on the
-                # node (the dense-leg lie).
-                "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
-                "        WHEN prior_ch = $ch THEN t.embedding ELSE NULL END "
-                "RETURN t.createdAt AS createdAt, t.status AS status",
-                params={"id": turn_id, "c": turn_text, "k": "event",
-                        "speaker": role, "s": "draft", "now": now,
-                        "ch": _content_hash(turn_text),
-                        "emb": turn_embedding},
-            ).result_set
-            # #3947 review (F4 + parity): the write's COALESCE decides what the
-            # graph holds — a RE-capture keeps the ORIGINAL createdAt AND the
-            # stored status (`coalesce(t.status, 'draft')`). Journal exactly
-            # what was stored: emitting the literal `now`/`draft` regresses a
-            # promoted turn back to draft on replay, and drifts createdAt on
-            # every re-capture. Read both back in the same statement.
-            turn_created_at = (
-                _turn_rows[0][0]
-                if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
-                else now)
-            turn_status = (
-                _turn_rows[0][1]
-                if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
-                else "draft")
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-                "MERGE (s)-[:CONTAINS]->(t)",
-                params={"sid": session_id, "tid": turn_id},
-            )
-            # #3947: journal the turn write so a rebuild can recreate it.
-            # The two Cypher writes above stay raw and un-reordered: their
-            # MERGE ordering + the deterministic `{session_id}_t{i}` id ARE
-            # the idempotency contract (#490 review P2-2), and the raw form
-            # keeps the live node shape unchanged.
-            #
-            # #3947 review (cycle 2, #3086): emit ONLY when a journal exists.
-            # On a lane with no `event_log_path` (`_make_sdk`/`_data_sdk` in
-            # hosted_api.py) the JSONL half is a no-op, and the `:GraphEvent`
-            # half is not a rebuild source — `rebuild()` wipes it with the rest
-            # of the graph. Paying `ensure_event_schema` + `next_seq` +
-            # `append_event` per turn there buys no durability on the very lane
-            # #3086 measures as already blocking the event loop (~4.75 s per
-            # 500-turn capture). Where a journal IS configured the record is
-            # what makes the rebuild possible, so it is emitted unconditionally.
-            #
-            # `contains_session` rides the EVENT ENVELOPE, not the point
-            # payload: the CONTAINS link is a capture-write structural fact
-            # (ONTOLOGY §4.5), so it is restored by the projection's edge fold
-            # without inventing a node property the live write never set —
-            # and without becoming a caller-forgeable prop.
-            if self._get_event_log() is not None:
-                self._emit_event(
-                    # Parity with `create_point`'s emission (#3947 review F5):
-                    # the PAYLOAD carries `content_hash`. It belongs here and
-                    # NOT in the `point` snapshot, which `_emit_event` strips
-                    # it from (`content_hash` is derived, and the replay
-                    # recomputes it in `_upsert_point_props`) — an earlier
-                    # draft put it in the snapshot, where nothing would ever
-                    # read it.
-                    "PointAdded",
-                    {"id": turn_id, "kind": "event",
-                     "content_hash": _content_hash(turn_text)},
-                    point={
-                        "id": turn_id,
-                        "content": turn_text,
-                        "pointKind": "event",
-                        "speaker": role,
-                        "is_episodic": True,
-                        "status": turn_status,
-                        "createdAt": turn_created_at,
-                    },
-                    contains_session=session_id,
-                )
+        # One batched `UNWIND $turns` transaction instead of the per-turn loop
+        # (two FalkorDB round-trips per turn on the event loop).
+        _write_capture_turns(
+            proj, self, session_id, windowed, now=now, turn_embs=_turn_embs)
 
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
