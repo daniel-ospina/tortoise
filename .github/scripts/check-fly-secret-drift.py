@@ -45,6 +45,20 @@ Sources (see the manifest header for the full rationale):
                          ``fly-toml-env``) or remove the Fly secret. A gate that
                          passes on a Fly-only variable is the fail-open #4126 was
                          filed to close.
+``fly-only:<issue-ref>``  a DELIBERATELY out-of-band secret: managed outside
+                         BOTH GitHub and ``fly.toml`` on purpose, with the named
+                         issue carrying the recorded decision (an ``OVERRIDES:``
+                         marker states what the ruling overrides). The ref must
+                         RESOLVE — ``#<N>`` (this repo) or ``<owner>/<repo>#<N>``.
+                         An empty or malformed ref is a manifest this checker
+                         cannot read: exit 2, never a pass — the exception is
+                         only meaningful because of the issue it names. This is
+                         what distinguishes it from ``unmanaged``: `unmanaged`
+                         means NO source was declared; `fly-only` means a source
+                         was deliberately REFUSED, and here is the ruling. A bare
+                         ``unmanaged`` entry still FAILS, and a ``fly-only`` name
+                         that is absent from Fly or that the deploy assigns also
+                         FAILS (the exception is for a live, real, unmanaged name).
 
 Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
   0 — every Fly secret is declared and every declaration is honoured
@@ -52,8 +66,10 @@ Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
       honour, a name whose declaration names NO managing source, or a guarded
       declaration whose GitHub secret does not exist)
   2 — could not determine state (missing/unparsable manifest, unreadable or
-      EMPTY secret list, malformed entry, absent GH_SECRETS_PRESENT, a payload
-      that cannot be read). Fail-closed: an unreadable state is never clean.
+      EMPTY secret list, malformed entry — including a `fly-only:` declaration
+      whose issue ref is empty or malformed — absent GH_SECRETS_PRESENT, a
+      payload that cannot be read). Fail-closed: an unreadable state is never
+      clean.
 
 Env seams (all optional; used by the hermetic test suite):
   FLY_SECRETS_FILE          fixture path holding the ``--json`` secret list
@@ -123,6 +139,18 @@ def read_gh_secret_presence() -> set[str]:
 
 # `NAME=…` tokens in a captured `flyctl secrets set` payload.
 _ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=([^\s]*)")
+# A comment leader: `#` at the start of a line or after whitespace. NOT any `#` —
+# a `fly-only:#661` issue reference is data, and a plain `split("#", 1)` turned
+# the reference into the empty string, failing the whole manifest as unreadable.
+# A trailing `  # note` still strips, because its `#` follows whitespace.
+_COMMENT_RE = re.compile(r"(?:^|\s)#")
+# A `fly-only:<issue-ref>` argument — the issue that carries the recorded
+# decision allowing a deliberately out-of-band secret. `<#N>` (this repo) or
+# `<owner>/<repo>#<N>`. The number is REQUIRED: `fly-only:`, `fly-only:#`, and
+# `fly-only:#661abc` are all unreadable state (exit 2), because the category
+# exists only to point at a ruling — without a resolvable ref it is
+# indistinguishable from `unmanaged`, which FAILS.
+_FLY_ONLY_REF_RE = re.compile(r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+$")
 # Substituted for `${{ secrets.X }}` when X is treated as present. The delimiters
 # are control characters that cannot occur in a GitHub/secret NAME, so a marker is
 # never a substring of another marker: `\x01SEC:FOO\x02` does NOT match inside
@@ -505,7 +533,8 @@ def read_manifest(path: Path) -> dict[str, str]:
     """
     entries: dict[str, str] = {}
     for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
-        line = raw.split("#", 1)[0].strip()
+        marker = _COMMENT_RE.search(raw)
+        line = (raw[: marker.start()] if marker else raw).strip()
         if not line:
             continue
         parts = line.split()
@@ -513,14 +542,28 @@ def read_manifest(path: Path) -> dict[str, str]:
             raise ValueError(f"{path.name}:{lineno}: expected '<NAME> <source>', got {raw!r}")
         name, source = parts
         kind, sep, argument = source.partition(":")
-        if kind not in ("gh-secret", "workflow", "fly-toml-env", "unmanaged"):
+        if kind not in ("gh-secret", "workflow", "fly-toml-env", "unmanaged", "fly-only"):
             raise ValueError(
                 f"{path.name}:{lineno}: unknown source {source!r} "
-                "(expected gh-secret:<GH_NAME> | workflow | fly-toml-env | unmanaged)"
+                "(expected gh-secret:<GH_NAME> | workflow | fly-toml-env | unmanaged | "
+                "fly-only:<issue-ref>)"
             )
         if kind == "gh-secret" and not argument:
             raise ValueError(f"{path.name}:{lineno}: gh-secret needs the GitHub secret name")
-        if kind != "gh-secret" and sep:
+        if kind == "fly-only" and not _FLY_ONLY_REF_RE.match(argument or ""):
+            # The SAFEGUARD: the category cannot be used as a second spelling of
+            # `unmanaged`. A ref that does not resolve to an issue number names
+            # no ruling, so the declaration carries no more information than
+            # `unmanaged` — which FAILS. Malformed is unreadable state (exit 2),
+            # never a pass.
+            raise ValueError(
+                f"{path.name}:{lineno}: fly-only needs a resolvable issue reference "
+                "('#<N>' or '<owner>/<repo>#<N>') naming the issue that carries the "
+                "recorded decision — got "
+                f"{source!r}. Without it the entry is `unmanaged` in disguise, which "
+                "fails"
+            )
+        if kind not in ("gh-secret", "fly-only") and sep:
             raise ValueError(f"{path.name}:{lineno}: {kind} takes no ':' argument (got {source!r})")
         if name in entries:
             raise ValueError(f"{path.name}:{lineno}: duplicate declaration for {name}")
@@ -771,6 +814,26 @@ def main() -> int:
                     "exists on neither Fly nor the deploy payload (remove the entry, "
                     "or declare its real source)"
                 )
+        elif kind == "fly-only":
+            # A decision-backed exception, NOT a way to spell `unmanaged` — see
+            # read_manifest: reaching here proves the ref named an issue number.
+            # The exception is only true while the name really is a live,
+            # deliberately unversioned Fly secret, so both halves are checked:
+            # a name that is gone (nothing to except) and a name the deploy
+            # assigns (version-controlled after all) are stale declarations.
+            if name not in fly_names:
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared fly-only:{gh_name} but "
+                    "exists neither on Fly nor in the deploy payload; a decision-backed "
+                    "exception is for a REAL out-of-band Fly secret (remove the entry, "
+                    "or declare its real source)"
+                )
+            elif name in assigned or name in unconditional or name in live:
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared fly-only:{gh_name} but "
+                    f"deploy-hosted.yml assigns the Fly variable {name}, so it IS "
+                    "managed from version control (declare the real source)"
+                )
 
     # The list describes the FLY app's state, so a declared-but-not-yet-present
     # name is not debt — the reverse-completeness rule above already covers it.
@@ -828,10 +891,12 @@ def main() -> int:
     # declaration the rules above accepted). No `unmanaged` subtraction is needed
     # here: a declared `unmanaged` name is a violation above, so reaching this
     # line proves none survives on Fly.
-    managed = [n for n in fly_names if n not in set(conditional)]
+    fly_only = [n for n in fly_names if declared.get(n, "").startswith("fly-only:")]
+    managed = [n for n in fly_names if n not in set(conditional) and n not in set(fly_only)]
     print(
         f"OK: all {len(fly_names)} Fly secret(s) are declared "
-        f"({len(managed)} managed, {len(fly_conditional)} conditionally propagated)"
+        f"({len(managed)} managed, {len(fly_conditional)} conditionally propagated, "
+        f"{len(fly_only)} decision-backed fly-only)"
     )
     return 0
 

@@ -1649,9 +1649,16 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     assert declared["SUPABASE_SERVICE_ROLE_KEY"] == "gh-secret:SUPABASE_SERVICE_KEY"
 
     debt = {n for n, s in declared.items() if s == "unmanaged"}
+    # The LIVE Fly app after #4126's fix, which is what the gate reads: a
+    # `fly-toml-env` name is BY CONTRACT not a Fly secret (a Fly secret of the
+    # same name shadows `[env]` — the gate reports that as STALE), so the fixture
+    # must not seed those names. Seeding every declared name modelled the pre-fix
+    # state and would make this test assert a violation that no longer exists.
     real_secrets = _fixture(
         "real-manifest-names.json",
-        json.dumps([{"name": n} for n in sorted(declared)]),
+        json.dumps(
+            [{"name": n} for n in sorted(declared) if not declared[n].startswith("fly-toml-env")]
+        ),
     )
     r = _run(
         real_secrets,
@@ -1666,8 +1673,225 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     )
     assert "STALE DECLARATION" not in r.stdout, r.stdout
     assert "UNDECLARED" not in r.stdout, r.stdout
-    assert r.returncode == (1 if debt else 0), r.stdout + r.stderr
-    if debt:
-        assert f"{len(debt)} violation(s)" in r.stdout, r.stdout
-        for name in sorted(debt):
-            assert f"UNSOURCED — '{name}'" in r.stdout, r.stdout
+    # #4126's seven recorded-debt names, pinned by KIND so a revert to
+    # `unmanaged` (or a dropped declaration) fails HERE, in review, instead of
+    # hard-blocking the deploy in CI.
+    config_names = {
+        "TORTOISE_CONTROL_PLANE",
+        "TORTOISE_REAUTH_WINDOW_SECONDS",
+        "TORTOISE_MANUAL_LINKING_ENABLED",
+    }
+    env_keys = module.fly_toml_env_keys(REAL_FLY_TOML.read_text())
+    workflow_refs = _referenced_secret_names(REAL_WORKFLOW)
+    for name in sorted(config_names):
+        assert declared[name] == "fly-toml-env", declared[name]
+        assert name in env_keys, f"{name} is not an assigned key in fly.toml [env]"
+    for name in ("TORTOISE_AUDIT_DSN", "TORTOISE_LINK_INTENT_SECRET", "SENTRY_DSN"):
+        assert declared[name] == f"gh-secret:{name}", declared[name]
+        assert name in workflow_refs, f"deploy-hosted.yml never references secrets.{name}"
+        assert name in module.workflow_secret_refs(REAL_WORKFLOW.read_text())
+    # The one decision-backed exception — and it must stay an exception, i.e. a
+    # ref to the issue carrying the ruling (#661's OVERRIDES marker).
+    assert declared["REGISTRY_STREAM_KEY"] == "fly-only:#661"
+    assert "REGISTRY_STREAM_KEY" not in workflow_refs, (
+        "REGISTRY_STREAM_KEY must stay OUT of the GitHub trust boundary (#661)"
+    )
+    assert debt == set(), f"recorded debt remains: {sorted(debt)}"
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+# ── The probe ↔ manifest lockstep (#4411 residual 1) ─────────────────────────
+# The gate cannot list repository secrets, so the deploy TELLS it which ones the
+# run carries — and a name missing from that block reads as ABSENT, which fails
+# the deploy for that name. The lockstep was previously untested: a probe line
+# gated on one secret while appending another (or an appended name with no
+# `env:` binding, so the shell sees an unset variable) would over-report presence
+# and let a hand-managed Fly value pass — the #4126 shape, green. Pinned here
+# rather than left to a future deploy to discover, because #4126's own fix
+# depends on it: three new `gh-secret:` declarations arrived with three new probe
+# lines and three new `env:` bindings.
+
+_PROBE_LINE_RE = re.compile(
+    r'\[\s*-n\s+"\$(?P<tested>[A-Z0-9_]+)"\s*\]\s*&&\s*'
+    r'GH_PRESENT="\$GH_PRESENT (?P<appended>[A-Z0-9_]+)"'
+)
+
+
+def _provenance_gate_step() -> dict:
+    """The workflow step that invokes this gate.
+
+    Parsed, not line-matched: this is the same reason the gate itself parses —
+    an `env:` or an `if:` is a YAML key, and its position relative to `run:` is
+    not a contract.
+    """
+    import yaml
+
+    doc = yaml.safe_load(REAL_WORKFLOW.read_text())
+    for job in (doc.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            if isinstance(step, dict) and "check-fly-secret-drift" in str(step.get("run") or ""):
+                return step
+    raise AssertionError("the provenance gate step is not wired into the real deploy workflow")
+
+
+def test_probe_block_and_manifest_gh_secret_names_are_in_lockstep():
+    """Every probe line tests the name it appends, is `env:`-bound, and is declared."""
+    step = _provenance_gate_step()
+    pairs = _PROBE_LINE_RE.findall(step["run"])
+    assert pairs, "no GH_SECRETS_PRESENT probe lines found in the gate step"
+    for tested, appended in pairs:
+        # A line that tests $A and appends B reports B as present on A's value:
+        # B is declared `gh-secret:B`, the deploy's guard reads an unset $B, the
+        # assignment is skipped every run, and Fly keeps whatever was hand-set.
+        assert tested == appended, (
+            f"probe line tests ${tested} but appends {appended} — the declared secret "
+            "for that name reads ABSENT and fails the deploy"
+        )
+    probed = {appended for _, appended in pairs}
+    env_keys = {str(k) for k in (step.get("env") or {})}
+    assert not probed - env_keys, (
+        "probed names with no `env:` binding on the gate step are unset shell "
+        f"variables, so they read as ABSENT: {sorted(probed - env_keys)}"
+    )
+    declared_gh = _declared_gh_names(REAL_MANIFEST)
+    assert probed == declared_gh, (
+        "the probe block and the manifest's `gh-secret:` declarations disagree — "
+        f"probe-only: {sorted(probed - declared_gh)}, "
+        f"manifest-only: {sorted(declared_gh - probed)}"
+    )
+
+
+# ── The `fly-only:` category — a decision-backed exception, NOT a fail-open ────
+#
+# #661 is a CLOSED recorded decision: the registry-stream key must never enter
+# the GitHub trust boundary, so the ABSENCE of a version-control source IS the
+# security property. The gate needs a way to say a source was deliberately
+# REFUSED — without becoming a second spelling of `unmanaged`, which must keep
+# failing. These tests pin both halves: the category works, and it cannot be
+# used to launder a bare unmanaged name or an unpointable one.
+
+_FLY_ONLY_LINE = "FLY_ONLY_KEY  fly-only:#661\n"
+_FLY_ONLY_MANIFEST = _MANIFEST + _FLY_ONLY_LINE
+_FLY_ONLY_SECRETS = [*_ALL_DECLARED, "FLY_ONLY_KEY"]
+
+
+def _fly_only_manifest(name: str, line: str, base: str = _MANIFEST) -> Path:
+    return _fixture(name, base + line)
+
+
+def test_fly_only_declaration_is_accepted_for_a_live_unassigned_secret():
+    """The positive half: a declared, live, unassigned out-of-band name passes."""
+    r = _run(
+        _secrets_file(_FLY_ONLY_SECRETS, "fly-only-clean.json"),
+        manifest=_fly_only_manifest("manifest-fly-only.txt", _FLY_ONLY_LINE),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "1 decision-backed fly-only" in r.stdout, r.stdout
+
+
+def test_fly_only_accepts_a_qualified_owner_repo_ref():
+    """A decision recorded in another repo must be pointable too."""
+    r = _run(
+        _secrets_file(_FLY_ONLY_SECRETS, "fly-only-qualified.json"),
+        manifest=_fly_only_manifest(
+            "manifest-fly-only-qualified.txt",
+            "FLY_ONLY_KEY  fly-only:daniel-ospina/tortoise#661\n",
+        ),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_fly_only_without_a_resolvable_issue_ref_is_exit_2():
+    """The SAFEGUARD, first half: no ref → nothing to resolve → fail-closed.
+
+    Every one of these is `unmanaged` in disguise: the declaration carries no
+    ruling, so it must not be accepted as one. Exit 2 (could-not-determine), not
+    a pass — and not exit 1 either, because a manifest this checker cannot read
+    is the same fail-closed class as a malformed `gh-secret` entry.
+    """
+    for index, ref in enumerate(
+        [
+            "fly-only:",  # empty
+            "fly-only:#",  # bare marker
+            "fly-only:#abc",  # no number
+            "fly-only:#661abc",  # trailing junk
+            "fly-only:661",  # no # — not an issue reference
+            "fly-only:owner/repo",  # qualified but no number
+            "fly-only:owner/repo#",  # qualified, no number
+        ]
+    ):
+        manifest = _fly_only_manifest(
+            f"manifest-fly-only-bad-{index}.txt", f"FLY_ONLY_KEY  {ref}\n"
+        )
+        r = _run(_secrets_file(_FLY_ONLY_SECRETS, f"fly-only-bad-{index}.json"), manifest=manifest)
+        assert r.returncode == 2, f"ref={ref!r} -> {r.returncode}\n{r.stdout}{r.stderr}"
+        assert "cannot determine secret provenance" in r.stderr, r.stderr
+
+
+def test_fly_only_on_a_name_the_deploy_assigns_is_stale():
+    """The SAFEGUARD, second half: the exception is only for an UNMANAGED name.
+
+    A `fly-only:` declaration on a name `deploy-hosted.yml` assigns is false —
+    the deploy manages it — so it must fail rather than pass. This is what stops
+    the category from becoming a blanket escape from the contract.
+    """
+    base = _MANIFEST.replace(
+        "STRIPE_PRICE_IDS      gh-secret:STRIPE_PRICE_IDS\n",
+        "STRIPE_PRICE_IDS      fly-only:#661\n",
+    )
+    assert base != _MANIFEST
+    r = _run(
+        _secrets_file(_ALL_DECLARED, "fly-only-assigned.json"),
+        manifest=_fly_only_manifest("manifest-fly-only-assigned.txt", "", base),
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "STALE DECLARATION — 'STRIPE_PRICE_IDS'" in r.stdout, r.stdout
+    assert "assigns the Fly variable" in r.stdout, r.stdout
+
+
+def test_fly_only_on_a_name_absent_from_fly_is_stale():
+    """There is nothing out-of-band to except once the name is gone."""
+    r = _run(
+        _secrets_file(_ALL_DECLARED, "fly-only-absent.json"),
+        manifest=_fly_only_manifest("manifest-fly-only-absent.txt", _FLY_ONLY_LINE),
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "STALE DECLARATION — 'FLY_ONLY_KEY'" in r.stdout, r.stdout
+
+
+def test_bare_unmanaged_still_fails_beside_a_valid_fly_only_entry():
+    """MUTATION GUARD: the new category must not rescue `unmanaged`.
+
+    Both are "a Fly secret with no CI source" on the surface; only one carries a
+    ruling. Declaring them side by side in the SAME manifest makes the contrast
+    executable: the `fly-only:#661` name is accepted and the bare `unmanaged`
+    name is still UNSOURCED. If the fly-only branch ever grew a fall-through that
+    admits `unmanaged`, this test goes red.
+    """
+    manifest = _fly_only_manifest(
+        "manifest-unmanaged-beside-fly-only.txt",
+        _FLY_ONLY_LINE + "UNMANAGED_KEY  unmanaged\n",
+    )
+    r = _run(
+        _secrets_file([*_FLY_ONLY_SECRETS, "UNMANAGED_KEY"], "unmanaged-beside-fly-only.json"),
+        manifest=manifest,
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "UNSOURCED — 'UNMANAGED_KEY'" in r.stdout, r.stdout
+    assert "FLY_ONLY_KEY" not in r.stdout, r.stdout
+
+
+def test_fly_only_ref_hash_is_not_treated_as_a_comment():
+    """`fly-only:#661` keeps its `#`: a comment leader only follows whitespace.
+
+    A plain `split('#', 1)` stripped the reference and failed the whole manifest
+    as unreadable — the category could not have been declared at all.
+    """
+    r = _run(
+        _secrets_file(_FLY_ONLY_SECRETS, "fly-only-hash.json"),
+        manifest=_fly_only_manifest(
+            "manifest-fly-only-trailing-comment.txt",
+            "FLY_ONLY_KEY  fly-only:#661   # the #661 ruling, referenced here\n",
+        ),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
