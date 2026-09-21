@@ -28,6 +28,9 @@ surfaces:
   # registration as the boot guards above, for the same reason: the file it
   # guards is tortoise/hosted_api.py, which selects the `api` surface.
   - test_health_ready_nonblocking.py
+  # #2877: a dead/never-started backup watcher must surface in /health, not just
+  # a boot log. Dual-registered with `core` (same rationale as the boot guards).
+  - test_backup_watcher_health.py
   # #3718: the REST graph-write handlers must not run synchronous FalkorDB I/O
   # on the event loop. Same dual registration as the two guards above and for
   # the same reason: the file it guards is tortoise/hosted_api.py, which
@@ -440,6 +443,10 @@ surfaces:
   # runs on the PR that edits the gate — pinned by test_ci_selection.py.
   - test_finding_provenance.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
+  # #2877: DB-free guards that a dead backup watcher degrades /health (the file
+  # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
+  # dual-registered `api`+`core` for the same reason as the boot guards).
+  - test_backup_watcher_health.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_build_window_transcript.py
@@ -1297,6 +1304,12 @@ durations:
   # 90% durations-coverage floor satisfied; refresh from the first post-merge
   # main run that includes it.
   test_installer_preserves_foreign_skill_content.py: 2.0
+  # #4470: same convention — the file is new, so no CI junit measurement yet;
+  # enter at the flat 2.0s default (the conservative floor keeps the 90%
+  # durations-coverage floor satisfied) and refresh from the first post-merge
+  # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
+  # (7 tests, DB-free, app-boot-free) on a loaded machine.
+  test_backup_watcher_health.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
