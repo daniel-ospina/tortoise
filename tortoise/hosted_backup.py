@@ -1941,7 +1941,8 @@ def _restore_swap_settle_s() -> float:
     not cancel the server-side ``GRAPH.COPY`` (#3813). Under a contended runner
     the bound can expire while the copy is still progressing, and the wall
     clock alone cannot distinguish that from a genuinely broken copy — so the
-    bound is a hypothesis and the DESTINATION's content is the verdict. The
+    bound is a hypothesis and the destination's node and edge COUNTS are the
+    verdict. The
     default equals the read bound, so each COPY's client-side budget is finite
     at 2x that bound; a restore issues the pre-restore safety copy AND the
     swap, and ``_graph_copy_or_diagnose`` may retry a wedged copy.
@@ -2042,7 +2043,7 @@ _RESTORE_SWAP_SETTLE_POLL_S = 0.25
 
 
 def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
-    """True when a timed-out copy's DESTINATION holds the SOURCE's content.
+    """True when a timed-out copy's DESTINATION matches the SOURCE's counts.
 
     For the restore's two copies — whose destination is either freshly deleted
     (the swap) or brand new (the pre-restore safety copy) — a destination the
@@ -2058,9 +2059,13 @@ def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
 
     Assumes a QUIESCED destination: a concurrent writer to a real (non-drill)
     live graph can add nodes between the copy and this probe, which then reads
-    as a mismatch — the copy is reported as a timeout. That is fail-closed (a
-    false NEGATIVE, never a false accept), as is refusing to settle when
-    ``_graph_present`` cannot read the listing.
+    as a mismatch — the copy is reported as a timeout (a false NEGATIVE). THE
+    CONVERSE IS NOT EXCLUDED: because the evidence is COUNT parity, a
+    coincidental match from a concurrent writer (or a same-count different
+    content) would be accepted. It cannot be a PRE-EXISTING graph
+    (``_graph_present`` refuses those), but it is not a content fingerprint.
+    Refusing to settle when ``_graph_present`` cannot read the listing is
+    likewise a fail-closed false negative.
 
     Deliberately never QUERIES a graph ``GRAPH.LIST`` does not name: a Cypher
     read on a missing graph CREATES an empty one (verified on FalkorDB
@@ -2112,8 +2117,9 @@ def _graph_present(db, name: str) -> bool:
 def _await_restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
     """Poll :func:`_restore_copy_settled` until the settle bound expires.
 
-    A condition-based wait (#4233): returns as soon as the destination holds
-    the source's content, so a copy that merely outlived the read bound is
+    A condition-based wait (#4233): returns as soon as the destination
+    matches the source's node and edge counts, so a copy that merely outlived
+    the read bound is
     recognised as the SUCCESS it is. A poll can itself block while the server
     is busy finishing the copy (the engine serves no other command from that
     handler), so the wall clock is re-checked after every attempt — a completed
@@ -2188,7 +2194,8 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
                 and _await_restore_copy_settled(db, src_name, dst_name)):
             logger.warning(
                 "%s: client read bound (%.0fs) expired, but the server-side "
-                "GRAPH.COPY completed — %s now holds the source's content",
+                "GRAPH.COPY completed — %s now matches the source's node and "
+                "edge counts",
                 role, _restore_swap_timeout_s(), dst_name,
             )
             if settled is not None:
@@ -2212,6 +2219,18 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
             client.connection_pool.disconnect()
         except Exception:
             pass
+
+
+#: The cap-immune data-node count query. Module-level so a test can assert
+#: its ONE-ROW AGGREGATE shape (which is what makes it immune to the
+#: server-global ``RESULTSET_SIZE`` cap) WITHOUT mutating that server-global
+#: setting (#4233).
+_COUNT_DATA_NODES_QUERY = (
+    "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
+    "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
+    "AND n.key IN $meta_keys) "
+    "RETURN count(n)"
+)
 
 
 def count_data_nodes(db, graph_name: str) -> int:
@@ -2253,10 +2272,7 @@ def count_data_nodes(db, graph_name: str) -> int:
         _EXPORT_SKIP_META_KEYS,
     )
     return int(db.select_graph(graph_name).query(
-        "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
-        "AND NOT ('Meta' IN labels(n) AND n.key IS NOT NULL "
-        "AND n.key IN $meta_keys) "
-        "RETURN count(n)",
+        _COUNT_DATA_NODES_QUERY,
         params={
             "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
             "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),

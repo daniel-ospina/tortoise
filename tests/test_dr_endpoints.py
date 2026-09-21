@@ -949,52 +949,43 @@ class TestDrRebaseline:
         assert hb.count_data_nodes(db, "org_settle_source") == expected
         assert expected == 4, expected  # 1 Point + 3 content Meta nodes
 
-    def test_count_data_nodes_is_immune_to_the_resultset_cap(self, client):
-        """#4233 — the count is an AGGREGATE, so RESULTSET_SIZE cannot cap it.
+    def test_count_data_nodes_query_is_a_single_row_aggregate(self, client):
+        """#4233 — cap immunity, pinned STRUCTURALLY (no server-global mutation).
 
-        The whole reason ``count_data_nodes`` is a server-side aggregate is
-        that a non-aggregate ``MATCH (n) RETURN labels(n), properties(n)`` read
-        is truncated at ``RESULTSET_SIZE`` (default 10000) and would silently
-        DEFLATE the count for a larger graph. Lower the cap below the node
-        count and assert the full count survives.
+        ``RESULTSET_SIZE`` truncates the ROWS a read returns; an aggregate
+        always returns exactly ONE row regardless of graph size. So asserting
+        the count query's row shape pins cap-immunity WITHOUT lowering a
+        server-global setting on a shared test server.
 
-        RED (mutation): revert ``count_data_nodes`` to the non-aggregate read +
-        ``_is_export_skip_node`` filter — the capped read returns only the cap
-        and this fails (verified).
+        RED (mutation): change ``_COUNT_DATA_NODES_QUERY`` to a non-aggregate
+        ``MATCH (n) RETURN …`` — it returns N rows and the row-count assertion
+        fails (verified).
         """
         import tortoise.hosted_backup as hb
-
-        if os.environ.get("TORTOISE_DB_URI"):
-            from tortoise.config import is_loopback_uri
-            if not is_loopback_uri(os.environ["TORTOISE_DB_URI"]):
-                pytest.skip("RESULTSET_SIZE is server-global — never lower it "
-                            "on a remote server")
+        from tortoise.hosted_api import (
+            _EXPORT_SKIP_LABELS,
+            _EXPORT_SKIP_META_KEYS,
+        )
 
         db = _held_proj_db()
-        conn = db.connection
         g = db.select_graph("org_settle_source")
         g.query("MATCH (n) DETACH DELETE n")
         for i in range(6):
             g.query("CREATE (p:Point {id:$id})", params={"id": f"p-{i}"})
         g.query("CREATE (m:Meta {key:'point_fts_v2'})")  # content-neutral marker
 
-        prev = conn.execute_command("GRAPH.CONFIG", "GET", "RESULTSET_SIZE")
-        try:
-            conn.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE", 3)
-            # a non-aggregate read really is capped here ...
-            assert len(g.query("MATCH (n) RETURN labels(n), properties(n)")
-                       .result_set) == 3
-            # ... but the aggregate is not: full data-node count survives.
-            assert hb.count_data_nodes(db, "org_settle_source") == 6
-        finally:
-            # Restore the server-global cap and VERIFY it. Deliberately NOT
-            # suppressed: a failed restore must fail this test loudly rather
-            # than leave the cap lowered (which would truncate every later
-            # non-aggregate read in the session/other lanes on this server).
-            conn.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE",
-                                 int(prev[1]))
-            assert conn.execute_command(
-                "GRAPH.CONFIG", "GET", "RESULTSET_SIZE")[1] == int(prev[1])
+        params = {
+            "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
+            "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),
+        }
+        rows = g.query(hb._COUNT_DATA_NODES_QUERY, params=params).result_set
+        assert len(rows) == 1, rows  # an aggregate — immune to the row cap
+        assert int(rows[0][0]) == 6
+        # The same graph read WITHOUT an aggregate returns many rows — the
+        # shape RESULTSET_SIZE would truncate, which this query must never be.
+        assert len(g.query(
+            "MATCH (n) RETURN labels(n), properties(n)").result_set) == 7
+        assert hb.count_data_nodes(db, "org_settle_source") == 6
 
 
 class TestDrDrill:
@@ -2180,7 +2171,8 @@ class TestRestoreSwapReadBound:
 
         When the client read timeout fires but the server-side copy actually
         COMPLETED, the restore must succeed: the settle poll confirms the
-        destination holds the source's content instead of reporting a timeout
+        destination matches the source's node and edge counts instead of
+        reporting a timeout
         that never happened. This is the contended-runner flake. The source
         carries an EDGE as well, so the edge half of the parity check is
         non-trivial.
@@ -2493,16 +2485,17 @@ class TestRestoreSwapReadBound:
 
         The contended-runner shape is a copy that lands DURING the settle
         window, after the read bound expired. A destination that materializes
-        a moment later must still be accepted; collapsing the loop to one
+        on a LATER poll must still be accepted; collapsing the loop to one
         check would miss it.
 
-        RED (mutation): replace ``_await_restore_copy_settled``'s loop with a
-        single ``_restore_copy_settled`` call — the destination is absent on
-        that first call and this fails (verified).
-        """
-        import threading
-        import time as _time
+        Deterministic — no sleep, no thread: the first poll makes the
+        destination appear and reports a miss (as if the copy had not landed
+        yet); the second poll sees the real state.
 
+        RED (mutation): replace ``_await_restore_copy_settled``'s loop with a
+        single ``_restore_copy_settled`` call — the first call reports the miss
+        and this fails (verified).
+        """
         import tortoise.hosted_backup as hb
 
         monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "3")
@@ -2513,21 +2506,32 @@ class TestRestoreSwapReadBound:
         if "org_settle_target" in db.list_graphs():
             db.select_graph("org_settle_target").delete()
 
-        def timeout_then_land(redis_client, src_name, dst_name):
-            def _land():
-                _time.sleep(0.6)
-                hb.restore_graph(db.select_graph(dst_name),
-                                 hb.dump_graph(db.select_graph(src_name)))
-            threading.Thread(target=_land, daemon=True).start()
+        def timeout_only(redis_client, src_name, dst_name):
             try:
                 raise redis.exceptions.TimeoutError("Timeout reading from socket")
             except redis.exceptions.TimeoutError:
                 raise ValueError("I/O operation on closed file.")  # noqa: B904
 
-        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_then_land)
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_only)
+        real_settled = hb._restore_copy_settled
+        polls: list[int] = []
+
+        def land_on_second_poll(db_, src_name, dst_name):
+            polls.append(len(polls))
+            if len(polls) == 1:
+                # the copy lands only now — after the read bound, during the
+                # settle window — and this poll still reports the miss.
+                hb.restore_graph(db_.select_graph(dst_name),
+                                 hb.dump_graph(db_.select_graph(src_name)))
+                return False
+            return real_settled(db_, src_name, dst_name)
+
+        monkeypatch.setattr(hb, "_restore_copy_settled", land_on_second_poll)
         hb._graph_copy_with_restore_bound(
             db, "org_settle_source", "org_settle_target",
             role="test swap", intact_name="test intact")
+
+        assert len(polls) >= 2, polls  # the loop really polled more than once
         assert "org_settle_target" in db.list_graphs()
 
     def test_restore_swap_settle_bound_resolution(self, monkeypatch):
