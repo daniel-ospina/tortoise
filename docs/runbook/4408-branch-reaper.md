@@ -103,8 +103,8 @@ Branch tip provably survives and no worktree holds it.
 | `feat/577-analytics` | `0c4b9e69bbe1` | 44 | pr-merged-tip | merged-pr-record | 635 |
 | `fix/540-prompt-url` | `d5d0b4ff9740` | 44 | pr-merged-tip | merged-pr-record | 640 |
 | `feat/578-e2e` | `df7288a352a3` | 44 | pr-merged-tip | merged-pr-record | 641 |
-| `fix/545-pricing-image` | `200abf34bdc6` | 43 | pr-merged-tip | merged-pr-record | 642 |
-| `fix/545-deploy-secrets` | `e10bc4bd40ea` | 43 | pr-merged-tip | merged-pr-record | 643 |
+| `fix/545-pricing-image` | `200abf34bdc6` | 44 | pr-merged-tip | merged-pr-record | 642 |
+| `fix/545-deploy-secrets` | `e10bc4bd40ea` | 44 | pr-merged-tip | merged-pr-record | 643 |
 | `fix/542-oauth-secrets` | `a3917cb358c2` | 43 | pr-merged-tip | merged-pr-record | 644 |
 | `fix/post-merge-drift` | `93acac020eb3` | 43 | ancestry | reachable-from-main | — |
 | `fix/543-analytics` | `3d329a2607fb` | 43 | pr-merged-tip | merged-pr-record | 646 |
@@ -361,7 +361,7 @@ Branch tip provably survives and no worktree holds it.
 | `fix/969-negative-leg-masking` | `70807249eadc` | 38 | pr-merged-tip | merged-pr-record | 1195 |
 | `feat/900-t9-sc4-markers` | `480d38075848` | 38 | pr-merged-tip | merged-pr-record | 1202 |
 | `fix/1189-welcome-e2e-tests` | `f5cc7f6b5bfe` | 38 | pr-merged-tip | merged-pr-record | 1205 |
-| `feat/1177-307-invite-accept-email` | `b642261cd72e` | 37 | ancestry | reachable-from-main | — |
+| `feat/1177-307-invite-accept-email` | `b642261cd72e` | 38 | ancestry | reachable-from-main | — |
 | `pr-1208` | `ad4809f6f53f` | 37 | ancestry | reachable-from-main | — |
 | `feat/epic909-calibration-tooling` | `54fd134bbb41` | 37 | pr-merged-tip | merged-pr-record | 1213 |
 | `docs/calibration-specs` | `9dd6fd4280a6` | 37 | pr-merged-tip | merged-pr-record | 1214 |
@@ -425,7 +425,7 @@ Branch tip provably survives and no worktree holds it.
 | `feat/1242-epic903-warmstart` | `d49af6d9326d` | 37 | ancestry | reachable-from-main | — |
 | `feat/1247-epic903-lifecycle` | `6c1d8e9add71` | 37 | ancestry | reachable-from-main | — |
 | `feat/1248-epic903-staleness-eval` | `0244f41fbeff` | 37 | ancestry | reachable-from-main | — |
-| `feat/1245-epic903-observability` | `48735a51d8dc` | 36 | ancestry | reachable-from-main | — |
+| `feat/1245-epic903-observability` | `48735a51d8dc` | 37 | ancestry | reachable-from-main | — |
 | `feat/1246-epic903-hosted` | `5ae94f364e85` | 36 | ancestry | reachable-from-main | — |
 | `feat/1249-epic903-mcp` | `6ac469040f3c` | 36 | ancestry | reachable-from-main | — |
 | `feat/1254-epic903-capstone` | `b69e6a5cf73a` | 36 | ancestry | reachable-from-main | — |
@@ -437,7 +437,7 @@ Branch tip provably survives and no worktree holds it.
 | `fix/ci-v3` | `8bb1607704bc` | 36 | pr-merged-tip | merged-pr-record | 1341 |
 | `feat/1287-auth-v4` | `4946ca1f7ad9` | 36 | ancestry | reachable-from-main | — |
 | `fix/1280-dashboard-v2b` | `f63d37176dea` | 36 | pr-merged-tip | merged-pr-record | 1342 |
-| `fix/signup-layout` | `6b1742aafef4` | 35 | pr-merged-tip | merged-pr-record | 1344 |
+| `fix/signup-layout` | `6b1742aafef4` | 36 | pr-merged-tip | merged-pr-record | 1344 |
 | `feat/1287-auth-v5` | `be05757e6da8` | 35 | pr-merged-tip | merged-pr-record | 1345 |
 | `fix/deploy-secret-gate` | `7380a31aaa2d` | 35 | pr-merged-tip | merged-pr-record | 1347 |
 | `fix/session-source-agentkind` | `cc60a653fc6b` | 34 | pr-merged-tip | merged-pr-record | 1354 |
@@ -626,7 +626,7 @@ Branch tip provably survives and no worktree holds it.
 | `fix/1906-welcome-dashboard` | `82e489bc29aa` | 22 | ancestry | reachable-from-main | — |
 | `chore/1976-epic-planning` | `e503bb626fa8` | 22 | pr-merged-tip | merged-pr-record | 2012 |
 | `feat/1930-packs-dir` | `a00f5acd038e` | 22 | pr-merged-tip | merged-pr-record | 2014 |
-| `feat/1933-agent-ops-pack` | `bbbeaeb6f432` | 21 | pr-merged-tip | merged-pr-record | 2015 |
+| `feat/1933-agent-ops-pack` | `bbbeaeb6f432` | 22 | pr-merged-tip | merged-pr-record | 2015 |
 | `feat/1935-hosted-packs` | `ef706f75e433` | 21 | pr-merged-tip | merged-pr-record | 2017 |
 | `fix/1914-pagination-params` | `12a0ff13b152` | 21 | ancestry | reachable-from-main | — |
 | `feat/1932-pack-docs` | `b534e22821c4` | 21 | pr-merged-tip | merged-pr-record | 2019 |
@@ -661,7 +661,7 @@ Branch tip provably survives and no worktree holds it.
 | `feat/2040-ledger-order` | `841f2e1d5690` | 21 | ancestry | reachable-from-main | — |
 | `feat/2032-body-sweep` | `0c88b73b6080` | 21 | ancestry | reachable-from-main | — |
 | `docs/500q-strong-reader-config` | `eda20ecf262a` | 21 | ancestry | reachable-from-main | — |
-| `fix/2052-redislite-orphan-sweep` | `142c65f28da8` | 20 | ancestry | reachable-from-main | — |
+| `fix/2052-redislite-orphan-sweep` | `142c65f28da8` | 21 | ancestry | reachable-from-main | — |
 | `fix/2065-flaky-pack-upload` | `cbb1e783959d` | 20 | ancestry | reachable-from-main | — |
 | `fix/2061-event-journaling` | `5667e5d96b04` | 20 | ancestry | reachable-from-main | — |
 | `feat/2001-W5-onboarding` | `0f2365a79ea9` | 20 | ancestry | reachable-from-main | — |
@@ -833,7 +833,7 @@ Branch tip provably survives and no worktree holds it.
 | `2529-onboarding-invite-flow` | `d87f6893c926` | 13 | pr-merged-tip | merged-pr-record | 2545 |
 | `opt/2315-mitigation` | `a4daec65d938` | 13 | ancestry | reachable-from-main | — |
 | `fix/org-create-copy-and-name-validation` | `356d74c82c60` | 13 | pr-merged-tip | merged-pr-record | 2547 |
-| `fix/org-create-spacing-and-edge-function` | `28edcc183c31` | 12 | pr-merged-tip | merged-pr-record | 2551 |
+| `fix/org-create-spacing-and-edge-function` | `28edcc183c31` | 13 | pr-merged-tip | merged-pr-record | 2551 |
 | `fix/fork-card-step-index` | `da3808ec7d83` | 12 | pr-merged-tip | merged-pr-record | 2553 |
 | `fix/connect-step-clean-layout` | `aff5a35ac1aa` | 12 | ancestry | reachable-from-main | — |
 | `feat/2242-cas-fold` | `884405328e57` | 12 | ancestry | reachable-from-main | — |
@@ -1286,14 +1286,14 @@ Oldest first. A human decides.
 | `pr-3354` | `ad70893d7e13` | 8 |
 | `rescue/3062-rebase` | `3c6d2f7fa59f` | 8 |
 | `fix/3247-refit` | `449df813d75a` | 8 |
-| `pr-3391` | `13a49e939ed1` | 7 |
+| `pr-3391` | `13a49e939ed1` | 8 |
 | `docs/scoping-3055` | `6677611089b5` | 7 |
 | `pr-3426` | `6b395bc485d1` | 7 |
 | `tmp-3511-orphan-threshold` | `344b01dc58c6` | 5 |
 | `feat/3543-tenancy-rename` | `1ed87510d269` | 5 |
 | `pr-3576-review` | `3479195932cb` | 5 |
 | `pr-2948` | `9642057418e4` | 5 |
-| `2813-revive-passthrough` | `258d0049ac95` | 4 |
+| `2813-revive-passthrough` | `258d0049ac95` | 5 |
 | `fix/3284-jwks-cold-start-bound` | `83399e14615e` | 4 |
 | `integration/3575-3664-exit-evidence` | `3e985a0175ff` | 4 |
 | `fix/3143-rebased` | `bbfe710becf3` | 4 |
@@ -1373,4 +1373,1005 @@ Oldest first. A human decides.
 | `/private/tmp/j3-4065/main` | `f2b3e91b2060` | — |
 | `/private/tmp/maincheck-b3` | `f2b3e91b2060` | — |
 | `/Users/danielospina/Documents/GitHub/tortoise/.worktrees/sync-3324` | `fc2aa045041d` | — |
+
+## Delegated worktree engine (`pi-reap-worktrees.sh`)
+
+```
+ot classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2300
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2301
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2302
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2303
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2305
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2306
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2307
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2308
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2311
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2317
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2318
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sc2319
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/scoping-3055
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/supersede-vf
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sweep-2747
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sweep-2950
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sync-2948
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sync-3068
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sync-3324
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/sync-3426
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/verify-3511
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/verify-main
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/w0-substrate
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/w6b-graph-candidate
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/wizard-connect-step-cleanup
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/tortoise/.worktrees/xtenant-isolation
+         reason=deferred  pass budget 300s exhausted — not classified
+preserve /Users/danielospina/Documents/GitHub/wt-tortoise-agents
+         reason=deferred  pass budget 300s exhausted — not classified
+
+armed pass complete: REMOVED=0 FAILED=0
+```
+
+## Post-apply results
+
+| metric | value |
+|---|---|
+| deleted | 923 |
+| refused | 0 |
+| skipped (held / moved) | 237 |
+| filesystem free before | 642050188 KiB |
+| filesystem free after | 641849908 KiB |
+| free-space delta | -200280 KiB |
+
+### Recovery record (written before deletion)
+
+| branch | tip | how |
+|---|---|---|
+| `2179-keepalive-siblings` | `ac24f6b68cf5ed1c672796f0bbb602764f5b275e` | reflog ~30d / `--backup-bundle` |
+| `2529-oauth-fragment-fix` | `be3b4e0ee1169422ae65b7be665eeef646e2f1f9` | reflog ~30d / `--backup-bundle` |
+| `2529-onboarding-invite-flow` | `d87f6893c92606aa6418322eda9a1a0ac4450930` | reflog ~30d / `--backup-bundle` |
+| `base-check` | `b367d69fc9697ab709d6274033cea4ea8254c9db` | reflog ~30d / `--backup-bundle` |
+| `chore/1067-welcome-e2e-secrets` | `fb07a602f3b9265409f70081eb7bd12e53eceae1` | reflog ~30d / `--backup-bundle` |
+| `chore/1097-migration-docfix` | `9a1a57dd9148d948a0845c0e4e7f741a8d182ee7` | reflog ~30d / `--backup-bundle` |
+| `chore/1146-pin-falkordb` | `e070967b615ac16f9a0ddfaecc262e2a65db5dfe` | reflog ~30d / `--backup-bundle` |
+| `chore/1221-email-env` | `89eeeda502db36c0aeed48608c3ee115b6432b7a` | reflog ~30d / `--backup-bundle` |
+| `chore/1436-loud-skips` | `16ea165593d6a398daf765f9f6d9a119d08ed849` | reflog ~30d / `--backup-bundle` |
+| `chore/187-untrack-pycache` | `02504b5f73586541c5b21236cdb131e5b616214d` | reflog ~30d / `--backup-bundle` |
+| `chore/1976-epic-planning` | `e503bb626fa8680a5a0f926e8603e7836630fd56` | reflog ~30d / `--backup-bundle` |
+| `chore/206-rename-website` | `b3bc416e2b2d6a1e5aec886fa2e3c08c41e26bbf` | reflog ~30d / `--backup-bundle` |
+| `chore/2174-lint-drift` | `f362a07129a13e1d49f2d8b52fec583ea2deaf45` | reflog ~30d / `--backup-bundle` |
+| `chore/2238-ignore-agent-evidence-dirs` | `d37d5d053a13bc9c465464afd9751d1bd8af95a6` | reflog ~30d / `--backup-bundle` |
+| `chore/2525-matched-recall-reconcile` | `1117aaa46c6bcb43594c201d64d16d59bb6d4570` | reflog ~30d / `--backup-bundle` |
+| `chore/291-capstone` | `98cc1eb1d6dbc363e037e159a47e301c45f7a3f8` | reflog ~30d / `--backup-bundle` |
+| `chore/2938-audit-fixes` | `4f88d91f61a3c16a36449b97bccc39c5a515b128` | reflog ~30d / `--backup-bundle` |
+| `chore/2938-audit-fixes2` | `15642fcabf1b7232080a7379cb86ec50091a2994` | reflog ~30d / `--backup-bundle` |
+| `chore/2938-surface-audit` | `2d084e7a42f8712fe3e266fb00ccb47b2dc2f0d3` | reflog ~30d / `--backup-bundle` |
+| `chore/323-search-capstone` | `ea9be5465d67ae9f110e6785fe9f171a634c09e5` | reflog ~30d / `--backup-bundle` |
+| `chore/375-cross-repo-readmes` | `7fe4d4b714d9b9b96d2ea63a671b819fd9872f1f` | reflog ~30d / `--backup-bundle` |
+| `chore/419-exa-lazy` | `d285b117b6bba66e25b7673d762a6335919f0a70` | reflog ~30d / `--backup-bundle` |
+| `chore/486-register-about-meta-keys` | `a094090c1282eb3f0b3f43e439d3a1ccd296e59a` | reflog ~30d / `--backup-bundle` |
+| `chore/492-uv-adoption` | `4e9df9bb7494532201081fc890e3b787b9280b5e` | reflog ~30d / `--backup-bundle` |
+| `chore/654-reconcile-schedule` | `8a16048eacdca99f7b420a9154113be24cfe36f9` | reflog ~30d / `--backup-bundle` |
+| `chore/660-fly-token-hardening` | `3fc6702e60be49732008d802a94c00bc563e431e` | reflog ~30d / `--backup-bundle` |
+| `chore/661-label-data-loss` | `ad38eb94562c8ae433c7b04a2a95ce7a5d473ee5` | reflog ~30d / `--backup-bundle` |
+| `chore/669-plan-docs` | `1d83d85fe5b58353c817c1e1d38bf209e131e7e5` | reflog ~30d / `--backup-bundle` |
+| `chore/677-postdeploy-legal-e2e` | `8fbc3cf7c316909e2a4ba717889afac78d6bfe80` | reflog ~30d / `--backup-bundle` |
+| `chore/682-pricing-guard-test-hygiene` | `2b3f4cac1be4c3db3445911346c7233d76c44214` | reflog ~30d / `--backup-bundle` |
+| `chore/682-pricing-json-guard` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `chore/690-status-vocab` | `de69e367e6b0bb27a9f7b91b22b7fbe65652e8f0` | reflog ~30d / `--backup-bundle` |
+| `chore/690-status-vocabulary` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `chore/agent-infra-v0.1.2` | `5fb3b8d8ccdf8e1a85fd78e96d83005652c131f0` | reflog ~30d / `--backup-bundle` |
+| `chore/restore-1987-ask-gates` | `3f33b7da25de1b866c925bf55c1d41a86dea510a` | reflog ~30d / `--backup-bundle` |
+| `chore/verify-onboarding` | `c837e89338d7aa044f014e3ebb1a3f045d1abfa9` | reflog ~30d / `--backup-bundle` |
+| `chore/version-bump-deploytest` | `5a2b4eb495d6d55b2433c62768c9a2ba54fd1be6` | reflog ~30d / `--backup-bundle` |
+| `chore/website-redeploy` | `a3abd9d21ecf1bb09b5884f0387f96dfc6482cec` | reflog ~30d / `--backup-bundle` |
+| `ci-check-local` | `2c280ab9793699b83d8aa3e619516e9cec561d0b` | reflog ~30d / `--backup-bundle` |
+| `ci/559-postmerge-validation` | `d6f82591ba1de7ce5e36a08a10dc432118a31b82` | reflog ~30d / `--backup-bundle` |
+| `ciinv` | `2c280ab9793699b83d8aa3e619516e9cec561d0b` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1083` | `5a62181f1ad618774730aa86def3df4b0c194245` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1112` | `88fb90d5e22eebba00524c9768a2b87858efd453` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1119` | `fb59df9033574d7713abaae65484bc695745219f` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1124` | `292a965ad3b8241a7efe911c63ec03f477b179f4` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1125` | `422b69ddd98c83bc69b60f36efc198e78b3993af` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1126` | `51671e35dc8ceb0d2d8c8b5e1631da28dba9fc11` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1148` | `14c4c496cdf54e0656e5168079befb2c9f6e7151` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1786630876` | `da0fcc11d75aa83235edd49527e2f46052108aa4` | reflog ~30d / `--backup-bundle` |
+| `cleanup-tmp-1786630879` | `914be0b28ae16ffa7d24f660c60abcae8692a905` | reflog ~30d / `--backup-bundle` |
+| `docs/1416-verdict-report` | `9ed905892419baa118260a975cfec0a325c28a5d` | reflog ~30d / `--backup-bundle` |
+| `docs/2026-08-15-scoping-plans` | `640dab22a0240602ee0df88dbe2a077dcc2d7172` | reflog ~30d / `--backup-bundle` |
+| `docs/2421-supersede-restatement` | `9a0a829ee256698ed5e4d8e07eb492e52c6ba158` | reflog ~30d / `--backup-bundle` |
+| `docs/2779-org-name-scoping` | `48a22bada527676508675859a7258f138f3cf392` | reflog ~30d / `--backup-bundle` |
+| `docs/2784-per-graph-backups-brief` | `ed27f553c8ecf994b39084b18e858cb435a34881` | reflog ~30d / `--backup-bundle` |
+| `docs/28-adr-008` | `8aee29e4e66bd7c12168800ecbe352df8abaf620` | reflog ~30d / `--backup-bundle` |
+| `docs/2854-scope-semantics` | `0df8625ef18ff9ba04ea74177fc659b2f5f51c20` | reflog ~30d / `--backup-bundle` |
+| `docs/3327-record-trigger-population` | `3f5c449bc57f3903e1c20bdc0242da5a5c93c2b6` | reflog ~30d / `--backup-bundle` |
+| `docs/3327-sweep-trigger-population` | `7c3d284472103f5383bd4b3145b6ca8c58ecf8ab` | reflog ~30d / `--backup-bundle` |
+| `docs/4293-runbook-probe-host` | `e6a4b9408b1a1656687999af1318e276d1d59613` | reflog ~30d / `--backup-bundle` |
+| `docs/500q-strong-reader-config` | `eda20ecf262acbd0b6f48025d19ff9e71d5fef31` | reflog ~30d / `--backup-bundle` |
+| `docs/549-epic-docs-merge` | `bcdb45f95f132d50b3c213eddf906ef1d8a2d807` | reflog ~30d / `--backup-bundle` |
+| `docs/557-scoping-research` | `ee676e3e0eda274a03776485900f1832a7ffb7c5` | reflog ~30d / `--backup-bundle` |
+| `docs/565-ontology-cascade` | `4c988746078b09233a1795579ef0bb7aba814850` | reflog ~30d / `--backup-bundle` |
+| `docs/566-deploy-runbook` | `be47daac5e874d27ed3724cf7b2d9a73b2746da9` | reflog ~30d / `--backup-bundle` |
+| `docs/598-prior-art-screening` | `4bae889d1595be311d9c011b507adbad62383593` | reflog ~30d / `--backup-bundle` |
+| `docs/703-quickstart-docs` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `docs/ai-review-gate-e2e` | `d5401e50568d09f2e2967125380d82de1c3c0e99` | reflog ~30d / `--backup-bundle` |
+| `docs/batch-bug-hunt-report` | `f36b337da4a10598a56c674c2347b92cb33ab1a5` | reflog ~30d / `--backup-bundle` |
+| `docs/blog-epic-status` | `7d6e60c128ecd0381776bedea2a9e95e570c1ea9` | reflog ~30d / `--backup-bundle` |
+| `docs/calibration-specs` | `9dd6fd4280a60c3d0164d3e1ecfd7a11823ce978` | reflog ~30d / `--backup-bundle` |
+| `docs/ci-process-research` | `8748991decb27d7f07866e9f0bb8bce4d6e33e69` | reflog ~30d / `--backup-bundle` |
+| `docs/epic909-docs` | `1b5f0d53a006b140cfab6c337c1cd70eee571421` | reflog ~30d / `--backup-bundle` |
+| `docs/epic909-plan` | `ea9be5465d67ae9f110e6785fe9f171a634c09e5` | reflog ~30d / `--backup-bundle` |
+| `docs/extraction-state-centric` | `0b11d8402560a65bda74c90d5432cf44309c31c6` | reflog ~30d / `--backup-bundle` |
+| `docs/fix-deploy-token-scope` | `792965b7ad6708ae0609c47281b8f9e56f6bf847` | reflog ~30d / `--backup-bundle` |
+| `docs/pointkinds-statement` | `a7a4b0e77488bd048513ae3017fbeb52e051a540` | reflog ~30d / `--backup-bundle` |
+| `docs/scoping-2304` | `c992583b3f056e5dde4e6b8275a5c706897a2fce` | reflog ~30d / `--backup-bundle` |
+| `docs/standard-harness-reuse-audit` | `8618ffa85e80d074ad51d56510c15c81bbc1137d` | reflog ~30d / `--backup-bundle` |
+| `docs/state-centric-memory` | `c5320e7d0eaef1212128bdd997509e44189636c2` | reflog ~30d / `--backup-bundle` |
+| `docs/state-centric-ontology` | `078651e1bf5db63e2ef9897d63fe9688d0dde888` | reflog ~30d / `--backup-bundle` |
+| `docs/tortoise-blog-cms-planning` | `bdbca67f985e9ea7c6c74952823d7a1759f74994` | reflog ~30d / `--backup-bundle` |
+| `epic/264-insight-mining` | `87fef08670ea58510298f7b3510b67c02c8ff555` | reflog ~30d / `--backup-bundle` |
+| `epic/test-db-migration` | `a78bcac000814a89c8aebf16470c432176d4bdeb` | reflog ~30d / `--backup-bundle` |
+| `feat-1503-m` | `23c26746d33a61e16a56d567b3aaa6cc17228be2` | reflog ~30d / `--backup-bundle` |
+| `feat/1021-tiered-selection` | `486ad04188f854344f8f25ac48dbc4a86f3a36c8` | reflog ~30d / `--backup-bundle` |
+| `feat/1081-abuse-protection` | `da0fcc11d75aa83235edd49527e2f46052108aa4` | reflog ~30d / `--backup-bundle` |
+| `feat/1082-claim-path` | `914be0b28ae16ffa7d24f660c60abcae8692a905` | reflog ~30d / `--backup-bundle` |
+| `feat/1083-login-routing` | `5a62181f1ad618774730aa86def3df4b0c194245` | reflog ~30d / `--backup-bundle` |
+| `feat/1112-dashboard-ci` | `88fb90d5e22eebba00524c9768a2b87858efd453` | reflog ~30d / `--backup-bundle` |
+| `feat/1144-longmemevl-runner` | `03fa1b40d5cc0affa84bf0866604856d52c5771a` | reflog ~30d / `--backup-bundle` |
+| `feat/1144-retrieval-eval` | `938762a883d10293bd1fcaab62d3a26e22402c7a` | reflog ~30d / `--backup-bundle` |
+| `feat/1148-protect-account` | `a59ac9b23c7d2de4d1779dae882471dd722e78df` | reflog ~30d / `--backup-bundle` |
+| `feat/1163-ep-dirty-persist` | `f5fc0fd0728c84ad1fbd75eaee274974ff1e6813` | reflog ~30d / `--backup-bundle` |
+| `feat/1177-307-invite-accept-email` | `b642261cd72e8f6195ee0d903c8b5b36deea0ad3` | reflog ~30d / `--backup-bundle` |
+| `feat/1221-email-integration-test` | `f3d7615d0799fc874f58b850a51e151dec6b761f` | reflog ~30d / `--backup-bundle` |
+| `feat/1239-epic903-diagnostics` | `6edb11ef04f8153c7ffa2fb8c27162d011a13d79` | reflog ~30d / `--backup-bundle` |
+| `feat/1240-epic903-freshness` | `8203d038bb792670faa3106d7bf1119ab4616bee` | reflog ~30d / `--backup-bundle` |
+| `feat/1241-epic903-scheduler` | `54377e30aadf9cde541fe437fbd8b66ae9a28211` | reflog ~30d / `--backup-bundle` |
+| `feat/1242-epic903-warmstart` | `d49af6d9326d54c17aa15e5c277c6d013dc0f6c3` | reflog ~30d / `--backup-bundle` |
+| `feat/1243-epic903-retention` | `de63580ec9b4b810c3e97da30d227b02b68d6fac` | reflog ~30d / `--backup-bundle` |
+| `feat/1244-epic903-moderouter` | `6de10266e37711e3e2134ffb13a1e7ecbfb7e26c` | reflog ~30d / `--backup-bundle` |
+| `feat/1245-epic903-observability` | `48735a51d8dc1914f84b5efa7070c2ffcd2b2464` | reflog ~30d / `--backup-bundle` |
+| `feat/1246-epic903-hosted` | `5ae94f364e85ec9b23f0ee93a893598c66b222c5` | reflog ~30d / `--backup-bundle` |
+| `feat/1247-epic903-lifecycle` | `6c1d8e9add71b4e5d0f346641c7525bc59533379` | reflog ~30d / `--backup-bundle` |
+| `feat/1248-epic903-staleness-eval` | `0244f41fbeff0d3ffa241b22bde467d3c5638814` | reflog ~30d / `--backup-bundle` |
+| `feat/1249-epic903-mcp` | `6ac469040f3c4ed00f6060f862a1616930b97d05` | reflog ~30d / `--backup-bundle` |
+| `feat/1250-epic903-fixtures` | `7c7a77a9ff705fd00d9931a346995ca2187a12d5` | reflog ~30d / `--backup-bundle` |
+| `feat/1254-epic903-capstone` | `b69e6a5cf73a8c9ecce8f8d99edd24b7f6539068` | reflog ~30d / `--backup-bundle` |
+| `feat/1272-calibrate-prompts` | `a32ab597a8223833c64873fe042238d192644cf6` | reflog ~30d / `--backup-bundle` |
+| `feat/1272-exec` | `044400c95c5d5ba474c5160731ba46ff2064de9a` | reflog ~30d / `--backup-bundle` |
+| `feat/1272-parity` | `ca34761f73abd6ce30f07b575e9d03ebe7fa4273` | reflog ~30d / `--backup-bundle` |
+| `feat/1272-present` | `47bf4aae7a6d7561b7accf3759e177a35775f781` | reflog ~30d / `--backup-bundle` |
+| `feat/1287-auth-v4` | `4946ca1f7ad9eb50293df25b0f930953723604ea` | reflog ~30d / `--backup-bundle` |
+| `feat/1287-auth-v5` | `be05757e6da8f7f9bc2bb3025fa87eaa610611de` | reflog ~30d / `--backup-bundle` |
+| `feat/1348-deeper-candidate-pool` | `9b2279dedf4ac04be1acb7ee4e0633002d0190c9` | reflog ~30d / `--backup-bundle` |
+| `feat/1349-embedder-swap` | `b63b17f1774ef8a147e2baec13dfc472628c795e` | reflog ~30d / `--backup-bundle` |
+| `feat/1350-parity-fix` | `9668a549c67425059aa92b06e86a12d854958cdb` | reflog ~30d / `--backup-bundle` |
+| `feat/1350-s3-chunk-fixes` | `039aae8e4e143258b009c49cf4e6baa504ca4ac1` | reflog ~30d / `--backup-bundle` |
+| `feat/1350-status-projection` | `40ee815134401892cb691514356eee8d2f344385` | reflog ~30d / `--backup-bundle` |
+| `feat/1353-relationships-decoration` | `f15cd62c624089dc88bb7031f4b789b6c9007186` | reflog ~30d / `--backup-bundle` |
+| `feat/1369-lme-v2-ingest` | `40481c3e9b70a5ccc93e11f83a2d509b9e92b3d9` | reflog ~30d / `--backup-bundle` |
+| `feat/1375-fallback-perf` | `f5f469eec6686708de04c65c90ad6e95dbe7db59` | reflog ~30d / `--backup-bundle` |
+| `feat/1386-supersession` | `7cbd503d899eb7199048cedd54e5e40be676e8f6` | reflog ~30d / `--backup-bundle` |
+| `feat/1391-read-filter` | `faadb379087fbd2cf35e2cf9def20714393799ac` | reflog ~30d / `--backup-bundle` |
+| `feat/1395-routing-config` | `51f219822dea83c514a500c67be4db34c849026f` | reflog ~30d / `--backup-bundle` |
+| `feat/1416-cli-executor-real` | `69188dab99a21762520cc010fd16fff9e4f176ef` | reflog ~30d / `--backup-bundle` |
+| `feat/1416-run-main` | `1cefbf2ce2f11733a03170259cc8c7c394a3a66b` | reflog ~30d / `--backup-bundle` |
+| `feat/1416-run-v2` | `be07ce3382b4ee331491f4007890cd9d888b5675` | reflog ~30d / `--backup-bundle` |
+| `feat/1416-run-v3` | `3b6ee571add11cd76994fae8da2bfad7bf936114` | reflog ~30d / `--backup-bundle` |
+| `feat/1416-run-v4` | `49314307046f250e087c5baf5cf7d46d015be9a4` | reflog ~30d / `--backup-bundle` |
+| `feat/1418-object-event-slots` | `5027a2331e68695317a85abe6ab472f8282fda76` | reflog ~30d / `--backup-bundle` |
+| `feat/1503-lint-config` | `a269b589b470910482030f420ce61dd4c381f029` | reflog ~30d / `--backup-bundle` |
+| `feat/1528-stats` | `8824bc50349e0293830ed6e6cd85afc3d1ea1a15` | reflog ~30d / `--backup-bundle` |
+| `feat/1529-failclosed-capture` | `0868358ee5d4013eac5ef7c322579e9025fc07bb` | reflog ~30d / `--backup-bundle` |
+| `feat/1536-s4-merge` | `a75a3a51a2adf8edcd7ba73e880bdc96e23cbc8d` | reflog ~30d / `--backup-bundle` |
+| `feat/1541-or-sparse` | `2b70893e330d513ca3e36e294a0aef0a056930b7` | reflog ~30d / `--backup-bundle` |
+| `feat/1549-prompt-efficiency` | `cf42490ad0ef5da8c6acdf38093116ffcb9c31fe` | reflog ~30d / `--backup-bundle` |
+| `feat/1549-run-protocol` | `c87907d6f37b5d46f4f716249cb8b948f5249c39` | reflog ~30d / `--backup-bundle` |
+| `feat/1549-session-parallel` | `07c68dc88ae873d9e8f8eadda985bcb7bd98d0d3` | reflog ~30d / `--backup-bundle` |
+| `feat/1566-welcome-in-app` | `5f220dc127f6408d79671e33b1ecddd467054161` | reflog ~30d / `--backup-bundle` |
+| `feat/1567-dashboard-latency` | `e23aea94a621693b49eeaff16eee239bb9509eff` | reflog ~30d / `--backup-bundle` |
+| `feat/1591-onboarding` | `bc4a960ec96c5720795e205ed8dc0b85859e0964` | reflog ~30d / `--backup-bundle` |
+| `feat/160-hosted-embeddings` | `03b634081baefb88927bfc63c4d9e0e453e04566` | reflog ~30d / `--backup-bundle` |
+| `feat/160-hosted-search-fts-vector` | `7393582b9b69f30bb17929f0fcb8b62bc4946288` | reflog ~30d / `--backup-bundle` |
+| `feat/1623-billing` | `1e8413fd232c867bd890b2c90f0110a4989453f8` | reflog ~30d / `--backup-bundle` |
+| `feat/1643-skills-install` | `f0244b7fe563d45944642e7ea36bb75291460bd1` | reflog ~30d / `--backup-bundle` |
+| `feat/1643-skills-repo` | `aa82e25b177cd273e68030ec2407ce5899e1a49a` | reflog ~30d / `--backup-bundle` |
+| `feat/1656-load-test` | `b61dddf0fc23a81ea5a276f1470f355e7fc0bdd8` | reflog ~30d / `--backup-bundle` |
+| `feat/1656-load-test-v2` | `22dccaa91fda3ff91355c3462040d4f84299f70c` | reflog ~30d / `--backup-bundle` |
+| `feat/1657-fusion-fix` | `b61dddf0fc23a81ea5a276f1470f355e7fc0bdd8` | reflog ~30d / `--backup-bundle` |
+| `feat/1657-fusion-fix-v2` | `2ed1dd54bc88a7f0fcd7e96d6b74fa4c64e39c58` | reflog ~30d / `--backup-bundle` |
+| `feat/1657-fusion-on` | `e65b1d9f83d8af50181042ce6f1091b329ae9026` | reflog ~30d / `--backup-bundle` |
+| `feat/1660-onboarding-redesign` | `82a1ce28b641bfaea9b6e2c31873206c47a48b97` | reflog ~30d / `--backup-bundle` |
+| `feat/1680-onboarding-polish` | `fa34f63e379c32b79ea2c83c5730f92bd879ad3c` | reflog ~30d / `--backup-bundle` |
+| `feat/1680-setup-back` | `67e6732c7000f0d32b92c025c14637d328330dcd` | reflog ~30d / `--backup-bundle` |
+| `feat/1680-setup-back2` | `4d281a16ca7c0b38ddf7519dd0c76e6e81410e54` | reflog ~30d / `--backup-bundle` |
+| `feat/1685-ruff-baseline-drift` | `13612966b46892e913f01fd1a5e96e2dc49ba569` | reflog ~30d / `--backup-bundle` |
+| `feat/1686-carveout-team-create-leak` | `dccc5584bb30b154cacadc4e038a4eef118e8214` | reflog ~30d / `--backup-bundle` |
+| `feat/1698-welcome-e2e-email-visibility` | `2a421b633ea7e679a766f786e131b194d654c0ac` | reflog ~30d / `--backup-bundle` |
+| `feat/1708-key-mint-idempotency` | `b5983bd4f5f875b60bc1c02ba073800d9f858c9f` | reflog ~30d / `--backup-bundle` |
+| `feat/1709-signup-idempotency-recovery` | `8eb31d44bef86038bae54fe7a881a03bcd18dee5` | reflog ~30d / `--backup-bundle` |
+| `feat/1714-memory-capture-onboarding` | `9e7c8c51409023671abbab61b229b29ad14c95e6` | reflog ~30d / `--backup-bundle` |
+| `feat/1715-token-revoke` | `d622c8cc5e9f4889d2174b26d088d70fe656505c` | reflog ~30d / `--backup-bundle` |
+| `feat/1725-slice0` | `404f99bf1794b6882e4d0d1325fac0929517c46e` | reflog ~30d / `--backup-bundle` |
+| `feat/1726-docs` | `949a2b78007323985ffdb79b2bb5d2c7858f0541` | reflog ~30d / `--backup-bundle` |
+| `feat/1748-onboarding-user-path` | `68762261dbd99c721b4f7848894ac9c295c301c3` | reflog ~30d / `--backup-bundle` |
+| `feat/1763-answer-string-mark` | `5bda081e154bea52d79e0c43f9c81bc5e54ad277` | reflog ~30d / `--backup-bundle` |
+| `feat/1793-blog-data` | `da3109cbc75dba3a5ecdc2590bdef592637a13a8` | reflog ~30d / `--backup-bundle` |
+| `feat/1794-blog-render` | `9bb06a8202bc58cab923418ae658a04ef021ea84` | reflog ~30d / `--backup-bundle` |
+| `feat/1795-agent-api` | `2caed1d378026622c527d1c03376ace20d2c9e8a` | reflog ~30d / `--backup-bundle` |
+| `feat/1795-blog-agent-api` | `b03ae1f1dab7630abb58d4c8ef6e8aa578db0f1e` | reflog ~30d / `--backup-bundle` |
+| `feat/1796-blog-seo` | `4caadbd66aa27f8fde9c5258b38e35bf70abe6a3` | reflog ~30d / `--backup-bundle` |
+| `feat/1797-admin-gate` | `abc8b3ea2abe4dd33b35d0d45c2ef4408306e95f` | reflog ~30d / `--backup-bundle` |
+| `feat/1798-admin-app` | `0d5c1dc67729ff5c9c6e4813be6e4d1f9e371573` | reflog ~30d / `--backup-bundle` |
+| `feat/1799-blog-events` | `86df5f8eef347d96db11e4831380e149c5f9c7c7` | reflog ~30d / `--backup-bundle` |
+| `feat/1800-blog-deploy` | `e056e21e344bca10accdc35a08667b0be5dd9a33` | reflog ~30d / `--backup-bundle` |
+| `feat/1841-overview-skeleton` | `d755ce65925d4c6384aa36b76aea46a60d09b874` | reflog ~30d / `--backup-bundle` |
+| `feat/1874-account-menu-restructure` | `af799110cc8a56eb3a02d0f70647ba832d579818` | reflog ~30d / `--backup-bundle` |
+| `feat/1875-invite-pending` | `d778a7d13a13d0afa693a807b8b90482ff2e7571` | reflog ~30d / `--backup-bundle` |
+| `feat/1876-billing-team-dropdown` | `86a78a298fc07abddac8b88ec7eb9d65a88858ba` | reflog ~30d / `--backup-bundle` |
+| `feat/1877-create-team-entitlement` | `31b74d485062b61262321b8d9d4a9c71fa91aa04` | reflog ~30d / `--backup-bundle` |
+| `feat/1893-source-scope-persist` | `9f886e3b779e885aef91e1e3229fdcc8a1d738e5` | reflog ~30d / `--backup-bundle` |
+| `feat/1894-docs-memory-source-switch` | `e96504978121fae46f91bf2995a600c71108d5e4` | reflog ~30d / `--backup-bundle` |
+| `feat/1895-repoll-cursor-advance` | `0dc1c1e15bff6fd7e7475f60d7194c57cfd826fc` | reflog ~30d / `--backup-bundle` |
+| `feat/1896-fly-orphan-machine-guard` | `a754bf284bb5fb49a432cd48db00957183d76c78` | reflog ~30d / `--backup-bundle` |
+| `feat/1929-pack-shipping` | `408c1a49c12369fe400287bbf2d14f8b78d101fb` | reflog ~30d / `--backup-bundle` |
+| `feat/1930-packs-dir` | `a00f5acd038e1825407633691c2d20956a8ce1d7` | reflog ~30d / `--backup-bundle` |
+| `feat/1932-pack-docs` | `b534e22821c4cb4a1f8028cdd4b80858c0c85991` | reflog ~30d / `--backup-bundle` |
+| `feat/1933-agent-ops-pack` | `bbbeaeb6f4326dde09104cfc19890403315c3540` | reflog ~30d / `--backup-bundle` |
+| `feat/1934-enforcement` | `32c830ee14028b8690cbd90614f96948b43f6a6f` | reflog ~30d / `--backup-bundle` |
+| `feat/1935-hosted-packs` | `ef706f75e43328163bd5eb5140c9d967339d4b9f` | reflog ~30d / `--backup-bundle` |
+| `feat/1936-pack-export` | `3bc74220864bfc0635253aa51e39563b8fb552ae` | reflog ~30d / `--backup-bundle` |
+| `feat/1970-ci-debug` | `0b78df1b56c3e5b81d7e8769a3c9ead7baffb61d` | reflog ~30d / `--backup-bundle` |
+| `feat/1970-main-hygiene` | `c841516f0c90ef6d41617783b6d7b6243685c31c` | reflog ~30d / `--backup-bundle` |
+| `feat/1997-W1-onboarding` | `4cb7e6711ebec05265255f2170ad78640ebf62d4` | reflog ~30d / `--backup-bundle` |
+| `feat/1998-W2-onboarding` | `9c63a9bf298964f5d80379b7ce1a951430da29c1` | reflog ~30d / `--backup-bundle` |
+| `feat/1999-W3-onboarding` | `58e840e5219a5886f1978551b702d10fdc1954b1` | reflog ~30d / `--backup-bundle` |
+| `feat/2000-W4-onboarding` | `06e34c0cd5db2ea7cb7a5489e16837ba39a19098` | reflog ~30d / `--backup-bundle` |
+| `feat/2001-W5-onboarding` | `0f2365a79ea99c81f70cbcb7dde53980f5697ae6` | reflog ~30d / `--backup-bundle` |
+| `feat/2002-W6-onboarding` | `4947b188eaf27cdbd87eea8fa165dafd75cdb5cb` | reflog ~30d / `--backup-bundle` |
+| `feat/2004-W8-onboarding` | `9c34f2cd32eee2f0af6a6463138191a5deeceda3` | reflog ~30d / `--backup-bundle` |
+| `feat/2005-W9-onboarding` | `e2959dbdcde15f22cd5ec252a7c2dea6e52d0b47` | reflog ~30d / `--backup-bundle` |
+| `feat/2006-W11-onboarding` | `e2959dbdcde15f22cd5ec252a7c2dea6e52d0b47` | reflog ~30d / `--backup-bundle` |
+| `feat/2007-W12-onboarding` | `e2959dbdcde15f22cd5ec252a7c2dea6e52d0b47` | reflog ~30d / `--backup-bundle` |
+| `feat/2028-foreign-kinds` | `376f6e050a2a5ec4efb241b1eeb87eb3889a07bf` | reflog ~30d / `--backup-bundle` |
+| `feat/2029-body-cap` | `5c8651a344e1a51e2480963f1d2acc331fbc8aaa` | reflog ~30d / `--backup-bundle` |
+| `feat/2030-namespaced-enforcement` | `1f7400cb7e2ae12a02566bbe5acaa17eceb0a772` | reflog ~30d / `--backup-bundle` |
+| `feat/2030b-pack-count-test` | `afb95481d5bbaade45953adbe4d1f2c23ed23c41` | reflog ~30d / `--backup-bundle` |
+| `feat/2031-tenant-view` | `e476eeda790924b2664a4912efa04897912e4b24` | reflog ~30d / `--backup-bundle` |
+| `feat/2032-body-sweep` | `0c88b73b608059114e48e608c7d46e81caefb999` | reflog ~30d / `--backup-bundle` |
+| `feat/2038-pack-rate-limit` | `2085c753ba0eb3546253ff021784f86a08735d4f` | reflog ~30d / `--backup-bundle` |
+| `feat/2039-backup-restore-guard` | `46fac62c76b493a5647e412f721d13eef54fdb96` | reflog ~30d / `--backup-bundle` |
+| `feat/2040-ledger-order` | `841f2e1d5690e4b4f564cbd11b5622295a9c0bfd` | reflog ~30d / `--backup-bundle` |
+| `feat/2052-reaper-sweep` | `8596791661efbed8ad811618b813d7fad5741097` | reflog ~30d / `--backup-bundle` |
+| `feat/2069-reader-routing` | `0dde912a9ed6a6c6d9ff6ca055deb0f2bcbfce26` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-gbrain-plan` | `f2e8d95455f044b9d9b576f309601c6c500585a0` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-gbrain-scope` | `bf01b77377f9d6c3262e3f9fe0954622fea12cf7` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-gbrain-verify` | `2cff245f4551852510c4126f3226317d5de8c45a` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-seams-wave1` | `f22097920de9ee867d87d41c0cc73ab5c8e0debc` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w1-learnings-map` | `a28fa8114f4e3f5ee53638f6a073fc8e30db1b31` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w2a-planted-gold` | `c255926d3292d199c67878791876dfe184350491` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w2b-benchmark-runner` | `cf4b964a500b6cf862f9064fecf06238734c9b5c` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w3a-cat34-harness` | `5cb319866e668f7a34e2d6b326e06820a0214bfc` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w3b-why-suite` | `e3e15bc3053d888298d4eb969cdce44e41689669` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w4a-why-enrichment` | `19c87ae05826ccde90b90469b8d454593cf81bae` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w4b-contested-score` | `8194cb4f523ce1dfa14da794f2b9b65799fe33a7` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w4c-volunteer-context` | `40fcb34d4dd52a82104cfed0b3f70123bfa0405e` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w5-ingestion-quality` | `afa0861839752dd963d30c81eac74243f4d63b6b` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w5-phase-d` | `6c7f4fe6748ca7d7d78f57cd6bffadffab617d49` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w5-phase-e` | `900022383ec341ec8b69a60daa18989ed7118bd4` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w5-phase-f` | `174ad63074f894d7ec5c7f19bf0c1adb3aee0ec9` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w5c-ep-ingest` | `6c32878a447fb0fa4bd688fc94daec724f06b2bb` | reflog ~30d / `--backup-bundle` |
+| `feat/2080-w7b-comparison-docs` | `931c5c822b78834a0e3b6f11bd364fe8f52fb56b` | reflog ~30d / `--backup-bundle` |
+| `feat/2083-multi-graph` | `deaf4835886d3783c1c4eb1b8fee15984e330df6` | reflog ~30d / `--backup-bundle` |
+| `feat/2110-c1-dual-mode-graph-key-model` | `9911b0915f0b14dcc623b986dd53c3667bcf72e6` | reflog ~30d / `--backup-bundle` |
+| `feat/2111-c2-provisioning-service` | `2e2c7275cb7fd8ae9c05c63e7fcd040403d9ec61` | reflog ~30d / `--backup-bundle` |
+| `feat/2112-c3-key-lifecycle` | `9030ca848f9f8bff2edbefb15686fbfa525206d8` | reflog ~30d / `--backup-bundle` |
+| `feat/2113-c4-acl-layer` | `182baf95d6fafc9804a16042336fbae45f6cb760` | reflog ~30d / `--backup-bundle` |
+| `feat/2114-c5-tenancy-spine` | `adcb54317ec7180e9636b5dea159cabdf16af552` | reflog ~30d / `--backup-bundle` |
+| `feat/2115-c6-delivery-shape-tenancy` | `2605983f979f039c7312788b1d634ed13ea0db1b` | reflog ~30d / `--backup-bundle` |
+| `feat/2116-c7-dashboard-graphs` | `61f1d2e423bb302ff110139ef8d44358fbc0c42e` | reflog ~30d / `--backup-bundle` |
+| `feat/2117-c8-migration-docs` | `04305e8926d36ade6c351e4d3a65df1830269018` | reflog ~30d / `--backup-bundle` |
+| `feat/2118-capstone` | `107474199db96a761d92f08d46c2027da900b154` | reflog ~30d / `--backup-bundle` |
+| `feat/2127-shared-fixture-helper` | `0d1565cdd0296f913c64239d3cf58d6d98070710` | reflog ~30d / `--backup-bundle` |
+| `feat/2127-wave1b-migration` | `65bb7f186f918f491d1128f7bf74a2ed9ec1bd6f` | reflog ~30d / `--backup-bundle` |
+| `feat/2127-wave2-migration` | `560ba26956fe1946934f25c74ccf25730600049f` | reflog ~30d / `--backup-bundle` |
+| `feat/2127-wave3-tripwire` | `29826e4a255b28e17cfb4ff74c13a6efdec34743` | reflog ~30d / `--backup-bundle` |
+| `feat/2164-capture-supersession-fold` | `b26c07a9b174eb6e7881dd729205a60501badbe7` | reflog ~30d / `--backup-bundle` |
+| `feat/2167-browser-session-auth` | `4f602c49dcdf8df0c50527c96be5547558305c6d` | reflog ~30d / `--backup-bundle` |
+| `feat/2178-keys-table-e2e` | `c71f4380af82bc163fb61bcc0f8f6fb32d789284` | reflog ~30d / `--backup-bundle` |
+| `feat/2193-hosted-supersession-migration` | `68468746704345b21d760ce660d0680035263063` | reflog ~30d / `--backup-bundle` |
+| `feat/2193-supersession-migration` | `2357b7d2945851e8a8bebd87cc514e01051b32ee` | reflog ~30d / `--backup-bundle` |
+| `feat/2194-journal-objectregistered` | `6b0d12fc70920af43b757ac2e1969a66367a7160` | reflog ~30d / `--backup-bundle` |
+| `feat/2229-rotate-held-key` | `99678088744228189105272fdcc2e861d42d4b25` | reflog ~30d / `--backup-bundle` |
+| `feat/2242-cas-fold` | `884405328e57619303656c193678fc2f947e382c` | reflog ~30d / `--backup-bundle` |
+| `feat/2249-supersession-order` | `b377dda11e3b04df246bad1601ceb6fa1dd5f960` | reflog ~30d / `--backup-bundle` |
+| `feat/2284-battery-measurement-path` | `16c290a04732a68fe357561631c265f8b1dbaa10` | reflog ~30d / `--backup-bundle` |
+| `feat/2284-executor-exposure` | `1db99413c80747257bff0ef35708d0db52bfa5c3` | reflog ~30d / `--backup-bundle` |
+| `feat/2291-a4-ep-semantics` | `abb9644ad8fb37dc48cf22b3531915c39c76bb56` | reflog ~30d / `--backup-bundle` |
+| `feat/2292-rubric-model-budget` | `1bc31d3101b9475778350cfd05fece2d0fe54854` | reflog ~30d / `--backup-bundle` |
+| `feat/2295-subjectadded-journaling` | `362022cb458ac6881ce6661da4c34c6b460085a8` | reflog ~30d / `--backup-bundle` |
+| `feat/2304-delete-trash` | `76ddfdba334e5a27585e495ea9f44921ce08ca50` | reflog ~30d / `--backup-bundle` |
+| `feat/2313-per-graph-backups` | `c60e1609eccfd73b779e41752534b729c721cf2a` | reflog ~30d / `--backup-bundle` |
+| `feat/235-hosted-onboarding-journey` | `d93359c5b728491a2e9a01535673d421f369b2af` | reflog ~30d / `--backup-bundle` |
+| `feat/236-mcp-streamable-http` | `f86a068bc213d8cf8865042a87a2be5d09cd0c7d` | reflog ~30d / `--backup-bundle` |
+| `feat/2360-real-starter-data` | `0355b79fa76f1b71698a9efae95ab137d8e7a5a0` | reflog ~30d / `--backup-bundle` |
+| `feat/2380-session-key-recovery` | `c200cf3a3daa4f275ce62f08a7504f3d774369fa` | reflog ~30d / `--backup-bundle` |
+| `feat/2406-signup-onboarding-email` | `e8ebe22a5b424b159a95e5b34efb76b7f1c4100a` | reflog ~30d / `--backup-bundle` |
+| `feat/2407-fork-unsure-option` | `2f89314781e3b9e8500d5c1e3316aa7cdf244f2f` | reflog ~30d / `--backup-bundle` |
+| `feat/2408-s4-reemit-census` | `8b170976835c3afdd471d02c30bfc7114a0ff833` | reflog ~30d / `--backup-bundle` |
+| `feat/2426-key-expiry` | `1fbdbed97cde9191317fd2aab523234fce87ead4` | reflog ~30d / `--backup-bundle` |
+| `feat/243-search-sessions-temporal` | `616412543e579cf5482ad0c0fb2a7a0a63f90b67` | reflog ~30d / `--backup-bundle` |
+| `feat/2437-contribution-policy` | `a87fadc62703278c0e6f337c8d09c6109e5fbab5` | reflog ~30d / `--backup-bundle` |
+| `feat/2439-inbound-intake-store` | `5f3be4e1334bb903108d4183a3ee4cb539bbbbf8` | reflog ~30d / `--backup-bundle` |
+| `feat/244-session-semantic-search` | `de2f42740e819b12916e83bbb3e371f78632a6ff` | reflog ~30d / `--backup-bundle` |
+| `feat/2479-re-auth-fix` | `dcc4c0d36ee4983dbbfd22afea0ea30aa76281a8` | reflog ~30d / `--backup-bundle` |
+| `feat/2479-re-auth-ux-investigation` | `ce6ccae83ae74582856a8dcda10df9fa986c1127` | reflog ~30d / `--backup-bundle` |
+| `feat/2494-account-menu-sections` | `1c7e8dda0a8be97eceedf486244289f87483a153` | reflog ~30d / `--backup-bundle` |
+| `feat/25-graph-informed-ranking` | `d85d5c2006c25deba4de6bae40f7638aa000b49e` | reflog ~30d / `--backup-bundle` |
+| `feat/2523-diff-profile-contract` | `05388c91c03d429bd8c81f4b62015d410ae7ced5` | reflog ~30d / `--backup-bundle` |
+| `feat/2688-dashboard-deploy-verification` | `1354a493074c7b349fa4ec1b61ff1bd5cefd1a25` | reflog ~30d / `--backup-bundle` |
+| `feat/2740-r1-derive` | `5d6baea425ac8448245eb240dfd579cf215e086d` | reflog ~30d / `--backup-bundle` |
+| `feat/2779-opaque-id-display-name` | `40a606c8f2bd03c1a317f0091b766ebbc3459d7b` | reflog ~30d / `--backup-bundle` |
+| `feat/278-ollama-local-mode` | `c0856b6b0189a812ee69c07171987a76ba9b86b0` | reflog ~30d / `--backup-bundle` |
+| `feat/2784-graphs-last-backup` | `a587badc8fd6f5baf090e8377a0514f50bb2d0d0` | reflog ~30d / `--backup-bundle` |
+| `feat/280-index-concurrency` | `9d11ce69ccaf284f979d00eccb3a354a7c99996d` | reflog ~30d / `--backup-bundle` |
+| `feat/2800-cr-tortoise-lane` | `4193388e5b462cdd9051dc7e2cc5eeeb711546e8` | reflog ~30d / `--backup-bundle` |
+| `feat/2800-mabench-cr-runloop` | `b6bd51a96b1818d1ebfd413f820995d005eb5d7c` | reflog ~30d / `--backup-bundle` |
+| `feat/2800-mabench-data-metric` | `26065873fcee66935e51dcb4b655dcbd463f8a83` | reflog ~30d / `--backup-bundle` |
+| `feat/2800-parity-executors` | `183aeb8e78f8072fefa7795f6186bf231ec57b24` | reflog ~30d / `--backup-bundle` |
+| `feat/281-instantiates-aboutobject` | `651d8f8494353524ce287c234f2e98adc46b15b7` | reflog ~30d / `--backup-bundle` |
+| `feat/300-dashboard` | `7112c1df7ff9ce97f550aa608a115a39c3d0a68a` | reflog ~30d / `--backup-bundle` |
+| `feat/303-ci-central` | `e8d1d69b84264fe7aefd10b4a3e7198d425b55d2` | reflog ~30d / `--backup-bundle` |
+| `feat/303-e2e-suite` | `7b45ab2c4d3b0a008656fd405f3d306308f66d41` | reflog ~30d / `--backup-bundle` |
+| `feat/304-hosted-cli` | `cb714e1b4603ff60d88c68af3c53afdf3c39cb8c` | reflog ~30d / `--backup-bundle` |
+| `feat/308-abuse-prevention` | `708afce81b39568a261187faa5ea8d57df4e354c` | reflog ~30d / `--backup-bundle` |
+| `feat/309-security-page` | `c3b1016a76548ca82fa04658d5834fda20753fc5` | reflog ~30d / `--backup-bundle` |
+| `feat/312-capture-sdk` | `376ab29d1cc686a03257cc04cec191387632e382` | reflog ~30d / `--backup-bundle` |
+| `feat/316-vector-benchmark` | `d9648ed82a6a2b8a6737a9d956aa330566a9adc5` | reflog ~30d / `--backup-bundle` |
+| `feat/316-vector-benchmark-rebased` | `d9648ed82a6a2b8a6737a9d956aa330566a9adc5` | reflog ~30d / `--backup-bundle` |
+| `feat/318-pack-isolation` | `1b6d16d829b82cba14bc84acc2e924408f4b64bd` | reflog ~30d / `--backup-bundle` |
+| `feat/324-connector-secrets-encryption` | `dbb1572aa61db897beae44017579495a89d8a412` | reflog ~30d / `--backup-bundle` |
+| `feat/326-ep-propagation` | `d7976cc04cf4ce96f779771273bca8be791c47d9` | reflog ~30d / `--backup-bundle` |
+| `feat/327-db-indexes` | `b7e5741ca788a9b650db4be212a05eeac4754d6f` | reflog ~30d / `--backup-bundle` |
+| `feat/329-security-hardening` | `1aa92b79e97e5a482129b72760c125df6e3e3818` | reflog ~30d / `--backup-bundle` |
+| `feat/330-data-divergence` | `18a673d800566cc7853854109e6671e569c83fae` | reflog ~30d / `--backup-bundle` |
+| `feat/334-wiring-phase01` | `d321348af81720db0b676e3b51ebcef6f858a05c` | reflog ~30d / `--backup-bundle` |
+| `feat/338-service-model-v2` | `5d32820b99cd790a8ddc536ce543d11eb511a3b2` | reflog ~30d / `--backup-bundle` |
+| `feat/341-ep-source-validation` | `941f5ab7180139df8816b6cdc5342c3771a64816` | reflog ~30d / `--backup-bundle` |
+| `feat/344-calibration-default` | `e4f246b3203dd72842248a7fcbf1f1a7d74e596e` | reflog ~30d / `--backup-bundle` |
+| `feat/348-audit-tool` | `9537f59053ebbd1e2e81b6d5dd3410fc0f0326ae` | reflog ~30d / `--backup-bundle` |
+| `feat/373-waitlist-form` | `cb12210d8c90f5cc2e0cabb24e222a028a654b88` | reflog ~30d / `--backup-bundle` |
+| `feat/3806-ship-test-instrument` | `c25999714b35ecc3108eb4746a37e1e12f99f0ad` | reflog ~30d / `--backup-bundle` |
+| `feat/388-connector-source-nodes` | `65e7b1bb863d12255aa681c3bc1b8168fd0ae455` | reflog ~30d / `--backup-bundle` |
+| `feat/395-local-ep` | `0b856004c12871348499a81f332e5aec7f33c2e4` | reflog ~30d / `--backup-bundle` |
+| `feat/398-source-credibility` | `5db19cd3823069af3936f5a8b782139579570cbd` | reflog ~30d / `--backup-bundle` |
+| `feat/399-embedding-matching` | `2a6fe4540e78997e83b244df05661cef6469d61c` | reflog ~30d / `--backup-bundle` |
+| `feat/405-domain-constraints` | `ff1e836506598d1423fea09a7eccb57e9b24b4ee` | reflog ~30d / `--backup-bundle` |
+| `feat/416-mining-pilot` | `4e2b9f4bb7f80479aa17a5fc905d43b0b69ef6f8` | reflog ~30d / `--backup-bundle` |
+| `feat/4170-stable-tool-id` | `e7071f72040898e017a1f64650a413f873d4993b` | reflog ~30d / `--backup-bundle` |
+| `feat/420-ep-validation` | `7521227df57a979bc78eb2816b6c38ca370172dd` | reflog ~30d / `--backup-bundle` |
+| `feat/427-tortoise-planning-skill` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `feat/428-ops-safety-residual` | `8b0a77adcfcbe7b1c5347199a8d60561b53fe379` | reflog ~30d / `--backup-bundle` |
+| `feat/4282-bridge-table` | `c9de1be02638f3b55242aecdbe870a5dc861e1b4` | reflog ~30d / `--backup-bundle` |
+| `feat/438-candidate-exposure` | `2911919fadaec1bb0200a2eaa6d7890a4795293b` | reflog ~30d / `--backup-bundle` |
+| `feat/454-canonical-tool-registry` | `860cc67ced3941d6e5a5825ceb082c591254bace` | reflog ~30d / `--backup-bundle` |
+| `feat/485-sync-tagged-edges` | `ef138b954336c181560501a2cbe25e3e22769773` | reflog ~30d / `--backup-bundle` |
+| `feat/497-onboarding-welcome-impl` | `1a929f6e622176213cd05b726174cf149f9c3889` | reflog ~30d / `--backup-bundle` |
+| `feat/498-onboarding-api-impl` | `0ca9508f8774376ed0e9fbcc30905d1ecf5c44c0` | reflog ~30d / `--backup-bundle` |
+| `feat/524-oauth-mcp` | `b28aae404a9db9727619d21e82952cd6869cc25a` | reflog ~30d / `--backup-bundle` |
+| `feat/525-rest` | `149979fe63fe43af17634de61f7ce26b6ad6758c` | reflog ~30d / `--backup-bundle` |
+| `feat/529-harness-onboarding` | `8cf753cf98cdd7ab73093d0886647e22ea78ab5b` | reflog ~30d / `--backup-bundle` |
+| `feat/529-onboarding-variants` | `26f67ed2feb79f621bf773172683646cddf61311` | reflog ~30d / `--backup-bundle` |
+| `feat/560-mcp-graph-ranking` | `1dc963dc4dc77b209f5a494872c00bac87a2a2fe` | reflog ~30d / `--backup-bundle` |
+| `feat/564-session-end-hook` | `218c02df6bdbd292660351ee870b1c2fcbfa9b90` | reflog ~30d / `--backup-bundle` |
+| `feat/568-decoupling-v2` | `3c5cce1ca4f98ff7464194f9fdef57788da39604` | reflog ~30d / `--backup-bundle` |
+| `feat/569-provisioning` | `175b4cd8863050e7c26c78ee8f15d327c41ebf68` | reflog ~30d / `--backup-bundle` |
+| `feat/570-session-key-v3` | `2df8188e9b47a7e230b77a47c7dc2b3ce2b102b1` | reflog ~30d / `--backup-bundle` |
+| `feat/571-reveal` | `a782b24a3093c09f1d17d8902a15a45616be6e2d` | reflog ~30d / `--backup-bundle` |
+| `feat/572-dashboard-auth` | `5fb4fe419d217227c4baf13481ecc1d1b023b32b` | reflog ~30d / `--backup-bundle` |
+| `feat/573-onboarding` | `3701675af7b42abc0fe75cfb2eeca1b347196410` | reflog ~30d / `--backup-bundle` |
+| `feat/573-onboarding-v2` | `1e23c30cf9e7d1ad2717e79387b8aafd3b25d6fc` | reflog ~30d / `--backup-bundle` |
+| `feat/574-invites` | `f87dc3d6fdcfef14bb582fe90e6a0e3e6aaa5908` | reflog ~30d / `--backup-bundle` |
+| `feat/575-pricing` | `ff4b8d4dcc8b991c1d426269a00c2cda1fa8a64c` | reflog ~30d / `--backup-bundle` |
+| `feat/576-email-v2` | `1760362e0578ceb6f09dcb8aa3b874afd3b3bf36` | reflog ~30d / `--backup-bundle` |
+| `feat/577-analytics` | `0c4b9e69bbe1f711d85dadae30bf85e643f837e4` | reflog ~30d / `--backup-bundle` |
+| `feat/578-e2e` | `df7288a352a31ea15fd34f31f4550e84886b04a5` | reflog ~30d / `--backup-bundle` |
+| `feat/592-topic-summarization` | `ea9cb64bc7a4cdd41848e31356cb590e5d83c3c7` | reflog ~30d / `--backup-bundle` |
+| `feat/596-backup-cron-alerting` | `287f5341d2d9a202a162789c094940eb0bcba102` | reflog ~30d / `--backup-bundle` |
+| `feat/655-team-backup-sweep` | `aa5829f37d1f091ccca2840edd6cc44acd1065ea` | reflog ~30d / `--backup-bundle` |
+| `feat/663-zero-email-signup` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `feat/669-child-763-invitations` | `87cc0bdfb69c01d41ff65ebe8c2846134a6015bd` | reflog ~30d / `--backup-bundle` |
+| `feat/669-child-764-onboarding-health` | `16728287ded60cff80e88ee1b93586caaaeca4e6` | reflog ~30d / `--backup-bundle` |
+| `feat/669-child-765-writer-inventory` | `6a169e0708898115aea315d27ed0a95db8bb0c50` | reflog ~30d / `--backup-bundle` |
+| `feat/669-child-766-postflip-verify` | `ea9eae9b4bc157156af58dbdaa74f601877773f4` | reflog ~30d / `--backup-bundle` |
+| `feat/669-child-767-auth-flip` | `5e009572d8ba34de54f5f3415104dbc58b8a6f85` | reflog ~30d / `--backup-bundle` |
+| `feat/669-child-768-backup-seam` | `de975962bf2c34e9808eeb9f7f4ea4b70a273854` | reflog ~30d / `--backup-bundle` |
+| `feat/669-child-769-schema-migrations` | `93069732425fa80210492a3ec5860f39e4f47385` | reflog ~30d / `--backup-bundle` |
+| `feat/673-telegram-alerts` | `e379b2ab782fcc1dad5879215a6fef451b9d4256` | reflog ~30d / `--backup-bundle` |
+| `feat/681-usage-metering` | `f057c1f725fdf5825352fd424c7a891653dfb835` | reflog ~30d / `--backup-bundle` |
+| `feat/683-enforce-limits` | `3deb6bff6597f85d56df2ae6bf3ad06ef0e06f7e` | reflog ~30d / `--backup-bundle` |
+| `feat/683-max-limits-enforcement` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `feat/684-mcp-tier-limits` | `817ba31f7604e89bd3d0b5433af963a3604eeb0b` | reflog ~30d / `--backup-bundle` |
+| `feat/688-eventlog-read-after` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `feat/688-eventlog-tail` | `64b9b4d65620639d6ec4bfdf8497e813f312fe7b` | reflog ~30d / `--backup-bundle` |
+| `feat/692-event-replay` | `63264e7461e19db2dc4fd3dc798b0712a407172c` | reflog ~30d / `--backup-bundle` |
+| `feat/705-onboard-embedded-db` | `e86a744efefd4dbb23ee477772ede90984d9a393` | reflog ~30d / `--backup-bundle` |
+| `feat/706-redislite-message` | `bec2264a08a01bdc706207c07933da68356a6315` | reflog ~30d / `--backup-bundle` |
+| `feat/714-dashboard-session-detail` | `80304b8fcff844eaa4726e3995513481aa374f95` | reflog ~30d / `--backup-bundle` |
+| `feat/736-x-signup-event` | `85805106c6ca3681f30fd3720548c26cfc9d3979` | reflog ~30d / `--backup-bundle` |
+| `feat/753-directed-nand` | `88a9ed5989f0636d07193ec3ce71ab4c9cd9aaa1` | reflog ~30d / `--backup-bundle` |
+| `feat/833-mcp-mount` | `8f1cbca2d9cbcd6578d88d2eea35e9ed1cc0f0bc` | reflog ~30d / `--backup-bundle` |
+| `feat/889-mcp-telemetry` | `369e98efdece81e42d4c96c24542448f4d005794` | reflog ~30d / `--backup-bundle` |
+| `feat/900-index-workflow` | `3c7418533af6d7e47498ad4e721cb016bdaedc7c` | reflog ~30d / `--backup-bundle` |
+| `feat/900-t1-file-indexer` | `187e31d8e4f9c09ec2c78bf733882b3a8fc921aa` | reflog ~30d / `--backup-bundle` |
+| `feat/900-t10-ont-note` | `c57283599bee7b8c4712f40b928e3c367ecc9ea1` | reflog ~30d / `--backup-bundle` |
+| `feat/900-t12-restore` | `f6a833ac54109d8bba505249345ed0c2e9ca336c` | reflog ~30d / `--backup-bundle` |
+| `feat/900-t3-index-sdk` | `ae0a27ac15a4972a8e9d731e6c065f4c01abfe33` | reflog ~30d / `--backup-bundle` |
+| `feat/900-t4-e2e-suite` | `e989217f644427f70ab4cede185fb62ec234eea5` | reflog ~30d / `--backup-bundle` |
+| `feat/900-t5-surfacing` | `2fb026d2365e1cd1bca3fe9c5368d5930cf7c54d` | reflog ~30d / `--backup-bundle` |
+| `feat/900-t9-sc4-markers` | `480d38075848c88740009177c71230d43254707b` | reflog ~30d / `--backup-bundle` |
+| `feat/900-tci-registration` | `8e3fe8e8cd079368d8e5e36aee7986d529a84120` | reflog ~30d / `--backup-bundle` |
+| `feat/900-tdocs` | `1b41de1e03438c46b0a037547825356def63b395` | reflog ~30d / `--backup-bundle` |
+| `feat/901-connect-workflow` | `ea9be5465d67ae9f110e6785fe9f171a634c09e5` | reflog ~30d / `--backup-bundle` |
+| `feat/902-a1-validation` | `1215e3c4b8ac8d6a128356e7180ec22f42fe1b45` | reflog ~30d / `--backup-bundle` |
+| `feat/902-a10-rebuild-durability` | `70471b245a55afd90d3bee864e897342e192624b` | reflog ~30d / `--backup-bundle` |
+| `feat/902-a2-failure-contract` | `b684f4991e355188ae3166e94f3f5fa4da121bc6` | reflog ~30d / `--backup-bundle` |
+| `feat/902-a3-idempotency` | `1f62c46005e1742d334e3518c8b7376679fd54e3` | reflog ~30d / `--backup-bundle` |
+| `feat/902-a4-batch-id` | `2ecf6c46179228aeceb4f530ec8d2a97a272032a` | reflog ~30d / `--backup-bundle` |
+| `feat/902-ingest-workflow` | `3c7418533af6d7e47498ad4e721cb016bdaedc7c` | reflog ~30d / `--backup-bundle` |
+| `feat/902-s8-direct-edge` | `e1940c22d536f7f16f46878c3d7ad97b6a6572f4` | reflog ~30d / `--backup-bundle` |
+| `feat/903-diagnostics-prodscale` | `6cb7290ead5cb26b55c318584e0ecd6143d3ce23` | reflog ~30d / `--backup-bundle` |
+| `feat/903-dreaming-ep` | `c1b0bca2f9b5055631c2451329032e289474d709` | reflog ~30d / `--backup-bundle` |
+| `feat/946-gate-window2-rubric-validation` | `db9136d076561f2d6750cac282b1058390989da2` | reflog ~30d / `--backup-bundle` |
+| `feat/946-validate-extractor` | `6a469206c19d957285c45684ac36312d8545ec25` | reflog ~30d / `--backup-bundle` |
+| `feat/add-email-ui-fixes` | `29e1bb7b768555d476fdc60a55de3f13d3377fa0` | reflog ~30d / `--backup-bundle` |
+| `feat/ai-review-gate` | `cc4944d39ef40ec08afd73e36e8262af31275559` | reflog ~30d / `--backup-bundle` |
+| `feat/api-key-labels` | `91777e9ac755f371406ba0fac4e4bf224f08a4e2` | reflog ~30d / `--backup-bundle` |
+| `feat/api-keys-ux-fixes` | `e2234e9d127705a5a607c8ec76ef0dc6792252a7` | reflog ~30d / `--backup-bundle` |
+| `feat/beat-narrative` | `4e88d351749497dea5eab6644633c9e152661f22` | reflog ~30d / `--backup-bundle` |
+| `feat/clean-profile-tab` | `87d8b86e82a4840d7ce9c233019e7be2d982ec75` | reflog ~30d / `--backup-bundle` |
+| `feat/contestation-signal` | `95fb223cad4edfcffc1ea8c32161fbd5b2dabb0e` | reflog ~30d / `--backup-bundle` |
+| `feat/dashboard-login-default-off` | `1c05905b2c6001a82144ee9ddee2d894f48c7a28` | reflog ~30d / `--backup-bundle` |
+| `feat/doctor-path` | `fe8c8ce779bafb42644b00d2b1af656b07017fd7` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-945-harness` | `2b87dbd96b1c6380824db5fb9507cc0c305ffce5` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-947-quota` | `2e45bb6b308d768c591fa454daf4a242edb751bb` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-948-ontology` | `9d09f7386079fab70c9ac57f9e1da79420aace9f` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-950-pack-content` | `8e8284c18dc827b2576352f741c883c64fc2494f` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-951-domain-loader` | `116b7b005004ca18ec47237db959a8326d121438` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-952-commit-schema` | `d0fbca4276c44ce9c562e488999e28dc0a44abf4` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-953-commit-endpoint` | `94affcdd2812d56be2ec6730750bff2c6c839462` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-960-metrics` | `027e56db749935dead445afc8d82cb1381d27861` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-calibration-tooling` | `54fd134bbb418ef17be8815b03a4d7a6f9215470` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-graph-construct` | `407cd862ba6e279ceb85b257eb03352a1a3b2d17` | reflog ~30d / `--backup-bundle` |
+| `feat/epic909-impl` | `661222d43d1d90fd5d25a936134ecd1e0338db35` | reflog ~30d / `--backup-bundle` |
+| `feat/free-tier-headroom` | `dec6c1e7728bbc56c3b466f57a7df4cfd3ef248c` | reflog ~30d / `--backup-bundle` |
+| `feat/identity-better-fallback` | `a58ffb3e389fcc8e3dd1c1927aa11a4aa6e4340f` | reflog ~30d / `--backup-bundle` |
+| `feat/identity-email-column` | `6d51e82aa40d357d243a5252b894fe77ab80e5ef` | reflog ~30d / `--backup-bundle` |
+| `feat/issue-284-entity-resolution-closeout` | `f8dd5dba0d84e8ef83ddcbc27268baad8d78d961` | reflog ~30d / `--backup-bundle` |
+| `feat/key-modal-expiry-label` | `2840d48d6f07d3e488b7129bbc58ff660e56ff93` | reflog ~30d / `--backup-bundle` |
+| `feat/seo-sitemap-consolidation` | `47fe3941458c56121365fd8d24becac642425b63` | reflog ~30d / `--backup-bundle` |
+| `feat/welcome-path-chooser` | `21116dd665f7a516147364f057877b169b62db72` | reflog ~30d / `--backup-bundle` |
+| `feat/welcome-segments` | `783aea1b5d3bb3afa8883f855343d6f04b806ce2` | reflog ~30d / `--backup-bundle` |
+| `finish/2796-killswitch-loud` | `ceec08ad613f2fa9a5932ae626bb187d21b510a5` | reflog ~30d / `--backup-bundle` |
+| `fix/0015-abuse-policy-idempotent` | `eefdfd89a59de69b54f6e133605c541d76652256` | reflog ~30d / `--backup-bundle` |
+| `fix/1001-migration-consolidate` | `c46510dd8be06640de85654fa8d0aa42330bccd7` | reflog ~30d / `--backup-bundle` |
+| `fix/1001-migration-renumber` | `4eb24ae588bf77bf6ba94bc3aaba49aa1c5853b6` | reflog ~30d / `--backup-bundle` |
+| `fix/1002-cors-allowlist` | `8824f4af6c41f911b7cb1a0f891b7fa5ea0d0268` | reflog ~30d / `--backup-bundle` |
+| `fix/1005-ci-orphan-gate` | `bb6a1f40a78614c41bf73d5e85e09806821e4e85` | reflog ~30d / `--backup-bundle` |
+| `fix/1005-end-sweep` | `5c8bf89133886eae312be2bafe3e72994628942f` | reflog ~30d / `--backup-bundle` |
+| `fix/1005-orphan-instrument` | `9992a7cac83a975d057afbc6bb6eb0aa2d0f8916` | reflog ~30d / `--backup-bundle` |
+| `fix/1005-redislite-leak` | `af4fc8b5340e0c821c7b57ae0a5dd75cf80ee098` | reflog ~30d / `--backup-bundle` |
+| `fix/1008-queue-health` | `104fda0da0608584f42d96caa204dda01df8d029` | reflog ~30d / `--backup-bundle` |
+| `fix/1028-metering-seam` | `abf0918772c3fc9dcd64d632ec1960986802ab88` | reflog ~30d / `--backup-bundle` |
+| `fix/1095-migration-drift-gate` | `2001e101b71bd15fae05f31421495062a23a307c` | reflog ~30d / `--backup-bundle` |
+| `fix/1118-preflight-jq` | `292a965ad3b8241a7efe911c63ec03f477b179f4` | reflog ~30d / `--backup-bundle` |
+| `fix/1118-wf-trigger` | `fb59df9033574d7713abaae65484bc695745219f` | reflog ~30d / `--backup-bundle` |
+| `fix/1124-pages-perpage` | `422b69ddd98c83bc69b60f36efc198e78b3993af` | reflog ~30d / `--backup-bundle` |
+| `fix/1125-perpage-clean` | `51671e35dc8ceb0d2d8c8b5e1631da28dba9fc11` | reflog ~30d / `--backup-bundle` |
+| `fix/1135-welcome-url` | `89b2f0dbc7d9ec734c32cc552f273d6f3d592976` | reflog ~30d / `--backup-bundle` |
+| `fix/1145-research-append-relative` | `8e40a5464b8b9a8ee88c9cf51464fac975c305e0` | reflog ~30d / `--backup-bundle` |
+| `fix/1149-monitor-false-positive` | `da34856560ffe434eaecb146a74aa0eea7352853` | reflog ~30d / `--backup-bundle` |
+| `fix/1155-gh-event-collision` | `e592f8a147bcde9796a36c7af5052670339341ab` | reflog ~30d / `--backup-bundle` |
+| `fix/1158-audit-sourcekind` | `3bb9177a404c91b97280f11daf1fb4871c12bfc8` | reflog ~30d / `--backup-bundle` |
+| `fix/1160-mining-dedup-docs` | `8e40a5464b8b9a8ee88c9cf51464fac975c305e0` | reflog ~30d / `--backup-bundle` |
+| `fix/1162-add-operator-ep` | `007914d3d69534524fc989e742f0e6122f10a2a3` | reflog ~30d / `--backup-bundle` |
+| `fix/1166-cli-serve-conflict` | `c705558569c802f8cccbc67e472c28dd8bc897b7` | reflog ~30d / `--backup-bundle` |
+| `fix/1168-verify-chain-skill-sync` | `8e40a5464b8b9a8ee88c9cf51464fac975c305e0` | reflog ~30d / `--backup-bundle` |
+| `fix/1189-welcome-e2e` | `1bdb8650d79f63bb489a3174984273bc3c608032` | reflog ~30d / `--backup-bundle` |
+| `fix/1189-welcome-e2e-tests` | `f5cc7f6b5bfee323df12ddde38cb76bf64289e10` | reflog ~30d / `--backup-bundle` |
+| `fix/1224-oauth-state-expiry` | `2bf2fd1d70928349205a64825994e16317c8f67c` | reflog ~30d / `--backup-bundle` |
+| `fix/1227-final` | `4674ba9591a1082878c74609b7e6cff576fd358d` | reflog ~30d / `--backup-bundle` |
+| `fix/1231-redislite-lifecycle` | `1c234e7dd790790b98ae1e1e0a5964da4cbf4a9d` | reflog ~30d / `--backup-bundle` |
+| `fix/1235-migration-guards` | `760e48c1e2e59756ecc42635dab8024600f9b38b` | reflog ~30d / `--backup-bundle` |
+| `fix/1266-suite-cap` | `2f72de11f7b2995749c1ae5b5857a4e69404684b` | reflog ~30d / `--backup-bundle` |
+| `fix/1272-review-fixes` | `69989611542a1f17996696bd7722e2b748477816` | reflog ~30d / `--backup-bundle` |
+| `fix/1280-dashboard-v2b` | `f63d37176dea4df2e662654582fdb72f29fc0737` | reflog ~30d / `--backup-bundle` |
+| `fix/1302-rebuild` | `3637765530d81ac5e63e83c51134e3bcf461f6b3` | reflog ~30d / `--backup-bundle` |
+| `fix/1359-falkordb-compat` | `d0866251f966aa6cc4138173b1456e5738719553` | reflog ~30d / `--backup-bundle` |
+| `fix/1382-ep-local-env` | `8e4cc71c4947c21d6c569822bfccd3f1411a5d04` | reflog ~30d / `--backup-bundle` |
+| `fix/1383-reaper-semantics` | `241562799a11cc93d887300875e19bc806cc6244` | reflog ~30d / `--backup-bundle` |
+| `fix/1400-tool-registry-count` | `887567e70715e88e8e3ed197798896836ae6c48d` | reflog ~30d / `--backup-bundle` |
+| `fix/1416-envelope-extract` | `e237a47d2ae78824860ece46886ea901b41849e9` | reflog ~30d / `--backup-bundle` |
+| `fix/1416-envelope-typeerror` | `a801cc51d944900d53d881099bb60a85faf03675` | reflog ~30d / `--backup-bundle` |
+| `fix/1416-episode-deadline` | `a0b09cfadb6d2aa4faa0533111e5e37f026d911d` | reflog ~30d / `--backup-bundle` |
+| `fix/1416-real-episode-deadline` | `31e2fd3825ee833904592817624ecabb2af23b22` | reflog ~30d / `--backup-bundle` |
+| `fix/1417-aboutEvent-untangle` | `09e4608a1f439f5daf46b67508bd4009d6da663f` | reflog ~30d / `--backup-bundle` |
+| `fix/1422-bench-kwarg` | `e0f366a9deae58c6d2fa4b1d1dcc437900a2b177` | reflog ~30d / `--backup-bundle` |
+| `fix/1427-orphan-reap` | `ebdab467f85d4bbda46e78f7ce7d79f7a3b293ec` | reflog ~30d / `--backup-bundle` |
+| `fix/1438-postmerge-verdict` | `562a11b57378110b0e0e49e298af99ad3dcc26eb` | reflog ~30d / `--backup-bundle` |
+| `fix/1439-postmerge-budget` | `3491a3723dd9aff984602797fdebe72394c42b7e` | reflog ~30d / `--backup-bundle` |
+| `fix/1471-split-test-slow` | `a20c0f35bc0adc1a6fc9e096e6b550b7b674dfd0` | reflog ~30d / `--backup-bundle` |
+| `fix/1472-single-manifest` | `03ec3925555dae3b5f688c43d3547685bbf76e48` | reflog ~30d / `--backup-bundle` |
+| `fix/1473-tier2-duration` | `17a2dbcacb42b76f87c13c551adc941e14b1ba4d` | reflog ~30d / `--backup-bundle` |
+| `fix/1474-postmerge-dedup` | `bc4ecc9734cdb97e555bb03cf9599e50d445fefe` | reflog ~30d / `--backup-bundle` |
+| `fix/1475-lifecycle-finalize` | `e168eb420ddad16f06f59f38fc0e2c2dba4831bf` | reflog ~30d / `--backup-bundle` |
+| `fix/1477-measure` | `c4c417b92791602c4c97de5881c3715f70b11ca3` | reflog ~30d / `--backup-bundle` |
+| `fix/1490-signup-login-page` | `aa8cb64f3379b3fdc62c7d92591ba3788aeae6d2` | reflog ~30d / `--backup-bundle` |
+| `fix/1498-apikey-label` | `422208847163a693a3f06eee3acdf35af4050715` | reflog ~30d / `--backup-bundle` |
+| `fix/1498-auth-gating` | `f86bad27e4156ab8fadd6beca6d7319b8a460d1d` | reflog ~30d / `--backup-bundle` |
+| `fix/1502-ci-red` | `9de006a1a2beb949b859e54fb62f45bc7fd70f6a` | reflog ~30d / `--backup-bundle` |
+| `fix/1506-auth-gating` | `1ae193e71d5cd527fa8df8e84af670ff8d6b7067` | reflog ~30d / `--backup-bundle` |
+| `fix/1549-pilot-extractor-reasoning` | `02127dc65700d592f1f02faad890c60a10e74770` | reflog ~30d / `--backup-bundle` |
+| `fix/1559-session-mint-429` | `1dd014934b03241169715d8433db468e9973809c` | reflog ~30d / `--backup-bundle` |
+| `fix/1566-e2e-redirect` | `a60b55e5e92d9fe65eb93f7b6d917d6d4d57c87a` | reflog ~30d / `--backup-bundle` |
+| `fix/1566-recovery-cap` | `a10aaddf94dc039d37775da47b1ecce0e25c006d` | reflog ~30d / `--backup-bundle` |
+| `fix/1591-cors-500` | `d334a5097bf0fbde0980f4eaca6ab653fbbf7158` | reflog ~30d / `--backup-bundle` |
+| `fix/1591-graph-design` | `c0210b8ddaa4bef57ea37df4d1aefd2ae6590e32` | reflog ~30d / `--backup-bundle` |
+| `fix/1591-graph-ux` | `50ceba43fa3de96b6a0b0d0dfdb5723b89a52b0b` | reflog ~30d / `--backup-bundle` |
+| `fix/1591-team-500` | `b0fdc8d444463699ad4311506f022c85b8631733` | reflog ~30d / `--backup-bundle` |
+| `fix/160-embeddings-cache-path` | `fe820a9ca3d37a040da953ada179b8a7c99ed8c8` | reflog ~30d / `--backup-bundle` |
+| `fix/1643-card-design` | `d1c64451bc8bc72f6006df1d5b4cf71b45667a18` | reflog ~30d / `--backup-bundle` |
+| `fix/1643-reentry` | `a59c39e29fe5b315219e14763f16260c66d21213` | reflog ~30d / `--backup-bundle` |
+| `fix/1643-skills-copy` | `f79559942fc39d1e9c3e84de1a00a8f5374cab81` | reflog ~30d / `--backup-bundle` |
+| `fix/1643-skills-primer` | `bf0075cbc3a3aebd34339108d22fa6c767f6794e` | reflog ~30d / `--backup-bundle` |
+| `fix/1643-wizard-nav` | `3c390a6f0916ccf8f66efdfb5434c9feb15b6475` | reflog ~30d / `--backup-bundle` |
+| `fix/1689-setup-visible` | `86d04ae20c8e626803ba76871423e857ad15d611` | reflog ~30d / `--backup-bundle` |
+| `fix/1691-onboarding-copy` | `292c2263039940413e06f1aa0e0af3fbc07d3895` | reflog ~30d / `--backup-bundle` |
+| `fix/1692-orient-order` | `938dd14896ccb630925109792d09353588c873c4` | reflog ~30d / `--backup-bundle` |
+| `fix/1694-web-steps` | `0d2a058a8952eeae5fb55fec905fb7ded602facc` | reflog ~30d / `--backup-bundle` |
+| `fix/1699-web-copy` | `9ebc30f92c5c3f3376056b91fb9172e8f2c676e4` | reflog ~30d / `--backup-bundle` |
+| `fix/1701-consent-page` | `658aea18a43364dc48f9ca62395fc874beadf75d` | reflog ~30d / `--backup-bundle` |
+| `fix/1704-cookie-session` | `2081be0aa93f444a7254348244f33140b3c8cb2a` | reflog ~30d / `--backup-bundle` |
+| `fix/1710-team-create-phantom-key` | `1bcf7be577996a76f0f9105de73b1f2a3a7e028b` | reflog ~30d / `--backup-bundle` |
+| `fix/1716-onboarding-orphan-key` | `1549456231d89c36d9b4813911da7280fc60d276` | reflog ~30d / `--backup-bundle` |
+| `fix/1719-session-login-mint-guard` | `055a08bd8bca0ecb60ee6d1d3fe921e193ed27b2` | reflog ~30d / `--backup-bundle` |
+| `fix/1721-asyncio-cascade` | `ba38fd8200c12efc0ac3bc0d63ecb7bcd6ba7059` | reflog ~30d / `--backup-bundle` |
+| `fix/1737-uniform-503` | `5b113d998cebc853c7ce587d00dd22b39ed7a985` | reflog ~30d / `--backup-bundle` |
+| `fix/1738-uuid-burst-copy` | `3488adbc8ceb7cc170a9043753e771428c6095fe` | reflog ~30d / `--backup-bundle` |
+| `fix/1749-recover-api-url` | `68ceb9cf044df55b255978af5c1908f6461df67c` | reflog ~30d / `--backup-bundle` |
+| `fix/1750-1751-signup-messaging` | `ee2b945a12724742326f9a82acb081bba8b20858` | reflog ~30d / `--backup-bundle` |
+| `fix/1752-token-source-divergence` | `07319f621dc39ecb3f2d243685719106b04f72ad` | reflog ~30d / `--backup-bundle` |
+| `fix/1753-1754-registry-parity` | `0cb000dbf423fc6f2aeb3abec790add8c31013c0` | reflog ~30d / `--backup-bundle` |
+| `fix/1755-token-revoke-confirm` | `3760bb8fa4ee0c1a0e67941a0acfc883350c67fa` | reflog ~30d / `--backup-bundle` |
+| `fix/1756-recover-guidance` | `af2c62775d0453a4286db95260e65241899728a7` | reflog ~30d / `--backup-bundle` |
+| `fix/1781-lint-clean` | `79bcdf77a614bb69a9ce4549cf33b4f302a75864` | reflog ~30d / `--backup-bundle` |
+| `fix/1822-admin-gate-supabase-auth` | `7f5fd0ee55c68e289f723c314b87b5ab246d4e90` | reflog ~30d / `--backup-bundle` |
+| `fix/1826-oauth-redirect` | `260dfd4f4b6ec036af5220f2a122568218c4228a` | reflog ~30d / `--backup-bundle` |
+| `fix/1828-session-key-deadlock` | `359c9057a34663850f5143f91fbccb26ea89c4d6` | reflog ~30d / `--backup-bundle` |
+| `fix/1830-recovery-rotation` | `d8a84dd32edba3a33b1ef03bd1af7a08b38e77b3` | reflog ~30d / `--backup-bundle` |
+| `fix/1832-session-failsoft` | `8d248b8a251ae70e73a5aedb9f7c07cd2e9081b4` | reflog ~30d / `--backup-bundle` |
+| `fix/1834-import-columns` | `0392f9c3839ea9f5688890d1e4b77c9a5e60b297` | reflog ~30d / `--backup-bundle` |
+| `fix/1835-google-cookie` | `c6624be91d4fcd2dd5e2daab0b2c0e02811c7342` | reflog ~30d / `--backup-bundle` |
+| `fix/1838-onboarding-race` | `31d1574c206bfc756c8a0717301c4cf3fbf8d83d` | reflog ~30d / `--backup-bundle` |
+| `fix/1844-object-only` | `5f53f8cc00df0a96d8f9705a3a1c9816735ed70b` | reflog ~30d / `--backup-bundle` |
+| `fix/1845-source-scope-multiselect` | `7d6352742eaa79b19b7f6281c16b06c294c12e6a` | reflog ~30d / `--backup-bundle` |
+| `fix/1847-memsources-refresh` | `c50ae9918ecd14b670d0760955c1925e913cb145` | reflog ~30d / `--backup-bundle` |
+| `fix/1856-deadshell` | `e059c8038f271da07206718825c38f57cd55e192` | reflog ~30d / `--backup-bundle` |
+| `fix/1880-ghost-members` | `54928a2b57a741cbf21f59a692ecaf94a46e93e4` | reflog ~30d / `--backup-bundle` |
+| `fix/1885-gate-test-bootstrap` | `fe02ba793bf63740e35aad50bbdca2a59c419ebb` | reflog ~30d / `--backup-bundle` |
+| `fix/1892-ci` | `241260903436e51fb3f2ddef468ed6a60f5dfb87` | reflog ~30d / `--backup-bundle` |
+| `fix/1900-dataset-join` | `55ba3a415f9aadde7c8a130451a002e73f151a05` | reflog ~30d / `--backup-bundle` |
+| `fix/1901-vacuity` | `b148980834212953e4ced9a5e946c6cfbe58e429` | reflog ~30d / `--backup-bundle` |
+| `fix/1903-team-graph-name` | `b771b3bbf213cec540448e8c9836f1948de8bdd5` | reflog ~30d / `--backup-bundle` |
+| `fix/1904-content-hash` | `3cc089a1d6298a337e9e62c824908e786724ab8c` | reflog ~30d / `--backup-bundle` |
+| `fix/1906-welcome-dashboard` | `82e489bc29aaba05f02dd2b54652202af4230c29` | reflog ~30d / `--backup-bundle` |
+| `fix/1908-ghost-expiry` | `2f677a4a35799b3f8a37d6fd444947453df872eb` | reflog ~30d / `--backup-bundle` |
+| `fix/1909-oauth-fragment` | `b8ce5e5eabef955d2aff97739134fc547eca00f9` | reflog ~30d / `--backup-bundle` |
+| `fix/191-audit-scripts-env` | `798cab091d77516db236ae851b39390b7476a61e` | reflog ~30d / `--backup-bundle` |
+| `fix/1912-teams-suspension` | `0c2391a32f68913819e502f78a3895e218b64fbc` | reflog ~30d / `--backup-bundle` |
+| `fix/1913-abuse-session-lane` | `6f0e4e4675ae77c94aef3f5476c86e111866c939` | reflog ~30d / `--backup-bundle` |
+| `fix/1914-pagination-params` | `12a0ff13b152c9ecb8d02bb801e9f22d16dc365b` | reflog ~30d / `--backup-bundle` |
+| `fix/1915-confidence-freshness` | `9005423f0dfa3306599a5b72c5c6b556e7d80f6c` | reflog ~30d / `--backup-bundle` |
+| `fix/1917-input-edge` | `9a0702bfc37d9707745d03d990bee3b2cfad85d4` | reflog ~30d / `--backup-bundle` |
+| `fix/1918-subject-canonical-id` | `b7a79aa3c7c91f4b119d6d264e07d2b076a81fbe` | reflog ~30d / `--backup-bundle` |
+| `fix/1919-operator-dedup` | `283a6cee7cbcd3f50360f8de38509eea722c780d` | reflog ~30d / `--backup-bundle` |
+| `fix/1927-consent` | `7349274cbfeae34608fb2a399eab1d07c3facc8e` | reflog ~30d / `--backup-bundle` |
+| `fix/1928-hosted-e2e-consent` | `c215d0b66aea0028026115f14b4e673f3ffb0c0b` | reflog ~30d / `--backup-bundle` |
+| `fix/1940-tracing-drift` | `07baa77ee908b7e3ac7243996c562787ee6c92a1` | reflog ~30d / `--backup-bundle` |
+| `fix/1941-proxy-text` | `36de6520ca20b2c5a1af27c5eb3063676f5a7dbf` | reflog ~30d / `--backup-bundle` |
+| `fix/1954-entitlement-toctou` | `30f3117117ac20ae3a5b2c899737968ecea625ee` | reflog ~30d / `--backup-bundle` |
+| `fix/1965-invite-capacity-toctou` | `7fd4aa926d9fc1d61fe56d3cf148b6515f75b4b9` | reflog ~30d / `--backup-bundle` |
+| `fix/1998-connect-durable-key` | `82c659205760f5dc336b265d63385e7f400cd891` | reflog ~30d / `--backup-bundle` |
+| `fix/20260813000005-migration-prefix` | `5c6e30928ac8775e497c7c8f786f2bbca7e5571c` | reflog ~30d / `--backup-bundle` |
+| `fix/2052-redislite-orphan-sweep` | `142c65f28da8bfcd2f6fe1c496c489785a2736b3` | reflog ~30d / `--backup-bundle` |
+| `fix/2061-event-journaling` | `5667e5d96b046d588ec72b3b2d518fddc7e53141` | reflog ~30d / `--backup-bundle` |
+| `fix/2062-ingest-event` | `47662051eb6c1fbaec630ad8dba5e0e20c41af61` | reflog ~30d / `--backup-bundle` |
+| `fix/2065-flaky-pack-upload` | `cbb1e783959d4c41d5fa9c19681c11da2ca86f89` | reflog ~30d / `--backup-bundle` |
+| `fix/2070-ask-retrieval` | `bdef11902409b64f520ad43b7df36595651da815` | reflog ~30d / `--backup-bundle` |
+| `fix/2071-spotcheck-judge` | `8cb4b87627042a4c6029168279b3d04aaccbfe1b` | reflog ~30d / `--backup-bundle` |
+| `fix/2084-uri-restore-guard` | `c422cd37e7103eb8a197279ec5c58d7f649625c1` | reflog ~30d / `--backup-bundle` |
+| `fix/2085-decide-legacy-skip` | `1a7795a4716181c7e79334a80638aa0b01a6fb49` | reflog ~30d / `--backup-bundle` |
+| `fix/2090-ci-lane-pollution` | `96e435213cf8241a289f470b10136acc35d6d947` | reflog ~30d / `--backup-bundle` |
+| `fix/2104-audit-headers` | `3135806e8e2c4885131a6bd68886a43b0f9b26d8` | reflog ~30d / `--backup-bundle` |
+| `fix/2134-reader-none-guard` | `e7395f6ff63ca03c9aeb4b81bf761ebb7f38943d` | reflog ~30d / `--backup-bundle` |
+| `fix/2138-ruf100-cleanup` | `d5210c22e7311d438ed2d9b13a17519ce7dac4f1` | reflog ~30d / `--backup-bundle` |
+| `fix/2147-2148-diff-gate-pythonci` | `799a4d1c21946e1b80342492dd5f6ee7b8d46c9e` | reflog ~30d / `--backup-bundle` |
+| `fix/2149-ciyml-path-gates` | `4254448279d3a1ef0dba20021ce640c09e5312ae` | reflog ~30d / `--backup-bundle` |
+| `fix/2151-mcp-lazy` | `11ad1baefa5c0bf272dc6b74e842d118baa6065b` | reflog ~30d / `--backup-bundle` |
+| `fix/2155-w2a-lint-cleanup` | `78b2f820d08814de62d4108034cff0312a70973e` | reflog ~30d / `--backup-bundle` |
+| `fix/2163-graph-drop` | `55639ae488c141eebe31ef6fd0527e80ed459c6c` | reflog ~30d / `--backup-bundle` |
+| `fix/2172-anchor-race` | `3abe56e62ddef82d8ddba456aaf94d9c7276daf7` | reflog ~30d / `--backup-bundle` |
+| `fix/2173-collect-strays` | `bf46d2bb45b44cc9c54005f13fd9d39dc95f1f74` | reflog ~30d / `--backup-bundle` |
+| `fix/2174-postmerge-lint` | `df1e6d561390056ab5fa70fed5b1538e9e4bbdd8` | reflog ~30d / `--backup-bundle` |
+| `fix/2179-keepalive-siblings` | `1955c740d22844e516b3e0c63e036d33521e89d5` | reflog ~30d / `--backup-bundle` |
+| `fix/2188-d14-gate` | `0e1e495632e8c88d318f3103f0b2d47cb258424e` | reflog ~30d / `--backup-bundle` |
+| `fix/2189-reconcile` | `2391b02aa2cdf3822817b82c3f3d974337c94b95` | reflog ~30d / `--backup-bundle` |
+| `fix/2199-decide-calibration` | `10368f132eaac20a04fb95fdcf3a7c4623e77775` | reflog ~30d / `--backup-bundle` |
+| `fix/22-sep-confidence-scale` | `c67ef79b5614b96301214c8ef791c20d47e8db81` | reflog ~30d / `--backup-bundle` |
+| `fix/2200-selfhost-docker` | `02be6ec02cc2fc7d6182e2b019aa280fb7b0ca77` | reflog ~30d / `--backup-bundle` |
+| `fix/2201-indexer-unreadable` | `a331daa14e4fdd17f0ee8f6d7c09304123930832` | reflog ~30d / `--backup-bundle` |
+| `fix/2202-health-truthful` | `ebd1caebe931de3a56177a5917e5a970c2e3e6ab` | reflog ~30d / `--backup-bundle` |
+| `fix/2203-orphan-redis-sigint` | `d6b54ea4000f7fdd260d67fb93a54ba2a2f8c86c` | reflog ~30d / `--backup-bundle` |
+| `fix/2204-doctor-preinit-noise` | `28a29d7315377fbe6f57b85209e714c828121b42` | reflog ~30d / `--backup-bundle` |
+| `fix/2205-summarize-counts` | `ad76da2fc561ea435d859c63f87355c020b826e2` | reflog ~30d / `--backup-bundle` |
+| `fix/2206-confidence-surfaces` | `65e6d0767f1546864e2865023c4a4c73b65c9acc` | reflog ~30d / `--backup-bundle` |
+| `fix/2207-extraction-digest` | `0102da8a8b155e772563ce3c13e726acbbd8012f` | reflog ~30d / `--backup-bundle` |
+| `fix/2208-version-endpoint` | `2314b417219e1656cc23ccea58581f3494fd78de` | reflog ~30d / `--backup-bundle` |
+| `fix/2209-session-hook-notice` | `c2b74c1d857c9bd9e6a74ab99c9fcdaa687af638` | reflog ~30d / `--backup-bundle` |
+| `fix/2210-cli-mcp-polish` | `ebf136a6b90d3ecda053e1ac89348bffa86dbe8b` | reflog ~30d / `--backup-bundle` |
+| `fix/2216-bgsave-fork-slot` | `0f97fb667f64784924bf2fb086f0e7f7345fe925` | reflog ~30d / `--backup-bundle` |
+| `fix/2218-guard-os-import` | `4fd1cb2922d093d49773389e93ac93ea09c89f6e` | reflog ~30d / `--backup-bundle` |
+| `fix/2235-dedup-syntax` | `81d580886242254124bb430086ca9fce2945c78c` | reflog ~30d / `--backup-bundle` |
+| `fix/2251-embedded-path-divergence` | `56555b6d1169a83a34340dc2b881fa946a229a82` | reflog ~30d / `--backup-bundle` |
+| `fix/2260-extraction-clean` | `bf6eb9db874c40e76e391b60e2835c0ae3b519f8` | reflog ~30d / `--backup-bundle` |
+| `fix/2260-legacy-scope` | `6e320eed82973659bf79d71025790d7112909ce8` | reflog ~30d / `--backup-bundle` |
+| `fix/2260-scope-extraction` | `ac721bd984d5cbda7bfaea02876638d305befd36` | reflog ~30d / `--backup-bundle` |
+| `fix/2260-scope-followup` | `c2d16022ef29463848d775db7e65a006d73bec4f` | reflog ~30d / `--backup-bundle` |
+| `fix/2280-ask-reader-collapse` | `35676f9efdce9df7fda00f228edcefa4acc7bc40` | reflog ~30d / `--backup-bundle` |
+| `fix/2287-ci-volunteer-guards` | `cf546dfac5b9278830381b62f5a779156bf9d692` | reflog ~30d / `--backup-bundle` |
+| `fix/2339-transport-stall` | `54a1c6f206e04dd501c90ee938cc4ddb38d3644e` | reflog ~30d / `--backup-bundle` |
+| `fix/2361-vocab-anchor` | `aef112674d1fd714875e5a7cb2803e2171b3fae5` | reflog ~30d / `--backup-bundle` |
+| `fix/2364-resume-round1` | `095d2387f648e9f30549744ff53c9c24ab42cb71` | reflog ~30d / `--backup-bundle` |
+| `fix/2367-watcher-state-teams` | `c5b6630ec57ee34c1d1c44b25dcd6f840125c030` | reflog ~30d / `--backup-bundle` |
+| `fix/2370-legacy-flat-index` | `1abd9185879848b07e7b6e2aa19f8a2d0fadc141` | reflog ~30d / `--backup-bundle` |
+| `fix/2371-acl-reconcile-to-thread` | `adce257966f6e3f6093db512e1662ff556c19d67` | reflog ~30d / `--backup-bundle` |
+| `fix/2372-sweep-rollup` | `67cecad9ee653890e8236e5e68c7e534a9f37fc7` | reflog ~30d / `--backup-bundle` |
+| `fix/2373-retention-day-anchors` | `cfed5dacc8ef8f874e46fb99839d775d5d19caa6` | reflog ~30d / `--backup-bundle` |
+| `fix/2374-pergraph-taxonomy` | `e2ba13b3c7dd575de03c7657b7cd78f28d0ca7d5` | reflog ~30d / `--backup-bundle` |
+| `fix/2375-driver-subject-scope` | `4856746413cc4555e334862ad84a34fb9480aebc` | reflog ~30d / `--backup-bundle` |
+| `fix/2376-create-graph-kind` | `e617fe7070516ed62500562ad2a3e608130ffaf2` | reflog ~30d / `--backup-bundle` |
+| `fix/2377-rebaseline-validate` | `7972a6479996374927c6db219f2d60d13a5c98e8` | reflog ~30d / `--backup-bundle` |
+| `fix/2378-docs-residuals` | `030bde2862694e7dbb3b8670b47f34d3cff6c722` | reflog ~30d / `--backup-bundle` |
+| `fix/2391-team-to-org-sweep` | `31f114ae951696a8f846928d3f948761c8988014` | reflog ~30d / `--backup-bundle` |
+| `fix/2392-dialog-focus-a11y` | `a9d2c7774a26499215f66956afb145ef2ec7860f` | reflog ~30d / `--backup-bundle` |
+| `fix/2411-selfheal` | `8cd3318a788db5dc6509954ae5104cc3780f47f4` | reflog ~30d / `--backup-bundle` |
+| `fix/2412-opstate` | `85c2d9166c624b3b861553f4047f2fc17ebb5f49` | reflog ~30d / `--backup-bundle` |
+| `fix/2413-subjmatch` | `a20c545d7591a0028a0ee188b02b788ba4edd83c` | reflog ~30d / `--backup-bundle` |
+| `fix/2414-keyderived` | `a41fe5e69b0e714e1ff07cdb1ac852ee21ec6f65` | reflog ~30d / `--backup-bundle` |
+| `fix/2415-residual` | `56b9813779ea8a460e2a4d4b16cb3dbce948764d` | reflog ~30d / `--backup-bundle` |
+| `fix/2422-ep-terminal-ghost` | `764325302cb264fac60492a0c0649f090913e85f` | reflog ~30d / `--backup-bundle` |
+| `fix/2426-wizard-tdz` | `92a4c265b8642d6d4a3265cf09076fbdbccdea8d` | reflog ~30d / `--backup-bundle` |
+| `fix/2450-judge-nonstring-gold` | `d25f1c63fb92948e5d56e32d6370210047351dc7` | reflog ~30d / `--backup-bundle` |
+| `fix/2462-p1-flatpurge` | `dffd2862229fa7dfdf7972b39477e43bc71168e8` | reflog ~30d / `--backup-bundle` |
+| `fix/2463-restore0row` | `66a6a3252e67effcc9ed4ab3d3b957d1d6997eb2` | reflog ~30d / `--backup-bundle` |
+| `fix/2464-stampcond` | `9433af10a28ae699558ea6725e99a7e4448c224a` | reflog ~30d / `--backup-bundle` |
+| `fix/2465-graceorigin` | `7d61325551287ed03a3cf2bf0faf48c330d661d5` | reflog ~30d / `--backup-bundle` |
+| `fix/2466-indexrmw` | `5a86689f5f17282db0ee61b98965914cdd2c4144` | reflog ~30d / `--backup-bundle` |
+| `fix/2467-quota` | `eaaec6e449576439ee76bf503c765b5c9f50f177` | reflog ~30d / `--backup-bundle` |
+| `fix/2468-namerace` | `61f6d52a14514e9b563e381526492519c9ce97cc` | reflog ~30d / `--backup-bundle` |
+| `fix/2469-inspect` | `e446467f86581c1b0ec9c7800e38a2131b6948a6` | reflog ~30d / `--backup-bundle` |
+| `fix/2470-locktimeout` | `2b93542f18b28576784f0fbe6af1c8bd6fae7bdf` | reflog ~30d / `--backup-bundle` |
+| `fix/2471-ghoststreak` | `e7d2d5e8d6e829cf3a2408f395151076b428dab1` | reflog ~30d / `--backup-bundle` |
+| `fix/2494-account-menu-section-order` | `0f0ce32d75e1d600cf300af7bda14e009dcd38b5` | reflog ~30d / `--backup-bundle` |
+| `fix/2494-logout-in-personal-section` | `4d41489f60ffa7e84f137c64ecabf5e7c61e5ae4` | reflog ~30d / `--backup-bundle` |
+| `fix/2494-overview-layout` | `958d3a38b001d970b368a70156067f563ee1b8ae` | reflog ~30d / `--backup-bundle` |
+| `fix/2559-reaud` | `97fcac586be638858ad96f763bc99a3255d6b2d9` | reflog ~30d / `--backup-bundle` |
+| `fix/2560-reaud` | `dfac9c3a997bb765ebf1de847c5dbbbf1e945ee9` | reflog ~30d / `--backup-bundle` |
+| `fix/2561-reaud` | `38c0b19efe88688c21b1c15b07447c11bb8bff62` | reflog ~30d / `--backup-bundle` |
+| `fix/2562-reaud` | `625b1d0c0515f1da0d6d460bf7a68fe614d36ced` | reflog ~30d / `--backup-bundle` |
+| `fix/2563-reaud` | `4f4330e13c27c82728d207110154c612d225a85e` | reflog ~30d / `--backup-bundle` |
+| `fix/2564-reaud` | `23391d13def46f42fbbdfb510cd08fdf330d01e3` | reflog ~30d / `--backup-bundle` |
+| `fix/2565-reaud` | `e1fbf8a400651ce4a33de7eae4a3e7a5b87b546a` | reflog ~30d / `--backup-bundle` |
+| `fix/2566-reaud` | `8c2102ff00ab2e8970dad12fb9d95a15ce024291` | reflog ~30d / `--backup-bundle` |
+| `fix/2601-judge-pair-distinct` | `b7c186ed28e860ce4dd61cd24bec60297583004d` | reflog ~30d / `--backup-bundle` |
+| `fix/2633-real-vendor-key-preflight` | `342cda7645b5521f9d9cb48a8def2605b1117639` | reflog ~30d / `--backup-bundle` |
+| `fix/2644-l4-flake` | `3bf46ef38c934317115e1be05da9c7ab4cabe63c` | reflog ~30d / `--backup-bundle` |
+| `fix/2656-drift-gate-decouple` | `e2e468db1e0f34c1002038c63fe7f8367533bf5b` | reflog ~30d / `--backup-bundle` |
+| `fix/2712-pin-preflight-test` | `c357886314f778b0d103e80fd490fc1351eee29e` | reflog ~30d / `--backup-bundle` |
+| `fix/2735-e2e-residuals` | `d93d6e49ab2a22af72031f851879ccac98205966` | reflog ~30d / `--backup-bundle` |
+| `fix/2759-authored-turn-refused` | `68791f365a5bc8f931b77d8146f3dd24a7c81786` | reflog ~30d / `--backup-bundle` |
+| `fix/2764-lint-i001` | `690ace738294cb9a62dcd7e9bae17d6ba1ba7821` | reflog ~30d / `--backup-bundle` |
+| `fix/2773-props-coercion` | `a71dc4756a5a944a8850b541ff94736f8ed6cb50` | reflog ~30d / `--backup-bundle` |
+| `fix/2797-parity-not-measured` | `17f0e2c3313edf032d58cda6b3f6276ee7a03733` | reflog ~30d / `--backup-bundle` |
+| `fix/2802-conflict-markers` | `9d08bbbbbf7475da947401e05b9a1e1ab7e78b8b` | reflog ~30d / `--backup-bundle` |
+| `fix/2823-sweep-no-teams` | `f70bd439b19bd2b708c7c6b2b179cea6cb8f9c08` | reflog ~30d / `--backup-bundle` |
+| `fix/2824-embed-state-tests` | `060176a30ee72f053cdfd144e05f8c8d195da2e4` | reflog ~30d / `--backup-bundle` |
+| `fix/2827-wizard-connect-polish` | `b3f083631baeca4287aaaa96b5e7841cd4ead2ab` | reflog ~30d / `--backup-bundle` |
+| `fix/2874-price-basis` | `a230291db1753ad1d9369d548c6a973fe531c7e3` | reflog ~30d / `--backup-bundle` |
+| `fix/2906-provider-cost` | `8569204692e052698e49940a277320721cefeff7` | reflog ~30d / `--backup-bundle` |
+| `fix/2906-spend-note` | `cea2783d03f461a967d77e4bba3e4de8c50b5ee0` | reflog ~30d / `--backup-bundle` |
+| `fix/2913-register-insert` | `9d05b01f8f187915fc5d1048dec72604793bbd46` | reflog ~30d / `--backup-bundle` |
+| `fix/2916-battery-surface` | `f5821f44a9e3f564020df33b43a69ecb1d8e210a` | reflog ~30d / `--backup-bundle` |
+| `fix/2919-parity-detail` | `1d3c3f4887a184f40276b1a412876bd3350cc950` | reflog ~30d / `--backup-bundle` |
+| `fix/2938-curate-surfaces` | `cd06d652a4c000ea08c20f30c7535a04556041bb` | reflog ~30d / `--backup-bundle` |
+| `fix/2947-embedded-ingest-cache` | `18b521002a049a0b1254390aac3abf1b1054b2e5` | reflog ~30d / `--backup-bundle` |
+| `fix/2947-orphan-investigation` | `e8ed2460f2ed24d319a71dd08d27aec8bccc181d` | reflog ~30d / `--backup-bundle` |
+| `fix/2952-time-dependent-ranking` | `29eb3ad2782403eee964f70e3590891ee87fb65b` | reflog ~30d / `--backup-bundle` |
+| `fix/2985-degrade-gate` | `e8ed2460f2ed24d319a71dd08d27aec8bccc181d` | reflog ~30d / `--backup-bundle` |
+| `fix/3074-flaky-pointsmerged` | `6b23a798bab3b67d0be718531185e98226fcebea` | reflog ~30d / `--backup-bundle` |
+| `fix/3076-review-gate-diagnosis` | `2bd1831cb24f0963ae89e70bbaa648b0f5028909` | reflog ~30d / `--backup-bundle` |
+| `fix/3218-onboarding-wizard-copy` | `16cb039a2a23c3717b3209b69e5a0eaea21dc478` | reflog ~30d / `--backup-bundle` |
+| `fix/3221-manifest-drift-both-files` | `d3ac78685a4d62b22375c49012fd46b5ec38dcde` | reflog ~30d / `--backup-bundle` |
+| `fix/3261-3381-selection-manifest` | `6e5cafcc9b781d1a96fed4e75eaea67358fcacf4` | reflog ~30d / `--backup-bundle` |
+| `fix/331-crash-batch` | `650082b891191032650fe555020b98d1cde60145` | reflog ~30d / `--backup-bundle` |
+| `fix/3325-keyword-false-positive` | `7ac54318fcc78673826f5c11b33ccd10020a4c70` | reflog ~30d / `--backup-bundle` |
+| `fix/338-contact-email` | `9627c4c41277415eb88ee7c324665cf3be00467a` | reflog ~30d / `--backup-bundle` |
+| `fix/338-contact-url` | `9a7a36af510be7df061685f9479d322da3e889ea` | reflog ~30d / `--backup-bundle` |
+| `fix/343-client-graceful` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/343-client-graceful-degradation` | `d52b8551e641ff3a2c8037bd3c36b58c4be067b6` | reflog ~30d / `--backup-bundle` |
+| `fix/3436-signup-duplicate-id` | `a94b272a771396663782dede28e2be647b58bcf1` | reflog ~30d / `--backup-bundle` |
+| `fix/345-domain-vocabulary` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/3474-api-domain` | `c7a669761a2a2b540743ffc34aabfd661b901215` | reflog ~30d / `--backup-bundle` |
+| `fix/3498-control-plane-offloop` | `7e4dbc30758d4679abc96fc345df7c3e830b6dbc` | reflog ~30d / `--backup-bundle` |
+| `fix/3503-session-fragment` | `fbab303fb23087853f372a00f77aa5ad8536146b` | reflog ~30d / `--backup-bundle` |
+| `fix/356-ontology-endpoints` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/3599-embedded-orphan-leak` | `8e43a5b2aa590db0ffd29cb7744c7de00141eafc` | reflog ~30d / `--backup-bundle` |
+| `fix/3620-upload-root` | `d72a7000185924f98f2e78e0d049d54c0c29c24d` | reflog ~30d / `--backup-bundle` |
+| `fix/3628-auth-watchdog` | `170367017c22f101279510bc715f1079711231f1` | reflog ~30d / `--backup-bundle` |
+| `fix/3795-upgrade-path` | `8a2074578b8cb180ce17851bd91d6ca15ddcf952` | reflog ~30d / `--backup-bundle` |
+| `fix/3863-mcp-sdk-surface-curation` | `eac93755771f4a3fdf9988acbb4444f1e1e30beb` | reflog ~30d / `--backup-bundle` |
+| `fix/390-391-edge-guards` | `ff664f79b3f2c2d3152f374084ae66de3d15c43c` | reflog ~30d / `--backup-bundle` |
+| `fix/3910-ask-spotcheck-capture-shape` | `3341d9a7cbdb4180470e3ddef3f7a477eeee9f51` | reflog ~30d / `--backup-bundle` |
+| `fix/400-ep-nplus1` | `157e5073f875873d37a69fb2042d8755ddcdafdb` | reflog ~30d / `--backup-bundle` |
+| `fix/407-skill-links` | `458ef8c4554647b1f55b681db366439f35a7de8a` | reflog ~30d / `--backup-bundle` |
+| `fix/4098-tmpdir-hardening` | `75e27a39d880e8fd007aa20b62a4181abd9c06ac` | reflog ~30d / `--backup-bundle` |
+| `fix/4113-capability-not-name-guards` | `007a9b3a02e9b2035db8e2b06b2b8ea0fd52fa38` | reflog ~30d / `--backup-bundle` |
+| `fix/4163-stale-carveout-counts` | `0f9dcf8fc5c54305f4533fda3e0850b761817fe5` | reflog ~30d / `--backup-bundle` |
+| `fix/4164-embedded-marker-selection` | `029d27cdf05ce395c09308040310e083209b8a79` | reflog ~30d / `--backup-bundle` |
+| `fix/420-ep-validation-gaps` | `99e3aff35629ebc95688c5e16a1e8c0487a6c7a7` | reflog ~30d / `--backup-bundle` |
+| `fix/420-quadrature-test-followup` | `14156468e413448a42409d4d8ff62cafa92e6bdb` | reflog ~30d / `--backup-bundle` |
+| `fix/478-mcp-db-target` | `2333f1fdd84a149f5c751350d10f278474b147a6` | reflog ~30d / `--backup-bundle` |
+| `fix/509-stale-search-tests` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/522-embedded-is-operator-index` | `af147b178c41eb87db466a0319609a5d65a4a9d6` | reflog ~30d / `--backup-bundle` |
+| `fix/527-provision-jwt` | `f2c674902bec3f9471f36c75f549593136c9f9c3` | reflog ~30d / `--backup-bundle` |
+| `fix/527-signup-form` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/529-mcp-url-trailing-slash` | `9006fbfd7f5eb3db94b78fe748b82f758fc727d0` | reflog ~30d / `--backup-bundle` |
+| `fix/540-prompt-url` | `d5d0b4ff97403051de412d290b2520076646b06f` | reflog ~30d / `--backup-bundle` |
+| `fix/541-e2e` | `2368cb19c9d60d0f34b1359524997d0e84346124` | reflog ~30d / `--backup-bundle` |
+| `fix/542-oauth-secrets` | `a3917cb358c281b0f0d2bbc42dfbdf21ca628dca` | reflog ~30d / `--backup-bundle` |
+| `fix/543-analytics` | `3d329a2607fb783efb08a2c53c4f43ffe7f05d47` | reflog ~30d / `--backup-bundle` |
+| `fix/544-selfhost` | `0bc417987aa076e7ef8b34b2a6f9b1050b7f81f5` | reflog ~30d / `--backup-bundle` |
+| `fix/545-deploy-pipeline` | `8dd2fd483d50594b78bd9eda145c0e048bf902b9` | reflog ~30d / `--backup-bundle` |
+| `fix/545-deploy-secrets` | `e10bc4bd40ea66837ae73cbcea15fba633b2faf0` | reflog ~30d / `--backup-bundle` |
+| `fix/545-deploy-serialize` | `146e1a63cd08caa79a5186e996634ede94537adb` | reflog ~30d / `--backup-bundle` |
+| `fix/545-memory-bump` | `768dfdc41f6635c091dce96a8648d57d05e6703d` | reflog ~30d / `--backup-bundle` |
+| `fix/545-prewarm-nonblocking` | `d53888e9cf833049be700c703e2f2e68ad4977c3` | reflog ~30d / `--backup-bundle` |
+| `fix/545-pricing-image` | `200abf34bdc6f6f71f9e31ddf40c7db9563d3fb6` | reflog ~30d / `--backup-bundle` |
+| `fix/547-supersede-validation` | `4c17616ffe0842b3dddd8d3e64c9a1d0130a8a1c` | reflog ~30d / `--backup-bundle` |
+| `fix/548-sdk-jsonl-events` | `b97ba7c910a9949ee0ff2784e9085bd5069cf980` | reflog ~30d / `--backup-bundle` |
+| `fix/555-ci` | `a9d6f4e010317a1084e4546eae219753c7d897c6` | reflog ~30d / `--backup-bundle` |
+| `fix/561-timeout-nodiscard` | `cefa2a91169251bb1d2bb4e2a8f20b38d7b594f3` | reflog ~30d / `--backup-bundle` |
+| `fix/647-suite-sweep` | `d7c175fd75c4fbd2c02d905663046f5283ece5ff` | reflog ~30d / `--backup-bundle` |
+| `fix/647-test-suite` | `d3452cff570cb10637d06a3246ca45f40604f272` | reflog ~30d / `--backup-bundle` |
+| `fix/651-nand-phi-docs` | `68063e690a7f7d273f03f163cf1abee37192fcfb` | reflog ~30d / `--backup-bundle` |
+| `fix/652-evidence-revert-prior` | `86074649b7bff8a7baeb93d101795965fafb70bd` | reflog ~30d / `--backup-bundle` |
+| `fix/652-source-inheritance-revert` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/656-backup-tier-gate` | `70126c7438be535dfa9ab5626de2b5bf45dc40e4` | reflog ~30d / `--backup-bundle` |
+| `fix/656-backup-tier-solo` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/657-welcome-footer-layout` | `6c3842945871b5be727a5d39bff6b88d65f23385` | reflog ~30d / `--backup-bundle` |
+| `fix/669-audit-dsn-live` | `90e112b652276ee4d3487e9b986bf25b24ab3450` | reflog ~30d / `--backup-bundle` |
+| `fix/685-last-used-at` | `2c593c0f166a172901147f09104267970aed3632` | reflog ~30d / `--backup-bundle` |
+| `fix/686-limit-failclosed` | `413da68d88f756772e0a3c5776ec01059d717c92` | reflog ~30d / `--backup-bundle` |
+| `fix/686-team-limit-failclosed` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/687-auth-key-scan` | `fe07ba11c0c7e66774e82de82ad0df9eebdd3053` | reflog ~30d / `--backup-bundle` |
+| `fix/689-retract-tombstone` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/689-retraction-tombstone` | `10f354b92d3e376692a3d4f83e60d4529d2a263b` | reflog ~30d / `--backup-bundle` |
+| `fix/702-selfhosted-mcp-deadend` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/705-onboard-embedded` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/706-redislite-message` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/707-init-api-key-validation` | `b2fe9772265cdc391777568ba3c1236e5aeffa9e` | reflog ~30d / `--backup-bundle` |
+| `fix/713-index-github` | `3e19ff0ebb9555e973d6f310bec7a5c2f718e95e` | reflog ~30d / `--backup-bundle` |
+| `fix/797-postmerge-validation` | `73ca177dbeba9d3c44c9b4e7138c42092a1b0360` | reflog ~30d / `--backup-bundle` |
+| `fix/797-postmerge-validation-full` | `a687ec8d90dbbd7b06cf48ddcb92ceee4c77fb63` | reflog ~30d / `--backup-bundle` |
+| `fix/798-python-ci` | `e45d4941d0d5388732af34360e93e7697623a743` | reflog ~30d / `--backup-bundle` |
+| `fix/801-signup-email-ratelimit` | `c9b4334e96280b5e312524f6a5b93638f7f058f7` | reflog ~30d / `--backup-bundle` |
+| `fix/802-provision-auth` | `751b0c34ad8df0016a4e2b4431dfa04938c524e7` | reflog ~30d / `--backup-bundle` |
+| `fix/822-llm-extraction-default` | `d192c3bff9918b200d9cba72939b5548b573e872` | reflog ~30d / `--backup-bundle` |
+| `fix/843-billing-routes` | `eecef0a6034ba0fac8498446d6a740decd25a3b3` | reflog ~30d / `--backup-bundle` |
+| `fix/844-ep-directional` | `12ad42b63b6f861e956d842a4bef656b3ae2b6ad` | reflog ~30d / `--backup-bundle` |
+| `fix/855-nand-propagation` | `0c976702f5fa9aa0f4a028d26c4031702d9701a2` | reflog ~30d / `--backup-bundle` |
+| `fix/879-crash-test-rescope` | `2b319f1c1b8f5879316346b0f5f0cfefb8401438` | reflog ~30d / `--backup-bundle` |
+| `fix/880-ci-green-rebalance` | `f48ac582e7cfcfeb841a5ace18f4d50436992d56` | reflog ~30d / `--backup-bundle` |
+| `fix/880-semantic-dedup-degrade` | `22f37a6a0c2489152607587f3898f79b3b5eeec2` | reflog ~30d / `--backup-bundle` |
+| `fix/881-hero-cta-pe-on` | `6d5146f7290386bc64dbad34b84387eef4cdd1c0` | reflog ~30d / `--backup-bundle` |
+| `fix/885-server-auth-abuse` | `f01cbc6f77c26d94d2e992b0539f52e486d39c42` | reflog ~30d / `--backup-bundle` |
+| `fix/914-required-checks` | `e587e5dbce1f3188a2be7cecf0e8c7146c7839a9` | reflog ~30d / `--backup-bundle` |
+| `fix/915-rebase3-tmp` | `f5e39bf7c2a7427eea43d7304d7d45e60d17fcd6` | reflog ~30d / `--backup-bundle` |
+| `fix/923-metering-degrade` | `a7e42e7a081e2d487eef273e7f78cc3ae2282c73` | reflog ~30d / `--backup-bundle` |
+| `fix/924-backups-graph-name` | `c9202330b923c6ee27e6c65e4933a65d9a8cc274` | reflog ~30d / `--backup-bundle` |
+| `fix/925-metering-readback` | `5b9435fea1e7e8bbff35d868e58ee7d7cf1560ae` | reflog ~30d / `--backup-bundle` |
+| `fix/942-selfhost-trust` | `873dac023ad6096ddfe605f8ef49149d962ff832` | reflog ~30d / `--backup-bundle` |
+| `fix/969-negative-leg-masking` | `70807249eadcec0518bb0726ce54f18c9855197f` | reflog ~30d / `--backup-bundle` |
+| `fix/981-mcp-config-parity` | `5c1f066e1f491fa0b10f40350c47a2fabc1a8a53` | reflog ~30d / `--backup-bundle` |
+| `fix/992-998-ep-confidence` | `a25e44b92c0145e8e71ca375dc161f33fe90941c` | reflog ~30d / `--backup-bundle` |
+| `fix/992-ep-draft-tests` | `c59c891fb7ddd78c8773055d2a0c64db9debb96e` | reflog ~30d / `--backup-bundle` |
+| `fix/993-mcp-entrypoint` | `09ef9e501990ed7e9106a8f9b64c3fde5385588a` | reflog ~30d / `--backup-bundle` |
+| `fix/accent-colors` | `4247814e4b336577cf67ed331b6005e89c58bffb` | reflog ~30d / `--backup-bundle` |
+| `fix/assert-cluster` | `e3c5a191fd71f449243eec421f6a820a9e852be5` | reflog ~30d / `--backup-bundle` |
+| `fix/backend-batch` | `ab9f0f84d993931f16adcea4962c8cfddd2c5ba5` | reflog ~30d / `--backup-bundle` |
+| `fix/backfill-embedded-gate` | `38a5329467a6c5674d35001ea6ba6dd418090099` | reflog ~30d / `--backup-bundle` |
+| `fix/beat-background` | `4389afd7c180eccd7c28630f689d1d23f4a08a7f` | reflog ~30d / `--backup-bundle` |
+| `fix/beat-spacing` | `aca7544b3a0d5d95855e76a06e620b602c2613a7` | reflog ~30d / `--backup-bundle` |
+| `fix/bench-degradation-vector` | `404179c565ba4a59c2135eb598878dba71c2054d` | reflog ~30d / `--backup-bundle` |
+| `fix/billing-surface` | `209d51f485bcb890c04d18f21a3abfb89fbb485e` | reflog ~30d / `--backup-bundle` |
+| `fix/calibration-7080` | `5a2a4d6738d8d6371a3d5f872e8e96db415e13b6` | reflog ~30d / `--backup-bundle` |
+| `fix/canary-gh-token` | `ca0c2ee01bad8629316f6b6f2300fb5702a455fe` | reflog ~30d / `--backup-bundle` |
+| `fix/canvas-zoom-2.2` | `e1a4330fe057ff92fe2b7e728313ad6abe4a748c` | reflog ~30d / `--backup-bundle` |
+| `fix/canvas-zoom-3x` | `fe71e6a3aeb32f39fe8764966d77733743c277ce` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-battery-manifest` | `7545229367149303acc1337d59de5cab23383d64` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-dedup2` | `5dbca167ee0da788ab5eb32def45ee8a48fa918b` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-email-flood` | `a373308880c0971b2221fbeec96638e16986b3ff` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-empty-uri-falkordb-probe` | `c7ab0661e134f9d220621709ff4b4536bc6eac7f` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-fast-leg-watchdog` | `bc6d79a38768b6fca998f8c7575cad93b28519cd` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-manifest-drift-2800` | `eb578392a55f3b08b259e7ced589729af0dc7fb4` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-manifest-drift-price-basis` | `41e7670ee0467426d212d8967c6edeecf0b3eb32` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-manifest-drift2` | `789754b7c37424ccdb2d3ee908b2dbdb510c0b0d` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-manifest-drift3` | `89b7ae29b91407cdd42e0f493d9d29290a93420a` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-remaining-red` | `f37c2f2856225caab7922e85a65aa27606213826` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-selection-manifest` | `0fb985cb655e40f9fb6f1b96c492e2733758900a` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-surfaces-drift-3c` | `d1199b84f362e0f3c8c8f2e9dbfc88b802938046` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-test-drift` | `2f8bc94b134ce72b3d04afb517c8ab575789cfbd` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-v3` | `8bb1607704bce9fab259b013e22c3eb2d783adbc` | reflog ~30d / `--backup-bundle` |
+| `fix/ci-validation-bugs` | `16e3ddcc5f45156a551ff2ab506d95ec69d279ee` | reflog ~30d / `--backup-bundle` |
+| `fix/confidence-graphranker-prior-coalesce` | `a6ad6fd9671d465be0052aa9a88e1a7053355b45` | reflog ~30d / `--backup-bundle` |
+| `fix/connect-step-clean-layout` | `aff5a35ac1aaeba175ba0c4cf1164bfdd75d46fa` | reflog ~30d / `--backup-bundle` |
+| `fix/connect-step-fork-aware-layout` | `09057abede5d6c82adbc3acf5daa734fa0aa4735` | reflog ~30d / `--backup-bundle` |
+| `fix/contestation-surface-only` | `1e41ce9de1f8ddc27d3ee874477c4b1d820b9014` | reflog ~30d / `--backup-bundle` |
+| `fix/create-source-is-episodic` | `ecb9f5b87796a70268000835b88862d12b3f3c35` | reflog ~30d / `--backup-bundle` |
+| `fix/deploy-secret-gate` | `7380a31aaa2d1252c130593281d4f0e5ca904c64` | reflog ~30d / `--backup-bundle` |
+| `fix/digest-noise-preserve-decision-shapes` | `79117bd06794076eb2dcbd193ac8bd8d8c07a335` | reflog ~30d / `--backup-bundle` |
+| `fix/dogfood-signup-fixes` | `e861ac140e1186536ef6548f6668dd268a090673` | reflog ~30d / `--backup-bundle` |
+| `fix/dr-issues-pat-name` | `02717b077307e04db2f9115eda2269977690f0db` | reflog ~30d / `--backup-bundle` |
+| `fix/email-notify-reborn` | `d45486e234f633a38a52f626c3a74df44b3e723a` | reflog ~30d / `--backup-bundle` |
+| `fix/email-scheduler` | `58a6631b9d801c149c17f953254a2ce3676fbcd7` | reflog ~30d / `--backup-bundle` |
+| `fix/ep-cascade` | `4a6ec96b09bd2f4f06de7642d7305807cce24433` | reflog ~30d / `--backup-bundle` |
+| `fix/ep-followups-651-400` | `95aabcb75ee1fc81456dc12d76ba065cdd9b02b1` | reflog ~30d / `--backup-bundle` |
+| `fix/flaky-signup-test` | `5a9e588db3e0dc3cbfdc3d7a414c49d58e005705` | reflog ~30d / `--backup-bundle` |
+| `fix/fork-card-step-index` | `da3808ec7d83be28e145f7a23e49dde350728b09` | reflog ~30d / `--backup-bundle` |
+| `fix/gitignore-tortoise-file` | `9230be3bd3492e2afe2df1519a01306478563d43` | reflog ~30d / `--backup-bundle` |
+| `fix/harness-copy-instructions` | `d99e21f9de1c533ceb1c30165f9e1a8ac656bcfb` | reflog ~30d / `--backup-bundle` |
+| `fix/hero-cta` | `36d08a526c6d8c983eb6c3d44c7c39e5b79deac7` | reflog ~30d / `--backup-bundle` |
+| `fix/hero-cta-signup` | `a5382233ff84b0ccaecf819770ec0635efcb56ff` | reflog ~30d / `--backup-bundle` |
+| `fix/hosted-coldstart` | `aac53f5ceb257043622b26a43136e68107b4bdf6` | reflog ~30d / `--backup-bundle` |
+| `fix/hosted-deploy-stage` | `0796c5ad4e4d9e99f5b76c6a53dc2581f62f3d72` | reflog ~30d / `--backup-bundle` |
+| `fix/hosted-mcp-hosts` | `eb59e613f08dee863c8a69d8d77ff4873fef094b` | reflog ~30d / `--backup-bundle` |
+| `fix/hosted-mcp-hosts-v2` | `665a5aa64814246714dd2334a7a9dac8cece7d66` | reflog ~30d / `--backup-bundle` |
+| `fix/hosted-mcp-origins` | `753b989d17c1f261baf1b427c0d42a6538a58066` | reflog ~30d / `--backup-bundle` |
+| `fix/index-test-embedded` | `f2b5cf662e8de12cdde06948c0b58b8d01f47d6a` | reflog ~30d / `--backup-bundle` |
+| `fix/indexer-exit-code-mixed-failure` | `f20d8fcb94736ba7b92f81a0f4efb2c771ea5a63` | reflog ~30d / `--backup-bundle` |
+| `fix/ingest-redis` | `37a1f7dde57fd48fff63bddc82415a337ffa249a` | reflog ~30d / `--backup-bundle` |
+| `fix/keepalive-test-pollution` | `89572d1aa5f5d53cafa223b434a1aed1ee0c51ad` | reflog ~30d / `--backup-bundle` |
+| `fix/landing-layout` | `83e91d90819cf5d2e0666798544e8da2129c6cfa` | reflog ~30d / `--backup-bundle` |
+| `fix/legal-e2e-obfuscated-mailto` | `c4eed197010df8be494ebc58d49055e552103a84` | reflog ~30d / `--backup-bundle` |
+| `fix/legal-e2e-skip-external-crawl` | `b60095ade6b8451f3c5949082dab8fcd2c096f65` | reflog ~30d / `--backup-bundle` |
+| `fix/mcp-asyncio` | `d64f5d7d2d08673fe3317d9b5ffcba6f909bae02` | reflog ~30d / `--backup-bundle` |
+| `fix/mcp-ingest-promotion-keyerror` | `d83dc28c96b191e03b0f1866e2c3653e4a0a79bc` | reflog ~30d / `--backup-bundle` |
+| `fix/migration-0012b-unique` | `b4fe182a7945decd1bb2f09282243cc1f75bd02f` | reflog ~30d / `--backup-bundle` |
+| `fix/migration-0015b-unique` | `d5b2a0d43bbb6438f1553071941479eb9010dca5` | reflog ~30d / `--backup-bundle` |
+| `fix/migration-timestamp-names` | `2417cca165426c588466a3dfc9c2fa3e8b03f2e4` | reflog ~30d / `--backup-bundle` |
+| `fix/mobile-responsive` | `62cce195e01f596435858eeabce7ffe9767da4c8` | reflog ~30d / `--backup-bundle` |
+| `fix/ops-followups-673-692-686-713` | `53bb0a2aa72b218ce9cd134e5d7972065a299490` | reflog ~30d / `--backup-bundle` |
+| `fix/org-create-copy-and-name-validation` | `356d74c82c60ed566909bceabf8f5214cb419258` | reflog ~30d / `--backup-bundle` |
+| `fix/org-create-spacing-and-edge-function` | `28edcc183c3158d3fc9862677d778e15c658a1a6` | reflog ~30d / `--backup-bundle` |
+| `fix/orphan-sweep-deferral` | `c1f06ef906af210136d4a5f84433f649320e5167` | reflog ~30d / `--backup-bundle` |
+| `fix/p2-github-error-text` | `bfe2557a97ea031a7341afe25d3dc723eb4a84d3` | reflog ~30d / `--backup-bundle` |
+| `fix/perf-note-indexing` | `31cdd209e508662eaf800ad057682fff0fa6860e` | reflog ~30d / `--backup-bundle` |
+| `fix/post-merge-drift` | `93acac020eb3b34a7b1c62f10b4caa346b2ae32d` | reflog ~30d / `--backup-bundle` |
+| `fix/pricing-cleanup` | `06a0d29663e00925e51ffef48f4410ca349cb8c1` | reflog ~30d / `--backup-bundle` |
+| `fix/raud2558` | `5176b81ecfb87b8094f8a0b39bc15fd6e7341dee` | reflog ~30d / `--backup-bundle` |
+| `fix/repair-432-clobber` | `f353f95af0150f1df78b8d346026f56371485cb6` | reflog ~30d / `--backup-bundle` |
+| `fix/selfhost-copy` | `dfd20571b23e6e5cc0c05d8d68d097a5f998d775` | reflog ~30d / `--backup-bundle` |
+| `fix/selfhost-smoke-redirect` | `49d33460b764a65dd710735788d592fec262e4d8` | reflog ~30d / `--backup-bundle` |
+| `fix/seo-301-immutable-headers` | `9e8c4e689d7a3e6e881d9a636d79c8f320390aab` | reflog ~30d / `--backup-bundle` |
+| `fix/session-source-agentkind` | `cc60a653fc6b62ed01aa8391d7b64333a46b8357` | reflog ~30d / `--backup-bundle` |
+| `fix/signup-layout` | `6b1742aafef406763e721b0cbdbf6a1556575aed` | reflog ~30d / `--backup-bundle` |
+| `fix/stale-search-tests` | `a895ad8bc9135d313d42cda1407ad1e83cd65325` | reflog ~30d / `--backup-bundle` |
+| `fix/suite-red` | `a05a3dcbcf67698a555609cdd6511c5c44ccafd1` | reflog ~30d / `--backup-bundle` |
+| `fix/suite-red2` | `6221cd32398913b6e2af921d79216e8a1be34e8c` | reflog ~30d / `--backup-bundle` |
+| `fix/team-500` | `49a7cbcd11a7362de34eb860a127a0f2d8e96c20` | reflog ~30d / `--backup-bundle` |
+| `fix/test-drift` | `bcdfc8c1a47ccf9c892a5a5722f854989be379d0` | reflog ~30d / `--backup-bundle` |
+| `fix/test-infra` | `dad7d5a26e12693d2c3af7fc6e83bcce34e52b7c` | reflog ~30d / `--backup-bundle` |
+| `fix/tos-dollar-guard` | `f37eedee15616407b2740d495de148e895a5715c` | reflog ~30d / `--backup-bundle` |
+| `fix/web-audit` | `1c22edb838892109865c8307748d93a93ea96a30` | reflog ~30d / `--backup-bundle` |
+| `fix/website-1` | `836440fd1b658f6fbb8325be061cfe73da9da962` | reflog ~30d / `--backup-bundle` |
+| `fix/website-2` | `13b95e539a02ce498d4fb75ccdcac59374deac34` | reflog ~30d / `--backup-bundle` |
+| `fix/website-tiers-test` | `782e7ee3a8a796b2ae400c84d058eb024ababcbd` | reflog ~30d / `--backup-bundle` |
+| `fix/welcome-bridge` | `ebfcbf9ec3ad78567bc3cadfe4e9f4fe3dd8d170` | reflog ~30d / `--backup-bundle` |
+| `fix/welcome-e2e` | `55544b1b088ed4f9f38c9766479f568ae60d25a6` | reflog ~30d / `--backup-bundle` |
+| `fix/welcome-e2e-monitor` | `b39ab72b52b538c477c0350ebb843fd56d2ae477` | reflog ~30d / `--backup-bundle` |
+| `hotfix/lint-eval-write-path` | `2f5979fcd9d6ed969ea8d9bdd80fb4386bb74007` | reflog ~30d / `--backup-bundle` |
+| `landing-run` | `a25e44b92c0145e8e71ca375dc161f33fe90941c` | reflog ~30d / `--backup-bundle` |
+| `merge-tmp` | `3fe0f45e37373c9e9a01c5be6c36bcb2267a5995` | reflog ~30d / `--backup-bundle` |
+| `ops/2146-graph-drop` | `5d1a80c115a2a598710b77cb3c73e7740effbf98` | reflog ~30d / `--backup-bundle` |
+| `ops/2146-orphan-cleanup` | `5b7a6aba8905004775f4cb24c43355f95f8b89a9` | reflog ~30d / `--backup-bundle` |
+| `opt/2080-d2-failover` | `f7455cc59b5d06041f5668a3a51334393d3048c5` | reflog ~30d / `--backup-bundle` |
+| `opt/2080-ex-quality` | `49e21c7e0a0aea7adf339fac3a4a811a4ab4966c` | reflog ~30d / `--backup-bundle` |
+| `opt/2080-qa-loop` | `84d35029fadab063b72ef95d995d65523af8267d` | reflog ~30d / `--backup-bundle` |
+| `opt/2080-retention` | `656935c2654f6f3d07401eea9c5f3f3a274e0b97` | reflog ~30d / `--backup-bundle` |
+| `opt/2080-trust-posture` | `a6250ee705329a3daf2dbc0f1cbc5d499f4d16c1` | reflog ~30d / `--backup-bundle` |
+| `opt/2315-mitigation` | `a4daec65d938fcb7e8afcbe2b85853a714873fb5` | reflog ~30d / `--backup-bundle` |
+| `opt/2424-clause-fix` | `59aac0401c8703c0c1007149be918a1c2c6fbc6d` | reflog ~30d / `--backup-bundle` |
+| `opt/2518-entity-keys` | `621fa6403891ed3b477ab98c13ac736d2b25cb21` | reflog ~30d / `--backup-bundle` |
+| `opt/2552-operators` | `4796ad47b4ebdc8adf56711c7154d93b30e2a221` | reflog ~30d / `--backup-bundle` |
+| `perf/4068-reaper-census` | `db570edb4a70c9a1f4b8b529933dc3f0316d59f3` | reflog ~30d / `--backup-bundle` |
+| `pr-1015` | `6ccac2466db8d616555d1e847c6f6d5e35fabe2f` | reflog ~30d / `--backup-bundle` |
+| `pr-1069` | `0f5d918194f994a96fc4b74e91e71ebfe856cbe5` | reflog ~30d / `--backup-bundle` |
+| `pr-1194` | `d192c3bff9918b200d9cba72939b5548b573e872` | reflog ~30d / `--backup-bundle` |
+| `pr-1208` | `ad4809f6f53f0adb2dd5b8f82d296b46dc7b4859` | reflog ~30d / `--backup-bundle` |
+| `pr-1215` | `2cb1e727f0f59fff0c0502f2cb1f49a5f3e35136` | reflog ~30d / `--backup-bundle` |
+| `pr-1761` | `e4ec6e708ad9684b2e1832a35d2b37e45b45d6f0` | reflog ~30d / `--backup-bundle` |
+| `pr-2013` | `4607fbb8d7541b2cf417804933d2501f133ea923` | reflog ~30d / `--backup-bundle` |
+| `pr-2049` | `096c60512714743592412998ac89fdc0329a7be5` | reflog ~30d / `--backup-bundle` |
+| `pr-2054` | `3a4c76e9b403f75b5e1c8efb1a28c4c0e4ec4b81` | reflog ~30d / `--backup-bundle` |
+| `pr-2366` | `36a7ca6b665522748420355f51868f85aa9a5e33` | reflog ~30d / `--backup-bundle` |
+| `pr-2664` | `76dd3039fda6fd31c67e32f6890dabba0f13ffd1` | reflog ~30d / `--backup-bundle` |
+| `pr1467` | `4463e6b9992ad927684030e9cf23b7aa8b361a55` | reflog ~30d / `--backup-bundle` |
+| `pr1868` | `d7e6e69d2936cf900de49b76f2beffb2694023b2` | reflog ~30d / `--backup-bundle` |
+| `pr2181` | `5d1a80c115a2a598710b77cb3c73e7740effbf98` | reflog ~30d / `--backup-bundle` |
+| `pr2664` | `76dd3039fda6fd31c67e32f6890dabba0f13ffd1` | reflog ~30d / `--backup-bundle` |
+| `pr3780` | `fcd01388e7acd7cc6a322f0f65aa1aaf476a407e` | reflog ~30d / `--backup-bundle` |
+| `research/matched-recall-controls` | `96938103894724b5dcc126965ebc791279dabb14` | reflog ~30d / `--backup-bundle` |
+| `review-bugs` | `9108a0096eadb0fbd1e243a5fb2aaba0d933c0d5` | reflog ~30d / `--backup-bundle` |
+| `scratch/801-baseline` | `23942d2186e14c24f9cd9e5409cbe3292cabdaa8` | reflog ~30d / `--backup-bundle` |
+| `seo-docs-link` | `ac3dbb336c212bcc0e966fb4ce34c1e723e69a31` | reflog ~30d / `--backup-bundle` |
+| `seo-fixes` | `f1705b4147cb8f122c9dbf482cd867fac6684ffb` | reflog ~30d / `--backup-bundle` |
+| `test/283-e2e-gaps` | `5f287a3f064ea1c1b3bd8afd2ab99d4127cba886` | reflog ~30d / `--backup-bundle` |
+| `test/303-hosted-e2e` | `661222d43d1d90fd5d25a936134ecd1e0338db35` | reflog ~30d / `--backup-bundle` |
+| `test/562-revise-embed-test` | `860a4271a1469a8f7fa98a9c92faed8224672b47` | reflog ~30d / `--backup-bundle` |
+| `test/563-rebuild-order-test` | `1f672b932d6429d9a6f4e4706a29e3e48b539d62` | reflog ~30d / `--backup-bundle` |
+| `test/748-749-revenue-surfaces` | `1e38b39843f849a1d43dfc306bd2f9a555c7ae73` | reflog ~30d / `--backup-bundle` |
+| `tmp-main-check` | `5f665c114c548d72c9813703b8c36703851c257d` | reflog ~30d / `--backup-bundle` |
+| `tmp/1922-cleanup` | `d21c89645867891023c9c089b73de40d4fe26dc2` | reflog ~30d / `--backup-bundle` |
+| `tmp/2252-d24probe` | `8ec4afc283bf9d6444dc0dd0a8dbe96e82a60db6` | reflog ~30d / `--backup-bundle` |
+| `tmp/2252-mainprobe` | `8ec4afc283bf9d6444dc0dd0a8dbe96e82a60db6` | reflog ~30d / `--backup-bundle` |
+| `tmp/2269-clean` | `bf6eb9db874c40e76e391b60e2835c0ae3b519f8` | reflog ~30d / `--backup-bundle` |
+| `tmp/lme-full-run` | `2f7c3df83bb174d97fa5c3636dda5fd5a2bb2a1c` | reflog ~30d / `--backup-bundle` |
+| `tmp/lme-rerun` | `f060b3180987cc00fa5f77de3d32cd5eef6afb0d` | reflog ~30d / `--backup-bundle` |
+| `tmp/lme-v2-run` | `2aed4a3d7e8d364561593c2cac6a326d30c41f25` | reflog ~30d / `--backup-bundle` |
+| `tmp/main-check` | `b69e6a5cf73a8c9ecce8f8d99edd24b7f6539068` | reflog ~30d / `--backup-bundle` |
+| `tmp/main-check2` | `b69e6a5cf73a8c9ecce8f8d99edd24b7f6539068` | reflog ~30d / `--backup-bundle` |
+| `tmp/main-clean` | `b69e6a5cf73a8c9ecce8f8d99edd24b7f6539068` | reflog ~30d / `--backup-bundle` |
+| `tmp/main-gate-check` | `4270f17159a949aecea6d6aefde392df5b6c93b5` | reflog ~30d / `--backup-bundle` |
+| `tmp/main-reaper` | `d6dee91fb6ab0593e7e66500d9ddcd0d7ccd9d6f` | reflog ~30d / `--backup-bundle` |
+| `tmp/maincheck` | `64fb2e67786e5bab0c2b8b0fbc2f8ca5daa1f816` | reflog ~30d / `--backup-bundle` |
+| `verify-t` | `9d226d89431c7c8eafcf7de687956a14a9a3f575` | reflog ~30d / `--backup-bundle` |
+| `verify/1001-main-check` | `2eec487e5d51f74337f70d92fefb1ac156f987ba` | reflog ~30d / `--backup-bundle` |
+| `verify/2833-e2e-connect` | `e45bfb29cd7ce360b777a07763cae983bfbb7355` | reflog ~30d / `--backup-bundle` |
+| `verify/291-capstone` | `98cc1eb1d6dbc363e037e159a47e301c45f7a3f8` | reflog ~30d / `--backup-bundle` |
+| `verify/epic909-main-check` | `f71e13718f53747e616dc3ead5493f9440fb38a4` | reflog ~30d / `--backup-bundle` |
+| `verify/epic909-prod` | `089c894ff6bba4c6a5be50e858bba72f083d2ce9` | reflog ~30d / `--backup-bundle` |
+| `verify/epic909-prod2` | `089c894ff6bba4c6a5be50e858bba72f083d2ce9` | reflog ~30d / `--backup-bundle` |
 
