@@ -381,6 +381,65 @@ def _kill_provenance_refusal(record: dict) -> str | None:
             f"(pid {pid})")
 
 
+def _has_ownership_claim(dbdir_real: str,
+                         pid: int | None) -> str | None:
+    """#3767: the POSITIVE ownership claim that makes a registry-less
+    directory OURS to reap. Returns None when the claim holds, else the
+    refusal reason.
+
+    `dbdir_real` is the candidate's SOCKET directory (`_classify`'s
+    `dbdir_real`) — the same dir `record_owner` writes the
+    `.tortoise-owners` instrument into.
+
+    Containment ("under the shared tempdir") and a `tmpXXXX`/`redislite_*`
+    NAME are evidence any co-resident same-uid redislite application also
+    produces, so neither is a claim: a directory's name is not ownership.
+    Two arms are admissible, both positive:
+
+      (a) PRESENT directory — it must be owned by the invoking effective uid
+          (the one property a foreign uid cannot forge; #4136's guard,
+          applied at ADMISSION here rather than only at destruction) AND
+          carry tortoise's own per-server instrument, the
+          `.tortoise-owners` record directory written by `tortoise.FalkorDB`
+          (#3599). A registry-less redislite server with neither is
+          indistinguishable from another application's, so it is not a
+          candidate. (The redislite registry itself is written by redislite,
+          not tortoise — when it is ABSENT there is no claim to read, which
+          is exactly this branch.)
+
+      (b) ABSENT directory — the #1005 / #1642 FIX 3 socket-less residue
+          class: the LIVE process's own argv names the (now-absent)
+          directory. Unforgeable by reading files out of the candidate dir
+          (#4136's pass-1 binding), which is why it is admissible without a
+          per-directory instrument. The #1557 confirmation window still
+          gates the kill — a live server whose dir was unlinked keeps
+          serving established connections, so a missing dir is never instant
+          proof of orphanhood.
+
+    The euid arm is dir-present only: a missing path fails
+    `_dir_owned_by_euid` by construction, and arm (b) carries the argv
+    binding instead. Fail closed: a present dir whose ownership or
+    instrument cannot be established, or an absent dir with no live pid
+    naming it, is refused.
+
+    NOTE (#3767): this decides ADMISSION only; it does NOT replace #4136's
+    action-time `_dir_owned_by_euid` re-checks (`_kill_provenance_refusal`,
+    `_cleanup_tempdir`, `_remove_stale_socket_dir` guard 5.5). A
+    discovery-time verdict is cached and therefore T4-unsafe on its own.
+    """
+    if os.path.isdir(dbdir_real):
+        if not _dir_owned_by_euid(dbdir_real):
+            return (f"dir not owned by euid {os.geteuid()} "
+                    f"(owner {_dir_owner_of(dbdir_real)})")
+        if not _owner_record_dir_present(dbdir_real):
+            return (f"no tortoise ownership record ({OWNERS_DIRNAME}) in "
+                    f"{dbdir_real}")
+        return None
+    if pid and _pid_cmdline_names_dir(pid, dbdir_real):
+        return None
+    return f"dir {dbdir_real!r} is absent and no live process names it"
+
+
 def active_suite_tokens() -> list[str]:
     """List active pytest-suite marker tokens (filenames in ACTIVE_SUITES_DIR).
 
@@ -1513,6 +1572,23 @@ def _classify_dir(dbdir: str, socket_path: str,
         # #1642 FIX 3: a path-based (user-data) server is NEVER killed
         # without orphan confirmation — reap() gates on this flag.
         "path_based": _is_path_based(registry, dbdir_real, tmpdir_real),
+        # #3767: no tortoise-written owner instrument => the server is
+        # UNATTRIBUTABLE. reap() requires the #1557/#1642 FIX 3
+        # orphan-confirmation window for it in every mode, exactly as for a
+        # path-based server: redislite's registry is written by redislite,
+        # not tortoise, so it does not establish ownership.
+        #
+        # RESIDUAL (#3767 review P2, accepted): this covers the DOMINANT route
+        # the issue names — a foreign no-path server with an INTACT registry —
+        # but only NARROWS it. Such a server is no longer fast-killed; it is
+        # still reachable through the confirmation window on a quiet host
+        # (`suites_active` False for ZERO_CLIENT_CONFIRM_MINUTES). Closing it
+        # outright means making every uninstrumented server permanently
+        # unreapable, which strands the raw-redislite test-residue class
+        # #1642 FIX 3's fallback exists for — the reaper would be inert. The
+        # issue's ordering note asks for the discriminator to be tightened
+        # first, which this does; the residual is recorded, not hidden.
+        "unattributed": not _owner_record_dir_present(dbdir_real),
         "dir_missing": dir_missing,
         "client_count": client_count,
         "uptime": uptime,
@@ -1529,10 +1605,31 @@ def _is_path_based(registry: dict | None, dbdir_real: str,
     user dbfilename, old-format .db presence). reap() refuses to kill a
     path_based server unless orphanhood is confirmed (persisted 0-client
     state — #1642 FIX 3); ephemeral test-tree servers keep the fast full-
-    sweep kill contract.
+    sweep kill contract — UNLESS they are `unattributed` (#3767), in which
+    case reap() applies the same confirmation requirement.
+
+    OVERRIDES (#3767): with NO registry record there is no signal to read, so
+    this returns True (fail CLOSED) rather than False — the registry is the
+    authoritative path-based discriminator (see _classify), and without it a
+    disposable no-path server cannot be proven. That deliberately engages the
+    every-mode orphan-confirmation requirement the pre-#3767 `return False`
+    disengaged.
+
+    CONSEQUENCE (#3767 review P2, documented not silent): `path_based` is ALSO
+    the gate `_mark_orphan_confirmation` uses to admit the #3599 per-server
+    fast confirmation (`no_live_owner = ... and not path_based`), so a
+    registry-less but tortoise-instrumented live orphan — an instrument whose
+    redislite registry file was removed while its socket dir survived — no
+    longer takes the fleet-independent "every owner provably dead" path and
+    converges only through the #1557/#1642 FIX 3 confirmation window (which
+    `suites_active` blocks on a host with a live suite marker). That is the
+    fail-CLOSED direction: the window's blast-radius restriction to provably
+    ephemeral servers is a #1642 FIX 3 decision, and a missing registry cannot
+    prove ephemerality. It is not a kill-path regression — the class is
+    admitted and still reapable via the window.
     """
     if not registry:
-        return False
+        return True
     reg_dbdir = registry.get("dir", registry.get("dbdir", ""))
     reg_dbdir_real = os.path.realpath(reg_dbdir) if reg_dbdir else ""
     if reg_dbdir_real and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
@@ -1574,7 +1671,24 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
             logger.warning(
                 "unrecognized dir pattern, treating as protected: %s", dbdir_real)
             return "protected"
-        # auto-generated dirname, no .db file -> could be a no-path server
+        # #1642 FIX 2: a provably-DEAD pid is leftover residue (the
+        # killed-suite class). It needs no ownership claim — there is no live
+        # server to mis-identify — and must keep classifying 'stale_socket'
+        # so the walk still converges on it.
+        if pid is not None and not _pid_effectively_alive(pid):
+            return _cooldown_check(registry, pid=pid)
+        # #3767 OWNERSHIP CLAIM. The remaining admission is a LIVE server in
+        # an auto-generated-named / tempdir-contained dir: exactly the shape
+        # another same-uid redislite application, a second tortoise instance,
+        # or another tenant sharing TMPDIR also produces. Name + containment
+        # is not ownership, so require the positive claim; without it the dir
+        # is not a candidate at all (not merely deferred to a later gate).
+        refusal = _has_ownership_claim(dbdir_real, pid)
+        if refusal is not None:
+            logger.warning(
+                "no ownership claim for registry-less dir (%s), treating "
+                "as protected: %s", refusal, dbdir_real)
+            return "protected"
         return _cooldown_check(registry, pid=pid)
 
     # Signal 1: registry 'dir' is a USER dir (not auto tempdir) -> path-based.
@@ -1848,9 +1962,14 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                         "orphan-confirmed under only_safe, skipping %s",
                         record.get("socket_path"))
                     continue
-                if record.get("path_based"):
+                # #3767: 'path_based' OR 'unattributed' — a server with no
+                # tortoise-written owner instrument cannot be attributed to
+                # us, so it needs the same confirmation as a user-data server
+                # in EVERY mode (not only under --only-safe). It remains
+                # reapable via the #1557/#1642 FIX 3 window.
+                if record.get("path_based") or record.get("unattributed"):
                     logger.info(
-                        "path-based server not orphan-confirmed, "
+                        "path-based/unattributed server not orphan-confirmed, "
                         "skipping %s", record.get("socket_path"))
                     continue
 
@@ -2873,6 +2992,53 @@ def _owner_lock_held(socket_path: str) -> bool | None:
             os.close(fd)
         except OSError:
             pass
+
+
+def _owner_record_dir_present(socket_dir: str) -> bool:
+    """True when `socket_dir` carries tortoise's owner-record instrument
+    (#3599) with at least one recognisable record file.
+
+    A CHEAP attribution test (one `listdir`, no `ps`). #3767 uses it for two
+    things: the registry-less ownership claim (`_has_ownership_claim`), and
+    the record's `unattributed` flag — a server with no tortoise instrument
+    cannot be attributed to us, so `reap()` requires the #1557/#1642 FIX 3
+    orphan-confirmation window for it in EVERY mode.
+
+    Deliberately NOT `_owner_records`, whose per-record liveness resolution
+    shells out to `ps`; the orphan VERDICT still comes from `_owner_records`
+    (`_mark_orphan_confirmation` / `reap`).
+
+    Recognition matches `_owner_records`: a dotted name is ignored and an
+    unparsable/non-positive pid prefix is a foreign file. An empty dir reads
+    False, mirroring `_owner_records`' "total == 0 is no evidence at all"
+    fail-closed rule. Fail closed on OSError.
+
+    RESIDUAL (#3767 review P2, accepted + documented): a tortoise server
+    whose owner closed GRACEFULLY while the daemon survived loses its
+    instrument (`forget_owner` removes the record and rmdirs the dir, #3599),
+    so it reads `unattributed` and reap() no longer fast-kills it in a full
+    sweep — it converges only through the #1557/#1642 FIX 3 confirmation
+    window. That is the deliberate fail-CLOSED direction: an instrument-less
+    server is byte-for-byte indistinguishable from a foreign same-uid
+    application's (`_has_ownership_claim`), and the whole point of #3767 is
+    that we may not kill what we cannot attribute. Distinguishing "never
+    instrumented" from "instrument withdrawn" would need a tombstone the
+    writer does not leave; not doing so is the accepted cost.
+    """
+    try:
+        names = os.listdir(os.path.join(socket_dir, OWNERS_DIRNAME))
+    except OSError:
+        return False
+    for n in names:
+        if n.startswith("."):
+            continue
+        try:
+            pid = int(n.partition("-")[0])
+        except ValueError:
+            continue
+        if pid > 0:
+            return True
+    return False
 
 
 def _owner_records(socket_path: str) -> tuple[int, int] | None:

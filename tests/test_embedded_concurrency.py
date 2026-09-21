@@ -224,13 +224,17 @@ def _make_flat_tmpdir() -> str:
 
 
 def _spawn_orphan_pid(tmpdir: str | None = None) -> tuple[int, str]:
-    """Spawn a no-path redislite server and SIGKILL the parent WITHOUT
+    """Spawn a no-path embedded server and SIGKILL the parent WITHOUT
     close() -> a genuine orphan. Returns (server_pid, socket_path).
 
     #1365: the child prints its OWN server pid + socket (db.client.pid /
     db.client.socket_file) so the test tracks only its own orphan — never
     ambient candidates[0]. TMPDIR is set in the CHILD env (the parent's
     tempfile.gettempdir() is cached by import time) for containment.
+
+    #3767: constructed through the GUARDED `tortoise.FalkorDB` so the orphan
+    carries production's `.tortoise-owners` instrument — the positive
+    ownership claim reap() now requires before an unconfirmed fast kill.
     """
     env = dict(os.environ)
     env.pop("TORTOISE_DB_URI", None)
@@ -238,7 +242,7 @@ def _spawn_orphan_pid(tmpdir: str | None = None) -> tuple[int, str]:
         env["TMPDIR"] = tmpdir
     code = (
         "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+        "from tortoise import FalkorDB; db=FalkorDB();\n"
         "print('READY', db.client.pid, db.client.socket_file, flush=True);"
         " time.sleep(30)"
     )
