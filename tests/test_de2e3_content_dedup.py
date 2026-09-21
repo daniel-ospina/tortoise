@@ -188,11 +188,15 @@ class TestDe2e3:
         assert r2["filed"] == 0 and r2["duplicates"] == 1
 
     def test_2892_hashless_fallback_after_rebuild(self, sdk, tmp_path):
-        """#2892: a JSONL rebuild leaves every ``content_hash`` NULL, so the
-        bare hash MATCH in ``_content_exists`` returned None and
-        ``checkpoint()``'s Tier-1 dedup gate re-filed already-present content
-        as a NEW duplicate. The A10 content+kind fallback (shared with
-        ``create_point``) must resolve the ORIGINAL id."""
+        """#2892: when a graph carries NO ``content_hash`` the bare hash MATCH
+        in ``_content_exists`` returns None and ``checkpoint()``'s Tier-1
+        dedup gate re-files already-present content as a NEW duplicate. The
+        A10 content+kind fallback (shared with ``create_point``) must resolve
+        the ORIGINAL id.
+
+        The hash-less state used to arise incidentally from a JSONL rebuild;
+        main's #2795 D2 now RECOMPUTES ``content_hash`` on replay, so this
+        test constructs the condition explicitly instead of depending on it."""
         content = "the rebuilt graph must not duplicate this checkpoint item"
         first = sdk.checkpoint(
             [{"wing": "w", "room": "r", "content": content}], threshold=1.0)
@@ -201,13 +205,22 @@ class TestDe2e3:
 
         rebuilt = sdk._get_proj().rebuild_all(str(tmp_path))
         assert rebuilt["events"] > 0
-        # Precondition (guard against a vacuous pass if rebuild ever starts
-        # restoring content_hash): the hash is gone, the content is intact.
+        # Precondition: the hash is ABSENT, the content is intact. A rebuild
+        # no longer produces this (main's #2795 D2 recomputes content_hash in
+        # ``projection/entities.py::_upsert_point_props``), so construct it
+        # explicitly — the property under test is "no hash, content present",
+        # whatever produced it. The old `assert row[0] is None` here fired as
+        # "fixture stale" the moment #2795 D2 landed, which is how this was
+        # caught; keep the assertion, move the setup.
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.content_hash = null",
+            params={"id": pid},
+        )
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.content",
             params={"id": pid},
         ).result_set[0]
-        assert row[0] is None, "rebuild left a content_hash — fixture stale"
+        assert row[0] is None, "fixture setup failed to clear content_hash"
         assert row[1] == content
 
         # The regression: resolve by content+kind, not None.
