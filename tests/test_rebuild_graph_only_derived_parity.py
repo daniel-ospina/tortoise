@@ -426,17 +426,18 @@ def test_sidecar_recovery_prefers_the_live_capture_over_stale_leftover(
     """#4305 code-review round 2 (P1) — the source-precedence direction.
 
     An id a LEFTOVER sidecar carries can ALSO be in the live capture (it
-    became log-covered after the sidecar was written, or a raw update postdates
-    it). No `_merge_entry` collision resolves it then, so the live capture —
-    the newer state — must be the PRIMARY source and the leftover only fill
-    its absences. The reverse restores a stale pre-wipe value over a newer live
-    one and loses the newer indexed dedup key, which the codebase treats as
-    strictly worse than NULL.
+    became log-covered after the sidecar was written). No `_merge_entry`
+    collision resolves it then, so the live capture — the newer state — must be
+    the PRIMARY source and the leftover only fill its absences. The reverse
+    restores a stale pre-wipe value over a newer live one and loses the newer
+    indexed dedup key.
 
-    Deliberately NOT an oracle-match pin: the live value here comes from an
-    unjournaled update, which the harness's `seed + apply(records)` oracle
-    cannot express. It pins the never-worse direction against base/main, both
-    of which kept the live capture's value.
+    This is a FIX-DIRECTION pin, not a never-worse pin: base and pre-fix main
+    restore the STALE leftover `sha256("OLD")` here (their tail iterates the
+    merged synthetic events), and the fix restores the live `sha256("NEW")` —
+    which IS the live `apply()` truth, so the assertion is the oracle's. What
+    the harness cannot express is the leftover SIDECAR INJECTION, which is why
+    the sidecar is written directly rather than through `_oracle`'s parameters.
     """
     from tortoise.ids import content_hash
     from tortoise.projection import (
@@ -466,8 +467,9 @@ def test_sidecar_recovery_prefers_the_live_capture_over_stale_leftover(
         "session_snapshot": [],
         "session_point_links": [],
     })
+    expected = _oracle(tmp_path, [_point_added(pid, "")], pid, "NEW")
     sdk._get_proj().rebuild_all(str(events))
-    assert _read_derived(sdk, pid)["content_hash"] == content_hash("NEW")
+    assert _read_derived(sdk, pid) == expected
 
 
 def test_revise_before_recreate_is_unchanged(sup, tmp_path):

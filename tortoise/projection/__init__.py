@@ -3886,9 +3886,11 @@ class FalkorProjection(
         # only the fields the capture leaves ABSENT. The capture is the
         # PRIMARY source: it is the newer state, and for an id carried by BOTH
         # a leftover sidecar and a live node that has since become log-covered
-        # (or been raw-updated) there is no `_merge_entry` collision to resolve
-        # it — the pure-leftover entry would otherwise beat the newer live
-        # value. The synthetic half is what makes the #2943 sidecar-recovery
+        # there is no `_merge_entry` collision to resolve it — a GRAPH-ONLY live
+        # node does get a fresh synthetic entry, which `_merge_entry` already
+        # fresh-wins, but a log-covered one does not, so the pure-leftover entry
+        # would otherwise beat the newer live value. The synthetic half is what
+        # makes the #2943 sidecar-recovery
         # path work: there the live capture is a partial replay whose
         # `content_hash` the replay's CONDITIONAL writer left absent (falsy
         # content), so only the sidecar has it.
@@ -4449,7 +4451,11 @@ class FalkorProjection(
         # must not leave a sidecar that the next rebuild would re-merge). A
         # failure above leaves it in place deliberately: the graph may be
         # partially wiped, and the sidecar is the rescue data.
-        if snapshot_pending:
+        # #4305: a failed derived RESTORE (`restore_failures`) falsifies the
+        # "holds everything the sidecar recorded" premise too — keep the sidecar
+        # so a retry (after repairing the stored value) can still recover the
+        # pre-wipe derived; the per-id restore walk is idempotent.
+        if snapshot_pending and not restore_failures:
             _clear_prewipe_snapshot(snapshot_path)
         node_count = self.g.query(
             "MATCH (n:Point) RETURN count(n)"
