@@ -1,0 +1,63 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/j6-2948/main/.venv/bin/python
+rootdir: /private/tmp/j6-2948/main
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 162 items / 159 deselected / 3 selected
+
+tests/test_projection.py::test_falkor_rebuild_recomputes_content_hash PASSED [ 33%]
+tests/test_projection.py::test_falkor_rebuild_undeclared_list_prop_denied PASSED [ 66%]
+tests/test_projection.py::test_J6_branch2948_preserves_tags_and_tagged_edges FAILED [100%]
+
+=================================== FAILURES ===================================
+______________ test_J6_branch2948_preserves_tags_and_tagged_edges ______________
+
+    def test_J6_branch2948_preserves_tags_and_tagged_edges():
+        """#2897: the PointAdded journal carries `tags` (the JSONL clean dict
+        strips only embedding/content_hash) — replay must restore BOTH the
+        `n.tags` node property and the `:Tag` nodes / `TAGGED` edges.
+        """
+        if _skip_if_no_falkor():
+            pytest.skip("redislite falkordb unavailable")
+        from tortoise.sdk import TortoiseSDK
+    
+        d = tempfile.mkdtemp(prefix="tortoise_rebuild_tags_")
+        try:
+            db_path = os.path.join(d, "tortoise.db")
+            events_path = os.path.join(d, "events.jsonl")
+            sdk = TortoiseSDK(db_path=db_path, event_log_path=events_path)
+            try:
+                p = sdk.create_point("statement", "tagged point",
+                                     tags=["alpha", "beta"])
+            finally:
+                sdk.close()
+    
+            proj = FalkorProjection(
+                os.path.join(d, "rebuilt.db"), graph_name="test")
+            try:
+                proj.rebuild_all(d)
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.tags",
+                    params={"id": p["id"]},
+                ).result_set
+                assert rows, "tagged point missing after rebuild"
+>               assert rows[0][0] == ["alpha", "beta"], (
+                    f"n.tags dropped on rebuild: {rows[0][0]!r} (#2897)")
+E                   AssertionError: n.tags dropped on rebuild: None (#2897)
+E                   assert None == ['alpha', 'beta']
+
+tests/test_projection.py:4325: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:513 Point list prop 'tags' dropped — undeclared list props are never written raw (#2795); not restorable from the payload
+WARNING  tortoise.projection:__init__.py:2269 auto-recovered empty embedded DB from /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tortoise_rebuild_tags_iq8heuu7 (1 events)
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:476 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+WARNING  tortoise.projection.entities:entities.py:513 Point list prop 'tags' dropped — undeclared list props are never written raw (#2795); not restorable from the payload
+--------------------------- Captured stdout teardown ---------------------------
+[redislite-hygiene] end sweep (other-suites=11): {'skipped': 'reaper-lock-held'}
+=========================== short test summary info ============================
+FAILED tests/test_projection.py::test_J6_branch2948_preserves_tags_and_tagged_edges
+============ 1 failed, 2 passed, 159 deselected in 60.73s (0:01:00) ============

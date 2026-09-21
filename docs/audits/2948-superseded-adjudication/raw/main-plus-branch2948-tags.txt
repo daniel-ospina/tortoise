@@ -1,0 +1,48 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/j6-2948/main/.venv/bin/python
+rootdir: /private/tmp/j6-2948/main
+configfile: pyproject.toml
+plugins: playwright-0.9.0, timeout-2.4.0, asyncio-1.4.0, anyio-4.14.2, base-url-2.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 162 items / 159 deselected / 3 selected
+
+tests/test_projection.py::test_falkor_rebuild_recomputes_content_hash PASSED [ 33%]
+tests/test_projection.py::test_falkor_rebuild_undeclared_list_prop_denied FAILED [ 66%]
+tests/test_projection.py::test_J6_branch2948_preserves_tags_and_tagged_edges PASSED [100%]
+
+=================================== FAILURES ===================================
+_______________ test_falkor_rebuild_undeclared_list_prop_denied ________________
+
+caplog = <_pytest.logging.LogCaptureFixture object at 0x11aa29640>
+
+    def test_falkor_rebuild_undeclared_list_prop_denied(caplog):
+        """#2795 (D2 mechanic 1): an UNDECLARED list prop is never written raw —
+        including `tags`, whose raw list would half-restore a node without its
+        TAGGED edges (#2897) — and the drop is REPORTED (indicator 4)."""
+        if _skip_if_no_falkor():
+            pytest.skip("redislite falkordb unavailable")
+        import logging
+        api, log = _api()
+        pid = api.add_point("list prop", provenance("d.txt", [0, 5], "q"),
+                            custom_list=["a", "b"], tags=["alpha"])
+        proj = _shared_proj()
+        try:
+            with caplog.at_level(logging.WARNING,
+                                 logger="tortoise.projection.entities"):
+                proj.rebuild_all(str(log.path.parent))
+            row = proj.query(
+                "MATCH (n:Point {id:$id}) RETURN n.custom_list, n.tags", id=pid
+            ).result_set
+            assert row and row[0][0] is None, row
+>           assert row[0][1] is None, row
+E           AssertionError: [[None, ['alpha']]]
+E           assert ['alpha'] is None
+
+tests/test_projection.py:759: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  tortoise.projection:__init__.py:2968 rebuild: the event-log dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tortoise_test_fwx8e32t differs from the embedded DB dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tortoise_shared_embedded_u5q4y_ac — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/tortoise_test_fwx8e32t` to recover (#2943)
+WARNING  tortoise.projection.entities:entities.py:520 Point list prop 'custom_list' dropped — undeclared list props are never written raw (#2795); not restorable from the payload
+WARNING  tortoise.projection.entities:entities.py:520 Point list prop 'tags' dropped — undeclared list props are never written raw (#2795); not restorable from the payload
+=========================== short test summary info ============================
+FAILED tests/test_projection.py::test_falkor_rebuild_undeclared_list_prop_denied
+============ 1 failed, 2 passed, 159 deselected in 66.49s (0:01:06) ============
