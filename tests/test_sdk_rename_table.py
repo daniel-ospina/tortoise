@@ -84,6 +84,11 @@ def part_a_rows() -> list[dict]:
     return rows
 
 
+def _doc() -> str:
+    """The generated document, read fresh — never cached across tests."""
+    return DOC.read_text(encoding="utf-8")
+
+
 def _section(name: str) -> str:
     """The text of the `## {name}` / `### {name}` section up to the next heading."""
     text = DOC.read_text(encoding="utf-8")
@@ -177,6 +182,233 @@ def test_check_mode_detects_a_drifted_copy(tmp_path: Path) -> None:
     assert rc != 0, "a drifted copy passed `--check` — the drift gate is disarmed"
 
 
+# The COMPLETE derived surface: every public method → its destination. Pinned in
+# full because the representative-pin test below covers group DEFAULTS only — an
+# `OVERRIDE` exception could be reassigned and the suite stayed green, with the row
+# then contradicting the very citation it carries (58 of the 80 overrides were
+# unpinned). A literal here is the anchor: any change to the mapping reds.
+TARGETS_LITERAL: dict[str, str] = {
+    "annotate_ask_hits": "search_knowledge",
+    "annotate_operator": "adjust_relationship",
+    "apikey_create": "create_key",
+    "apikey_list": "list_keys",
+    "apikey_revoke": "revoke_key",
+    "apikey_verify": "DISCARDED",
+    "approve_merge": "UNCHANGED",
+    "assess_source": "manage_source_trust",
+    "audit": "graph_overview",
+    "backfill_about_entities": "DISCARDED",
+    "backfill_sources": "DISCARDED",
+    "backfill_v25": "DISCARDED",
+    "batch_create_points": "write_knowledge_batch",
+    "belief_timeline": "check_confidence",
+    "calibrate_summary": "check_confidence",
+    "calibration_passed": "check_confidence",
+    "capture_session": "mine_knowledge_from_session",
+    "check_structure": "graph_overview",
+    "checkpoint": "DISCARDED",
+    "cleanup_expired_invitations": "DISCARDED",
+    "close": "UNCHANGED",
+    "commit_session": "mine_knowledge_from_session",
+    "complete_source": "DISCARDED",
+    "compute_confidence": "refresh_confidence",
+    "compute_reputation": "UNBACKED",
+    "create_derivation": "link_entities",
+    "create_direct_edge": "link_entities",
+    "create_document": "create_entity",
+    "create_edge": "link_entities",
+    "create_entity": "UNCHANGED",
+    "create_event": "create_entity",
+    "create_object": "create_entity",
+    "create_operator": "link_entities",
+    "create_or_update_point": "create_entity",
+    "create_point": "create_entity",
+    "create_source": "register_source",
+    "create_subject": "create_entity",
+    "delete": "delete_knowledge",
+    "delete_entity": "delete_knowledge",
+    "delete_point": "delete_knowledge",
+    "delete_point_wrapped": "delete_knowledge",
+    "diary_read": "DISCARDED",
+    "diary_write": "DISCARDED",
+    "dream": "refresh_confidence",
+    "dream_health_check": "graph_overview",
+    "dream_health_state": "graph_overview",
+    "events_poll": "poll_events",
+    "expand_relationships": "explore_connections",
+    "file_decision": "write_question",
+    "file_human_approval": "record_decision",
+    "get_confidence": "check_confidence",
+    "get_cross_lens_candidates": "review_link_candidates",
+    "get_entity": "UNCHANGED",
+    "get_events": "get_entity",
+    "get_org_structure": "explore_connections",
+    "get_owned_entities": "get_entity",
+    "get_point": "get_entity",
+    "get_provenance_chain": "get_entity",
+    "get_session": "get_entity",
+    "get_source_reliability": "manage_source_trust",
+    "graph_active_key_count": "list_keys",
+    "graph_count": "list_memory_graphs",
+    "graph_delete": "delete_memory_graph",
+    "graph_key_ids": "list_keys",
+    "graph_list": "list_memory_graphs",
+    "graph_restore": "restore_memory_graph",
+    "graph_set_name": "update_memory_graph",
+    "graph_set_recording": "update_memory_graph",
+    "index_directory": "index_sources_from_directory",
+    "index_file": "index_sources_from_directory",
+    "index_sessions": "index_sources_from_directory",
+    "ingest": "write_knowledge_batch",
+    "ingest_corpus": "index_sources_from_directory",
+    "invalidate_point": "update_knowledge",
+    "invitation_accept": "DISCARDED",
+    "invitation_create": "DISCARDED",
+    "invitation_get_by_id": "DISCARDED",
+    "invitation_get_by_token": "DISCARDED",
+    "invitation_list": "DISCARDED",
+    "invitation_revoke": "DISCARDED",
+    "issue_insight": "search_knowledge",
+    "link_source_to_entity": "link_entities",
+    "list_batch": "list_knowledge",
+    "list_batches": "list_knowledge",
+    "list_dedup_candidates": "review_link_candidates",
+    "list_drafts": "DISCARDED",
+    "list_graphs": "graph_overview",
+    "list_namespaces": "graph_overview",
+    "list_pointkinds": "graph_overview",
+    "list_relations": "graph_overview",
+    "list_sources": "list_knowledge",
+    "list_tags": "graph_overview",
+    "list_topics": "graph_overview",
+    "membership_create": "add_member",
+    "membership_delete": "remove_member",
+    "membership_get": "DISCARDED",
+    "membership_list": "list_members",
+    "membership_update_role": "DISCARDED",
+    "migrate_orgs_to_registry": "DISCARDED",
+    "mine_corpus": "mine_knowledge_from_directory",
+    "mitigate_operator": "adjust_relationship",
+    "operator_action": "adjust_relationship",
+    "org_create": "UNBACKED",
+    "org_delete": "DISCARDED",
+    "org_get": "get_organisation_account",
+    "org_list": "get_organisation_account",
+    "org_update": "DISCARDED",
+    "paginated_query": "list_knowledge",
+    "promote_point": "DISCARDED",
+    "provenance": "check_confidence",
+    "quarantine_batch": "DISCARDED",
+    "query": "list_knowledge",
+    "query_points_by_tag": "list_knowledge",
+    "recall_gaps": "check_confidence",
+    "recall_state": "check_confidence",
+    "recall_subgraph": "DISCARDED",
+    "reconcile_sessions": "DISCARDED",
+    "record_calibration": "UNBACKED",
+    "resolve_id": "get_entity",
+    "restore_point_at": "get_historical_knowledge",
+    "retract_point": "update_knowledge",
+    "retrieval_legs": "check_confidence",
+    "review_connections": "review_link_candidates",
+    "search_sessions": "search_knowledge",
+    "session_context": "check_confidence",
+    "session_index_health": "index_sources_from_directory",
+    "set_point_baseline": "DISCARDED",
+    "set_source_tier": "manage_source_trust",
+    "signup_token_lookup": "DISCARDED",
+    "signup_token_recover": "DISCARDED",
+    "signup_token_revoke": "DISCARDED",
+    "stale_points": "graph_overview",
+    "status": "graph_overview",
+    "suggest_entry_points": "search_knowledge",
+    "summarize_structure": "graph_overview",
+    "supersede": "supersede_knowledge",
+    "supersede_point": "supersede_knowledge",
+    "sweep_invite_ghost_memberships": "DISCARDED",
+    "taxonomy": "graph_overview",
+    "test_guard": "DISCARDED",
+    "topic_summarize": "search_knowledge",
+    "tortoise_fts_query": "search_knowledge",
+    "trash_graphs": "DISCARDED",
+    "traverse": "explore_connections",
+    "ulid": "DISCARDED",
+    "update": "update_knowledge",
+    "update_entity": "update_knowledge",
+    "update_point": "update_knowledge",
+    "validate_domain": "graph_overview",
+    "volunteer_context": "check_confidence",
+}
+
+
+# The C3 tensions: method → (what Part A carries, what the other doc implies).
+# Pinned because deleting the tensions list renders "None." and, before this test,
+# the suite stayed green — the section's whole content was unread.
+C3_TENSIONS_LITERAL = {
+    "get_owned_entities": ("get_entity", "explore_connections"),
+    "get_provenance_chain": ("get_entity", "check_confidence"),
+    "restore_point_at": ("get_historical_knowledge", "check_confidence"),
+    "list_sources": ("list_knowledge", "graph_overview"),
+    "test_guard": ("DISCARDED", "graph_overview"),
+    "graph_set_recording": ("update_memory_graph", "kept, inside the control-plane block"),
+}
+
+
+def test_part_c3_tensions_are_read() -> None:
+    """C3 is a findings table; emptying it must red, and its cells must stay true."""
+    doc = _doc()
+    c3 = doc.split("### C3")[1].split("### C4")[0]
+    rows = re.findall(
+        r"^\| `([a-z_][a-z0-9_]*)` \| `?([A-Za-z_][A-Za-z0-9_ ,-]*)`? \| "
+        r"`?([A-Za-z_][A-Za-z0-9_ ,-]*)`? \|",
+        c3, re.M,
+    )
+    parsed = {n: (a.strip(), b.strip()) for n, a, b in rows}
+    assert parsed == C3_TENSIONS_LITERAL, (
+        "C3's cross-doc tensions changed, or the section emptied itself.\n"
+        f"  parsed: {parsed}\n  pinned: {C3_TENSIONS_LITERAL}"
+    )
+
+
+def test_structural_counts_and_the_summary_sentence_are_read() -> None:
+    """The summary sentence and the structural counts were rendered but never asserted.
+
+    The summary sentence's numbers can be made self-contradictory ("1 are target
+    methods with no def ... 34 are target methods that already exist") with the
+    suite green, so each is pinned here.
+    """
+    doc = _doc()
+    m = re.search(
+        r"Distinct destinations: \*\*(\d+)\*\* — \*\*(\d+)\*\* are target methods "
+        r"with no `def` today \(Phase 2 work, Part C1\), \*\*(\d+)\*\* are target "
+        r"methods that already exist \(`create_entity`, `get_entity`\), and "
+        r"\*\*(\d+)\*\* are the non-target dispositions",
+        doc,
+    )
+    assert m, "the 'Distinct destinations' summary sentence is missing or changed shape"
+    distinct, no_def, exists, non_target = (int(g) for g in m.groups())
+    assert distinct == no_def + exists + non_target, (
+        f"the summary's parts ({no_def}+{exists}+{non_target}) do not sum to its "
+        f"distinct-destination count ({distinct})"
+    )
+    # Each part is pinned, not just the sum: `replaced = 1` keeps `1 + 34 + 3 == 38`
+    # true while making the sentence claim 1 method has no `def` when 33 do.
+    assert (distinct, no_def, exists, non_target) == (38, 33, 2, 3), (
+        "the destination summary moved: "
+        f"{distinct} destinations = {no_def} no-def + {exists} existing + {non_target} other"
+    )
+    assert "**32 groups** over **149** named members" in doc, (
+        "the structural note's canonical-group counts are gone"
+    )
+    assert "150 = the 150-method surface" in doc, (
+        "the structural note no longer reconciles its members to the 150-method surface"
+    )
+    c5 = doc.split("### C5")[1].split("### Structural")[0]
+    assert set(re.findall(r"`([WN]\d+)`", c5)) == {"W16"}, (
+        "C5 no longer names exactly the wildcard families' resolved group (W16)"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────
 # PART A — the table
 # ─────────────────────────────────────────────────────────────────────
@@ -194,6 +426,23 @@ def test_part_a_covers_exactly_the_public_surface() -> None:
         "duplicate is in the constant too"
     )
     assert sorted(names) == sorted(public_methods_independently())
+
+
+def test_the_whole_mapping_is_pinned() -> None:
+    """Every one of the 150 `method → destination` pairs equals the pinned literal.
+
+    The representative-pin test guards group defaults; this guards the exceptions.
+    Without it a row can be reassigned to a different target while its citation
+    still quotes the ORIGINAL target's sentence — a self-contradicting row that
+    passes every substring check.
+    """
+    actual = {r["name"]: r["target"] for r in part_a_rows()}
+    assert actual == TARGETS_LITERAL, (
+        "the method → destination mapping moved.\n"
+        f"  changed: {sorted(k for k in actual if TARGETS_LITERAL.get(k) != actual[k])}\n"
+        f"  added:   {sorted(set(actual) - set(TARGETS_LITERAL))}\n"
+        f"  dropped: {sorted(set(TARGETS_LITERAL) - set(actual))}"
+    )
 
 
 def test_part_a_line_numbers_point_at_the_right_method() -> None:

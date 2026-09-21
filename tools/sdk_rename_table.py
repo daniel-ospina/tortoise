@@ -22,7 +22,9 @@ Derived (computed, never typed):
   * the **method set** — an AST walk of the `TortoiseSDK` class body (via
     `tools.bridge_table._sdk_targets`, the Phase 0.1 walker; a second copy would be a
     second answer to "what is the public surface" and the two would drift);
-  * every `sdk.py:N` line number, and the 284/150 def count;
+  * every `sdk.py:N` line number, and the def count — **284** `def` statements in
+    the class body, of which **150** are public (no leading underscore). The 281
+    sometimes quoted is 284 minus the 3 dunders; this file uses 284/150 throughout;
   * the **40 targets** — parsed out of `docs/product/beta-sdk-surface.md` (the
     owner-approved surface), not re-typed here;
   * the **canonical group partition** (R1–R9 / W1–W17 / N1–N6) — parsed out of
@@ -638,6 +640,11 @@ def _validate(methods: dict[str, int], groups: dict[str, list[str]],
 
     # 4. A citation is only real if the doc still says it.
     for key, (doc, quote, _named) in cites.items():
+        if not quote.strip():
+            errs.append(f"EMPTY CITATION: {key} carries no quote — an empty string is a "
+                        f"substring of every document, so the citation check passes while "
+                        f"the destination is asserted by nothing")
+            continue
         text = (BETA_DOC if doc == BETA else CANON_DOC).read_text(encoding="utf-8")
         if quote not in text:
             errs.append(f"CITATION DRIFT: {key} quotes {doc} but that text is gone: "
