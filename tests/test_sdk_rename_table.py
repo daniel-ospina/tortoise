@@ -95,7 +95,7 @@ CITES_LITERAL: dict[str, str] = {
     'n1_console': '| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` | 5 | Console plumbing.',
     'n2_count': '`list_memory_graphs` answers "how many" for any real N.',
     'n2_keys': '| `graph_key_ids`, `graph_active_key_count` | 2 | Console diagnostics. Both fold into `list_keys`. |',
-    'n2_recording': 'The override therefore folds into **`update_memory_graph`**',
+    'n2_recording': "| ~~`graph_set_recording`~~ (SDK method) | 1 | **Discarded as an SDK method, KEPT as an MCP tool.** It is a per-field setter, the same shape as `set_memory_graph_name`/`set_memory_graph_backend`, which were deleted so that fields go on create plus one partial update. The override therefore folds into **`update_memory_graph`** (row 30) — while the **MCP tool** `graph_set_recording` survives, because it is an agent's only in-MCP recovery from the capture 409. |",
     'n2_rename': '| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` | → rows 30–33 `*_memory_graph*`. |',
     'n3_members': '| 37 | `add_member` | Grant a person access to the account |',
     'n4_keys': '| 34 | `create_key` | Mint a credential scoped to one memory graph.',
@@ -118,7 +118,7 @@ CITES_LITERAL: dict[str, str] = {
     'r6': '| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` | ~5 | → `graph_overview`',
     'r6_aliases': 'narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` | **Deleted, not folded.**',
     'r6_canon': '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`',
-    'r6_list_sources': "It folds into **row 4 `list_knowledge(kind='source')`**",
+    'r6_list_sources': "| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), and it is covered by `tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |",
     'r6_test_guard': '| `test_guard` | **Kept and relocated.**',
     'r7': '| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → `review_link_candidates`. |',
     'r8': '| `events_poll` | → row 11 `poll_events`. |',
@@ -137,7 +137,7 @@ CITES_LITERAL: dict[str, str] = {
     'w11_retract': '| `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`.',
     'w11_supersede': '| `supersede`, `supersede_point` | 2 | → `supersede_knowledge`.',
     'w12': '| `delete_point`, `delete_point_wrapped` | 2 | → `delete_knowledge`. |',
-    'w12_canon': '| W12 | `delete_knowledge` | #18 | `delete`,',
+    'w12_canon': '| W12 | `delete_knowledge` | #18 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |',
     'w13_canon': '| W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` |',
     'w15': '| `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship`',
     'w17_ulid': '| `ulid` | 1 | A ULID generator. Not a memory operation. |',
@@ -205,8 +205,8 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     "create_point": ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`.”'),
     "create_source": ('register_source', '`canonical-sdk-methods.md` — “\\| W3 \\| `register_source` \\| #11 \\| `create_source`, `complete_source` \\|”'),
     "create_subject": ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`.”'),
-    "delete": ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`,”'),
-    "delete_entity": ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`,”'),
+    "delete": ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
+    "delete_entity": ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` \\| keep, collapse \\|”'),
     "delete_point": ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
     "delete_point_wrapped": ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
     "diary_read": ('DISCARDED', '`beta-sdk-surface.md` — “**The journal capability** — `checkpoint`, `diary_write`, `diary_read`.”'),
@@ -235,7 +235,7 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     "graph_list": ('list_memory_graphs', '`beta-sdk-surface.md` — “\\| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` \\| → rows 30–33 `*_memory_graph*`. \\|”'),
     "graph_restore": ('restore_memory_graph', '`beta-sdk-surface.md` — “\\| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` \\| → rows 30–33 `*_memory_graph*`. \\|”'),
     "graph_set_name": ('update_memory_graph', '`beta-sdk-surface.md` — “\\| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` \\| → rows 30–33 `*_memory_graph*`. \\|”'),
-    "graph_set_recording": ('update_memory_graph', '`beta-sdk-surface.md` — “The override therefore folds into **`update_memory_graph`**”'),
+    "graph_set_recording": ('update_memory_graph', "`beta-sdk-surface.md` — “\\| ~~`graph_set_recording`~~ (SDK method) \\| 1 \\| **Discarded as an SDK method, KEPT as an MCP tool.** It is a per-field setter, the same shape as `set_memory_graph_name`/`set_memory_graph_backend`, which were deleted so that fields go on create plus one partial update. The override therefore folds into **`update_memory_graph`** (row 30) — while the **MCP tool** `graph_set_recording` survives, because it is an agent's only in-MCP recovery from the capture 409. \\|”"),
     "index_directory": ('index_sources_from_directory', '`canonical-sdk-methods.md` — “\\| W4 \\| `index_files` \\| #12 \\| `index_file`, `index_directory`”'),
     "index_file": ('index_sources_from_directory', '`beta-sdk-surface.md` — “\\| `ingest_corpus`, `index_file`, `session_index_health` \\| 3 \\| → `index_sources_from_directory`. \\|”'),
     "index_sessions": ('index_sources_from_directory', '`canonical-sdk-methods.md` — “\\| `index_sessions` / `ingest_corpus` → `index_directory` \\|”'),
@@ -258,7 +258,7 @@ ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
     "list_namespaces": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
     "list_pointkinds": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
     "list_relations": ('graph_overview', '`canonical-sdk-methods.md` — “\\| R6 \\| `graph_overview` \\| #6 \\| `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`”'),
-    "list_sources": ('list_knowledge', "`beta-sdk-surface.md` — “It folds into **row 4 `list_knowledge(kind='source')`**”"),
+    "list_sources": ('list_knowledge', "`beta-sdk-surface.md` — “\\| `list_sources` \\| **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), and it is covered by `tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. \\|”"),
     "list_tags": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
     "list_topics": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
     "membership_create": ('add_member', '`beta-sdk-surface.md` — “\\| 37 \\| `add_member` \\| Grant a person access to the account \\|”'),
@@ -814,6 +814,36 @@ def test_basis_and_target_agree() -> None:
             )
 
 
+def test_every_stated_row_names_its_method_in_the_quote() -> None:
+    """A `stated` row must be backed by a quote that actually NAMES the method.
+
+    The Basis legend defines `stated` as "the cited quote names this method". That was
+    a hand-authored property (`named`, a frozenset beside each citation) rather than a
+    computed one, and three rows contradicted their own legend while every other test
+    stayed green: `delete_entity` cited a `W12` row that named only `delete`;
+    `graph_set_recording` and `list_sources` cited prose that named no method at all.
+    `basis` is now computed from the quote (`_names`), and THIS test is the independent
+    check — it re-parses the rendered document and re-derives the invariant, so a
+    regression that reintroduces an authored basis reds here even if `--check` agrees
+    with itself. Method names are matched on token boundaries: `delete` appears inside
+    `delete_entity`, so a substring test would pass the very row this test exists for.
+    """
+    bad = []
+    for r in part_a_rows():
+        if r["basis"] != "stated":
+            continue
+        m = CITE_RE.match(r["cite"])
+        assert m, f"{r['name']}: a stated row has an unparseable citation: {r['cite']!r}"
+        quote = m.group(2).replace("\\|", "|")
+        if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(r['name'])}(?![A-Za-z0-9_])",
+                         quote):
+            bad.append(f"{r['name']} → {quote[:70]!r}")
+    assert not bad, (
+        "rows render Basis=stated but their quoted evidence does not name the method, "
+        "contradicting the Basis legend:\n  " + "\n  ".join(bad)
+    )
+
+
 def test_the_resolved_partition_never_emits_the_wildcard_group() -> None:
     """`W16` is the canonical doc's wildcard spelling of N1–N6; it has no own members."""
     groups = {r["group"] for r in part_a_rows()}
@@ -849,10 +879,10 @@ def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
     """Cells that render facts but were read by no test, plus Part A's numbering.
 
     Each of these was mutable with the whole suite green: the ordinals could become
-    `100, 101, …`, C1's status cell could state the opposite of its own heading, C2's
-    reason could contradict its finding, and C4's referent could name a method that
-    does not exist. A cell that states a fact is a claim; unread, it is a claim that
-    can be false.
+    `100, 101, …`, C1's status cell could state the opposite of its own heading, and
+    C4's referent could name a method that does not exist. A cell that states a fact is
+    a claim; unread, it is a claim that can be false. (C2's own Source and Reason columns
+    are pinned separately, in `test_part_c2_reasons_and_sources_are_read`.)
     """
     text = DOC.read_text(encoding="utf-8")
     part_a = text.split("## Part A")[1].split("## Part B")[0]
@@ -999,6 +1029,43 @@ def test_part_c2_is_exactly_the_unbacked_rows() -> None:
     )
     unbacked_in_table = {r["name"] for r in part_a_rows() if r["target"] == "UNBACKED"}
     assert listed == unbacked_in_table
+
+
+def test_part_c2_reasons_and_sources_are_read() -> None:
+    """C2's Source and Reason columns were rendered but read by no test.
+
+    The finding *is* the reason, and the Source is the claim that the method exists at
+    that line: a reason that drifts from its finding, or a Source pointing at the wrong
+    line, is a false claim nothing else in the suite can see. The line numbers are
+    checked against a fresh AST walk; the reasons are pinned literally.
+    """
+    section = _section("C2 — rows with NO doc backing")
+    rows = re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| `sdk\.py:(\d+)` \| (.*) \|$",
+                      section, re.M)
+    parsed = {n: (int(ln), reason) for n, ln, reason in rows}
+    assert parsed == {
+        "org_create": (
+            15385,
+            "No target method creates an organisation account. The tenancy block reads "
+            "one (`get_organisation_account`) and files account *closure* as a console "
+            "operation, but no row covers creation.",
+        ),
+        "compute_reputation": (
+            20160,
+            "The canonical `stabilize_beliefs` group lists it, but that group's beta "
+            "target is `refresh_confidence` — “Recompute confidence after changes”. "
+            "Reputation scoring is not confidence recomputation, and no other target "
+            "absorbs it.",
+        ),
+        "record_calibration": (
+            20410,
+            "Same group, same mismatch: `refresh_confidence` recomputes confidence; "
+            "recording a calibration milestone is a different operation and has no target.",
+        ),
+    }, f"C2's rows changed:\n  {parsed}"
+    truth = public_methods_independently()
+    wrong = {n: (ln, truth[n]) for n, (ln, _) in parsed.items() if ln != truth[n]}
+    assert not wrong, f"C2 cites the wrong `sdk.py` line: {wrong}"
 
 
 def test_part_c4_lists_the_doc_code_name_mismatches() -> None:
@@ -1150,7 +1217,7 @@ def test_validate_rejects_a_drifted_citation(generator_module) -> None:
     groups = generator_module._groups(CANON.read_text(encoding="utf-8"))
     targets = targets_independently()
     cites = dict(generator_module.CITES)
-    cites["drift"] = ("beta-sdk-surface.md", "this sentence is in no doc at all", set())
+    cites["drift"] = ("beta-sdk-surface.md", "this sentence is in no doc at all")
     errs = generator_module._validate(methods, groups, targets, cites)
     assert any("CITATION DRIFT" in e and "drift" in e for e in errs), (
         f"a drifted citation did not fail the build: {errs}"
@@ -1173,8 +1240,89 @@ def test_validate_rejects_a_broken_partition(generator_module) -> None:
     )
 
 
+def test_section_prose_paragraphs_are_read() -> None:
+    """The section intros and footers are claims, and every one was unread.
+
+    Mutation testing found all seven of these paragraphs mutable with the whole suite
+    green: Part A's "earlier sketch" note, C1's Phase-2 intro and constructor footer,
+    C2's "open question" intro and "finding, not a gap" footer, C3's "different
+    destinations" intro, and C4's "doc→code mismatch" intro. They are pinned verbatim
+    here so the document's own explanation cannot quietly invert.
+    """
+    doc = _doc()
+    paragraphs = [
+        "Every `sdk.py:N` citation is **read from the AST at build time**, so it cannot "
+        "drift from the code it cites. The 40 target names are **parsed out of "
+        "`docs/product/beta-sdk-surface.md`** (owner-approved 2026-09-21), and the "
+        "R/W/N group partition out of `docs/product/canonical-sdk-methods.md`; every "
+        "count below is arithmetic over those, never a typed number. Each row's "
+        "citation quote is **verified to still be in the doc it names** — a citation "
+        "that no longer resolves fails the build.",
+        "The canonical inventory's group names are an **earlier sketch** "
+        "(`revise_knowledge`, `stabilize_beliefs`, `write_knowledge`, `index_files`). "
+        "The `Target` column always carries the **beta** target name "
+        "(`update_knowledge`, `refresh_confidence`, `write_knowledge_batch`, "
+        "`index_sources_from_directory`) — the canonical doc itself says beta governs "
+        "where the two disagree, and records the renames.",
+        "A rename whose destination does not exist yet is **Phase 2 work**, not a rename.",
+        "The plan listed the whole table as renames; this is what Part A exists to catch.",
+        "`Tortoise` is row 1 of the target table (the constructor), not a method; the "
+        "class today is `TortoiseSDK`, so the approved surface also renames the type.",
+        "No document states a destination for these; the row is an open question, not an",
+        "answer. Each needs an owner ruling before Phase 2 implements it.",
+        "**An unbacked row is a finding, not a gap to fill by analogy.** Rolling these "
+        "into a nearby target would silently drop a capability the surface has today.",
+        "Two docs name **different** destinations for the same method. The row in Part A",
+        "carries the `beta-sdk-surface.md` destination, because that is the owner-approved",
+        'surface and the canonical inventory itself says so ("Where the two disagree, that',
+        'doc governs"). The conflict is recorded here rather than resolved silently.',
+        "A doc→code name mismatch. Where a referent is named, the Part A row for that",
+        "referent cites the doc under its *doc* name; where no referent exists, the",
+        "doc's statement is about a method that was never there.",
+        "The inventory's group table has group labels whose members are expressed as",
+        "wildcards (`org_*`, `graph_*`, …) that expand to the same methods as the",
+        "control-plane families. They carry no distinct member, so the partition here",
+        "resolves each method to its family group: `W16`.",
+        "- Every group collapse above is checked against the AST walk at build time: a "
+        "method the docs know and the code does not (or the reverse) **fails the build**.",
+    ]
+    missing = [p for p in paragraphs if p not in doc]
+    assert not missing, (
+        "section prose changed or was dropped — each paragraph is a claim:\n  "
+        + "\n  ".join(m[:90] for m in missing)
+    )
+
+
 def test_doc_header() -> None:
     """The doc must announce what it is and that editing it by hand is a mistake."""
     text = DOC.read_text(encoding="utf-8")
     assert text.startswith("# Phase 0.3b — the SDK rename table\n")
     assert "**GENERATED — do not edit.**" in text
+
+
+def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
+    """The header prose, the Basis legend and the Reproduce block were unread.
+
+    The legend is load-bearing: `stated`/`derived`/`unbacked` in Part A mean only what
+    these sentences say, so if the legend drifts while the Basis values do not, the
+    table contradicts its own definition in silence. The Reproduce block is the
+    promise that the document can be regenerated; both commands are pinned.
+    """
+    doc = _doc()
+    assert (
+        "`Basis` says how strongly the row is backed: **stated** — the cited quote "
+        "names this method and gives its collapse, rename or deletion; **derived** — a "
+        "doc gives the destination only for a namespace or wildcard covering this "
+        "method, without naming it; **unbacked** — no doc gives a destination."
+    ) in doc, "the Basis legend's definitions changed"
+    assert "**This is the SDK half of the rename table.**" in doc
+    assert "`docs/product/bridge-table.md` (Phase 0.1)" in doc
+    assert "## Reproduce" in doc
+    assert "uv run python tools/sdk_rename_table.py          # regenerate this file" in doc
+    assert ("uv run python tools/sdk_rename_table.py --check  # verify, non-zero on "
+            "drift") in doc
+    # The structural reconciliation must name its 32 groups and 149 members, and say
+    # how `backfill_v25` (the Archived-table member) reconciles to the 150-method surface.
+    assert "partitions the surface into **32 groups** over **149** named members" in doc
+    assert "`backfill_v25` is in its Archived table instead" in doc
+    assert "150 = the 150-method surface" in doc

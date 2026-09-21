@@ -88,195 +88,141 @@ UNBACKED_REASON = {
 
 # ─────────────────────────────────────────────────────────────────────
 # CITATIONS. A citation is only real if the doc still says it, so each
-# `needle` is verified as a literal substring of the named doc at build
-# time (`_validate`). `named` is the set of methods the quote NAMES: a row
-# whose method is in its citation's `named` set is *stated*; otherwise it
-# is *derived* from the group collapse.
+# `quote` is verified as a literal substring of the named doc at build time
+# (`_validate`). A row is *stated* when its quote NAMES the method and *derived*
+# otherwise — the basis is COMPUTED from the quote by `_names`, never authored
+# beside it. An authored `named` set was the earlier design and let a row claim
+# `stated` while its quote named a different method; the two can no longer diverge
+# because there is only one of them.
 # ─────────────────────────────────────────────────────────────────────
-CITES: dict[str, tuple[str, str, frozenset[str]]] = {
+CITES: dict[str, tuple[str, str]] = {
     # ── READ ────────────────────────────────────────────────────────
     "r1": (BETA, "| `search_sessions`, `suggest_entry_points`, `topic_summarize`, "
-                 "`issue_insight`, `annotate_ask_hits` | 5 | → `search_knowledge`. |",
-           frozenset({"search_sessions", "suggest_entry_points", "topic_summarize",
-                      "issue_insight", "annotate_ask_hits"})),
+                 "`issue_insight`, `annotate_ask_hits` | 5 | → `search_knowledge`. |"),
     "r2": (BETA, "| `query`, `paginated_query`, `query_points_by_tag` | 3 | "
-                 "→ `list_knowledge`. |",
-           frozenset({"query", "paginated_query", "query_points_by_tag"})),
+                 "→ `list_knowledge`. |"),
     "r1_canon": (CANON, "| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, "
                         "`suggest_entry_points`, `search_sessions`, `issue_insight`, "
-                        "`topic_summarize`, `annotate_ask_hits` |",
-                 frozenset({"tortoise_fts_query"})),
+                        "`topic_summarize`, `annotate_ask_hits` |"),
     "r3": (BETA, "| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, "
-                 "`calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence`",
-           frozenset({"recall_gaps", "recall_state", "calibrate_summary",
-                      "calibration_passed"})),
-    "r3_restore": (BETA, "| `restore_point_at` | → row 7 **`get_historical_knowledge`**.",
-                   frozenset({"restore_point_at"})),
-    "r3_drop_subgraph": (BETA, "**`recall_subgraph` is dropped, not folded**",
-                         frozenset({"recall_subgraph"})),
+                 "`calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence`"),
+    "r3_restore": (BETA, "| `restore_point_at` | → row 7 **`get_historical_knowledge`**."),
+    "r3_drop_subgraph": (BETA, "**`recall_subgraph` is dropped, not folded**"),
     "r3_context": (BETA, "| `provenance`, `belief_timeline`, `session_context`, "
-                         "`volunteer_context` | 4 | → `check_confidence`",
-                   frozenset({"provenance", "belief_timeline", "session_context",
-                              "volunteer_context"})),
+                         "`volunteer_context` | 4 | → `check_confidence`"),
     "r3_canon": (CANON, "| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, "
                         "`recall_subgraph`, `retrieval_legs`, `volunteer_context`, "
-                        "`session_context`, `get_confidence`",
-                 frozenset({"get_confidence", "retrieval_legs"})),
+                        "`session_context`, `get_confidence`"),
     "r4": (BETA, "| narrow readers (`get_session`, `get_events`, `get_owned_entities`, "
-                 "`get_provenance_chain`, …) | ~8 | → `get_entity`",
-           frozenset({"get_session", "get_events", "get_owned_entities",
-                      "get_provenance_chain"})),
+                 "`get_provenance_chain`, …) | ~8 | → `get_entity`"),
     "r4_canon": (CANON, "| R4 | `get_entity` | #4 | `get_point`, `get_entity`, "
-                        "`get_session`, `get_events`, `resolve_id` |",
-                 frozenset({"get_point", "resolve_id"})),
+                        "`get_session`, `get_events`, `resolve_id` |"),
     "r5": (BETA, "| `traverse`, `expand_relationships`, `get_org_structure` | 3 | "
-                 "→ `explore_connections`. |",
-           frozenset({"traverse", "expand_relationships", "get_org_structure"})),
+                 "→ `explore_connections`. |"),
     "r6": (BETA, "| `audit`, `validate_domain`, `summarize_structure`, "
-                 "`dream_health_check`, `dream_health_state` | ~5 | → `graph_overview`",
-           frozenset({"audit", "validate_domain", "summarize_structure",
-                      "dream_health_check", "dream_health_state"})),
+                 "`dream_health_check`, `dream_health_state` | ~5 | → `graph_overview`"),
     "r6_aliases": (BETA, "narrow aliases absorbed by `graph_overview` — `taxonomy`, "
                          "`list_pointkinds`, `list_tags`, `list_namespaces`, "
                          "`list_graphs`, `status`, `stale`, `check_structure`, "
-                         "`list_topics` | **Deleted, not folded.**",
-                   frozenset({"taxonomy", "list_pointkinds", "list_tags",
-                              "list_namespaces", "list_graphs", "status", "stale",
-                              "check_structure", "list_topics"})),
-    "r6_test_guard": (BETA, "| `test_guard` | **Kept and relocated.**",
-                      frozenset({"test_guard"})),
+                         "`list_topics` | **Deleted, not folded.**"),
+    "r6_test_guard": (BETA, "| `test_guard` | **Kept and relocated.**"),
     "r6_canon": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "
                         "`list_pointkinds`, `list_sources`, `list_tags`, "
-                        "`list_namespaces`, `list_relations`",
-                 frozenset({"list_relations"})),
-    "r6_list_sources": (BETA, "It folds into **row 4 `list_knowledge(kind='source')`**",
-                        frozenset({"list_sources"})),
+                        "`list_namespaces`, `list_relations`"),
+    "r6_list_sources": (BETA, "| `list_sources` | **Not discarded.** Present at "
+                              "`tortoise/sdk.py` with an MCP tool and a CLI command "
+                              "(`tortoise/__main__.py`), and it is covered by "
+                              "`tests/test_enumeration_surfaces.py` and "
+                              "`tests/test_connector_sources.py`. It folds into "
+                              "**row 4 `list_knowledge(kind='source')`** — the *question* "
+                              "it asks stays first-class and gains the credibility tier; "
+                              "it no longer needs its own method. |"),
     "r7": (BETA, "| `review_connections`, `get_cross_lens_candidates`, "
-                 "`list_dedup_candidates` | 3 | → `review_link_candidates`. |",
-           frozenset({"review_connections", "get_cross_lens_candidates",
-                      "list_dedup_candidates"})),
-    "r8": (BETA, "| `events_poll` | → row 11 `poll_events`. |",
-           frozenset({"events_poll"})),
-    "r9": (BETA, "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`.",
-           frozenset({"list_batch", "list_batches"})),
+                 "`list_dedup_candidates` | 3 | → `review_link_candidates`. |"),
+    "r8": (BETA, "| `events_poll` | → row 11 `poll_events`. |"),
+    "r9": (BETA, "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`."),
     # ── WRITE ───────────────────────────────────────────────────────
     "w1": (BETA, "| `create_subject`, `create_object`, `create_event`, "
                  "`create_document`, `create_point` | 5 | Collapsed into "
-                 "`create_entity(type=)`.",
-           frozenset({"create_subject", "create_object", "create_event",
-                      "create_document", "create_point"})),
-    "w1_coup": (CANON, "| `create_or_update_point` → `create_point` |",
-                frozenset({"create_or_update_point"})),
-    "w1_batch": (BETA, "| `batch_create_points` | 1 | → `write_knowledge_batch`. |",
-                 frozenset({"batch_create_points"})),
-    "w2": (CANON, "| W2 | `write_knowledge` | — | `ingest` |", frozenset({"ingest"})),
+                 "`create_entity(type=)`."),
+    "w1_coup": (CANON, "| `create_or_update_point` → `create_point` |"),
+    "w1_batch": (BETA, "| `batch_create_points` | 1 | → `write_knowledge_batch`. |"),
+    "w2": (CANON, "| W2 | `write_knowledge` | — | `ingest` |"),
     "w2_rename": (CANON, "`write_knowledge` and `stabilize_beliefs` where the current "
-                         "target says", frozenset()),
-    "w3": (CANON, "| W3 | `register_source` | #11 | `create_source`, `complete_source` |",
-           frozenset({"create_source", "complete_source"})),
-    "w3_cut": (BETA, "| `complete_source` | 1 | **Cut.**",
-               frozenset({"complete_source"})),
+                         "target says"),
+    "w3": (CANON, "| W3 | `register_source` | #11 | `create_source`, `complete_source` |"),
+    "w3_cut": (BETA, "| `complete_source` | 1 | **Cut.**"),
     "w4": (BETA, "| `ingest_corpus`, `index_file`, `session_index_health` | 3 | "
-                 "→ `index_sources_from_directory`. |",
-           frozenset({"ingest_corpus", "index_file", "session_index_health"})),
+                 "→ `index_sources_from_directory`. |"),
     "w4_rename": (BETA, "| `index_sources` (bare) | 1 | Renamed → "
-                        "`index_sources_from_directory`", frozenset()),
-    "w4_canon": (CANON, "| W4 | `index_files` | #12 | `index_file`, `index_directory`",
-                 frozenset({"index_directory"})),
-    "w4_mine": (BETA, "| `mine_corpus` | 1 | → `mine_knowledge_from_directory`.",
-                frozenset({"mine_corpus"})),
+                        "`index_sources_from_directory`"),
+    "w4_canon": (CANON, "| W4 | `index_files` | #12 | `index_file`, `index_directory`"),
+    "w4_mine": (BETA, "| `mine_corpus` | 1 | → `mine_knowledge_from_directory`."),
     "w4_index_sessions": (CANON, "| `index_sessions` / `ingest_corpus` → "
-                                 "`index_directory` |",
-                          frozenset({"index_sessions", "ingest_corpus"})),
-    "w5": (BETA, "**The journal capability** — `checkpoint`, `diary_write`, `diary_read`.",
-           frozenset({"checkpoint", "diary_write", "diary_read"})),
+                                 "`index_directory` |"),
+    "w5": (BETA, "**The journal capability** — `checkpoint`, `diary_write`, `diary_read`."),
     "w6": (BETA, "| `capture_session` / `commit_session` | → row 16 "
-                 "`mine_knowledge_from_session`, one method.",
-           frozenset({"capture_session", "commit_session"})),
+                 "`mine_knowledge_from_session`, one method."),
     "w8": (BETA, "| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | "
-                 "→ `manage_source_trust`",
-           frozenset({"assess_source", "set_source_tier", "get_source_reliability"})),
+                 "→ `manage_source_trust`"),
     "w8_backfill": (BETA, "| `backfill_v25`, `backfill_sources`, "
                           "`backfill_about_entities`, `reconcile_sessions` | 4 | "
-                          "One-shot migrations.",
-                    frozenset({"backfill_v25", "backfill_sources",
-                               "backfill_about_entities", "reconcile_sessions"})),
+                          "One-shot migrations."),
     "w9": (BETA, "| `create_operator`, `create_direct_edge`, `create_derivation`, "
-                 "`link_source_to_entity` | 4 | → `link_entities`",
-           frozenset({"create_operator", "create_direct_edge", "create_derivation",
-                      "link_source_to_entity"})),
-    "w9_canon": (CANON, "| W9 | `link_entities` | #15 | `create_edge`,",
-                 frozenset({"create_edge"})),
-    "w10": (BETA, "| `file_human_approval` | 1 | → `record_decision`. |",
-            frozenset({"file_human_approval"})),
+                 "`link_source_to_entity` | 4 | → `link_entities`"),
+    "w9_canon": (CANON, "| W9 | `link_entities` | #15 | `create_edge`,"),
+    "w10": (BETA, "| `file_human_approval` | 1 | → `record_decision`. |"),
     "w10_file_decision": (BETA, "| `file_decision` | → rows 20/21 **`write_question`** "
-                                "+ **`record_decision`**.",
-                          frozenset({"file_decision"})),
-    "w11": (BETA, "| `update_point`, `update_entity` | 2 | → `update_knowledge`. |",
-            frozenset({"update_point", "update_entity"})),
-    "w11_canon": (CANON, "| W11 | `revise_knowledge` | #17 | `update`,",
-                  frozenset({"update"})),
+                                "+ **`record_decision`**."),
+    "w11": (BETA, "| `update_point`, `update_entity` | 2 | → `update_knowledge`. |"),
+    "w11_canon": (CANON, "| W11 | `revise_knowledge` | #17 | `update`,"),
     "w11_supersede": (BETA, "| `supersede`, `supersede_point` | 2 | "
-                            "→ `supersede_knowledge`.",
-                      frozenset({"supersede", "supersede_point"})),
+                            "→ `supersede_knowledge`."),
     "w11_retract": (BETA, "| `retract_point`, `invalidate_point` | 2 | → fields on "
-                          "`update_knowledge`.",
-                    frozenset({"retract_point", "invalidate_point"})),
+                          "`update_knowledge`."),
     "w11_lifecycle": (BETA, "| `promote_point`, `set_point_baseline`, `list_drafts`, "
-                            "`quarantine_batch` | 4 | Lifecycle and confidence wrangling",
-                      frozenset({"promote_point", "set_point_baseline", "list_drafts",
-                                 "quarantine_batch"})),
+                            "`quarantine_batch` | 4 | Lifecycle and confidence wrangling"),
     "w12": (BETA, "| `delete_point`, `delete_point_wrapped` | 2 | "
-                  "→ `delete_knowledge`. |",
-            frozenset({"delete_point", "delete_point_wrapped"})),
-    "w12_canon": (CANON, "| W12 | `delete_knowledge` | #18 | `delete`,",
-                  frozenset({"delete", "delete_entity"})),
+                  "→ `delete_knowledge`. |"),
+    "w12_canon": (CANON, "| W12 | `delete_knowledge` | #18 | `delete`, "
+                        "`delete_point`, `delete_entity`, `delete_point_wrapped` | "
+                        "keep, collapse |"),
     "w13_canon": (CANON, "| W13 | `stabilize_beliefs` | #19 | `dream`, "
                         "`compute_confidence`, `compute_reputation`, "
-                        "`record_calibration` |",
-                  frozenset({"dream", "compute_confidence", "compute_reputation",
-                             "record_calibration"})),
+                        "`record_calibration` |"),
     "w15": (BETA, "| `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | "
-                  "→ `adjust_relationship`",
-            frozenset({"mitigate_operator", "operator_action", "annotate_operator"})),
-    "w17_ulid": (BETA, "| `ulid` | 1 | A ULID generator. Not a memory operation. |",
-                 frozenset({"ulid"})),
+                  "→ `adjust_relationship`"),
+    "w17_ulid": (BETA, "| `ulid` | 1 | A ULID generator. Not a memory operation. |"),
     "unchanged4": (BETA, "current SDK (`create_entity`, `get_entity`, `approve_merge`, "
-                         "`close`)",
-                   frozenset({"create_entity", "get_entity", "approve_merge", "close"})),
+                         "`close`)"),
     # ── Control plane ───────────────────────────────────────────────
     "n1_console": (BETA, "| `org_update`, `org_delete`, `membership_get`, "
                          "`membership_update_role`, `apikey_verify` | 5 | "
-                         "Console plumbing.",
-                   frozenset({"org_update", "org_delete", "membership_get",
-                              "membership_update_role", "apikey_verify"})),
+                         "Console plumbing."),
     "n1_account": (BETA, "| 28 | `get_organisation_account` | Read the account and the "
-                         "plan it is on |", frozenset()),
+                         "plan it is on |"),
     "n2_rename": (BETA, "| `graph_delete`, `graph_restore`, `graph_list`, "
-                        "`graph_set_name` | → rows 30–33 `*_memory_graph*`. |",
-                  frozenset({"graph_delete", "graph_restore", "graph_list",
-                             "graph_set_name"})),
+                        "`graph_set_name` | → rows 30–33 `*_memory_graph*`. |"),
     "n2_keys": (BETA, "| `graph_key_ids`, `graph_active_key_count` | 2 | Console "
-                      "diagnostics. Both fold into `list_keys`. |",
-                frozenset({"graph_key_ids", "graph_active_key_count"})),
-    "n2_recording": (BETA, "The override therefore folds into **`update_memory_graph`**",
-                     frozenset({"graph_set_recording"})),
-    "n2_count": (BETA, "`list_memory_graphs` answers \"how many\" for any real N.",
-                 frozenset()),
+                      "diagnostics. Both fold into `list_keys`. |"),
+    "n2_recording": (BETA, "| ~~`graph_set_recording`~~ (SDK method) | 1 | **Discarded "
+                           "as an SDK method, KEPT as an MCP tool.** It is a per-field "
+                           "setter, the same shape as `set_memory_graph_name`/"
+                           "`set_memory_graph_backend`, which were deleted so that fields "
+                           "go on create plus one partial update. The override therefore "
+                           "folds into **`update_memory_graph`** (row 30) — while the "
+                           "**MCP tool** `graph_set_recording` survives, because it is an "
+                           "agent's only in-MCP recovery from the capture 409. |"),
+    "n2_count": (BETA, "`list_memory_graphs` answers \"how many\" for any real N."),
     "maintenance": (BETA, "| `trash_graphs`, `migrate_orgs_to_registry`, "
                           "`cleanup_expired_invitations`, "
-                          "`sweep_invite_ghost_memberships` | 4 | **Our maintenance.**",
-                    frozenset({"trash_graphs", "migrate_orgs_to_registry",
-                               "cleanup_expired_invitations",
-                               "sweep_invite_ghost_memberships"})),
-    "n3_members": (BETA, "| 37 | `add_member` | Grant a person access to the account |",
-                   frozenset()),
+                          "`sweep_invite_ghost_memberships` | 4 | **Our maintenance.**"),
+    "n3_members": (BETA, "| 37 | `add_member` | Grant a person access to the account |"),
     "n4_keys": (BETA, "| 34 | `create_key` | Mint a credential scoped to one memory "
-                      "graph.", frozenset()),
+                      "graph."),
     "n5_invite": (BETA, "| `invitation_*` (6) | 6 | The invite **UX** belongs to the "
-                        "console, where a human clicks it. |", frozenset()),
-    "n6_signup": (BETA, "| `signup_token_*` (3) | 3 | Operator-side agent self-signup",
-                  frozenset()),
+                        "console, where a human clicks it. |"),
+    "n6_signup": (BETA, "| `signup_token_*` (3) | 3 | Operator-side agent self-signup"),
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -444,25 +390,24 @@ TENSIONS: list[tuple[str, str, str]] = [
     ("test_guard", "`graph_overview`", "t_r6"),
     ("graph_set_recording", "kept, inside the control-plane block", "t_n2"),
 ]
-TENSION_CITES: dict[str, tuple[str, str, frozenset[str]]] = {
+TENSION_CITES: dict[str, tuple[str, str]] = {
     "t_r3": (CANON, "| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, "
                     "`recall_subgraph`, `retrieval_legs`, `volunteer_context`, "
                     "`session_context`, `get_confidence`, `calibrate_summary`, "
                     "`calibration_passed`, `get_provenance_chain`, `provenance`, "
-                    "`belief_timeline`, `restore_point_at` |", frozenset()),
+                    "`belief_timeline`, `restore_point_at` |"),
     "t_r5": (CANON, "| R5 | `explore_connections` | #5 | `expand_relationships`, "
-                    "`traverse`, `get_owned_entities`, `get_org_structure` |",
-             frozenset()),
+                    "`traverse`, `get_owned_entities`, `get_org_structure` |"),
     "t_r6": (CANON, "| R6 | `graph_overview` | #6 | `status`, `taxonomy`, "
                     "`list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, "
                     "`list_relations`, `list_topics`, `list_graphs`, `stale_points`, "
                     "`summarize_structure`, `check_structure`, `audit`, "
                     "`validate_domain`, `dream_health_check`, `dream_health_state`, "
-                    "`test_guard` |", frozenset()),
+                    "`test_guard` |"),
     "t_n2": (CANON, "| N2 | `graph` | `graph_list`, `graph_count`, `graph_delete`, "
                     "`graph_restore`, `trash_graphs`, `graph_set_name`, "
                     "`graph_set_recording`, `graph_key_ids`, "
-                    "`graph_active_key_count` |", frozenset()),
+                    "`graph_active_key_count` |"),
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -481,16 +426,14 @@ PHANTOMS: list[tuple[str, str, str]] = [
     ("index_sources", "index_directory", "w4_rename"),
     ("withdraw_knowledge", "", "p_withdraw"),
 ]
-PHANTOM_CITES: dict[str, tuple[str, str, frozenset[str]]] = {
+PHANTOM_CITES: dict[str, tuple[str, str]] = {
     "p_graph_count": (BETA, "| `count_memory_graphs` | The plan is unlimited on builder "
                             "plans, so its stated purpose — checking an allowance — "
                             "does not exist. `list_memory_graphs` answers \"how many\" "
-                            "for any real N. |", frozenset()),
+                            "for any real N. |"),
     "p_set_name": (BETA, "| `set_memory_graph_name`, `set_memory_graph_backend`, "
-                         "`count_memory_graphs` | 3 | See \"Provisioning\" above. |",
-                   frozenset()),
-    "p_withdraw": (BETA, "| `withdraw_knowledge` | 1 | **Never existed**",
-                   frozenset()),
+                         "`count_memory_graphs` | 3 | See \"Provisioning\" above. |"),
+    "p_withdraw": (BETA, "| `withdraw_knowledge` | 1 | **Never existed**"),
 }
 
 
@@ -570,6 +513,18 @@ def _groups(canon_text: str) -> dict[str, list[str]]:
     return out
 
 
+def _names(quote: str, method: str) -> bool:
+    """Does `quote` NAME `method` as a whole token?
+
+    The Basis legend defines `stated` as "the cited quote names this method", so this
+    is the only thing that may decide it. A plain substring test is wrong: `delete` is
+    a substring of `delete_entity`, so a quote naming the latter would mark the former
+    `stated`. The boundary is the same character class as the method names themselves.
+    """
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(method)}(?![A-Za-z0-9_])",
+                     quote) is not None
+
+
 def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
     """One migration row per public method, with a computed `basis`."""
     group_of: dict[str, str] = {}
@@ -591,8 +546,8 @@ def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
             quote = ""
             doc = ""
         else:
-            doc, quote, named = CITES[key]
-            basis = "stated" if name in named else "derived"
+            doc, quote = CITES[key]
+            basis = "stated" if _names(quote, name) else "derived"
         rows.append({
             "name": name,
             "line": methods[name],
@@ -659,7 +614,7 @@ def _validate(methods: dict[str, int], groups: dict[str, list[str]],
             errs.append(f"UNRECOGNISED destination for {m}: {target!r}")
 
     # 4. A citation is only real if the doc still says it.
-    for key, (doc, quote, _named) in cites.items():
+    for key, (doc, quote) in cites.items():
         if not quote.strip():
             errs.append(f"EMPTY CITATION: {key} carries no quote — an empty string is a "
                         f"substring of every document, so the citation check passes while "
@@ -832,7 +787,7 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         out += ["| Method | Part A carries | The other doc implies | Other doc's grouping |",
                 "|---|---|---|---|"]
         for method, other, key in findings["tensions"]:
-            doc, quote, _ = TENSION_CITES[key]
+            doc, quote = TENSION_CITES[key]
             out.append(f"| `{method}` | `{OVERRIDE[method][0]}` | {other} | "
                        f"`{doc}` — “{_cell(quote)}” |")
     else:
@@ -850,7 +805,7 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "|---|---|---|",
     ]
     for name, referent, key in findings["phantoms"]:
-        doc, quote, _ = PHANTOM_CITES.get(key) or CITES[key]
+        doc, quote = PHANTOM_CITES.get(key) or CITES[key]
         ref = f"`{referent}`" if referent else "**none**"
         out.append(f"| `{name}` | {ref} | `{doc}` — “{_cell(quote)}” |")
 
