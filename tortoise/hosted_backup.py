@@ -2207,7 +2207,8 @@ def count_data_nodes(db, graph_name: str) -> int:
     guard, drill verification — so re-baseline must too: a projection opened on
     the org graph MERGEs its ``point_fts_v2`` marker into that graph, and a raw
     ``MATCH (n)`` then reports 4 for a 3-point graph (the false-red that blocked
-    unrelated PRs). The watcher consumes the same ``node_count``, so excluding
+    unrelated PRs). The DATA_LOSS_CANDIDATE detector
+    (``backup_sweep._sweep_graph``) consumes the same ``node_count``, so excluding
     the marker is also what keeps a marker-only change from reading as data
     loss.
 
@@ -2222,7 +2223,7 @@ def count_data_nodes(db, graph_name: str) -> int:
     Cypher three-valued logic would otherwise drop it from the count. The
     equivalence holds for the scalar (string) ``key`` shape the schema writes;
     a LIST-valued key makes the Python predicate raise (its own pre-existing
-    defect) while this count treats it as data. The parity is pinned by
+    defect, #4525) while this count treats it as data. The parity is pinned by
     ``tests/test_dr_endpoints.py::TestDrRebaseline::test_count_data_nodes_matches_the_dump_node_set``.
 
     ⚠️ Above FalkorDB's ``RESULTSET_SIZE`` (default 10000) this is the
@@ -2415,6 +2416,7 @@ def _restore_into_temp_verify_swap(
     # failure chain). Best-effort — skipped when live is empty/missing.
     fork_slot: ForkSlotRecovery | None = None
     pre_g = None
+    pre_settled: list[bool] = []
     if live_nodes > 0:
         try:
             # #3845: a wedged module-fork slot refuses this copy too. The copy
@@ -2422,12 +2424,15 @@ def _restore_into_temp_verify_swap(
             # is what lets the swap below use a fork at all instead of the
             # fork-free fallback. #3813: a long server-side copy, so the copy
             # STEP runs over the restore's own read bound rather than an
-            # ordinary request's socket_timeout.
+            # ordinary request's socket_timeout. #4233: record an overrun here
+            # too, so an RTO breach caused by the pre-restore copy is
+            # attributable (it is the other half of the restore's copy budget).
             recovery = _graph_copy_or_diagnose(
                 live_g, pre_name, db=db, site="pre-restore safety copy",
                 copy=lambda: _graph_copy_with_restore_bound(
                     db, live_name, pre_name,
                     role="Pre-restore safety copy", intact_name=live_name,
+                    settled=pre_settled,
                 ),
             )
             if recovery is not None:
@@ -2560,11 +2565,12 @@ def _restore_into_temp_verify_swap(
         "restored": counts,
         "restored_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }
-    if swap_settled:
-        # #4233: the swap's GRAPH.COPY outlived the restore's read bound and
-        # was proven complete by its outcome. Reported distinctly (the #3845
-        # `fork_slot` precedent) so a drill that breaches the RTO because of
-        # it is attributable, not just visible as a longer duration.
+    if pre_settled or swap_settled:
+        # #4233: a GRAPH.COPY outlived the restore's read bound and was proven
+        # complete by its outcome — either the pre-restore safety copy or the
+        # swap. Reported distinctly (the #3845 `fork_slot` precedent) so a
+        # drill that breaches the RTO because of it is attributable, not just
+        # visible as a longer duration. The WARNING log names which copy.
         result["copy_read_bound_overrun"] = True
     if fork_slot is not None:
         # #3845: report the wedge DISTINCTLY from a slow copy, and what was

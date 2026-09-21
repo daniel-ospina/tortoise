@@ -1661,6 +1661,48 @@ class TestDrDrillScheduled:
         assert _has_open(fake.calls, ha_mod._DRILL_FAILED_KIND)
         assert not _has_resolve(fake.calls, ha_mod._DRILL_FAILED_KIND)
 
+    def test_rto_breach_incident_names_the_copy_overrun(self, client, dr_env,
+                                                        mem_storage,
+                                                        monkeypatch):
+        """#4233 — an RTO breach caused by an overrun copy NAMES it in the
+        incident payload, not only in the drill record.
+
+        The unattended scheduled drill alerts from the incident; a flag that
+        never reaches it leaves the breach unattributed for the operator who
+        only sees alerts.
+
+        RED (mutation): drop the ``copy_read_bound_overrun`` entry from the
+        RTO-breach incident payload — this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "2")
+        monkeypatch.setattr(ha_mod, "_DRILL_RTO_S", 0.0)  # any duration breaches
+
+        def copy_then_timeout(redis_client, src_name, dst_name):
+            from falkordb import Graph
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", copy_then_timeout)
+        fake = _FakeAlerts()
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+        _seed_team("team_x", nodes=1)
+        _default_drill_key(client, mem_storage)
+        r = client.post("/v1/internal/backups/drill-scheduled",
+                        headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "drill_ok" and body["within_rto"] is False
+        opened = [c for c in fake.calls
+                  if c[0] == "open" and c[1] == ha_mod._DRILL_FAILED_KIND]
+        assert opened, fake.calls
+        assert opened[-1][3].get("copy_read_bound_overrun") is True, opened[-1]
+
     def test_respects_shared_cooldown(self, client, dr_env, mem_storage,
                                       monkeypatch):
         import time as _time
