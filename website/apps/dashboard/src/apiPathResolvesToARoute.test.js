@@ -148,6 +148,13 @@ function methodFor(src, index, kind) {
           // `{ ['me' + 'thod']: … }`. It MIGHT be `method`, so fail closed rather than
           // assume GET: the alternative is exactly the silent false pass above.
           result = '?'
+        } else if (/^[^\s:,\n]*\\u/i.test(rest)) {
+          // F4: a `\u` escape in a KEY at a key position. `{ meth\u006Fd: 'DELETE' }`
+          // IS `{ method: 'DELETE' }` to javascript, but this scan reads the key text
+          // verbatim, matched no known spelling, and left the default GET — so a DELETE
+          // call was certified by the GET route (a 405). A key this scan cannot decode is
+          // a key it cannot skip: fail closed with `?`.
+          result = '?'
         }
       }
     }
@@ -347,6 +354,77 @@ function fetchCallFirstArg(body) {
 }
 
 const squash = (s) => s.replace(/\s+/g, '')
+
+// The template literal handed to `new URL(…)` by `const <name> = new URL(…)`. The proxy
+// reconstructs the upstream path with one, and a SUBSTRING test on the file cannot tell a
+// doubled `/v1/` segment from a single one — so the template itself is what is read.
+function urlTemplateArg(src, name) {
+  const m = new RegExp('const\\s+' + escapeRe(name) + '\\s*=\\s*new URL\\(\\s*`([^`]*)`').exec(src)
+  return m ? m[1] : null
+}
+
+// A template literal split into its STATIC text and its `${…}` holes:
+// `${env.API_ORIGIN}/v1/${rest}` → statics ['', '/v1/', ''] and holes ['env.API_ORIGIN', 'rest'].
+function templateParts(tpl) {
+  const statics = []
+  const holes = []
+  let last = 0
+  for (let i = 0; i < tpl.length; i += 1) {
+    if (tpl[i] === '\\') { i += 1; continue }
+    if (tpl[i] === '$' && tpl[i + 1] === '{') {
+      statics.push(tpl.slice(last, i))
+      let j = i + 2
+      let depth = 1
+      while (j < tpl.length && depth > 0) {
+        if (tpl[j] === '{') depth += 1
+        else if (tpl[j] === '}') depth -= 1
+        j += 1
+      }
+      holes.push(tpl.slice(i + 2, j - 1))
+      last = j
+      i = j - 1
+    }
+  }
+  statics.push(tpl.slice(last))
+  return { statics, holes }
+}
+
+// The `method`-like keys at an object literal's OWN top level (depth 1), used to assert
+// that `api()` does not force a verb of its own: a `method` nested inside `headers` is not
+// the fetch's method, and a `...spread` carries none literally. A key containing a `\u`
+// escape is reported too — javascript resolves it, this scan does not.
+function topLevelMethodKeys(objText) {
+  const text = stripComments(objText)
+  const methodish = (raw) =>
+    /\\u/i.test(raw) || /^(?:method|['"]method['"]|\[\s*['"]method['"]\s*\])$/.test(raw)
+  const keys = []
+  let depth = 0
+  let inString = null
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (inString) {
+      if (ch === '\\') i += 1
+      else if (ch === inString) inString = null
+      continue
+    }
+    if (depth === 1) {
+      const prev = text.slice(0, i).replace(/\s+$/, '')
+      if (prev.endsWith('{') || prev.endsWith(',')) {
+        if (text.startsWith('...', i)) { i += 2; continue }
+        const m = /^(?:\[[^\]]*\]|'(?:\\.|[^'])*'|"(?:\\.|[^"])*"|[^:,\}\s]+)/.exec(text.slice(i))
+        if (m) {
+          if (methodish(m[0])) keys.push(m[0])
+          i += m[0].length - 1
+          continue
+        }
+      }
+    }
+    if (ch === "'" || ch === '"' || ch === '`') inString = ch
+    else if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
+  }
+  return keys
+}
 
 // A `fetch()` literal, classified. SCANNED is a path this origin would receive;
 // EXTERNAL is another origin's URL; COMPUTED is a `${API_BASE}` template whose path
@@ -565,7 +643,7 @@ function serverRoutes() {
   // A BACKSLASH continuation (`@app.get \` newline `("/v1/x")`) is valid python and was
   // invisible to BOTH this parser and the completeness count, so a real route read as
   // one the server had lost (#4345 cycle 7).
-  const re = /^[ \t]*@app\.(get|post|put|patch|delete|head|options)\s*(?:\\\s*)?\(\s*['"]([^'"]+)['"]/gm
+  const re = /^[ \t]*@app\.(get|post|put|patch|delete|head|options)\s*(?:\\\s*)?\(\s*['"]([^'"]+)['"]\s*(?=[,)])/gm
   let m
   while ((m = re.exec(src)) !== null) routes.push({ method: m[1].toUpperCase(), path: m[2] })
   for (const entry of apiRouteEntries(src).entries) routes.push(entry)
@@ -580,7 +658,7 @@ function serverRoutes() {
 // decorator nor a route path, and serves an entire subtree.
 function mountPrefixes(src = serverSource()) {
   const out = []
-  for (const m of src.matchAll(/^[ \t]*app\.mount\(\s*['"]([^'"]+)['"]/gm)) out.push(m[1])
+  for (const m of src.matchAll(/^[ \t]*app\.mount\(\s*['"]([^'"]+)['"]\s*(?=[,)])/gm)) out.push(m[1])
   return out
 }
 
@@ -590,7 +668,7 @@ function mountPrefixes(src = serverSource()) {
 // from a verb-decorated one (otherwise a correct tree fails the per-verb comparison).
 function apiRouteEntries(src = serverSource()) {
   const entries = []
-  const re = /^[ \t]*@app\.api_route\(\s*['"]([^'"]+)['"][\s\S]*?methods\s*=\s*\[([^\]]*)\]/gm
+  const re = /^[ \t]*@app\.api_route\(\s*['"]([^'"]+)['"]\s*,[\s\S]*?methods\s*=\s*\[([^\]]*)\]/gm
   let m
   while ((m = re.exec(src)) !== null) {
     for (const verb of m[2].matchAll(/['"]([A-Za-z]+)['"]/g)) {
@@ -610,6 +688,30 @@ function declaredDecoratorForms() {
     forms.set(m[1], (forms.get(m[1]) ?? 0) + 1)
   }
   return forms
+}
+
+// Decorators whose path argument is NOT a complete string literal. `serverRoutes()` reads a
+// path only when the decorator's first argument is a complete quoted literal; anything else
+// — a concatenation (`"/v1/" + "backups"`), an `f`/`r`/`b`-prefixed literal, a variable, or
+// a call — is a PARSE GAP, and must be reported as such, never as "the server lost a
+// route". The old regex matched the FIRST quoted fragment (`/v1/`), registered it as a live
+// route, and left the per-verb count balanced — so a functionally-correct tree with
+// `@app.get("/v1/" + "backups")` reddened with "no route serves GET /v1/backups" while a
+// client call to `/v1/` was itself certified.
+function unparsedRouteDecorators() {
+  const src = serverSource()
+  const out = []
+  for (const m of src.matchAll(/^[ \t]*@app\.([A-Za-z_]+)\s*(?:\\\s*)?\(/gm)) {
+    const form = m[1]
+    if (!ROUTE_VERBS.includes(form) || NON_ROUTE_DECORATORS.includes(form)) continue
+    const after = src.slice(m.index + m[0].length)
+    // A COMPLETE literal: the closing quote is followed only by whitespace and a separator
+    // — `,` (more arguments) or `)` (end of the decorator). Leading whitespace is skipped too,
+    // so a decorator whose arguments wrap onto the next line is read, not reported as a gap.
+    if (/^\s*['"][^'"]*['"]\s*(?:,|\))/.test(after)) continue
+    out.push(src.slice(m.index, m.index + 60).split('\n')[0])
+  }
+  return out
 }
 
 // The server source with the CONTENTS of triple-quoted strings blanked. Exposed so the
@@ -788,6 +890,17 @@ function pagesRouteExists(path) {
 test('the server-route matcher is not vacuous (it rejects what must not resolve)', () => {
   const routes = serverRoutes()
   assert.ok(routes.length > 50, `expected to read many routes from hosted_api.py, got ${routes.length}`)
+  // F5: every route decorator's path argument must be a COMPLETE string literal the parser
+  // can read. A concatenation, an `f`/`r`/`b`-prefixed literal, a variable, or a call is a
+  // PARSER gap — fail as one here, before any per-verb count can blame the server.
+  const parserGaps = unparsedRouteDecorators()
+  assert.deepEqual(
+    parserGaps,
+    [],
+    'serverRoutes() cannot read the path of these decorators (their first argument is not a '
+    + 'complete string literal — a concatenation, an f/r/b-prefixed literal, a variable, or a '
+    + `call), so this is a PARSER gap, not a missing route:\n  ${parserGaps.join('\n  ')}`,
+  )
   // The extraction must be COMPLETE — see the per-verb and unknown-form checks below.
   for (const form of ['add_api_route(', 'add_route(', 'add_websocket_route(', 'include_router(', 'APIRouter(']) {
     assert.equal(
@@ -936,12 +1049,66 @@ test('the server-route matcher is not vacuous (it rejects what must not resolve)
     '/v1/team/keys/${row?.id}',
     'a `?` inside a `${…}` hole truncated the path at the JS optional-chaining operator',
   )
+  // ── F4: an escaped method KEY ──────────────────────────────────────────────
+  // `{ meth\u006Fd: 'DELETE' }` IS `{ method: 'DELETE' }` to javascript. The reader matched
+  // only the literal spellings, found no method, and graded the call GET while it sent
+  // DELETE — a 405 on the GET route, silently certified. A key containing a `\u` escape is
+  // unreadable, not skippable.
+  assert.equal(
+    literalCallPaths('api(`/v1/sessions${q}`, { meth\\u006Fd: "DELETE", useSession: true })').paths[0].method,
+    '?',
+    'a `\\u`-escaped method key was skipped — javascript resolves `meth\\u006Fd` to `method`, '
+    + 'so grading it GET certifies a DELETE call against the GET route',
+  )
+  // …and the four honest spellings still read.
+  for (const [label, opts] of [
+    ['bare', '{ method: "DELETE" }'],
+    ['single-quoted', "{ 'method': 'DELETE' }"],
+    ['double-quoted', '{ "method": "DELETE" }'],
+    ['computed-literal', "{ ['method']: 'DELETE' }"],
+  ]) {
+    assert.equal(
+      literalCallPaths(`api('/v1/sessions', ${opts})`).paths[0].method,
+      'DELETE',
+      `the ${label} spelling of \`method\` stopped being read`,
+    )
+  }
+  // …and these object literals are still GET: a non-method option, a `method` VALUE, a
+  // `method:` inside a string VALUE, and a duplicate key whose LAST value wins.
+  assert.equal(
+    literalCallPaths("api('/v1/sessions', { useSession: true })").paths[0].method,
+    'GET',
+    'a non-method option was misread as a method',
+  )
+  assert.equal(
+    literalCallPaths("api('/v1/sessions', { x: method })").paths[0].method,
+    'GET',
+    'a `method` VALUE (not a KEY) was read as the request method',
+  )
+  assert.equal(
+    literalCallPaths(`api('/v1/sessions', { note: 'method: GET' })`).paths[0].method,
+    'GET',
+    'a `method:` inside a string VALUE was read as a key',
+  )
+  assert.equal(
+    literalCallPaths('api("/v1/sessions", { method: "DELETE", method: "GET" })').paths[0].method,
+    'GET',
+    'the LAST `method` key must win, as it does in javascript',
+  )
 })
 
 test('every literal call path resolves — client route AND upstream server route', () => {
   const routes = serverRoutes()
   const proxyRoute = existsSync(join(FUNCTIONS_DIR, 'api', 'v1', '[[path]].ts'))
   assert.ok(proxyRoute, 'the BFF proxy route functions/api/v1/[[path]].ts is missing')
+  // A route decorator the parser cannot read is a PARSER gap: fail here, with that message,
+  // before any finding below can misattribute it to the server as "no route serves …".
+  assert.deepEqual(
+    unparsedRouteDecorators(),
+    [],
+    'serverRoutes() cannot read a route decorator (its first argument is not a complete string '
+    + 'literal); fix the parser before trusting any route finding below',
+  )
 
   const bad = []
   let total = 0
@@ -1126,6 +1293,82 @@ test('the prefix this guard models matches the client constant and the proxy rou
     /\/v1\/\$\{/.test(proxy) && proxy.includes('API_ORIGIN'),
     'the proxy route must rebuild the upstream path under /v1/ from API_ORIGIN — the guard '
     + 'server-checks the path the proxy forwards, so that prefix is load-bearing',
+  )
+  // F1: a SUBSTRING check is not a RECONSTRUCTION check. Mutating the rebuild to
+  // `${API_ORIGIN}/v1/v1/${rest}` keeps `/v1/${` and `API_ORIGIN` present while every proxied
+  // call 404s upstream. Read the template actually handed to `new URL(…)` and require exactly
+  // [API_ORIGIN] + '/v1/' + [the wildcard remainder] — one `/v1/` segment, no more.
+  const upstreamTpl = urlTemplateArg(proxy, 'upstream')
+  assert.ok(
+    upstreamTpl !== null,
+    'the proxy must build its upstream URL as `const upstream = new URL(`…`)` — the guard models '
+    + 'that reconstruction',
+  )
+  const upParts = templateParts(upstreamTpl)
+  assert.deepEqual(
+    upParts.holes.map((h) => h.trim()),
+    ['env.API_ORIGIN', 'rest'],
+    `the proxy's upstream URL must be built from env.API_ORIGIN and the wildcard remainder; got `
+    + `holes ${JSON.stringify(upParts.holes)}`,
+  )
+  assert.deepEqual(
+    upParts.statics,
+    ['', '/v1/', ''],
+    `the proxy must insert exactly one '/v1/' segment when rebuilding the upstream URL — it inserts `
+    + `${JSON.stringify(upParts.statics[1] ?? '')}, so the upstream path is not the /v1/… path this `
+    + 'guard server-checks',
+  )
+  // …and its OWN prefix check must be against the same single `/v1/`, or a doubled segment
+  // passes the very check the file applies to it.
+  const baseTpl = urlTemplateArg(proxy, 'upstreamBase')
+  assert.ok(
+    baseTpl !== null,
+    'the proxy must derive its prefix check from `const upstreamBase = new URL(`…`)` — the guard '
+    + 'models that check',
+  )
+  assert.deepEqual(
+    templateParts(baseTpl).statics,
+    ['', '/v1/'],
+    `the proxy's /v1/ prefix check must use exactly one '/v1/' segment; it uses `
+    + `${JSON.stringify(templateParts(baseTpl).statics[1] ?? '')}`,
+  )
+  assert.match(
+    squash(proxy),
+    /!?upstream\.pathname\.startsWith\(upstreamBase\.pathname\)/,
+    'the proxy must actually TEST the constructed path against the /v1/ prefix base — the guard '
+    + 'certifies the path the proxy forwards only if the proxy enforces that prefix',
+  )
+  // F2: the fetch ARGUMENT is only half the request path. `path = '/zzz' + path` before the
+  // fetch keeps the `${API_BASE}${path}` template byte-identical while every api() request
+  // becomes `/api/zzz/…`. The helper must not reassign its `path` parameter.
+  const pathAssign = /(^|[^.\w$])path\s*(?:\+\+|--|\?\?=|&&=|\|\|=|[-+*/%]=|=(?![=>]))/.exec(
+    stripComments(apiBody.body),
+  )
+  assert.equal(
+    pathAssign,
+    null,
+    `api() reassigns its \`path\` parameter (\`${pathAssign?.[0]?.trim()}\`) — the fetch argument `
+    + 'stays `${API_BASE}${path}` while the VALUE of `path` is no longer the caller\'s, so every '
+    + 'api() request is silently re-pointed while this guard stays green',
+  )
+  // F3: the helper must not force a verb. Mutating the fetch options to
+  // `{ ...opts, method: 'DELETE', headers }` keeps the call-site `method` scan green (it reads
+  // the CALLER's options) while every request is sent DELETE — GET-routed call sites then 405.
+  const apiArgsRest = apiFetch.args.slice(firstTopLevelSegment(apiFetch.args).length).replace(/^\s*,\s*/, '')
+  const apiOptsText = firstTopLevelSegment(apiArgsRest).trim()
+  assert.match(
+    squash(apiOptsText),
+    /\.\.\.opts\b/,
+    `api() must build its fetch options from the caller's opts (a \`...opts\` spread); got `
+    + `\`${apiOptsText}\``,
+  )
+  const helperMethodKeys = topLevelMethodKeys(apiOptsText)
+  assert.deepEqual(
+    helperMethodKeys,
+    [],
+    `api() must not add or override a \`method\` key of its own (found ${JSON.stringify(helperMethodKeys)}) — `
+    + "the caller's opts carry the verb, and the call-site scan reads only the caller's options, so a "
+    + 'helper-forced verb is invisible to it',
   )
 })
 
