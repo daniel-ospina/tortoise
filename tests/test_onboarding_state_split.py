@@ -890,9 +890,11 @@ class TestPatchRouting:
             tc.__exit__(None, None, None)
 
     def test_catalog_presented_false_is_noop(self):
-        """False must NOT mark the catalog-presented step edge (only True
-        does) — a non-None-but-False value flipping the build gate was the
-        review-found bug this pins."""
+        """False must NOT mark the catalog-presented step edge (only True does).
+        No gate claim here: since #3913 `_GATE_BUILD` is
+        `{harness-connected, first-points-filed}`, so nothing written under
+        this id can complete any fork — the write still has to be correct; it
+        is simply no longer load-bearing for completion."""
         tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",

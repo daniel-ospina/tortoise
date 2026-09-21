@@ -62,7 +62,7 @@
 3. **Step:** assert anchors never Object/Statement → **Acceptance:** exactly 2 Subject nodes; 0 Object/Statement with the anchor names → **Test:** TestSeedOntology::test_never_object_or_statement
 
 ### Journey: Build + compact forks
-1. **Step:** fork=build → seed both + catalog-presented checkpoint → **Acceptance:** complete WITHOUT decide → **Test:** TestSeedEndpoint::test_build_fork_defers_decide_to_catalog
+1. **Step:** fork=build → seed both + catalog-presented checkpoint → **Acceptance:** complete WITHOUT decide → **Test:** `TestSeedJourney::test_build_fork_completes_on_the_seed_plus_connected` (renamed by #3913's gate change — the test now asserts completion on the two observed acts rather than deferral to a catalog; the former name `TestSeedEndpoint::test_build_fork_defers_decide_to_catalog` no longer exists).
 2. **Step:** compact org → seed (org anchor) → **Acceptance:** seed-lite completes on first-points-filed + connected; person not required → **Test:** TestSeedEndpoint::test_compact_seed_lite
 
 ### Failure Modes

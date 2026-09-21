@@ -254,7 +254,9 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 route.fulfill(status=409, content_type="application/json",
                               body=json.dumps({"detail": "Sub-team already created"}))
                 return
-            # #1997 (W1): fork set-once + catalog-presented checkpoint writes.
+            # #1997 (W1), revised by #3913: the fork checkpoint is the ONLY
+            # client write — `catalog-presented` must never appear here (the
+            # assertions below pin exactly that).
             if path.endswith("/v1/onboarding/state/checkpoint") and method == "POST":
                 body = json.loads(route.request.post_data or "{}")
                 cap["checkpoint"].append(body)
