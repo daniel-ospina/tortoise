@@ -17,12 +17,15 @@ doc_status: live
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 > - §5: **"claim"** is declared as the sanctioned user-facing **gloss** for a logic-layer
 >   Point (the asserted belief — extraction emits `pointKind: statement`; the legacy write
->   kinds remain valid Point kinds). It is **not a distinct kind**: no `claim` type, no
->   `claim` pointKind, and never a node write value; word-carrying identifiers (the EP slot
+>   kinds remain valid Point kinds). It is **not a distinct kind**: no `claim` type and no
+>   `claim` pointKind, and no canonical node write value — the SDK's kind vocabulary is
+>   deliberately open (an unrecognized kind is accepted with a warning), so this states the
+>   vocabulary rule, not an enforced write rejection; word-carrying identifiers (the EP slot
 >   `claim_id`, the pack-manifest `storeAs: claim` bucket) are untouched. The canonical
 >   machine vocabulary is unchanged (Point / `statement`) — the declaration makes the
 >   document's belief-node usages of the noun resolve against a declared term instead of an
->   accretion. **No rename** (decision option A): the 775 code identifiers,
+>   accretion. **No rename** (decision option A): the ~775 `claim`/`claims` occurrences in
+>   `tortoise/**/*.py` (measured 2026-09-20; identifiers and prose alike),
 >   `tortoise/weights.py`'s single-source docstring and the shipped skill keep the word.
 >
 > **Changelog v3.13 (2026-09-18, issue #3980 — the `valid_from` kwarg precondition):**
@@ -716,10 +719,11 @@ decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY 
 > correct in canonical prose too, and the machine vocabulary is unchanged
 > (Point / `statement`).
 > **It is not a distinct kind:** there is no `claim` type and no `claim` pointKind, and
-> "claim" is never a node write value (no type, kind, edge, or property on the entity model
-> is named `claim`). Word-carrying identifiers are untouched — the EP slot `claim_id` (§3)
-> and the pack-manifest `storeAs: claim` stream bucket are not node kinds; the bucket is a
-> manifest label.
+> `claim` is never a **canonical** node write value — the SDK's kind vocabulary is
+> deliberately open (an unrecognized kind is accepted with a warning), so this is a
+> vocabulary rule, not an enforced write rejection. Word-carrying identifiers are untouched —
+> the EP slot `claim_id` (§3) and the pack-manifest `storeAs: claim` stream bucket are not
+> node kinds; the bucket is a manifest label.
 
 ### Object Kind Vocabulary (core)
 
