@@ -357,7 +357,7 @@ at the tool layer:
 > list above.** The labels `R1–R9`, `W1–W17`, `N1–N6` are reused here for different groups: above,
 > `W2` is `write_knowledge`; here, `W2` is `create_source`/`complete_source`. This table also uses
 > `W18`, `W19` and `N7`, which exist nowhere in the target list. **Cross-reference by method name,
-> never by label.** Reconciling the two schemes is part of Phase 0.3, which owns the per-name map.
+> never by label.** Reconciling the two schemes is part of Phase 0.3b, which owns the per-name SDK map.
 
 Every method outside the **consensus core** needs a justification strong enough to survive
 review. The core, measured across 13 competitors, is only **six capability buckets** —

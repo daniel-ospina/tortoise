@@ -90,7 +90,7 @@ person managing their own account).
 
 > **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the
 > current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`). The MCP column names the *target* tool. None of the 25 exists verbatim — every registered MCP tool carries a `tortoise_` prefix — and only 3 (`create_entity`, `get_entity`, `approve_merge`) have a prefixed equivalent. So it is **25 of 25 by name**, or **22 of 25** if you normalise the prefix.
-> The old→new mapping is a **Phase 0.3 deliverable and does not exist yet** — do not look for it.
+> The old→new mapping is a **Phase 0.3b deliverable and does not exist yet** — do not look for it.
 Until it lands, the only per-tool mapping is `docs/product/bridge-table.md`, which maps every
 *current* tool to its destination but does not name the target's replacing name.
 

@@ -99,11 +99,11 @@ The ledger of the departing names — grouped, with the rationale for each group
 
 **Exactly four target names are reused verbatim from the current SDK:** `create_entity`,
 `get_entity`, `approve_merge` and `close`. Everything else on the 40 is a new name, a renamed
-name, or a merge — which is why the per-name old→new mapping matters and is a **Phase 0.3
+name, or a merge — which is why the per-name old→new mapping matters and is a **Phase 0.3b
 deliverable that does not exist yet**. (`list_sources` is *not* one of the four: it is a current
 name that folds into the target `list_knowledge(kind='source')`, so the question it asks survives
 but the name does not.) The ledger is written per group, not per name — a group-level ledger is the
-honest form, and the per-name completeness check is deferred to Phase 0.3.
+honest form, and the per-name completeness check is deferred to Phase 0.3b.
 
 **40 rows**, of which the table's rows 1–2 are the `Tortoise(...)` constructor and
 `close()`.
@@ -120,6 +120,29 @@ beta surface adds four, drops three and splits one:
 
 23 + 4 − 3 + 1 = **25**. ✓
 
+## ⛔ Cross-artifact tensions — do not let the target silently close an owner-open item
+
+`docs/product/canonical-mcp-tools.md` is **owner-approved and merged**, and it carries four items left **open**, three marked literally
+**"OPEN — owner decision"** and `run_onboarding` marked **"OPEN — decision"**. The beta target has already made a call on all four. **A draft
+making a call does not resolve an owner-open item**, and no lane may treat it as resolved merely
+because the bridge table renders a destination. Each needs the owner, or an explicit statement that
+the beta supersedes it.
+
+| Owner-open item (in the approved doc) | What the beta target does | Status |
+|---|---|---|
+| `graph_set_recording` — *keep it as a 24th tool, or accept the loss?* Dropping it leaves an agent that hits a 409 with **no recovery path inside MCP** (REST is unreachable from an MCP client). | Maps it to `REMOVED`; the count stays 25. | **Unresolved — and this one has a session-count consequence.** |
+| `packs_list` — *does a tenant need to list its own packs?* Folding it into an operator-only tool **removes a tenant-visible read**. | Absorbed under the tenancy block, which is not on the MCP. | **Unresolved.** |
+| `pack_install` — same question for a **write** (`hosted_only`, `http_policy=True`). | Absorbed under the tenancy block. | **Unresolved.** |
+| `run_onboarding` — it absorbs two read-only tenant-served tools, so it is both read and write on a customer-grantable surface, which the read/write principle forbids. | Dropped for `check_connection`. | **Unresolved.** |
+
+Also on the approved doc's plate: **`manage_deployment` was marked "placement OPEN"**, and the beta
+resolves it by moving the whole block to a tenancy surface that is not on the MCP.
+
+**None of this blocks the docs.** It blocks Phase 1.2 (cutting the surface manifest) and Phase 3.2
+(removing anything): until these five are answered, the target is a **proposal**, and the frozen
+registry is what exists. File them as questions to the owner — with the consequence of each already
+stated above, which is the form they are already in.
+
 ## Implementation plan
 
 Phases are ordered so nothing is written twice. **The SDK is frozen while the MCP list is
@@ -130,9 +153,10 @@ handler twice.
 
 | | Deliverable | Why |
 |---|---|---|
-| **0.1** | **The bridge table.** Every MCP `type=` / `mode=` / `section=` discriminator → the exact SDK method and argument it resolves to. | The merged tools dispatch internally. Until that mapping is written down, nobody knows whether the 23 names can be implemented on the frozen SDK — or whether a `type=` value has no SDK method to call. **This is the check that prevents a rewrite.** |
+| **0.1** | **The bridge table.** Every MCP `type=` / `mode=` / `section=` discriminator → the exact SDK method and argument it resolves to. | The merged tools dispatch internally. Until that mapping is written down, nobody knows whether the 25 names can be implemented on the frozen SDK — or whether a `type=` value has no SDK method to call. **This is the check that prevents a rewrite.** |
 | **0.2** | **Name the target.** A short note in both canonical docs stating that **every name is a target, not a description of today.** | The review found the MCP column reads as present tense. A developer following it today calls tools that do not exist. |
 | **0.3** | **The MCP rename table.** old name → new name, per tool. | **None of the 25 is live verbatim** — every registered MCP tool carries a `tortoise_` prefix, and only 3 (create_entity, get_entity, approve_merge) have a prefixed equivalent. Without this, implementation silently renames the whole MCP surface with no migration note. |
+| **0.3b** | **The SDK rename table.** old name → new name, per method — the SDK pair to 0.3. This exists because 0.3 is the *MCP* table; the SDK half would otherwise have had no owner. `beta-sdk-surface.md` and the SDK reconciliation above both delegate their per-name check here. | 0.1 |
 | **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of 150. The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
 
 ### Phase 1 — the declaration and the gate
