@@ -1,8 +1,9 @@
 """#1997 (W1) onboarding wizard e2e (RUN_DASHBOARD_E2E opt-in, two-origin harness).
 
 Journey coverage: the 4 HUMAN wizard steps (org-create →
-fork card → connect-consent → done), the fork checkpoint (self + build /
-catalog-presented), the connect step's key affordances, and the re-entry card.
+fork card → connect-consent → done), the fork checkpoint (self + build;
+the build pick records NO catalog-presented step — #3913), the connect step's
+key affordances, and the re-entry card.
 The done step exits WITHOUT patching onboarding_complete (accept-and-drop).
 
 #2710 / #2711 / #2755 / #2756 (2026-09-09 connect-step fixes) brought this spec
@@ -1066,14 +1067,13 @@ def test_3218_key_row_states_the_visibility_window(page: Page) -> None:
         "exactly ONE visibility note may render (not one per key surface)"
 
 
-def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
-    """#1997 (W1, review P1 regression): picking the BUILD fork on the fork
-    card must mark catalog-presented via the checkpoint (the render-time
-    effect cannot observe the fresh pick — React batches the fork-chosen +
-    advance states — so the handler fires it directly). #3913: the
-    catalog-presented mark is now an OPTIONAL record — the build-fork gate is
-    the two observed acts (harness-connected + first-points-filed), never a
-    catalog render — but the handler write is retained and still asserted.
+def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) -> None:
+    """#3913 (owner ruling 2026-09-20): picking the BUILD fork records the fork
+    and NO checkpoint step. The build-fork gate is the two acts the server
+    OBSERVES — harness-connected + first-points-filed — so the dashboard must
+    not write `catalog-presented` (the render-time effect is gone and the pick
+    handler's optional mark is gone with it). This is the runtime half of that
+    removal: the ONLY client checkpoint on the journey is the set-once fork.
     #2323: the org-holding journey never mints a second org.
 
     The catalog pin is deliberately two-sided (#2763): the fork card renders the
@@ -1113,11 +1113,44 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
                 message="the registry catalog fetch (exactly once)")
     assert cap["capabilities"] == 1, \
         f"#2004 (W8): the registry catalog must be fetched exactly once: {cap['capabilities']}"
-    assert any(c.get("fork") == "build" for c in cap["checkpoint"]), \
-        f"build fork not checkpointed: {cap['checkpoint']}"
-    assert any(c.get("step") == "catalog-presented" for c in cap["checkpoint"]), \
-        f"catalog-presented not marked: {cap['checkpoint']}"
+    # #3913: the fork is the ONLY checkpoint the dashboard writes. The old
+    # assertion here was the opposite — it required the catalog-presented mark;
+    # that write is deleted, so the meaningful pin is now its ABSENCE, and the
+    # exact capture proves no OTHER step write was smuggled in beside the fork.
+    assert cap["checkpoint"] == [{"fork": "build"}], \
+        f"#3913: the build pick must record the fork and NO step: {cap['checkpoint']}"
+    assert [c for c in cap["checkpoint"] if c.get("step")] == [], \
+        f"#3913: no checkpoint step may be written by the dashboard: {cap['checkpoint']}"
+    # the PATCH surface is the other way a catalog mark could return.
+    assert [b for b in cap["state"] if b.get("catalog_presented")] == [], \
+        f"#3913: no PATCH may record catalog_presented: {cap['state']}"
     assert cap["org_create"] == [], f"#2323 violated: org_create fired: {cap['org_create']}"
+
+
+def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:
+    """#3913: a build-fork projection carrying the two OBSERVED acts
+    (harness-connected + first-points-filed) and NOT `catalog-presented` is the
+    state the dashboard reflects — the wizard reaches the connected done screen
+    with no catalog row and no catalog-presented carried anywhere. This is the
+    client-side half of the gate change; the server-side completion assertions
+    live in test_capabilities_endpoint.py / test_onboarding_auto_complete.py."""
+    _seed_cookie(page, "u-bld-2acts")
+    proj = {"org_id": "team_o", "fork": "build", "status": "active",
+            "onboarding_complete": False,
+            "completed_steps": ["team-named", "harness-connected", "first-points-filed"],
+            "session_recording": True}
+    # the pin: the completion evidence is EXACTLY the two acts, never a catalog.
+    assert "catalog-presented" not in proj["completed_steps"]
+    _wire(page, role="owner", onboarding_projection=proj)
+    _walk_to_fork(page)  # fork already chosen server-side → Continue is present
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
+    _advance_to_done(page)
+    expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
+    done = page.locator("div.done")
+    expect(done).to_contain_text("Connected", timeout=10_000)
+    assert "catalog" not in done.inner_text().lower(), \
+        "#3913: the build gate carries no catalog requirement into the done step"
 
 
 # ── #3428/#2937 (lane B3, review cycle 2 P2-2): runtime coverage for the ──

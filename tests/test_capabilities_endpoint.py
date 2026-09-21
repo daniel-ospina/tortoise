@@ -148,9 +148,26 @@ class TestBuildForkGate:
 
     def test_dashboard_patch_catalog_presented_marks_the_optional_edge(self, client):
         """The dashboard write surface (PATCH catalog_presented: true) still
-        MERGEs the SAME step edge — recording only, never a completion gate."""
+        MERGEs the SAME step edge — recording only, never a completion gate.
+        The org here is already completed by the two observed acts, so the
+        meaningful assertion is that the edge MERGED (the negative — the PATCH
+        alone on a fresh org — is test_catalog_presented_alone_never_completes)."""
         org_id, _ = self._build_fork_org(client)
         r = client.patch("/v1/onboarding/state", json={"catalog_presented": True})
         assert r.status_code == 200, r.text
         assert "catalog-presented" in _completed(org_id)
         assert r.json()["onboarding"]["status"] == "complete", r.text
+
+    def test_catalog_presented_alone_never_completes_a_build_org(self, client):
+        """#3913 endpoint-level negative: a FRESH build org that PATCHes
+        `catalog_presented: true` and nothing else stays ACTIVE — the catalog
+        id is an accepted record, never a gate input. (An assert of `complete`
+        after the two observed acts completed the org proves nothing.)"""
+        org_id, _ = _registered(client)
+        _checkpoint(client, fork="build")
+        r = client.patch("/v1/onboarding/state", json={"catalog_presented": True})
+        assert r.status_code == 200, r.text
+        assert r.json()["onboarding"]["status"] == "active", r.text
+        assert r.json()["onboarding"]["onboarding_complete"] is False, r.text
+        # the record WAS merged — it is simply not a completion input
+        assert "catalog-presented" in _completed(org_id)

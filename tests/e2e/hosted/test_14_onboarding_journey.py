@@ -125,14 +125,16 @@ def test_build_fork_completes_on_the_two_observed_acts(api):
     # #3913: ONE observed act is not enough (fail-closed)
     r = api.get("/v1/onboarding/state", headers=headers)
     assert r.json()["onboarding"]["status"] == "active"
+    # decide does NOT complete a build org — asserted while the org is still
+    # ACTIVE. (Asserting `complete` after first-points-filed completed it is a
+    # tautology: it proves nothing about the decide edge.)
+    r = _checkpoint(api, headers, {"step": "decide-completed"})
+    assert r.json()["onboarding"]["status"] == "active"
     # the second observed act completes the build fork
     r = _checkpoint(api, headers, {"step": "first-points-filed"})
     assert r.json()["onboarding"]["status"] == "complete"
     assert r.json()["onboarding"]["onboarding_complete"] is True
-    # decide does NOT change a build org
-    r = _checkpoint(api, headers, {"step": "decide-completed"})
-    assert r.json()["onboarding"]["status"] == "complete"
-    # catalog-presented stays an accepted, optional record
+    # catalog-presented stays an accepted, optional record on the complete org
     r = api.patch("/v1/onboarding/state", headers=headers,
                   data={"catalog_presented": True})
     assert r.status == 200, r.text()

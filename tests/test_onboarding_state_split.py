@@ -575,14 +575,16 @@ class TestCheckpoint:
             # #3913: ONE observed act is not enough (fail-closed)
             r0 = tc.get("/v1/onboarding/state")
             assert r0.json()["onboarding"]["status"] == "active"
+            # decide does NOT affect a build org — asserted while the org is
+            # still ACTIVE (a `complete` assert after first-points-filed
+            # completed it is a tautology).
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"step": "decide-completed"})
+            assert r.json()["onboarding"]["status"] == "active"
             # the second observed act completes it — no catalog needed
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "first-points-filed"})
             r = tc.get("/v1/onboarding/state")
-            assert r.json()["onboarding"]["status"] == "complete"
-            # decide does NOT affect a build org
-            r = tc.post("/v1/onboarding/state/checkpoint",
-                        json={"step": "decide-completed"})
             assert r.json()["onboarding"]["status"] == "complete"
             # catalog-presented stays accepted (optional record, never a gate)
             r2 = tc.patch("/v1/onboarding/state",

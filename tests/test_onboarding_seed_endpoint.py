@@ -325,13 +325,15 @@ class TestSeedJourney:
             tc.post("/v1/onboarding/state/checkpoint", json={"fork": "build"})
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
+            # decide never enters the build picture — asserted while the org is
+            # still ACTIVE (a `complete` assert after the seed completed it is a
+            # tautology that proves nothing about the decide edge).
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"step": "decide-completed"})
+            assert r.json()["onboarding"]["status"] == "active"
             res = _seed(tc, org_name="Acme", person_name="Alex")
             assert res["onboarding"]["status"] == "complete"
             assert res["next"] == "done"
-            # decide never enters the build picture
-            r = tc.post("/v1/onboarding/state/checkpoint",
-                        json={"step": "decide-completed"})
-            assert r.json()["onboarding"]["status"] == "complete"
             # catalog-presented is an accepted, optional record
             r2 = tc.post("/v1/onboarding/state/checkpoint",
                          json={"step": "catalog-presented"})

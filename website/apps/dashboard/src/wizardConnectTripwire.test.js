@@ -491,8 +491,8 @@ test('#3428: the connect-step advance no longer writes the harness-connected che
 // replacement scans EVERY non-test source module under src/, collapses literal
 // string concatenation first, and judges the serialized body by its VALUE (not
 // by deep-equality against the duplicated pair), so a whitespace reformat or a
-// behaviour-identical DRY dedupe of the two `catalog-presented` bodies stays
-// green while a split URL or a parameterized step does not.
+// behaviour-identical reformat of the fork body stays green while a split URL,
+// a parameterized step, or a reinstated catalog-presented write does not.
 function sourceModules() {
   const files = []
   const walk = (dir) => {
@@ -526,14 +526,14 @@ function normalizeBodyValue(v) {
   return v.replace(/['"`\s]/g, '')
 }
 
-test('#3428/#2937 / #3913: exactly the two known checkpoint call sites may exist, each with an allowlisted body', () => {
+test('#3428/#2937 / #3913: exactly ONE checkpoint call site may exist across src/ — the fork write', () => {
   // review cycle 7 (item 1-ii): the dist-level probe audits ONE serialized
   // literal, so a writer can be reinstated by moving the POST into a small
   // helper — the body becomes `{step:r}`, the exact probe never appears, and a
   // reviewer BUILT that mutation: 33/33 tripwire + 4/4 distBundle green with the
   // click-writer fully reinstated. This is the SOURCE-side backstop, hardened in
   // review cycle 8 (items 3 + 4): cross-file, concatenation-collapsed, and
-  // VALUE-based. MUTATIONS that fail here: a 4th site; a split URL
+  // VALUE-based. MUTATIONS that fail here: a 2nd site; a split URL
   // ('/v1/onboarding/' + 'state/checkpoint'); a step carried as a value
   // (['harness','connected'].join('-') or a `{ step: param }` object); a writer in
   // a sibling module; `JSON.stringify(checkpointBody(step))` (uninspectable).
@@ -544,16 +544,16 @@ test('#3428/#2937 / #3913: exactly the two known checkpoint call sites may exist
       sites.push({ file: mod.file, index: m.index, window: mod.src.slice(m.index, m.index + 400) })
     }
   }
-  assert.equal(sites.length, 2,
-    `exactly TWO /v1/onboarding/state/checkpoint call sites may exist across src/ — found ` +
+  assert.equal(sites.length, 1,
+    `exactly ONE /v1/onboarding/state/checkpoint call site may exist across src/ — found ` +
     `${sites.length} (${[...new Set(sites.map((s) => s.file.replace(`${here}/`, '')))].join(', ') || 'none'}). ` +
     // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
     // even when the count was LOWER than expected, describing the wrong failure.
-    // #3913 removed the render-time catalog-presented effect (the build gate no
-    // longer requires it), leaving the fork write + the optional handler mark.
-    (sites.length > 2
-      ? 'A 3rd means a checkpoint writer was re-introduced (the #3913 ruling removed the render effect)'
-      : 'Fewer than two means a legitimate checkpoint site is missing (or the src walk lost a module)'))
+    // #3913 removed the render-time catalog-presented effect AND the build-fork
+    // pick handler's mark, leaving the fork write alone.
+    (sites.length > 1
+      ? 'A 2nd means a checkpoint STEP writer was re-introduced — #3913 removed both the render effect and the build-fork pick mark'
+      : 'Zero means the fork write is missing (or the src walk lost a module)'))
   for (const site of sites) {
     const rel = site.file.replace(`${here}/`, '')
     assert.doesNotMatch(site.window, /harness-connected/,
@@ -583,22 +583,21 @@ test('#3428/#2937 / #3913: exactly the two known checkpoint call sites may exist
     value = collapseStringConcat(value)
     const norm = normalizeBodyValue(value)
     const step = norm.match(/step:([^,}]+)/)
-    if (step) {
-      assert.equal(step[1], 'catalog-presented',
-        `${rel}:${site.index} serializes a step other than catalog-presented (${norm}) — ` +
-        'the click-writer is back (#3428/#2937)')
-    } else {
-      assert.match(norm, /fork/,
-        `${rel}:${site.index} checkpoint body is neither a catalog-presented step nor the fork write`)
-      assert.doesNotMatch(norm, /harness-connected/,
-        `${rel}:${site.index} checkpoint body serializes harness-connected`)
-    }
+    assert.equal(step, null,
+      `${rel}:${site.index} serializes a checkpoint step (${norm}) — #3913 deleted every ` +
+      'client step writer; the only checkpoint left is the fork pick itself')
+    assert.match(norm, /fork/,
+      `${rel}:${site.index} checkpoint body is not the fork write`)
+    assert.doesNotMatch(norm, /harness-connected/,
+      `${rel}:${site.index} checkpoint body serializes harness-connected`)
   }
   // the fork site's `body` derivation, so re-pointing the variable at a
   // harness-connected step cannot hide behind the allowlisted `body` name
   const src = sourceModules().map((m) => m.src).join('\n')
   assert.match(src, /const body = forkId === 'unsure' \? \{ fork_unsure_at: true \} : \{ fork: forkId \}/,
     'the fork checkpoint body is the fork write, never a harness-connected step')
+  assert.doesNotMatch(src, /catalog-presented/,
+    'no src module may serialize a catalog-presented checkpoint — #3913 removed the dashboard writer')
 })
 
 test('#3428/#2937 (cycle 8 item 4, M4): completed_steps is never written client-side', () => {
