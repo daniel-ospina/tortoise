@@ -26,12 +26,15 @@ Two layers are tested here:
 2. the CALL SITES — a point write must not claim a decision, a decision write
    must (this is the layer that actually reds on the pre-fix code).
 
-19 of the 24 tests below red on the pre-fix code (verified against `origin/main`);
-the 5 that do not are regression/no-op guards
-(`test_cache_true_only_on_real_completion`, `test_decision_observed_is_keyword_only`,
-`test_failed_write_never_reaches_the_auto_complete`,
-`test_compact_org_completes_on_the_two_inferred_steps`,
-`test_grandfathered_node_write_preserves_the_mirror`).
+#3913 RED evidence (measured 2026-09-21 by running THIS file against the
+merge-base tree, where the build gate still required `catalog-presented`):
+exactly ONE test reds — `test_build_fork_completes_on_the_two_observed_acts`.
+`test_build_fork_fail_closed_when_an_observed_act_is_missing` and the #3784-era
+guards pass on both sides of the ruling. The census that previously stood here
+("19 of the 24 tests below red on the pre-fix code", verified against
+`origin/main`) does not reproduce at the merge base — 24 passed, 1 failed — so
+it is replaced by the measurement above and must not be read as this PR's
+evidence.
 """
 from __future__ import annotations
 

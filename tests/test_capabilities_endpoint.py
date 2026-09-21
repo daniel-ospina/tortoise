@@ -146,26 +146,30 @@ class TestBuildForkGate:
         assert replay["onboarding"]["status"] == "complete"
         assert "catalog-presented" in replay["noop_steps"]
 
-    def test_dashboard_patch_catalog_presented_marks_the_optional_edge(self, client):
-        """The dashboard write surface (PATCH catalog_presented: true) still
-        MERGEs the SAME step edge — recording only, never a completion gate.
-        The org here is already completed by the two observed acts, so the
-        meaningful assertion is that the edge MERGED (the negative — the PATCH
-        alone on a fresh org — is test_catalog_presented_alone_never_completes)."""
+    def test_patch_catalog_presented_marks_the_optional_edge(self, client):
+        """The PATCH surface (`catalog_presented: true`) still MERGEs the SAME
+        step edge — recording only, never a completion gate. The org here is
+        already completed by the two observed acts, so the meaningful assertion
+        is that the edge MERGED (the fail-closed arm — the PATCH alone on a
+        fresh build org — is
+        test_catalog_presented_alone_never_completes_a_build_org)."""
         org_id, _ = self._build_fork_org(client)
         r = client.patch("/v1/onboarding/state", json={"catalog_presented": True})
         assert r.status_code == 200, r.text
-        # The edge MERGE is the meaningful assertion here (the negative — the PATCH
-        # alone on a fresh build org — is test_catalog_presented_alone_never_completes).
+        # The edge MERGE is the meaningful assertion here (the fail-closed arm —
+        # the PATCH alone on a fresh build org — is
+        # test_catalog_presented_alone_never_completes_a_build_org).
         # No `status == "complete"` assert: this org was already completed by
         # `_build_fork_org`, so it would restate the fixture, not test the app.
         assert "catalog-presented" in _completed(org_id)
 
     def test_catalog_presented_alone_never_completes_a_build_org(self, client):
-        """#3913 endpoint-level negative: a FRESH build org that PATCHes
-        `catalog_presented: true` and nothing else stays ACTIVE — the catalog
-        id is an accepted record, never a gate input. (An assert of `complete`
-        after the two observed acts completed the org proves nothing.)"""
+        """Fail-closed guard (NOT a #3913 pin — it behaves the same on both
+        sides of the ruling): a FRESH build org that PATCHes
+        `catalog_presented: true` and nothing else stays ACTIVE. The catalog id
+        is an accepted record, never sufficient on its own. The test that
+        DISTINGUISHES the gate change is
+        test_build_fork_completes_on_the_two_observed_acts above."""
         org_id, _ = _registered(client)
         _checkpoint(client, fork="build")
         r = client.patch("/v1/onboarding/state", json={"catalog_presented": True})

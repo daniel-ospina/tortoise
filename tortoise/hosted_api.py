@@ -19306,9 +19306,9 @@ class OnboardingStatePatchRequest(BaseModel):
     # send is REJECTED loudly (403/422) instead of silently dropped — and
     # catalog-presented, the ONE step key a client may still PATCH (step-edge
     # MERGE — an optional record, never a completion requirement). Since #3913
-    # (owner ruling 2026-09-20) NO dashboard path sends it: the fork pick
-    # writes {fork} only, and the id stays accepted for agent/external callers
-    # and for existing orgs' completed_steps. All other FLOW keys are
+    # (owner ruling 2026-09-20) NO dashboard path sends it: the fork card writes
+    # only the fork (or its unsure marker), never a step, and the id stays
+    # accepted for agent/external callers and for existing orgs' completed_steps. All other FLOW keys are
     # server-owned / checkpoint-owned on this surface.
     catalog_presented: bool | None = None
     harness_connected: bool | None = None
