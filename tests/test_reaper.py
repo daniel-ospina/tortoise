@@ -4579,7 +4579,7 @@ def test_run_sweep_forwards_jobs_to_reap(monkeypatch):
 
     #4299: `_run_sweep` forwards `jobs` to discover() but called reap()
     WITHOUT it, so reap fell back to its own default (jobs=8) and the flag
-    that exists to parallelize the dominant cost silently did half its job.
+    that exists to parallelize the probe pool silently did half its job.
 
     Mutation: delete `jobs=jobs` from the reap() call in `_run_sweep` and
     this test fails.

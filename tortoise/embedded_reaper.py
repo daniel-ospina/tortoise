@@ -2661,8 +2661,9 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     skipped), so the suite-end sweep can never run past pytest-timeout no
     matter how large the discovered backlog is.
 
-    jobs>1 parallelizes the per-candidate CLIENT LIST probes (the dominant
-    cost at hundreds of leaked servers — issue #1005); kills stay serial
+    jobs>1 parallelizes the per-candidate CLIENT LIST probes (a
+    parallelizable cost at hundreds of leaked servers — issue #1005); kills
+    stay serial
     with pacing. sigterm_timeout threads into reap()/_kill(): the suite-end
     sweep (conftest) lowers it to 3.0 so a server ignoring SIGTERM gets
     SIGKILL quickly — the default 10s wait × many servers compounds past

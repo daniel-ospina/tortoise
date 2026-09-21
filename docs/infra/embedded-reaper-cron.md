@@ -132,10 +132,9 @@ rendered plist changes, which is why an upgrade off the old
   `REAPER_INTERVAL` is not greater than `REAPER_TIMEOUT`. The 120s default is
   too tight for a multi-hundred orphan backlog on a loaded box (observed abort
   mid-cleanup).
-  `--jobs` sets the parallel per-candidate CLIENT LIST probe pool; it is a
-  pool-size setting, not a claim that probing dominates wall time. Note the
-  measured reason a backlog did NOT drain is the orphan-confirmation signal
-  (`#4487` / `#4500`), not the budget.
+  `--jobs` sets the parallel per-candidate CLIENT LIST probe pool. The
+  condition under which a backlog drains is tracked separately (`#4487` /
+  `#4500`).
 - Singleton lock (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`) prevents cron/manual overlap.
 - Only **no-path tempdir orphans** are killed; path-based servers (stable
   singleton, CWD leaks) are NEVER touched (that's Child 2's migration job).

@@ -68,21 +68,16 @@ if [ -z "$PYTHON_BIN" ]; then
     echo "ERROR: no python3 found (set PYTHON_BIN)" >&2
     exit 1
 fi
-# #4299: this raises the sweep's ceiling (`--timeout`) and widens the probe
-# pool (`--jobs`). The measured reason the backlog did NOT drain on this host
-# is NOT the budget (a manual run at timeout 900 finished in ~4 min and acted
-# on 1): an INSTRUMENTED orphan is unconfirmable under `--only-safe` while any
-# suite is live (#4487), and an UNINSTRUMENTED spawn produced no owner record
-# at all (#4500). State the parameters only — do not restate a cause the
-# issues' own records refute (the #1224 re-staling lesson).
+# #4299: the sweep's ceiling (`--timeout`) and the probe pool (`--jobs`).
+# The condition under which a backlog drains is tracked separately
+# (#4487 / #4500); it is not asserted here.
 #   - `--timeout`: the SIGALRM sweep budget. `_ReaperLock` serializes sweeps,
 #     so the interval must EXCEED the budget or a fire is refused mid-sweep.
 #     `REAPER_INTERVAL` defaults to `REAPER_TIMEOUT + 300` and a warning is
 #     emitted when it is not greater.
-#   - `--jobs`: parallel CLIENT LIST probe workers. `_run_sweep` used to drop
+#   - `--jobs`: the parallel CLIENT LIST probe pool. `_run_sweep` used to drop
 #     the flag before `reap()`, so it reached discovery only; forwarding it is
-#     the #4438 fix. The pool size is a probe-pool setting, not a claim that
-#     probing dominates wall time.
+#     the #4438 fix.
 REAPER_TIMEOUT="${REAPER_TIMEOUT:-900}"
 REAPER_JOBS="${REAPER_JOBS:-16}"
 case "$REAPER_TIMEOUT" in
@@ -90,6 +85,15 @@ case "$REAPER_TIMEOUT" in
         echo "ERROR: REAPER_TIMEOUT must be a whole number of seconds, got '$REAPER_TIMEOUT'" >&2
         exit 2 ;;
 esac
+case "$REAPER_JOBS" in
+    ''|*[!0-9]*)
+        echo "ERROR: REAPER_JOBS must be a whole number, got '$REAPER_JOBS'" >&2
+        exit 2 ;;
+esac
+if [ "$REAPER_JOBS" -lt 1 ]; then
+    echo "ERROR: REAPER_JOBS must be >= 1, got '$REAPER_JOBS'" >&2
+    exit 2
+fi
 # #4438 review: derive the interval from the budget so the
 # "interval > budget" invariant holds by construction, and warn (never
 # silently) when a hand-set value violates it.

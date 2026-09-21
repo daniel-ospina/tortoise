@@ -1,3 +1,15 @@
+---
+title: "CWD-Leak Orphan Cleanup (issue #176)"
+type: engineering
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+created: 2026-08-23
+ownedBy: epistemic-team
+aboutSubjects: tortoise
+aboutObjects: tortoise-embedded-reaper
+---
+
 # CWD-Leak Orphan Cleanup (issue #176)
 
 Repeatable procedure for cleaning **path-based** redis-server orphans left by
