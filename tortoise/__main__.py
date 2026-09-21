@@ -2512,20 +2512,28 @@ def _cmd_install_hooks(args) -> int:
         rc = _install_read_hook(args)
         if uninstall and harness == "claude":
             # Claude is the one harness with a SECOND half: the capture seam
-            # (`session-start.sh` / `session-end.sh` + their
-            # SessionStart/SessionEnd entries). `--uninstall` is scoped to the
-            # read-hook registration and never deletes a project's capture
-            # scripts, so the run must SAY that instead of leaving a user to
-            # conclude "Uninstalled volunteer-turn.sh" meant the seam was
-            # gone while the capture registrations stayed live (#3808 R14).
+            # (every script in `CLAUDE_CAPTURE_HOOKS` + its registration).
+            # `--uninstall` is scoped to the read-hook registration and never
+            # deletes a project's capture scripts, so the run must SAY that
+            # instead of leaving a user to conclude "Uninstalled
+            # volunteer-turn.sh" meant the seam was gone while the capture
+            # registrations stayed live (#3808 R14).  The accounting is DERIVED
+            # from the declaration, not retyped: naming two of three scripts
+            # reads as complete while leaving the third's registration live and
+            # unmentioned (#3963).
             from pathlib import Path as _P
 
+            from tortoise.capture_install import CLAUDE_CAPTURE_HOOKS
+
             root = _P(getattr(args, "dir", "."))
+            scripts = " and ".join(f".claude/hooks/{name}"
+                                   for name, _, _ in CLAUDE_CAPTURE_HOOKS)
+            events = "/".join(sorted({event
+                                       for _, event, _ in CLAUDE_CAPTURE_HOOKS}))
             print(
                 "Note: `--uninstall` removes only the per-turn read hook "
                 "(volunteer-turn.sh). If the capture seam is installed it is "
-                "left in place — .claude/hooks/session-start.sh and "
-                "session-end.sh plus their SessionStart/SessionEnd entries in "
+                f"left in place — {scripts} plus their {events} entries in "
                 f"{root / '.claude' / 'settings.json'} are untouched. Delete "
                 "those to uninstall capture."
             )
@@ -3600,7 +3608,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         # Not attempted: already filed, inside its backoff window, or the entry
         # was discarded above. Distinguish them — "already filed" for a pending
         # retry is a lie to the operator (#3963 review).
-        if summary.discarded or written["discards"]:
+        if summary.lost or written["discards"]:
             return 1
         meta = read_spool_meta(root, session_id) or {}
         if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
@@ -3611,7 +3619,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         print(f"Spooled session: {session_id}")
         return 0
     if not outcome.ok:
-        if summary.discarded:
+        if summary.lost:
             return 1
         # TRANSIENT (network / 5xx / retryable 4xx): the capture is DURABLE in
         # the spool — report the deferral honestly and exit 0 (the data is not
