@@ -1801,13 +1801,17 @@ def test_fly_only_accepts_a_qualified_owner_repo_ref():
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def test_fly_only_without_a_resolvable_issue_ref_is_exit_2():
-    """The SAFEGUARD, first half: no ref → nothing to resolve → fail-closed.
+def test_fly_only_without_a_well_formed_issue_ref_is_exit_2():
+    """The SAFEGUARD, first half: no usable ref → nothing to name → fail-closed.
 
-    Every one of these is `unmanaged` in disguise: the declaration carries no
+    Every one of these is `unmanaged` in disguise: the declaration names no
     ruling, so it must not be accepted as one. Exit 2 (could-not-determine), not
     a pass — and not exit 1 either, because a manifest this checker cannot read
     is the same fail-closed class as a malformed `gh-secret` entry.
+
+    `#0` and the Arabic-Indic `#٦٦١` are here because the first cut used
+    `#\\d+`: `\\d` is Unicode-aware, so a non-ASCII numeral was accepted, and issue
+    numbers start at 1, so `#0` names nothing. Both exited 0 (#4523 review, T2).
     """
     for index, ref in enumerate(
         [
@@ -1818,6 +1822,15 @@ def test_fly_only_without_a_resolvable_issue_ref_is_exit_2():
             "fly-only:661",  # no # — not an issue reference
             "fly-only:owner/repo",  # qualified but no number
             "fly-only:owner/repo#",  # qualified, no number
+            "fly-only:#0",  # issue numbers start at 1 — names nothing
+            "fly-only:owner/repo#0",  # same, qualified
+            "fly-only:#٦٦١",  # non-ASCII digits are not an issue number
+            "fly-only:#-1",  # not a number
+            "fly-only:../..#661",  # `..` is not an owner/repo prefix
+            "fly-only:/repo#661",  # no owner
+            "fly-only:owner/#661",  # no repo
+            "fly-only:owner//repo#661",  # empty segment
+            "fly-only:owner/repo#661/extra",  # trailing path
         ]
     ):
         manifest = _fly_only_manifest(
@@ -1826,6 +1839,28 @@ def test_fly_only_without_a_resolvable_issue_ref_is_exit_2():
         r = _run(_secrets_file(_FLY_ONLY_SECRETS, f"fly-only-bad-{index}.json"), manifest=manifest)
         assert r.returncode == 2, f"ref={ref!r} -> {r.returncode}\n{r.stdout}{r.stderr}"
         assert "cannot determine secret provenance" in r.stderr, r.stderr
+
+
+def test_fly_only_on_a_fly_toml_env_key_is_stale():
+    """The exception is for a name whose value is NOWHERE in version control.
+
+    The fixture fly.toml assigns `ENV_ONLY_KEY` in `[env]`. Declaring that name
+    `fly-only:` would claim the value is deliberately out-of-band while the value
+    is committed — and the Fly secret shadows the committed one, which is exactly
+    the state the `fly-toml-env` route exists to reject. It must fail.
+    """
+    base = _MANIFEST.replace(
+        "ENV_ONLY_KEY          fly-toml-env\n",
+        "ENV_ONLY_KEY          fly-only:#661\n",
+    )
+    assert base != _MANIFEST
+    r = _run(
+        _secrets_file([*_ALL_DECLARED, "ENV_ONLY_KEY"], "fly-only-env-key.json"),
+        manifest=_fly_only_manifest("manifest-fly-only-env-key.txt", "", base),
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "STALE DECLARATION — 'ENV_ONLY_KEY'" in r.stdout, r.stdout
+    assert "assigned key in fly.toml's [env] table" in r.stdout, r.stdout
 
 
 def test_fly_only_on_a_name_the_deploy_assigns_is_stale():

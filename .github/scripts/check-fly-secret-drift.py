@@ -49,16 +49,25 @@ Sources (see the manifest header for the full rationale):
                          BOTH GitHub and ``fly.toml`` on purpose, with the named
                          issue carrying the recorded decision (an ``OVERRIDES:``
                          marker states what the ruling overrides). The ref must
-                         RESOLVE — ``#<N>`` (this repo) or ``<owner>/<repo>#<N>``.
-                         An empty or malformed ref is a manifest this checker
-                         cannot read: exit 2, never a pass — the exception is
-                         only meaningful because of the issue it names. This is
-                         what distinguishes it from ``unmanaged``: `unmanaged`
-                         means NO source was declared; `fly-only` means a source
-                         was deliberately REFUSED, and here is the ruling. A bare
-                         ``unmanaged`` entry still FAILS, and a ``fly-only`` name
-                         that is absent from Fly or that the deploy assigns also
-                         FAILS (the exception is for a live, real, unmanaged name).
+                         be a WELL-FORMED, non-zero issue number — ``#<N>`` (this
+                         repo) or ``<owner>/<repo>#<N>``. ``#0``, a non-ASCII
+                         digit, an empty ref, or trailing junk is a manifest this
+                         checker cannot read: exit 2, never a pass — the
+                         exception is only meaningful because of the issue it
+                         names. This is what distinguishes it from ``unmanaged``:
+                         `unmanaged` means NO source was declared; `fly-only`
+                         means a source was deliberately REFUSED, and here is the
+                         ruling. A bare ``unmanaged`` entry still FAILS, and a
+                         ``fly-only`` name that is absent from Fly, that the
+                         deploy assigns, or that is a ``fly.toml [env]`` key also
+                         FAILS (the exception is for a live, real, unmanaged
+                         name).
+                         ⚠️ SHAPE ONLY — the checker is hermetic and offline, so
+                         it verifies the ref is a well-formed issue number, NOT
+                         that the issue exists or carries the ruling: a
+                         well-formed ref to a nonexistent issue passes. The
+                         existence half is a reviewer's job, and the `OVERRIDES:`
+                         marker on the named issue is what makes it checkable.
 
 Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
   0 — every Fly secret is declared and every declaration is honoured
@@ -146,11 +155,22 @@ _ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=([^\s]*)")
 _COMMENT_RE = re.compile(r"(?:^|\s)#")
 # A `fly-only:<issue-ref>` argument — the issue that carries the recorded
 # decision allowing a deliberately out-of-band secret. `<#N>` (this repo) or
-# `<owner>/<repo>#<N>`. The number is REQUIRED: `fly-only:`, `fly-only:#`, and
-# `fly-only:#661abc` are all unreadable state (exit 2), because the category
-# exists only to point at a ruling — without a resolvable ref it is
-# indistinguishable from `unmanaged`, which FAILS.
-_FLY_ONLY_REF_RE = re.compile(r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d+$")
+# `<owner>/<repo>#<N>`. The number is REQUIRED and must be a well-formed,
+# NON-ZERO ASCII issue number:
+#   `fly-only:`, `fly-only:#`, `fly-only:#abc`, `fly-only:#661abc`, `fly-only:661`
+#   and a bare `owner/repo` are all unreadable state (exit 2);
+#   `#[1-9][0-9]*` rather than `#\d+` because `\d` matches UNICODE decimal
+#   digits — `#\u0666\u0666\u0661` (Arabic-Indic 661) is not an issue number and
+#   must not be accepted — and because issue numbers start at 1, so `#0`
+#   names no issue. Both were accepted before this was tightened (found in the
+#   #4523 review as a T2 fail-open).
+#   Each `owner`/`repo` part must START with an alphanumeric, so `..`, `-x` and
+#   `/repo` are not accepted as an owner/repo prefix (a `..` prefix that parsed
+#   as an owner would be a malformed ref that still exited 0).
+# The category exists only to point at a ruling — without a well-formed ref it
+# is indistinguishable from `unmanaged`, which FAILS.
+_FLY_ONLY_OWNER_REPO = r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*"
+_FLY_ONLY_REF_RE = re.compile(rf"^(?:{_FLY_ONLY_OWNER_REPO})?#[1-9][0-9]*$")
 # Substituted for `${{ secrets.X }}` when X is treated as present. The delimiters
 # are control characters that cannot occur in a GitHub/secret NAME, so a marker is
 # never a substring of another marker: `\x01SEC:FOO\x02` does NOT match inside
@@ -552,16 +572,15 @@ def read_manifest(path: Path) -> dict[str, str]:
             raise ValueError(f"{path.name}:{lineno}: gh-secret needs the GitHub secret name")
         if kind == "fly-only" and not _FLY_ONLY_REF_RE.match(argument or ""):
             # The SAFEGUARD: the category cannot be used as a second spelling of
-            # `unmanaged`. A ref that does not resolve to an issue number names
-            # no ruling, so the declaration carries no more information than
-            # `unmanaged` — which FAILS. Malformed is unreadable state (exit 2),
-            # never a pass.
+            # `unmanaged`. A ref that does not name an issue number carries no
+            # ruling, so the declaration is worth no more than `unmanaged` —
+            # which FAILS. Malformed is unreadable state (exit 2), never a pass.
+            # The regex excludes `#0` and non-ASCII digits; see `_FLY_ONLY_REF_RE`.
             raise ValueError(
-                f"{path.name}:{lineno}: fly-only needs a resolvable issue reference "
-                "('#<N>' or '<owner>/<repo>#<N>') naming the issue that carries the "
-                "recorded decision — got "
-                f"{source!r}. Without it the entry is `unmanaged` in disguise, which "
-                "fails"
+                f"{path.name}:{lineno}: fly-only needs a well-formed, non-zero issue "
+                "number ('#<N>' or '<owner>/<repo>#<N>') naming the issue that carries "
+                f"the recorded decision — got {source!r}. Without it the entry is "
+                "`unmanaged` in disguise, which fails"
             )
         if kind not in ("gh-secret", "fly-only") and sep:
             raise ValueError(f"{path.name}:{lineno}: {kind} takes no ':' argument (got {source!r})")
@@ -818,15 +837,25 @@ def main() -> int:
             # A decision-backed exception, NOT a way to spell `unmanaged` — see
             # read_manifest: reaching here proves the ref named an issue number.
             # The exception is only true while the name really is a live,
-            # deliberately unversioned Fly secret, so both halves are checked:
-            # a name that is gone (nothing to except) and a name the deploy
-            # assigns (version-controlled after all) are stale declarations.
+            # deliberately unversioned Fly secret, so every half is checked:
+            # a name that is gone (nothing to except), a name the deploy assigns
+            # (version-controlled after all), and a name that is an assigned key
+            # in `fly.toml [env]` (version-controlled THERE, and a Fly secret
+            # shadows that value — the same state the `fly-toml-env` route
+            # rejects) are all stale declarations.
             if name not in fly_names:
                 violations.append(
                     f"STALE DECLARATION — {name!r} is declared fly-only:{gh_name} but "
                     "exists neither on Fly nor in the deploy payload; a decision-backed "
                     "exception is for a REAL out-of-band Fly secret (remove the entry, "
                     "or declare its real source)"
+                )
+            elif name in env_keys:
+                violations.append(
+                    f"STALE DECLARATION — {name!r} is declared fly-only:{gh_name} but is "
+                    "an assigned key in fly.toml's [env] table, so its value IS recorded "
+                    "in version control (declare it fly-toml-env, and drop the Fly "
+                    "secret that shadows it)"
                 )
             elif name in assigned or name in unconditional or name in live:
                 violations.append(
