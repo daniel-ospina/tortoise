@@ -1349,3 +1349,32 @@ class TestConjunctFalsifiability:
             surface_assertion="tests/test_x.py::test_internal",
         )
         assert "certification-not-on-shipping-surface" in ee.closes_issue(rec)[1]
+
+    def test_producer_can_emit_a_closing_record(self, monkeypatch, tmp_path):
+        """The headline defect: `closes_issue` was False for EVERY produced record.
+
+        A legitimately-good GREEN-half shape — a paired red at the pairing ref, an
+        all-green fixed commit at the same HEAD as the reviewing checkout, a clean
+        tree, and a declared shipping surface — must now reach a CLOSING verdict.
+        This is the end-to-end PASS that the hardcoded `at_fixed_commit` /
+        `surface` fields made impossible, and it exercises all thirteen conjuncts
+        at once.
+        """
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        same = "a" * 40
+        rec = self._produce(
+            monkeypatch, tmp_path,
+            runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            checkout_head=same,
+            measured_commit=same,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        ok, reasons = ee.closes_issue(rec)
+        assert ok is True, f"producer cannot reach a closing record: {reasons}"
+        assert reasons == []
+        assert ee.exit_code(rec) == 0
+        assert rec["verdict"]["status"] == "PAIRED-RED-DEMONSTRATED"
