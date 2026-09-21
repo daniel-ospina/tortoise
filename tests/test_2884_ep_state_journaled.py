@@ -88,6 +88,28 @@ def _records(events) -> list[dict]:
             if line.strip()]
 
 
+def _raw_append(events, sdk, type_: str, **fields) -> None:
+    """Append a raw-producer JSONL line (the live graph never sees it; only
+    rebuild replays it) — the raw-producer leverage the rebuild tests use."""
+    import datetime as _dt
+    line = {
+        "event_id": sdk.ulid(),
+        "ts": _dt.datetime.now(_dt.UTC).isoformat(),
+        "type": type_,
+        "initiated_by": "raw-producer",
+        "projection_version": 2,
+    }
+    line.update(fields)
+    with open(events / "events.jsonl", "a") as fh:
+        fh.write(json.dumps(line) + "\n")
+
+
+def _outdated(sdk: TortoiseSDK, pid: str):
+    return sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.outdated",
+        params={"id": pid}).result_set[0][0]
+
+
 def _run_dream(sdk: TortoiseSDK, ids: list[str]) -> None:
     """Drive a real incremental EP+dream pass over the chain."""
     sdk.set_point_baseline(ids[-1], 8.0, 2.0)  # evidence → non-uniform EP
@@ -306,6 +328,14 @@ def test_f2_pure_fold_skips_corrupt_values():
         ("posterior_beta", float("inf")),
         ("lastDreamedAt", "\x00bad"),
         ("lastDreamedAt", 123),
+        # #2884 A5: `outdated` is a STRICT bool — an int is not a flag.
+        ("outdated", 1),
+        # #2884 A1: an int no double can hold. ``json.loads`` parses any
+        # integer literal as an arbitrary-precision int, and ``math.isfinite``
+        # raises OverflowError on a >308-digit value — RED before the gate
+        # became total. Must DROP, not raise.
+        ("posterior_alpha", 10 ** 400),
+        ("confidence", -(10 ** 400)),
     ]:
         pts = fold([base, {"type": "ConfidenceChanged", "id": "p",
                            bad_key: bad_val,
@@ -323,6 +353,16 @@ def test_f2_pure_fold_skips_corrupt_values():
                        "posterior_alpha": 3, "confidence": 0.5}])
     assert pts["p"]["posterior_alpha"] == 3
     assert pts["p"]["confidence"] == 0.5
+    # #2884 A5: a valid `outdated` bool folds (the assess_source flag);
+    # a non-bool is dropped, and null clears.
+    pts = fold([base, {"type": "ConfidenceChanged", "id": "p",
+                       "outdated": True}])
+    assert pts["p"]["outdated"] is True
+    pts = fold([base, {"type": "ConfidenceChanged", "id": "p",
+                       "outdated": True},
+                {"type": "ConfidenceChanged", "id": "p",
+                 "outdated": None}])
+    assert pts["p"]["outdated"] is None
 
 
 def test_f2_graph_fold_skips_corrupt_values(journaled):
@@ -335,6 +375,11 @@ def test_f2_graph_fold_skips_corrupt_values(journaled):
                 "posterior_alpha": "abc", "confidence": True,
                 "posterior_beta": float("nan"),
                 "lastDreamedAt": "2024-01-01T00:00:00+00:00"})
+    # #2884 A1: a huge int must be DROPPED, not raise inside the fold. The
+    # pre-fix gate raised OverflowError here — during pass-1b that aborts
+    # rebuild_all AFTER the wipe.
+    proj.apply({"type": "ConfidenceChanged", "id": ids[0],
+                "confidence": 10 ** 400})
     st = _state(sdk, [ids[0]])[ids[0]]
     assert st["posterior_alpha"] is None, st
     assert st["confidence"] is None, st
@@ -466,12 +511,18 @@ def test_f4_update_point_belief_props_folded_on_replay(journaled):
 
 def test_f5_belief_emitter_writes_a_replayable_record(tmp_path):
     """The ingest seam's emitter writes a `ConfidenceChanged` record the
-    replay fold reads, and ignores any other type."""
+    replay fold reads, and ignores any other type.
+
+    #2884 A6: the record now rides `EventAPI.emit_belief` — the ONE ingest
+    envelope — instead of a hand-built third shape.
+    """
+    from tortoise.api import EventAPI
     from tortoise.ingest import _belief_emitter
     from tortoise.log import EventLog
 
-    log = EventLog(tmp_path / "events.jsonl")
-    emit = _belief_emitter(log)
+    api = EventAPI(EventLog(tmp_path / "events.jsonl"),
+                   initiated_by="extractor")
+    emit = _belief_emitter(api)
     emit("ConfidenceChanged", id="p", confidence=0.5,
          posterior_alpha=1.0, posterior_beta=1.0)
     emit("NotBelief", id="q")                       # ignored by this seam
@@ -481,6 +532,7 @@ def test_f5_belief_emitter_writes_a_replayable_record(tmp_path):
     assert len(recs) == 1, recs
     assert recs[0]["type"] == "ConfidenceChanged"
     assert recs[0]["id"] == "p"
+    assert recs[0]["initiated_by"] == "extractor"
     pts = fold([
         {"type": "PointAdded", "point": {"id": "p", "content": "x"}},
         recs[0],
@@ -488,11 +540,32 @@ def test_f5_belief_emitter_writes_a_replayable_record(tmp_path):
     assert pts["p"]["confidence"] == 0.5
 
 
-def test_f5_run_ep_propagation_journals_through_the_threaded_log(journaled):
+def test_f5_emit_belief_is_best_effort(tmp_path, monkeypatch):
+    """#2884 A6: a failing log append must NOT propagate out of the emitter —
+    the graph write committed before EP returned, so an OSError/ENOSPC here
+    would crash the public ingest CLI after a successful mutation."""
+    from tortoise.api import EventAPI
+    from tortoise.ingest import _belief_emitter
+    from tortoise.log import EventLog
+
+    api = EventAPI(EventLog(tmp_path / "events.jsonl"),
+                   initiated_by="extractor")
+
+    def boom(_event):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(api.log, "append", boom)
+    emit = _belief_emitter(api)
+    emit("ConfidenceChanged", id="p", confidence=0.5)  # must not raise
+
+
+def test_f5_run_ep_propagation_journals_through_the_threaded_api(journaled):
     """`_run_ep_propagation` must build its `TortoiseEP` WITH the emitter —
     otherwise the ingest-propagation belief writes are unjournaled (the exact
-    silent-loss class #2884 fixes)."""
+    silent-loss class #2884 fixes).
+    """
     _db, _events, sdk = journaled
+    from tortoise.api import EventAPI
     from tortoise.ingest import _run_ep_propagation
     from tortoise.log import EventLog
 
@@ -503,7 +576,8 @@ def test_f5_run_ep_propagation_journals_through_the_threaded_log(journaled):
         sdk.update_point(pid, confidence=0.6)
 
     ingest_log = _events / "ingest_propagation.jsonl"
-    _run_ep_propagation(sdk._get_proj(), EventLog(ingest_log), label="EP")
+    api = EventAPI(EventLog(ingest_log), initiated_by="extractor")
+    _run_ep_propagation(sdk._get_proj(), api, label="EP")
     recs = [json.loads(line) for line in ingest_log.read_text().splitlines()
             if line.strip()]
     changed = [r for r in recs if r.get("type") == "ConfidenceChanged"]
@@ -519,3 +593,151 @@ def test_f5_run_ep_propagation_journals_through_the_threaded_log(journaled):
                     "lastDreamedAt")), r
     assert any("posterior_alpha" in r and "posterior_beta" in r
                for r in changed), changed
+
+
+# ── A2: the promote arm's belief props are written AND replayed ───
+# Cycle-1's FIX-4 taught the replay fold to apply `PointRevised` belief props,
+# but the promote arm of ``update_point`` wrote ONLY status/updatedAt while the
+# emit journaled the WHOLE props dict — so replay applied a confidence the live
+# graph never had. This is the regression guard.
+
+
+def test_a2_promote_belief_props_agree_across_rebuild(journaled):
+    _db, events, sdk = journaled
+    pid = sdk.create_point("statement", "draft claim", status="draft")["id"]
+    sdk.update_point(pid, status="live", confidence=0.5, posterior_alpha=3.0)
+    # Live: the promote arm wrote them (write == journal).
+    assert _state(sdk, [pid])[pid]["confidence"] == pytest.approx(0.5)
+    assert _state(sdk, [pid])[pid]["posterior_alpha"] == pytest.approx(3.0)
+
+    sdk._get_proj().rebuild_all(str(events))
+    st = _state(sdk, [pid])[pid]
+    assert st["confidence"] == pytest.approx(0.5), st
+    assert st["posterior_alpha"] == pytest.approx(3.0), st
+
+
+# ── A3: the invalidate decay must not clobber a later belief writer ─
+
+
+def test_a3_invalidate_decay_respects_journal_order(journaled):
+    """PointAdded → CC(0.9) → PointInvalidated → CC(0.25): live ends at 0.25
+    (the later writer); the trailing sweep must not write its decayed 0.5
+    over it. The decay DID happen (posteriors 1.0) — it is the later
+    confidence-only writer that must win, not the whole invalidate fold."""
+    _db, events, sdk = journaled
+    pid = _chain(sdk, n=1)[0]
+    corr = sdk.create_point("statement", "corrector", status="live")["id"]
+    _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
+                posterior_alpha=9.0, posterior_beta=2.0)
+    _raw_append(events, sdk, "PointInvalidated", id=pid, corrected_by=corr)
+    _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.25)
+
+    sdk._get_proj().rebuild_all(str(events))
+    st = _state(sdk, [pid])[pid]
+    assert st["confidence"] == pytest.approx(0.25), st
+    # The invalidate's OTHER half still folded (its decay, then outdated).
+    assert st["posterior_alpha"] == pytest.approx(1.0), st
+    assert st["posterior_beta"] == pytest.approx(1.0), st
+    assert _outdated(sdk, pid) is True
+
+
+# ── A5: the outdated flag rides the belief record ─────────────────
+
+
+def test_a5_assess_source_outdated_flag_survives_rebuild(journaled):
+    """`assess_source` flags the older assessment EP-dead in the same SET that
+    decays it. Without the flag on the record a rebuilt graph treats the
+    superseded assessment as EP-active."""
+    _db, events, sdk = journaled
+    url = "https://s.example"
+    first = sdk.assess_source(url, "alice", 0.4, "first")
+    sdk.assess_source(url, "alice", 0.9, "second")
+    oid = first["assessment_point_id"]
+    assert _outdated(sdk, oid) is True
+
+    recs = [r for r in _records(events)
+            if r["type"] == "ConfidenceChanged" and r["id"] == oid]
+    assert recs and recs[-1].get("outdated") is True, recs
+
+    sdk._get_proj().rebuild_all(str(events))
+    assert _outdated(sdk, oid) is True, "rebuilt graph lost the outdated flag"
+
+
+# ── A7: belief folds honor the hard-delete→recreate boundary ──────
+
+
+def test_a7_belief_fold_drops_across_delete_recreate(journaled):
+    """The pure fold POPS the entry on a hard delete, so the graph fold must
+    not resurrect the dead incarnation's belief values onto the re-created
+    node — the #330 parity contract."""
+    _db, events, sdk = journaled
+    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
+                posterior_alpha=9.0)
+    _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
+                label="Point")
+    _raw_append(events, sdk, "PointAdded",
+                point={"id": pid, "content": "c2", "pointKind": "",
+                       "status": "live"})
+    _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.3)
+
+    sdk._get_proj().rebuild_all(str(events))
+    graph = _state(sdk, [pid])[pid]
+    assert graph["confidence"] == pytest.approx(0.3), graph
+    assert graph["posterior_alpha"] is None, (
+        f"the dead incarnation's posterior_alpha was resurrected: {graph}")
+
+    pure = fold([
+        {"type": "PointAdded",
+         "point": {"id": pid, "content": "c1"}},
+        {"type": "ConfidenceChanged", "id": pid, "confidence": 0.9,
+         "posterior_alpha": 9.0},
+        {"type": "EntityMutated", "op": "delete", "id": pid,
+         "label": "Point"},
+        {"type": "PointAdded",
+         "point": {"id": pid, "content": "c2"}},
+        {"type": "ConfidenceChanged", "id": pid, "confidence": 0.3},
+    ])[pid]
+    assert pure.get("posterior_alpha") is None, pure
+    assert pure["confidence"] == pytest.approx(0.3), pure
+    # ... and the two dispatchers agree on the belief props.
+    assert graph["confidence"] == pytest.approx(pure["confidence"])
+    assert graph["posterior_alpha"] == pure.get("posterior_alpha")
+
+
+def test_a7_revise_belief_props_drop_across_delete_recreate(journaled):
+    """The `_revise_point` belief clauses (`skip_belief_props`) obey the same
+    real-hard-delete boundary — a pre-recreation `PointRevised`'s belief value
+    must not leak onto the re-created node."""
+    _db, events, sdk = journaled
+    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    _raw_append(events, sdk, "PointRevised", id=pid, new_content="c2",
+                confidence=0.9, posterior_alpha=9.0)
+    _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
+                label="Point")
+    _raw_append(events, sdk, "PointAdded",
+                point={"id": pid, "content": "c3", "pointKind": "",
+                       "status": "live"})
+    _raw_append(events, sdk, "PointRevised", id=pid, new_content="c4",
+                confidence=0.3)
+
+    sdk._get_proj().rebuild_all(str(events))
+    graph = _state(sdk, [pid])[pid]
+    assert graph["confidence"] == pytest.approx(0.3), graph
+    assert graph["posterior_alpha"] is None, (
+        f"a pre-recreation revise's posterior_alpha leaked: {graph}")
+
+    pure = fold([
+        {"type": "PointAdded", "point": {"id": pid, "content": "c1"}},
+        {"type": "PointRevised", "id": pid, "new_content": "c2",
+         "confidence": 0.9, "posterior_alpha": 9.0},
+        {"type": "EntityMutated", "op": "delete", "id": pid,
+         "label": "Point"},
+        {"type": "PointAdded", "point": {"id": pid, "content": "c3"}},
+        {"type": "PointRevised", "id": pid, "new_content": "c4",
+         "confidence": 0.3},
+    ])[pid]
+    assert pure.get("posterior_alpha") is None, pure
+    assert pure["confidence"] == pytest.approx(0.3), pure
+    assert graph["confidence"] == pytest.approx(pure["confidence"])
+    assert graph["posterior_alpha"] == pure.get("posterior_alpha")

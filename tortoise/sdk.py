@@ -5044,12 +5044,22 @@ class TortoiseSDK:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2:
                 # single round trip, no widened write window).
+                # #2884 A2: carry the REST of `props` too. This arm used to
+                # write ONLY status/updatedAt/version while the emit below
+                # unconditionally journaled the whole `props` dict — so
+                # `update_point(draft, status='live', confidence=0.5)` claimed
+                # a write the live graph never made, and the replay fold then
+                # applied it: a rebuilt graph held a confidence the pre-wipe
+                # graph never had. The sibling no-status arm below already
+                # writes `SET n += $props`, so this makes the two arms agree
+                # and makes live match the durable record (write == read).
                 res = proj.g.query(
                     "MATCH (n:Point:Object {id:$id}) "
                     "WHERE (n.status IS NULL OR n.status = 'draft') "
                     "SET n.status = 'live', n.updatedAt = $now, "
-                    "n.version = coalesce(n.version, 0) + 1 RETURN n",
-                    params={"id": id, "now": now},
+                    "n.version = coalesce(n.version, 0) + 1, n += $props "
+                    "RETURN n",
+                    params={"id": id, "props": props, "now": now},
                 )
                 if not res.result_set:
                     _raise_update_point_status_error(proj, id)
@@ -5062,11 +5072,15 @@ class TortoiseSDK:
         else:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2).
+                # #2884 A2: see the :Object arm above — the rest of `props`
+                # rides the same statement, so the journaled payload is the
+                # whole truth of this write.
                 res = proj.g.query(
                     "MATCH (n:Point {id:$id}) "
                     "WHERE (n.status IS NULL OR n.status = 'draft') "
-                    "SET n.status = 'live', n.updatedAt = $now RETURN n",
-                    params={"id": id, "now": now},
+                    "SET n.status = 'live', n.updatedAt = $now, n += $props "
+                    "RETURN n",
+                    params={"id": id, "props": props, "now": now},
                 )
                 if not res.result_set:
                     _raise_update_point_status_error(proj, id)
@@ -11687,8 +11701,20 @@ class TortoiseSDK:
         # rebuild must replay the CLEAR or it resurrects the stale posteriors
         # the live graph no longer holds. `RETURN n.id` binds the journal to
         # the rows the statement actually committed; a missing Point wrote
-        # nothing and journals nothing. Only the two keys this statement
-        # wrote are carried — `confidence` is untouched here.
+        # nothing and journals nothing.
+        # SCOPE (honest, #2884 A4): the record carries ONLY the two posterior
+        # clears. The SAME statement also writes `ep_alpha`, `ep_beta`,
+        # `baseline_set` and `baseline_source`, and NO journaled event carries
+        # those four — they are in `_POINT_DENY`, so the PointAdded passthrough
+        # drops them, and `_REPLAY_GAP_PROPS` restores only synthetic
+        # graph-only ids. An author-set baseline is therefore LOST on rebuild
+        # (and `_hydrate_evidence` then finds no prior, refusing the next EP
+        # run). That is a pre-existing gap this fix deliberately does not
+        # widen into: journaling an EP prior is a design decision (the E3
+        # pre-write writes `ep_alpha`/`ep_beta` CONDITIONALLY on the
+        # pre-existing `baseline_set`, so the correct payload is the
+        # statement's OUTCOME, not its input params) and is filed as a
+        # residual for the controller. `confidence` is untouched here.
         if self._event_log_path:
             for row in written:
                 self._emit_event(
@@ -11886,10 +11912,14 @@ class TortoiseSDK:
                 params={"id": pid},
             ).result_set
             # #2884 D3/FIX-3: the revert REMOVEs the posteriors LIVE, so a
-            # rebuild must replay the CLEAR (journal the two belief keys the
-            # statement wrote; `confidence` is untouched). `RETURN count(n)`
-            # binds the journal to the committed rows — a missing Point
-            # removed nothing and journals nothing.
+            # rebuild must replay the CLEAR (the two belief keys carried here;
+            # `confidence` is untouched). `RETURN count(n)` binds the journal
+            # to the committed rows — a missing Point removed nothing and
+            # journals nothing.
+            # SCOPE (honest, #2884 A4): the REMOVE also clears `ep_alpha`,
+            # `ep_beta`, `baseline_set`, `baseline_source` and `inherited_at`,
+            # and none of those five is journaled (see the note in
+            # `set_point_baseline` — same residual, same reason).
             if self._event_log_path and reverted and reverted[0][0]:
                 self._emit_event(
                     "ConfidenceChanged", id=pid,
@@ -20151,13 +20181,19 @@ class TortoiseSDK:
             # rebuild must replay it or it resurrects the pre-sweep values.
             # `RETURN p.id` already binds the journal set to the committed
             # set; the `if old_ids` gate means a sweep that matched nothing
-            # journals nothing. Carry EXACTLY the three keys decay_clause
-            # wrote.
+            # journals nothing.
+            # #2884 A5: the SAME statement also raises `outdated=true` — and
+            # that flag is EP-terminal (it filters `_apply_source_inheritance`'s
+            # factor query), so a record carrying only the decay would leave a
+            # rebuilt graph treating a stale assessment as EP-active while live
+            # treats it as dead. It rides the belief record, whose fold now
+            # writes it (strict-bool gate).
             if self._event_log_path:
                 for _oid in old_ids:
                     self._emit_event(
                         "ConfidenceChanged", id=_oid, confidence=0.5,
-                        posterior_alpha=1.0, posterior_beta=1.0)
+                        posterior_alpha=1.0, posterior_beta=1.0,
+                        outdated=True)
             # #2422: the superseded assessments' influence rides their
             # operators' sibling edges (same ghost class as invalidate) —
             # drop their messages so the next warm-start recomputes instead

@@ -1390,6 +1390,13 @@ class TortoiseEP:
             # than reshaping the write statement (the write is unconditional
             # for every matched id). A later flush journals the real
             # posteriors, so replay order restores the final value.
+            # SCOPE (honest, #2884 A4): the SAME statement also writes
+            # `ep_alpha`/`ep_beta` (conditionally — the CASE keeps an explicit
+            # baseline immutable), and the record carries only the posterior
+            # clear. The prior is therefore not replayed (same residual as
+            # `set_point_baseline`/the inheritance revert — see the note on
+            # `set_point_baseline`): journaling it correctly requires the
+            # statement's OUTCOME, not its input params.
             if self._emit is not None:
                 rows = self.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "

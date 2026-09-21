@@ -1145,7 +1145,9 @@ def _journal_append_product(graph_name: str) -> None:
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import (  # noqa: E402, I001
+    BELIEF_BOOL_PROPS,
     BELIEF_PROPS,
+    _belief_bool_value_ok,
     _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
@@ -1517,6 +1519,17 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
                     continue
                 value = ev[key]
                 if not _belief_prop_value_ok(key, value):
+                    continue
+                p[key] = value
+            # #2884 A5: the boolean flag riding the same record
+            # (`assess_source`'s `outdated=true`) — same presence-conditional
+            # shape and its own strict bool gate, so the pure fold and the
+            # graph fold agree.
+            for key in BELIEF_BOOL_PROPS:
+                if key not in ev:
+                    continue
+                value = ev[key]
+                if not _belief_bool_value_ok(value):
                     continue
                 p[key] = value
     elif t in _NO_POINT_FOLD:
@@ -3605,6 +3618,14 @@ class FalkorProjection(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
                         ann_anchor is not None and seq <= ann_anchor),
+                    # #2884 A7: the belief props ride the SAME real-hard-delete
+                    # boundary as the annotator dims — a pre-recreation
+                    # revision's belief value died with the deleted node live
+                    # (the pure fold POPS the entry on delete; the graph must
+                    # agree or #330 parity breaks). A bare same-id re-emit is
+                    # NOT a boundary (it MERGEs live and keeps belief state).
+                    skip_belief_props=(
+                        ann_anchor is not None and seq <= ann_anchor),
                     skip_content=superseded,
                     skip_embedding=skip_embedding,
                     skip_hash=skip_hash)
@@ -3656,6 +3677,22 @@ class FalkorProjection(
                 # when the target was hard-deleted / never re-created —
                 # audible, mirroring the PointSuperseded / EntityMutated /
                 # OperatorAnnotated fold-miss warnings.
+                #
+                # #2884 A7: gate on the SAME real-hard-delete boundary as the
+                # annotator dims (`last_ann_drop_seq`) — a belief write that
+                # predates a hard delete→recreate wrote onto an incarnation
+                # live DETACH DELETEd, so the re-created node never had it.
+                # Folding it would resurrect the dead node's belief; the pure
+                # fold POPS the entry on delete (#330 parity). NOT gated on
+                # the terminalizing `last_recreate_seq`: a bare same-id
+                # re-emit MERGEs live and keeps belief state, so dropping the
+                # fold there would lose a live-valid value.
+                _cc_rid = ev.get("id")
+                _cc_anchor = (
+                    last_ann_drop_seq.get(("Point", _cc_rid))
+                    if isinstance(_cc_rid, str) else None)
+                if _cc_anchor is not None and seq <= _cc_anchor:
+                    continue
                 if self._fold_confidence_changed(ev) == 0:
                     logger.warning(
                         "rebuild: ConfidenceChanged fold matched no Point "
@@ -3725,7 +3762,24 @@ class FalkorProjection(
                 # journal-append order. The fold applies outdated=true +
                 # validTo/expiredAt/updatedAt + CORRECTS only — it never
                 # writes status (an invalidated point stays status='live').
+                #
+                # #2884 A3: the BELIEF half (`decay_clause`) folds INLINE
+                # HERE, at the event's own journal position, NOT in the
+                # trailing sweep. The sweep runs after the whole pass-1b
+                # loop, so a decay applied there clobbers every LATER
+                # same-id inline belief writer (ConfidenceChanged / a
+                # PointRevised carrying confidence): replay ended at 0.5
+                # while live ended at the later writer's value. Inline
+                # application makes journal order decide, as live
+                # chronology does; the sweep keeps the stamp/CORRECTS half.
+                # The survivor rule is the sweep's OWN anchor
+                # (``last_recreate_seq``) so a pre-recreation fold's decay
+                # is dropped here too — it died with the deleted node live.
                 if isinstance(ev.get("id"), str):
+                    _inv_rid = ev["id"]
+                    _inv_anchor = last_recreate_seq.get(("Point", _inv_rid))
+                    if _inv_anchor is None or seq > _inv_anchor:
+                        self._decay_point_belief(_inv_rid)
                     point_re_stamp_folds.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
@@ -5276,6 +5330,7 @@ class FalkorProjection(
 
     def _revise_point(self, ev: dict, set_updated_at: bool = False,
                       skip_annotator_dims: bool = False,
+                      skip_belief_props: bool = False,
                       skip_content: bool = False,
                       skip_embedding: bool = False,
                       skip_hash: bool = False) -> tuple[bool, bool]:
@@ -5288,6 +5343,14 @@ class FalkorProjection(
         re-created node). A bare same-id re-emit is NOT such a boundary, so it
         never suppresses a live-valid dim. Chronological callers (``apply()``)
         leave it False. Content/embedding replay is unaffected.
+
+        ``skip_belief_props`` (#2884 A7): the same boundary and the same
+        reasoning, applied to the four belief properties. A revision that
+        predates a real delete→recreate wrote its belief value onto an
+        incarnation live DETACH-DELETEd, so the re-created node never had it;
+        folding it would resurrect a dead node's belief (#330 parity — the
+        pure fold POPS the entry on delete). ``rebuild_all`` sets it from the
+        SAME ``last_ann_drop_seq`` anchor; ``apply()`` leaves it False.
 
         ``skip_content`` / ``skip_embedding`` / ``skip_hash`` (#4042): the
         CONTENT/derived half of the same class, with a DIFFERENT boundary.
@@ -5402,13 +5465,14 @@ class FalkorProjection(
         # dropped the caller's belief state (write ≠ read). Presence-
         # conditional and gated by the SAME `_belief_prop_value_ok` the
         # `_fold_confidence_changed` / ConfidenceChanged folds use (#330
-        # parity). Not gated by `skip_annotator_dims`: the belief props have no
-        # annotator hard-delete boundary of their own; the broader revision
-        # fold-totality problem is #2795 D1, not this slice.
-        for key in BELIEF_PROPS:
-            if key in ev and _belief_prop_value_ok(key, ev[key]):
-                set_clauses.append(f"n.{key} = ${key}")
-                params[key] = ev[key]
+        # parity). #2884 A7: suppressed by `skip_belief_props` on the same
+        # real-hard-delete anchor as the annotator dims — a pre-recreation
+        # revision's belief value died with the deleted incarnation live.
+        if not skip_belief_props:
+            for key in BELIEF_PROPS:
+                if key in ev and _belief_prop_value_ok(key, ev[key]):
+                    set_clauses.append(f"n.{key} = ${key}")
+                    params[key] = ev[key]
 
         # #4042: every clause can now be suppressed at once (a superseded
         # props-only revision carrying no dims). FalkorDB rejects a `SET` with
