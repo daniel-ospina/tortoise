@@ -24299,7 +24299,11 @@ async def backups_rebaseline(request: Request, body: dict):
     graph_id = body.get("graph_id", "default")
     if not org_id:
         raise HTTPException(status_code=400, detail="org_id required")
-    from tortoise.hosted_backup import _validate_graph_id, _validate_org_id
+    from tortoise.hosted_backup import (
+        _validate_graph_id,
+        _validate_org_id,
+        count_data_nodes,
+    )
     try:
         # #2377 (defense in depth): org_id/graph_id flow into R2 state keys
         # (_graph_state_key + the legacy org-file write below) — apply the
@@ -24333,8 +24337,13 @@ async def backups_rebaseline(request: Request, body: dict):
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=f"Re-baseline failed: {e}")  # noqa: B904
     try:
-        g = db.select_graph(row["graph_name"])
-        count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        # #4233: count the SAME node set every other DR surface counts —
+        # dump_graph's (the sweep manifest, the empty-backup guard, drill
+        # verification). A raw `MATCH (n)` included the projection's internal
+        # `Meta {key:'point_fts_v2'}` marker once a projection had been opened
+        # on the org graph, so a 3-point graph re-baselined to 4 and flaked the
+        # required check on unrelated PRs.
+        count = count_data_nodes(db, row["graph_name"])
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"graph unavailable: {e}")  # noqa: B904
     state = {

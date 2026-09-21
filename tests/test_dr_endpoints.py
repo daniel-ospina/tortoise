@@ -848,6 +848,53 @@ class TestDrRebaseline:
         state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
         assert state["node_count"] == 3
 
+    def test_rebaseline_excludes_projection_bookkeeping_marker(
+            self, client, dr_env, mem_storage):
+        """#4233 — re-baseline's node_count is ``dump_graph``'s node set, not
+        a raw ``MATCH (n)``.
+
+        A projection opened ON the org graph (the export seam does this via
+        ``_make_sdk(graph_name=...)``) MERGEs its internal
+        ``:Meta {key:'point_fts_v2'}`` index-guard marker into that graph
+        (#1541). Counting it made a 3-point graph re-baseline to 4 — the flake
+        that red'd the required check on unrelated PRs.
+
+        RED (mutation): count ``MATCH (n) RETURN count(n)`` again — the
+        assertion below reads 4 == 3 (verified).
+        """
+        _seed_team("team_x", nodes=3)
+        # The projection's index guard (`FalkorProjection._ensure_indexes`,
+        # #1541) MERGEs this marker into whatever graph it is opened on — the
+        # sweep / export / re-baseline seams all open one. A test session
+        # redirects an SDK's graph NAME (Epic #1647 D-1=A), so inject the
+        # identical node directly into the raw org graph the DR seams address
+        # by name — the marker node is what matters, not how it got there.
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        db = sdk._get_proj().db
+        db.select_graph("org_team_x").query(
+            "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
+        assert int(db.select_graph("org_team_x").query(
+            "MATCH (m:Meta {key:'point_fts_v2'}) RETURN count(m)"
+        ).result_set[0][0]) == 1, "probe did not write the bookkeeping marker"
+        assert int(db.select_graph("org_team_x").query(
+            "MATCH (n) RETURN count(n)").result_set[0][0]) == 4, (
+            "the marker must be present for this guard to be non-vacuous"
+        )
+
+        mem_storage.upload(
+            "ops/teams/team_x/state.json",
+            json.dumps({"node_count": 10}).encode(),
+        )
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["node_count"] == 3, r.text
+        state = json.loads(mem_storage.download("ops/teams/team_x/state.json"))
+        assert state["node_count"] == 3
+
 
 class TestDrDrill:
     def test_drill_requires_params(self, client, dr_env, mem_storage):
@@ -1769,6 +1816,12 @@ class TestRestoreSwapReadBound:
         """
         import tortoise.hosted_backup as hb
 
+        # #4233: the settle poll now confirms a reported timeout against the
+        # copy's OUTCOME. Shrink it so this classification guard does not wait
+        # the full read bound; the destination never materialises here, so the
+        # timeout verdict is unchanged.
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.1")
+
         _seed_team("team_x", nodes=2)
         key = _default_drill_key(client, mem_storage)
 
@@ -1824,6 +1877,10 @@ class TestRestoreSwapReadBound:
         """
         import tortoise.hosted_backup as hb
         from tortoise.fork_slot import ForkSlotRecovery
+
+        # #4233: keep the OUTCOME settle poll short — the destination never
+        # materialises, so the TIMEOUT verdict under test is unchanged.
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.1")
 
         _seed_team("team_x", nodes=2)
         key = _default_drill_key(client, mem_storage)
@@ -1973,3 +2030,91 @@ class TestRestoreSwapReadBound:
         )
         # ... and it failed AS a timeout, not as some other error.
         assert hb._is_client_read_timeout(ei.value), ei.value
+
+    def test_read_bound_expiry_is_resolved_by_the_copys_outcome(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#4233 — the read bound is a HYPOTHESIS, not a verdict.
+
+        When the client read timeout fires but the server-side copy actually
+        COMPLETED, the restore must succeed: the settle poll confirms the
+        destination holds the source's content instead of reporting a timeout
+        that never happened. This is the contended-runner flake.
+
+        The injected seam does the real (fork-free) copy and THEN raises the
+        exact masked read-timeout shape the embedded lane produced — the
+        server-side work finished even though the client's read did not.
+
+        RED (mutation): drop the ``_await_restore_copy_settled`` branch (fail
+        on the timeout immediately) — the restore then raises
+        ``RestoreCopyTimeoutError`` and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "2")
+
+        def copy_then_timeout(redis_client, src_name, dst_name):
+            from falkordb import Graph
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", copy_then_timeout)
+
+        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        source = db.select_graph("org_settle_source")
+        source.query("MATCH (n) DETACH DELETE n")
+        for i in range(2):
+            source.query(
+                "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
+                params={"id": f"pt-{i}", "c": f"c{i}"},
+            )
+        payload = hb.dump_graph(source)
+        target = db.select_graph("org_settle_target")
+        target.query("MATCH (n) DETACH DELETE n")
+        target.query(
+            "CREATE (p:Point {id:'stale', content:'old', pointKind:'claim'})")
+
+        hb._restore_into_temp_verify_swap(
+            db, payload, live_name="org_settle_target")
+
+        rows = db.select_graph("org_settle_target").query(
+            "MATCH (n:Point) RETURN n.id ORDER BY n.id").result_set
+        assert [r[0] for r in rows] == ["pt-0", "pt-1"]
+
+    def test_read_bound_expiry_without_the_copy_is_still_a_timeout(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#4233 (mirror, and the settle branch's mutation check).
+
+        The settle poll must NOT blanket-accept a timeout. A client read
+        timeout with NO completed destination is still reported as a timeout:
+        the restore 503s, names the verified temp graph intact, and says the
+        live graph was NOT restored. Force the genuinely broken copy (the
+        timeout fires and the destination never materializes) and the restore
+        must still red.
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.5")
+
+        def timeout_only(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_only)
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
+        r = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x", "backup_key": key},
+        )
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert "timed out" in detail.lower(), detail
+        assert "not restored" in detail.lower(), detail

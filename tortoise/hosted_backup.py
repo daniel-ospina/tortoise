@@ -31,6 +31,10 @@ Env (restore):
 - TORTOISE_RESTORE_SWAP_TIMEOUT_S — explicit read bound (seconds) for the
   restore's GRAPH.COPY copies. Default 120, clamped to [60, 3600]. See
   _restore_swap_timeout_s.
+- TORTOISE_RESTORE_SWAP_SETTLE_S — how long, after that read bound expires,
+  the restore keeps polling the copy's DESTINATION for its outcome before
+  reporting a timeout (#4233). Default: the read bound. See
+  _restore_swap_settle_s.
 
 Env:
 - TORTOISE_BACKUP_KEY — base64 32-byte ACTIVE key for AES-256-GCM (encrypt
@@ -52,6 +56,7 @@ import math
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from typing import Callable, Protocol  # noqa: UP035
 
@@ -1915,6 +1920,38 @@ def _restore_swap_timeout_s() -> float:
     return v
 
 
+#: #4233: after the restore copy's client read bound expires, how long the
+#: restore keeps checking the OPERATION's outcome before reporting a timeout.
+#: A client read bound ends the blocking READ; it does not cancel the
+#: server-side ``GRAPH.COPY`` (#3813). Under a contended runner the bound can
+#: expire while the copy is still progressing, and the wall clock alone cannot
+#: distinguish that from a genuinely broken copy — so the bound is a
+#: hypothesis and the DESTINATION's content is the verdict. Defaults to the
+#: read bound, so a restore's total copy budget is 2x its configured read
+#: bound and still finite.
+def _restore_swap_settle_s() -> float:
+    """Resolve the post-timeout OUTCOME-poll bound, in seconds.
+
+    ``TORTOISE_RESTORE_SWAP_SETTLE_S``, defaulting to the read bound
+    (:func:`_restore_swap_timeout_s`). Floored at 0.05s so a mis-set value can
+    never busy-spin, capped at the read bound's own ceiling.
+    """
+    raw = os.environ.get("TORTOISE_RESTORE_SWAP_SETTLE_S")
+    if raw is None or not str(raw).strip():
+        return _restore_swap_timeout_s()
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is not a number — "
+                       "using the read bound", raw)
+        return _restore_swap_timeout_s()
+    if not math.isfinite(v) or v <= 0:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is not a finite "
+                       "positive bound — using the read bound", raw)
+        return _restore_swap_timeout_s()
+    return max(0.05, min(v, _RESTORE_SWAP_TIMEOUT_MAX_S))
+
+
 class RestoreCopyTimeoutError(RuntimeError):
     """A restore GRAPH.COPY outlived its own (generous) read bound (#3813).
 
@@ -1980,6 +2017,82 @@ def _issue_graph_copy(client, src_name: str, dst_name: str) -> None:
     client.execute_command("GRAPH.COPY", src_name, dst_name)
 
 
+#: Poll interval for the post-timeout OUTCOME wait. Small enough to catch a
+#: copy that lands just after the read bound, large enough not to hammer
+#: ``GRAPH.LIST`` for the whole settle window.
+_RESTORE_SWAP_SETTLE_POLL_S = 0.25
+
+
+def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
+    """True when a timed-out copy's DESTINATION holds the SOURCE's content.
+
+    ``GRAPH.COPY`` installs ``dst_name`` only after the whole source graph has
+    been loaded, so for the restore's two copies — whose destination is either
+    freshly deleted (the swap) or brand new (the pre-restore safety copy) —
+    the destination EXISTING with the source's counts IS the operation's
+    success condition (#4233). Node AND edge counts are compared, so a
+    truncated install can never be accepted as the copy's outcome.
+
+    Deliberately never QUERIES a graph ``GRAPH.LIST`` does not name: a Cypher
+    read on a missing graph CREATES an empty one (verified on FalkorDB
+    4.20.4), and on the swap's freshly-deleted ``live_name`` that would leave
+    an empty live graph behind a FAILED restore — the wipe-then-empty class
+    the pre-restore safety copy exists to prevent.
+    """
+    try:
+        names = set(db.list_graphs() or [])
+        if dst_name not in names or src_name not in names:
+            return False
+        dst_g = db.select_graph(dst_name)
+        src_g = db.select_graph(src_name)
+        dst_nodes = int(dst_g.query(
+            "MATCH (n) RETURN count(n)").result_set[0][0])
+        src_nodes = int(src_g.query(
+            "MATCH (n) RETURN count(n)").result_set[0][0])
+        if dst_nodes != src_nodes:
+            return False
+        dst_edges = int(dst_g.query(
+            "MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+        src_edges = int(src_g.query(
+            "MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+    except Exception:
+        return False
+    return dst_edges == src_edges
+
+
+def _graph_present(db, name: str) -> bool:
+    """Whether ``name`` exists, FAIL-CLOSED to ``True`` on a probe failure.
+
+    Used only to decide whether a timed-out copy's destination could have been
+    produced by that copy: an unreadable listing must never authorize treating
+    a pre-existing graph as the copy's output.
+    """
+    try:
+        return name in set(db.list_graphs() or [])
+    except Exception:
+        return True
+
+
+def _await_restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
+    """Poll :func:`_restore_copy_settled` until the settle bound expires.
+
+    A condition-based wait (#4233): returns as soon as the destination holds
+    the source's content, so a copy that merely outlived the read bound is
+    recognised as the SUCCESS it is. A poll can itself block while the server
+    is busy finishing the copy (the engine serves no other command from that
+    handler), so the wall clock is re-checked after every attempt — a completed
+    copy always wins over an expired deadline.
+    """
+    deadline = time.monotonic() + _restore_swap_settle_s()
+    while True:
+        if _restore_copy_settled(db, src_name, dst_name):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_RESTORE_SWAP_SETTLE_POLL_S, remaining))
+
+
 def _is_client_read_timeout(exc: BaseException) -> bool:
     """True when ``exc`` IS — or MASKS — a redis CLIENT read timeout (#3813).
 
@@ -2011,15 +2124,34 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
     than a dead connection or a failed copy.
     """
     client = _restore_copy_client(db)
+    # A timed-out copy may only be resolved by a destination IT produced. If
+    # the destination already existed when the copy was issued (the swap's
+    # best-effort live-delete failed), completing is not evidence of success,
+    # so the settle check is refused up front. Fail-closed: an unreadable
+    # listing counts as present.
+    dst_preexisting = _graph_present(db, dst_name)
     try:
         _issue_graph_copy(client, src_name, dst_name)
     except Exception as e:
-        if _is_client_read_timeout(e):
+        if not _is_client_read_timeout(e):
+            raise
+        # #4233: the read bound is not the operation's verdict — it ends OUR
+        # blocking read; the server-side GRAPH.COPY is not cancelled (#3813)
+        # and may still be running. Ask the OPERATION what happened before
+        # reporting a timeout, so a slow-but-correct copy (a contended runner)
+        # cannot false-red a restore that actually succeeded.
+        if (not dst_preexisting
+                and _await_restore_copy_settled(db, src_name, dst_name)):
+            logger.warning(
+                "%s: client read bound (%.0fs) expired, but the server-side "
+                "GRAPH.COPY completed — %s now holds the source's content",
+                role, _restore_swap_timeout_s(), dst_name,
+            )
+        else:
             raise RestoreCopyTimeoutError(
                 role=role, timeout_s=_restore_swap_timeout_s(),
                 intact_name=intact_name, dst_name=dst_name,
             ) from e
-        raise
     finally:
         try:
             # redis-py's ``Redis.close()`` is a NO-OP for the socket when a
@@ -2034,6 +2166,35 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
             client.connection_pool.disconnect()
         except Exception:
             pass
+
+
+def count_data_nodes(db, graph_name: str) -> int:
+    """Count a graph's USER nodes — exactly the node set :func:`dump_graph` exports.
+
+    #1625/#4233: the projection's runtime bookkeeping (``EpMeta`` /
+    ``GraphEventMeta`` / ``TeamMeta`` label-wide, plus ``Meta`` nodes keyed
+    ``point_fts_v2`` / ``event_fts_v2``) is not content. Every DR ``node_count``
+    surface counts without it — the sweep manifest, the empty-backup-over-live
+    guard, drill verification — so re-baseline must too: a projection opened on
+    the org graph MERGEs its ``point_fts_v2`` marker into that graph, and a raw
+    ``MATCH (n)`` then reports 4 for a 3-point graph (the false-red that blocked
+    unrelated PRs). The watcher consumes the same ``node_count``, so excluding
+    the marker is also what keeps a marker-only change from reading as data
+    loss.
+
+    Reuses the single ``_is_export_skip_node`` predicate (never a second,
+    hand-written Cypher exclusion) so a new skip class cannot drift this count
+    away from the dump's. The read is the sweep dump's own cost class, on an
+    operator action.
+    """
+    from tortoise.hosted_api import _is_export_skip_node
+    rows = db.select_graph(graph_name).query(
+        "MATCH (n) RETURN labels(n), properties(n)").result_set
+    return sum(
+        1 for row in rows
+        if not _is_export_skip_node([str(l) for l in (row[0] or [])],  # noqa: E741
+                                    dict(row[1] or {}))
+    )
 
 
 def _restore_into_temp_verify_swap(
