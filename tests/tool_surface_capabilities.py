@@ -59,12 +59,22 @@ NON_SDK_WRITER_OPERATIONS: dict[str, str] = {
                               "tortoise/pack_manifest_store.py",
 }
 
+# The TOOL that carries each non-SDK writer operation.  #4035 corrected the
+# `tortoise_pack_install` declaration to the handler-served idiom
+# (`sdk_method=""`; the helper is reached from `mcp_server.py`), so the
+# operation is no longer a declared SDK label — the binding is by TOOL NAME.
+NON_SDK_WRITER_BINDINGS: dict[str, str] = {
+    "upsert_tenant_manifest": "tortoise_pack_install",
+}
+
 # Registry `sdk_method` labels that do not resolve to a TortoiseSDK attribute.
 # These are the #3994 `fix-declaration` rows (declared-SDK-link drift, not
 # missing features).  Kept exact so a *new* dangling declaration fails.
+# #4035 blanked `analyze`/`entity_profile`/`upsert_tenant_manifest`, so only the
+# retired `tortoise_health` (`health`) and `get_tenant_packs` remain —
+# `get_tenant_packs` is still read-through-tracked in READ_THROUGH_WRITE_METHODS.
 DANGLING_SDK_DECLARATIONS: frozenset[str] = frozenset({
-    "analyze", "entity_profile", "get_tenant_packs", "health",
-    "upsert_tenant_manifest",
+    "get_tenant_packs", "health",
 })
 
 # Operations a handler reaches that are reads with no registry binding (they
@@ -132,10 +142,14 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_seed",
     "tortoise_onboarding_session_recording",
     "tortoise_onboarding_github_connect", "tortoise_onboarding_github_index",
+    # #4035: handler-served writer (reaches pack_manifest_store.upsert_tenant_manifest)
+    "tortoise_pack_install",
 })
 NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
     "tortoise_overview", "tortoise_get", "tortoise_onboarding_state",
     "tortoise_onboarding_github_status",
+    # #4035: handler-served reads (declaration corrected to sdk_method="")
+    "tortoise_packs_list", "tortoise_entity_profile", "tortoise_analyze",
 })
 
 # Writer-annotated tools that are NOT in WRITE_TOOL_NAMES because they are
@@ -848,13 +862,19 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
         if not e.sdk_method and e.name not in (NON_SDK_WRITER_TOOLS | NON_SDK_READ_TOOLS):
             out.append(f"{e.name}: empty sdk_method but not declared non-SDK")
     # non-SDK writer operations must be bound to a writer tool in WRITE_TOOL_NAMES
-    for operation in sorted(NON_SDK_WRITER_OPERATIONS):
-        for e in by_method.get(operation, []):
-            if e.name not in _ms.WRITE_TOOL_NAMES or (
-                    e.annotations is None or e.annotations.readOnlyHint is not False):
-                out.append(
-                    f"{e.name}: non-SDK writer operation {operation!r} not "
-                    f"writer-classified in WRITE_TOOL_NAMES")
+    by_name = {e.name: e for e in entries}
+    for operation, tool_name in sorted(NON_SDK_WRITER_BINDINGS.items()):
+        e = by_name.get(tool_name)
+        if e is None:
+            # liveness (the bound tool exists) is asserted by
+            # declared_set_violations against the SERVED set; here `entries`
+            # may be a synthetic subset, so a missing tool is skipped.
+            continue
+        if e.name not in _ms.WRITE_TOOL_NAMES or (
+                e.annotations is None or e.annotations.readOnlyHint is not False):
+            out.append(
+                f"{e.name}: non-SDK writer operation {operation!r} not "
+                f"writer-classified in WRITE_TOOL_NAMES")
     return out
 
 
@@ -931,8 +951,10 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
         for e in bound:
             if e.http_policy:
                 out.append(f"{e.name}: declared HTTP-excluded operation {op!r} is HTTP-exposed")
+    by_name = {e.name: e for e in entries}
     for op in sorted(NON_SDK_WRITER_OPERATIONS):
-        if not by_method.get(op):
+        bound_tool = NON_SDK_WRITER_BINDINGS.get(op)
+        if bound_tool is None or bound_tool not in by_name:
             out.append(f"NON_SDK_WRITER_OPERATIONS entry {op!r} has no tool binding")
     for op in sorted(READ_THROUGH_WRITE_METHODS):
         if op not in methods and op not in NON_SDK_WRITER_OPERATIONS \
