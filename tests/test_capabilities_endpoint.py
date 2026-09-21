@@ -4,8 +4,8 @@ GET /v1/capabilities (epic I-7) returns the registry-backed indexers+
 extractors catalog. #3913 (owner ruling 2026-09-20): the build-fork
 completion gate is the two OBSERVED acts — harness-connected +
 first-points-filed — never a catalog render; the catalog-presented step edge
-stays an accepted, optional record (the dashboard checkpoint / PATCH path
-still MERGEs it).
+stays an accepted, optional record (the agent/external checkpoint and the
+PATCH path still MERGE it; no dashboard path writes it since #3913).
 
 Runs in the docker lane (TORTOISE_DB_URI) — the gate assertions exercise
 real FalkorDB step-edge writes. URI-less runs (tier-2 embedded legs,
