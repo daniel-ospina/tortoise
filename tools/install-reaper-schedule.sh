@@ -43,15 +43,15 @@
 #                   directly; cron divides by 60), default REAPER_TIMEOUT + 300
 #   REAPER_TIMEOUT  sweep budget in seconds; default 900
 #   REAPER_JOBS     parallel CLIENT LIST probe workers; default 16
-#   AGENTS_DIR      launchd install dir (default the LOGIN ACCOUNT's
-#                   ~/Library/LaunchAgents, resolved from the password
-#                   database — not the mutable $HOME).
+#   AGENTS_DIR      launchd install dir (default $HOME/Library/LaunchAgents).
 #                   ⛔ A THROWAWAY $HOME/AGENTS_DIR DOES NOT SANDBOX THIS
 #                   SCRIPT. `launchctl` addresses the user domain BY UID
 #                   (`gui/$(id -u)`), so a bootstrap here re-points the LIVE
 #                   agent launchd holds for that label whatever HOME says.
-#                   A non-standard AGENTS_DIR — including one derived from a
-#                   throwaway $HOME — is REFUSED unless
+#                   The install is REFUSED unless AGENTS_DIR is the LOGIN
+#                   ACCOUNT's <passwd-home>/Library/LaunchAgents (resolved
+#                   from the password database, not the mutable $HOME) — a
+#                   throwaway-$HOME default is refused too — unless
 #                   REAPER_ALLOW_NONSTANDARD_AGENTS_DIR=1 (see below).
 #   REAPER_ALLOW_NONSTANDARD_AGENTS_DIR  set to 1 to permit a non-standard
 #                   AGENTS_DIR — at your own risk; it re-points the live agent
@@ -332,11 +332,20 @@ uninstall() {
             echo "removed $PLIST_PATH"
             ;;
         Linux)
-            local current
+            local current filtered
             current="$($CRONTAB_CMD -l 2>/dev/null || true)"
-            printf '%s\n' "$current" \
-                | grep -vF -e "$CRON_MARKER" -e "tortoise.embedded_reaper" \
-                | $CRONTAB_CMD - || return 1
+            # `grep -v` exits 1 when it selects NOTHING (a crontab holding
+            # only reaper entries) — exactly the state this installer
+            # creates. Under `set -o pipefail` that made the write look
+            # failed, so `|| return 1` fired and the success message was
+            # skipped. Capture the filtered text first, tolerating no-match.
+            filtered="$(printf '%s\n' "$current" \
+                | { grep -vF -e "$CRON_MARKER" -e "tortoise.embedded_reaper" || true; })"
+            if [ -n "$filtered" ]; then
+                printf '%s\n' "$filtered" | $CRONTAB_CMD - || return 1
+            else
+                printf '' | $CRONTAB_CMD - || return 1
+            fi
             echo "removed cron entry ($CRON_MARKER)"
             ;;
         *) echo "unsupported platform: $(uname -s)"; return 1 ;;

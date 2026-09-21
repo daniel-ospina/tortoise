@@ -174,8 +174,10 @@ def test_huge_numeric_value_is_refused_closed(tmp_path):
     """A value too large for shell integer arithmetic is refused (exit 2),
     not silently wrapped past the ``>= 1`` guard.
 
-    Mutation: restore ``if [ "$X" -lt 1 ]`` -> the comparison errors (status
-    2, read as false), the huge value passes, install proceeds rc 0 -> RED.
+    Mutation: remove the ``${#X}`` digit bound AND restore ``[ "$X" -lt 1 ]``
+    -> the huge value passes the errored comparison and the digit guard, and
+    the install proceeds rc 0 -> RED. (The digit bound alone refuses it, so
+    reverting the comparison alone does NOT redden this test.)
     """
     sb = _sandbox(tmp_path, uname="Linux")
     sb["env"]["AGENTS_DIR"] = str(tmp_path / "elsewhere")
@@ -194,6 +196,22 @@ def test_huge_reaper_jobs_value_is_refused_closed(tmp_path):
     res = _run(sb)
     assert res.returncode == 2, (res.stdout, res.stderr)
     assert "REAPER_JOBS" in res.stderr and "out of range" in res.stderr
+
+
+def test_huge_reaper_interval_is_refused_closed(tmp_path):
+    """``REAPER_INTERVAL`` has NO digit bound, so the fail-closed comparison
+    is its only defense — a 20-digit value must be refused, not wrapped into
+    the schedule arithmetic.
+
+    Mutation: delete the ``REAPER_INTERVAL >= 1`` guard -> the huge value
+    reaches the arithmetic, wraps, and the install proceeds rc 0 -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    sb["env"]["REAPER_INTERVAL"] = "99999999999999999999"
+    res = _run(sb)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "REAPER_INTERVAL" in res.stderr and ">= 1" in res.stderr
+    assert not sb["crontab_store"].exists(), "wrapped schedule was installed"
 
 
 def test_zero_and_negative_knobs_are_refused(tmp_path):
@@ -280,6 +298,28 @@ def test_linux_uninstall_removes_marker_and_schedule(tmp_path):
     assert _MARKER not in text, text
     assert "tortoise.embedded_reaper" not in text, text
     assert "# keep me" in text, text
+
+
+def test_linux_uninstall_of_only_reaper_entries_exits_zero(tmp_path):
+    """A crontab holding ONLY the marker + schedule line (exactly what this
+    installer creates on a machine with no other cron jobs) uninstalls with
+    rc 0. ``grep -v`` selects nothing -> exit 1, and under ``pipefail`` the
+    write was reported as failed, skipping the success message.
+
+    Mutation: put ``|| return 1`` back on the grep->crontab pipeline with no
+    ``|| true`` guard -> rc 1 and no output -> RED.
+    """
+    sb = _sandbox(tmp_path, uname="Linux")
+    sb["crontab_store"].write_text(
+        f"{_MARKER}\n"
+        "*/20 * * * * cd /repo && py -m tortoise.embedded_reaper --x\n",
+        encoding="utf-8",
+    )
+    res = _run(sb, "--uninstall")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "removed cron entry" in res.stdout
+    assert sb["crontab_store"].read_text(encoding="utf-8").strip() == "", \
+        sb["crontab_store"].read_text(encoding="utf-8")
 
 
 # ── P2: an interval >= 60 min must not silently mean "hourly" on cron ───────

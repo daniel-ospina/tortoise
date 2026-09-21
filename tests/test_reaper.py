@@ -4616,7 +4616,8 @@ def test_reap_nonpositive_jobs_does_not_crash(monkeypatch):
     for its parallel CLIENT LIST pre-probe; a non-positive `jobs` makes that
     `max_workers=0` -> `ValueError: max_workers must be greater than 0`.
 
-    Mutation: delete the `jobs = max(1, jobs)` clamp in reap() and this raises.
+    Mutation: delete the `if jobs < 1: jobs = 1` clamp in reap() and this
+    raises.
     """
     import tortoise.embedded_reaper as R
 
