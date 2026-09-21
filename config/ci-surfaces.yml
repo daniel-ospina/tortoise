@@ -1586,10 +1586,10 @@ durations:
   test_battery_cli.py: 1.5
   test_bridge_mcp.py: 1.5
   test_bridge_table.py: 240.0  # 18 tests; the generator/tortoise.sdk import dominates (paid by the in-process import and the two subprocess --check tests). Re-measured locally 25-30s; CI-observed range 34s-537s depending on box load, so the #3400 reserve is retained deliberately (#4282).
-  # #4282 Phase 0.3: 12 tests, same import cost as the sibling above and the same
+  # #4282 Phase 0.3: 20 tests, same import cost as the sibling above and the same
   # high variance. Measured 254s wall on this box (2026-09-21, load ~8); the sibling's
   # 34s floor and 537s ceiling apply here too (the shared conftest + generator import
-  # dominates, and the extra `--check` subprocesses add ~4-6s each). A held middle.
+  # dominates, and the single `--check` subprocess adds ~4-6s). A held middle.
   # Refresh from the first CI junit run that includes it.
   test_mcp_rename_table.py: 250.0
   test_connector_sources.py: 1.5
