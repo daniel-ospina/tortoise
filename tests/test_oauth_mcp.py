@@ -2825,43 +2825,54 @@ class TestCimdOccupancy3669:
         cp = FakeControlPlane({"organizations": [], "oauth_clients": []})
         monkeypatch.setattr(_ha_mod, "_oauth_control_plane", lambda: (cp, True))
 
+        park_s = 2.0
+        threads: list[str] = []
+
         def _parked_fetch(_client_id):
-            time.sleep(0.4)
+            threads.append(threading.current_thread().name)
+            time.sleep(park_s)
             raise cimd.CimdError("refused")
 
         monkeypatch.setattr(cimd, "fetch_client_metadata", _parked_fetch)
         verifier, challenge = _pkce()  # noqa: RUF059
         params = _authorize_params(challenge)
 
-        async def _run() -> tuple[int, int]:
-            beats = 0
+        async def _run() -> tuple[int, float]:
+            loop = asyncio.get_running_loop()
+            gaps: list[float] = []
+            last = loop.time()
 
             async def _heartbeat():
-                nonlocal beats
+                nonlocal last
                 while True:
-                    beats += 1
+                    now = loop.time()
+                    gaps.append(now - last)
+                    last = now
                     await asyncio.sleep(0.005)
 
             hb = asyncio.ensure_future(_heartbeat())
-            await asyncio.sleep(0.02)          # let the heartbeat settle
-            before = beats
+            await asyncio.sleep(0.05)          # let the heartbeat settle
             transport = httpx.ASGITransport(app=_ha_mod.app)
             async with httpx.AsyncClient(
                     transport=transport, base_url="http://testserver") as client:
                 r = await client.get("/oauth/authorize", params=params)
-            during = beats - before
             hb.cancel()
             with __import__("contextlib").suppress(asyncio.CancelledError):
                 await hb
-            return r.status_code, during
+            return r.status_code, max(gaps)
 
-        status, beats_during = asyncio.run(_run())
+        status, max_gap = asyncio.run(_run())
         assert status == 400
-        assert beats_during >= 20, (
-            f"the event loop ticked only {beats_during} times while a CIMD fetch "
-            "was parked — the fetch is occupying the loop (#3669). A 0.4s park "
-            "at a 5ms tick should allow ~80 ticks."
-        )
+        # Deterministic half: the fetch ran on a worker, not the loop thread.
+        assert threads and not threads[0].startswith("MainThread"), (
+            f"the CIMD fetch ran on {threads} — the event-loop thread")
+        # Behavioural half: the loop was never stalled for anywhere near the
+        # park. A mutation that reverts the offload stalls it for the full
+        # `park_s`, so the threshold on HALF the park cleanly separates the two
+        # while tolerating the heaviest scheduler blips on a loaded box.
+        assert max_gap < park_s / 2, (
+            f"the event loop stalled {max_gap:.3f}s while a {park_s}s CIMD fetch "
+            "was in flight — the fetch is occupying the loop (#3669)")
 
     @pytest.mark.parametrize("door", [
         "authorize", "consent", "token_code", "token_refresh"])

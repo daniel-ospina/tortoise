@@ -15,6 +15,8 @@ Controls under test
 4. size + status handling
 5. fetch cache (successes only; TTL; LRU cap; NEVER negative)
 6. fetch rate limiting (per-host, aggregate, store cap)
+7. total occupancy (#3669): in-flight cap, absolute fetch deadline, per-window
+   wall-clock budget reserved at admission
 """
 from __future__ import annotations
 
@@ -236,7 +238,12 @@ class _FakePool:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.script = list(_FakePool.script)
+        self.closed = False
         _FakePool.instances.append(self)
+
+    def close(self):
+        # The #3669 hard-deadline watchdog calls this from its timer thread.
+        self.closed = True
 
     def __enter__(self):
         return self
@@ -543,10 +550,12 @@ def test_rate_limited_fetch_raises_without_caching(monkeypatch):
 # in ``resolve_client_metadata`` — the one function all four unauthenticated
 # front doors reach through ``resolve_client``.
 
-def test_fetch_budget_is_charged_and_refuses_a_later_fetch(monkeypatch):
-    """Once the window's wall-clock budget is spent, a further fetch is
-    refused BEFORE it starts (and before it charges the rate limiter)."""
-    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 0.05)
+def test_fetch_budget_reserves_the_worst_case_and_refuses_a_later_fetch(monkeypatch):
+    """A fetch RESERVES FETCH_MAX_S up front, settles to actual on return, and
+    once the window cannot fit another reservation the next fetch is refused
+    BEFORE it starts (and before it charges the rate limiter)."""
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 0.05)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 0.1)
     monkeypatch.setattr(cimd, "CACHE_TTL_S", 0)   # force a second fetch
     calls: list[str] = []
 
@@ -556,11 +565,34 @@ def test_fetch_budget_is_charged_and_refuses_a_later_fetch(monkeypatch):
         return _doc()
 
     monkeypatch.setattr(cimd, "fetch_client_metadata", _slow)
-    _resolve_direct()                               # spends > the budget
-    assert cimd._BUDGET_SPENT > cimd.FETCH_BUDGET_S
+    _resolve_direct()                               # settles to ~0.08 actual
+    assert 0.05 <= cimd._BUDGET_SPENT < cimd.FETCH_BUDGET_S
     with pytest.raises(cimd.CimdError, match="wall-clock budget"):
         _resolve_direct()
     assert len(calls) == 1, "the refused fetch must not have been attempted"
+
+
+def test_budget_reservation_is_refunded_to_actual(monkeypatch):
+    """The FETCH_MAX_S reservation is refunded to the real duration on return,
+    so a fast fetch does not permanently consume its worst case."""
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 5.0)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 100.0)
+    monkeypatch.setattr(cimd, "fetch_client_metadata", lambda _c: _doc())
+    _resolve_direct()
+    assert cimd._BUDGET_SPENT < 1.0, (
+        "the 5s worst-case reservation must be refunded to the ~0s actual")
+
+
+def test_an_unsettled_reservation_stays_charged(monkeypatch):
+    """An ABANDONED fetch (its caller's offload bound expired while the worker
+    kept running) never reaches ``_budget_settle``, so its reservation stays
+    charged — that is what keeps the budget a worst-case upper bound."""
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 5.0)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 100.0)
+    cimd._budget_reserve()
+    assert cimd._BUDGET_SPENT == 5.0
+    cimd._budget_settle(0.0)
+    assert cimd._BUDGET_SPENT == 0.0
 
 
 def test_budget_refusal_does_not_charge_the_rate_limiter(monkeypatch):
@@ -578,7 +610,8 @@ def test_budget_refusal_does_not_charge_the_rate_limiter(monkeypatch):
 def test_budget_window_rolls_over(monkeypatch):
     """The budget is per RATE_WINDOW_S: once the window elapses the next
     check starts a fresh one (lazy roll-over, no background timer)."""
-    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 0.05)
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 0.05)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 0.1)
     monkeypatch.setattr(cimd, "CACHE_TTL_S", 0)
     calls: list[str] = []
 
@@ -648,6 +681,22 @@ def test_in_flight_slot_is_released_on_failure(monkeypatch):
     assert _resolve_direct()["client_id"] == CLIENT_ID
 
 
+def test_release_targets_the_acquired_semaphore_across_a_reset(monkeypatch):
+    """The release must target the semaphore that was ACQUIRED. A concurrent
+    ``_rate_limit_reset`` rebinds the module global to a fresh semaphore;
+    releasing the global would then release a fully-permitted ``BoundedSemaphore``
+    and raise "released too many times" out of the ``finally``, masking the
+    resolution's real result."""
+    real_reset = cimd._rate_limit_reset
+
+    def _reset_mid_fetch(_client_id):
+        real_reset()          # rebinds cimd._IN_FLIGHT
+        return _doc()
+
+    monkeypatch.setattr(cimd, "fetch_client_metadata", _reset_mid_fetch)
+    assert _resolve_direct()["client_id"] == CLIENT_ID
+
+
 def test_cache_hit_skips_the_occupancy_bounds(monkeypatch):
     """The cap and the budget bound FETCHES; a cached resolution pays neither
     (same doctrine as the rate limiter)."""
@@ -670,6 +719,38 @@ def test_rate_limit_reset_clears_the_occupancy_bounds(monkeypatch):
     assert cimd._RATE_BUCKETS == {} and cimd._RATE_AGGREGATE == []
     assert cimd._IN_FLIGHT.acquire(timeout=0.01), (
         "the reset must hand back a fresh, fully-permitted semaphore")
+
+
+# ── Control 7 — the absolute fetch deadline (a per-op read timeout is not one) ──
+
+def test_read_capped_enforces_the_deadline():
+    """``READ_TIMEOUT_S`` is per socket read, so a trickling body resets it
+    forever; ``_read_capped`` takes an absolute deadline and refuses past it."""
+    def _trickle():
+        yield b"{"
+        yield b"}"
+
+    with pytest.raises(cimd.CimdError, match="deadline"):
+        cimd._read_capped(_trickle(), cimd.DOCUMENT_MAX_BYTES,
+                          deadline=time.monotonic() - 1)
+
+
+def test_fetch_aborts_a_trickled_body_at_the_hard_deadline(fake_pool, monkeypatch):
+    """BEHAVIOURAL: a body that trickles past FETCH_MAX_S is aborted (and the
+    watchdog closes the pool) even though each read is inside READ_TIMEOUT_S."""
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 0.05)
+    monkeypatch.setattr(cimd, "READ_TIMEOUT_S", 30.0)   # would never fire
+
+    def _trickle():
+        yield b"{"
+        time.sleep(0.2)          # server stalls mid-body, under the read timeout
+        yield b"}"
+
+    fake_pool.script = [_FakeResponse(200, _trickle())]
+    with pytest.raises(cimd.CimdError, match="deadline"):
+        cimd.fetch_client_metadata(CLIENT_ID)
+    assert fake_pool.instances[-1].closed, (
+        "the watchdog must close the pool at the hard deadline")
 
 
 # ── Feature gate ───────────────────────────────────────────────────────────

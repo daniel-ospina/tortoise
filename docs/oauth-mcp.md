@@ -160,7 +160,7 @@ is a server-side request forgery surface, so the fetch lives in
 | 4 | Size + timeout | 64 KiB body cap, 3 s connect/read |
 | 5 | Cache | successes only, 300 s TTL, LRU cap 128; errors and malformed documents are **never** cached (§4.3) |
 | 6 | Rate limit | per-host 60/hr + aggregate 600/hr + live-store cap 256 |
-| 7 | Total occupancy (#3669) | in-flight fetches capped process-wide (4) + wall-clock budget per 3600 s window (120 s), charged for every fetch |
+| 7 | Total occupancy (#3669) | in-flight fetches capped process-wide (4), an ABSOLUTE per-fetch deadline (8 s; the 3 s read timeout is per-socket-read, not total), and a per-window wall-clock budget (120 s / 3600 s) whose worst case is RESERVED at admission |
 
 Control 2 is closed against **DNS rebinding** rather than narrowed: a custom
 `httpcore` `NetworkBackend` resolves the host, refuses the whole resolution if
@@ -232,22 +232,36 @@ Before #4097 an empty value silently disabled `TORTOISE_OAUTH_CIMD` (and, worse,
 
 ### Limitations (deliberate)
 
-- The rate-limit and fetch-cache stores are in-process, so the real bound is
-  `limit × running machines` and resets on restart — the same accepted
-  limitation as `_OAUTH_DCR_BUCKETS` (#2866; the shared primitive is #3124).
+- The rate-limit, fetch-cache and #3669 occupancy stores are in-process, so the
+  real bound is `limit × running machines` and resets on restart — the same
+  accepted limitation as `_OAUTH_DCR_BUCKETS` (#2866; the shared primitive is
+  #3124). The in-flight cap is per process (N machines ⇒ N×4), and the window
+  budget is per process (N machines ⇒ N×120 s/window).
 - The fetch is **synchronous** by construction, matching this path's existing
   control-plane style (`cp.query` is a blocking PostgREST call made from the
   same async handler). **#3669 moved the whole OAuth client resolution off the
   event loop** through the bounded `monitoring` offload seam on a dedicated
   `oauth` pool, so a fetch no longer occupies the loop (`Dockerfile.hosted` runs
-  a single `uvicorn` process with no `--workers`). Total occupancy is bounded by
-  a process-wide **in-flight cap** (`cimd.MAX_IN_FLIGHT_FETCHES`) plus a
-  **wall-clock budget per window** (`cimd.FETCH_BUDGET_S`), charged in
-  `resolve_client_metadata` — the one function all four unauthenticated front
-  doors reach through `resolve_client`. Fetch COUNT alone never bounded the
-  product (distinct `client_id` URLs share one aggregate budget; 600 fetches at
-  the 6 s ceiling is ~the whole window), so the budget is the load-bearing fix
-  and it is not an SSRF bypass.
+  a single `uvicorn` process with no `--workers`). Total occupancy is bounded
+  three ways, all charged in `resolve_client_metadata` — the one function all
+  four unauthenticated front doors reach through `resolve_client`: a
+  process-wide **in-flight cap** (`cimd.MAX_IN_FLIGHT_FETCHES`), an **absolute
+  per-fetch deadline** (`cimd.FETCH_MAX_S`; the per-read `READ_TIMEOUT_S` does
+  not bound a trickled body, so a watchdog closes the pool at the deadline), and
+  a **wall-clock budget per window** (`cimd.FETCH_BUDGET_S`) whose worst case is
+  reserved at admission and settled to the actual duration on return. Fetch
+  COUNT alone never bounded the product (distinct `client_id` URLs share one
+  aggregate budget; 600 fetches at the 6 s ceiling is ~the whole window).
+- **The window budget is an admitted cost, and it is the reason a sustained
+  attack can still starve a legitimate CIMD client.** It is a single
+  process-wide 120 s / 3600 s allowance, so a hostile host that keeps ~15–20
+  fetches alive near the `FETCH_MAX_S` ceiling exhausts it, after which every
+  later cache-miss CIMD client is refused to `invalid_client` for the rest of
+  the window (a cache hit, and any non-CIMD/DCR client, is unaffected). The fix
+  removes the *unbounded* occupancy and keeps the AS responsive; it does not
+  make CIMD fetch capacity attack-proof, and the 600/hr aggregate limiter is the
+  other ceiling on the same path. This is the residual the single-worker
+  deployment carries until the limiter/budget moves to shared state (#3124).
 - The `authorize` error path uses the client **stamped on the raised
   `OAuthError`** by `validate_authorize_params`, so an in-document
   `redirect_uri` is still honoured on error responses without a second

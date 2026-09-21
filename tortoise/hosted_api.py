@@ -4604,7 +4604,8 @@ def _control_plane_unavailable() -> HTTPException:
 
 
 async def _cp_offload(fn, *, op: str, best_effort: bool = False,
-                      pool: str = "auth", unavailable=None):
+                      pool: str = "auth", timeout: float | None = None,
+                      unavailable=None):
     """#3498: run ONE blocking control-plane helper off the event loop.
 
     Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
@@ -4631,9 +4632,15 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
-    the OAuth endpoints pass a factory raising RFC 6749 §5.2
+    the OAuth read-only lanes pass a factory raising RFC 6749 §5.2
     ``temporarily_unavailable`` instead, because their consumers parse the
     OAuth error body (#2863) and never the FastAPI ``detail`` shape.
+
+    ``timeout`` is the WAIT BOUND on the submission (``None`` = the seam's
+    ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``). ``math.inf`` waits WITHOUT a bound —
+    used by the mutating token grants, because ``wait_for`` cancels only the
+    await, never the worker thread (CPython #87185), so abandoning a grant that
+    is mid-write would claim a retryable state it cannot observe (#2863).
 
     The Auth/REST lane is the blast radius the issue names: a regression here
     is a total auth outage, so this seam is deliberately the ONLY new thing
@@ -4643,7 +4650,8 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
     # pool explicitly (#3498 review P1, preserved by #3669's ``pool`` param).
     effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
     try:
-        return await run_control_plane_call(fn, op=op, pool=effective_pool)
+        return await run_control_plane_call(
+            fn, op=op, pool=effective_pool, timeout=timeout)
     except ControlPlaneOffloadError as exc:
         if best_effort:
             logging.getLogger("tortoise.api").warning(
@@ -4655,7 +4663,7 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
         raise _control_plane_unavailable() from None
 
 
-async def _oauth_offload(fn, *, op: str):
+async def _oauth_offload(fn, *, op: str, no_wait_bound: bool = False):
     """#3669: run ONE synchronous OAuth resolution off the event loop.
 
     The OAuth client-resolution lane is synchronous end to end —
@@ -4663,13 +4671,24 @@ async def _oauth_offload(fn, *, op: str):
     ``client_id``, a blocking ``httpcore`` fetch — and it is reached from FOUR
     unauthenticated front doors. Offloading the RESOLUTION (not the fetch) puts
     the whole resolve on a pool dedicated to this lane, so the event loop is
-    never occupied; the fetch's own in-flight cap and per-window wall-clock
-    budget live in ``tortoise.cimd`` and are therefore charged identically at
-    all four doors.
+    never occupied; the fetch's own in-flight cap, absolute deadline and
+    per-window wall-clock budget live in ``tortoise.cimd`` and are therefore
+    charged identically at all four doors.
 
     A dedicated ``"oauth"`` pool (not ``"auth"``) keeps an attacker-driven
     CIMD fetch flood from parking the auth slots — the same isolation that
     split ``telemetry`` out (#3498 review P1).
+
+    ``no_wait_bound=True`` is for the two MUTATING token grants. The seam's
+    wait bound ABANDONS the daemon worker on expiry (``wait_for`` cancels the
+    await, not the thread — CPython #87185), so a bound miss there would answer
+    a retryable ``temporarily_unavailable`` while the abandoned grant may still
+    consume the code or rotate the refresh token. That is exactly what the
+    #2863 contract on ``OAuthTemporarilyUnavailable`` forbids ("Never on an
+    unobserved write state"), so a grant is awaited WITHOUT a wait bound: its
+    own httpx phase timeouts bound it, and the only remaining offload failure
+    is a REFUSED submission (full backlog), where no write started and a
+    retryable 503 is accurate.
 
     Failure is the OAuth contract (RFC 6749 §5.2 503 ``temporarily_unavailable``),
     never the FastAPI ``control_plane_unavailable`` body the auth/REST lane uses.
@@ -4677,6 +4696,7 @@ async def _oauth_offload(fn, *, op: str):
     from tortoise.oauth import OAuthTemporarilyUnavailable
     return await _cp_offload(
         fn, op=op, pool="oauth",
+        timeout=float("inf") if no_wait_bound else None,
         unavailable=lambda: OAuthTemporarilyUnavailable(
             "Client resolution is temporarily unavailable — retry."))
 
@@ -25855,11 +25875,11 @@ async def oauth_token(request: Request):
         if grant == "authorization_code":
             out = await _oauth_offload(
                 lambda: exchange_auth_code(cp, body, base),
-                op="oauth_token_exchange")
+                op="oauth_token_exchange", no_wait_bound=True)
         elif grant == "refresh_token":
             out = await _oauth_offload(
                 lambda: refresh_grant(cp, body, base),
-                op="oauth_token_refresh")
+                op="oauth_token_refresh", no_wait_bound=True)
         else:
             raise OAuthError(400, "unsupported_grant_type",
                              "grant_type must be authorization_code or refresh_token")

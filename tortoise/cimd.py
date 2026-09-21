@@ -39,9 +39,10 @@ implemented here:
    invalid or malformed").
 6. **Fetch rate limiting** — per-host + aggregate + store cap, mirroring the
    DCR limiter's bucket idiom in ``hosted_api``.
-7. **Total occupancy** (#3669) — a process-wide in-flight cap plus a
-   wall-clock budget per window, so the product (fetches x duration) is bounded
-   and not just the fetch count.
+7. **Total occupancy** (#3669) — a process-wide in-flight cap, an ABSOLUTE
+   per-fetch deadline (the per-op timeouts do not bound a trickled body), and a
+   wall-clock budget per window whose worst case is RESERVED at admission, so
+   the product (fetches x duration) is bounded and not just the fetch count.
 
 Control (2) is closed against **DNS rebinding** by connecting the TCP socket to
 the *validated* address while TLS SNI and the HTTP ``Host`` header stay on the
@@ -85,7 +86,8 @@ __all__ = [
     "validate_client_id_url",
 ]
 
-# ── Caps (all overridable by env for ops; every default is the strict one) ──
+# ── Caps (module constants, kept deliberately strict; the two FEATURE levers
+#    above are the env-overridable surface) ─────────────────────────────────
 
 CLIENT_ID_MAX_LEN = 2048
 DOCUMENT_MAX_BYTES = 64 * 1024
@@ -116,6 +118,15 @@ STORE_CAP = 256
 # escape the accounting.
 MAX_IN_FLIGHT_FETCHES = 4
 FETCH_BUDGET_S = 120.0
+#: ABSOLUTE wall-clock deadline for ONE fetch, whole exchange. ``READ_TIMEOUT_S``
+#: is a per-socket-read timeout, not a total one: a server that trickles the
+#: body one byte at a time keeps resetting it and can hold a worker — and an
+#: in-flight permit — indefinitely. A watchdog closes the pool at this deadline,
+#: and the budget RESERVES this worst case at admission (see ``_budget_reserve``)
+#: so a fetch that never returns cannot be reset out of the accounting. Sits
+#: BELOW ``monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` so a fetch returns
+#: before its caller's offload bound would abandon it.
+FETCH_MAX_S = 8.0
 #: How long a resolution waits for an in-flight slot before refusing. Bounded,
 #: so a saturated cap fails fast instead of parking a caller indefinitely.
 IN_FLIGHT_WAIT_S = 2.0
@@ -366,29 +377,35 @@ def _budget_remaining_locked(now: float) -> float:
     return FETCH_BUDGET_S - _BUDGET_SPENT
 
 
-def _budget_admit() -> None:
-    """Refuse a fetch once the window's wall-clock budget is spent.
+def _budget_reserve() -> None:
+    """Reserve ``FETCH_MAX_S`` against the window, refusing when it does not fit.
 
-    Admission is checked BEFORE the fetch and the budget is charged with the
-    ACTUAL elapsed time afterwards (see :func:`_budget_charge`). A concurrent
-    burst admitted just under the line can therefore overshoot by at most
-    ``MAX_IN_FLIGHT_FETCHES`` x the 6 s exchange ceiling (~24 s by default) —
-    bounded, and deliberately NOT reserved up front, because reserving the
-    timeout would refuse honest fetches that finish far inside it.
+    Reserving the WORST CASE up front (rather than charging the actual duration
+    after the fact) is what makes the window budget a true upper bound:
+    concurrent admissions cannot overshoot it, and a fetch that is ABANDONED
+    (its caller's offload bound expired while the worker kept running) keeps its
+    full reservation charged until it finishes. :func:`_budget_settle` refunds
+    the unused remainder once the fetch returns.
     """
     now = time.monotonic()
-    with _BUDGET_LOCK:
-        if _budget_remaining_locked(now) <= 0:
-            raise CimdError(
-                "CIMD fetch wall-clock budget exhausted for this window.")
-
-
-def _budget_charge(elapsed: float) -> None:
-    """Charge ACTUAL fetch seconds. Called in a ``finally``, so a refused or
-    failed fetch still pays for the time it occupied."""
     global _BUDGET_SPENT
     with _BUDGET_LOCK:
-        _BUDGET_SPENT += elapsed
+        if _budget_remaining_locked(now) < FETCH_MAX_S:
+            raise CimdError(
+                "CIMD fetch wall-clock budget exhausted for this window.")
+        _BUDGET_SPENT += FETCH_MAX_S
+
+
+def _budget_settle(elapsed: float) -> None:
+    """Replace the ``FETCH_MAX_S`` reservation with the ACTUAL elapsed time.
+
+    Called in a ``finally``, so a failed fetch still pays for the time it
+    occupied. Adds the difference, so an over-deadline fetch (the watchdog is a
+    best-effort backstop) is still charged for everything it used.
+    """
+    global _BUDGET_SPENT
+    with _BUDGET_LOCK:
+        _BUDGET_SPENT += elapsed - FETCH_MAX_S
 
 
 def _prune(bucket: list[float], now: float) -> list[float]:
@@ -453,9 +470,12 @@ def _cache_put(client_id: str, document: dict) -> None:
 
 # ── Controls 3 + 4 — the fetch itself ──────────────────────────────────────
 
-def _read_capped(stream, cap: int) -> bytes:
+def _read_capped(stream, cap: int, deadline: float | None = None) -> bytes:
     body = bytearray()
     for chunk in stream:
+        if deadline is not None and time.monotonic() > deadline:
+            raise CimdError(
+                "client metadata document exceeded the fetch deadline.")
         if not chunk:
             continue
         body.extend(chunk)
@@ -480,6 +500,15 @@ def fetch_client_metadata(client_id: str) -> dict:
                "write": CONNECT_TIMEOUT_S, "pool": CONNECT_TIMEOUT_S}
     pool = httpcore.ConnectionPool(network_backend=_PinningNetworkBackend(),
                                    max_connections=2, retries=0)
+    # #3669 control 7: an ABSOLUTE deadline on the whole exchange. The per-op
+    # timeouts below do not bound a server that trickles the headers or body
+    # (each byte resets the read timeout), so a watchdog closes the pool at
+    # FETCH_MAX_S and the blocked read aborts. Cancelled in the `finally` for
+    # every other exit, so a normal fetch never pays the deadline.
+    watchdog = threading.Timer(FETCH_MAX_S, pool.close)
+    watchdog.daemon = True
+    watchdog.start()
+    deadline = time.monotonic() + FETCH_MAX_S
     try:
         # The validated URL goes to httpcore verbatim: it derives SNI and the
         # Host header from the URL's host, which is exactly the pairing the
@@ -496,11 +525,14 @@ def fetch_client_metadata(client_id: str) -> dict:
             if status != 200:
                 raise CimdError(
                     f"client_id URL returned HTTP {status}.")
-            body = _read_capped(response.iter_stream(), DOCUMENT_MAX_BYTES)
+            body = _read_capped(response.iter_stream(), DOCUMENT_MAX_BYTES,
+                                deadline=deadline)
     except CimdError:
         raise
     except Exception as exc:
         raise CimdError(f"could not fetch the client metadata document: {exc}") from exc
+    finally:
+        watchdog.cancel()
     try:
         document = json.loads(body.decode("utf-8"))
     except Exception as exc:
@@ -618,16 +650,21 @@ def resolve_client_metadata(client_id: str, *, supported_scopes: set[str],
     cached = _cache_get(client_id)
     if cached is not None:
         return cached
-    if not _IN_FLIGHT.acquire(timeout=IN_FLIGHT_WAIT_S):
+    # Bind the semaphore LOCALLY: a concurrent `_rate_limit_reset` (test/ops
+    # seam) rebinds the module global, and releasing the global in the `finally`
+    # would release the NEW semaphore — raising "released too many times" out of
+    # the finally and masking the real result, while leaking a permit here.
+    sem = _IN_FLIGHT
+    if not sem.acquire(timeout=IN_FLIGHT_WAIT_S):
         raise CimdError("CIMD fetch concurrency limit reached.")
     try:
-        _budget_admit()
+        _budget_reserve()
         _charge_rate_limit(urlparse(client_id).hostname or "")
         started = time.monotonic()
         try:
             document = fetch_client_metadata(client_id)
         finally:
-            _budget_charge(time.monotonic() - started)
+            _budget_settle(time.monotonic() - started)
         record = validate_document(
             client_id, document,
             supported_scopes=supported_scopes,
@@ -636,4 +673,4 @@ def resolve_client_metadata(client_id: str, *, supported_scopes: set[str],
         _cache_put(client_id, record)
         return record
     finally:
-        _IN_FLIGHT.release()
+        sem.release()

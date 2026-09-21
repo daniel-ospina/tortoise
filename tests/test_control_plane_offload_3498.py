@@ -235,22 +235,43 @@ def test_oauth_pool_is_separate_from_auth_and_telemetry():
 def test_oauth_offload_routes_to_the_oauth_pool(monkeypatch):
     """WIRING guard: reverting ``_oauth_offload`` to the auth pool would keep
     every behavioural test green, so record what it actually passes."""
-    seen: list[str] = []
+    seen: list[tuple[str, object]] = []
 
-    async def _recorder(fn, *, op, pool="auth"):
-        seen.append(pool)
+    async def _recorder(fn, *, op, pool="auth", timeout=None):
+        seen.append((pool, timeout))
         return "ok"
 
     monkeypatch.setattr(ha, "run_control_plane_call", _recorder)
 
     async def _run():
-        await ha._oauth_offload(lambda: None, op="oauth-probe")
+        await ha._oauth_offload(lambda: None, op="read-only")
+        await ha._oauth_offload(lambda: None, op="grant", no_wait_bound=True)
 
     asyncio.run(_run())
-    assert seen == ["oauth"], (
-        f"_oauth_offload used pool {seen} — the OAuth lane must never share the "
-        "auth pool (#3669)"
+    assert [pool for pool, _t in seen] == ["oauth", "oauth"], (
+        f"_oauth_offload used pools {seen} — the OAuth lane must never share "
+        "the auth pool (#3669)"
     )
+    # The reading lane is bounded by the seam default; the MUTATING grant lane
+    # must be awaited WITHOUT a wait bound (inf), or the bound would abandon a
+    # mid-write grant and answer a retryable state it cannot observe (#2863).
+    assert seen[0][1] is None
+    assert seen[1][1] == float("inf")
+
+
+def test_fetch_deadline_sits_below_the_offload_bound():
+    """Constant ordering: a fetch must return before its caller's offload bound
+    would abandon it (an abandoned fetch keeps a worker and a reservation)."""
+    from tortoise import cimd
+    assert cimd.FETCH_MAX_S < monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S
+
+
+def test_oauth_pool_is_larger_than_the_in_flight_cap():
+    """The CIMD in-flight cap must be the binding constraint on concurrent
+    fetches (defence in depth), with the remaining oauth workers still free for
+    the token grants and registry reads."""
+    from tortoise import cimd
+    assert monitoring.CONTROL_PLANE_OAUTH_WORKERS > cimd.MAX_IN_FLIGHT_FETCHES
 
 
 def test_oauth_offload_maps_failure_to_the_oauth_503(monkeypatch):
@@ -284,7 +305,7 @@ def test_cp_offload_routes_best_effort_to_the_telemetry_pool(monkeypatch):
     Record what ``_cp_offload`` actually passes."""
     seen: list[str] = []
 
-    async def _recorder(fn, *, op, pool="auth"):
+    async def _recorder(fn, *, op, pool="auth", timeout=None):
         seen.append(pool)
         return "ok"
 
