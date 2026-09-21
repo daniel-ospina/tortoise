@@ -154,6 +154,12 @@ def track_tempfile_artifacts() -> Iterator[None]:
     Autouse for the whole suite (re-exported by `tests/conftest.py`). The
     leak the suite had was normal-exit churn, so teardown removal is the
     complete fix for it; killed runs remain the reaper's domain.
+
+    ⚠️ TEMPORARY DIAGNOSTIC PROBE (PR #4076 blocker) — REMOVE BEFORE LANDING.
+    Inert on purpose: the suite runs with NO per-test tracking, to measure
+    whether the tracker is implicated in the CI red at all. The redislite-dir
+    protection probe already exonerated the tracker's removal of redislite
+    instance dirs; this settles the tracker as a whole.
     """
-    with TrackedTempfileArtifacts():
-        yield
+    # probe: the tracker is never entered for this run
+    yield
