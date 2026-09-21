@@ -1651,11 +1651,9 @@ def test_harness_disables_redislite_rdb_save():
 
     from tests._embedded import REDIS_SAVE_DISABLED
 
-    # Truthy AND the disable form — the two properties the trap depends on.
+    # The disable form must be the truthy 2-char string, not an empty one:
+    # config() deletes falsy settings (see the negative control below).
     assert REDIS_SAVE_DISABLED == '""'
-    assert bool(REDIS_SAVE_DISABLED) is True, (
-        "the disable form must stay TRUTHY: config() deletes falsy settings "
-        "(see test_falsy_save_omits_directive_documenting_trap)")
     assert configuration.DEFAULT_REDIS_SETTINGS["save"] == REDIS_SAVE_DISABLED
 
     save_lines = [l for l in configuration.config().splitlines()  # noqa: E741
@@ -1672,9 +1670,11 @@ def test_falsy_save_omits_directive_documenting_trap(monkeypatch):
     `save=[]` / `save=''` OMIT the directive — and Redis's built-in defaults
     then apply (measured on the bundled redis-server v8.6.2: `3600 1 / 300 100
     / 60 10000`), i.e. saving is NOT disabled.
-    This is the trap the `save ""` form avoids; pinning it here stops a
-    future "simplification" to a falsy value from silently restoring the
-    fork storm while looking correct.
+    This control documents redislite's rendering semantics. The gate that a
+    future "simplification" to a falsy harness value cannot pass silently is
+    `test_harness_disables_redislite_rdb_save` (which reads the HARNESS
+    constant and its rendered line) — this test intentionally monkeypatches
+    redislite directly, so by itself it would still pass under that trap.
 
     `monkeypatch.setitem` restores the harness default at teardown — without
     it this test would leave the module global falsy and re-arm the storm for
@@ -1682,14 +1682,22 @@ def test_falsy_save_omits_directive_documenting_trap(monkeypatch):
     """
     from redislite import configuration
 
+    from tests._embedded import REDIS_SAVE_DISABLED
+
     for falsy in ([], ""):
-        assert not falsy  # the property under test
         monkeypatch.setitem(configuration.DEFAULT_REDIS_SETTINGS, "save", falsy)
         save_lines = [l for l in configuration.config().splitlines()  # noqa: E741
                       if l.startswith("save")]
         assert save_lines == [], (
             f"falsy save={falsy!r} unexpectedly rendered {save_lines!r}; the "
             "trap (omitted directive → Redis built-in defaults) changed")
+
+    # Prove the restore contract the harness depends on: after the mutations
+    # are undone the disable form is back, so no later server is re-armed.
+    monkeypatch.undo()
+    assert configuration.DEFAULT_REDIS_SETTINGS["save"] == REDIS_SAVE_DISABLED, (
+        "the falsy mutations must not survive the test — a leaked falsy "
+        "default would re-arm the fork storm for every later server")
 
 
 def test_live_fixture_server_reports_rdb_save_disabled(tmp_path):
@@ -1719,4 +1727,5 @@ def test_live_fixture_server_reports_rdb_save_disabled(tmp_path):
         assert value == "", (
             f"live fixture must report save disabled (empty), got {result!r}")
     finally:
-        proj.close()
+        with contextlib.suppress(Exception):
+            proj.close()
