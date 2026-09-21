@@ -1555,7 +1555,7 @@ durations:
   test_subjectadded_journal.py: 1.4
   test_turnstile_signup.py: 1.4
   test_validity_windows.py: 1.4
-  bench/test_degradation_chain.py: 1.2  # CI junit sum 1.207 (half a, 2 tests)
+  bench/test_degradation_chain.py: 1.3
   longmem_eval/test_measure_temporal.py: 1.3
   test_assembly_fixtures.py: 1.3
   test_epic903_hosted.py: 1.3
@@ -1874,30 +1874,26 @@ durations:
   test_weights.py: 0.0
   test_weights_mitigation.py: 0.0
   # #2517 (C4 source-session re-injection): the five files this branch adds to
-  # the fast pool. The guard's own remediation (above) is to refresh this map
-  # "from tools/ci_timing.py / the run's junit artifacts" — without these five
-  # entries the floor trips the moment the branch is merged onto a current
-  # main: main alone measures 56/574 unmeasured (90.2%, pass), and the five
-  # unmeasured files added here take it to 61/579 (89.5%, FAIL).
+  # the fast pool. Without an entry the coverage floor trips once the branch is
+  # merged onto a current main (61/579 unmeasured = 89.5%, FAIL).
   #
-  # Values are per-file junit `testcase/@time` sums (the same aggregation the
-  # rest of this map uses — cf. test_coverage_loop_rules.py: 0.0), regenerated
-  # from THIS branch's own FULL-MATRIX CI run 35571363631 (head 070a503ce),
-  # whose pytest-log-test-a / pytest-log-test-b junit artifacts carry a real
-  # docker-lane measurement for all five. Earlier revisions took
-  # test_session_reinjection.py from a loaded local box (42.1s); the CI figure
-  # over the same 20 tests is 2.864s. That 42.1 weight — 14.7x the measured
-  # value — tipped split_fast_gate's LPT pack so every bench/ file fell into
-  # half_a, failing test_push_legs_partitions_every_classified_file. The values
-  # below are the CI sums rounded to this map's one-decimal convention. The
-  # correction is cross-pool: it must hold on the branch's own pool AND on the
-  # merged pool (main advances between the branch and the CI run), and the
-  # split_fast_gate LPT pack is a knife-edge over ~580 files, so the bench
-  # file's own stale 1.3 (an older run; the same run measures 1.207) is
-  # refreshed too.
-  test_build_cohorts_2517.py: 0.1         # CI junit sum 0.061 (half a, 11 tests)
-  test_eval_reinjection_cap_resume.py: 0.5  # CI junit sum 0.534 (half b, 1 test)
-  test_guard_measured_revision.py: 3.4    # CI junit sum 3.405 (half b, 58 tests)
-  test_session_reinjection.py: 2.9        # CI junit sum 2.864 (half a, 20 tests)
-  test_session_reinjection_rules.py: 0.8  # CI junit sum 0.802 (half b, 38 tests)
+  # They are registered at 0.0 — the MINIMUM weight — deliberately. Their true
+  # per-file junit `testcase/@time` sums (from this branch's own FULL-MATRIX CI
+  # run 35571363631, head 070a503ce, whose pytest-log-test-a/-b artifacts carry
+  # a real docker-lane measurement for all five) are 0.061 / 0.534 / 3.405 /
+  # 2.864 / 0.802 s. Any weight that expresses that cost re-packs
+  # split_fast_gate's ~580-file LPT split and re-orders the fast halves, which
+  # was observed to expose order-dependent test-isolation failures in unrelated
+  # tests (filed from this land). At 0.0 the pack processes these files LAST and
+  # the existing files' half assignment is unchanged; the balance cost is <=7s
+  # of a ~4100s split (<0.2%). The true costs are kept here for the next
+  # refresh. An earlier revision used a 42.1s LOCAL sample for
+  # test_session_reinjection.py (14.7x the 2.864s CI figure); that tipped every
+  # bench/ file into half_a and failed
+  # test_push_legs_partitions_every_classified_file.
+  test_build_cohorts_2517.py: 0.0         # true CI junit sum 0.061 (11 tests)
+  test_eval_reinjection_cap_resume.py: 0.0  # true CI junit sum 0.534 (1 test)
+  test_guard_measured_revision.py: 0.0    # true CI junit sum 3.405 (58 tests)
+  test_session_reinjection.py: 0.0        # true CI junit sum 2.864 (20 tests)
+  test_session_reinjection_rules.py: 0.0  # true CI junit sum 0.802 (38 tests)
   test_backups_v1_alias.py: 0.01
