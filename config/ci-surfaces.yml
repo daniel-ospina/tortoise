@@ -1830,3 +1830,28 @@ durations:
   test_website_static.py: 0.0
   test_weights.py: 0.0
   test_weights_mitigation.py: 0.0
+  # #2517 (C4 source-session re-injection): the five files this branch adds to
+  # the fast pool. The guard's own remediation (above) is to refresh this map
+  # "from tools/ci_timing.py / the run's junit artifacts" — without these five
+  # entries the floor trips the moment the branch is merged onto a current
+  # main: main alone measures 56/574 unmeasured (90.2%, pass), and the five
+  # unmeasured files added here take it to 61/579 (89.5%, FAIL).
+  #
+  # Values are per-file junit `testcase/@time` sums (the same aggregation the
+  # rest of this map uses — cf. test_coverage_loop_rules.py: 0.0):
+  #   * four hermetic files — from THIS branch's own CI run 35208465736
+  #     (head 33059ae7a) junit artifacts, pytest-log-test-a (half a) and
+  #     pytest-log-test-b (half b) of the Python CI workflow;
+  #   * test_session_reinjection.py is docker-lane and SKIPS in the embedded
+  #     lane, so that run carries no duration for it (its testcases are
+  #     `skipped`, time 0). No docker-lane CI run exists for this branch yet
+  #     (tier-2 PR runs are embedded), so its value is a LOCAL docker-lane
+  #     measurement taken 2026-09-21 against the canonical falkordb on
+  #     127.0.0.1:6379 (junit sum 42.120s over 20 tests, testsuite 42.879s).
+  #     It is a loaded-box local sample, not a CI figure — re-measure from a
+  #     full-matrix run rather than trusting it.
+  test_build_cohorts_2517.py: 0.0         # CI junit sum 0.031 (half a, 11 tests)
+  test_eval_reinjection_cap_resume.py: 0.7  # CI junit sum 0.662 (half b, 1 test)
+  test_guard_measured_revision.py: 3.0    # CI junit sum 3.001 (half b, 58 tests)
+  test_session_reinjection.py: 42.1       # LOCAL docker-lane junit sum 42.120 (20 tests)
+  test_session_reinjection_rules.py: 0.4  # CI junit sum 0.433 (half b, 38 tests)
