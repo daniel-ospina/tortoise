@@ -345,12 +345,14 @@ def test_stripe_webhook_analytics_offload_failure_does_not_500(monkeypatch):
     resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
 
     assert resp.status_code == 200
+    # The offloaded worker genuinely STARTED (so this is the bound path, not a
+    # refused submission) — asserted BEFORE the ordering check, because the
+    # worker appends its marker on entry: waiting here is what makes the order
+    # read deterministic under a loaded pool.
+    assert started.wait(5.0), "the telemetry worker never started"
     assert order.index("notify") < order.index("analytics"), (
         f"the notification must fire before the telemetry attempt: {order}"
     )
-    # The offloaded worker genuinely STARTED (so this is the bound path, not a
-    # refused submission), and its result was abandoned rather than 500ing.
-    assert started.wait(5.0), "the telemetry worker never started"
 
 
 # ── the shape pin: ONE direct call site, inside the off-loop entry point ────

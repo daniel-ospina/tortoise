@@ -595,51 +595,67 @@ class _Collector(ast.NodeVisitor):
         Two conditions, both required (#4015 review):
 
         1. The call sits in that function and passes the caller's
-           ``org_id``/``event_name``/``properties`` through **by name**
-           (positionally or by keyword). Anything else — a literal dict, a
-           call, an expression — is not the pass-through and gets RECORDED,
-           where the count pin catches it.
-        2. No parameter is REBOUND anywhere in the helper's body. Without
-           this, a one-line injection such as
-           ``properties = {**(properties or {}), "unregistered_key": 1}``
-           keeps the call looking verbatim (the argument is still the name
-           ``properties``) while the injected key reaches the sink from every
-           routed site — and `_literal_dict_keys` cannot resolve a `**`
-           unpacking, so the assignment walk would not catch it either. A
-           rebound parameter is the shape that actually closes the hole, not
-           a reworded claim.
+           ``org_id``/``event_name``/``properties`` through **by name** —
+           positionally or by keyword, with no extra positional argument, no
+           keyword outside those three, and no ``**`` expansion. Anything else
+           (a literal dict, a call, an expression, a sneaked-in extra keyword)
+           is not the pass-through and gets RECORDED, where the count pin
+           catches it.
+        2. The helper does nothing else with those names — see
+           ``_entry_point_forwards_parameters_untouched``. Without it, a
+           one-line injection such as
+           ``properties = {**(properties or {}), "unregistered_key": 1}`` or
+           ``properties.update({"unregistered_key": 1})`` keeps the call
+           looking verbatim while the injected key reaches the sink from every
+           routed site.
         """
         if not self.func_stack \
                 or self.func_stack[-1] != "_emit_analytics_off_loop":
             return False
-        if self._entry_point_rebinds_a_parameter():
+        if not self._entry_point_forwards_parameters_untouched():
+            return False
+        params = self._ENTRY_POINT_PARAMS
+        if len(node.args) > len(params):
             return False
         values: dict[str, ast.expr] = {}
-        for i, arg in enumerate(node.args[:len(self._ENTRY_POINT_PARAMS)]):
-            values[self._ENTRY_POINT_PARAMS[i]] = arg
+        for i, arg in enumerate(node.args):
+            values[params[i]] = arg
         for kw in node.keywords:
-            if kw.arg in self._ENTRY_POINT_PARAMS:
-                values[kw.arg] = kw.value
-        if set(values) != set(self._ENTRY_POINT_PARAMS):
+            if kw.arg is None or kw.arg not in params:
+                return False
+            values[kw.arg] = kw.value
+        if set(values) != set(params):
             return False
         return all(
             isinstance(values[p], ast.Name) and values[p].id == p
-            for p in self._ENTRY_POINT_PARAMS)
+            for p in params)
 
-    def _entry_point_rebinds_a_parameter(self) -> bool:
-        """True when the helper assigns to any of its own parameters."""
-        names = set(self._ENTRY_POINT_PARAMS)
+    def _entry_point_forwards_parameters_untouched(self) -> bool:
+        """True only when the helper does nothing with its own parameters.
+
+        Reference counting is deliberately strict: ``org_id``/``event_name``/
+        ``properties`` must appear EXACTLY ONCE each in the helper body — the
+        forward itself. That single rule closes every write/mutation shape at
+        once instead of enumerating them:
+
+        * a re-assignment (``properties = {...}``, ``properties, _ = ...``),
+        * an in-place mutation (``properties.update(...)``),
+        * a subscript target (``properties["k"] = 1``),
+        * a ``for``/``with``/``except``/comprehension target,
+        * any additional use at all (a log line, a second call),
+
+        each adds a reference and turns the skip OFF, so the call is RECORDED
+        and the count pin fails on it. An enumeration of assignment TARGETS (the
+        previous shape) let an in-place mutation through, because
+        ``properties.update(...)`` is a plain expression statement whose target
+        is a ``Subscript``/``Call``, not a ``Name``.
+        """
+        names = frozenset(self._ENTRY_POINT_PARAMS)
+        seen: dict[str, int] = {}
         for stmt in ast.walk(self.func_nodes[-1]):
-            if isinstance(stmt, ast.Assign):
-                targets = stmt.targets
-            elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-                targets = [stmt.target]
-            else:
-                continue
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id in names:
-                    return True
-        return False
+            if isinstance(stmt, ast.Name) and stmt.id in names:
+                seen[stmt.id] = seen.get(stmt.id, 0) + 1
+        return all(seen.get(param) == 1 for param in names)
 
     def visit_Call(self, node):
         callee = _callee_name(node.func)

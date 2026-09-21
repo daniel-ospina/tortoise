@@ -21549,12 +21549,14 @@ def _track_analytics_event(org_id: str, event_name: str,
         delivered = False
         try:
             import httpx
-            # #4015: the client is built PER EVENT, deliberately. The write is
-            # off-loop now (``_emit_analytics_off_loop`` → the telemetry pool),
-            # so a fresh TCP+TLS handshake costs a telemetry WORKER SLOT, never
-            # an event-loop stall — it is not the defect this issue names.
-            # Reusing a pooled client is a throughput optimisation for that
-            # pool and needs its own measurement plus a lifecycle it does not
+            # #4015: the client is built PER EVENT, deliberately. For the
+            # funnel sites it goes through ``_emit_analytics_off_loop`` → the
+            # telemetry pool, so a fresh TCP+TLS handshake costs a telemetry
+            # WORKER SLOT, never an event-loop stall — it is not the defect this
+            # issue names. (The capture-cost lane reaches this helper on the
+            # loop's shared default executor instead; either way, off-loop.)
+            # Reusing a pooled client is a throughput optimisation for those
+            # pools and needs its own measurement plus a lifecycle it does not
             # have today (lazy construction gated on ``configured``, because
             # this sink must keep serving a HALF-CONFIGURED env and degrade to
             # the JSONL — the #3677/#3820 contract); tracked as #4462.
@@ -22185,9 +22187,9 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     It is the one entry point for the sites that #4352 routed through
     ``_cp_offload``; the capture-cost lane (``_emit_capture_ledger``) keeps its
     own ``asyncio.to_thread`` path — still off-loop, but on the loop's SHARED
-    default executor rather than a pool of its own, so it is not isolated from
-    the probe/abuse work — and ``mcp_server`` its own retained emitter. Moving
-    the capture lane here is part of the deferred pooling change, #4462.
+    default executor, which the abuse hooks and the selfhost readiness probe
+    also use, so it is not isolated the way this pool is — and ``mcp_server``
+    its own retained emitter. Moving the capture lane onto this pool is #4468.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
@@ -22199,14 +22201,27 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
 
     ``best_effort=True`` bounds FAILURE, not LATENCY — this emit is AWAITED,
     so a saturated telemetry pool can add up to the seam's
-    ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` (10 s) to one request before it
-    returns. The emit is not fire-and-forget because the #3821 strict-mode
+    ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` (10 s) to ONE request before it returns
+    (the bound is per call; a request that emits at several sites pays it per
+    site). The emit is not fire-and-forget because the #3821 strict-mode
     escape below must be able to propagate, and a detached dispatch cannot
     carry it. The wait bound swallows an OFFLOAD failure — a missed bound or a
     saturated telemetry backlog — because telemetry must never gate the request
-    path with an ERROR. The ONE exception that still escapes is the #3821
-    strict-mode ``UnregisteredTelemetryKey``: that guard exists precisely so a
-    misregistered prop cannot be silently swallowed, and the onboarding wrapper
+    path with an ERROR.
+
+    The bound is deliberately BELOW the wrapped call's own worst case, which
+    inverts the seam's usual "outer bound above inner bound" rule and is an
+    accepted exception here: ``_ANALYTICS_POST_TIMEOUT_S`` is an httpx
+    PER-PHASE timeout, so one POST can hold its worker for ~3x that. A
+    `wait_for` expiry abandons the await, never the daemon thread (CPython
+    #87185), so under sustained slow emits a worker keeps running for the
+    remainder while the caller has already moved on. The trade is explicit:
+    bounding the WORKER instead would make a slow-but-healthy telemetry sink
+    gate a user request for longer than the seam's own budget allows.
+
+    The ONE exception that still escapes is the #3821 strict-mode
+    ``UnregisteredTelemetryKey``: that guard exists precisely so a misregistered
+    prop cannot be silently swallowed, and the onboarding wrapper
     (``_track_onboarding_event``) depends on the escape.
 
     A caller whose failure path is UNRECOVERABLE guards the call itself: the
