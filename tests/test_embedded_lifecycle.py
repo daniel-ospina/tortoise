@@ -1182,15 +1182,24 @@ def test_release_owner_uses_the_captured_socket_after_teardown(tmp_path):
     pinned here."""
     from redislite.client import Redis as RawRedis
 
-    from tortoise.embedded_lifecycle import _owner_refcounts, _release_owner
+    from tortoise.embedded_lifecycle import (
+        _owner_refcounts,
+        _release_owner,
+        owner_socket_of,
+    )
     from tortoise.embedded_reaper import _owner_records
 
     raw = RawRedis(str(tmp_path / "captured_sock.db"))
     try:
         sock = raw.socket_file
         assert _owner_records(sock) == (1, 1), "the patch must have recorded it"
-        # The seam's post-teardown shape: `socket_file` is already gone, so the
-        # caller-captured `sock` is the ONLY way to resolve the claim.
+        # Construct the TRUE post-teardown state: redislite's `_cleanup()`
+        # nulls `socket_file`, so the caller-captured `sock` becomes the ONLY
+        # way to resolve the claim. Without this the test passes against the
+        # pre-fix code too (it would just re-derive the same path).
+        raw.socket_file = None
+        assert owner_socket_of(raw) is None, (
+            "the test must exercise the nulled-socket_file state")
         _release_owner(raw, raw, sock)
         assert sock not in _owner_refcounts, (
             "the captured-socket path must release a raw client's claim; "
