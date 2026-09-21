@@ -163,14 +163,16 @@ def test_retry_signal_is_never_shorter_than_the_bound():
 
     Every breach is caused by work that EXCEEDED the bound, so an advertised
     delay shorter than the bound tells a compliant caller to re-enter the SAME
-    slow operation while the abandoned attempt is still running: at
+    slow operation while the abandoned attempt is still running. The SHIPPED
+    pair is 10/10, which holds one copy of one logical operation (every retry
+    waits out the bound). This record is for the PRE-FIX pair: at the pre-fix
     bound/retry = 10/2 the steady-state concurrent copies of ONE logical
-    operation are 5 (measured at 1/50 scale: refusals=5,
+    operation were 5 (measured at 1/50 scale: refusals=5,
     dispatches_started=5, peak_concurrent=5), and for a non-idempotent tool the
     abandoned original can still commit AFTER the caller was told to retry —
     duplicate side effects. A prose caveat cannot discharge this: retry
     middleware acts on status/code/header, not on the body. Pinned so a future
-    edit cannot quietly re-open the window.
+    edit cannot quietly re-open the window — do NOT restore retry = 2.
     """
     assert ma._TRANSPORT_WAIT_RETRY_AFTER_S >= ma._TRANSPORT_WAIT_BOUND_S, (
         f"advertised back-off {ma._TRANSPORT_WAIT_RETRY_AFTER_S!r}s is shorter "
@@ -714,13 +716,23 @@ async def test_mcp_wait_bound_fast_path_overhead_is_bounded(monkeypatch):
     """#3834 F2 guard: the seam wraps EVERY tool call, so its fast-path cost
     must stay small.
 
-    The CI-visible budget is
-    ``tests/test_mcp_telemetry.py::TestOverhead::test_p95_under_5ms``; this pins
-    the seam's OWN incremental cost next to the code that would regress it, by
-    comparing the real dispatch against the unwrapped ``_original_call_tool``
-    on the same tool. The ``asyncio.wait`` primitive F2 caught added +1.8–2.0 ms
-    (reddening the budget test); ``wait_for`` + ``shield`` must stay well under
-    that. Median, not mean, so one scheduler spike cannot decide the verdict.
+    WHAT THIS COVERS: the seam's TYPICAL (median) incremental dispatch cost,
+    sampled INTERLEAVED against the unwrapped ``_original_call_tool`` on the
+    same tool, so host-load drift lands on both arms instead of masquerading as
+    seam cost. The cost is the per-call ``ensure_future`` task indirection —
+    ABANDON-don't-cancel requires owning the task — measured at p50 ≈ +0.48 ms.
+    It is NOT a guard on the waiter: ``wait_for(shield)`` and ``asyncio.wait``
+    are cost-neutral (198 µs vs 199 µs p50, same 53.8 µs floor).
+
+    WHAT THIS DOES **NOT** COVER: the CI gate
+    ``tests/test_mcp_telemetry.py::TestOverhead::test_p95_under_5ms`` asserts an
+    ABSOLUTE p95 on a quiet CI host. This guard is a DELTA on a possibly-loaded
+    host — a different statistic against a different baseline — and it neither
+    re-derives nor substitutes for that absolute budget. At load ~150 on this
+    host the absolute p95 is 20–32 ms even on unmodified ``origin/main`` (the raw
+    UNWRAPPED baseline alone 7.6–16.5 ms), so the absolute budget is not
+    reproducible here at all. Median, not mean and not p95: a single scheduler
+    spike must not decide the verdict on a shared box.
     """
     import statistics
 
@@ -739,31 +751,96 @@ async def test_mcp_wait_bound_fast_path_overhead_is_bounded(monkeypatch):
     monkeypatch.setattr(ms, "_emit_mcp_tool_call_telemetry",
                         lambda *a, **k: None)
     try:
-        async def _samples(fn, n=80):
-            out = []
-            for _ in range(n):
-                t = time.perf_counter()
-                await fn()
-                out.append((time.perf_counter() - t) * 1000.0)
-            return out
-
-        wrapped = await _samples(lambda: ms.mcp.call_tool("_bound_fast"))
-        raw = await _samples(lambda: ms._original_call_tool("_bound_fast"))
-        delta = statistics.median(wrapped) - statistics.median(raw)
-        # The ``asyncio.wait`` primitive F2 caught measured +1.8–2.0 ms; the
-        # ``wait_for`` + ``shield`` pair must stay clearly under that. 1.5 ms is
-        # the guard's ceiling — median (not mean) so one scheduler spike cannot
-        # decide it.
+        # Interleaved, so load drift hits BOTH arms rather than the second only.
+        wrapped: list[float] = []
+        raw: list[float] = []
+        for _ in range(80):
+            t = time.perf_counter()
+            await ms.mcp.call_tool("_bound_fast")
+            wrapped.append((time.perf_counter() - t) * 1000.0)
+            t = time.perf_counter()
+            await ms._original_call_tool("_bound_fast")
+            raw.append((time.perf_counter() - t) * 1000.0)
+        wrapped.sort()
+        raw.sort()
+        w_med, r_med = statistics.median(wrapped), statistics.median(raw)
+        w_p95 = wrapped[int(len(wrapped) * 0.95) - 1]
+        r_p95 = raw[int(len(raw) * 0.95) - 1]
+        delta = w_med - r_med
+        # 1.5 ms bounds the seam's TYPICAL cost (measured p50 ≈ +0.48 ms); the
+        # absolute p95 gate above is a different quantity and is deliberately
+        # not asserted here (see the docstring). The p95 delta is REPORTED in
+        # the failure message for diagnosis, never asserted: on a shared box it
+        # is load-dominated (measured +1.0 to +7.3 ms across two runs at load
+        # ~150) and would flake.
         assert delta < 1.5, (
-            f"the wait-bound seam added {delta:.3f} ms per fast call "
-            f"(median wrapped {statistics.median(wrapped):.3f} ms, raw "
-            f"{statistics.median(raw):.3f} ms) — the primitive got expensive "
-            "again (``asyncio.wait`` measured +1.8–2.0 ms)")
+            f"the wait-bound seam added {delta:.3f} ms per fast call (median "
+            f"wrapped {w_med:.3f} ms, raw {r_med:.3f} ms; p95 delta "
+            f"{w_p95 - r_p95:+.3f} ms) — the seam's typical cost grew from the "
+            "measured p50 ≈ +0.48 ms (the per-call ``ensure_future`` owns the "
+            "task ABANDON-don't-cancel needs)")
     finally:
         try:  # noqa: SIM105
             ms.mcp.local_provider.remove_tool("_bound_fast")
         except Exception:
             pass
+
+
+@pytest.mark.asyncio
+async def test_mcp_breach_emit_imports_hosted_api_off_the_event_loop(
+        fast_bound, mcp_slow_tool):
+    """#3834 G1: the breach path must not import ``hosted_api`` on the loop.
+
+    ``hosted_api`` imports ``mcp_server`` at module scope, so the MCP seam can
+    only reach the shared breach writer through a lazy import — and that import
+    builds the whole hosted FastAPI app. DONE ON THE LOOP (as it was), it froze
+    the loop and delivered the refusal seconds after the bound: in a fresh
+    process against a 0.05 s bound the refusal returned after ~2–4 s with an
+    event-loop heartbeat gap of the same span. The import now runs inside the
+    callable submitted to the telemetry pool, so this swaps ``sys.modules`` for
+    a fake module whose writer records the thread that ran it, and asserts that
+    thread is not the event loop's.
+    """
+    import sys
+    import threading
+    import types
+
+    import tortoise
+    from tortoise import mcp_server as ms
+
+    recorded: list = []
+    fake = types.ModuleType("tortoise.hosted_api")
+
+    def _record(org_id, route_path, method, latency_ms, *, tool_name=None):
+        recorded.append(threading.current_thread())
+
+    fake._emit_wait_bound_breach = _record
+    saved = sys.modules.get("tortoise.hosted_api")
+    had_attr = hasattr(tortoise, "hosted_api")
+    saved_attr = getattr(tortoise, "hosted_api", None)
+    sys.modules["tortoise.hosted_api"] = fake
+    tortoise.hosted_api = fake
+    try:
+        result = await ms.mcp.call_tool("_bound_slow")
+        assert result.is_error is True
+        for _ in range(200):
+            if recorded:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        if saved is None:
+            sys.modules.pop("tortoise.hosted_api", None)
+        else:
+            sys.modules["tortoise.hosted_api"] = saved
+        if had_attr:
+            tortoise.hosted_api = saved_attr
+        else:
+            delattr(tortoise, "hosted_api")
+    assert recorded, (
+        "the breach emit never ran — the shared writer was not reached")
+    assert recorded[0] is not threading.main_thread(), (
+        "the breach telemetry (and its hosted_api import) ran ON the event "
+        "loop — that is the G1 freeze, which delivers the refusal seconds late")
 
 
 @pytest.mark.asyncio

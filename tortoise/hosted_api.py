@@ -2425,9 +2425,10 @@ class WaitBoundMiddleware:
     inherits): on every non-exempt request ``__call__`` re-binds ``send`` to a
     guarded closure and runs the app as a child task. Owning ``send`` is what
     lets it substitute a refusal for a response that has not started, so that
-    cost is the bound's price, not an accident — and it is measured (see the
-    overhead guard in ``tests/test_mcp_telemetry.py`` and the sibling seam's
-    comment in ``tortoise/mcp_server.py``).
+    cost is the bound's price, not an accident. ⚠️ Only the SIBLING MCP seam's
+    cost is measured (``tests/test_mcp_telemetry.py::TestOverhead`` drives
+    ``mcp.call_tool`` directly — no ASGI app, no middleware stack); THIS
+    middleware's own re-bind + child-task overhead is not measured by any test.
 
     ⚠️ What it does NOT bound is MCP *tool calls*, and the earlier claim that
     it "covers the mounted MCP app by construction" was false: FastMCP's
@@ -2516,14 +2517,14 @@ class WaitBoundMiddleware:
         task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
         try:
             # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
-            # ``wait_for`` is a single deadline around ``await fut``, while
-            # ``asyncio.wait`` builds a waiter Future plus per-future
-            # done-callbacks on EVERY call — measured at +1.8–2.0 ms p95 on the
-            # MCP seam, the difference that reddened
-            # ``test_mcp_telemetry.py::test_p95_under_5ms``. The ``shield`` is
-            # REQUIRED: ``wait_for`` alone CANCELS the awaited future on
-            # timeout, and this bound must ABANDON, never cancel (the SDK-closing
-            # ``finally`` doctrine below).
+            # ``wait_for`` is a single deadline around ``await fut``, and the two
+            # are cost-neutral (measured on the sibling MCP seam: 198 µs vs
+            # 199 µs p50). The cost THIS boundary pays is the per-call
+            # ``ensure_future`` task it must OWN — ABANDON-never-cancel requires
+            # an owned task — measured there as ~+0.48 ms p50 / +1.7 ms p95 over
+            # the unwrapped call. The ``shield`` is REQUIRED: ``wait_for`` alone
+            # CANCELS the awaited future on timeout, and this bound must
+            # ABANDON, never cancel (the SDK-closing ``finally`` doctrine below).
             return await asyncio.wait_for(
                 asyncio.shield(task),
                 timeout=_mcp_auth._TRANSPORT_WAIT_BOUND_S)

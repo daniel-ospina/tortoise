@@ -322,6 +322,15 @@ class TestOverhead:
     wrapper's own cost (perf_counter, dict build, branch) plus the tool body —
     the tool body is a trivial echo, so p95 of the total approximates the
     wrapper+dispatch overhead budget.
+
+    ⚠️ This is an ABSOLUTE p95 budget for a quiet CI host. It is NOT the same
+    quantity as the F2 guard in ``tests/test_transport_wait_bound.py::
+    test_mcp_wait_bound_fast_path_overhead_is_bounded``, which measures the
+    seam's INCREMENTAL (delta) median against the unwrapped ``_original_call_tool``
+    and deliberately does not assert p95. Neither substitutes for the other, and
+    on a heavily loaded box the absolute budget is not reproducible: at load ~150
+    the unwrapped ``origin/main`` baseline alone measures 7.6–16.5 ms p95, so a
+    failure here on a shared host is machine load, not necessarily a regression.
     """
 
     pytestmark = pytest.mark.asyncio

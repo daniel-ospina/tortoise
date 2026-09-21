@@ -239,6 +239,11 @@ async def _flush_mcp_telemetry() -> None:
 #: them. Entries remove themselves on completion.
 _pending_mcp_wait_bound: set = set()
 
+#: Breach-telemetry SCHEDULING futures (the telemetry pool's submit future),
+#: tracked only so a late exception on it is retrieved. The write's own future
+#: is tracked by the shared writer in ``hosted_api``.
+_pending_mcp_wait_bound_telemetry: set = set()
+
 #: The breach marker on a refused result's ``_meta``. A client can branch on it
 #: without parsing prose; ``_wrapped_call_tool`` reads it to classify the
 #: accompanying ``mcp_tool_call`` telemetry as ``timeout`` rather than ``ok``.
@@ -273,6 +278,47 @@ def _hold_mcp_dispatch_after_request(task) -> None:
             monitoring.workload_exit()
 
     task.add_done_callback(_done)
+
+
+def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
+                                         name: str) -> None:
+    """Schedule the shared breach writer OFF the event loop (#3834 G1).
+
+    The writer is ``hosted_api._emit_wait_bound_breach`` — the SAME single emit
+    site the REST arm uses — but ``hosted_api`` imports ``mcp_server`` at module
+    scope, so this module cannot import it back at module scope. Importing it
+    lazily HERE, on the loop and on the BREACH path, built the whole hosted
+    FastAPI app before the refusal could be written: measured in a fresh process
+    against a 0.05 s bound, the refusal came back after ~2–4 s (load-dependent)
+    with the event loop frozen for the same span — the refusal is the product on
+    this path, so a late one defeats the unit. The lazy import therefore lives
+    INSIDE the callable submitted to the telemetry pool
+    (``monitoring.control_plane_worker("telemetry")``, daemon workers, bounded
+    backlog; #3498): the worker thread pays the import, the loop writes the
+    refusal. The single emit site is unchanged — only where its module is
+    imported moved.
+    """
+    def _emit() -> None:
+        try:
+            from tortoise import hosted_api as _ha
+            _ha._emit_wait_bound_breach(
+                org_id, "/mcp", "POST", latency_ms, tool_name=name)
+        except Exception:  # telemetry must never turn a refusal into an error
+            _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
+
+    try:
+        fut = monitoring.control_plane_worker("telemetry").submit(_emit)
+    except Exception:  # telemetry must never turn a refusal into an error
+        _log.debug("mcp wait-bound telemetry schedule failed", exc_info=True)
+        return
+    _pending_mcp_wait_bound_telemetry.add(fut)
+
+    def _done(f) -> None:
+        _pending_mcp_wait_bound_telemetry.discard(f)
+        if not f.cancelled():
+            f.exception()  # retrieve, so it is never un-retrieved
+
+    fut.add_done_callback(_done)
 
 
 # Captured before wrapping — the middleware chain re-dispatches
@@ -348,11 +394,15 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     retry signal shipped WITH the bound instead of dropping it.
 
     On the TIMEOUT path the dispatch is ABANDONED, never cancelled: cancelling
-    an ``asyncio`` await runs every ``finally`` the handler owns, and this
-    module's handlers close their SDK in one (#2988 / #3718). On the
-    CANCELLATION path the opposite holds — the cancellation is propagated INTO
-    the dispatch, as the direct await this wrapper replaced did, so the tool's
-    own cancellation cleanup runs.
+    an ``asyncio`` await runs every ``finally`` the handler owns, and would also
+    release this seam's #2850 gauge hold (``_hold_mcp_dispatch_after_request``)
+    while the dispatched work is still in flight — the exact
+    busy-misread-as-idle the hold exists to prevent. (The SDK-closing
+    ``finally`` that makes an early cancel destructive is a fact about the
+    hosted handlers in ``hosted_api`` — #2988 / #3718 — not about this module.)
+    On the CANCELLATION path the opposite holds — the cancellation is propagated
+    INTO the dispatch, as the direct await this wrapper replaced did, so the
+    tool's own cancellation cleanup runs.
     """
     t0 = _time.perf_counter()
     # #3834 F1: spend the TRANSPORT's REMAINING deadline, not a fresh one. The
@@ -371,12 +421,17 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
                             run_middleware=True, task_meta=task_meta))
     try:
         # ``wait_for`` + ``shield`` rather than ``asyncio.wait`` — the same
-        # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``, and
-        # for the same measured reason (+1.8–2.0 ms p95, which reddened
-        # ``test_mcp_telemetry.py::test_p95_under_5ms``). The ``shield`` is what
-        # preserves ABANDON-don't-cancel: ``wait_for`` alone cancels the awaited
-        # future on timeout, and cancelling here would run the SDK-closing
-        # ``finally`` under work still using it (#2988 / #3718).
+        # primitive choice as ``hosted_api.WaitBoundMiddleware.__call__``. The
+        # seam's cost is NOT the waiter: measured, the two are cost-neutral (same
+        # trivial coroutine — ``wait_for(shield)`` 198 µs p50 vs ``asyncio.wait``
+        # 199 µs p50, identical 53.8 µs floor; an inline ``asyncio.timeout`` is
+        # 7.7 µs). It is the per-call ``ensure_future`` task indirection —
+        # ABANDON-don't-cancel requires owning the task — measured as a dispatch
+        # delta of p50 ≈ +0.48 ms, p95 ≈ +1.7 ms vs the unwrapped
+        # ``_original_call_tool``. The ``shield`` is what preserves
+        # ABANDON-don't-cancel: ``wait_for`` alone cancels the awaited future on
+        # timeout, and cancelling here would run the SDK-closing ``finally``
+        # under work still using it (#2988 / #3718).
         return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
     except asyncio.CancelledError:
         # Outer cancellation (client disconnect, server shutdown, transport
@@ -399,21 +454,13 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         pass
 
     _hold_mcp_dispatch_after_request(task)
-    try:
-        # The SAME breach writer the REST arm uses — one emit site, one prop
-        # vocabulary. Fire-and-forget off the request path (it submits to the
-        # daemon telemetry pool); "tool_name" is already allowlisted there.
-        #
-        # Late and GUARDED, on the BREACH path only: ``hosted_api`` imports
-        # ``mcp_server`` at module scope, so this module cannot import it back at
-        # module scope, and the fast path must not pay a hosted_api import that
-        # stalls the loop while it builds the hosted FastAPI app.
-        from tortoise import hosted_api as _ha
-        _ha._emit_wait_bound_breach(
-            _current_org_id.get() or "", "/mcp", "POST",
-            int((_time.perf_counter() - t0) * 1000), tool_name=name)
-    except Exception:  # telemetry must never turn a refusal into an error
-        _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
+    # The SAME breach writer the REST arm uses — one emit site, one prop
+    # vocabulary — scheduled OFF the loop (see
+    # ``_emit_mcp_wait_bound_breach_off_loop``): the fast path must not pay a
+    # ``hosted_api`` import, and neither must the breach path, where that import
+    # froze the loop and delivered the refusal seconds late.
+    _emit_mcp_wait_bound_breach_off_loop(
+        _current_org_id.get() or "", int((_time.perf_counter() - t0) * 1000), name)
     _log.warning(
         "transport wait bound (%.0fs) exceeded: MCP tools/call %s — refusing "
         "legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, name)
