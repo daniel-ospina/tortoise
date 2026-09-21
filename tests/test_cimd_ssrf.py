@@ -881,6 +881,9 @@ def test_deadline_stream_rewraps_after_start_tls():
     assert isinstance(wrapped, cimd._DeadlineStream)
     assert wrapped._inner is stub.tls_result, (
         "the re-wrap must target the POST-TLS stream, not the pre-TLS one")
+    assert wrapped._deadline == stream._deadline, (
+        "the SAME absolute deadline must survive the TLS upgrade, or post-TLS "
+        "reads get a renewed budget and can outlive the fetch deadline")
     wrapped.read(10, timeout=cimd.READ_TIMEOUT_S)
     assert stub.tls_result.reads, "a post-TLS read must reach the new stream"
 

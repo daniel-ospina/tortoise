@@ -160,7 +160,7 @@ is a server-side request forgery surface, so the fetch lives in
 | 4 | Size + timeout | 64 KiB body cap, 3 s connect/read |
 | 5 | Cache | successes only, 300 s TTL, LRU cap 128; errors and malformed documents are **never** cached (§4.3) |
 | 6 | Rate limit | per-host 60/hr + aggregate 600/hr + live-store cap 256 |
-| 7 | Total occupancy (#3669) | in-flight fetches capped process-wide (4), a per-fetch deadline bounding every phase (6 s: connect loop, TLS, status/header and body reads — the 3 s read timeout is per-socket-read, not total), and a per-window wall-clock budget (120 s / 3600 s) whose worst case is RESERVED at admission |
+| 7 | Total occupancy (#3669) | in-flight fetches capped process-wide (4), a per-fetch deadline bounding every socket phase (6 s: connect attempts, TLS, status/header and body reads — the 3 s read timeout is per-socket-read, not total; the OS resolver's `getaddrinfo` tail is the documented exception, see Limitations), and a per-window wall-clock budget (120 s / 3600 s) whose worst case is RESERVED at admission |
 
 Control 2 is closed against **DNS rebinding** rather than narrowed: a custom
 `httpcore` `NetworkBackend` resolves the host, refuses the whole resolution if
