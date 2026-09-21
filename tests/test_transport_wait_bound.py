@@ -1250,8 +1250,10 @@ async def test_breach_path_is_sanitized_before_the_log_and_the_sink(
 async def test_mcp_tool_name_is_sanitized_at_the_log_and_the_analytics_sink(
         fast_bound, monkeypatch, caplog):
     """#3834 F-3: the MCP tool name is the client-supplied JSON-RPC
-    ``params.name`` and reaches the seam BEFORE any registry lookup, so it is
-    untrusted for the same reason the REST arm sanitizes its route path. A name
+    ``params.name`` and reaches the seam without a registry-membership guarantee
+    on the UNscoped path (a scoped key's name is resolved and checked by
+    ``_enforce_mcp_tool_scope`` first), so it is untrusted for the same reason the
+    REST arm sanitizes its route path. A name
     carrying CR/LF, an ANSI escape, NUL, U+2028/U+2029 and the C1 introducers
     must appear ESCAPED in BOTH the log record and the analytics props.
 

@@ -2,7 +2,9 @@
 
 Covers the issue's verification checklist:
 - event emitted per call (exactly one, incl. the middleware re-dispatch guard)
-- all 4 status categories produced (ok / validation_error / auth_error / exec_error)
+- the 4 status categories produced here (ok / validation_error / auth_error /
+  exec_error; the emission also carries timeout / cancelled / refused — see
+  ``_emit_mcp_tool_call_telemetry``)
 - validation vs exec error classification (pydantic → validation_error with
   '<error_type>:<field>' kind; everything else → exec_error with class name)
 - latency present and measured around the tool execution

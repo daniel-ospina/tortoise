@@ -178,6 +178,28 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
                                   latency_ms: int, error_kind: str | None) -> None:
     """Fire-and-forget, fail-safe analytics write. Never raises, never blocks.
 
+    ``status`` is one of this full set — the vocabulary is stated HERE because
+    this is the single emission point for ``mcp_tool_call``:
+
+    - ``ok`` — the call completed.
+    - ``validation_error`` / ``auth_error`` / ``exec_error`` — mapped by
+      ``_classify_mcp_call_error`` (``error_kind`` = the offending field, the
+      exception class, or the unwrapped cause's class name, respectively).
+    - ``timeout`` — the transport wait bound fired at this seam
+      (``error_kind = "wait_bound"``).
+    - ``cancelled`` — the caller cancelled the dispatch
+      (``error_kind = "caller_cancelled"``).
+    - ``refused`` — the TRANSPORT had already refused and answered this request
+      before this seam could wait on it; the refusal is recorded once here
+      instead of being duplicated as a false ``timeout``
+      (``error_kind = "transport_wait_bound"``).
+
+    The first four are the #889 set; ``timeout``, ``cancelled`` and ``refused``
+    were added by #3834. The #888 research brief
+    (``docs/epics/2026-08-11-888-surface-design/01-research-brief.md``) still
+    lists only the original four — it is #888's artifact, not this lane's, so it
+    is deliberately not edited here and this docstring is the live vocabulary.
+
     The Supabase write (sync httpx POST, up to 5s timeout in
     _track_analytics_event) runs OFF the tool-call hot path: on the default
     executor when an event loop is running (all server transports), else on a
@@ -246,8 +268,10 @@ _pending_mcp_wait_bound: set = set()
 _pending_mcp_wait_bound_telemetry: set = set()
 
 #: The breach marker on a refused result's ``_meta``. A client can branch on it
-#: without parsing prose; ``_wrapped_call_tool`` reads it to classify the
-#: accompanying ``mcp_tool_call`` telemetry as ``timeout`` rather than ``ok``.
+#: without parsing prose; ``_wrapped_call_tool`` reads it to keep the
+#: accompanying ``mcp_tool_call`` telemetry out of ``ok`` — ``timeout`` when this
+#: seam's own deadline fires, or ``refused``/``transport_wait_bound`` when the
+#: transport already refused the request and this seam suppresses its duplicate.
 _WAIT_BOUND_META_KEY = "tortoise_wait_bound"
 
 
@@ -521,10 +545,14 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         latency_ms = int((_time.perf_counter() - t0) * 1000)
     else:
         latency_ms = int((_time.monotonic() - arrival) * 1000)
-    # #3834 F-3: the tool name is the client-supplied JSON-RPC ``params.name``,
-    # reaching this seam before any registry lookup — so it is untrusted in the
-    # same class of sink the REST arm already sanitizes its route path for.
-    # Escape it for the log line (the analytics sink sanitizes its own copy).
+    # #3834 F-3: the tool name is the client-supplied JSON-RPC ``params.name``.
+    # On the SCOPED path ``_enforce_mcp_tool_scope`` has already resolved it
+    # against the registry (and denies an unregistered name), but on the
+    # UNscoped (org-wide / selfhost) path it reaches this seam without any
+    # registry-membership guarantee — and the ``mcp_tool_call`` sink is always on,
+    # so it is untrusted in the same class of sink the REST arm already sanitizes
+    # its route path for. Escape it for the log line (the analytics sink
+    # sanitizes its own copy).
     safe_name = _mcp_auth._sanitize_for_log(name)
     if transport_refused:
         # The transport's warning already covers this request; a second
@@ -621,7 +649,8 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                              task_meta=None):
     """Telemetry-instrumented single dispatch point (installed as mcp.call_tool).
 
-    Emits one mcp_tool_call analytics event per client tool call, with
+    Emits one mcp_tool_call analytics event per client tool call — the ``status``
+    vocabulary is documented at ``_emit_mcp_tool_call_telemetry`` — with
     latency measured around the tool execution only (transport auth runs
     before this point and is excluded). Background-task dispatches
     (task_meta) are measured at scheduling granularity — our tools never use
