@@ -1704,11 +1704,13 @@ jobs:
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
           # widened. The floor is 30 and the number is NOT arbitrary: the four
           # marked files that are ALREADY carve-out registered (precision_leak
-          # 6 + test_hosted_api 5 + fork_slot_wedge 12 + fork_safety 4 = 27)
-          # pass on their own, so a floor at 25 would still be met by a hook
-          # broadened to skip exactly the class #4164 exists for. 30 sits above
-          # that baseline and below the measured total, so losing the rescued
-          # class reds the job while a few legitimate removals do not.
+          # 6 + test_hosted_api 5 + fork_slot_wedge 12 + fork_safety 4 = 27 marked,
+          # of which 25 PASS on the ubuntu runner — the two darwin-gated
+          # fork_safety ones skip) are the always-passing baseline, so a floor at
+          # 25 would still be met by a hook broadened to skip exactly the class
+          # #4164 rescues. 30 sits above that baseline (25) and below the measured
+          # total, so losing the rescued class reds the job while a few legitimate
+          # removals do not.
           # Measured 2026-09-20 on this tree (run 35518962357, head fd23a4033): 35
           # passed / 34 skipped (each skip exogenous — the 32 module-level gate
           # markers, and the two darwin-gated #3845 fork tests; no real test skips

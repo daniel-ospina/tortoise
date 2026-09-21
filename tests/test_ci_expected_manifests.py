@@ -138,6 +138,127 @@ def _shell_commands(workflow: str) -> list[str]:
     return commands
 
 
+_GUARD_PATH = "tools/skip-guard.py"
+# Words that re-dispatch to another command (so the interesting word comes later) or
+# that introduce a command without being one. A CLOSED vocabulary, deliberately not a
+# denylist of printers: an unknown head word is simply not an invocation, which is the
+# safe direction for a pin whose job is to prove ENFORCEMENT.
+_CMD_PREFIXES = frozenset({"env", "sudo", "command", "exec", "nohup", "time", "xargs"})
+_SHELL_KEYWORDS = frozenset({"if", "elif", "else", "then", "do", "while", "until", "!"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _shell_segments(command: str) -> list[str]:
+    """One run-block command split into its simple commands, quote-aware.
+
+    A separator inside quotes is TEXT, not a separator: `echo "a; b"` is one command.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote is not None:
+            current.append(ch)
+            quote = None if ch == quote else quote
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            current.append(ch)
+            i += 1
+            continue
+        if command.startswith("||", i) or command.startswith("&&", i):
+            segments.append("".join(current))
+            current = []
+            i += 2
+            continue
+        if ch in ";|&()\n":
+            segments.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    segments.append("".join(current))
+    return segments
+
+
+def _shell_words(segment: str) -> list[str]:
+    """The words of one simple command, with their quotes REMOVED.
+
+    Quoting is what makes `echo "python3 tools/skip-guard.py …"` one word whose value
+    is a whole sentence instead of an invocation, so the removal has to happen here,
+    where the word boundaries are decided, rather than in the matcher.
+    """
+    words: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    for ch in segment:
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            else:
+                current.append(ch)
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch.isspace():
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        words.append("".join(current))
+    return words
+
+
+def _is_guard_word(word: str) -> bool:
+    return word == _GUARD_PATH or word.endswith("/" + _GUARD_PATH)
+
+
+def _is_interpreter(word: str) -> bool:
+    base = word.rsplit("/", 1)[-1]
+    return base.startswith("python") or base in {"py", "uv", "uvx", "pypy", "pypy3"}
+
+
+def _invokes_guard(command: str) -> bool:
+    """True iff `command` RUNS the skip-guard — the script in COMMAND POSITION.
+
+    A substring test is satisfied by a command that only PRINTS the invocation:
+    replacing the d14 call with `echo "python3 tools/skip-guard.py … --manifest-only"`
+    left every consumer pin GREEN while the frozen set was enforced by nothing
+    (cycle-10 finding). Quoting alone does not close it either — the unquoted
+    `echo python3 tools/skip-guard.py …` reads identically to a real call — so the
+    HEAD word decides: leading env assignments, shell keywords and re-dispatching
+    prefixes are skipped, and the next word must be an INTERPRETER (`python*`, `py`,
+    `uv`, `uvx`) or the guard itself. An unknown head word (`echo`, `printf`, `cat`, a
+    shell FUNCTION name) is not an invocation, and a `sh -c '<script>'` wrapper is not
+    resolved — it REDS rather than passing (fail closed; see the pin's declared
+    surface).
+    """
+    for segment in _shell_segments(command):
+        words = _shell_words(segment)
+        index = 0
+        while index < len(words) and (
+            re.fullmatch(r"[A-Za-z_]\w*=.*", words[index])
+            or words[index] in _SHELL_KEYWORDS
+            or words[index] in _CMD_PREFIXES
+        ):
+            index += 1
+        if index >= len(words):
+            continue
+        head = words[index]
+        if head in _SHELLS:
+            continue
+        if _is_interpreter(head) or _is_guard_word(head):
+            if any(_is_guard_word(word) for word in words[index:]):
+                return True
+    return False
+
+
 def _workflow_jobs() -> dict[str, dict]:
     """The workflow's jobs, by name.
 
@@ -206,6 +327,11 @@ def _guard_consumers(step_text: str, rel: str) -> list[tuple[int, str]]:
     documented `M=<path>` refactor) exempted every command that merely STARTS with an
     assignment, so an env-prefixed invocation (`SG_ENV=1 python3 … --manifest-only ||
     true`) escaped every exit-status check (cycle-9 finding).
+
+    The invocation test is `_invokes_guard` — the script in COMMAND POSITION — and not
+    a substring: a command that merely PRINTS the invocation (`echo "…skip-guard.py …
+    --manifest-only"`, or the same text unquoted) satisfied every consumer pin while the
+    frozen set was enforced by nothing (cycle-10 finding).
     """
     commands = _shell_commands(step_text)
     assigned = {
@@ -215,7 +341,7 @@ def _guard_consumers(step_text: str, rel: str) -> list[tuple[int, str]]:
     }
     consumers: list[tuple[int, str]] = []
     for index, cmd in enumerate(commands):
-        if "tools/skip-guard.py" not in cmd:
+        if not _invokes_guard(cmd):
             continue
         if rel in cmd or any(re.search(rf"\$\{{?{re.escape(var)}\b", cmd) for var in assigned):
             consumers.append((index, cmd))
@@ -552,15 +678,20 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     d14 job before the flag existed.
 
     DECLARED THREAT SURFACE (what this pin is for, and all it claims): a step that
-    RUNS the guard on the manifest, with `--manifest-only` as an argument of THAT
-    invocation, in a step and a job that are not `continue-on-error` and whose `if:`
-    can be true on a green run, and whose exit status can reach the step. Those are
-    the four ways the frozen set can be enforced by nothing while the artifacts look
-    right, and each is mutation-tested. It does NOT model arbitrary shell control
-    flow — a `trap`, `set +e` plus a masking command inside a function, a sourced
-    script, or a `$VAR` holding the FLAG (a variable FLAG is the #4207 class a text
-    pin cannot see; this pin refuses it loudly instead of passing it). The end-to-end
-    proof — a lane that mutates the manifest and shows the job reds — is #4463.
+    RUNS the guard on the manifest — the script in COMMAND POSITION, not a mention of
+    it inside a printed string (cycle-10 finding) — with `--manifest-only` as an
+    argument of THAT invocation, in a step and a job that are not `continue-on-error`
+    and whose `if:` can be true on a green run, and whose exit status can reach the
+    step. Those are the ways the frozen set can be enforced by nothing while the
+    artifacts look right, and each is mutation-tested.
+
+    It does NOT model arbitrary shell control flow — a `trap`, `set +e` plus a masking
+    command inside a function, a sourced script, a shell FUNCTION name, a `sh -c
+    '<script>'` wrapper (the last two RED rather than pass: the head word is not an
+    interpreter, which is the fail-closed direction), or a `$VAR` holding the FLAG or
+    the SCRIPT PATH (the #4207 class a text pin cannot see; a variable FLAG is refused
+    loudly instead of passing it). The end-to-end proof — a lane that mutates the
+    manifest and shows the job reds — is #4463.
     """
     jobs = _workflow_jobs()
     rel = str(manifest.relative_to(ROOT))
@@ -625,7 +756,11 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
         # already removed, so a trailing `# note: NOT --manifest-only` is not read as the
         # flag (cycle 6) and a flag in an unrelated command of the same step does not
         # stand in for the invocation that lacks it (cycle-9 finding).
-        flag_re = re.compile(r"(?<![\w-])--manifest-only(?![\w-])")
+        # `=` is refused as a boundary too: `--manifest-only=true` is not the flag the
+        # guard receives (argparse-style `--flag=value` is an unknown argument to
+        # `"--manifest-only" in argv`, so the guard exits 2) and a pin that reads it as
+        # the flag asserts something that is not true (cycle-10 finding).
+        flag_re = re.compile(r"(?<![\w=-])--manifest-only(?![\w=-])")
         commands = _shell_commands(step["run"])
         for index, cmd in _guard_consumers(step["run"], rel):
             assert flag_re.search(cmd), (
