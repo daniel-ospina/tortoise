@@ -45,6 +45,8 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
     api_key_created,
     first_api_call,
     first_api_call_pending,
+    onboarding_decide_complete,
+    onboarding_seed_complete,
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
@@ -18996,6 +18998,75 @@ def _maybe_apply_completion(org_id: str) -> bool:
         return False
 
 
+# ── #2006 (W11): onboarding funnel telemetry ──────────────────────────
+# The emission gate is the COMPLETED_STEP edge's NEW CREATION — the
+# ``created`` flag ``onboarding.state.write_completed_step`` already returns
+# for exactly this purpose. That transition is the domain fact itself, so
+# one event per edge creation falls out of it by construction: restart-safe
+# and multi-worker-safe, with NO second dedup store, NO threshold and NO
+# in-process set. Every writer of a W11 step maps its own edge result
+# through ``_emit_onboarding_step_events``; a non-creating replay never
+# reaches the emitter. (``decide-completed`` is the one W11 edge
+# with a sanctioned removal path — the #3912 repair — after which a genuine
+# re-completion re-emits; see ``analytics.onboarding_decide_complete``.)
+#
+# Deliberately NOT instrumented: ``harness-connected`` (the funnel keys off
+# seed/decide) and ``catalog-presented`` (the build fork's display row has
+# no W11 event).
+_ONBOARDING_STEP_EVENTS = {
+    "first-points-filed": onboarding_seed_complete,
+    "decide-completed": onboarding_decide_complete,
+}
+
+
+def _onboarding_distinct_id(org_id: str, org: dict | None = None,
+                            *, user_id: str | None = None) -> str:
+    """Funnel identity for the W11 onboarding events (#2006).
+
+    The Supabase user UUID wherever one is RESOLVABLE, falling back to the
+    org id — matching ``analytics.py``'s identity contract so these server
+    events join the web funnel's ``user_signed_up`` (distinct_id = user
+    UUID, never an email).
+
+    Every candidate passes the SAME predicate the #2600 ``actor_user_id``
+    alias uses (``_is_uuid_shape``): the repo documents that a raw
+    ``created_by`` is NOT always a human id — production mints store the
+    literal ``"api"``, ``st_``-prefixed recovery ids, and registry-lane
+    EMAIL self-signup creators (``tortoise/sdk.py``). Emitting one of those
+    as ``distinct_id`` would push PII into PostHog and collapse unrelated
+    orgs onto one pseudo-person, so a non-UUID candidate is DROPPED."""
+    from tortoise.sdk import _current_actor_user_id, _is_uuid_shape
+    candidates = [user_id]
+    if org is not None:
+        candidates += [org.get("actor_user_id"),
+                       org.get(_SESSION_USER_ID_KEY),
+                       org.get("created_by")]
+    candidates.append(_current_actor_user_id.get())
+    for uid in candidates:
+        if _is_uuid_shape(uid):
+            return uid
+    return org_id
+
+
+def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
+                                 org_id: str, source: str) -> None:
+    """Emit the W11 funnel event for each step edge a write NEWLY created.
+
+    ``created_steps`` must carry ONLY the steps whose ``created`` was True —
+    that filtering is the caller's gate, so a replay is silent and the
+    event is exact-once per edge creation. Fail-safe: ``capture()`` never
+    raises, and each emit is guarded here too, so telemetry can never turn a
+    committed write into an error."""
+    for step in created_steps:
+        emit = _ONBOARDING_STEP_EVENTS.get(step)
+        if emit is None:
+            continue
+        try:  # noqa: SIM105
+            emit(distinct_id, org_id, source)
+        except Exception:
+            pass  # telemetry must never break the write path (R19)
+
+
 def _update_onboarding_state(org_id: str, **fields) -> dict:
     """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
     legacy whole-dict merge — its non-atomicity caveat is pre-existing
@@ -19011,9 +19082,14 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     and evals via _maybe_apply_completion."""
     jsonb_fields: dict[str, object] = {}
     wrote_step = False
+    # #2006 (W11): the steps whose COMPLETED_STEP edge THIS call created —
+    # the only steps a funnel event may be emitted for.
+    created_steps: list[str] = []
     for k, v in fields.items():
         if k in _os.STEP_IDS:
-            _os.write_completed_step(_org_proj(org_id), org_id, k)
+            if _os.write_completed_step(
+                    _org_proj(org_id), org_id, k).get("created"):
+                created_steps.append(k)
             wrote_step = True
         elif k in _os.FLOW_KEYS:
             # only step-edge keys are routable here; scalar FLOW keys are
@@ -19036,6 +19112,15 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
         _write_onboarding_state(org_id, state)
     if wrote_step:
         _maybe_apply_completion(org_id)
+        # #2006 (W11): emit for the edges this call NEWLY created (empty on a
+        # replay). No production caller routes a W11 step here today — the
+        # PATCH boundary 422s first-points-filed/decide-completed — but this
+        # generic router accepts any STEP_IDS key, so it is instrumented so a
+        # future routing change cannot silently lose the funnel event.
+        if created_steps:
+            _emit_onboarding_step_events(
+                created_steps, distinct_id=_onboarding_distinct_id(org_id),
+                org_id=org_id, source="state_router")
     # Echo = the MERGED PROJECTION (writer-return-composed — GET/PATCH can
     # never diverge), overlaid with the just-written jsonb fields: the
     # pre-#2001 echo returned the in-memory merged state, and a missing
@@ -19723,6 +19808,25 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     except Exception:
         raise HTTPException(status_code=500,
                             detail="Checkpoint failed — retry-safe") from None
+    # #2006 (W11): funnel events for the step edges THIS call newly created.
+    # ``created_steps`` already carries the structural gate — a replay
+    # (created=False) is silent, and the edge-creation transition is
+    # exact-once per edge creation, so this survives restarts and multiple
+    # workers with no in-process set. Emission sits OUTSIDE the write-path
+    # try/except above: telemetry can never turn a committed checkpoint into
+    # a 500.
+    if created_steps:
+        # Off the loop (the analytics.py contract for async handlers) and
+        # guarded HERE too: the write above has already committed, so even a
+        # bug in the emitter itself must not turn a committed checkpoint into
+        # a 500 (R19 — telemetry never degrades the API).
+        try:  # noqa: SIM105
+            await asyncio.to_thread(
+                _emit_onboarding_step_events, created_steps,
+                distinct_id=_onboarding_distinct_id(org_id, org),
+                org_id=org_id, source="checkpoint")
+        except Exception:
+            pass
     return {
         "created_steps": created_steps,
         "noop_steps": noop_steps,
@@ -19891,6 +19995,14 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
         step = _os.write_completed_step(
             proj, org_id, "first-points-filed",
             status_from_mirror=legacy_mirror)
+        if step.get("created"):
+            # #2006 (W11): the edge's new creation is the once-per-org fact
+            # (a replay reports created=False and emits nothing).
+            _emit_onboarding_step_events(
+                ["first-points-filed"],
+                distinct_id=_onboarding_distinct_id(
+                    org_id, user_id=person_user_id),
+                org_id=org_id, source="seed")
         _maybe_apply_completion(org_id)
     finally:
         sdk.close()
@@ -20054,6 +20166,15 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
             step = _os.write_completed_step(
                 proj, org_id, "first-points-filed",
                 status_from_mirror=legacy_mirror)
+            if step.get("created"):
+                # #2006 (W11): provisioning-time seed step — same structural
+                # gate as the interactive seed (only ONE of the two writers
+                # can ever see created=True for a given org).
+                _emit_onboarding_step_events(
+                    ["first-points-filed"],
+                    distinct_id=_onboarding_distinct_id(
+                        org_id, user_id=person_user_id),
+                    org_id=org_id, source="starter_seed")
         _maybe_apply_completion(org_id)
     finally:
         sdk.close()

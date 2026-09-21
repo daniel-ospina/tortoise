@@ -2986,9 +2986,11 @@ def _maybe_onboarding_auto_complete(*,
         return  # already known complete
     try:
         from tortoise.hosted_api import (
+            _emit_onboarding_step_events,
             _get_onboarding_projection,
             _get_onboarding_state,
             _maybe_apply_completion,
+            _onboarding_distinct_id,
             _org_proj,
         )
         from tortoise.onboarding.state import (
@@ -3007,9 +3009,18 @@ def _maybe_onboarding_auto_complete(*,
             observed.append("decide-completed")
         legacy_mirror = bool(
             _get_onboarding_state(org_id).get("onboarding_complete"))
+        # #2006 (W11): emit IMMEDIATELY after each creating write, so a later
+        # step's failure cannot discard an edge creation this call already
+        # observed. Fail-safe (capture never raises, and the helper guards each
+        # emit), so this can never block the agent's write.
         for step in observed:
-            _os_write_step(proj, org_id, step,
-                           status_from_mirror=legacy_mirror)
+            res = _os_write_step(proj, org_id, step,
+                                 status_from_mirror=legacy_mirror)
+            if res.get("created"):
+                _emit_onboarding_step_events(
+                    [step],
+                    distinct_id=_onboarding_distinct_id(org_id),
+                    org_id=org_id, source="mcp_auto")
         # Server-owned status → the canonical fork-aware gate decides, never
         # this function (monotonic; a no-op if already complete).
         if _maybe_apply_completion(org_id):
