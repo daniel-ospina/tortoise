@@ -44,8 +44,10 @@ later), we need a clear license grant from every outside contributor. See the
 ## The MCP tool surface and public SDK methods cannot grow by accident
 
 Adding an entry to `TOOL_REGISTRY` in [`tortoise/tool_registry.py`](tortoise/tool_registry.py) does not
-just register a tool — it **expands what every agent can see**. That surface grew to 99 MCP tools and
-152 public SDK methods without anyone deciding it should, so it is now gated.
+just register a tool — it **expands what every agent can see**. That surface grew to 98 MCP tools and
+150 public SDK methods without anyone deciding it should, so it is now gated. (The #3863 curation then
+retired 16 names; the live surface is 82 MCP tools, and the gate's baseline in
+`config/surface-manifest.yml` records every one of them.)
 
 The gate: **`tools/surface-guard.py`** (CI job `surface-guard`, part of the required `python-ci-gate`)
 compares the live declaration against the approved baseline in
@@ -101,6 +103,51 @@ reads, through a route nobody chose.
 match the registry — that is precisely the unapproved expansion the check exists to catch. The curated
 list, including what each tool does, what uses it, and the recommendation for it, lives in
 [`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md).
+
+## A finding must carry the tree it was measured against
+
+A defect report is **true of the tree it was measured on** and may be **false of the product**. Three
+lanes once reported a defect that was already fixed on `origin/main` — each measured against a stale
+worktree or an un-rebased branch. One follow-up was about to be closed as *moot* for a file that
+exists on main; one epic phase was sequenced as *blocking* to re-implement a defect that commit
+`65b26f6c2` had already fixed (#4290). Worktrees do not self-update, so a six-day-old checkout reads
+exactly like a live defect unless the report says which tree it came from.
+
+Every finding therefore carries **one machine-produced line**:
+
+```
+Measured at: <ref-label>@<40-hex-sha> on <YYYY-MM-DD>
+```
+
+Do not hand-type the SHA. Run the emitter in the checkout you actually measured against and paste its
+output into the issue or comment:
+
+```bash
+python3 tools/finding_provenance.py --emit
+```
+
+Before reporting, ask the cheap question — *is my checkout behind, and by how many commits?*:
+
+```bash
+python3 tools/finding_provenance.py --checkout
+```
+
+The gate is mechanical, not a convention. [`tools/finding_provenance.py`](tools/finding_provenance.py)
+answers whether the finding was measured against a tree that **contains** the fix — using an ancestry
+test (`git merge-base --is-ancestor`), never SHA equality — and **fails** on a stale measurement:
+
+```bash
+python3 tools/finding_provenance.py --validate finding.md            # contains current origin/main?
+python3 tools/finding_provenance.py --validate finding.md --fix 65b26f6c2   # contains the claimed fix?
+gh issue view 4009 --json body -q .body | python3 tools/finding_provenance.py --validate -
+```
+
+Exit `0` = current, `1` = stale / undated / predates the fix, `2` = environment error. **A missing
+`Measured at:` line is a failure, never a pass** — a free-text field nothing validates is the defect
+the gate exists to remove. The `.github/workflows/finding-provenance.yml` job runs the same check when a
+finding issue is opened (and on demand via `workflow_dispatch`), annotating an undated or stale finding
+with the `provenance-stale` label instead of letting it be acted on silently. It exempts
+`beta-feedback` reports — an external report is about a released version, not a commit.
 
 ## Contribution license note
 

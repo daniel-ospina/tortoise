@@ -75,7 +75,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Page | File | Purpose |
 | --- | --- | --- |
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
-| Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Pro/Team), self-hosted section |
+| Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Builder/Team), self-hosted section |
 | Self-hosted | `website/self-hosted.html` | Self-hosted setup guide at `/self-hosted` (install, daemon, onboarding, MCP connect, role memory); guarded by `test_harness_mcp_config.py`, crawled by `tests/e2e/test_legal_pages.py` |
 | Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `website/functions/blog/sitemap.xml.ts` (`/blog/sitemap.xml`) · `website/functions/blog/feed.xml.ts` (`/blog/feed.xml`) · `website/functions/blog/api/posts/[[path]].ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (favicon, og-image) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
@@ -168,10 +168,10 @@ are canonical in `product/pricing.json`:
 | --- | --- | --- | --- | --- | --- |
 | Free | 0 | 1 | 1 | 2 | 10k |
 | Solo | 9 | 2 | 1 | 5 | 10k |
-| Pro | 25 | ∞ | 2 | 10 | 50k |
+| Builder | 25 | ∞ | 2 | 10 | 50k |
 | Team | 149 | ∞ | ∞ | 20 | 200k |
 
-Overage: $5 per additional 10k write ops (Pro + Team). Billing is **per team**,
+Overage: $5 per additional 10k write ops (Builder + Team). Billing is **per team**,
 not per seat (#310/#432).
 
 ---
