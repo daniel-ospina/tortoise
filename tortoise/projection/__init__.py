@@ -3184,6 +3184,24 @@ class FalkorProjection(
         last_recreate_seq_by_source: dict[tuple[tuple[str, str], int], int] = {}
         last_embed_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         last_hash_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        # #4305: id-WIDE (cross-file) journal-owned derived markers for the
+        # pass-1b restore tail. The per-source anchors above are a WITHIN-file
+        # chronology boundary; the restore tail runs AFTER every journal file,
+        # so it needs the file-blind question "did ANY journaled event
+        # determine this field?".
+        #   ``journal_hash_write`` / ``journal_embed_write`` — a journaled
+        #     event wrote OR explicitly cleared that conditional derived field
+        #     for the id. The pre-wipe snapshot value is then the OLDER writer
+        #     and must NOT be re-applied over it (shape H, point_promoted,
+        #     revise_to_empty).
+        #   ``journal_deleted`` — the journal HARD-deleted the id, destroying
+        #     the incarnation the snapshot describes; its derived belongs to a
+        #     dead node and must not be restored (delete_then_falsy_recreate).
+        # A SYNTHETIC event never contributes here: its source ordinal is None,
+        # so it is not a journal writer.
+        journal_hash_write: set[str] = set()
+        journal_embed_write: set[str] = set()
+        journal_deleted: set[str] = set()
         # (kind, id) pairs hard-deleted since their last creation — a
         # following creation of the SAME kind is a RE-creation (new
         # incarnation), not a bare upsert. #3860: keyed by (kind, id), so a
@@ -3297,6 +3315,14 @@ class FalkorProjection(
                         last_embed_write_by_source[key] = seq
                     if wrote_content_hash:
                         last_hash_write_by_source[key] = seq
+                    # #4305: the id-wide counterpart (see the sets'
+                    # declaration). A re-creation explicitly cleared both
+                    # conditional fields before the upsert, so it owns them
+                    # whether or not the upsert then wrote them back.
+                    if is_recreate or wrote_embedding:
+                        journal_embed_write.add(p["id"])
+                    if is_recreate or wrote_content_hash:
+                        journal_hash_write.add(p["id"])
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
         # #3664: EntityLinked records are deferred to a trailing sweep that
@@ -3362,7 +3388,13 @@ class FalkorProjection(
                         max_inline_seq[p["id"]] = seq
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
-                    self._upsert_point_props(p)
+                    wrote_embedding, wrote_content_hash = (
+                        self._upsert_point_props(p))
+                    # #4305: id-wide journal-owned derived marks.
+                    if wrote_embedding:
+                        journal_embed_write.add(p["id"])
+                    if wrote_content_hash:
+                        journal_hash_write.add(p["id"])
             elif t == "OperatorPromoted":
                 # #785/R16: fold/apply parity with the main handler
                 # (#2256 review P1): UPSERT the snapshot synthesized into
@@ -3372,7 +3404,14 @@ class FalkorProjection(
                 if isinstance(p, dict) and p.get("id"):
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
-                    self._upsert_point_props(_promotion_point_with_operator(p))
+                    op_p = _promotion_point_with_operator(p)
+                    wrote_embedding, wrote_content_hash = (
+                        self._upsert_point_props(op_p))
+                    # #4305: id-wide journal-owned derived marks.
+                    if wrote_embedding:
+                        journal_embed_write.add(p["id"])
+                    if wrote_content_hash:
+                        journal_hash_write.add(p["id"])
                 else:
                     oid = ev.get("id") or ev.get("event_id")
                     if oid is not None:
@@ -3385,6 +3424,10 @@ class FalkorProjection(
                 for mid in ev.get("merge_ids") or []:
                     # #331 (review r4): str-only ids.
                     if isinstance(mid, str):
+                        # #4305: a merge hard-deletes the id (see _delete) —
+                        # the snapshot's derived must not be restored onto a
+                        # node a later re-creation brings back.
+                        journal_deleted.add(mid)
                         self._delete(mid)
             elif t == "EntityMutated":
                 # #3299 pass-1b rebuild parity: apply() folds the
@@ -3416,6 +3459,15 @@ class FalkorProjection(
                 # to the any-kind max, preserving the legacy bare-id
                 # semantics because the fold falls back id-wide there too.
                 rid = ev.get("id")
+                # #4305: a journaled hard delete destroys the incarnation the
+                # pre-wipe snapshot describes, so its derived must not be
+                # restored later. A non-Point label deletes a different node
+                # and never blocks the Point restore; a missing/unknown label
+                # is the legacy id-wide delete and may have hit the Point.
+                if ev.get("op") == "delete" and isinstance(rid, str):
+                    _del_label = ev.get("label")
+                    if _del_label is None or _del_label in ("Point", "Operator"):
+                        journal_deleted.add(rid)
                 anchor = None
                 if isinstance(rid, str):
                     label = ev.get("label")
@@ -3494,13 +3546,21 @@ class FalkorProjection(
                         skip_hash = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_hash_write_by_source.get(key, -1) > seq)
-                self._revise_point(
+                wrote_embedding, wrote_content_hash = self._revise_point(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
                         ann_anchor is not None and seq <= ann_anchor),
                     skip_content=superseded,
                     skip_embedding=skip_embedding,
                     skip_hash=skip_hash)
+                if isinstance(rid, str):
+                    # #4305: id-wide journal-owned derived marks — the revision
+                    # wrote (or explicitly wiped) each field it was not told
+                    # to skip, so the snapshot must not overwrite it later.
+                    if wrote_embedding:
+                        journal_embed_write.add(rid)
+                    if wrote_content_hash:
+                        journal_hash_write.add(rid)
             elif t == "OperatorAnnotated":
                 # #3689 pass-1b rebuild parity: apply() folds the explicit
                 # annotation record, and the rebuild chain needs the SAME
@@ -3775,23 +3835,79 @@ class FalkorProjection(
                 params={"pid": pid, "bid": bid},
             )
 
-        # Pass 1b tail (#2943): re-apply the snapshot Point properties the
-        # replay itself cannot rebuild. See _REPLAY_GAP_PROPS — this is what
+        # Pass 1b tail (#2943, #4305): re-apply the snapshot Point properties
+        # the replay itself cannot rebuild. See _REPLAY_GAP_PROPS — this is what
         # keeps a graph-only Point that was invalidated (or hash-keyed) before
         # the wipe from coming back as a different node. Values are the
         # pre-wipe capture's, i.e. the state of the node this wipe destroyed;
         # the MATCH is a no-op for an id a journal event has since deleted.
+        #
+        # #4305: the derived restore is FIELD-GATED by what the journal replay
+        # itself determined, instead of being re-applied unconditionally to
+        # every synthetic id. Three pre-existing losses drove this:
+        #   * a JOURNALED event that wrote (or explicitly cleared) a derived
+        #     field OWNS it — the snapshot value is the OLDER writer and must
+        #     not clobber it. Unconditional re-application was shape H (a
+        #     `PointRevised` with no creating record: the synthetic #548
+        #     `PointAdded`'s stale `content_hash` overwrote the revision's),
+        #     `point_promoted`, and `revise_to_empty`.
+        #   * an id whose journaled creation writes NO derived (falsy content,
+        #     an operator payload, an unwritable revision) has no journal
+        #     carrier at all — and when the id IS log-covered the #548
+        #     generator emits no synthetic event for it, so the pre-wipe
+        #     derived was lost entirely. Shapes G,
+        #     `falsy_reemit_then_nul_revise`, `point_added_truthy_operator`.
+        #   * an id the journal HARD-DELETED is a destroyed incarnation: the
+        #     snapshot's derived belongs to it and must NOT be restored
+        #     (`delete_then_falsy_recreate` — restoring it would be STRICTLY
+        #     worse than the pre-fix behaviour, which is why the delete is a
+        #     barrier rather than just another writer).
+        # The source map is the pre-wipe `:Point` capture, widened from
+        # `synthetic_events` alone so LOG-COVERED ids are reachable; synthetic
+        # entries still union in for the #2943 sidecar-recovery path, where the
+        # live graph is already wiped and only the sidecar carries the values.
+        restore_sources: dict[str, dict] = dict(existing_points)
+        synthetic_ids: set[str] = set()
         for ev in synthetic_events:
             sp = ev.get("point") if isinstance(ev, dict) else None
-            if not isinstance(sp, dict) or not isinstance(sp.get("id"), str):
+            if isinstance(sp, dict) and isinstance(sp.get("id"), str):
+                restore_sources.setdefault(sp["id"], sp)
+                synthetic_ids.add(sp["id"])
+        for pid, sp in restore_sources.items():
+            if pid in journal_deleted:
                 continue
-            gap = {k: sp[k] for k in _REPLAY_GAP_PROPS
-                   if sp.get(k) is not None}
+            gap: dict = {}
+            if pid in synthetic_ids:
+                # The non-derived _REPLAY_GAP_PROPS keep their ORIGINAL scope:
+                # only a graph-only (synthetic) id. Widening them would let a
+                # pre-wipe value overwrite a journaled invalidate/supersede
+                # fold, which is not this change's subject.
+                for k in _REPLAY_GAP_PROPS:
+                    if k != "content_hash" and sp.get(k) is not None:
+                        gap[k] = sp[k]
+            if (sp.get("content_hash") is not None
+                    and pid not in journal_hash_write):
+                gap["content_hash"] = sp["content_hash"]
+            emb = sp.get("embedding")
+            restore_embedding = (emb is not None
+                                 and pid not in journal_embed_write)
+            if not gap and not restore_embedding:
+                continue
+            clauses: list[str] = []
+            params: dict = {"pid": pid}
             if gap:
-                self.g.query(
-                    "MATCH (n:Point {id:$pid}) SET n += $props",
-                    params={"pid": sp["id"], "props": gap},
-                )
+                clauses.append("n += $props")
+                params["props"] = gap
+            if restore_embedding:
+                # `vecf32()` cast exactly like `_upsert_point_props`: the HNSW
+                # index rejects a bare list, and a bare-list write would leave
+                # the restored vector unsearchable.
+                clauses.append("n.embedding = vecf32($emb)")
+                params["emb"] = list(emb)
+            self.g.query(
+                f"MATCH (n:Point {{id:$pid}}) SET " + ", ".join(clauses),
+                params=params,
+            )
 
         # ── #3947 review: restore the :Session containers + their CONTAINS
         # edges from the pre-wipe snapshot ──
@@ -5030,7 +5146,7 @@ class FalkorProjection(
                       skip_annotator_dims: bool = False,
                       skip_content: bool = False,
                       skip_embedding: bool = False,
-                      skip_hash: bool = False) -> None:
+                      skip_hash: bool = False) -> tuple[bool, bool]:
         """Apply PointRevised event — update content, context, and re-compute embedding.
 
         ``skip_annotator_dims`` (#3689): suppress ONLY the annotator-dim
@@ -5053,6 +5169,13 @@ class FalkorProjection(
         / ``skip_hash``); a bare re-emit that wrote neither leaves the
         revision's value live-valid. Chronological callers leave all three
         False.
+
+        Returns ``(embedding_written, content_hash_written)`` (#4305) — the
+        same conditional-write outcome ``_upsert_point_props`` reports, and
+        for the same reason: a written field (an explicit ``None`` wipe
+        included) is a JOURNAL-OWNED value the #4305 restore tail must not
+        overwrite with the older pre-wipe snapshot. Every other caller ignores
+        the return.
         """
         new_content = ev.get("new_content")
         new_context = ev.get("new_context")  # noqa: F841
@@ -5064,7 +5187,7 @@ class FalkorProjection(
             # Malformed PointRevised (non-str, or a NUL/lone-surrogate str the
             # engine/driver reject as a param) — skip rather than crash a
             # rebuild after the wipe (issue #325; #3689 review P1).
-            return
+            return False, False
         if new_content is not None and not _annotator_value_ok(new_content):
             # A content value FalkorDB cannot take as a parameter (NUL/lone-
             # surrogate str, map, non-finite float, ...). Drop the content
@@ -5075,6 +5198,8 @@ class FalkorProjection(
             new_content = None
         params: dict = {"id": pid}
         set_clauses: list[str] = []
+        wrote_embedding = False
+        wrote_content_hash = False
 
         # #4042: `n.content` is written UNCONDITIONALLY by
         # `_upsert_point_props`, so a creation that superseded this revision
@@ -5105,6 +5230,7 @@ class FalkorProjection(
                 except Exception:
                     params["embedding"] = None  # wipe stale embedding on failure (#19)
                 set_clauses.append("n.embedding = $embedding")
+                wrote_embedding = True
             if not skip_hash:
                 # #2795: content_hash is derived from content — mirror the live
                 # update_point #1904 recompute so a replayed PointRevised cannot
@@ -5117,6 +5243,7 @@ class FalkorProjection(
                 # content-equality fallback; a stale present-but-wrong hash does
                 # not — so NULL is the correct failure value.
                 set_clauses.append("n.content_hash = $content_hash")
+                wrote_content_hash = True
                 try:
                     params["content_hash"] = _content_hash(new_content)
                 except Exception:
@@ -5142,12 +5269,13 @@ class FalkorProjection(
         # would strand the rebuilt graph after the wipe. Nothing to write is a
         # no-op, not a crash.
         if not set_clauses:
-            return
+            return False, False
 
         self.g.query(
             f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)}",
             params=params,
         )
+        return wrote_embedding, wrote_content_hash
 
     def _delete_entity_by_id(self, id_val: str,
                              label: str | None = None) -> int:

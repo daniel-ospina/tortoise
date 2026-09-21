@@ -353,18 +353,26 @@ def test_rebuild_is_idempotent_for_graph_only_derived(sup, tmp_path):
 
 
 def test_revise_before_recreate_is_unchanged(sup, tmp_path):
-    """OUT-OF-SCOPE pre-existing axis (#4260/#4042) — never-worse pin.
+    """OUT-OF-SCOPE adjacent axis (#4260/#4042) — never-worse pin.
 
     A ``PointRevised`` whose record PRECEDES the id's delete→recreate is
-    hoisted by pass-1a and folds onto the re-created incarnation, so both
-    content and derived diverge from the live chronology (rebuild 'R' vs
-    oracle 'Z'). That is the pre-first-creation axis #4305 deliberately does
-    NOT touch.
+    hoisted by pass-1a and folds onto the re-created incarnation. That is the
+    pre-first-creation axis #4305 deliberately does NOT touch.
 
-    This test pins the value base ``2381d8f88`` and current main produce, so
-    the #4305 derived tail cannot silently move it in either direction. It
-    is deliberately NOT an oracle-match assertion — it is the never-worse
-    evidence for the one adjacent shape the fix must leave alone.
+    MEASURED, not assumed (the recovered harness's claim that base and main
+    agree here was stale):
+
+      base ``2381d8f88`` — content ``'R'``, hash ``sha256('R')``  (diverges
+          from the live oracle, which is ``'Z'`` / ``sha256('Z')``)
+      main ``31c44d3f5`` (post-#4263) — content ``'Z'``, hash
+          ``sha256('Z')`` — i.e. #4263 legitimately MOVED this axis and it
+          now MATCHES the oracle
+
+    So the value this fix must not move is main's ``'Z'``. The pin asserts it
+    directly, and is deliberately NOT an oracle-match assertion (it is the
+    never-worse evidence for the one adjacent shape the fix must leave
+    alone). Before the fix this failed on main as well — it is a stale base
+    pin, not a product defect.
     """
     from tortoise.ids import content_hash
     events, sdk = sup
@@ -375,5 +383,5 @@ def test_revise_before_recreate_is_unchanged(sup, tmp_path):
     _write_journal(events, records)
     sdk._get_proj().rebuild_all(str(events))
     state = _read_derived(sdk, pid)
-    assert state["content"] == "R"
-    assert state["content_hash"] == content_hash("R")
+    assert state["content"] == "Z"
+    assert state["content_hash"] == content_hash("Z")
