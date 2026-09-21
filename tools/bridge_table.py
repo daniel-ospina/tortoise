@@ -306,6 +306,215 @@ def _sdk_targets() -> dict[str, int]:
     return out
 
 
+# ─────────────────────────────────────────────────────────────────────
+# THE CITATIONS. The destination map is authored from the beta doc's disposition
+# tables, and until now nothing bound the two together: the doc is the authority
+# the owner reviews, the map is what renders. A citation is only evidence if the
+# doc still says it AND the read is MAXIMAL. A read that stops at the clause that
+# agrees with the row drops the clause that contradicts it, and because a
+# truncated prefix of a real sentence is still a real substring, a bare
+# `quote in text` test cannot see the difference.
+#
+# The quotes below are DERIVED from the doc — the whole disposition row, read at
+# build time — never typed beside the map. The rule shape (`_maximal`, and its
+# boundary set) is `tools/sdk_rename_table.py`'s, deliberately not a second rule.
+# ─────────────────────────────────────────────────────────────────────
+BETA_DOC = ROOT / "docs" / "product" / "beta-sdk-surface.md"
+
+# A disposition cell can name something that is not a target because it is itself
+# folded one hop further. The hop is stated IN THE DOC, so it is recorded as a
+# citation of its own rather than assumed: without it `get_source_reliability`
+# reads as unsupported (its own cell says `list_sources`), which is not a finding.
+# name -> (doc, quote, the target it folds into).
+FOLDS: dict[str, tuple[str, str, str]] = {
+    "list_sources": (
+        BETA_DOC.name,
+        "| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP "
+        "tool and a CLI command (`tortoise/__main__.py`), and it is covered by "
+        "`tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. "
+        "It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it "
+        "asks stays first-class and gains the credibility tier; it no longer needs its "
+        "own method. |",
+        "list_knowledge",
+    ),
+}
+
+# A quote that stops mid-clause is exactly what this rule rejects. Boundaries: a
+# cell/row `|`, a line end, the document end, or a sentence end.
+_REGION_END = re.compile(r"[.!?][\"')\]\u201d`*_]*$")
+_ARROW_TARGET = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`]*\))?`")
+_COUNT_CELL = re.compile(r"~?\d+$")
+
+
+def _maximal(quote: str, text: str) -> bool:
+    """Is `quote` a maximal region of `text` — not a right-truncation of one?
+
+    True when the match ends at a table-cell/row boundary (`|`), at a line end, at the
+    end of the document, or at a sentence boundary. A quote that stops mid-clause is
+    rejected, because the cut is exactly where a contradiction can hide.
+
+    Sentence boundaries count on purpose: the rule exists to stop a quote MID-clause,
+    not to force every quote to span a whole table row.
+    """
+    idx = text.find(quote)
+    if idx < 0:
+        return True  # absent text is CITATION DRIFT, reported by its own check
+    after = text[idx + len(quote):]
+    if after == "" or after.startswith("\n"):
+        return True
+    if quote.endswith("|"):
+        return True
+    return _REGION_END.search(quote) is not None
+
+
+def _arrow_targets(cell: str) -> list[str]:
+    """Every TARGET named after a `→` in a disposition cell, in document order.
+
+    Only target names are kept, plus the names `FOLDS` maps into a target — a disposition
+    cell also names fields (`invalid_at`), parameter values (`credibility`) and the
+    methods being folded, and counting those as destinations would make this guard
+    PERMISSIVE, the one direction a guard must never fail.
+    """
+    keep = set(TARGET_MCP) | set(FOLDS)
+    out: list[str] = []
+    for seg in cell.split("→")[1:]:
+        out += [t for t in _ARROW_TARGET.findall(seg) if t in keep]
+    return out
+
+
+def _prefix_targets(cell: str) -> list[str]:
+    r"""Targets in the FIRST CLAUSE after the first `→` — the prefix a truncated read keeps.
+
+    The cut is the clause boundary a right-truncation actually lands on: the first `;` or
+    `.` after the arrow. That is the shape the defect takes — a quote that keeps
+    "→ `manage_source_trust`" and drops the continuation "; reads via `list_sources`" — and
+    reading only that prefix is how a row's support can vanish from its own evidence while
+    the substring test stays green.
+    """
+    segs = cell.split("→")[1:]
+    if not segs:
+        return []
+    seg = re.split(r"[;.]", segs[0], maxsplit=1)[0]
+    keep = set(TARGET_MCP) | set(FOLDS)
+    return [t for t in _ARROW_TARGET.findall(seg) if t in keep]
+
+
+def _doc_citations() -> dict[str, dict]:
+    """tool -> the doc row that dispositions it, read out of the doc itself.
+
+    Beta's disposition tables are `| names… | count | prose |`. A row is the citation
+    for every registry tool whose `sdk_method` it names, and the QUOTE IS THE ROW — so
+    it cannot drift from the doc without the doc changing.
+    """
+    text = BETA_DOC.read_text(encoding="utf-8")
+    by_method: dict[str, str] = {}
+    for r in _registry_rows():
+        if r["sdk_method"]:
+            by_method[r["sdk_method"]] = r["name"]
+
+    cites: dict[str, dict] = {}
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # Only the disposition tables: a numeric count cell, names, and an arrow.
+        if len(cells) < 3 or not _COUNT_CELL.match(cells[1]):
+            continue
+        names = re.findall(r"`([a-z_][a-z0-9_]*)`", cells[0])
+        if not names or "→" not in cells[2]:
+            continue
+        quote = line.rstrip()
+        for n in names:
+            tool = by_method.get(n)
+            if tool is not None:
+                cites[tool] = {
+                    "doc": BETA_DOC.name,
+                    "quote": quote,
+                    "targets": _arrow_targets(cells[2]),
+                    # The prefix a truncated read keeps. A row supported only beyond
+                    # this point is supported ONLY by the clause maximality preserves.
+                    "first_targets": _prefix_targets(cells[2]),
+                }
+    return cites
+
+
+def _citation_errors(cites: dict[str, dict]) -> list[str]:
+    """Fail the build on DRIFT or on a TRUNCATED citation — never on a disagreement.
+
+    A disagreement between the map and its full citation is a FINDING that needs an
+    owner ruling, so it is rendered, not raised. A citation that is missing or
+    truncated is a defect in the EVIDENCE itself, and evidence that can be edited to
+    agree with the row is worse than no evidence at all.
+    """
+    errs: list[str] = []
+    # Non-vacuity: a guard that resolves nothing cannot fail, and would read as green.
+    if not cites:
+        errs.append("NO destination citation resolved — the citation guard is UNARMED")
+    for tool, c in sorted(cites.items()):
+        text = (ROOT / "docs" / "product" / c["doc"]).read_text(encoding="utf-8")
+        if c["quote"] not in text:
+            errs.append(f"CITATION DRIFT: {tool}'s quote is not in {c['doc']}")
+        elif not _maximal(c["quote"], text):
+            errs.append(
+                f"TRUNCATED CITATION for {tool}: the quote stops mid-clause in "
+                f"{c['doc']} — it must reach a cell `|`, a line end or a sentence end, "
+                "because the clause it drops is where a contradiction hides"
+            )
+    for name, (doc, quote, _target) in sorted(FOLDS.items()):
+        text = (ROOT / "docs" / "product" / doc).read_text(encoding="utf-8")
+        if quote not in text:
+            errs.append(f"FOLD CITATION DRIFT: {name}'s quote is not in {doc}")
+        elif not _maximal(quote, text):
+            errs.append(f"TRUNCATED FOLD CITATION: {name} in {doc} stops mid-clause")
+    return errs
+
+
+def _citation_findings(cites: dict[str, dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """(unsupported, clause_only, ambiguous) — all REPORT-ONLY, all rendered.
+
+    `unsupported`: the map's destination is not named anywhere in the row's full
+    citation — the row and its own evidence disagree, one level up from the truncated
+    quote that hides the same thing. The mapping is owner-approved, so it is reported
+    with its evidence and NOT silently changed.
+
+    `clause_only`: the destination IS named, but only in a clause BEYOND the first `→`.
+    A read that stopped at the first clause would drop the row's entire support, so this
+    list is the maximality rule's load-bearing set — computed, not asserted.
+
+    `ambiguous`: the citation names more than one target, so it does not by itself
+    determine a destination. Which clause applies to which method is a reading, not a
+    computation — the maximal quote is rendered so the clause is visible and must be
+    read, which is the most a mechanical rule can do.
+    """
+    folds = {k: v[2] for k, v in FOLDS.items()}
+
+    def resolve(names: list[str]) -> list[str]:
+        out: list[str] = []
+        for t in names:
+            r = folds.get(t, t)
+            if r not in out:
+                out.append(r)
+        return out
+
+    unsupported: list[dict] = []
+    clause_only: list[dict] = []
+    ambiguous: list[dict] = []
+    for tool, c in sorted(cites.items()):
+        dest = DESTINATION.get(tool)
+        if dest is None:
+            continue
+        named = resolve(c["targets"])
+        prefix = resolve(c["first_targets"])
+        row = {"tool": tool, "dest": dest, "named": named, "prefix": prefix, **c}
+        if dest not in named:
+            unsupported.append(row)
+        elif dest not in prefix:
+            clause_only.append(row)
+        if len(named) > 1:
+            ambiguous.append(row)
+    return unsupported, clause_only, ambiguous
+
+
 def _validate(rows: list[dict]) -> list[str]:
     """Fail loudly. Never reconcile silently — a mismatch IS the finding."""
     errs: list[str] = []
@@ -365,7 +574,7 @@ def _blockers(rows: list[dict], sdk_defs: dict[str, int]) -> tuple[list[dict], l
     return no_method, unresolved
 
 
-def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
+def render(rows: list[dict], sdk_defs: dict[str, int], cites: dict[str, dict]) -> str:
     by_dest: dict[str, list[str]] = {}
     for r in rows:
         by_dest.setdefault(DESTINATION[r["name"]], []).append(r["name"])
@@ -509,6 +718,111 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
     else:
         out.append("None.")
 
+    # ── Part D — the destination citations ──────────────────────────
+    n_cited = len(cites)
+    unsupported, clause_only, ambiguous = _citation_findings(cites)
+    by_quote: dict[tuple[str, str], list[str]] = {}
+    for tool, c in sorted(cites.items()):
+        by_quote.setdefault((c["doc"], c["quote"]), []).append(tool)
+
+    out += [
+        "",
+        "## Part D — destination citations",
+        "",
+        "The `Destination` column's evidence is the beta doc's own disposition row, quoted",
+        "**in full**. The quote is not decoration. A read that stops at the clause agreeing with",
+        "the row drops the clause that contradicts it, and because a truncated prefix of a real",
+        "sentence is still a real substring, a `quote in text` test passes while the evidence has",
+        "been edited to agree with the row. **Every quote below reaches a region boundary** (a",
+        "cell `|`, a line end, a sentence end), and the generator **fails the build** if one stops",
+        "mid-clause.",
+        "",
+        f"**{len(by_quote)} citations cover {n_cited} of the {len(rows)} registry rows.** The other **{len(rows) - n_cited}**",
+        "are map decisions with no disposition row in the doc to cite — a net-new target, or a row",
+        "that table does not carry.",
+        "",
+        "#### D1 — the citation corpus",
+        "",
+    ]
+    for (doc, quote), tools in sorted(by_quote.items()):
+        out.append(f"- `{doc}` · rows {', '.join(f'`{t}`' for t in tools)}")
+        out.append(f"  > {quote}")
+
+    out += [
+        "",
+        "**Documented hops.** A citation can name something that is not a target because it is",
+        "itself folded one hop further. The hop is stated in the doc, so it is carried as a",
+        "citation of its own — checked by the same rule — rather than assumed. Without it",
+        "`tortoise_get_source_reliability`'s row reads as unsupported, which is not a finding.",
+        "",
+    ]
+    for name, (_fold_doc, fold_quote, fold_target) in sorted(FOLDS.items()):
+        out.append(f"- `{name}` → `{fold_target}`")
+        out.append(f"  > {fold_quote}")
+
+    out += [
+        "",
+        f"**{len(unsupported)} rows disagree with their own citation; {len(clause_only)} are supported only",
+        f"beyond the first clause; {len(ambiguous)} sit under an ambiguous citation.** Every count",
+        "here is computed from the doc, not typed.",
+        "",
+        "#### D2 — citations that do NOT name their row's destination",
+        "",
+        "**These are findings, not edits.** A row whose destination is not named by the row's own",
+        "full citation is the `get_source_reliability` failure mode read one level up — the row and",
+        "its evidence disagree. The destination map is owner-approved, so the disagreement is",
+        "reported here with its evidence and the mapping is left ALONE. Changing an owner-approved",
+        "destination is not a build step.",
+        "",
+    ]
+    if unsupported:
+        for f in unsupported:
+            named = ", ".join(f"`{n}`" for n in f["named"]) or "*(no target named)*"
+            out.append(f"- **`{f['tool']}`** — map says `{f['dest']}`; citation names {named}")
+            out.append(f"  > {f['quote']}")
+    else:
+        out.append("None — every citation names its row's destination.")
+
+    out += [
+        "",
+        "#### D2b — rows whose support exists ONLY beyond the first clause",
+        "",
+        "These rows are **why the maximality rule is load-bearing, not decorative**. Their",
+        "destination is named by the citation, but only in a clause after the first `→` — the",
+        "exact point a truncated quote would stop. A `quote in text` test would accept the cut",
+        "prefix and the row's whole support would vanish from its own evidence, silently.",
+        "",
+    ]
+    if clause_only:
+        for f in clause_only:
+            named = ", ".join(f"`{n}`" for n in f["named"])
+            prefix = ", ".join(f"`{n}`" for n in f["prefix"]) or "*(no target in the first clause)*"
+            out.append(f"- **`{f['tool']}`** — map says `{f['dest']}`; the first clause names {prefix}, the full citation names {named}")
+            out.append(f"  > {f['quote']}")
+    else:
+        out.append("None — every row's destination is named in its citation's first clause.")
+
+    out += [
+        "",
+        "#### D3 — citations that name more than one target",
+        "",
+        "A citation here does not by itself determine a destination: it names several, split by",
+        "prose (`; reads via …`, `where they are …`, `for annotation`). Which clause applies to",
+        "which method is a reading, not a computation — so the **full** quote is rendered for these",
+        "rows in D1, where the clause a truncated read would have dropped is visible.",
+        "",
+        "| Row | Destination (map) | Citation names | First clause names |",
+        "|---|---|---|---|",
+    ]
+    if ambiguous:
+        for f in ambiguous:
+            out.append(
+                f"| `{f['tool']}` | `{f['dest']}` | "
+                f"{', '.join(f'`{n}`' for n in f['named'])} | "
+                f"{', '.join(f'`{n}`' for n in f['prefix']) or '*(none)*'} |"
+            )
+    else:
+        out.append("| *(none)* | | | |")
     out += [
         "",
         "---",
@@ -531,15 +845,16 @@ def main() -> int:
 
     rows = _registry_rows()
     sdk_defs = _sdk_targets()
+    cites = _doc_citations()
 
-    errs = _validate(rows)
+    errs = [*_validate(rows), *_citation_errors(cites)]
     if errs:
         print("BRIDGE TABLE BUILD FAILURE — the map and the registry disagree:", file=sys.stderr)
         for e in errs:
             print(f"  • {e}", file=sys.stderr)
         return 1
 
-    doc = render(rows, sdk_defs)
+    doc = render(rows, sdk_defs, cites)
 
     if args.check:
         current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
@@ -551,10 +866,15 @@ def main() -> int:
 
     OUT.write_text(doc, encoding="utf-8")
     no_method, _ = _blockers(rows, sdk_defs)
+    unsupported, clause_only, ambiguous = _citation_findings(cites)
     print(f"wrote {OUT}")
     print(f"  registry tools: {len(rows)}")
     print(f"  target methods with NO def on TortoiseSDK ({len(no_method)}): "
           f"{', '.join(b['what'] for b in no_method) or 'none'}")
+    print(f"  citations: {len(cites)} rows cited from {BETA_DOC.name}; "
+          f"{len(unsupported)} disagree with their citation, {len(clause_only)} supported "
+          f"only beyond the first clause, {len(ambiguous)} under an ambiguous citation "
+          f"(all report-only)")
     return 0
 
 

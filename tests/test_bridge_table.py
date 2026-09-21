@@ -712,3 +712,226 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
             f"{r['use_instead']} leads to {DESTINATION[r['use_instead']]!r} — the "
             f"retirement warning and the bridge table disagree about one journey"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# THE DESTINATION CITATIONS (#4282, defect class of PR #4477)
+#
+# The `Destination` column's evidence is the beta doc's own disposition row. A read
+# that stops at the clause AGREEING with the row drops the clause that contradicts
+# it — and because a truncated prefix of a real sentence is still a real substring,
+# a bare `quote in text` test cannot see the difference. `_maximal` is the fix, and
+# the tests below derive the boundary rule THEMSELVES: `tools.bridge_table._maximal`
+# is the implementation under test, so importing it would move both sides of the
+# assertion together.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _part_d_citations() -> dict[str, str]:
+    """`tool -> its rendered maximal citation`, read out of the generated document."""
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    assert "## Part D" in doc, (
+        "the generated doc has no Part D — the citation corpus is unreachable, so a "
+        "truncated citation is invisible to every reader"
+    )
+    d1 = doc.split("#### D1")[1].split("#### D2")[0]
+    # The documented-hop block uses the same bullet+quote shape, so cut it off first.
+    d1 = d1.split("**Documented hops.**")[0]
+    rows = re.findall(r"^- `([^`]+)` · rows (.+)$", d1, re.M)
+    quotes = re.findall(r"^  > (.+)$", d1, re.M)
+    assert rows, "Part D1 rendered no citation rows — the citation guard is unarmed"
+    # A rendered row with no quote (or vice versa) would silently shift the zip below.
+    assert len(quotes) == len(rows), (
+        f"Part D1 has {len(rows)} citation rows but {len(quotes)} quotes"
+    )
+    out: dict[str, str] = {}
+    for (docname, toollist), quote in zip(rows, quotes, strict=True):
+        assert docname in ("beta-sdk-surface.md",), f"unexpected citation doc {docname!r}"
+        for t in re.findall(r"`([a-z_][a-z0-9_]*)`", toollist):
+            assert t not in out, f"{t} is cited twice in Part D1"
+            out[t] = quote
+    return out
+
+
+def _is_maximal(quote: str, text: str) -> bool:
+    """The maximality rule, re-derived — a quote must end at a region boundary.
+
+    Boundaries: a cell/row `|`, a line end, the document end, or a sentence end. A quote
+    stopping mid-clause is a right-truncation, and the cut is where a contradiction hides.
+    """
+    idx = text.find(quote)
+    assert idx >= 0, f"citation is not in its doc at all: {quote[:60]!r}"
+    after = text[idx + len(quote):]
+    if after == "" or after.startswith("\n") or quote.endswith("|"):
+        return True
+    return re.search(r"[.!?][\"')\]\u201d`*_]*$", quote) is not None
+
+
+def _section(doc: str, heading: str) -> str:
+    """The body of `heading`, up to the next heading of the same-or-higher level."""
+    assert heading in doc, f"the generated doc has no {heading!r} section"
+    return re.split(r"\n#{2,4} ", doc.split(heading)[1])[0]
+
+
+def _cited_findings() -> tuple[set[str], set[str], set[str]]:
+    """(unsupported, clause-only, ambiguous) from the RENDERED doc — the oracle subject."""
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    d2 = _section(doc, "#### D2 —")
+    d2b = _section(doc, "#### D2b —")
+    d3 = _section(doc, "#### D3 —")
+    unsupported = set(re.findall(r"^- \*\*`([a-z_][a-z0-9_]*)`\*\*", d2, re.M))
+    clause_only = set(re.findall(r"^- \*\*`([a-z_][a-z0-9_]*)`\*\*", d2b, re.M))
+    ambiguous = set(re.findall(r"^\| `([a-z_][a-z0-9_]*)` \|", d3, re.M))
+    return unsupported, clause_only, ambiguous
+
+
+def test_rendered_citations_are_present_and_maximal() -> None:
+    """Every citation in the rendered doc must reach a region boundary, in its own doc.
+
+    The end-to-end half of the rule: a generator that starts emitting a citation cut at
+    the clause that agrees with its row would render a document that *looks* sourced here.
+    """
+    beta = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(encoding="utf-8")
+    cites = _part_d_citations()
+    # Non-vacuity: a corpus that shrank to nothing cannot fail the loop below.
+    assert len(cites) >= 20, (
+        f"only {len(cites)} citations rendered — the corpus shrank, and an empty or tiny "
+        "corpus makes every maximality assertion below vacuous"
+    )
+    bad = [f"{t}: {q[:90]!r}" for t, q in cites.items() if not _is_maximal(q, beta)]
+    assert not bad, (
+        "these rendered citations stop mid-clause, so a clause is being hidden from the "
+        "reader — and the dropped clause is where a contradiction lives:\n  "
+        + "\n  ".join(bad)
+    )
+
+
+def test_a_truncated_citation_is_rejected_by_the_build(monkeypatch) -> None:
+    """The guard must RED on a truncated citation, and must not write the doc.
+
+    The fixture is the named failure mode itself: the `get_source_reliability` row cut at
+    the `;` that introduces `reads via \\`list_sources\\`` — the clause that decides the
+    row's destination. The cut is a real substring of the doc, so `quote in text` accepts
+    it; `_maximal` must not.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    beta = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(encoding="utf-8")
+    full = _part_d_citations()["tortoise_get_source_reliability"]
+    cut = full[: full.index(";")]
+    assert cut != full, "the truncation fixture is no longer truncating anything"
+    assert cut in beta, "the truncated fixture is no longer a substring of the doc"
+    assert not _is_maximal(cut, beta), (
+        "the independent boundary oracle accepts the truncated fixture — the fixture "
+        "no longer demonstrates a mid-clause cut"
+    )
+
+    # 1. The predicate. `tortoise_get_source_reliability` is exactly the row that needs
+    #    this clause: without it the row reads as supported by `manage_source_trust`.
+    assert not bt._maximal(cut, beta), "`_maximal` accepted a mid-clause truncation"
+    assert bt._maximal(full, beta), "`_maximal` rejected its own maximal citation"
+
+    # 2. The wired path — the guard must fail the BUILD, not merely exist.
+    before = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    bad = {"tortoise_get_source_reliability": {"doc": "beta-sdk-surface.md", "quote": cut}}
+    errs = bt._citation_errors(bad)
+    assert any("TRUNCATED CITATION" in e for e in errs), (
+        f"`_citation_errors` did not flag the truncation: {errs}"
+    )
+    monkeypatch.setattr(bt, "_doc_citations", lambda: bad)
+    monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
+    assert bt.main() == 1, "the generator's main() did not fail the build on a truncated citation"
+    after = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    assert after == before, "the generator WROTE the document despite a truncated citation"
+    # A guard that resolves nothing cannot fail. Assert the armed case is non-empty too.
+    assert bt._doc_citations(), "the citation guard resolved no citations at all"
+
+
+def test_part_d_findings_match_an_independent_recomputation() -> None:
+    """D2 / D2b / D3 must list exactly what the citations and the map imply.
+
+    Recomputed here from the RENDERED corpus plus the map — the generator's own
+    `_citation_findings` is not imported — so emptying any of those sections reds this
+    test instead of passing as "nothing to report".
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools.bridge_table import DESTINATION
+
+    cites = _part_d_citations()
+    # The one documented hop, asserted LITERALLY rather than imported: the beta doc states
+    # `list_sources` folds into `list_knowledge(kind='source')`.
+    folds = {"list_sources": "list_knowledge"}
+
+    def resolve(names: list[str]) -> list[str]:
+        out: list[str] = []
+        for n in names:
+            r = folds.get(n, n)
+            if r not in out:
+                out.append(r)
+        return out
+
+    def rendered(quote: str, first_clause: bool) -> list[str]:
+        segs = quote.split("→")[1:]
+        if first_clause:
+            segs = [re.split(r"[;.]", segs[0], maxsplit=1)[0]] if segs else []
+        names: list[str] = []
+        for s in segs:
+            names += re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`]*\))?`", s)
+        # Keep only names that are destinations in the map, derived from the map's values
+        # rather than from the generator's own TARGET_MCP set — a different derivation of
+        # the same universe, so the two sides of this assertion cannot move together.
+        keep = {d.split(":", 1)[-1] for d in DESTINATION.values()} | set(folds)
+        return [n for n in names if n in keep]
+
+    unsupported: set[str] = set()
+    clause_only: set[str] = set()
+    ambiguous: set[str] = set()
+    for tool, quote in cites.items():
+        dest = DESTINATION[tool]
+        named = resolve(rendered(quote, first_clause=False))
+        prefix = resolve(rendered(quote, first_clause=True))
+        if dest not in named:
+            unsupported.add(tool)
+        elif dest not in prefix:
+            clause_only.add(tool)
+        if len(named) > 1:
+            ambiguous.add(tool)
+
+    # Non-vacuity, and the finding this rule exists to produce: the named failure mode is
+    # present in the corpus, so a rule that reports "nothing" is a broken rule.
+    assert clause_only == {"tortoise_get_source_reliability"}, (
+        "expected exactly the `get_source_reliability` row to be supported only beyond its "
+        f"citation's first clause; computed {sorted(clause_only)}"
+    )
+    assert unsupported, "no citation disagrees with its row — the audit found nothing"
+
+    got = _cited_findings()
+    for label, want, have in (
+        ("D2 (disagree)", unsupported, got[0]),
+        ("D2b (clause-only)", clause_only, got[1]),
+        ("D3 (ambiguous)", ambiguous, got[2]),
+    ):
+        assert have == want, (
+            f"{label} does not list what the citations imply.\n"
+            f"  listed but not implied: {sorted(have - want)}\n"
+            f"  implied but not listed: {sorted(want - have)}"
+        )
+
+
+def test_the_named_failure_mode_is_visible_in_the_document() -> None:
+    """The clause that decides `get_source_reliability` must be RENDERED, not summarised.
+
+    This is the whole point of quoting maximally: the row's destination (`list_knowledge`)
+    is reachable only through `; reads via \\`list_sources\\``. If the document shows only
+    the clause that agrees, a reader cannot audit the row at all — so pin the continuation
+    and the hop that resolves it.
+    """
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    assert "; reads via `list_sources`." in doc, (
+        "the citation for the source-trust family is truncated in the document: the clause "
+        "that decides `get_source_reliability`'s destination is missing"
+    )
+    assert "folds into **row 4 `list_knowledge(kind='source')`**" in doc, (
+        "the documented hop from `list_sources` to `list_knowledge` is not rendered"
+    )
