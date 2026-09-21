@@ -18,10 +18,12 @@
   "open_pr_carrying_the_measured_revision": 3577,
   "verified_at_seal": {
    "date": "2026-09-21",
+   "provenance": "computed by this generator from the repo's git state at generation time; NOT derived from the measurement",
+   "method": "git rev-parse origin/main / git rev-list --count / git merge-base --is-ancestor",
    "origin_main": "a36fd686eec2b6cdb21fc21af45e365dd64974a2",
    "commits_in_origin_main_not_in_measured_revision": 306,
    "merge_base": "a079767f1655c2a7ba3a0daa78b83200e16d6c61",
-   "method": "git merge-base --is-ancestor / git rev-list --count / git cat-file -e"
+   "measured_revision_is_ancestor_of_origin_main": false
   },
   "measured_surface_absent_from_origin_main": [
    "tortoise/session_reinjection.py",
@@ -12530,7 +12532,19 @@
      "cap10": 0.9225,
      "cap15": 0.9155
     },
-    "per_question_movement": "exactly ONE question (d3ab962e: 1.0 -> 0.5, a REGRESSION at the higher cap, while it still reports total_cap_hit=True at cap=15)"
+    "per_question_movement": {
+     "improved": [],
+     "regressed": [
+      [
+       "d3ab962e",
+       1.0,
+       0.5
+      ]
+     ],
+     "regressed_total_cap_hit_at_cap15": {
+      "d3ab962e": true
+     }
+    }
    },
    "verdict": "0.8592 IS NOT A TRUNCATION LOWER BOUND. Raising the total cap 10 -> 15 cuts total_cap_hit from 30/71 (42.3%) to 6/71 (8.5%) and admits ~80 more injected-and-merged items, yet the delta does NOT move UP \u2014 it moves marginally DOWN (recall_all@5 0.8592 -> 0.8451). The truncation was not what limited the arm; the shipped cap is not suppressing it, and on this cohort the extra injected volume is (weakly, on one question) harmful \u2014 consistent with rank displacement / context dilution at a saturated reader window."
   },
@@ -12541,12 +12555,7 @@
      "cap10_on": 7799.2,
      "cap15_on": 7768.6
     },
-    "reader_token_cap": 8000,
-    "sr_block_latency_ms": {
-     "mean": 19.01,
-     "p95": 53.92,
-     "max": 149.13
-    }
+    "reader_token_cap": 8000
    },
    "verdict": "NO CONTEXT-TOKEN REGRESSION at the shipped cap (7795.5 -> 7799.2, +3.7 tokens; the window is already 97.4% of the 8000-token cap in EVERY arm, so the reader is saturated before any injection). At cap=15 the token mean DROPS (7768.6) because the extra injected items displace base items. The arm's own block cost is 19.0 ms mean / 53.9 ms p95 \u2014 process-level retrieval latency is NOT a cost proxy in this campaign (host contention)."
   },
@@ -12558,7 +12567,7 @@
     "off_vs_off_b_ranked_ids_identical": "71/71",
     "off_vs_off_b_graded_metric_flips": "0/0 on every metric",
     "cap10_off_vs_cap15_off_top5_identical": "70/71",
-    "cap10_off_vs_cap15_off_graded_metric_flips": "0/0"
+    "cap10_off_vs_cap15_off_graded_metric_flips": "0/0 on every metric"
    },
    "verdict": "NOT INERT: the fetch fires on every question with seeds (71/71 fetch_ok), seeds 354 sessions and injects-and-merges 617 items (617/617) at cap=10, both injected arms. ISOLATION IS PROVEN, NOT ASSUMED: two OFF runs on two dedicated servers produce byte-identical ranked_ids on 71/71 questions (the deterministic ingest is reproducible across servers), and the cap=10 and cap=15 OFF runs are metric-identical on all 71. This run does NOT reproduce the harness-side pool-order instability the superseded receipt documented."
   },
@@ -12571,13 +12580,18 @@
     "n71_full_class": {
      "off": 0.6761,
      "on": 0.8592
-    },
-    "prior_receipt_n20": {
-     "off": 0.65,
-     "on": 0.9
     }
    },
-   "verdict": "THE n=20 SAMPLE OVERSTATED THE CLASS RATE BY 4.1 POINTS. On the first 20 questions of this cohort the run reproduces the superseded receipt EXACTLY (OFF 0.65 -> ON 0.90); on the full 71-question class the same arm gives OFF 0.6761 -> ON 0.8592. A sample fixes the point estimate it measured; it does not establish the class rate, and here it did not."
+   "verdict": "THE n=20 SAMPLE OVERSTATED THE CLASS RATE BY 4.1 POINTS. On the first 20 questions of this cohort the run reproduces the superseded receipt EXACTLY (OFF 0.65 -> ON 0.90); on the full 71-question class the same arm gives OFF 0.6761 -> ON 0.8592. A sample fixes the point estimate it measured; it does not establish the class rate, and here it did not.",
+   "cited_not_measured": {
+    "prior_receipt_n20": {
+     "value": {
+      "off": 0.65,
+      "on": 0.9
+     },
+     "provenance": "literal, read at seal from the superseded receipt (see `supersedes`); that artifact is NOT at HEAD or on origin/main, so it cannot be re-derived here"
+    }
+   }
   },
   "6_evidence_surface_guardrail": {
    "measured": {

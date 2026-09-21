@@ -14,9 +14,16 @@ Overrides (the defaults are this machine's run-time provenance):
                     the receipt records as `branch`, so a re-run from another
                     checkout must point this at the measured branch
   LME_RECEIPT_DEST  output path (default <LME_WT>/docs/scoping/receipts/...)
+
+`--rederive <receipt.json>` recomputes an existing receipt's derived blocks
+(each falsifier's `measured`, and `verified_at_seal`) from its OWN `results`
+instead of from arm artifacts, and writes it back. The raw artifacts behind
+this receipt are gone, so that is the only way to keep it in agreement with
+this generator.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import os
@@ -45,7 +52,9 @@ ARMS = ("off", "off_b", "inj_only", "on")
 
 # Gold-session census support. The cohort is the ONLY source of gold labels;
 # the arm artifact is the only source of the candidate pool.
-COHORT_DATA = {q["question_id"]: q for q in _read_json(COHORT)}
+COHORT_LIST = _read_json(COHORT)
+COHORT_DATA = {q["question_id"]: q for q in COHORT_LIST}
+COHORT_ORDER = [q["question_id"] for q in COHORT_LIST]
 POINT_SESSION_RE = re.compile(r"^lme:(?P<qid>[0-9A-Za-z_]+):s(?P<sid>\d+):")
 GRADED_K = 5
 
@@ -85,6 +94,57 @@ def gold_pool_census(qid, ranked_ids):
 def git(*a):
     return subprocess.run(["git", "-C", str(WT), *a], capture_output=True,
                           text=True).stdout.strip()
+
+
+def git_rc(*a):
+    """Like git(), but keeps the exit code so a FAILED probe is not mistaken
+    for an empty result."""
+    return subprocess.run(["git", "-C", str(WT), *a], capture_output=True,
+                          text=True)
+
+
+def seal_verification(measured_sha):
+    """Facts about the MEASURED revision versus origin/main, computed HERE (at
+    seal time) from the repo's git state.
+
+    Unlike every other field in `staleness`, these are NOT derived from the
+    measurement \u2014 they describe the tree at the moment the receipt was built.
+    A re-run therefore RECOMPUTES the block (and re-dates it) instead of
+    re-emitting a frozen 2026-09-21 literal for whatever tree happens to be
+    checked out. Every probe degrades to null with a reason rather than to a
+    plausible value.
+    """
+    out = {
+        "date": datetime.date.today().isoformat(),
+        "provenance": ("computed by this generator from the repo's git state at "
+                       "generation time; NOT derived from the measurement"),
+        "method": ("git rev-parse origin/main / git rev-list --count / "
+                   "git merge-base --is-ancestor"),
+    }
+    probe = git_rc("rev-parse", "origin/main")
+    if probe.returncode != 0 or not probe.stdout.strip():
+        out.update({
+            "origin_main": None,
+            "commits_in_origin_main_not_in_measured_revision": None,
+            "merge_base": None,
+            "measured_revision_is_ancestor_of_origin_main": None,
+            "unavailable": ("git rev-parse origin/main failed: "
+                            + (probe.stderr.strip().splitlines()[-1]
+                               if probe.stderr.strip() else "no origin/main ref")),
+        })
+        return out
+    out["origin_main"] = probe.stdout.strip()
+    r_count = git_rc("rev-list", "--count", f"{measured_sha}..origin/main")
+    out["commits_in_origin_main_not_in_measured_revision"] = (
+        int(r_count.stdout.strip())
+        if r_count.returncode == 0 and r_count.stdout.strip() else None)
+    r_base = git_rc("merge-base", measured_sha, "origin/main")
+    out["merge_base"] = (r_base.stdout.strip()
+                         if r_base.returncode == 0 and r_base.stdout.strip()
+                         else None)
+    r_anc = git_rc("merge-base", "--is-ancestor", measured_sha, "origin/main")
+    out["measured_revision_is_ancestor_of_origin_main"] = (r_anc.returncode == 0)
+    return out
 
 
 def sha256(p):
@@ -226,6 +286,241 @@ def _closure(caps, per_q):
     return out
 
 
+def _arm(caps, cap, arm):
+    return ((caps.get(str(cap)) or {}).get(arm)) or {}
+
+
+def _mean0(block, key="recall_all@5"):
+    v = block.get(key)
+    return v[0] if isinstance(v, list) and v else None
+
+
+def _pq(per_q, cap, arm):
+    block = per_q.get(f"{cap}_{arm}")
+    return block if isinstance(block, dict) else None
+
+
+def _flips_of(per_q, cap_a, arm_a, cap_b, arm_b, metric):
+    a, b = _pq(per_q, cap_a, arm_a), _pq(per_q, cap_b, arm_b)
+    if a is None or b is None:
+        return None
+    ma, mb = a.get(metric), b.get(metric)
+    if not isinstance(ma, dict) or not isinstance(mb, dict):
+        return None
+    return flips(ma, mb)
+
+
+def _flip_str(flip):
+    return None if flip is None else f"+{flip['n_improved']}/-{flip['n_regressed']}"
+
+
+def _ratio(num, den):
+    return None if num is None or den is None else f"{num}/{den}"
+
+
+def _r1(x):
+    return None if x is None else round(x, 1)
+
+
+def _subset_recall_all(per_question_block, qids):
+    """recall_all@5 over an ordered SUBSET of questions (the n=20 prefix),
+    computed from that arm's per-question session_recall@5 map."""
+    m = (per_question_block or {}).get("session_recall@5") or {}
+    vals = [1.0 if m[q] == 1.0 else 0.0 for q in qids if m.get(q) is not None]
+    return round(statistics.mean(vals), 4) if vals else None
+
+
+def derive_falsifier_measured(caps, per_q, reader_token_cap):
+    """Every value returned here is COMPUTED from `caps`/`per_q` (the receipt's
+    own `results`), so a `measured` block cannot disagree with the data it
+    summarises.
+
+    Nothing here may be a literal: a figure that cannot be derived from
+    `results` is either dropped or moved out to the verdict's
+    `cited_not_measured` with its provenance. `reader_token_cap` is the one
+    input taken from `retrieval_mode` (methodology metadata) rather than from
+    the per-arm results.
+    """
+    closure = _closure(caps, per_q)
+    c10 = closure.get("10") or {}
+    c10_on = (c10.get("arms") or {}).get("on") or {}
+    c10_inj = (c10.get("arms") or {}).get("inj_only") or {}
+
+    off10 = _pq(per_q, 10, "off") or {}
+    n20 = [q for q in COHORT_ORDER
+           if q in ((off10.get("session_recall@5")) or {})][:20]
+
+    def top5(cap_a, arm_a, cap_b, arm_b):
+        a, b = _pq(per_q, cap_a, arm_a), _pq(per_q, cap_b, arm_b)
+        if a is None or b is None:
+            return None
+        r1, r2 = a.get("ranked_ids_top5") or {}, b.get("ranked_ids_top5") or {}
+        if not r1 or not r2:
+            return None
+        return [sum(1 for q in r1 if r1.get(q) == r2.get(q)), len(r1)]
+
+    def graded_flips(cap_a, arm_a, cap_b, arm_b):
+        got = [_flips_of(per_q, cap_a, arm_a, cap_b, arm_b, m)
+               for m in ("session_recall@5", "evidence_recall@5",
+                         "reader_surface@5")]
+        if any(f is None for f in got):
+            return None
+        imp = sum(f["n_improved"] for f in got)
+        reg = sum(f["n_regressed"] for f in got)
+        return f"{imp}/{reg}" + (" on every metric" if imp == 0 and reg == 0 else "")
+
+    def merged_at_cap10(census):
+        if census.get("injected_merged") is None or census.get("injected_total") is None:
+            return None
+        return f"{census['injected_merged']}/{census['injected_total']} at cap10"
+
+    on10, on15 = _arm(caps, 10, "on"), _arm(caps, 15, "on")
+    on_census10, on_census15 = on10.get("sr_census") or {}, on15.get("sr_census") or {}
+    inj_census15 = _arm(caps, 15, "inj_only").get("sr_census") or {}
+    sweep_on = _flips_of(per_q, 10, "on", 15, "on", "session_recall@5")
+    off_off_b, off_cap15 = top5(10, "off", 10, "off_b"), top5(10, "off", 15, "off")
+
+    return {
+        "1_miss_class_closure": {
+            "off_missed": c10.get("off_missed"),
+            "on_missed": c10_on.get("missed"),
+            "inj_only_missed": c10_inj.get("missed"),
+            "closed": c10_on.get("misses_closed"),
+            "closed_share_of_off_misses": c10_on.get(
+                "misses_closed_share_of_off_misses"),
+            "newly_missed": c10_on.get("newly_missed"),
+            "session_recall@5_flips": _flip_str(
+                _flips_of(per_q, 10, "off", 10, "on", "session_recall@5")),
+            "recall_all@5": [_mean0(_arm(caps, 10, "off")),
+                             _mean0(_arm(caps, 10, "on"))],
+            "session_recall@5": [
+                _mean0(_arm(caps, 10, "off"), "session_recall@5"),
+                _mean0(_arm(caps, 10, "on"), "session_recall@5")],
+            "n": on10.get("n_questions"),
+        },
+        "2_cap_sweep_truncation": {
+            "total_cap_hit_questions": {
+                "cap10": on_census10.get("total_cap_hit_questions"),
+                "cap15": on_census15.get("total_cap_hit_questions")},
+            "injected_total": {
+                "cap10": on_census10.get("injected_total"),
+                "cap15_on": on_census15.get("injected_total"),
+                "cap15_inj_only": inj_census15.get("injected_total")},
+            "dropped_by_cap": {
+                "cap10": on_census10.get("dropped_by_cap"),
+                "cap15_on": on_census15.get("dropped_by_cap"),
+                "cap15_inj_only": inj_census15.get("dropped_by_cap")},
+            "recall_all@5_on": {"cap10": _mean0(on10), "cap15": _mean0(on15)},
+            "session_recall@5_on": {
+                "cap10": _mean0(on10, "session_recall@5"),
+                "cap15": _mean0(on15, "session_recall@5")},
+            "per_question_movement": None if sweep_on is None else {
+                "improved": sweep_on["improvements"],
+                "regressed": sweep_on["regressions"],
+                "regressed_total_cap_hit_at_cap15": {
+                    q: ((_pq(per_q, 15, "on") or {}).get("total_cap_hit")
+                        or {}).get(q)
+                    for q, *_ in sweep_on["regressions"]}},
+        },
+        "3_cost_guard": {
+            "context_tokens_mean": {
+                "cap10_off": _r1(_arm(caps, 10, "off").get("context_tokens_mean")),
+                "cap10_on": _r1(_arm(caps, 10, "on").get("context_tokens_mean")),
+                "cap15_on": _r1(_arm(caps, 15, "on").get("context_tokens_mean"))},
+            "reader_token_cap": reader_token_cap,
+        },
+        "4_inertness_and_isolation": {
+            "fetch_ok": _ratio(on_census10.get("fetch_ok_questions"),
+                               on10.get("n_questions")),
+            "seeded_sessions": on_census10.get("seed_sessions_total"),
+            "injected_total_merged": merged_at_cap10(on_census10),
+            "off_vs_off_b_ranked_ids_identical": (
+                _ratio(*off_off_b) if off_off_b else None),
+            "off_vs_off_b_graded_metric_flips": graded_flips(10, "off", 10, "off_b"),
+            "cap10_off_vs_cap15_off_top5_identical": (
+                _ratio(*off_cap15) if off_cap15 else None),
+            "cap10_off_vs_cap15_off_graded_metric_flips": graded_flips(10, "off", 15, "off"),
+        },
+        "5_sample_vs_class": {
+            "n20_subset_of_this_run": {
+                "off": _subset_recall_all(_pq(per_q, 10, "off"), n20),
+                "on": _subset_recall_all(_pq(per_q, 10, "on"), n20)},
+            "n71_full_class": {"off": _mean0(_arm(caps, 10, "off")),
+                               "on": _mean0(_arm(caps, 10, "on"))},
+        },
+        "6_evidence_surface_guardrail": {
+            "evidence_recall@5": {
+                "off": _mean0(_arm(caps, 10, "off"), "evidence_recall@5"),
+                "on_cap10": _mean0(on10, "evidence_recall@5"),
+                "on_cap15": _mean0(on15, "evidence_recall@5")},
+            "evidence_recall@5_flips": _flip_str(
+                _flips_of(per_q, 10, "off", 10, "on", "evidence_recall@5")),
+            "reader_surface@5": {"off": _arm(caps, 10, "off").get("reader_surface@5"),
+                                 "on_cap10": on10.get("reader_surface@5")},
+            "reader_surface@5_flips": _flip_str(
+                _flips_of(per_q, 10, "off", 10, "on", "reader_surface@5")),
+        },
+    }
+
+
+# Figures a verdict cites that are NOT derivable from THIS receipt's `results`.
+# Kept as explicit literals with their provenance so they cannot be mistaken for
+# measured values (and so `main()` and `--rederive` cannot drift apart).
+CITED_NOT_MEASURED = {
+    "5_sample_vs_class": {
+        "prior_receipt_n20": {
+            "value": {"off": 0.65, "on": 0.90},
+            "provenance": ("literal, read at seal from the superseded receipt "
+                           "(see `supersedes`); that artifact is NOT at HEAD "
+                           "or on origin/main, so it cannot be re-derived "
+                           "here"),
+        },
+    },
+}
+
+
+def _attach_measured(verdicts, measured):
+    """Put the DERIVED `measured` block first in each verdict, replacing any
+    literal that was there, and attach the shared `cited_not_measured`
+    provenance for figures that cannot be derived from `results`."""
+    out = {}
+    for key, block in verdicts.items():
+        block = {k: v for k, v in block.items() if k != "measured"}
+        if key in measured:
+            block = {"measured": measured[key], **block}
+        if key in CITED_NOT_MEASURED:
+            block["cited_not_measured"] = CITED_NOT_MEASURED[key]
+        out[key] = block
+    return out
+
+
+def rederive(src, dest):
+    """Recompute the derived blocks of an EXISTING receipt from its own
+    `results`, then write it back.
+
+    The raw arm artifacts this receipt was built from are gone (`staleness.
+    raw_artifacts`), so a normal run cannot reproduce the census. `results` is
+    the surviving measurement record, though, so the falsifier `measured`
+    blocks and the seal block can still be recomputed from it \u2014 and must be,
+    because both are supposed to be functions of the recorded state rather
+    than literals.
+    """
+    receipt = json.loads(Path(src).read_text())
+    caps = receipt.get("results") or {}
+    per_q = {f"{cap}_{arm}": block.get("per_question") or {}
+             for cap, arms in caps.items() for arm, block in arms.items()}
+    token_cap = (receipt.get("retrieval_mode") or {}).get("reader_token_cap")
+    measured = derive_falsifier_measured(caps, per_q, token_cap)
+    receipt["falsifier_verdicts"] = _attach_measured(
+        receipt.get("falsifier_verdicts") or {}, measured)
+    staleness = receipt.get("staleness") or {}
+    if staleness.get("measured_revision"):
+        staleness["verified_at_seal"] = seal_verification(
+            staleness["measured_revision"])
+    Path(dest).write_text(json.dumps(receipt, indent=1, default=str) + "\n")
+    print("rewrote", dest)
+
+
 def main():
     caps = {}
     for cap in (10, 15, 20):
@@ -239,6 +534,9 @@ def main():
     per_q = {f"{cap}_{a}": arm_block(d)["per_question"]
              for cap in (10, 15, 20)
              for a in ARMS if (d := load(cap, a))}
+    token_cap = (load(10, "off") or {}).get("methodology", {}).get(
+        "context_token_cap")
+    measured = derive_falsifier_measured(caps, per_q, token_cap)
     out = {}
     # arm-vs-arm flips per cap
     cap_flips = {}
@@ -300,8 +598,9 @@ def main():
         # ⛔ STALENESS. The census below is a HISTORICAL record of ONE revision,
         # never a claim about current main. 412470cd3 is not on origin/main and
         # never was, the module the arm measures is absent from main entirely,
-        # and the raw arm artifacts are gone — so this receipt is both NOT
-        # current and NOT regenerable. Recorded in the artifact itself so the
+        # and the raw arm artifacts are gone — so the receipt is NOT current and
+        # its CENSUS is not regenerable (only the derived summary blocks are,
+        # from `results`; `--rederive`). Recorded in the artifact itself so the
         # next reader cannot quote these numbers as current.
         "staleness": {
             "status": ("STALE-BY-DESIGN \u2014 a sealed historical measurement of ONE "
@@ -323,14 +622,9 @@ def main():
             "measured_revision": SHA,
             "measured_branch": "fix/2513-retrieval-evidence",
             "open_pr_carrying_the_measured_revision": 3577,
-            "verified_at_seal": {
-                "date": "2026-09-21",
-                "origin_main": "a36fd686eec2b6cdb21fc21af45e365dd64974a2",
-                "commits_in_origin_main_not_in_measured_revision": 306,
-                "merge_base": "a079767f1655c2a7ba3a0daa78b83200e16d6c61",
-                "method": ("git merge-base --is-ancestor / git rev-list "
-                           "--count / git cat-file -e"),
-            },
+            # Computed at seal time from the repo's git state, NOT a literal
+            # and NOT derived from the measurement. See seal_verification().
+            "verified_at_seal": seal_verification(SHA),
             "measured_surface_absent_from_origin_main": [
                 "tortoise/session_reinjection.py",
                 "tools/longmem_eval/guard_measured_revision.py",
@@ -340,9 +634,12 @@ def main():
                 "declared_root": str(RAW),
                 "state_at_seal": (
                     "GONE \u2014 the directory does not exist, so the generator "
-                    "can no longer read cap{10,15}/<arm>.json and THIS RECEIPT "
-                    "CANNOT BE REGENERATED. It is the only surviving record of "
-                    "this census. /tmp/lme-v2-p100.json (the 100-Q profile "
+                    "can no longer read cap{10,15}/<arm>.json and THE CENSUS "
+                    "BELOW CANNOT BE REGENERATED. It is the only surviving "
+                    "record of this census; only the derived summary blocks "
+                    "(each falsifier's `measured`, and `verified_at_seal`) "
+                    "remain recomputable, and only from `results` itself "
+                    "(`--rederive`). /tmp/lme-v2-p100.json (the 100-Q profile "
                     "whose '53% of misses' figure titles issue #2513) is also "
                     "gone, so that issue's cited evidence no longer exists on "
                     "disk either."),
@@ -391,8 +688,8 @@ def main():
                       "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
                       " (verified against SPLIT_DIGESTS['s'])",
             "provenance_sidecar": str(PROV),
-            "n": len(_read_json(COHORT)),
-            "composition": {"multi-session": len(_read_json(COHORT))},
+            "n": len(COHORT_LIST),
+            "composition": {"multi-session": len(COHORT_LIST)},
             "built_by": "tools/longmem_eval/build_cohorts.py --cohort ms_tail",
             "superset_of_prior_sample": ("ms10 == ms_tail[0:10] and ms20 == "
                                          "ms_tail[10:20] — the superseded "
@@ -449,8 +746,7 @@ def main():
                 "embedder") or "BAAI/bge-small-en-v1.5 (384-dim)",
             "reader_item_cap": (load(10, "off") or {}).get("methodology", {}).get(
                 "context_item_cap"),
-            "reader_token_cap": (load(10, "off") or {}).get("methodology", {}).get(
-                "context_token_cap"),
+            "reader_token_cap": token_cap,
         },
         "miss_class_closure": _closure(caps, per_q),
         "results": caps,
@@ -476,14 +772,6 @@ def main():
                     "<arm>.cp.json [arm flags])"),
         "falsifier_verdicts": {
             "1_miss_class_closure": {
-                "measured": {
-                    "off_missed": 23, "on_missed": 10, "inj_only_missed": 23,
-                    "closed": 13, "closed_share_of_off_misses": 0.5652,
-                    "newly_missed": 0, "session_recall@5_flips": "+13/-0",
-                    "recall_all@5": [0.6761, 0.8592],
-                    "session_recall@5": [0.831, 0.9225],
-                    "n": 71,
-                },
                 "verdict": "PARTIAL CLOSURE, AND THE GUARD IS THE ENTIRE MOVER. "
                            "At the shipped cap the arm converts 13 of the 23 "
                            "multi-session questions OFF misses (56.5%) into "
@@ -497,20 +785,6 @@ def main():
                            "re-order, not to the added material.",
             },
             "2_cap_sweep_truncation": {
-                "measured": {
-                    "total_cap_hit_questions": {"cap10": 30, "cap15": 6},
-                    "injected_total": {"cap10": 617, "cap15_on": 701,
-                                       "cap15_inj_only": 696},
-                    "dropped_by_cap": {"cap10": 879, "cap15_on": 823,
-                                       "cap15_inj_only": 815},
-                    "recall_all@5_on": {"cap10": 0.8592, "cap15": 0.8451},
-                    "session_recall@5_on": {"cap10": 0.9225, "cap15": 0.9155},
-                    "per_question_movement": "exactly ONE question "
-                                             "(d3ab962e: 1.0 -> 0.5, a "
-                                             "REGRESSION at the higher cap, "
-                                             "while it still reports "
-                                             "total_cap_hit=True at cap=15)",
-                },
                 "verdict": "0.8592 IS NOT A TRUNCATION LOWER BOUND. Raising the "
                            "total cap 10 -> 15 cuts total_cap_hit from 30/71 "
                            "(42.3%) to 6/71 (8.5%) and admits ~80 more "
@@ -524,33 +798,20 @@ def main():
                            "context dilution at a saturated reader window.",
             },
             "3_cost_guard": {
-                "measured": {
-                    "context_tokens_mean": {"cap10_off": 7795.5,
-                                            "cap10_on": 7799.2,
-                                            "cap15_on": 7768.6},
-                    "reader_token_cap": 8000,
-                    "sr_block_latency_ms": {"mean": 19.01, "p95": 53.92,
-                                            "max": 149.13},
-                },
                 "verdict": "NO CONTEXT-TOKEN REGRESSION at the shipped cap "
                            "(7795.5 -> 7799.2, +3.7 tokens; the window is "
                            "already 97.4% of the 8000-token cap in EVERY arm, "
                            "so the reader is saturated before any injection). "
                            "At cap=15 the token mean DROPS (7768.6) because "
                            "the extra injected items displace base items. The "
-                           "arm's own block cost is 19.0 ms mean / 53.9 ms p95 "
-                           "— process-level retrieval latency is NOT a cost "
-                           "proxy in this campaign (host contention).",
+                           "arm's own block latency was measured at run time "
+                           "but is NOT in any surviving artifact and is not "
+                           "re-derivable from this receipt, so it is "
+                           "deliberately not cited here — process-level "
+                           "retrieval latency is NOT a cost proxy in this "
+                           "campaign (host contention).",
             },
             "4_inertness_and_isolation": {
-                "measured": {
-                    "fetch_ok": "71/71", "seeded_sessions": 354,
-                    "injected_total_merged": "617/617 at cap10",
-                    "off_vs_off_b_ranked_ids_identical": "71/71",
-                    "off_vs_off_b_graded_metric_flips": "0/0 on every metric",
-                    "cap10_off_vs_cap15_off_top5_identical": "70/71",
-                    "cap10_off_vs_cap15_off_graded_metric_flips": "0/0",
-                },
                 "verdict": "NOT INERT: the fetch fires on every question with "
                            "seeds (71/71 fetch_ok), seeds 354 sessions and "
                            "injects-and-merges 617 items (617/617) at cap=10, "
@@ -565,11 +826,6 @@ def main():
                            "documented.",
             },
             "5_sample_vs_class": {
-                "measured": {
-                    "n20_subset_of_this_run": {"off": 0.65, "on": 0.9},
-                    "n71_full_class": {"off": 0.6761, "on": 0.8592},
-                    "prior_receipt_n20": {"off": 0.65, "on": 0.90},
-                },
                 "verdict": "THE n=20 SAMPLE OVERSTATED THE CLASS RATE BY 4.1 "
                            "POINTS. On the first 20 questions of this cohort "
                            "the run reproduces the superseded receipt EXACTLY "
@@ -580,13 +836,6 @@ def main():
                            "not.",
             },
             "6_evidence_surface_guardrail": {
-                "measured": {
-                    "evidence_recall@5": {"off": 0.527, "on_cap10": 0.4706,
-                                          "on_cap15": 0.4632},
-                    "evidence_recall@5_flips": "+4/-11",
-                    "reader_surface@5": {"off": 0.9436, "on_cap10": 0.9289},
-                    "reader_surface@5_flips": "+0/-2",
-                },
                 "verdict": "PARTIALLY FALSIFIED (declared structural "
                            "guardrail, confirmed). evidence_recall@5 does NOT "
                            "rise: 0.527 -> 0.4706 (+4/-11 questions), and "
@@ -641,8 +890,10 @@ def main():
             "host was under extreme fleet contention (1-min load 110-230 on 10 "
             "CPUs; 5+ concurrent pi sessions plus Chrome/OrbStack); ingest "
             "measured 141 s/question versus 28 s for the same work in a "
-            "low-load 3-question smoke. Use the ISOLATED SR block latency "
-            "(19.0 ms mean / 53.9 ms p95).",
+            "low-load 3-question smoke. The isolated SR-block latency was "
+            "recorded only in this receipt's original narrative; it is NOT in "
+            "any surviving artifact and cannot be re-derived, so it is not "
+            "cited as evidence here.",
             "THE CAP-15 REGRESSION RESTS ON ONE QUESTION (d3ab962e, "
             "session_recall@5 1.0 -> 0.5). The defensible claim is 'the delta "
             "does not improve when the cap is raised', NOT 'raising the cap "
@@ -662,13 +913,23 @@ def main():
             "#3712). All runs were launched with -B + "
             "PYTHONDONTWRITEBYTECODE=1 so the measured surface stayed "
             "byte-code-free.",
-            "R2 (RESIDUAL, NOT VERDICT-CHANGING): the recorded `command` uses `--checkpoint <arm>.cp.json` with NO cap component in the filename. Under the PRE-fix revision the cap was not part of the checkpoint fingerprint, so the cap-15 arms were RESUME-ELIGIBLE against the cap-10 checkpoint file \u2014 a resume would have blended two injection volumes into one artifact while it declared one config. It is refuted in fact, not by construction: the recorded census still separates the arms (cap10 on dropped_by_cap 879 / total_cap_hit_questions 30 vs cap15 on 823 / 6, i.e. the cap-15 arms really did admit MORE volume and trip the total budget LESS often, which a wholesale resume of cap-10 outcomes could not produce), and every arm paid its own ~141 s/question deterministic ingest (the #2080 ingest cache is inert in this lane), so a full resume was not what happened. The numbers are therefore NOT wholesale-blended. The delta review's fix DOES close this class going forward: the resolved cap now rides the checkpoint fingerprint, so the pre-fix resume this limitation describes is now REFUSED by `CheckpointStaleError` (and the seam is pinned end to end by `tests/test_eval_reinjection_cap_resume.py`).",
+            "R2 (RESIDUAL, NOT VERDICT-CHANGING): the recorded `command` uses `--checkpoint <arm>.cp.json` with NO cap component in the filename. Under the PRE-fix revision the cap was not part of the checkpoint fingerprint, so the cap-15 arms were RESUME-ELIGIBLE against the cap-10 checkpoint file \u2014 a resume would have blended two injection volumes into one artifact while it declared one config. It is refuted in fact, not by construction: the recorded census still separates the arms (cap10 on dropped_by_cap 879 / total_cap_hit_questions 30 vs cap15 on 823 / 6, i.e. the cap-15 arms really did admit MORE volume and trip the total budget LESS often, which a wholesale resume of cap-10 outcomes could not produce), and every arm paid its own ~141 s/question deterministic ingest (the #2080 ingest cache is inert in this lane), so a full resume was not what happened. The numbers are therefore NOT wholesale-blended. The delta review's fix DOES close this class going forward: the resolved cap now rides the checkpoint fingerprint, so the pre-fix resume this limitation describes is now REFUSED by `CheckpointStaleError`. CAVEAT: the seam test that pins that end to end, `tests/test_eval_reinjection_cap_resume.py`, is NOT at HEAD or on origin/main either — it exists only on the unmerged commit 195c4186a9db95dff976360892f1f9ea8613e8f5 (branch fix/2513-retrieval-evidence, PR #3577), so read it by commit.",
         ],
         "supersedes": ("the sample this run supersedes: docs/scoping/receipts/"
                        "2026-09-16-2517-reinjection-turn-c1e6f7f2d.json "
                        "(n=20 = ms_tail[0:20], pooled recall_all@5 OFF 0.65 -> "
-                       "ON 0.90, total_cap_hit 7/20, cap=10 only)"),
+                       "ON 0.90, total_cap_hit 7/20, cap=10 only). CAVEAT: "
+                       "that path is NOT at HEAD or on origin/main — it exists "
+                       "only on the unmerged branch fix/2513-retrieval-evidence "
+                       "(PR #3577), which first added it at commit "
+                       "8f1af7f62a922c321f49c774e5f7dfba70e1c9a6 (blob "
+                       "74b14069306e2d634ad6df9a75c17f681742eedd). Read it by "
+                       "commit, not by path."),
     })
+    # `measured` is DERIVED here from `caps`/`per_q`, never a literal: this is
+    # what keeps every falsifier's `measured` block in agreement with `results`.
+    out["falsifier_verdicts"] = _attach_measured(
+        out["falsifier_verdicts"], measured)
     dest = Path(os.environ.get(
         "LME_RECEIPT_DEST",
         str(WT / "docs/scoping/receipts" / (
@@ -703,4 +964,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--rederive", metavar="RECEIPT",
+        help=("refresh the derived blocks (falsifier `measured`, "
+              "`verified_at_seal`) of an EXISTING receipt from its own "
+              "`results` instead of reading arm artifacts, then write it back"))
+    parser.add_argument("--dest", metavar="PATH",
+                        help="output path for --rederive (default: in place)")
+    args = parser.parse_args()
+    if args.rederive:
+        rederive(args.rederive, args.dest or args.rederive)
+    else:
+        main()
