@@ -337,15 +337,18 @@ class _EntityHandlers:
         never does (the server lane lands the same write, which is why only
         the embedded lane reddened). So the node kept its OLD vector and a
         rebuilt Point's ``embedding`` no longer derived from its ``content``.
-        ``REMOVE``-first is the pattern this repo's other vector-write sites
-        already use (e.g. ``tests/test_precision_leak_4028.py``); on the
-        server lane the final state is unchanged, and because the clause is
-        emitted ONLY when a new vector is being written, the preserve-on-None
-        semantics above are untouched. See the query below.
+        ``REMOVE``-first is the workaround this repo's own test helper
+        documents (``tests/test_precision_leak_4028.py``); the OTHER
+        vector-write sites carry the same overwrite shape and are NOT fixed by
+        this clause (tracked in #4520). On the server lane the final state is
+        unchanged, and because the clause is emitted ONLY when a new vector is
+        being written, the preserve-on-None semantics above are untouched.
+        See the query below.
 
-        The parity tests exercise this with REAL embedder output. A probe
-        built from synthetic one-hot vectors has a per-component delta ≫ 1.0
-        and therefore MISSES the discard, and the engine defect itself is
+        The parity tests exercise this with REAL embedder output, whose
+        per-component deltas are well below the threshold. A probe whose
+        per-component delta reaches ~1.0 — a plain 0/1 one-hot swap, exactly
+        1.0 — LANDS and therefore MISSES the discard; the engine defect is
         tracked separately (#4520).
         """
         op = p.get("operator")
