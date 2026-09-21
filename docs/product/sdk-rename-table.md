@@ -215,7 +215,7 @@ The canonical inventory's group names are an **earlier sketch** (`revise_knowled
 | `write_question` | `file_decision` | 1 |
 | **total** | — | **150** |
 
-Distinct destinations: **38** — **33** are target methods with no `def` today (Phase 2 work, Part C1), **2** are target methods that already exist (`create_entity`, `get_entity`), and **3** are the non-target dispositions (`UNCHANGED` / `DISCARDED` / `UNBACKED`).
+Distinct destinations: **38** — **33** are target methods with no `def` today (Part C1 lists all 36 Phase-2 methods), **2** are target methods that already exist (`create_entity`, `get_entity`), and **3** are the non-target dispositions (`UNCHANGED` / `DISCARDED` / `UNBACKED`).
 
 ## Part C — findings
 

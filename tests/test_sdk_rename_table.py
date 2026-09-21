@@ -84,6 +84,79 @@ def part_a_rows() -> list[dict]:
     return rows
 
 
+# Every citation's QUOTE TEXT, keyed by citation key. Pinning only `{method: target}`
+# left the evidence free: a row could keep its target and swap in ANY other real
+# sentence from the same document and stay `stated`, because `basis` is computed from
+# the authored `named` set rather than from the quote itself. Row 68 then quoted
+# `test_guard`'s disposition while claiming `update_memory_graph` — suite green.
+CITES_LITERAL: dict[str, str] = {
+    'maintenance': '| `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` | 4 | **Our maintenance.**',
+    'n1_account': '| 28 | `get_organisation_account` | Read the account and the plan it is on |',
+    'n1_console': '| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` | 5 | Console plumbing.',
+    'n2_count': '`list_memory_graphs` answers "how many" for any real N.',
+    'n2_keys': '| `graph_key_ids`, `graph_active_key_count` | 2 | Console diagnostics. Both fold into `list_keys`. |',
+    'n2_recording': 'The override therefore folds into **`update_memory_graph`**',
+    'n2_rename': '| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` | → rows 30–33 `*_memory_graph*`. |',
+    'n3_members': '| 37 | `add_member` | Grant a person access to the account |',
+    'n4_keys': '| 34 | `create_key` | Mint a credential scoped to one memory graph.',
+    'n5_invite': '| `invitation_*` (6) | 6 | The invite **UX** belongs to the console, where a human clicks it. |',
+    'n6_signup': '| `signup_token_*` (3) | 3 | Operator-side agent self-signup',
+    'p_graph_count': '| `count_memory_graphs` | The plan is unlimited on builder plans, so its stated purpose — checking an allowance — does not exist. `list_memory_graphs` answers "how many" for any real N. |',
+    'p_set_name': '| `set_memory_graph_name`, `set_memory_graph_backend`, `count_memory_graphs` | 3 | See "Provisioning" above. |',
+    'p_withdraw': '| `withdraw_knowledge` | 1 | **Never existed**',
+    'r1': '| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` | 5 | → `search_knowledge`. |',
+    'r1_canon': '| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` |',
+    'r2': '| `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |',
+    'r3': '| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` | ~6 | → `check_confidence`',
+    'r3_canon': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`',
+    'r3_context': '| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` | 4 | → `check_confidence`',
+    'r3_drop_subgraph': '**`recall_subgraph` is dropped, not folded**',
+    'r3_restore': '| `restore_point_at` | → row 7 **`get_historical_knowledge`**.',
+    'r4': '| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) | ~8 | → `get_entity`',
+    'r4_canon': '| R4 | `get_entity` | #4 | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` |',
+    'r5': '| `traverse`, `expand_relationships`, `get_org_structure` | 3 | → `explore_connections`. |',
+    'r6': '| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` | ~5 | → `graph_overview`',
+    'r6_aliases': 'narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` | **Deleted, not folded.**',
+    'r6_canon': '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`',
+    'r6_list_sources': "It folds into **row 4 `list_knowledge(kind='source')`**",
+    'r6_test_guard': '| `test_guard` | **Kept and relocated.**',
+    'r7': '| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → `review_link_candidates`. |',
+    'r8': '| `events_poll` | → row 11 `poll_events`. |',
+    'r9': "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`.",
+    'unchanged4': 'current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`)',
+    'w1': '| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` | 5 | Collapsed into `create_entity(type=)`.',
+    'w10': '| `file_human_approval` | 1 | → `record_decision`. |',
+    'w10_file_decision': '| `file_decision` | → rows 20/21 **`write_question`** + **`record_decision`**.',
+    'w11': '| `update_point`, `update_entity` | 2 | → `update_knowledge`. |',
+    'w11_canon': '| W11 | `revise_knowledge` | #17 | `update`,',
+    'w11_lifecycle': '| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | 4 | Lifecycle and confidence wrangling',
+    'w11_retract': '| `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`.',
+    'w11_supersede': '| `supersede`, `supersede_point` | 2 | → `supersede_knowledge`.',
+    'w12': '| `delete_point`, `delete_point_wrapped` | 2 | → `delete_knowledge`. |',
+    'w12_canon': '| W12 | `delete_knowledge` | #18 | `delete`,',
+    'w13_canon': '| W13 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` |',
+    'w15': '| `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | → `adjust_relationship`',
+    'w17_ulid': '| `ulid` | 1 | A ULID generator. Not a memory operation. |',
+    'w1_batch': '| `batch_create_points` | 1 | → `write_knowledge_batch`. |',
+    'w1_coup': '| `create_or_update_point` → `create_point` |',
+    'w2': '| W2 | `write_knowledge` | — | `ingest` |',
+    'w2_rename': '`write_knowledge` and `stabilize_beliefs` where the current target says',
+    'w3': '| W3 | `register_source` | #11 | `create_source`, `complete_source` |',
+    'w3_cut': '| `complete_source` | 1 | **Cut.**',
+    'w4': '| `ingest_corpus`, `index_file`, `session_index_health` | 3 | → `index_sources_from_directory`. |',
+    'w4_canon': '| W4 | `index_files` | #12 | `index_file`, `index_directory`',
+    'w4_index_sessions': '| `index_sessions` / `ingest_corpus` → `index_directory` |',
+    'w4_mine': '| `mine_corpus` | 1 | → `mine_knowledge_from_directory`.',
+    'w4_rename': '| `index_sources` (bare) | 1 | Renamed → `index_sources_from_directory`',
+    'w5': '**The journal capability** — `checkpoint`, `diary_write`, `diary_read`.',
+    'w6': '| `capture_session` / `commit_session` | → row 16 `mine_knowledge_from_session`, one method.',
+    'w8': '| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust`',
+    'w8_backfill': '| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` | 4 | One-shot migrations.',
+    'w9': '| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` | 4 | → `link_entities`',
+    'w9_canon': '| W9 | `link_entities` | #15 | `create_edge`,',
+}
+
+
 def _doc() -> str:
     """The generated document, read fresh — never cached across tests."""
     return DOC.read_text(encoding="utf-8")
@@ -380,13 +453,23 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     doc = _doc()
     m = re.search(
         r"Distinct destinations: \*\*(\d+)\*\* — \*\*(\d+)\*\* are target methods "
-        r"with no `def` today \(Phase 2 work, Part C1\), \*\*(\d+)\*\* are target "
+        r"with no `def` today \(Part C1 lists all (\d+) Phase-2 methods\), "
+        r"\*\*(\d+)\*\* are target "
         r"methods that already exist \(`create_entity`, `get_entity`\), and "
         r"\*\*(\d+)\*\* are the non-target dispositions",
         doc,
     )
     assert m, "the 'Distinct destinations' summary sentence is missing or changed shape"
-    distinct, no_def, exists, non_target = (int(g) for g in m.groups())
+    distinct, no_def, c1_total, exists, non_target = (int(g) for g in m.groups())
+    # The summary counts DISTINCT DESTINATIONS; C1 lists METHODS. They differ by the
+    # targets that have no `def` but are never a destination (`Tortoise`,
+    # `check_connection`, `create_memory_graph`) — so 33 vs 36 is correct, and the
+    # sentence must say which is which rather than attributing 33 to C1.
+    assert c1_total == 36, f"Part C1 lists {c1_total} Phase-2 methods, expected 36"
+    assert c1_total == no_def + 3, (
+        f"C1's {c1_total} and the summary's {no_def} destinations should differ by exactly "
+        f"the 3 never-a-destination targets"
+    )
     assert distinct == no_def + exists + non_target, (
         f"the summary's parts ({no_def}+{exists}+{non_target}) do not sum to its "
         f"distinct-destination count ({distinct})"
@@ -406,6 +489,25 @@ def test_structural_counts_and_the_summary_sentence_are_read() -> None:
     c5 = doc.split("### C5")[1].split("### Structural")[0]
     assert set(re.findall(r"`([WN]\d+)`", c5)) == {"W16"}, (
         "C5 no longer names exactly the wildcard families' resolved group (W16)"
+    )
+
+
+def test_every_citation_quote_is_pinned() -> None:
+    """The quote TEXT is pinned, not merely the citation key that carries it.
+
+    Without this, a citation can be swapped for a different real sentence in the same
+    document: the row keeps its Target and its `stated` basis, and only the evidence
+    is wrong. That is the failure mode this artifact exists to make impossible.
+    """
+    import tools.sdk_rename_table as gen
+
+    actual = {k: v[1] for k, v in gen.CITES.items()}
+    actual.update({k: v[1] for k, v in (gen.PHANTOM_CITES or {}).items()})
+    assert actual == CITES_LITERAL, (
+        "a citation quote changed, or cites were re-keyed.\n"
+        f"  changed: {sorted(k for k in actual if CITES_LITERAL.get(k) != actual[k])}\n"
+        f"  added:   {sorted(set(actual) - set(CITES_LITERAL))}\n"
+        f"  dropped: {sorted(set(CITES_LITERAL) - set(actual))}"
     )
 
 

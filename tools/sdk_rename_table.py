@@ -511,6 +511,7 @@ def _targets(doc_text: str) -> list[str]:
     1..40 — a gap or a duplicate is a build failure, not a quietly shorter list.
     """
     found: dict[int, str] = {}
+    seen: list[int] = []
     for line in doc_text.splitlines():
         if not line.startswith("|"):
             continue
@@ -522,8 +523,27 @@ def _targets(doc_text: str) -> list[str]:
         name = cells[1].strip("`").strip()
         name = re.sub(r"\(.*\)$", "", name)
         if name:
+            seen.append(int(cells[0]))
             found[int(cells[0])] = name
-    return [found[i] for i in sorted(found)]
+    # A DUPLICATE row number silently overwrites its predecessor and yields the same
+    # 40 keys, so a count check cannot see it: the target on the overwritten row is
+    # lost while `len(targets) == 40` still holds. The row numbers are the guard —
+    # and they must be counted BEFORE the dict collapses them, or the check is blind.
+    dupes = sorted({n for n in seen if seen.count(n) > 1})
+    if dupes:
+        raise SystemExit(
+            f"the beta doc's target table repeats row number(s) {dupes}; a duplicate "
+            f"silently drops the target on the row it overwrites, leaving 40 names "
+            f"with one of them wrong"
+        )
+    numbers = sorted(found)
+    if numbers != list(range(1, len(numbers) + 1)):
+        raise SystemExit(
+            f"the beta doc's target table is not numbered 1..N: {len(numbers)} rows, "
+            f"range {numbers[0] if numbers else '-'}..{numbers[-1] if numbers else '-'}, "
+            f"with gaps"
+        )
+    return [found[i] for i in numbers]
 
 
 def _groups(canon_text: str) -> dict[str, list[str]]:
@@ -752,7 +772,8 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         f"| **total** | — | **{n}** |",
         "",
         f"Distinct destinations: **{len(by_target)}** — **{replaced}** are target methods "
-        f"with no `def` today (Phase 2 work, Part C1), **{real_targets}** are target "
+        f"with no `def` today (Part C1 lists all {len(findings['no_def'])} Phase-2 "
+        f"methods), **{real_targets}** are target "
         "methods that already exist (`create_entity`, `get_entity`), and "
         f"**{_non_target_destinations(by_target)}** are the non-target dispositions "
         "(`UNCHANGED` / `DISCARDED` / `UNBACKED`).",
