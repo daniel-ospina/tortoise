@@ -47,8 +47,10 @@ def test_create_point_with_user_error_prop_records_observation(tmp_path, monkeyp
     """The defect direction: a *successful* write whose props carry a user key
     named ``error`` must still record the onboarding observation."""
     calls: list[bool] = []
+    # The merged signature carries the #3784 `decision_observed` keyword, so the
+    # stub must tolerate it; the assertion below is about the CALL, not the kwarg.
     monkeypatch.setattr(mcp_server, "_maybe_onboarding_auto_complete",
-                        lambda: calls.append(True))
+                        lambda **_kw: calls.append(True))
     with _hosted_ctx(tmp_path, "err-prop"):
         res = mcp_server.tortoise_create_point(
             kind="statement",
@@ -64,7 +66,7 @@ def test_failed_write_does_not_record_observation(tmp_path, monkeypatch):
     """The other direction: a real transport failure must NOT record."""
     calls: list[bool] = []
     monkeypatch.setattr(mcp_server, "_maybe_onboarding_auto_complete",
-                        lambda: calls.append(True))
+                        lambda **_kw: calls.append(True))
     from tortoise.mcp_auth import _transport_mode
     with _hosted_ctx(tmp_path, "err-real"):
         tok = _transport_mode.set(None)  # fail-closed: _safe returns auth error

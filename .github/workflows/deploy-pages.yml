@@ -61,19 +61,27 @@ jobs:
         # already active). Once the token gains DNS scope this repairs the
         # subdomain automatically.
         continue-on-error: true
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           ZONE=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=premiselabs.co" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result[0].id')
           echo "zone: $ZONE"
           REC=$(curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=tortoise.premiselabs.co" \
-            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
           REC_ID=$(echo "$REC" | jq -r '.result[0].id // empty')
           CUR=$(echo "$REC" | jq -r '.result[0].content // empty')
           echo "current: id=$REC_ID content=$CUR"
           if [ "$CUR" != "premise-labs.pages.dev" ]; then
             echo "repairing CNAME $CUR → premise-labs.pages.dev"
             curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records/$REC_ID" \
-              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
               -H "Content-Type: application/json" \
               -d '{"type":"CNAME","name":"tortoise.premiselabs.co","content":"premise-labs.pages.dev","proxied":true}' \
               | jq -c '{success, errors: [.errors[].message]}'
@@ -241,8 +249,39 @@ jobs:
       # KNOWN LIMIT below.
       - name: Post-deploy — sign-in is actually reachable
         run: |
-          url=https://tortoise.premiselabs.co/auth/start
+          # TWO hops, because the moved surface is a seam across two origins:
+          #
+          #   tortoise.premiselabs.co/auth/start --302--> app.premiselabs.co/auth/start
+          #                                     --302--> <supabase>/auth/v1/authorize?…&code_challenge_method=s256
+          #
+          # Hop 1 pins THIS project's routing contract: a 302 to the app origin,
+          # at the same path. Per `SCOPE.md` §12 / F12 a NEW branch for the moved
+          # auth surface is 302 — never a 301 (a 301 is browser-persistent and
+          # cannot be reclaimed by a deploy), and never a 404 (F12 exists to
+          # answer a stale bookmark). The OVERRIDES marker for that departure
+          # lives on #3501/#3521.
+          #
+          # The PREVIOUS version of this probe asked for `302 + PKCE` from the
+          # marketing host in ONE request. Verified by execution: it FAILS on this
+          # correct architecture, because hop 1's 302 is a redirect to the app
+          # origin and carries no PKCE challenge — so it was UNSATISFIABLE, red on
+          # `main` with no correct fix available, and its message named the wrong
+          # remedy ("expected a 302 to Supabase" from the marketing host). It also
+          # could not distinguish "the marketing host routes to the app" from "the
+          # marketing host serves the BFF itself", which is the pre-cutover shape.
+          #
+          # Hop 2 is the BFF, and it is the ONLY hop that can carry the #3616
+          # evidence: start.ts performs an awaited INSERT into auth_flows (so a
+          # 302 proves that write did not throw) and `new URL()` throws on an
+          # unset SUPABASE_URL (so a 302 proves that too). A 503 here is the
+          # `session_store_unavailable` signature. Checking for 503 on hop 1
+          # would be VACUOUS — the middleware redirects before any Function runs,
+          # so hop 1 can never answer 503.
+          host=https://tortoise.premiselabs.co/auth/start
+          app=https://app.premiselabs.co/auth/start
+          url=$host
           code=000
+          loc=""
           curl_rc=0
           # Poll: Pages can briefly serve the previous deployment after upload.
           for attempt in $(seq 1 10); do
@@ -265,9 +304,49 @@ jobs:
             if [ "$curl_rc" -ne 0 ]; then
               code="curl-failed(rc=$curl_rc)"
             fi
-            [ "$code" = "302" ] && break
+            # `-i` so the Location header is greppable in the SAME file — the
+            # two hops are then asserted from one artifact each. `%{redirect_url}`
+            # is deliberately not used: it reports a curl-computed URL, and a
+            # wrong-but-well-formed Location must still fail.
+            loc=$(grep -i '^location:' /tmp/start.hdr 2>/dev/null | head -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//')
+            [ "$code" = "302" ] && [ "$loc" = "$app" ] && break
             # No sleep after the FINAL attempt — it would delay the failure by
             # 15s for nothing.
+            [ "$attempt" -lt 10 ] && sleep 15
+          done
+          echo "$url -> $code"
+          echo "$url -> Location: $loc"
+
+          if [ "$code" != "302" ]; then
+            echo "::error::hop 1: expected a 302 from the marketing host, got $code"
+            echo '::error::Per SCOPE.md §12/F12 a NEW branch for the moved auth surface'
+            echo '::error::is 302 — a 301 is browser-persistent and a 404 breaks stale links.'
+            cat /tmp/start.err 2>/dev/null || true
+            cat /tmp/start.body 2>/dev/null || true
+            exit 1
+          fi
+          # A 302 alone is not enough on hop 1: it must redirect to the app
+          # origin, at the SAME path and preserving the query. A 302 to
+          # somewhere else is a routing regression, not a healthy deploy.
+          if [ "$loc" != "$app" ]; then
+            echo "::error::hop 1 redirected to '$loc', expected '$app'"
+            cat /tmp/start.hdr
+            exit 1
+          fi
+
+          # ── Hop 2 — the BFF. This is where the #3616 evidence lives. ──
+          url=$app
+          code=000
+          curl_rc=0
+          for attempt in $(seq 1 10); do
+            curl_rc=0
+            code=$(curl -sS -o /tmp/start2.body -D /tmp/start2.hdr \
+                        -w '%{http_code}' -m 20 "$url" 2>/tmp/start2.err) \
+              || curl_rc=$?
+            if [ "$curl_rc" -ne 0 ]; then
+              code="curl-failed(rc=$curl_rc)"
+            fi
+            [ "$code" = "302" ] && break
             [ "$attempt" -lt 10 ] && sleep 15
           done
           echo "$url -> $code"
@@ -279,25 +358,25 @@ jobs:
             echo '::error::/auth/start returned 503 — the session store is unavailable.'
             echo '::error::Expected `session_store_unavailable` (session.ts). Almost always'
             echo '::error::a missing SESSIONS D1 binding — see issue #3616.'
-            cat /tmp/start.body 2>/dev/null || true
+            cat /tmp/start2.body 2>/dev/null || true
             exit 1
           fi
           if [ "$code" != "302" ]; then
-            echo "::error::expected a 302 to Supabase, got $code"
-            cat /tmp/start.err 2>/dev/null || true
-            cat /tmp/start.body 2>/dev/null || true
+            echo "::error::hop 2: expected a 302 to Supabase, got $code"
+            cat /tmp/start2.err 2>/dev/null || true
+            cat /tmp/start2.body 2>/dev/null || true
             exit 1
           fi
 
           # A 302 alone is not enough: the redirect must carry a PKCE challenge.
           # The challenge is generated in-process, so this proves the awaited
           # INSERT into auth_flows did not throw (not that the row is readable).
-          if ! grep -qi 'code_challenge_method=s256' /tmp/start.hdr; then
+          if ! grep -qi 'code_challenge_method=s256' /tmp/start2.hdr; then
             echo '::error::302 did not include a PKCE code_challenge'
-            cat /tmp/start.hdr
+            cat /tmp/start2.hdr
             exit 1
           fi
-          echo "✅ sign-in reachable, SESSIONS write succeeded, PKCE challenge issued"
+          echo "✅ sign-in reachable across both hops, SESSIONS write succeeded, PKCE challenge issued"
 
       # #3620: the deploy step above stages an explicit upload set. This is the
       # gate that proves it — the paths below were verified LIVE at 200 while
@@ -447,15 +526,24 @@ jobs:
         # `__Host-session` cookie. VITE_* are public-safe (anon key). The app's
         # env guard throws at RUNTIME (browser), so missing secrets would
         # silently ship a white-screen SPA — fail fast instead.
+        # #4361: both secrets are bound in `env:` and read as QUOTED shell
+        # variables. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
             echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
             exit 1
           fi
           cd website/apps/blog-admin
           npm ci
-          VITE_SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-          VITE_SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+          VITE_SUPABASE_URL="$SUPABASE_URL" \
+          VITE_SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
             npm run build
           mkdir -p ../dashboard/dist/admin
           cp -r dist/* ../dashboard/dist/admin/
@@ -465,12 +553,17 @@ jobs:
         # dashboard project is visible BEFORE deploying so a 403-scoped
         # token fails fast (loud, at the right step) instead of silently
         # skipping the deploy.
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable — never interpolated into the `run:` text (a value with `"`
+        # loses its quotes; `$(…)`/backticks would execute).
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           # No per_page param — the Pages projects endpoint REJECTS it with
           # "Invalid list options provided" (known CF issue, error 8000024;
           # the docs list it but the API doesn't accept it). Returns the
           # default page — sufficient for this account's project count.
-          LIST=$(curl -s --max-time 20 "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects"             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+          LIST=$(curl -s --max-time 20 "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects"             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
           # Diagnostic: surface the API status + a snippet so a failing
           # pre-flight is debuggable (not just 'cannot list').
           STATUS=$(echo "$LIST" | jq -r '.success // empty' 2>/dev/null || echo 'parse-error')

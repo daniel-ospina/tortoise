@@ -2,6 +2,8 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
+// #4336: TIER_LABELS is the display-name map; its parity against
+// product.html's `labels` map is pinned by tests/test_website_static.py.
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
@@ -2963,36 +2965,22 @@ function claimIntentInFlight() {
   // affordance sitting next to the primary action. Members (no in-dashboard
   // mint) always see the paste box: it is their only path.
   const [wizardShowPaste, setWizardShowPaste] = React.useState(false)
-  // #1997 (W1): catalog-presented is marked when the build catalog
-  // RENDERS (not just on pick) — re-entry with fork=build already set must
-  // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
-  // the checkpoint is keyed-MERGE (replay no-op), but a per-ORG guard keeps
-  // the network quiet on re-renders (the latch is keyed by team id so a
-  // second build org in the same session still marks its own catalog —
-  // review P2, #1997).
-  const catalogMarkedRef = React.useRef({})
-  React.useEffect(() => {
-    if (wizardStep !== 2) return
-    const teamKey = orgIdRef.current || 'default'
-    const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
-    if (buildFork && !catalogMarkedRef.current[teamKey]) {
-      catalogMarkedRef.current[teamKey] = true
-      api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ step: 'catalog-presented' }),
-      }).catch(() => {})
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
+  // #1997 (W1) / #3913: the dashboard writes NO `catalog-presented` mark. The
+  // render-time effect that marked it when the catalog rendered was removed,
+  // and the build-fork PICK handler's optional mark is gone too (owner ruling
+  // 2026-09-20: the build fork completes on the two acts the server OBSERVES —
+  // harness-connected + first-points-filed — so nothing the browser does is a
+  // completion input). The step id stays ACCEPTED server-side (existing orgs
+  // carry it), which is why no client writer is needed.
 
   // #2004 (W8): the registry-backed builder catalog — fetched ONCE per
   // session from GET /v1/capabilities (tortoise/tool_registry.py
   // CAPABILITY_CATALOG) when the build branch renders on step 2. The static
   // placeholder in wizardFlow.js renders until the fetch resolves and stays
   // as the OFFLINE fallback (same names — never a blank catalog; the
-  // registry-presented mark above is untouched: this swap is SOURCE-only,
-  // the once-per-org catalog-presented step edge still fires on first
-  // build-fork render and is a keyed-MERGE no-op on replay).
+  // registry-presented swap is SOURCE-only; the dashboard fires NO
+  // catalog-presented step edge at all — #3913, it is an accepted server id,
+  // never a client write).
   const [wizardCatalog, setWizardCatalog] = React.useState(null)
   const catalogFetchedRef = React.useRef(false)
   React.useEffect(() => {
@@ -4698,12 +4686,13 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
-  // branch: the catalog render marks catalog-presented via W5's checkpoint
-  // (surface 4 write contract — the build-fork gate is evaluable; W8 #2004
-  // replaced the placeholder SOURCE with the registry endpoint, the
-  // mark/mechanism is unchanged). Fork SEMANTICS are W2-owned — W1 renders
-  // the shell only.
+  // #1997 (W1): fork-card step handler — checkpoint fork (set-once). #3913
+  // (owner ruling 2026-09-20): a BUILD pick records the fork and NOTHING else —
+  // the build gate completes on the two acts the server OBSERVES
+  // (harness-connected + first-points-filed), so no client step write is a
+  // completion input. W8 #2004 replaced the placeholder catalog SOURCE with
+  // the registry endpoint; the CARD still renders on a build pick. Fork
+  // SEMANTICS are W2-owned — W1 renders the shell only.
   async function handleWizardFork(forkId) {
     setWizardForkBusy(true)
     setWizardForkError('')
@@ -4728,25 +4717,14 @@ function claimIntentInFlight() {
         return
       }
       setWizardForkChosen(forkId)
-      // review P1 (#1997): the catalog-presented mark fires HERE, not in a
-      // step-2 effect — React batches setWizardForkChosen + setWizardStep(3)
-      // into ONE render where wizardStep===3, so the effect's step-2 guard
-      // never observes the fresh build pick. Fire-and-forget; keyed-MERGE
-      // (replay no-op). The step-2 effect above still covers RE-ENTRY with a
-      // persisted build fork (onboarding.fork === 'build').
-      // A build pick also STAYS on step 2 so the catalog renders (the user
-      // sees what they can build on before continuing) — the Continue button
-      // appears once a fork is chosen; self picks advance.
-      if (forkId === 'build') {
-        const teamKey = orgIdRef.current || 'default'
-        if (!catalogMarkedRef.current[teamKey]) {
-          catalogMarkedRef.current[teamKey] = true
-          api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-            method: 'POST', useSession: true,
-            body: JSON.stringify({ step: 'catalog-presented' }),
-          }).catch(() => {})
-        }
-      } else {
+      // #3913 (owner ruling 2026-09-20): a BUILD pick writes NO checkpoint step.
+      // The catalog-presented mark that used to fire here was deleted with the
+      // render-time effect — the build gate is the two acts the server OBSERVES
+      // (harness-connected + first-points-filed), so picking a fork must not
+      // record anything the gate could read. The catalog CARD still renders: a
+      // build pick stays on the fork step (the chosen state shows it) and the
+      // Continue button appears; a self pick advances to the connect step.
+      if (forkId !== 'build') {
         setWizardStep(2)
       }
     } catch (e) {
@@ -4871,7 +4849,25 @@ function claimIntentInFlight() {
         setWizardDurableError('The organization changed while the key was being created — the key was created on the previous organization. Switch back to it in the account menu to use it, or create another key here.')
         return
       }
-      setWizardDurableKey((mk && (mk.key || mk.api_key)) || '')
+      // #4359: the connect-step latch reads the SAME shared predicate as every
+      // other reveal seam. A truthy-but-unrevealable 2xx (`42`, `{}`, `[]`,
+      // `'   '`) used to be stored verbatim: the connect snippet embedded a
+      // non-key, and the row-truth effect / revoke prefix-clear then ran
+      // `wizardDurableKey.startsWith(...)` on it → `TypeError: …startsWith is
+      // not a function`. The secret is unrecoverable, so refuse it and say so,
+      // mirroring `createKey`. A previously-held plaintext is deliberately NOT
+      // cleared (#2735 class: a failed attempt must never destroy a shown-once
+      // key the user still holds).
+      const plaintext = revealableMintPlaintext(mk)
+      if (!plaintext) {
+        // The remedy names the row this mint created: `keyName` is always set
+        // here (unlike the create path's optional name), so pointing at "an
+        // unlabeled key" would be false.
+        setWizardDurableError(`The server did not return the new key\u2019s value, so it cannot be shown. The key may still have been created as \u201c${keyName}\u201d \u2014 open the API Keys tab to revoke it, then create another key here.`)
+        await loadAll('').catch(() => {})
+        return
+      }
+      setWizardDurableKey(plaintext)
       // #2246 (ADR-010): the durable key is NOT installed (no
       // localStorage/teamKeysRef/apiKey write — the browser never holds a
       // key). wizardDurableKey keeps it in-memory so the connect snippet can
@@ -5533,7 +5529,7 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite members.')
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.')
           setBusy(false)
           return
         }
@@ -5611,17 +5607,31 @@ function claimIntentInFlight() {
 
   async function loadBackups(key) {
     const _teamAtCall = orgIdRef.current // Round-10: staleness guard
-    // #2167 (rule 2): session-mode /backups pins ?org_id=<selected> and
+    // #2167 (rule 2): session-mode /v1/backups pins ?org_id=<selected> and
     // sends NO key header — the old shape team-scoped by the KEY header
     // (a zero-key session whose selected team ≠ first membership rendered
-    // the first membership's backups: /backups is ungated server-side, so
+    // the first membership's backups: /v1/backups is ungated server-side, so
     // _session_user_org resolves memberships[0] without the param).
-    // Key-mode (authMode 'apikey' — no session JWT exists there) keeps the
-    // key header as its authenticator.
-    // #1842 P1-2: /backups is session-dual-auth (get_current_org_session_ungated).
+    // #1842 P1-2: /v1/backups is session-dual-auth (get_current_org_session_ungated).
+    // Only the SESSION lane reaches this route: the BFF proxy requires the
+    // `__Host-session` cookie, strips any client-built `authorization` header and
+    // attaches its own Bearer, so key-mode (authMode 'apikey') cannot authenticate
+    // here at all — it does not render the backups surface.
+    // #4144: the `/v1/` prefix is REQUIRED, not cosmetic. `api()` targets the
+    // same-origin BFF proxy, whose TypeScript route is `functions/api/v1/[[path]].ts`
+    // and which rebuilds the upstream URL as `${API_ORIGIN}/v1/${rest}`. This call
+    // predates the #3501/#4054 migration to the proxy and was the one call site left
+    // without the prefix, so it asked `/api/backups` — a path with no Pages Function
+    // — and the Backups card silently read as empty (404 in the console). Every other
+    // call site in this file that reaches the HOSTED API goes through `/v1/…` (paths
+    // like `/session` and `/profile` are Pages Functions and are served directly).
+    // The route-side regression pin for this fix is tests/test_backups_v1_alias.py:
+    // it reads the LIVE route table and requires every public backup route to have a
+    // `/v1` alias. A file-wide guard over the dashboard's literal call paths is
+    // proposed in #4446 (a runtime-derived check, not a static text scan).
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
-      const b = await api(`/backups${q}`, { useSession: true })
+      const b = await api(`/v1/backups${q}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       // #2784: retain the whole array — the Graphs tab derives a per-graph
@@ -5826,13 +5836,24 @@ function claimIntentInFlight() {
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
       if (orgIdRef.current !== _teamAtCall) return null
-      // #4330: a 2xx that carries no plaintext is NOT a reveal. The secret is
-      // unrecoverable at this point, so refuse the success path rather than
-      // render an empty box (and never let a falsy value reach the clipboard).
-      const plaintext = (mk && (mk.key || mk.api_key)) || ''
+      // #4330/#4359: a 2xx that carries no REVEALABLE plaintext is NOT a
+      // reveal. The secret is unrecoverable at this point, so refuse the
+      // success path rather than render an empty box (and never let a
+      // non-string/blank value reach the clipboard or claim "Copied ✓"). The
+      // shared predicate — not a bare falsy check — also catches the
+      // truthy-but-unrevealable shapes (`42`, `{}`, `[]`, `'   '`), which are
+      // non-falsy and used to latch a blank/uncopyable reveal with no error.
+      const plaintext = revealableMintPlaintext(mk)
       if (!plaintext) {
-        setError('The server did not return the new key\u2019s value, so it cannot be shown. Refresh the list and revoke any unlabeled key you just created.')
+        // Refresh FIRST, then surface the refusal: `loadAll` owns the same
+        // `error` slot and overwrites it from its own catch, so the message
+        // that a live key exists and must be revoked would otherwise be lost to
+        // a generic network error. The identity guard is re-applied: a switch
+        // during the refresh must not carry this team's message under the new
+        // team's header.
         await loadAll('')
+        if (orgIdRef.current !== _teamAtCall) return null
+        setError('The server did not return the new key\u2019s value, so it cannot be shown. Refresh the list and revoke any unlabeled key you just created.')
         return null
       }
       setNewKey(plaintext)
@@ -5872,7 +5893,11 @@ function claimIntentInFlight() {
   // failed copy used to take the shown-once key with it). It never writes a
   // non-string: `navigator.clipboard.writeText(null)` stringifies to "null".
   async function copyNewKey() {
-    const plaintext = typeof newKey === 'string' ? newKey : ''
+    // #4359: the SAME predicate the reveal gate uses. A whitespace-only
+    // `newKey` must not be written to the clipboard — `writeText('   ')`
+    // resolves and the handler then set `keyCopied = true`, a false
+    // "Copied ✓" over a clipboard that holds only whitespace.
+    const plaintext = revealablePlaintext(newKey)
     if (!plaintext) return
     // Feed the connect snippet even if the clipboard refuses (in-memory only).
     setWizardDurableKey(plaintext)
@@ -5901,7 +5926,46 @@ function claimIntentInFlight() {
   // renders in every other state — so a falsy `newKey` can never produce the
   // empty `.key-value` box (the owner's "square") and is never handed to
   // `navigator.clipboard.writeText` (which stringifies `null` to "null").
-  const newKeyReveal = (keyModalStage === 'done' && typeof newKey === 'string' && newKey) || ''
+  // #4359: the SAME shared predicate as the latch and the copy — a truthy
+  // non-string or a whitespace-only `newKey` no longer renders a blank reveal;
+  // the form is its exact-complement else-branch, so it stays the single gate.
+  const newKeyReveal = (keyModalStage === 'done' && revealablePlaintext(newKey)) || ''
+
+  // #4342/#4359: the ONE authority for "is this a revealable plaintext?" — a
+  // non-empty, non-blank STRING. A 2xx can carry a number, an object, or
+  // padding, and every one of those is non-falsy, so a bare `!plaintext` check
+  // latched a box the user could not copy.
+  //
+  // SCOPE: this is NOT a whole-file invariant. Same-class writers outside the
+  // create/connect/rotate reveals are tracked in #4370.
+  //
+  // `trim()` alone is NOT a blankness test — it strips whitespace but not
+  // zero-width / invisible characters, so a string of only those would pass
+  // this single gateway and reproduce the reported symptom exactly: a visually
+  // blank `.key-value` under a "Copied ✓". The class is the Unicode FORMAT set
+  // plus the DEFAULT-IGNORABLE set, plus BRAILLE PATTERN BLANK (U+2800), which
+  // is in NEITHER property. Only the DECISION uses the stripped copy — the
+  // returned value is always the verbatim secret.
+  function revealablePlaintext(value) {
+    return (typeof value === 'string' && value.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').trim()) ? value : ''
+  }
+
+  // #4359: a mint response carries the plaintext on EITHER leg (`key` on the
+  // POST /v1/team/keys response, `api_key` on the provision envelope). The legs
+  // are composed through the predicate INDIVIDUALLY: `mk.key || mk.api_key`
+  // selected a truthy-but-unrevealable primary first, so `{key: {},
+  // api_key: 'tt_ok'}` was refused while a valid value sat in the other leg.
+  function revealableMintPlaintext(response) {
+    return revealablePlaintext(response && response.key) || revealablePlaintext(response && response.api_key)
+  }
+
+  // #4342: the rotate replacement's key, derived ONCE for the same reason as
+  // `newKeyReveal` above — the reveal renders iff this is a non-empty string,
+  // so a falsy `rotatedKey.plaintext` can never produce the empty `.key-value`
+  // box and is never handed to `navigator.clipboard.writeText`. `regenerateKey`
+  // already refuses to latch a plaintext-less mint (the old key is revoked by
+  // then); this is the render-side half of that same guard.
+  const rotatedKeyReveal = (rotatedKey && revealablePlaintext(rotatedKey.plaintext)) || ''
 
   // #4330: Done dismisses the reveal — the key is already live and listed; this
   // only drops the browser's last copy of the plaintext. Guarded so a click
@@ -5916,7 +5980,9 @@ function claimIntentInFlight() {
   // (the repo pins exactly this standard — `KEY_VISIBILITY_NOTE` and the
   // wizardConnectTripwire "shown once" ban).
   function dismissKeyModal() {
-    const plaintext = typeof newKey === 'string' ? newKey : ''
+    // #4359: the same predicate — a blank `newKey` is not a secret worth a
+    // confirm, and must not be fed to the connect step's `wizardDurableKey`.
+    const plaintext = revealablePlaintext(newKey)
     if (plaintext && !keyCopied
         && !window.confirm('Close without copying it? This dialog will not show the key again.')) return
     if (plaintext) setWizardDurableKey(plaintext)
@@ -5974,12 +6040,35 @@ function claimIntentInFlight() {
       if (orgIdRef.current !== _teamAtCall) return
       await revokeKey(keyId, { skipConfirm: true })
       if (orgIdRef.current !== _teamAtCall) return
+      // #4342: a 2xx mint that carries no revealable plaintext is NOT a
+      // reveal. The secret is unrecoverable at this point AND the OLD key was
+      // revoked on the line above, so the only honest outcome is to say so —
+      // never to latch `rotatedKey` with a falsy (or non-string, or blank)
+      // plaintext, which rendered an empty `.key-value` box whose copy wrote
+      // the empty string (the #4330 class on the rotate surface; `mintGraphKey`
+      // and `createKey` already refuse the falsy case). The remedy is
+      // rotate-specific: create cannot lose a live credential, rotate already
+      // has.
+      const plaintext = revealableMintPlaintext(mk)
+      if (!plaintext) {
+        // Refresh FIRST, then surface the reason: `loadAll` owns the same
+        // `error` slot and overwrites it from its own catch, so a compound
+        // failure (the rotate legs succeeded, the refresh did not) would
+        // otherwise replace the one message that tells the user their old key
+        // is gone and which row to clean up. The identity guard mirrors the
+        // stale-response rule — a switch during the refresh must not carry this
+        // team's error under the new team's header.
+        await loadAll('')
+        if (orgIdRef.current !== _teamAtCall) return
+        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
+        return
+      }
       // #2246: no held install — the replacement is shown once and managed
       // from the table like any other durable. #2735: its OWN reveal state
       // (rotatedKey), never the create modal's newKey — the create modal's
       // dismiss paths clear newKey, which would destroy this unread
       // replacement (the old key is already revoked by this point).
-      setRotatedKey({ plaintext: (mk && (mk.key || mk.api_key)) || '', expiresAt: (mk && mk.expires_at) || null })
+      setRotatedKey({ plaintext: plaintext, expiresAt: (mk && mk.expires_at) || null })
       await loadAll('')
     } catch (e) {
       if (orgIdRef.current === currentOrgId) {
@@ -5993,6 +6082,34 @@ function claimIntentInFlight() {
       }
     } finally {
       setBusy(false)
+    }
+  }
+
+  // #4342: rotate's replacement Copy — the seam that lost the create path's
+  // key to `writeText('')` (a silent no-op that then cleared the only copy of a
+  // live replacement, #2392 class). It never hands a non-string to the
+  // clipboard: the plaintext is read through the same type guard the reveal
+  // gate uses, and a falsy read returns before the clipboard is touched.
+  async function copyRotatedKey() {
+    const plaintext = rotatedKey ? revealablePlaintext(rotatedKey.plaintext) : ''
+    if (!plaintext) return
+    try {
+      // #2735: clear the one-time plaintext ONLY after the clipboard write
+      // resolves. The old key is already revoked, so a failed write that still
+      // cleared the reveal would destroy the only copy of the live replacement.
+      await navigator.clipboard.writeText(plaintext)
+      setRotatedKey(null)
+    } catch {
+      // Keep it visible + select it for a manual copy (mirrors revealKey's
+      // fallback and copyNewKey's).
+      const el = document.querySelector('.new-key .key-value')
+      if (el) {
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        const sel = window.getSelection()
+        sel.removeAllRanges()
+        sel.addRange(range)
+      }
     }
   }
 
@@ -8184,7 +8301,7 @@ function claimIntentInFlight() {
                     {(currentOrgName || 'O').charAt(0).toUpperCase()}
                   </span>
                   <span className="account-org-name">{currentOrgName || 'No organization'}</span>
-                  {team?.tier && <span className="tier-badge">{team.tier}</span>}
+                  {team?.tier && <span className="tier-badge">{TIER_LABELS[team.tier] || team.tier}</span>}
                 </div>
                 {teams.length > 1 && (
                   <>
@@ -8355,7 +8472,7 @@ function claimIntentInFlight() {
         )}
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {team.tier || 'free'} tier · Upgrade
+            {(TIER_LABELS[team.tier] || team.tier || 'free')} tier · Upgrade
           </a>
         )}
         {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
@@ -8752,36 +8869,19 @@ function claimIntentInFlight() {
                 Restored inline from its OWN state (rotatedKey), so the create
                 modal's dismiss paths (which clear newKey) can never destroy
                 this already-revoked-old-key replacement. */}
-            {rotatedKey && (
+            {rotatedKeyReveal && (
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>
-                <code className="key-value">{rotatedKey.plaintext}</code>
+                <code className="key-value">{rotatedKeyReveal}</code>
                 {rotatedKey.expiresAt ? (
                   <span className="dim">expires {fmtExpiryDate(rotatedKey.expiresAt)}</span>
                 ) : (
                   <span className="dim">never expires</span>
                 )}
-                <button className="ghost small" onClick={async () => {
-                  // #2735: clear the one-time plaintext ONLY after the clipboard
-                  // write resolves. The old key is already revoked, so a failed
-                  // write that still cleared the reveal would destroy the only
-                  // copy of the live replacement (#2392 class). On failure keep
-                  // the key visible + select it for a manual copy — mirrors
-                  // revealKey's fallback.
-                  try {
-                    await navigator.clipboard.writeText(rotatedKey.plaintext)
-                    setRotatedKey(null)
-                  } catch {
-                    const el = document.querySelector('.new-key .key-value')
-                    if (el) {
-                      const range = document.createRange()
-                      range.selectNodeContents(el)
-                      const sel = window.getSelection()
-                      sel.removeAllRanges()
-                      sel.addRange(range)
-                    }
-                  }
-                }}>Copy &amp; done</button>
+                {/* #4342: the copy rides `copyRotatedKey`, whose plaintext read
+                    is type-guarded the same way as the gate above — the raw
+                    state is never handed to the clipboard. */}
+                <button className="ghost small" onClick={copyRotatedKey}>Copy &amp; done</button>
               </div>
             )}
             {/* #2246 (ADR-010): the keys table is uniform — every durable row
@@ -9394,7 +9494,7 @@ function claimIntentInFlight() {
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
+              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>

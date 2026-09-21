@@ -290,7 +290,8 @@ class TestRepair:
             proj, org)["status"] == _os.STATUS_COMPLETE
 
     def test_build_org_keeps_its_earned_status(self):
-        """The build gate needs `catalog-presented`, never `decide-completed`."""
+        """The build gate needs the two observed acts, never decide-completed
+        (#3913) — so removing the spurious decide edge cannot regress it."""
         org = _new_org()
         sdk, proj = _seed(org, fork="build", steps=(
             "team-named", "harness-connected", "first-points-filed",

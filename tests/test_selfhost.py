@@ -222,8 +222,10 @@ def _tool_result(body):
     the call path; both are handled here."""
     result = body.get("result", {}) if body else {}
     if isinstance(result, dict) and "content" in result:
+        # Skip the trailing #3883 retirement warning block (it is not payload).
         text = "".join(c.get("text", "") for c in result["content"]
-                       if isinstance(c, dict))
+                       if isinstance(c, dict)
+                       and not c.get("text", "").startswith("RETIRED TOOL"))
         if text:
             import json
             try:
@@ -336,7 +338,9 @@ class TestHealthTruthMCP:
             })
             assert r.status_code == 200, r.text
             names = [t["name"] for t in body["result"]["tools"]]
-            assert "tortoise_health" in names
+            assert "tortoise_overview" in names
+            # #3883: tortoise_health is RETIRED — callable and warned, never listed.
+            assert "tortoise_health" not in names
 
         stray_after = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
         assert stray_after == stray_before, (

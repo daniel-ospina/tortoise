@@ -236,7 +236,7 @@ test('#3428/#2937: the shipped-script scan covers every asset chunk AND every in
   }
 })
 
-test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three checkpoint sites across EVERY shipped script', () => {
+test('#3428/#2937 / #3913 (cycle 8 item 1): the artifact is authoritative — exactly ONE checkpoint site across EVERY shipped script', () => {
   // The source pin can be split ('/v1/onboarding/' + 'state/checkpoint') and a
   // sibling/public module can move the URL out of main.jsx entirely (M3/M10/
   // M6/M9). A *src* literal cannot be split past the bundler: esbuild folds an
@@ -245,10 +245,13 @@ test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three chec
   // hold for a `public/`-copied file, which is never bundler-processed and is
   // exactly the root the widening added (review cycle 9 code F2: mutation
   // MUT-D split the path inside a copied public/ file and this probe stayed
-  // green). Count the literal across everything served and reject a site whose
-  // serialized body is not a literal `catalog-presented` step, so a
-  // parameterized step (`['harness','connected'].join('-')`) reds even when the
-  // count happens to match. The behaviour is owned by the executing test
+  // green). #3913 (owner ruling 2026-09-20) removed the render-time
+  // catalog-presented effect AND the build-fork PICK handler's optional mark,
+  // so the ONLY checkpoint a shipped script may fire is the fork pick itself.
+  // Count the literal across everything served and reject a site whose
+  // serialized body carries a `step`, so a parameterized step
+  // (`['harness','connected'].join('-')`) or a reinstated mark reds even when
+  // the count happens to match. The behaviour is owned by the executing test
   // (onboardingContinueExec.test.js); this is the shipped-artifact backstop.
   const scripts = shippedScripts()
   const sites = []
@@ -257,19 +260,24 @@ test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three chec
       sites.push({ name: s.name, index: m.index, js: s.js })
     }
   }
-  assert.equal(sites.length, 3,
-    `exactly THREE checkpoint call sites may exist across every shipped script — found ${sites.length} ` +
+  assert.equal(sites.length, 1,
+    `exactly ONE checkpoint call site may exist across every shipped script — found ${sites.length} ` +
     `(${[...new Set(sites.map((s) => s.name))].join(', ') || 'none'}). ` +
     // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
-    // even when the count was LOWER than three, which describes the wrong failure.
-    (sites.length > 3
-      ? 'A 4th means a checkpoint writer was re-introduced (M3/M6/M9/M10 all shipped one and passed the old entry-only scan)'
-      : 'Fewer than three means a legitimate checkpoint site is missing from the shipped bundle — check the build'))
+    // even when the count was LOWER than expected, which describes the wrong failure.
+    // #3913 removed the render-time catalog-presented effect and the build-fork
+    // handler mark, leaving the fork write alone.
+    (sites.length > 1
+      ? 'A 2nd means a checkpoint STEP writer was re-introduced — #3913 removed both the render effect and the build-fork pick mark, leaving only the fork write'
+      : 'Zero means the fork write is missing from the shipped bundle — check the build'))
   for (const site of sites) {
     const window = site.js.slice(site.index, site.index + 400)
     assert.doesNotMatch(window, /harness-connected/,
       `dist/${site.name} checkpoint at ${site.index} sits next to a harness-connected literal — ` +
       'a client writer cannot serialize that step (#3428/#2937)')
+    assert.doesNotMatch(window, /catalog-presented/,
+      `dist/${site.name} checkpoint at ${site.index} still serializes catalog-presented — ` +
+      '#3913 deleted that writer from the dashboard')
     const body = window.match(/body:\s*JSON\.stringify\(\s*(\{[^}]{0,160}\}|[A-Za-z_$][\w$]*)\s*\)/)
     assert.ok(body,
       `dist/${site.name} checkpoint at ${site.index} must serialize an inspectable ` +
@@ -277,11 +285,10 @@ test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three chec
     const arg = body[1]
     if (arg.startsWith('{')) {
       const step = arg.match(/step:\s*([^,}]+)/)
-      if (step) {
-        assert.equal(step[1].trim().replace(/^["'`]|["'`]$/g, ''), 'catalog-presented',
-          `dist/${site.name} checkpoint at ${site.index} serializes a step that is not ` +
-          `catalog-presented (${step[1].trim()}) — the writer is back (#3428/#2937)`)
-      }
+      assert.ok(!step,
+        `dist/${site.name} checkpoint at ${site.index} serializes a \`step\` ` +
+        `(${step && step[1].trim()}) — #3913 deleted every client step writer; the only ` +
+        'checkpoint left is the fork pick itself')
     }
   }
 })

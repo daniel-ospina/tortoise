@@ -45,6 +45,8 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
     api_key_created,
     first_api_call,
     first_api_call_pending,
+    onboarding_decide_complete,
+    onboarding_seed_complete,
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
@@ -64,6 +66,7 @@ from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
     RestoreVerificationError,
+    _r2_config_from_env,
     _restore_into_temp_verify_swap,
     create_backup,
     decrypt_backup,
@@ -75,12 +78,14 @@ from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     PROBE_HARD_TIMEOUT,
     PROBE_STALE_AFTER,
+    ControlPlaneOffloadError,
     HealthProbe,
     event_retention_interval,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
+    run_control_plane_call,
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
@@ -1230,7 +1235,13 @@ async def _lifespan(app):
         # driver-disabled case is covered by construction. Spawned only when
         # the sweep config validates (fail-closed default keeps TestClient and
         # misconfigured deploys quiet) and not explicitly disabled for tests.
-        global _WATCHER
+        global _WATCHER, _WATCHER_START_ERROR
+        # #2877: recompute watcher liveness per app instance. Without the
+        # reset, a prior lifespan's start failure (or a stale thread) would
+        # leak into /health on TestClient/app reuse — reporting a dead watcher
+        # as running, or a running one as failed.
+        _WATCHER = None
+        _WATCHER_START_ERROR = None
         try:
             cfg = _backup_config_safe()
             # #2922: EVERY reason the watcher does not start must be stated on
@@ -1391,6 +1402,11 @@ async def _lifespan(app):
             # have surfaced #2790 (no sweep for 33 days, no drill ever recorded).
             # Loud, with a traceback, so a dead watcher can never be invisible again.
             _logger.error("backup watcher could not start: %s", exc, exc_info=True)
+            # #2877: and not invisible to /health either. This marker is set
+            # ONLY here, so _backup_watcher_health() can distinguish "wanted
+            # but failed to start" (degraded) from the legitimate disabled
+            # states (ok).
+            _WATCHER_START_ERROR = str(exc)[:200]
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-org graphs get purged by the SDK lazy hook too (embedded/stdio);
@@ -2793,6 +2809,46 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _backup_watcher_health() -> dict:
+    """#2877: backup-watcher liveness for /health.
+
+    The watcher is the hosted durability monitor for #305/R2 backups, and
+    #2851/#2922 showed it can be completely dead while the process serves
+    normally. ``_WATCHER is None`` is ambiguous — it is the state after a
+    FAILED start *and* the fail-closed default when the sweep is off
+    (TestClient/embedded) or the test-only kill switch is set. The
+    ``_WATCHER_START_ERROR`` marker, set only from the start-failure handler,
+    is the one signal that separates those.
+
+    States:
+      * ``running``  — thread alive (the healthy case).
+      * ``failed``   — wanted but ``_WATCHER_START_ERROR`` was recorded.
+      * ``stopped``  — started, but its watchdog-backed thread is no longer
+        alive (a dead monitor that must not read as healthy).
+      * ``disabled`` — no config / kill switch: legitimate, stays ``ok``.
+
+    Mirrors the ``db`` block: a sub-dict carrying ``ok``, folded into
+    ``status`` by the caller. Never raises and never 5xxes — a dead monitor
+    must not kill a live process's liveness probe (#338).
+    """
+    try:
+        watcher = _WATCHER
+        if watcher is not None:
+            thread = getattr(watcher, "_thread", None)
+            if thread is not None and thread.is_alive():
+                return {"state": "running", "ok": True, "error": None}
+            return {
+                "state": "stopped",
+                "ok": False,
+                "error": "watcher thread is not alive",
+            }
+        if _WATCHER_START_ERROR is not None:
+            return {"state": "failed", "ok": False, "error": _WATCHER_START_ERROR}
+        return {"state": "disabled", "ok": True, "error": None}
+    except Exception as exc:  # liveness must answer, always
+        return {"state": "unknown", "ok": False, "error": str(exc)[:200]}
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -2833,6 +2889,12 @@ async def health():
     # The response shape is unchanged for deploy/dashboard consumers:
     # ``{"status", "db"}`` — ``probe`` and ``loop_stale_ms`` are additive.
     # It never 5xxes: a dead DB is "degraded", never a killed process.
+
+    Watcher check (#2877): a dead/never-started backup watcher is the SAME
+    shape of silent durability failure, so it rides along in ``backup_watcher``
+    and flips ``status`` to "degraded" under the identical rule. A disabled
+    sweep (no config / kill switch) stays ``ok`` — only "wanted but failed"
+    degrades.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -2846,8 +2908,10 @@ async def health():
         loop_age_ms = loop_heartbeat_info().get("loop_age_ms")
     except Exception:
         loop_age_ms = None
-    return {"status": "ok" if db.get("ok") else "degraded", "db": db,
-            "probe": probe_meta, "loop_stale_ms": loop_age_ms}
+    watcher = _backup_watcher_health()
+    return {"status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
+            "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
+            "backup_watcher": watcher}
 
 
 @app.get("/health/ready")
@@ -3264,7 +3328,15 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         update_last_used,
     )
     try:
-        org = resolve_api_key(get_control_plane(), token)
+        # #3498: the key resolution is 2-3 sequential PostgREST round-trips
+        # (api_keys + teams rung + the last_used_at PATCH) and is SYNCHRONOUS
+        # by construction — off the loop, or one slow dependency call delays
+        # every request in the process (including /health). The unit of
+        # offload is the RESOLUTION, not each round-trip: one thread hop keeps
+        # the ladder's ordering intact inside one worker.
+        org = await _cp_offload(
+            lambda: resolve_api_key(get_control_plane(), token),
+            op="resolve_api_key")
         if org is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
@@ -3283,7 +3355,13 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # (telemetry must never gate auth). Membership-only resolutions have
         # no api_keys row (key_id=None) → no write.
         if org.get("key_id"):
-            update_last_used(get_control_plane(), org["key_id"])
+            # #3498 review P1: best-effort by contract — an OFFLOAD failure
+            # (pool saturated / bound missed) must NOT become a new way for
+            # telemetry to gate auth. The helper already swallows its own
+            # transport errors; best_effort swallows the seam's too.
+            await _cp_offload(
+                lambda: update_last_used(get_control_plane(), org["key_id"]),
+                op="update_last_used", best_effort=True)
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
@@ -3358,8 +3436,8 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
 # the client tripwire (review-guarded, not test-provable by this file).
 
 
-def _session_pinned_org(cp: object, user_id: str, pinned: str | None, *,
-                         memberships: list[dict] | None = None) -> str | None:
+def _session_pinned_org(pinned: str | None, *,
+                        memberships: list[dict]) -> str | None:
     """#2230/#2299: membership-gate a truthy ?org_id= pin (session lane).
 
     A truthy pin must be one of the session user's ACTIVE memberships, else
@@ -3378,27 +3456,17 @@ def _session_pinned_org(cp: object, user_id: str, pinned: str | None, *,
     caller's intrinsic-org default governs — see the #2230 divergence note
     in toggle_api_key_enabled's docstring).
 
-    memberships: optional precomputed user_memberships rows. The DI seam
-    (_session_user_org) and the dashboard-login lane pass their list (they
-    queried it anyway for the empty-check + memberships[0] default — avoids
-    a second control-plane query); the toggle-PATCH lane omits it and the
-    helper queries lazily (only paid when a pin is actually present).
+    memberships: REQUIRED precomputed user_memberships rows. #3498: this used
+    to read ``user_memberships`` LAZILY when a caller omitted the list — a
+    SYNCHRONOUS control-plane call on the event loop, reachable from any
+    session handler that passed a pin. The lazy read is gone; every caller
+    must resolve the rows off-loop (``_cp_offload``) FIRST and pass them, so
+    the gate is a pure in-memory predicate and cannot re-introduce the block.
+    The gate is only consulted when ``pinned`` is truthy, so a caller with no
+    pin may pass an empty list.
     """
     if not pinned:
         return None
-    if memberships is None:
-        from tortoise.supabase_control import user_memberships
-
-        try:
-            memberships = user_memberships(cp, user_id)
-        except RuntimeError:
-            # #1719/#2299: the lazy membership read is a control-plane call —
-            # an outage/schema-cache failure degrades to the repo-standard
-            # 503 control_plane_unavailable (the mint-path map), never a raw
-            # 500 from the global handler. Only this lazy read is wrapped;
-            # the precomputed-membership callers (DI seam) run their own
-            # earlier read — pre-existing, left as-is.
-            raise _control_plane_unavailable() from None
     if pinned not in {m["org_id"] for m in memberships}:
         raise HTTPException(status_code=403, detail="No membership in team")
     return pinned
@@ -3449,7 +3517,12 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     if not is_supabase_enabled():
         raise HTTPException(status_code=401, detail="Session auth is hosted-mode only")
     cp = get_control_plane()
-    memberships = user_memberships(cp, user["user_id"])
+    # #3498: every control-plane read in this DI seam (reached by ~33
+    # session endpoints) runs OFF the loop. The membership read is sequential
+    # and dependent (empty-check → pin gate → the orgs ladder), so the unit of
+    # offload is the RESOLUTION.
+    memberships = await _cp_offload(
+        lambda: user_memberships(cp, user["user_id"]), op="user_memberships")
     if not memberships:
         raise HTTPException(status_code=403, detail="No team membership")
     # #1148 review P1 (gate-closing) + #2299 (consolidation): the session
@@ -3463,7 +3536,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # pin resolves through one implementation. The default (memberships[0])
     # is always a membership, so only a bad PIN can raise here.
     org_id = _session_pinned_org(
-        cp, user["user_id"], request.query_params.get("org_id"),
+        request.query_params.get("org_id"),
         memberships=memberships) or memberships[0]["org_id"]
     from tortoise.supabase_control import (
         _ORG_ADDITIVE_0015_TIER,
@@ -3474,19 +3547,21 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
     )
-    row = _orgs_row_fail_soft(
-        cp, org_id, select=_QUOTA_SELECT,
-        # #1832: the FULL additive ladder (newest migration tier dropped
-        # FIRST — 2040 marker, then import tier), same as resolve_api_key /
-        # recover_team_key. The #1230 import ledger + points-cap columns
-        # (last_import_sha256/max_points, migration 20260817000001) ride
-        # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
-        # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
-        # /v1/sessions, /v1/onboarding/state.
-        additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                         _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
-                         _ORG_ADDITIVE_0015_TIER,
-                         _ORG_ADDITIVE_BILLING_TIER])
+    row = await _cp_offload(
+        lambda: _orgs_row_fail_soft(
+            cp, org_id, select=_QUOTA_SELECT,
+            # #1832: the FULL additive ladder (newest migration tier dropped
+            # FIRST — 2040 marker, then import tier), same as resolve_api_key /
+            # recover_team_key. The #1230 import ledger + points-cap columns
+            # (last_import_sha256/max_points, migration 20260817000001) ride
+            # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
+            # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
+            # /v1/sessions, /v1/onboarding/state.
+            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                            _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
+                            _ORG_ADDITIVE_0015_TIER,
+                            _ORG_ADDITIVE_BILLING_TIER]),
+        op="orgs_row_fail_soft")
     if row is None:
         raise HTTPException(status_code=403, detail="Organization not found")
     # #1828 review P2: a suspended org must 403 on SESSION-authed
@@ -3516,7 +3591,8 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # default — it must never pass a bare None, because a PRESENT-and-None
     # limit means UNLIMITED to the quota gate (enforce_org_limit) and would
     # fail OPEN.
-    _gate_limits = _org_node_sync_limits(org_id)
+    _gate_limits = await _cp_offload(
+        lambda: _org_node_sync_limits(org_id), op="org_node_limits")
     org = {
         "org_id": org_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
@@ -4587,6 +4663,107 @@ def _control_plane_unavailable() -> HTTPException:
             "message": "Sign-in is temporarily unavailable — try again in a moment.",
         },
     )
+
+
+async def _cp_offload(fn, *, op: str, best_effort: bool = False,
+                      pool: str = "auth", timeout: float | None = None,
+                      unavailable=None):
+    """#3498: run ONE blocking control-plane helper off the event loop.
+
+    Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
+    an AUTH-CRITICAL call it owns the FAIL-CLOSED ERROR MAPPING: an offload
+    that misses its wait bound — or a saturated worker pool — becomes the
+    repo-standard 503 ``control_plane_unavailable`` the client already renders,
+    never a hang and never a silent pass-through. Domain errors raised by the
+    helper itself propagate UNCHANGED, so each caller's existing error mapping
+    is preserved (e.g. ``_get_current_org_supabase`` still raises a 500 ``Auth
+    error`` on an unexpected helper failure — the seam changes only WHERE the
+    call runs, not what its failure means).
+
+    ``best_effort=True`` is for calls whose CONTRACT is "this must never gate
+    the request path": an OFFLOAD failure (bound missed / pool saturated) is
+    logged and swallowed. Without it, routing a documented never-raise
+    telemetry write through the fail-closed seam would give telemetry a new way
+    to fail auth or an OAuth redirect. Only the OFFLOAD failure is swallowed —
+    an exception from the helper itself (e.g. the strict-mode
+    ``UnregisteredTelemetryKey``) still propagates.
+
+    ``pool`` (#3669) selects the worker pool: ``"auth"`` (default),
+    ``"telemetry"`` for best-effort work, or ``"oauth"`` for the
+    attacker-reachable OAuth client-resolution lane.
+
+    ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
+    auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
+    the OAuth resolution lanes pass a factory raising RFC 6749 §5.2
+    ``temporarily_unavailable`` instead, because their consumers parse the
+    OAuth error body (#2863) and never the FastAPI ``detail`` shape. (The
+    authorize/consent lanes are read-mostly: their only write is the idempotent
+    ``oauth_clients`` provisioning insert, so a retry after a bound miss is
+    safe. The MUTATING token grants do not use this bound at all — see below.)
+
+    ``timeout`` is the WAIT BOUND on the submission (``None`` = the seam's
+    ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``). ``math.inf`` waits WITHOUT a bound —
+    used by the mutating token grants, because ``wait_for`` cancels only the
+    await, never the worker thread (CPython #87185), so abandoning a grant that
+    is mid-write would claim a retryable state it cannot observe (#2863).
+
+    The Auth/REST lane is the blast radius the issue names: a regression here
+    is a total auth outage, so this seam is deliberately the ONLY new thing
+    callers touch, and every routed site is covered by a behavioural test.
+    """
+    # Best-effort work routes to the telemetry pool unless the caller named a
+    # pool explicitly (#3498 review P1, preserved by #3669's ``pool`` param).
+    effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
+    try:
+        return await run_control_plane_call(
+            fn, op=op, pool=effective_pool, timeout=timeout)
+    except ControlPlaneOffloadError as exc:
+        if best_effort:
+            logging.getLogger("tortoise.api").warning(
+                "control-plane offload %r failed (best-effort, swallowed): %s",
+                op, exc)
+            return None
+        if unavailable is not None:
+            raise unavailable() from None
+        raise _control_plane_unavailable() from None
+
+
+async def _oauth_offload(fn, *, op: str, no_wait_bound: bool = False):
+    """#3669: run ONE synchronous OAuth resolution off the event loop.
+
+    The OAuth client-resolution lane is synchronous end to end —
+    ``resolve_client`` makes a blocking PostgREST lookup AND, for a CIMD
+    ``client_id``, a blocking ``httpcore`` fetch — and it is reached from FOUR
+    unauthenticated front doors. Offloading the RESOLUTION (not the fetch) puts
+    the whole resolve on a pool dedicated to this lane, so the event loop is
+    never occupied; the fetch's own in-flight cap, per-fetch deadline and
+    per-window wall-clock budget live in ``tortoise.cimd`` and are therefore
+    charged identically at all four doors.
+
+    A dedicated ``"oauth"`` pool (not ``"auth"``) keeps an attacker-driven
+    CIMD fetch flood from parking the auth slots — the same isolation that
+    split ``telemetry`` out (#3498 review P1).
+
+    ``no_wait_bound=True`` is for the two MUTATING token grants. The seam's
+    wait bound ABANDONS the daemon worker on expiry (``wait_for`` cancels the
+    await, not the thread — CPython #87185), so a bound miss there would answer
+    a retryable ``temporarily_unavailable`` while the abandoned grant may still
+    consume the code or rotate the refresh token. That is exactly what the
+    #2863 contract on ``OAuthTemporarilyUnavailable`` forbids ("Never on an
+    unobserved write state"), so a grant is awaited WITHOUT a wait bound: its
+    own httpx phase timeouts bound it, and the only remaining offload failure
+    is a REFUSED submission (full backlog), where no write started and a
+    retryable 503 is accurate.
+
+    Failure is the OAuth contract (RFC 6749 §5.2 503 ``temporarily_unavailable``),
+    never the FastAPI ``control_plane_unavailable`` body the auth/REST lane uses.
+    """
+    from tortoise.oauth import OAuthTemporarilyUnavailable
+    return await _cp_offload(
+        fn, op=op, pool="oauth",
+        timeout=float("inf") if no_wait_bound else None,
+        unavailable=lambda: OAuthTemporarilyUnavailable(
+            "Client resolution is temporarily unavailable — retry."))
 
 
 def _dashboard_key_login_reason(org: dict) -> str | None:
@@ -5673,7 +5850,13 @@ async def _session_login_exchange(
 
     # Post-verify membership backstop (TOCTOU: creator removed mid-mint).
     try:
-        still_member = membership_for_user_org(cp, target, org_id) is not None
+        # #3498: blocking PostgREST read — off the loop. A missed bound/pool
+        # saturation maps to the repo-standard 503 inside _cp_offload; a
+        # helper RuntimeError keeps this lane's 503 mapping.
+        _membership = await _cp_offload(
+            lambda: membership_for_user_org(cp, target, org_id),
+            op="membership_for_user_org")
+        still_member = _membership is not None
     except RuntimeError:
         raise _control_plane_unavailable() from None
     if not still_member:
@@ -6005,7 +6188,9 @@ async def register_user(request: Request, response: Response):
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
-            set_dashboard_key_login(cp, org_id, True)
+            await _cp_offload(
+                lambda: set_dashboard_key_login(cp, org_id, True),
+                op="set_dashboard_key_login")
         except Exception as _provision_err:
             try:  # noqa: SIM105
                 _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name).delete()
@@ -6727,7 +6912,8 @@ async def send_onboarding_offer_email_endpoint(request: Request):
         return {"status": "skipped", "reason": "registry-mode"}
 
     try:
-        org = org_by_id(get_control_plane(), org_id)
+        org = await _cp_offload(
+            lambda: org_by_id(get_control_plane(), org_id), op="org_by_id")
         if org is None:
             _logger.warning("onboarding email: skipped (unknown team %s)",
                             org_id)
@@ -7581,7 +7767,9 @@ async def revoke_api_key(key_id: str, request: Request, org: dict = Depends(get_
     await _require_owner_admin_if_session(org)
     if is_supabase_enabled():
         try:
-            row = api_key_by_id(get_control_plane(), key_id)
+            row = await _cp_offload(
+                lambda: api_key_by_id(get_control_plane(), key_id),
+                op="api_key_by_id")
             if row is None:
                 raise HTTPException(status_code=404, detail="API key not found")
             # #2299: consolidated fail-closed — the DI-resolved org (pinned
@@ -7670,7 +7858,9 @@ async def toggle_dashboard_login(
     )
     if is_supabase_enabled():
         cp = get_control_plane()
-        memberships = user_memberships(cp, user["user_id"])
+        # #3498: membership read + the flag write are blocking PostgREST calls.
+        memberships = await _cp_offload(
+            lambda: user_memberships(cp, user["user_id"]), op="user_memberships")
         if not memberships:
             raise HTTPException(status_code=403, detail="No team membership")
         if org_id is None:
@@ -7681,12 +7871,13 @@ async def toggle_dashboard_login(
         # BEFORE the role gate — no org-state/key existence oracle. A
         # member-but-not-owner/admin pin still 403s at _require_owner_admin
         # below (the role gate is the pin's second enforcement layer).
-        _session_pinned_org(cp, user["user_id"], org_id,
-                             memberships=memberships)
+        _session_pinned_org(org_id, memberships=memberships)
         # verify this user is owner/admin of that org
         await _require_owner_admin(user["user_id"], org_id)
         from tortoise.supabase_control import set_dashboard_key_login as _set_flag
-        _set_flag(cp, org_id, body.enabled)
+        await _cp_offload(
+            lambda: _set_flag(cp, org_id, body.enabled),
+            op="set_dashboard_key_login")
         return {"org_id": org_id, "dashboard_key_login": body.enabled}
     # Registry mode: operators control access directly; flag is a no-op
     # (always true). Return success so the UI doesn't error.
@@ -7749,6 +7940,7 @@ async def toggle_api_key_enabled(
         api_key_by_id,
         get_control_plane,
         is_supabase_enabled,
+        user_memberships,
     )
     from tortoise.supabase_control import (
         set_api_key_enabled as _sb_set_enabled,
@@ -7776,9 +7968,24 @@ async def toggle_api_key_enabled(
         # (the deliberate #2230 divergence from DELETE's memberships[0]
         # default — see the function docstring). Registry lane below is
         # untouched (selfhost keys are org-scoped by the key itself).
-        pinned = _session_pinned_org(
-            cp, user["user_id"], request.query_params.get("org_id"))
-        row = api_key_by_id(cp, key_id)
+        pinned_param = request.query_params.get("org_id")
+        # #3498: the pin gate used to read memberships LAZILY inside
+        # _session_pinned_org — a synchronous control-plane read on the loop.
+        # Resolve them OFF-loop here (only paid when a pin is actually present,
+        # preserving the pre-#3498 cost shape) and keep the gate a pure
+        # in-memory predicate. A control-plane outage keeps the repo-standard
+        # 503 the lazy read mapped (#1719/#2299), not a raw 500.
+        memberships: list[dict] = []
+        if pinned_param:
+            try:
+                memberships = await _cp_offload(
+                    lambda: user_memberships(cp, user["user_id"]),
+                    op="user_memberships")
+            except RuntimeError:
+                raise _control_plane_unavailable() from None
+        pinned = _session_pinned_org(pinned_param, memberships=memberships)
+        row = await _cp_offload(
+            lambda: api_key_by_id(cp, key_id), op="api_key_by_id")
         if row is None:
             raise HTTPException(status_code=404, detail="API key not found")
         org_id = row.get("org_id")
@@ -7826,16 +8033,22 @@ async def toggle_api_key_enabled(
         # Explicit null for enabled is treated as absent (leave untouched) —
         # `None is not False` would silently RE-ENABLE a disabled key.
         if "enabled" in body.model_fields_set and body.enabled is not None:
-            _sb_set_enabled(cp, key_id, body.enabled)
+            await _cp_offload(
+                lambda: _sb_set_enabled(cp, key_id, body.enabled),
+                op="set_api_key_enabled")
             result["enabled"] = body.enabled
         # model_fields_set distinguishes explicit null (clear label) from
         # field-absent (don't touch) — JSON null must clear, not skip.
         if "name" in body.model_fields_set:
             cleaned = _clean_key_label(body.name)
-            _sb_set_name(cp, key_id, cleaned)
+            await _cp_offload(
+                lambda: _sb_set_name(cp, key_id, cleaned),
+                op="set_api_key_name")
             result["name"] = cleaned
         if "scopes" in body.model_fields_set:
-            _sb_set_scopes(cp, key_id, body.scopes or [])
+            await _cp_offload(
+                lambda: _sb_set_scopes(cp, key_id, body.scopes or []),
+                op="set_api_key_scopes")
             result["scopes"] = body.scopes or []
         return result
     # Registry mode (selfhost): no enabled column — enabled is a no-op echo
@@ -8593,9 +8806,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
     # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
     # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
-    # since #3914. It deliberately omits Source/extraction and — until
-    # #4197's backfill decision — the embedding, so it keeps modelling the
-    # un-backfilled / no-embedder store the shipping ask lane still reads.
+    # since #3914. It omits Source/extraction, but since W7A it EMBEDS every
+    # turn BY DEFAULT through the shared store seam (#4194/#4304) and retains
+    # `embed=False` for #4197's un-backfilled backlog.
     # #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
@@ -11067,7 +11280,10 @@ async def _user_memberships(user_id: str) -> list[dict]:
         user_memberships as _sb_memberships,
     )
     if is_supabase_enabled():
-        return _sb_memberships(get_control_plane(), user_id)
+        # #3498: the Supabase lane is a blocking PostgREST read — off the loop.
+        return await _cp_offload(
+            lambda: _sb_memberships(get_control_plane(), user_id),
+            op="user_memberships")
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -11093,7 +11309,12 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
         membership_for_user_org as _sb_membership,
     )
     if is_supabase_enabled():
-        return _sb_membership(get_control_plane(), user_id, org_id)
+        # #3498: blocking PostgREST read — off the loop. This seam is reached
+        # by every membership-gated session endpoint; the design's §B names it
+        # (`_membership_team`) as one of the ~six auth/REST seams.
+        return await _cp_offload(
+            lambda: _sb_membership(get_control_plane(), user_id, org_id),
+            op="membership_for_user_org")
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
@@ -11119,7 +11340,10 @@ async def _org_node(org_id: str) -> dict | None:
         org_by_id as _sb_org,
     )
     if is_supabase_enabled():
-        return _sb_org(get_control_plane(), org_id)
+        # #3498: blocking PostgREST read — off the loop (reached by ~10 session
+        # endpoints, and by _require_owner_admin's suspension-stamp check).
+        return await _cp_offload(
+            lambda: _sb_org(get_control_plane(), org_id), op="org_by_id")
     sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -11692,7 +11916,7 @@ async def _provision_preflight(org: dict) -> None:
     if org.get("tier", "free") in _GRAPH_TIER_BLOCKED:
         raise HTTPException(
             status_code=402,
-            detail="Custom graphs require the Pro plan. Upgrade to create "
+            detail="Custom graphs require the Builder plan. Upgrade to create "
                    "multiple graphs.",
             headers={"X-Upgrade-CTA": "pro"},
         )
@@ -13008,7 +13232,9 @@ async def _require_owner_admin(user_id: str, org_id: str) -> dict:
             # dashboard-login / create / revoke — all inherit 503 parity.
             # Non-outage exceptions propagate untouched (a schema/dialect
             # bug must stay loud, not masquerade as an outage).
-            membership = _sb_membership(get_control_plane(), user_id, org_id)
+            membership = await _cp_offload(
+                lambda: _sb_membership(get_control_plane(), user_id, org_id),
+                op="membership_for_user_org")
         except Exception as _exc:
             _raise_503_if_cp_outage(_exc)
             raise
@@ -13246,7 +13472,8 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
     if is_supabase_enabled():
         try:
             await _require_owner_admin(user["user_id"], org_id)
-            org = org_by_id(get_control_plane(), org_id)
+            org = await _cp_offload(
+                lambda: org_by_id(get_control_plane(), org_id), op="org_by_id")
             if org is None:
                 raise HTTPException(status_code=404, detail="Unknown organization")
             # #1875: tier gate matches pricing (free=1, solo=1, pro=2,
@@ -13257,7 +13484,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             tier = org.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Pro or Team tier — upgrade to invite members")
+                                    detail="Invites require the Builder or Team tier — upgrade to invite members")
             # #1965: per-org lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per org_id; the count
@@ -13329,7 +13556,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Pro or Team tier — upgrade to invite members")
+                                detail="Invites require the Builder or Team tier — upgrade to invite members")
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -14370,7 +14597,7 @@ async def resend_invite(invitation_id: str, org_id: str, request: Request,
 async def expire_invite(invitation_id: str, org_id: str,
                         user: dict = Depends(get_current_user)):  # noqa: B008
     """#2003 (W7): admin expire-now — a PENDING invitation dies immediately
-    (link dead, leaves pending lists, Pro seat freed). Owner/admin only.
+    (link dead, leaves pending lists, a Builder-plan (`pro`) seat freed). Owner/admin only.
     Consumed invitations are not expire-able (409)."""
     from tortoise.supabase_control import (
         InvitationError,
@@ -16554,22 +16781,26 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
 
     if is_supabase_enabled():
         cp = get_control_plane()
-        org_id = _resolve_signup_token(cp, signup_token)
+        org_id = await _cp_offload(
+            lambda: _resolve_signup_token(cp, signup_token),
+            op="resolve_signup_token")
         if org_id is None:
             raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
-        row = _orgs_row_fail_soft(
-            cp, org_id, select=_QUOTA_SELECT,
-            # #1709 fixer P2.6: the FULL additive ladder (same as
-            # resolve_api_key — newest migration tier dropped FIRST, incl.
-            # the #2040 marker tier) — the recovery emergency path must not
-            # 500 on migration skew (a schema one migration behind the
-            # newest additive drops that tier to safe defaults instead of
-            # raising).
-            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                            _ORG_ADDITIVE_IMPORT_TIER,
-                            _ORG_ADDITIVE_DKL_TIER,
-                            _ORG_ADDITIVE_0015_TIER,
-                            _ORG_ADDITIVE_BILLING_TIER])
+        row = await _cp_offload(
+            lambda: _orgs_row_fail_soft(
+                cp, org_id, select=_QUOTA_SELECT,
+                # #1709 fixer P2.6: the FULL additive ladder (same as
+                # resolve_api_key — newest migration tier dropped FIRST, incl.
+                # the #2040 marker tier) — the recovery emergency path must not
+                # 500 on migration skew (a schema one migration behind the
+                # newest additive drops that tier to safe defaults instead of
+                # raising).
+                additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                                _ORG_ADDITIVE_IMPORT_TIER,
+                                _ORG_ADDITIVE_DKL_TIER,
+                                _ORG_ADDITIVE_0015_TIER,
+                                _ORG_ADDITIVE_BILLING_TIER]),
+            op="orgs_row_fail_soft")
         if row is None or row.get("deleted_at") is not None:
             # soft-deleted org → uniform 422 (indistinguishable from
             # never-existed; the token path never mints on a deleted org).
@@ -16803,7 +17034,9 @@ async def agent_signup(request: Request):
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
-            set_dashboard_key_login(get_control_plane(), org_id, True)
+            await _cp_offload(
+                lambda: set_dashboard_key_login(get_control_plane(), org_id, True),
+                op="set_dashboard_key_login")
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
@@ -17233,7 +17466,8 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     # 1. key → org; must be an anon (unclaimed) org
     cp = get_control_plane()
     try:
-        org = resolve_api_key(cp, api_key)
+        org = await _cp_offload(
+            lambda: resolve_api_key(cp, api_key), op="resolve_api_key")
     except RuntimeError:
         # #1737: claim_email's direct resolve shares the control-plane
         # outage class — uniform 503, never a raw 500.
@@ -17331,7 +17565,9 @@ async def claim_status(request: Request):
         # JWKS + RPC) — the welcome guard is a no-op.
         return {"claimable": False, "unsupported": True}
     try:
-        org = resolve_api_key(get_control_plane(), api_key)
+        org = await _cp_offload(
+            lambda: resolve_api_key(get_control_plane(), api_key),
+            op="resolve_api_key")
     except Exception:
         # Fail-closed on control-plane errors: never report claimable.
         return {"claimable": False}
@@ -17350,8 +17586,12 @@ async def claim_status(request: Request):
         # Already claimed — distinguish this-user idempotency for the UI.
         from tortoise.supabase_control import membership_for_user_org
         try:
-            claimed_by_user = membership_for_user_org(
-                get_control_plane(), session["user_id"], org_id) is not None
+            claimed_by_user = (
+                await _cp_offload(
+                    lambda: membership_for_user_org(
+                        get_control_plane(), session["user_id"], org_id),
+                    op="membership_for_user_org")
+            ) is not None
         except RuntimeError:
             raise _control_plane_unavailable() from None
         if claimed_by_user:
@@ -18168,7 +18408,12 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     cp = get_control_plane()
     user_id = user["user_id"]
 
-    memberships = user_memberships(cp, user_id)
+    # #3498: the pre-lock reads are blocking PostgREST calls — off the loop.
+    # (The in-lock cap/revoke/recheck/insert calls below stay synchronous BY
+    # DESIGN: the section runs under the per-org in-process mint lock, which
+    # forbids awaits. That residual is tracked separately.)
+    memberships = await _cp_offload(
+        lambda: user_memberships(cp, user_id), op="user_memberships")
     if not memberships:
         raise HTTPException(status_code=403, detail="No team membership — create a team first")
     if len(memberships) > 1:
@@ -18178,10 +18423,14 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     else:
         tid = memberships[0]["org_id"]
 
-    if not membership_for_user_org(cp, user_id, tid):
+    _is_member = await _cp_offload(
+        lambda: membership_for_user_org(cp, user_id, tid),
+        op="membership_for_user_org")
+    if not _is_member:
         raise HTTPException(status_code=403, detail="No membership in team")
 
-    org_row = org_by_id(cp, tid)
+    org_row = await _cp_offload(
+        lambda: org_by_id(cp, tid), op="org_by_id")
     tier = (org_row or {}).get("tier") or "free"
     # #308 (R5): a suspended org cannot re-mint keys (scoping delta 12).
     if (org_row or {}).get("suspended_at") is not None:
@@ -18809,6 +19058,75 @@ def _maybe_apply_completion(org_id: str) -> bool:
         return False
 
 
+# ── #2006 (W11): onboarding funnel telemetry ──────────────────────────
+# The emission gate is the COMPLETED_STEP edge's NEW CREATION — the
+# ``created`` flag ``onboarding.state.write_completed_step`` already returns
+# for exactly this purpose. That transition is the domain fact itself, so
+# one event per edge creation falls out of it by construction: restart-safe
+# and multi-worker-safe, with NO second dedup store, NO threshold and NO
+# in-process set. Every writer of a W11 step maps its own edge result
+# through ``_emit_onboarding_step_events``; a non-creating replay never
+# reaches the emitter. (``decide-completed`` is the one W11 edge
+# with a sanctioned removal path — the #3912 repair — after which a genuine
+# re-completion re-emits; see ``analytics.onboarding_decide_complete``.)
+#
+# Deliberately NOT instrumented: ``harness-connected`` (the funnel keys off
+# seed/decide) and ``catalog-presented`` (the build fork's display row has
+# no W11 event).
+_ONBOARDING_STEP_EVENTS = {
+    "first-points-filed": onboarding_seed_complete,
+    "decide-completed": onboarding_decide_complete,
+}
+
+
+def _onboarding_distinct_id(org_id: str, org: dict | None = None,
+                            *, user_id: str | None = None) -> str:
+    """Funnel identity for the W11 onboarding events (#2006).
+
+    The Supabase user UUID wherever one is RESOLVABLE, falling back to the
+    org id — matching ``analytics.py``'s identity contract so these server
+    events join the web funnel's ``user_signed_up`` (distinct_id = user
+    UUID, never an email).
+
+    Every candidate passes the SAME predicate the #2600 ``actor_user_id``
+    alias uses (``_is_uuid_shape``): the repo documents that a raw
+    ``created_by`` is NOT always a human id — production mints store the
+    literal ``"api"``, ``st_``-prefixed recovery ids, and registry-lane
+    EMAIL self-signup creators (``tortoise/sdk.py``). Emitting one of those
+    as ``distinct_id`` would push PII into PostHog and collapse unrelated
+    orgs onto one pseudo-person, so a non-UUID candidate is DROPPED."""
+    from tortoise.sdk import _current_actor_user_id, _is_uuid_shape
+    candidates = [user_id]
+    if org is not None:
+        candidates += [org.get("actor_user_id"),
+                       org.get(_SESSION_USER_ID_KEY),
+                       org.get("created_by")]
+    candidates.append(_current_actor_user_id.get())
+    for uid in candidates:
+        if _is_uuid_shape(uid):
+            return uid
+    return org_id
+
+
+def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
+                                 org_id: str, source: str) -> None:
+    """Emit the W11 funnel event for each step edge a write NEWLY created.
+
+    ``created_steps`` must carry ONLY the steps whose ``created`` was True —
+    that filtering is the caller's gate, so a replay is silent and the
+    event is exact-once per edge creation. Fail-safe: ``capture()`` never
+    raises, and each emit is guarded here too, so telemetry can never turn a
+    committed write into an error."""
+    for step in created_steps:
+        emit = _ONBOARDING_STEP_EVENTS.get(step)
+        if emit is None:
+            continue
+        try:  # noqa: SIM105
+            emit(distinct_id, org_id, source)
+        except Exception:
+            pass  # telemetry must never break the write path (R19)
+
+
 def _update_onboarding_state(org_id: str, **fields) -> dict:
     """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
     legacy whole-dict merge — its non-atomicity caveat is pre-existing
@@ -18819,14 +19137,21 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
 
-    NOTE: step-edge writes via this router (PATCH catalog-presented) trigger
-    the post-write gate eval; the checkpoint calls state.py writers directly
-    and evals via _maybe_apply_completion."""
+    NOTE: this router's step-edge branch is NOT on the PATCH catalog path —
+    `patch_onboarding_state` pops `catalog_presented` and writes the edge +
+    evals itself, and the checkpoint path calls the state.py writers directly.
+    Any other caller that hands a step id to this router does get the
+    post-write gate eval."""
     jsonb_fields: dict[str, object] = {}
     wrote_step = False
+    # #2006 (W11): the steps whose COMPLETED_STEP edge THIS call created —
+    # the only steps a funnel event may be emitted for.
+    created_steps: list[str] = []
     for k, v in fields.items():
         if k in _os.STEP_IDS:
-            _os.write_completed_step(_org_proj(org_id), org_id, k)
+            if _os.write_completed_step(
+                    _org_proj(org_id), org_id, k).get("created"):
+                created_steps.append(k)
             wrote_step = True
         elif k in _os.FLOW_KEYS:
             # only step-edge keys are routable here; scalar FLOW keys are
@@ -18849,6 +19174,15 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
         _write_onboarding_state(org_id, state)
     if wrote_step:
         _maybe_apply_completion(org_id)
+        # #2006 (W11): emit for the edges this call NEWLY created (empty on a
+        # replay). No production caller routes a W11 step here today — the
+        # PATCH boundary 422s first-points-filed/decide-completed — but this
+        # generic router accepts any STEP_IDS key, so it is instrumented so a
+        # future routing change cannot silently lose the funnel event.
+        if created_steps:
+            _emit_onboarding_step_events(
+                created_steps, distinct_id=_onboarding_distinct_id(org_id),
+                org_id=org_id, source="state_router")
     # Echo = the MERGED PROJECTION (writer-return-composed — GET/PATCH can
     # never diverge), overlaid with the just-written jsonb fields: the
     # pre-#2001 echo returned the in-memory merged state, and a missing
@@ -19115,8 +19449,11 @@ class OnboardingStatePatchRequest(BaseModel):
     github_docs_scope: list[dict] | None = None
     # #2001 (W5): FLOW keys DECLARED on the PATCH surface so a stray client
     # send is REJECTED loudly (403/422) instead of silently dropped — and
-    # catalog-presented, the ONE step key the dashboard writes (W1/W8 first
-    # catalog render, step-edge MERGE). All other FLOW keys are
+    # catalog-presented, the ONE step key a client may still PATCH (step-edge
+    # MERGE — an optional record, never a completion requirement). Since #3913
+    # (owner ruling 2026-09-20) NO dashboard path sends it: the fork card writes
+    # only the fork (or its unsure marker), never a step, and the id stays
+    # accepted for agent/external callers and for existing orgs' completed_steps. All other FLOW keys are
     # server-owned / checkpoint-owned on this surface.
     catalog_presented: bool | None = None
     harness_connected: bool | None = None
@@ -19176,10 +19513,12 @@ async def get_capabilities(org: dict = Depends(get_current_org_session_ungated))
     The indexers+extractors registry rows from tool_registry.py
     ``CAPABILITY_CATALOG`` (R2-9 — no new infra): one canonical list for the
     registry endpoint AND the dashboard's build-path catalog read (W8
-    replaced W1's static placeholder source with this endpoint; the
-    dashboard's first build-fork render marks the catalog-presented
-    checkpoint via the existing W1/W5 mechanism — presentation only, never
-    a billing gate). Org-independent static registry data (no graph
+    replaced W1's static placeholder source with this endpoint; the BUILD
+    fork pick records the FORK ONLY — since #3913 (owner ruling 2026-09-20)
+    no dashboard path writes catalog-presented, and the id stays accepted for
+    agent/external callers. Presentation only, never a billing gate, never a
+    build-completion requirement). Org-independent static
+    registry data (no graph
     touch — never 'unavailable'); dual-auth like the onboarding state reads.
 
     Contract: ``200 {modules: [{name, kind: indexer|extractor, description,
@@ -19242,8 +19581,13 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
-        _track_analytics_event(org["org_id"], "artifact_copied",
-                               {"harness": harness, "section": section})
+        # #3498: the analytics write builds a fresh httpx.Client per event —
+        # a blocking PostgREST call; off the loop.
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                org["org_id"], "artifact_copied",
+                {"harness": harness, "section": section}),
+            op="analytics_event", best_effort=True)
     elif harness is not None or section is not None:
         # #3821: an enum-invalid beacon used to produce NO event and NO
         # observer — indistinguishable from a beacon that never fired. The
@@ -19290,7 +19634,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     updates = _validate_scope_payload(updates)
     # #2001 (W5): per-key-type write-surface ownership at the PATCH
     # boundary — server-owned FLOW keys 403, agent-step keys 422, the one
-    # dashboard step (catalog-presented) MERGEs the step edge.
+    # client-writable step (catalog-presented) MERGEs the step edge. Since
+    # #3913 the dashboard no longer sends it; the surface stays open for
+    # agent/external callers.
     _sent_owned = [k for k in _PATCH_SERVER_OWNED_KEYS if k in updates]
     if _sent_owned:
         raise HTTPException(
@@ -19349,8 +19695,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 # #2001 (W5): agent/internal checkpoint — the ONLY surface for the agent
 # steps + fork/compact set-once + last_decide_attempt LWW + member_progress.
-# Per-step write-surface ownership (scope pin 8): the dashboard PATCHes only
-# operational keys + catalog-presented; agents checkpoint everything else.
+# Per-step write-surface ownership (scope pin 8): the PATCH surface accepts
+# operational keys + catalog-presented (no dashboard path has sent the latter
+# since #3913); agents checkpoint everything else.
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
@@ -19531,6 +19878,25 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     except Exception:
         raise HTTPException(status_code=500,
                             detail="Checkpoint failed — retry-safe") from None
+    # #2006 (W11): funnel events for the step edges THIS call newly created.
+    # ``created_steps`` already carries the structural gate — a replay
+    # (created=False) is silent, and the edge-creation transition is
+    # exact-once per edge creation, so this survives restarts and multiple
+    # workers with no in-process set. Emission sits OUTSIDE the write-path
+    # try/except above: telemetry can never turn a committed checkpoint into
+    # a 500.
+    if created_steps:
+        # Off the loop (the analytics.py contract for async handlers) and
+        # guarded HERE too: the write above has already committed, so even a
+        # bug in the emitter itself must not turn a committed checkpoint into
+        # a 500 (R19 — telemetry never degrades the API).
+        try:  # noqa: SIM105
+            await asyncio.to_thread(
+                _emit_onboarding_step_events, created_steps,
+                distinct_id=_onboarding_distinct_id(org_id, org),
+                org_id=org_id, source="checkpoint")
+        except Exception:
+            pass
     return {
         "created_steps": created_steps,
         "noop_steps": noop_steps,
@@ -19591,16 +19957,18 @@ class _OrgSeedSurface:
 
 def _next_onboarding_step(org_id: str, proj) -> str | None:
     """First incomplete fork-aware step after the seed (the decide nudge
-    target): self fork → decide; build → catalog-presented; compact →
-    harness-connected. 'done' when the gate already satisfied the status."""
+    target): self fork → decide; build/compact → harness-connected (the
+    #3913 build gate is the two observed acts; first-points-filed is written
+    by the seed itself, so after a successful seed only harness-connected can
+    still be open). 'done' when the gate already satisfied the status."""
     node = _os.read_onboarding_node(proj, org_id)
     if node is None or node.get("status") == _os.STATUS_COMPLETE:
         return "done"
     steps = set(_os.completed_steps(proj, org_id))
-    if bool(node.get("compact")):
+    # #3913: build no longer trails catalog-presented — build and compact share
+    # the reduced post-seed checklist (the seed files first-points-filed).
+    if bool(node.get("compact")) or node.get("fork") == _os.FORK_BUILD:
         order = ("harness-connected",)
-    elif node.get("fork") == _os.FORK_BUILD:
-        order = ("harness-connected", "catalog-presented")
     else:
         order = ("harness-connected", "decide-completed")
     for step in order:
@@ -19699,6 +20067,14 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
         step = _os.write_completed_step(
             proj, org_id, "first-points-filed",
             status_from_mirror=legacy_mirror)
+        if step.get("created"):
+            # #2006 (W11): the edge's new creation is the once-per-org fact
+            # (a replay reports created=False and emits nothing).
+            _emit_onboarding_step_events(
+                ["first-points-filed"],
+                distinct_id=_onboarding_distinct_id(
+                    org_id, user_id=person_user_id),
+                org_id=org_id, source="seed")
         _maybe_apply_completion(org_id)
     finally:
         sdk.close()
@@ -19862,6 +20238,15 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
             step = _os.write_completed_step(
                 proj, org_id, "first-points-filed",
                 status_from_mirror=legacy_mirror)
+            if step.get("created"):
+                # #2006 (W11): provisioning-time seed step — same structural
+                # gate as the interactive seed (only ONE of the two writers
+                # can ever see created=True for a given org).
+                _emit_onboarding_step_events(
+                    ["first-points-filed"],
+                    distinct_id=_onboarding_distinct_id(
+                        org_id, user_id=person_user_id),
+                    org_id=org_id, source="starter_seed")
         _maybe_apply_completion(org_id)
     finally:
         sdk.close()
@@ -19955,9 +20340,9 @@ async def set_session_recording(body: dict, org: dict = Depends(get_current_org_
     # #1927 semantic drift: the off-switch fires question_answered for
     # continuity with existing analytics — toggle-off is NOT a consent
     # answer (the consent/re-ask machinery was removed).
-    _track_onboarding_event(org, "question_answered",
-                            question_id="session_recording",
-                            answer="yes" if enabled else "no")
+    await _track_onboarding_event(org, "question_answered",
+                                  question_id="session_recording",
+                                  answer="yes" if enabled else "no")
     return {"onboarding": state}
 
 
@@ -20026,15 +20411,19 @@ async def create_onboarding_org(body: dict,
                 status_code=402,
                 detail=_one_free_org_detail(_free_org_ids[0]),
             )
-        return _create_onboarding_org_lane(org, name, owner_user_id)
+        return await _create_onboarding_org_lane(org, name, owner_user_id)
 
 
-def _create_onboarding_org_lane(org: dict, name: str,
+async def _create_onboarding_org_lane(org: dict, name: str,
                                  owner_user_id: str) -> dict:
     """#1954: the onboarding sub-org lane — re-entry guard + provision +
     org_created write. MUST be called holding the caller's
     _org_create_lock (the guard is read-then-write; the lock is what makes
-    a concurrent double-call mint exactly one sub-org)."""
+    a concurrent double-call mint exactly one sub-org).
+
+    #3498: async so its analytics emit can be offloaded (the emit is a
+    blocking PostgREST write); the caller's ``asyncio.Lock`` is held across
+    the await, which is safe."""
     # NOTE (second-model P2, plan deviation): the plan's "reject non-UUID
     # created_by" step is NOT applied — the test fixtures use non-UUID ids
     # by design, and the provision RPC already maps a non-UUID uuid-column
@@ -20093,8 +20482,8 @@ def _create_onboarding_org_lane(org: dict, name: str,
                                     detail="Organization name already exists")
             raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
         _update_onboarding_state(org["org_id"], org_created=True)
-        _track_onboarding_event(org, "question_answered",
-                                question_id="create_team", answer="yes")
+        await _track_onboarding_event(org, "question_answered",
+                                      question_id="create_team", answer="yes")
         return {"org_id": org_id, "name": name, "graph_name": graph_name}
     # #1748: the registry-lane SDK must be the CANONICAL control plane
     # (namespace="registry" → registry_control_plane). The old
@@ -20113,8 +20502,8 @@ def _create_onboarding_org_lane(org: dict, name: str,
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
     _update_onboarding_state(org["org_id"], org_created=True)
-    _track_onboarding_event(org, "question_answered",
-                            question_id="create_team", answer="yes")
+    await _track_onboarding_event(org, "question_answered",
+                                  question_id="create_team", answer="yes")
     return {"org_id": result.get("id"), "name": name,
             "graph_name": result.get("graph_name")}
 
@@ -20139,8 +20528,8 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     ).result_set
     if existing:
         _update_onboarding_state(org["org_id"], demo_created=True)
-        _track_onboarding_event(org, "first_memory_created",
-                                source="demo", point_count=15)
+        await _track_onboarding_event(org, "first_memory_created",
+                                      source="demo", point_count=15)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
     # #1922: quota-gate the seed like the MCP twin
@@ -20488,11 +20877,12 @@ _ANALYTICS_RESOLVE_NOT_BEFORE = None
 # only when the window did not move under the resolve. The single exception is
 # the process-start UNKNOWN state, where a failed read arms nothing (the window
 # doubles as the alert gate): there a delivered write retries until the store
-# answers, and each retry pays a fresh store CONSTRUCTION plus one read
-# (`_analytics_alert_store()` rebuilds the channel and `_backup_storage()`
-# builds a new object-store client per attempt) — not the R2 PUT + GitHub
-# search + Telegram a dispatch costs. An honest bound, chosen over a window
-# that would silence a real episode.
+# answers, and each retry rebuilds the alert channel and pays one read —
+# `_analytics_alert_store()` rebuilds the channel per attempt, while the
+# object store and its boto3 client are process-wide (keyed on the resolved
+# R2 config, #3968) — not the R2 PUT + GitHub search + Telegram a dispatch
+# costs. An honest bound, chosen over a window that would silence a real
+# episode.
 _ANALYTICS_RESOLVE_BACKOFF_S = 300
 # #3820 (cycle-8 P1): the resolve is serialized by its OWN lock — separate from
 # `_ANALYTICS_ALERT_LOCK` so the claim cannot be blocked by the counters or the
@@ -21253,16 +21643,25 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     }
 
 
-def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
+async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     """Convenience: track with the current org, swallowing errors.
 
     #3821: the ONE exception that must escape this swallow is
     ``UnregisteredTelemetryKey`` — strict mode exists precisely so a
     misregistered prop cannot be silently swallowed by this wrapper.
     Everything else is still swallowed (analytics must never break the
-    onboarding flow)."""
+    onboarding flow).
+
+    #3498: async because the write it wraps is a blocking PostgREST call —
+    ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
+    event, which used to run ON the event loop from every async caller. The
+    strict-mode ``UnregisteredTelemetryKey`` still escapes (it is raised in the
+    worker thread and re-raised through ``await``)."""
     try:
-        _track_analytics_event(org["org_id"], event_name, props or None)
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                org["org_id"], event_name, props or None),
+            op="analytics_event", best_effort=True)
     except UnregisteredTelemetryKey:
         raise
     except Exception:
@@ -21472,8 +21871,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
     welcome_url = f"{email_link_base()}/welcome.html"
 
     if error:
-        _track_analytics_event("", "onboarding_error",
-                               {"step": "github_connect", "error_type": "oauth_denied"})
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                "", "onboarding_error",
+                {"step": "github_connect", "error_type": "oauth_denied"}),
+            op="analytics_event", best_effort=True)
         return RedirectResponse(f"{welcome_url}?github=denied", status_code=302)
 
     # Validate state — 404 on missing/invalid (don't leak existence)
@@ -21548,8 +21950,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
             _run_indexing(job_id, org_id, org, None))
-    _track_analytics_event(org_id, "question_answered",
-                           {"question_id": "github_connect", "answer": "yes"})
+    await _cp_offload(
+        lambda: _track_analytics_event(
+            org_id, "question_answered",
+            {"question_id": "github_connect", "answer": "yes"}),
+        op="analytics_event", best_effort=True)
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
@@ -21676,7 +22081,11 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     except ValueError:
         return {"connected": False, "org": None, "repos_count": None}
     gh_org = await _heal_github_org(_org_id, encrypted, gh_org)
-    repos_count = _github_repos_count(token)
+    # #3498 (the audit's §A1 item 9): _github_repos_count is a BLOCKING
+    # httpx.Client call to api.github.com — off the loop.
+    repos_count = await _cp_offload(
+        lambda: _github_repos_count(token), op="github_repos_count",
+        best_effort=True)
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
@@ -22713,14 +23122,32 @@ if os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower() == "memory":
         "process memory only and are LOST on restart (test seam, #303)"
     )
 _MEMORY_BACKUP_STORE: MemoryStorage | None = None
+# #3968: the DEFAULT (R2) path needs the same process-wide reuse the memory seam
+# already has. Without it every `_backup_storage()` call built a fresh
+# `R2Storage`, and `R2Storage._s3()` builds a fresh boto3 client per instance —
+# so the #3820 process-start-UNKNOWN resolve (which retries one read per
+# delivered write until the store answers) paid a client construction per
+# write. Keyed on the RESOLVED R2 config (`_r2_config_from_env`), never a bare
+# "have we built one yet" flag: a changed `R2_*` env (a credential rotation, or
+# a test's monkeypatch) rebuilds the store instead of pinning a stale
+# credential into a long-lived client. No health/refresh path is needed because
+# the env IS the credential source in this process model — the key covers it.
+_R2_BACKUP_STORE: R2Storage | None = None
+_R2_BACKUP_STORE_CONFIG: tuple[str, str, str, str] | None = None
 
 
 def _backup_storage() -> R2Storage | MemoryStorage:
     """Backup object store. R2 from env (R2_ACCOUNT_ID / ...) by default.
 
     TORTOISE_BACKUP_STORAGE=memory → process-wide MemoryStorage singleton
-    (E2E seam, #303). Unknown value → RuntimeError (fail-closed)."""
-    global _MEMORY_BACKUP_STORE
+    (E2E seam, #303). Unknown value → RuntimeError (fail-closed).
+
+    The R2 path is ALSO process-wide, keyed on the resolved R2 config (#3968):
+    N calls build one ``R2Storage`` (and therefore one lazily-built boto3
+    client), not N. An incomplete config still raises here, fail-closed — the
+    key is compared BEFORE any return, so a removed ``R2_*`` cannot be served
+    out of a previously-populated cache."""
+    global _MEMORY_BACKUP_STORE, _R2_BACKUP_STORE, _R2_BACKUP_STORE_CONFIG
     mode = os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower()
     if mode == "memory":
         if _MEMORY_BACKUP_STORE is None:
@@ -22734,7 +23161,15 @@ def _backup_storage() -> R2Storage | MemoryStorage:
         raise RuntimeError(
             f"TORTOISE_BACKUP_STORAGE={mode!r} unknown — use 'memory' or unset for R2"
         )
-    return R2Storage()
+    config = _r2_config_from_env()
+    if _R2_BACKUP_STORE is None or config != _R2_BACKUP_STORE_CONFIG:
+        # `R2Storage()` re-resolves the SAME env into the SAME tuple, so the
+        # cached store always describes `config`. Assign only AFTER a
+        # successful construction: a raise (missing R2_*) leaves the cache
+        # untouched rather than half-updated.
+        _R2_BACKUP_STORE = R2Storage()
+        _R2_BACKUP_STORE_CONFIG = config
+    return _R2_BACKUP_STORE
 
 
 def _backup_mirror_storage(cfg) -> R2Storage | None:
@@ -22802,7 +23237,7 @@ def _require_backup_tier(org: dict) -> None:
     if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Pro feature — upgrade to enable hourly backups",
+            detail="Backups are a Builder feature — upgrade to enable hourly backups",
         )
 
 
@@ -22899,7 +23334,16 @@ def _incident_subject(inc: dict) -> str:
     return tid
 
 
+# #4144: the public backups family is ALSO served under `/v1/`. The dashboard
+# reaches the API only through the same-origin BFF proxy
+# (`website/apps/dashboard/functions/api/v1/[[path]].ts`), which rebuilds the
+# upstream URL as `${API_ORIGIN}/v1/${rest}` — it cannot produce a bare path.
+# Served only at `/backups`, the dashboard's `loadBackups` got a 404 from Pages
+# (no `api/backups.ts` exists either) and the Backups card silently read as
+# empty. The alias is the SAME function object, so it cannot drift into a
+# second implementation.
 @app.get("/backups")
+@app.get("/v1/backups")
 async def backups_list(org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """List this org's backups (newest first) with timestamps + node counts.
 
@@ -22907,7 +23351,7 @@ async def backups_list(org: dict = Depends(get_current_org_session_ungated)):  #
     loadBackups call carries NO key when a recoverable mint failure left
     apiKey empty (the overview reads ride the session JWT), so a bare
     get_current_org dependency 401'd and the Backups card silently
-    disappeared for Pro users. Ungated dual-auth accepts session JWT OR
+    disappeared for Builder-plan (`pro`) users. Ungated dual-auth accepts session JWT OR
     tt_ key; only org["org_id"] is read below, so a session-resolved
     dict behaves identically."""
     org_id = org.get("org_id")
@@ -23042,8 +23486,9 @@ async def _org_restore_lock(org_id: str) -> asyncio.Lock:
 
 
 @app.post("/backups", status_code=201)
+@app.post("/v1/backups", status_code=201)  # #4144 BFF-reachable alias
 async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """Trigger an on-demand backup of the org graph (Pro tier)."""
+    """Trigger an on-demand backup of the org graph (Builder plan, tier `pro`)."""
     org_id = org.get("org_id")
     if not org_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -23181,8 +23626,9 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
 
 
 @app.post("/backups/restore")
+@app.post("/v1/backups/restore")  # #4144 BFF-reachable alias
 async def backups_restore(body: BackupRestoreRequest, request: Request, org: dict = Depends(get_current_org_session)):  # noqa: B008
-    """Restore the org graph from a backup (Pro tier; confirm=true required).
+    """Restore the org graph from a backup (Builder plan, tier `pro`; confirm=true required).
 
     Restores into a temp graph, verifies node/edge counts against the payload,
     then swaps (pre-restore safety copy → delete live → copy temp). The live
@@ -23299,6 +23745,13 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
 # not true).
 
 _WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # noqa: F821
+# #2877: why the watcher is not running. `_WATCHER is None` ALONE cannot tell a
+# dead monitor from a deliberately-disabled one — it is also the fail-closed
+# default (no/invalid backup config) and the `BACKUP_WATCHER_DISABLED=1` kill
+# switch. Set only from the watcher-start `except` in `_lifespan`; cleared when
+# the watcher starts cleanly, so the one signal it carries is "wanted but
+# failed". Read by `_backup_watcher_health()` for /health.
+_WATCHER_START_ERROR: str | None = None
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600
@@ -25083,9 +25536,11 @@ async def webhooks_stripe(request: Request):
                 request, org_id, notify_kind,
                 resource_type="team", resource_id=org_id,
             )
-            _track_analytics_event(org_id, notify_kind, {
-                "plan": tier, "tier": tier, "status": etype,
-            })
+            await _cp_offload(
+                lambda: _track_analytics_event(org_id, notify_kind, {
+                    "plan": tier, "tier": tier, "status": etype,
+                }),
+                op="analytics_event", best_effort=True)
             notify_billing_event(
                 notify_kind, {"org_id": org_id, "tier": tier},
                 {"subscription_status": etype},
@@ -25486,13 +25941,14 @@ async def oauth_authorize(request: Request):
         "resource": request.query_params.get("resource", ""),
     }
     try:
-        client = validate_authorize_params(
-            cp, client_id=params["client_id"],
-            redirect_uri=params["redirect_uri"] or None,
-            response_type=params["response_type"] or None,
-            code_challenge=params["code_challenge"] or None,
-            code_challenge_method=params["code_challenge_method"] or None,
-        )
+        client = await _oauth_offload(
+            lambda: validate_authorize_params(
+                cp, client_id=params["client_id"],
+                redirect_uri=params["redirect_uri"] or None,
+                response_type=params["response_type"] or None,
+                code_challenge=params["code_challenge"] or None,
+                code_challenge_method=params["code_challenge_method"] or None),
+            op="oauth_authorize_params")
     except OAuthError as exc:
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
         # Open-redirect guard: only redirect when the redirect_uri is
@@ -25506,17 +25962,15 @@ async def oauth_authorize(request: Request):
         # `_redirect_uri_matches` also refuses parse-differential input: this is
         # the one place the raw request param is echoed into a Location header,
         # so relaxing the match without that guard would BE the open redirect.
-        from tortoise.oauth import _redirect_uri_matches, resolve_client
-        client = None
-        if params["client_id"]:
-            try:
-                # #2847: the resolver, not `get_client`, so a CIMD client's
-                # in-document redirect_uri is honoured on this path too.
-                # Best-effort: a refused fetch must not turn an OAuth error
-                # response into a 5xx, so this stays non-fatal.
-                client = resolve_client(cp, params["client_id"])
-            except Exception:
-                client = None
+        #
+        # #3669 finding 2: `validate_authorize_params` STAMPS the client it
+        # resolved (None when unresolved) on the raised OAuthError, so this
+        # handler never re-resolves. Re-resolving here cost a SECOND CIMD
+        # fetch and a second rate-limit charge on the FAILURE path (the success
+        # path paid nothing — the cache absorbed it), halving the effective
+        # failure budget.
+        from tortoise.oauth import _redirect_uri_matches
+        client = getattr(exc, "client", None)
         registered_uris = (client.get("redirect_uris") or []) if client else []
         if not isinstance(registered_uris, (list, tuple)):
             registered_uris = [registered_uris]
@@ -25598,13 +26052,14 @@ async def oauth_consent(request: Request):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     try:
-        client = validate_authorize_params(
-            cp, client_id=body.get("client_id", ""),
-            redirect_uri=body.get("redirect_uri") or None,
-            response_type=body.get("response_type") or None,
-            code_challenge=body.get("code_challenge") or None,
-            code_challenge_method=body.get("code_challenge_method") or "S256",
-        )
+        client = await _oauth_offload(
+            lambda: validate_authorize_params(
+                cp, client_id=body.get("client_id", ""),
+                redirect_uri=body.get("redirect_uri") or None,
+                response_type=body.get("response_type") or None,
+                code_challenge=body.get("code_challenge") or None,
+                code_challenge_method=body.get("code_challenge_method") or "S256"),
+            op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)
     # The browser session JWT — same JWKS/ES256+RS256 verification the session
@@ -25650,11 +26105,22 @@ async def oauth_token(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     grant = body.get("grant_type")
+    base = _oauth_base(request)
     try:
+        # #3669: the token grant is offloaded as a UNIT — `_verify_client_auth`
+        # resolves the client (a CIMD fetch for an https client_id) and the
+        # grant then makes several blocking PostgREST calls. Offloading the
+        # grant puts both off the loop and charges the CIMD bounds at BOTH
+        # token front doors (auth-code and refresh) as well as the two
+        # authorize/consent doors, because all four reach `resolve_client`.
         if grant == "authorization_code":
-            out = exchange_auth_code(cp, body, _oauth_base(request))
+            out = await _oauth_offload(
+                lambda: exchange_auth_code(cp, body, base),
+                op="oauth_token_exchange", no_wait_bound=True)
         elif grant == "refresh_token":
-            out = refresh_grant(cp, body, _oauth_base(request))
+            out = await _oauth_offload(
+                lambda: refresh_grant(cp, body, base),
+                op="oauth_token_refresh", no_wait_bound=True)
         else:
             raise OAuthError(400, "unsupported_grant_type",
                              "grant_type must be authorization_code or refresh_token")

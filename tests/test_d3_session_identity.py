@@ -363,7 +363,9 @@ def test_ask_lane_annotation_does_not_touch_the_dedup_pool():
     """POOL SAFETY: the derived identity must NOT be attached as the
     ``session_id`` key on ask-lane hits, because that key IS the ask lane's
     ``dedup_pool`` bucket key — attaching it re-buckets the pool and changes
-    which hits fit the 8k/32KiB reader window (measured: the eval lane's
+    which hits fit the resolved ask-lane reader window (default
+    200/200/16000/derived since #4105; 8k/32KiB before it) (measured: the
+    eval lane's
     ``:Session`` ids are internal ``lme:{qid}:sNN`` values, so the join would
     re-bucket every dataset hit). The identity rides read-only instead.
     """

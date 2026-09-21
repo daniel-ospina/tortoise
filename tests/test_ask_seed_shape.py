@@ -143,18 +143,23 @@ def test_seed_capture_turn_store_is_capture_exact(sdk):
     assert is_episodic is True, sessions[0]
     assert [list(r) for r in edges] == [["sess-x", i] for i in ids]
 
-    # #4194 — the ONE deliberate seeder/capture divergence: the seeder does NOT
-    # embed its turns. The real capture path now DOES (both turn-write paths),
-    # but the ask lane must keep exercising the un-backfilled / no-embedder
-    # store its consumers actually read until #4197's backfill decision. Pin
-    # the ABSENCE so a future "restore seeder/capture parity" edit cannot
-    # silently erase that coverage (the #3914 drift class this file owns).
+    # #4194 / W7A — the seeder now MATCHES capture's turn write by embedding
+    # every turn by DEFAULT, because a fixture without a vector BLINDS the
+    # retrieval measurements to the dense leg (the instrument reported
+    # ``retrieval_degraded`` 21/21 for that reason). The un-embedded
+    # ``embed=False`` variant still models the pre-#4194 / no-embedder store
+    # (#4197's backlog) and is pinned by
+    # ``test_seed_capture_turn_store_embeds_by_default_and_can_model_the_backlog``.
+    # Here we only pin the DEFAULT side; when no embedder is installed the
+    # product cannot embed either, so the fail-soft shape is NULL per turn.
+    from tortoise.embeddings import EmbeddingModel
     embedded = sdk._get_proj().g.query(
         "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-x_t' "
         "AND t.embedding IS NOT NULL RETURN count(t)").result_set
-    assert embedded[0][0] == 0, (
-        "seed_capture_turn_store must not embed turns until #4197 — see its "
-        "#4194 comment")
+    if EmbeddingModel.get() is None:
+        assert embedded[0][0] == 0, embedded
+    else:
+        assert embedded[0][0] == len(ids), embedded
 
     # Pre-mutation blank gate: nothing at all is written for a blank session.
     assert seed_capture_turn_store(
@@ -162,6 +167,140 @@ def test_seed_capture_turn_store_is_capture_exact(sdk):
     after = sdk._get_proj().g.query(
         "MATCH (s:Session {id:'sess-blank'}) RETURN count(s)").result_set
     assert after[0][0] == 0
+
+
+def test_seed_capture_turn_store_embeds_by_default_and_can_model_the_backlog(
+        sdk):
+    """W7A: the fixture stores the PRODUCT's own turn vector by default.
+
+    The product's turn write now embeds every episodic turn (#4194), so a
+    default fixture without a vector models a store the product no longer
+    writes and BLINDS every retrieval measurement to the dense leg — the
+    frozen instrument reported ``retrieval_degraded`` 21/21 for exactly that
+    reason. ``embed=False`` seeds #4197's BACKLOG state (captured before the
+    backfill, or with no embedder installed): no ``embedding`` at all. Both
+    shapes are pinned here so a later edit cannot silently swap them.
+    """
+    from tortoise.embeddings import EmbeddingModel, compute_embedding
+    from tortoise.search_engine import run_vector_query
+
+    turns = [{"role": "user", "content": "the gym schedule is Monday"},
+             {"role": "assistant", "content": "noted, Monday it is"}]
+    proj = sdk._get_proj()
+    has_embedder = EmbeddingModel.get() is not None
+
+    # (a) DEFAULT — the product's own vector, on every turn of the session.
+    ids = seed_capture_turn_store(sdk, "sess-emb", turns)
+    assert ids == [f"sess-emb_t{i}" for i in range(len(turns))], ids
+    embedded = proj.g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-emb_t' "
+        "AND t.embedding IS NOT NULL RETURN count(t)").result_set[0][0]
+    if not has_embedder:
+        # No embedder installed: the product cannot embed either, and the
+        # fail-soft shape is NULL — never an invented stand-in vector.
+        assert embedded == 0, embedded
+    else:
+        assert embedded == len(ids), (embedded, ids)
+
+        # ... each stored vector IS the product encoder's own output for the
+        # turn's stored text (same model, dimension, normalisation) — never a
+        # stand-in. This also pins the batched composition equal to the single
+        # ``compute_embedding`` the product's read path uses.
+        import numpy as np
+        rows = proj.g.query(
+            "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-emb_t' "
+            "RETURN t.id, t.content, t.embedding ORDER BY t.id").result_set
+        assert len(rows) == len(ids), rows
+        for pid, stored_text, stored in rows:
+            want = compute_embedding(stored_text)
+            assert want is not None and len(want) == 384, (pid, want)
+            assert len(stored) == len(want), (pid, len(stored))
+            assert np.allclose(np.asarray(stored, dtype=float),
+                               np.asarray(want, dtype=float), atol=1e-5), pid
+
+        # ... and the read path's OWN vector leg is non-degraded on it.
+        trace: list[dict] = []
+        hits = run_vector_query(proj.g, compute_embedding("gym schedule"),
+                                limit=10, leg_trace=trace)
+        assert trace and trace[-1]["degraded"] is False, trace
+        assert hits, "the seeded turn vector must be retrievable"
+        assert all(h[0] in ids for h in hits), hits
+
+    # (b) BACKLOG — the pre-#4194 / no-embedder shape: NO ``embedding``.
+    # Asserted whether or not an embedder is installed, so the switch always
+    # has coverage.
+    seed_capture_turn_store(sdk, "sess-backlog", turns, embed=False)
+    backlog = proj.g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-backlog_t' "
+        "AND t.embedding IS NOT NULL RETURN count(t)").result_set[0][0]
+    assert backlog == 0, backlog
+
+
+def test_seeder_turn_vectors_go_through_the_store_width_guard(
+        sdk, monkeypatch):
+    """W7A: the seeder routes through #4304's STORE seam, not the raw encoder.
+
+    #4280: the vector-width constraint belongs to the store's Point HNSW index,
+    so a write path must call ``encode_batch_for_store`` with
+    ``proj.required_embedding_dim``. Calling the raw encoder instead has two
+    failure shapes, and this test pins BOTH — only a path that consults
+    ``required_embedding_dim`` can pass:
+
+      * an INDEXED store declares :data:`EMBEDDING_DIM` — a wrong-width vector
+        must degrade to NO vector, because storing it hands ``vecf32`` a
+        vector the index cannot hold (a broken leg, not a near-miss);
+      * the index-less brute-force lane declares ``None`` — a self-consistent
+        vector of ANY width must be KEPT. Dropping it is the #4280 regression
+        that emptied the cross-lens pool (``p.embedding IS NOT NULL``).
+
+    The wrong width comes from a replaced ``EmbeddingModel``, so the test does
+    not depend on the ambient lane or the real encoder's width.
+    """
+    import numpy as np
+
+    from tortoise.embeddings import EMBEDDING_DIM, EmbeddingModel
+    from tortoise.projection import FalkorProjection
+
+    if EmbeddingModel.get() is None:
+        pytest.skip("no embedder installed — the seeder fails soft to NULL")
+
+    class _WrongDim:
+        def encode(self, texts, batch_size=32, show_progress_bar=False):
+            return np.zeros((len(texts), EMBEDDING_DIM - 1))
+
+    turns = [{"role": "user", "content": f"width probe {i}"}
+             for i in range(3)]
+
+    def _stored(sid: str) -> list:
+        return [r[0] for r in sdk._get_proj().g.query(
+            "MATCH (t:Point) WHERE t.id STARTS WITH $p "
+            "RETURN t.embedding ORDER BY t.id",
+            params={"p": f"{sid}_t"}).result_set]
+
+    try:
+        monkeypatch.setattr(
+            EmbeddingModel, "get",
+            classmethod(lambda cls, load_timeout=None: _WrongDim()))
+        EmbeddingModel._reset()
+
+        # (a) INDEXED store: the wrong-width vector is DROPPED; the turn lands.
+        monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                            property(lambda self: EMBEDDING_DIM))
+        ids = seed_capture_turn_store(sdk, "sess-xguard", turns)
+        assert len(ids) == len(turns), ids
+        assert all(v is None for v in _stored("sess-xguard")), (
+            _stored("sess-xguard"))
+
+        # (b) NO index: the encoder's own width governs — the SAME vector is
+        # KEPT (dropping it here is exactly the #4280 failure shape).
+        monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                            property(lambda self: None))
+        seed_capture_turn_store(sdk, "sess-noidx", turns)
+        got = _stored("sess-noidx")
+        assert got and all(v is not None for v in got), got
+        assert all(len(v) == EMBEDDING_DIM - 1 for v in got), got
+    finally:
+        EmbeddingModel._reset()
 
 
 # ── 2. The transcript seeder writes the capture shape ─────────────────────

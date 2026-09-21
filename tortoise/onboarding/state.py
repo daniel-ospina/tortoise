@@ -40,13 +40,13 @@ ONBOARDING_STEPS: frozenset[str] = frozenset(STEP_IDS)
 # Card COUNTED subset (⊆ canonical): the rows the Setup-guide card counts
 # toward N-of-M. capture-disclosed is canonical but NEVER a counted row —
 # "capture-disclosed before decide must NOT render '4 of 4'" (#2001 pin).
-# decide-completed and catalog-presented are fork-exclusive display rows
-# (self shows decide; build shows catalog) — per-fork M = 3, never 4.
+# decide-completed is the self-fork display row; the build fork renders only
+# harness-connected + first-points-filed (#3913 — the build gate is no longer
+# catalog-based). Per-fork M = 3 (self) / 2 (build), never 4.
 CARD_STEPS: tuple[str, ...] = (
     "harness-connected",
     "first-points-filed",
     "decide-completed",
-    "catalog-presented",
 )
 
 STATUS_ACTIVE = "active"
@@ -87,11 +87,16 @@ PER_KEY_SEMANTICS.update({
 })
 
 # gate definitions (epic plan §2 WF-4, scope pin 12) — compact-first
+# #3913 (owner ruling 2026-09-20): the build fork completes on the two acts
+# the server OBSERVES — a harness reached the server (harness-connected) and
+# a first point was filed (first-points-filed). `catalog-presented` is no
+# longer required (the id stays accepted on the checkpoint allowlist so
+# existing orgs' completed_steps remain valid — no data migration).
 _GATE_SELF: frozenset[str] = frozenset({
     "team-named", "harness-connected", "first-points-filed", "decide-completed",
 })
 _GATE_BUILD: frozenset[str] = frozenset({
-    "harness-connected", "first-points-filed", "catalog-presented",
+    "harness-connected", "first-points-filed",
 })
 _GATE_COMPACT: frozenset[str] = frozenset({
     "harness-connected", "first-points-filed",
@@ -1024,11 +1029,11 @@ def repair_false_decide_completion(graph: Any, org_id: str, *, apply: bool = Fal
 
     THE STATUS IS REGRESSED ONLY WHEN THE ORG IS NO LONGER COMPLETE WITHOUT
     THE EDGE. `decide-completed` is required by the SELF gate but NOT by the
-    compact gate (`{harness-connected, first-points-filed}`) or the build
-    gate (`{harness-connected, first-points-filed, catalog-presented}`), and
-    the pre-#3784 writer filed the edge on EVERY org — so a legitimately
-    complete compact/build org can carry a spurious decide edge. Removing
-    that edge is correct; regressing its status is not. After the removal the
+    reduced gates — the compact and (post-#3913) build gates are both
+    `{harness-connected, first-points-filed}` — and the pre-#3784 writer filed
+    the edge on EVERY org, so a legitimately complete compact/build org can
+    carry a spurious decide edge. Removing that edge is correct; regressing
+    its status is not. After the removal the
     canonical fork-aware gate (and the legacy grandfathered branch — see
     ``_legacy_grandfathered``) is re-evaluated, and the status is left alone
     when either still grants completion. A half-repaired node (edge gone,

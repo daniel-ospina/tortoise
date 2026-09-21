@@ -249,6 +249,12 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # and no production seam resolves the name.
         '"registry_3895"': "test-constructed",  # scratch registry handle for create_backup's stamp seam
     },
+    # #4290: declared per the new-test-file registration rule. ZERO sites by
+    # construction — the finding-provenance gate is hermetic over a temp git
+    # repo and never calls select_graph; the key is a deliberate "considered,
+    # nothing to route" statement, and test_select_graph_routing_table_keys_exist
+    # pins that the module really exists.
+    "test_finding_provenance.py": {},
 }
 
 # Carve-out / non-migrated files exempt from both guards.
