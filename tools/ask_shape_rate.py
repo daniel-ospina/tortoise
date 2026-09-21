@@ -96,6 +96,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from datetime import UTC, datetime
@@ -445,20 +446,21 @@ def _redact_substrate_text(text: str) -> str:
     ``receipt['live']['per_question'][*]['error']``, which is a COMMITTED file
     (round-5 finding). The label was redacted; the text around it was not.
 
-    Fail-CLOSED by construction: the redaction set is built from the values
-    the substrate URI actually carried (raw value, netloc, hostname, username,
-    password — registered by the parse AND re-read from the env at call time),
-    and a token of ANY LENGTH is redacted. The worst case is therefore an
-    OVER-redacted diagnostic line, never a leaked credential — a receipt whose
-    error text reads oddly is the correct failure direction, and saying so is
-    why there is no length floor.
+    Fail-CLOSED by construction, within the rule the code actually implements:
+    the RAW value of each substrate env var is always registered, and its
+    derived components (netloc / hostname / username / password) plus any
+    bracketed host segment are registered whenever the parse yields them — each
+    under its OWN guard, so one raising property cannot drop the rest. A token
+    of ANY LENGTH is redacted, so the worst case is an OVER-redacted diagnostic
+    line and never a leaked credential — a receipt whose error text reads oddly
+    is the correct failure direction, and saying so is why there is no length
+    floor.
 
     An ABSENT or blank env value leaves the text unchanged. A value that cannot
     be PARSED still contributes its own RAW string — it is added to the set
-    BEFORE the ``try`` — so only its derived components (netloc / hostname /
-    username / password) are unavailable, and a message quoting the raw URI is
-    redacted all the same. The parse's own error text is never echoed, so this
-    function makes no claim about WHY a value failed to parse.
+    BEFORE the parse — so only its derived components are unavailable. The
+    parse's own error text is never echoed, so this function makes no claim
+    about WHY a value failed to parse.
 
     NOT applied inside ``_substrate_error``: its result feeds ``_run_arm``'s
     ``expected_error_prefix`` comparison, and redacting a token that happens to
@@ -474,14 +476,34 @@ def _redact_substrate_text(text: str) -> str:
         raw = os.environ.get(var, "").strip()
         if not raw:
             continue
+        # The RAW value is registered FIRST and unconditionally — a value the
+        # parser cannot decompose still redacts itself wherever it is quoted.
         secrets.add(raw)
         try:
             from urllib.parse import urlparse
             u = urlparse(raw)
-            secrets.update(c for c in (u.netloc, u.hostname, u.username,
-                                       u.password) if c)
         except Exception:  # noqa: BLE001, RUF100 — a redactor never raises
-            continue
+            u = None
+        if u is not None:
+            # ⚠️ ONE GUARD PER ATTRIBUTE, never a generator over the tuple:
+
+            # ``.hostname`` and ``.port`` raise EAGERLY on the malformed
+            # forms this function exists for, and a lazy generator would
+            # abort on the first raise and silently drop every LATER
+            # component (measured at review: only the raw value and netloc
+            # were registered for ``docker://:pw@[<secret>]:6379/g``).
+            for attr in ("netloc", "hostname", "username", "password"):
+                try:
+                    component = getattr(u, attr)
+                except Exception:  # noqa: BLE001, RUF100
+                    continue
+                if component:
+                    secrets.add(component)
+        # ``.hostname`` adds the brackets itself but RAISES when the host is
+        # not an IP literal — so the bracketed segment, which is exactly where
+        # a credential sits in that documented malformation, is captured
+        # explicitly instead of being lost with the raise.
+        secrets.update(re.findall(r"\[([^\]]+)\]", raw))
     for secret in sorted((s for s in secrets if s), key=len, reverse=True):
         text = re.sub(re.escape(secret), "***", text, flags=re.IGNORECASE)
     return text
@@ -557,16 +579,42 @@ def _install_redacting_excepthook() -> None:
     ``--mode seed-timing`` printed ``ConnectionError: Error 8 connecting to
     <password>:16379`` to stderr, i.e. into CI logs.
 
-    Installed by :func:`main`, so it covers every uncaught path (today's
-    ``seed_timing`` and any future one) rather than one call site. The
-    traceback SHAPE is preserved — type, frames and message — so the diagnostic
-    survives; only the credential tokens are substituted.
+    ⚠️ ``sys.excepthook`` is NOT the only stderr writer: CPython routes a
+    THREAD's uncaught exception through ``threading.excepthook`` and an
+    exception raised inside an ``atexit`` callback through
+    ``sys.unraisablehook``, and the DEFAULT implementations of both ignore
+    ``sys.excepthook`` and print the traceback themselves (measured at review:
+    the credential reached stderr verbatim from a thread and from an atexit
+    callback with only ``sys.excepthook`` installed). All THREE are replaced
+    here, sharing one redactor — so this really does cover every uncaught path
+    (today's ``seed_timing``, any future one, an off-main-thread fault, and a
+    teardown fault), not one call site.
+
+    Installed by :func:`main`. The traceback SHAPE is preserved — type, frames
+    and message — so the diagnostic survives; only the credential tokens are
+    substituted.
     """
-    def _hook(exc_type, exc, tb) -> None:
+    def _emit(exc_type, exc, tb) -> None:
         sys.stderr.write(_redact_substrate_text(
             "".join(traceback.format_exception(exc_type, exc, tb))))
 
+    def _hook(exc_type, exc, tb) -> None:
+        _emit(exc_type, exc, tb)
+
+    def _thread_hook(args) -> None:
+        name = getattr(getattr(args, "thread", None), "name", None) or "?"
+        sys.stderr.write(f"Exception in thread {name}:\n")
+        _emit(args.exc_type, args.exc_value, args.exc_traceback)
+
+    def _unraisable_hook(unraisable) -> None:
+        if unraisable.err_msg:
+            sys.stderr.write(f"{unraisable.err_msg}\n")
+        _emit(unraisable.exc_type, unraisable.exc_value,
+              unraisable.exc_traceback)
+
     sys.excepthook = _hook
+    threading.excepthook = _thread_hook
+    sys.unraisablehook = _unraisable_hook
 
 
 def _parse_substrate(base: str) -> tuple[str, str, int | None, str]:
@@ -1844,7 +1892,13 @@ def _write_receipt(args, receipt: dict) -> None:
     path = args.receipt or os.path.join(
         _REPO_ROOT, "docs", "runbook",
         f"ask-shape-rate-{datetime.now(UTC):%Y-%m-%d}.json")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # ``os.makedirs("")`` raises FileNotFoundError, so a bare relative
+    # ``--receipt receipt.json`` could not produce its evidence artifact
+    # (pre-existing on origin/main; fixed here because this is the write
+    # path). ``./receipt.json`` worked, which made the failure misleading.
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     receipt["receipt_path"] = path
     # ONE write chokepoint, redacted over the OBJECT TREE (never the serialized
     # text — see ``_redact_receipt``) and with a REDACTING encoder fallback

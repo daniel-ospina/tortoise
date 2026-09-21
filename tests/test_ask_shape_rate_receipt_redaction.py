@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools.ask_shape_rate import (
     _fresh_db,
     _install_redacting_excepthook,
+    _redact_substrate_text,
     _substrate_label,
     _write_receipt,
 )
@@ -341,3 +343,68 @@ def test_a_cyclic_receipt_neither_hangs_nor_truncates(monkeypatch, tmp_path):
     assert parsed["self"] == "<circular reference>"
     assert secret not in written
     assert not list(tmp_path.glob("*.tmp.*")), "temp file was left behind"
+
+
+def test_a_component_that_raises_does_not_drop_the_others(monkeypatch):
+    """``.hostname``/``.port`` raise EAGERLY on the documented malformations.
+
+    Registering the components through a lazy generator aborted on the first
+    raise and silently dropped the rest (measured at review: only the raw value
+    and netloc were registered for ``docker://:pw@[<secret>]:6379/g``), so the
+    redactor was weakest exactly where the netloc was most suspicious.
+    """
+    secret = "S3cret-Pa55w0rd"
+    for uri in (f"docker://:pw@[{secret}]:6379/g",
+                f"docker://:pw@[{secret}]:notaport/g"):
+        monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI", uri)
+        text = f"connecting to {secret} now"
+        assert secret not in _redact_substrate_text(text), uri
+        assert secret.lower() not in _redact_substrate_text(text).lower(), uri
+
+
+def test_the_hook_covers_threads_and_unraisable_exceptions(monkeypatch,
+                                                           capsys):
+    """CPython does NOT route a thread's uncaught exception or an atexit
+    callback's exception through ``sys.excepthook`` — their default hooks print
+    the traceback themselves, so installing only ``sys.excepthook`` left the
+    credential on stderr (measured at review)."""
+    secret = "S3cret-Pa55w0rd"
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+    saved = (sys.excepthook, threading.excepthook, sys.unraisablehook)
+    try:
+        _install_redacting_excepthook()
+        # (a) a THREAD's uncaught exception
+        def _boom():
+            raise ConnectionError(
+                f"Error 8 connecting to {secret.lower()}:16379.")
+        thread = threading.Thread(target=_boom, name="redaction-probe")
+        thread.start()
+        thread.join()
+        # (b) an UNRAISABLE (the atexit-callback path)
+        class _Unraisable:
+            exc_type = ConnectionError
+            exc_value = ConnectionError(
+                f"Error 8 connecting to {secret.lower()}:16379.")
+            exc_traceback = None
+            err_msg = "Exception ignored in atexit callback"
+
+        sys.unraisablehook(_Unraisable())
+    finally:
+        (sys.excepthook, threading.excepthook, sys.unraisablehook) = saved
+    err = capsys.readouterr().err
+    assert secret not in err
+    assert secret.lower() not in err.lower()
+    # a redaction, not a suppression
+    assert "Error 8 connecting to" in err
+    assert "Exception in thread redaction-probe" in err
+
+
+def test_a_bare_relative_receipt_path_can_be_written(monkeypatch, tmp_path):
+    """``os.makedirs("")`` raises, so ``--receipt receipt.json`` could not
+    produce its evidence artifact (pre-existing on origin/main)."""
+    monkeypatch.delenv("TORTOISE_ASK_SHAPE_DB_URI", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _write_receipt(SimpleNamespace(receipt="receipt.json"),
+                   {"instrument": "x"})
+    assert json.loads((tmp_path / "receipt.json").read_text())["instrument"] == "x"
