@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path'
 import {
   allowanceLine,
   capLimitFrom,
+  existingKeyNoteFrom,
   keyAllowance,
   rotateCapNoticeFrom,
   serverKeyLimit,
@@ -134,6 +135,56 @@ test('#2699: the degraded (no-number) create notice offers the achievable remedy
   assert.match(up, /Revoke an existing key to free a slot/, up)
   assert.doesNotMatch(up, /regenerate/i, up)
   assert.doesNotMatch(up, /\bof \d+ API keys\b/, `must not invent a limit: ${up}`)
+})
+
+// ── 4c. #4353: the connect step's existing-key note is cap-aware ─────────
+// Below the cap, rotate is the route that does not grow the count. AT the cap
+// it is a dead end: rotate mints the replacement through the SAME capped
+// POST /v1/team/keys before revoking the old row, so `regenerateKey` 402s on
+// its mint leg and the old key is never revoked. The note therefore returns
+// the canonical at-cap remedy (revoke — a revoked row leaves the gate's
+// count) exactly as the create-path notice states it.
+
+test('#4353: at the cap the existing-key note returns the canonical cap remedy, never rotate', () => {
+  const team = { max_api_keys: 2 }
+  const note = existingKeyNoteFrom(team, [{ id: 'a' }, { id: 'b' }])
+  // Pinned to the ONE canonical string — a second copy of the remedy here is
+  // exactly how the two surfaces desync.
+  assert.equal(note, rotateCapNoticeFrom('', team),
+    'the note must be the canonical at-cap notice, not a second copy that can drift')
+  assert.match(note, /revoke an unused key first/, note)
+  assert.doesNotMatch(note, /regenerate/i, `the dead end must not return: ${note}`)
+  assert.doesNotMatch(note, /^Rotate the existing key in the API Keys tab/, note)
+})
+
+test('#4353: below the cap the existing-key note keeps the rotate sentence', () => {
+  const note = existingKeyNoteFrom({ max_api_keys: 2 }, [{ id: 'a' }])
+  assert.match(note, /^Rotate the existing key in the API Keys tab/, note)
+  assert.match(note, /without adding a key/, note)
+  // The fresh-mint cost clause must survive the move out of main.jsx — the
+  // below-cap note has to name the price of creating another key here.
+  assert.match(note, /Creating a new key here spends another of your plan's key slots/, note)
+})
+
+test('#4353: an unknown allowance never fabricates a limit — the note stays the rotate sentence', () => {
+  for (const team of [{}, { max_api_keys: null }, { max_api_keys: undefined }, { max_api_keys: 'x' }]) {
+    const note = existingKeyNoteFrom(team, [{ id: 'a' }, { id: 'b' }, { id: 'c' }])
+    assert.match(note, /^Rotate the existing key in the API Keys tab/,
+      `unknown allowance (${JSON.stringify(team)}) must not claim the cap: ${note}`)
+  }
+})
+
+test('#4353: a revoked row does not hold a slot, so the note stays below-cap', () => {
+  const now = Date.parse('2026-09-18T00:00:00Z')
+  const rows = [
+    { id: 'live' },
+    { id: 'revoked', revoked_at: new Date(now - 1000).toISOString() },
+  ]
+  assert.equal(usedKeySlots(rows, now), 1,
+    'a revoked row is an audit tombstone — it leaves the gate count')
+  const note = existingKeyNoteFrom({ max_api_keys: 2 }, rows, now)
+  assert.match(note, /^Rotate the existing key in the API Keys tab/,
+    'one live row on a 2-key plan is not at the cap')
 })
 
 // ── 5. Cross-surface agreement (the issue's core invariant) ──────────────
