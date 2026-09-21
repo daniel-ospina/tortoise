@@ -9,6 +9,37 @@
   "tree": "clean at launch",
   "verified_by": "tools/longmem_eval/guard_measured_revision.py --rev 412470cd3 --paths tortoise/ tools/ -> rc=0 after removing 88 pre-existing __pycache__ byte-caches (guard class 16, #3712); all runs launched with -B + PYTHONDONTWRITEBYTECODE=1"
  },
+ "staleness": {
+  "status": "STALE-BY-DESIGN \u2014 a sealed historical measurement of ONE revision, not a statement about current main",
+  "caveat": "EVERY NUMBER IN THIS RECEIPT DESCRIBES REVISION 412470cd3 AND NOTHING ELSE; it is NOT a current-main result and must not be quoted as one. 412470cd3 is the measurement tip of branch fix/2513-retrieval-evidence, it is NOT an ancestor of origin/main (`git merge-base --is-ancestor 412470cd3 origin/main` exits non-zero), and the module this arm measures \u2014 tortoise/session_reinjection.py (472 lines at 412470cd3) \u2014 is ABSENT from origin/main entirely. The headline figures (session_recall@5 OFF 0.831 / ON-cap10 0.9225; evidence_recall@5 OFF 0.527 / ON-cap10 0.4706) are therefore the record of what an UNMERGED arm did at 412470cd3 on 2026-09-16, not a measurement of the tree anyone can check out from main today.",
+  "measured_at": "2026-09-16T22:44:49-05:00",
+  "measured_revision": "412470cd3",
+  "measured_branch": "fix/2513-retrieval-evidence",
+  "open_pr_carrying_the_measured_revision": 3577,
+  "verified_at_seal": {
+   "date": "2026-09-21",
+   "origin_main": "a36fd686eec2b6cdb21fc21af45e365dd64974a2",
+   "commits_in_origin_main_not_in_measured_revision": 306,
+   "merge_base": "a079767f1655c2a7ba3a0daa78b83200e16d6c61",
+   "measured_revision_is_ancestor_of_origin_main": false,
+   "provenance": "literal, captured at seal \u2014 NOT derived from the measurement and NOT recomputed on a re-run",
+   "method": "git merge-base --is-ancestor / git rev-list --count / git cat-file -e, run once at seal on 2026-09-21"
+  },
+  "measured_surface_absent_from_origin_main": [
+   "tortoise/session_reinjection.py",
+   "tools/longmem_eval/guard_measured_revision.py",
+   "tools/longmem_eval/build_cohorts.py"
+  ],
+  "raw_artifacts": {
+   "declared_root": "/tmp/lme2513/ms71",
+   "state_at_seal": "GONE \u2014 the directory does not exist, so the generator can no longer read cap{10,15}/<arm>.json and THE CENSUS BELOW CANNOT BE REGENERATED. It is the only surviving record of this census; only the derived blocks remain recomputable from `results` itself (`--rederive`): each falsifier's `measured`. `verified_at_seal` is NOT derivable from `results` \u2014 it is a seal-time literal re-emitted verbatim. /tmp/lme-v2-p100.json (the 100-Q profile whose '53% of misses' figure titles issue #2513) is also gone, so that issue's cited evidence no longer exists on disk either."
+  },
+  "cohort_anchor": "STILL VALID: the cohort file named in `cohort.file` is present and its sha256 still equals `cohort.sha256`, so the gold labels behind the (A)/(B) split remain checkable even though the arm artifacts do not.",
+  "still_derivable_from_this_artifact": [
+   "The (A)/(B)/(C) split of the cap10 ON residual re-derives from `per_question` alone: A=1 (ba358f49 \u2014 gold session 28 contributes 0 rows to the ranked pool), B=9, C=0.",
+   "The OFF-arm identity across servers (off / off_b) and across caps, as recorded in `reproducibility`."
+  ]
+ },
  "substrate": {
   "embedder": "BAAI/bge-small-en-v1.5 (384-dim, local SentenceTransformer) \u2014 the real embedder; retrieval mode is HYBRID (fts + vector + rrf), NOT keyword-only",
   "graph": "one DEDICATED docker FalkorDB per arm (falkordb/falkordb@sha256:adbddd418916c25618564ff8597a919b08bc76452ebeb74eb985c38d7281df62, REDIS_ARGS='--requirepass falkordb --save \"\" --maxmemory 6gb --maxmemory-policy noeviction --activedefrag yes'), 127.0.0.1:6391-6397",
@@ -108,7 +139,7 @@
  "retrieval_mode": {
   "retriever": "hybrid (fts + vector, RRF-fused)",
   "checkpoint_key": "hnsw__hybrid__default__default",
-  "leg_mix_observed": "every retrieved hit carries match_source 'rrf' (2503 hits over the cap=10 OFF arm) \u2014 so this is NOT a keyword/FTS-only run",
+  "leg_mix_observed": "every retrieved hit carries match_source 'rrf' \u2014 so this is NOT a keyword/FTS-only run (the raw hit count is not recorded in this receipt)",
   "embedder": {
    "available": true,
    "model": "BAAI/bge-small-en-v1.5",
@@ -1387,6 +1418,578 @@
        "lme:09ba9854_abs:s30:t0",
        "lme:09ba9854_abs:s5:t6"
       ]
+     },
+     "gold_sessions_in_pool": {
+      "d3ab962e": {
+       "8": true,
+       "37": true
+      },
+      "2311e44b": {
+       "37": true,
+       "45": true
+      },
+      "cc06de0d": {
+       "19": true,
+       "32": true
+      },
+      "a11281a2": {
+       "23": true,
+       "37": true
+      },
+      "4f54b7c9": {
+       "21": true,
+       "42": true
+      },
+      "85fa3a3f": {
+       "7": true,
+       "30": true
+      },
+      "9aaed6a3": {
+       "10": true,
+       "15": true
+      },
+      "1f2b8d4f": {
+       "11": true,
+       "12": true
+      },
+      "e6041065": {
+       "3": true,
+       "37": true
+      },
+      "51c32626": {
+       "9": true,
+       "47": true
+      },
+      "d905b33f": {
+       "18": true,
+       "33": true
+      },
+      "7405e8b1": {
+       "10": true,
+       "30": true
+      },
+      "f35224e0": {
+       "32": true,
+       "45": true
+      },
+      "6456829e": {
+       "38": true,
+       "41": true
+      },
+      "a4996e51": {
+       "19": true,
+       "43": true
+      },
+      "3c1045c8": {
+       "24": true,
+       "26": true
+      },
+      "60036106": {
+       "38": true,
+       "39": true
+      },
+      "681a1674": {
+       "6": true,
+       "34": true
+      },
+      "e25c3b8d": {
+       "11": true,
+       "19": true
+      },
+      "4adc0475": {
+       "27": true,
+       "37": true
+      },
+      "4bc144e2": {
+       "5": true,
+       "40": true
+      },
+      "ef66a6e5": {
+       "26": true,
+       "28": true
+      },
+      "5025383b": {
+       "41": true,
+       "45": true
+      },
+      "a1cc6108": {
+       "9": true,
+       "20": true
+      },
+      "9ee3ecd6": {
+       "7": true,
+       "45": true
+      },
+      "3fdac837": {
+       "16": true,
+       "38": true
+      },
+      "91b15a6e": {
+       "14": true,
+       "28": true
+      },
+      "27016adc": {
+       "11": true,
+       "31": true
+      },
+      "720133ac": {
+       "22": true,
+       "45": true
+      },
+      "77eafa52": {
+       "1": true,
+       "34": true
+      },
+      "8979f9ec": {
+       "20": true,
+       "29": true
+      },
+      "0100672e": {
+       "36": true,
+       "45": true
+      },
+      "a96c20ee": {
+       "8": true,
+       "12": true
+      },
+      "92a0aa75": {
+       "29": true,
+       "33": true
+      },
+      "3fe836c9": {
+       "16": true,
+       "40": true
+      },
+      "1c549ce4": {
+       "21": true,
+       "33": true
+      },
+      "6c49646a": {
+       "17": true,
+       "28": true
+      },
+      "1192316e": {
+       "3": true,
+       "11": true
+      },
+      "0ea62687": {
+       "0": true,
+       "24": true
+      },
+      "67e0d0f2": {
+       "6": true,
+       "37": true
+      },
+      "bb7c3b45": {
+       "14": true,
+       "42": true
+      },
+      "ba358f49": {
+       "7": true,
+       "28": false
+      },
+      "61f8c8f8": {
+       "23": true,
+       "31": true
+      },
+      "60159905": {
+       "4": true,
+       "8": true
+      },
+      "ef9cf60a": {
+       "13": true,
+       "51": true
+      },
+      "73d42213": {
+       "5": true,
+       "44": true
+      },
+      "bc149d6b": {
+       "9": true,
+       "10": true
+      },
+      "099778bb": {
+       "6": true,
+       "42": true
+      },
+      "09ba9854": {
+       "13": true,
+       "28": true
+      },
+      "d6062bb9": {
+       "14": true,
+       "19": true
+      },
+      "157a136e": {
+       "37": true,
+       "44": true
+      },
+      "c18a7dc8": {
+       "26": true,
+       "34": true
+      },
+      "a3332713": {
+       "30": true,
+       "34": true
+      },
+      "55241a1f": {
+       "17": true,
+       "22": true
+      },
+      "a08a253f": {
+       "28": true,
+       "36": true
+      },
+      "f0e564bc": {
+       "11": true,
+       "34": true
+      },
+      "078150f1": {
+       "0": true,
+       "34": true
+      },
+      "8cf4d046": {
+       "15": true,
+       "43": true
+      },
+      "a346bb18": {
+       "1": true,
+       "23": true
+      },
+      "37f165cf": {
+       "9": true,
+       "33": true
+      },
+      "8e91e7d9": {
+       "18": true,
+       "22": true
+      },
+      "87f22b4a": {
+       "12": true,
+       "34": true
+      },
+      "e56a43b9": {
+       "12": true,
+       "31": true
+      },
+      "efc3f7c2": {
+       "21": true,
+       "43": true
+      },
+      "21d02d0d": {
+       "3": true,
+       "30": true
+      },
+      "2311e44b_abs": {
+       "13": true,
+       "48": true
+      },
+      "6456829e_abs": {
+       "14": true,
+       "45": true
+      },
+      "e5ba910e_abs": {
+       "22": true,
+       "42": true
+      },
+      "a96c20ee_abs": {
+       "18": true,
+       "51": true
+      },
+      "ba358f49_abs": {
+       "8": true,
+       "36": true
+      },
+      "09ba9854_abs": {
+       "5": true,
+       "32": true
+      }
+     },
+     "gold_session_best_rank": {
+      "d3ab962e": {
+       "8": 8,
+       "37": 1
+      },
+      "2311e44b": {
+       "37": 2,
+       "45": 0
+      },
+      "cc06de0d": {
+       "19": 13,
+       "32": 0
+      },
+      "a11281a2": {
+       "23": 1,
+       "37": 0
+      },
+      "4f54b7c9": {
+       "21": 0,
+       "42": 6
+      },
+      "85fa3a3f": {
+       "7": 0,
+       "30": 1
+      },
+      "9aaed6a3": {
+       "10": 14,
+       "15": 2
+      },
+      "1f2b8d4f": {
+       "11": 0,
+       "12": 2
+      },
+      "e6041065": {
+       "3": 3,
+       "37": 0
+      },
+      "51c32626": {
+       "9": 1,
+       "47": 0
+      },
+      "d905b33f": {
+       "18": 9,
+       "33": 0
+      },
+      "7405e8b1": {
+       "10": 2,
+       "30": 0
+      },
+      "f35224e0": {
+       "32": 1,
+       "45": 5
+      },
+      "6456829e": {
+       "38": 12,
+       "41": 2
+      },
+      "a4996e51": {
+       "19": 4,
+       "43": 0
+      },
+      "3c1045c8": {
+       "24": 0,
+       "26": 4
+      },
+      "60036106": {
+       "38": 3,
+       "39": 0
+      },
+      "681a1674": {
+       "6": 1,
+       "34": 0
+      },
+      "e25c3b8d": {
+       "11": 3,
+       "19": 0
+      },
+      "4adc0475": {
+       "27": 0,
+       "37": 2
+      },
+      "4bc144e2": {
+       "5": 2,
+       "40": 0
+      },
+      "ef66a6e5": {
+       "26": 1,
+       "28": 0
+      },
+      "5025383b": {
+       "41": 2,
+       "45": 0
+      },
+      "a1cc6108": {
+       "9": 0,
+       "20": 16
+      },
+      "9ee3ecd6": {
+       "7": 0,
+       "45": 1
+      },
+      "3fdac837": {
+       "16": 1,
+       "38": 0
+      },
+      "91b15a6e": {
+       "14": 2,
+       "28": 0
+      },
+      "27016adc": {
+       "11": 1,
+       "31": 0
+      },
+      "720133ac": {
+       "22": 0,
+       "45": 1
+      },
+      "77eafa52": {
+       "1": 0,
+       "34": 4
+      },
+      "8979f9ec": {
+       "20": 10,
+       "29": 4
+      },
+      "0100672e": {
+       "36": 0,
+       "45": 9
+      },
+      "a96c20ee": {
+       "8": 0,
+       "12": 2
+      },
+      "92a0aa75": {
+       "29": 1,
+       "33": 3
+      },
+      "3fe836c9": {
+       "16": 1,
+       "40": 2
+      },
+      "1c549ce4": {
+       "21": 3,
+       "33": 0
+      },
+      "6c49646a": {
+       "17": 1,
+       "28": 0
+      },
+      "1192316e": {
+       "3": 0,
+       "11": 1
+      },
+      "0ea62687": {
+       "0": 0,
+       "24": 4
+      },
+      "67e0d0f2": {
+       "6": 0,
+       "37": 1
+      },
+      "bb7c3b45": {
+       "14": 1,
+       "42": 0
+      },
+      "ba358f49": {
+       "7": 0,
+       "28": null
+      },
+      "61f8c8f8": {
+       "23": 4,
+       "31": 0
+      },
+      "60159905": {
+       "4": 0,
+       "8": 1
+      },
+      "ef9cf60a": {
+       "13": 1,
+       "51": 0
+      },
+      "73d42213": {
+       "5": 3,
+       "44": 0
+      },
+      "bc149d6b": {
+       "9": 0,
+       "10": 28
+      },
+      "099778bb": {
+       "6": 5,
+       "42": 0
+      },
+      "09ba9854": {
+       "13": 0,
+       "28": 2
+      },
+      "d6062bb9": {
+       "14": 0,
+       "19": 1
+      },
+      "157a136e": {
+       "37": 0,
+       "44": 10
+      },
+      "c18a7dc8": {
+       "26": 2,
+       "34": 11
+      },
+      "a3332713": {
+       "30": 0,
+       "34": 5
+      },
+      "55241a1f": {
+       "17": 0,
+       "22": 4
+      },
+      "a08a253f": {
+       "28": 11,
+       "36": 0
+      },
+      "f0e564bc": {
+       "11": 2,
+       "34": 0
+      },
+      "078150f1": {
+       "0": 6,
+       "34": 1
+      },
+      "8cf4d046": {
+       "15": 0,
+       "43": 3
+      },
+      "a346bb18": {
+       "1": 2,
+       "23": 1
+      },
+      "37f165cf": {
+       "9": 2,
+       "33": 0
+      },
+      "8e91e7d9": {
+       "18": 40,
+       "22": 31
+      },
+      "87f22b4a": {
+       "12": 0,
+       "34": 1
+      },
+      "e56a43b9": {
+       "12": 5,
+       "31": 0
+      },
+      "efc3f7c2": {
+       "21": 2,
+       "43": 4
+      },
+      "21d02d0d": {
+       "3": 0,
+       "30": 3
+      },
+      "2311e44b_abs": {
+       "13": 0,
+       "48": 1
+      },
+      "6456829e_abs": {
+       "14": 0,
+       "45": 12
+      },
+      "e5ba910e_abs": {
+       "22": 0,
+       "42": 2
+      },
+      "a96c20ee_abs": {
+       "18": 2,
+       "51": 5
+      },
+      "ba358f49_abs": {
+       "8": 0,
+       "36": 9
+      },
+      "09ba9854_abs": {
+       "5": 1,
+       "32": 2
+      }
      }
     }
    },
@@ -2444,6 +3047,578 @@
        "lme:09ba9854_abs:s30:t0",
        "lme:09ba9854_abs:s5:t6"
       ]
+     },
+     "gold_sessions_in_pool": {
+      "d3ab962e": {
+       "8": true,
+       "37": true
+      },
+      "2311e44b": {
+       "37": true,
+       "45": true
+      },
+      "cc06de0d": {
+       "19": true,
+       "32": true
+      },
+      "a11281a2": {
+       "23": true,
+       "37": true
+      },
+      "4f54b7c9": {
+       "21": true,
+       "42": true
+      },
+      "85fa3a3f": {
+       "7": true,
+       "30": true
+      },
+      "9aaed6a3": {
+       "10": true,
+       "15": true
+      },
+      "1f2b8d4f": {
+       "11": true,
+       "12": true
+      },
+      "e6041065": {
+       "3": true,
+       "37": true
+      },
+      "51c32626": {
+       "9": true,
+       "47": true
+      },
+      "d905b33f": {
+       "18": true,
+       "33": true
+      },
+      "7405e8b1": {
+       "10": true,
+       "30": true
+      },
+      "f35224e0": {
+       "32": true,
+       "45": true
+      },
+      "6456829e": {
+       "38": true,
+       "41": true
+      },
+      "a4996e51": {
+       "19": true,
+       "43": true
+      },
+      "3c1045c8": {
+       "24": true,
+       "26": true
+      },
+      "60036106": {
+       "38": true,
+       "39": true
+      },
+      "681a1674": {
+       "6": true,
+       "34": true
+      },
+      "e25c3b8d": {
+       "11": true,
+       "19": true
+      },
+      "4adc0475": {
+       "27": true,
+       "37": true
+      },
+      "4bc144e2": {
+       "5": true,
+       "40": true
+      },
+      "ef66a6e5": {
+       "26": true,
+       "28": true
+      },
+      "5025383b": {
+       "41": true,
+       "45": true
+      },
+      "a1cc6108": {
+       "9": true,
+       "20": true
+      },
+      "9ee3ecd6": {
+       "7": true,
+       "45": true
+      },
+      "3fdac837": {
+       "16": true,
+       "38": true
+      },
+      "91b15a6e": {
+       "14": true,
+       "28": true
+      },
+      "27016adc": {
+       "11": true,
+       "31": true
+      },
+      "720133ac": {
+       "22": true,
+       "45": true
+      },
+      "77eafa52": {
+       "1": true,
+       "34": true
+      },
+      "8979f9ec": {
+       "20": true,
+       "29": true
+      },
+      "0100672e": {
+       "36": true,
+       "45": true
+      },
+      "a96c20ee": {
+       "8": true,
+       "12": true
+      },
+      "92a0aa75": {
+       "29": true,
+       "33": true
+      },
+      "3fe836c9": {
+       "16": true,
+       "40": true
+      },
+      "1c549ce4": {
+       "21": true,
+       "33": true
+      },
+      "6c49646a": {
+       "17": true,
+       "28": true
+      },
+      "1192316e": {
+       "3": true,
+       "11": true
+      },
+      "0ea62687": {
+       "0": true,
+       "24": true
+      },
+      "67e0d0f2": {
+       "6": true,
+       "37": true
+      },
+      "bb7c3b45": {
+       "14": true,
+       "42": true
+      },
+      "ba358f49": {
+       "7": true,
+       "28": false
+      },
+      "61f8c8f8": {
+       "23": true,
+       "31": true
+      },
+      "60159905": {
+       "4": true,
+       "8": true
+      },
+      "ef9cf60a": {
+       "13": true,
+       "51": true
+      },
+      "73d42213": {
+       "5": true,
+       "44": true
+      },
+      "bc149d6b": {
+       "9": true,
+       "10": true
+      },
+      "099778bb": {
+       "6": true,
+       "42": true
+      },
+      "09ba9854": {
+       "13": true,
+       "28": true
+      },
+      "d6062bb9": {
+       "14": true,
+       "19": true
+      },
+      "157a136e": {
+       "37": true,
+       "44": true
+      },
+      "c18a7dc8": {
+       "26": true,
+       "34": true
+      },
+      "a3332713": {
+       "30": true,
+       "34": true
+      },
+      "55241a1f": {
+       "17": true,
+       "22": true
+      },
+      "a08a253f": {
+       "28": true,
+       "36": true
+      },
+      "f0e564bc": {
+       "11": true,
+       "34": true
+      },
+      "078150f1": {
+       "0": true,
+       "34": true
+      },
+      "8cf4d046": {
+       "15": true,
+       "43": true
+      },
+      "a346bb18": {
+       "1": true,
+       "23": true
+      },
+      "37f165cf": {
+       "9": true,
+       "33": true
+      },
+      "8e91e7d9": {
+       "18": true,
+       "22": true
+      },
+      "87f22b4a": {
+       "12": true,
+       "34": true
+      },
+      "e56a43b9": {
+       "12": true,
+       "31": true
+      },
+      "efc3f7c2": {
+       "21": true,
+       "43": true
+      },
+      "21d02d0d": {
+       "3": true,
+       "30": true
+      },
+      "2311e44b_abs": {
+       "13": true,
+       "48": true
+      },
+      "6456829e_abs": {
+       "14": true,
+       "45": true
+      },
+      "e5ba910e_abs": {
+       "22": true,
+       "42": true
+      },
+      "a96c20ee_abs": {
+       "18": true,
+       "51": true
+      },
+      "ba358f49_abs": {
+       "8": true,
+       "36": true
+      },
+      "09ba9854_abs": {
+       "5": true,
+       "32": true
+      }
+     },
+     "gold_session_best_rank": {
+      "d3ab962e": {
+       "8": 8,
+       "37": 1
+      },
+      "2311e44b": {
+       "37": 2,
+       "45": 0
+      },
+      "cc06de0d": {
+       "19": 13,
+       "32": 0
+      },
+      "a11281a2": {
+       "23": 1,
+       "37": 0
+      },
+      "4f54b7c9": {
+       "21": 0,
+       "42": 6
+      },
+      "85fa3a3f": {
+       "7": 0,
+       "30": 1
+      },
+      "9aaed6a3": {
+       "10": 14,
+       "15": 2
+      },
+      "1f2b8d4f": {
+       "11": 0,
+       "12": 2
+      },
+      "e6041065": {
+       "3": 3,
+       "37": 0
+      },
+      "51c32626": {
+       "9": 1,
+       "47": 0
+      },
+      "d905b33f": {
+       "18": 9,
+       "33": 0
+      },
+      "7405e8b1": {
+       "10": 2,
+       "30": 0
+      },
+      "f35224e0": {
+       "32": 1,
+       "45": 5
+      },
+      "6456829e": {
+       "38": 12,
+       "41": 2
+      },
+      "a4996e51": {
+       "19": 4,
+       "43": 0
+      },
+      "3c1045c8": {
+       "24": 0,
+       "26": 4
+      },
+      "60036106": {
+       "38": 3,
+       "39": 0
+      },
+      "681a1674": {
+       "6": 1,
+       "34": 0
+      },
+      "e25c3b8d": {
+       "11": 3,
+       "19": 0
+      },
+      "4adc0475": {
+       "27": 0,
+       "37": 2
+      },
+      "4bc144e2": {
+       "5": 2,
+       "40": 0
+      },
+      "ef66a6e5": {
+       "26": 1,
+       "28": 0
+      },
+      "5025383b": {
+       "41": 2,
+       "45": 0
+      },
+      "a1cc6108": {
+       "9": 0,
+       "20": 16
+      },
+      "9ee3ecd6": {
+       "7": 0,
+       "45": 1
+      },
+      "3fdac837": {
+       "16": 1,
+       "38": 0
+      },
+      "91b15a6e": {
+       "14": 2,
+       "28": 0
+      },
+      "27016adc": {
+       "11": 1,
+       "31": 0
+      },
+      "720133ac": {
+       "22": 0,
+       "45": 1
+      },
+      "77eafa52": {
+       "1": 0,
+       "34": 4
+      },
+      "8979f9ec": {
+       "20": 10,
+       "29": 4
+      },
+      "0100672e": {
+       "36": 0,
+       "45": 9
+      },
+      "a96c20ee": {
+       "8": 0,
+       "12": 2
+      },
+      "92a0aa75": {
+       "29": 1,
+       "33": 3
+      },
+      "3fe836c9": {
+       "16": 1,
+       "40": 2
+      },
+      "1c549ce4": {
+       "21": 3,
+       "33": 0
+      },
+      "6c49646a": {
+       "17": 1,
+       "28": 0
+      },
+      "1192316e": {
+       "3": 0,
+       "11": 1
+      },
+      "0ea62687": {
+       "0": 0,
+       "24": 4
+      },
+      "67e0d0f2": {
+       "6": 0,
+       "37": 1
+      },
+      "bb7c3b45": {
+       "14": 1,
+       "42": 0
+      },
+      "ba358f49": {
+       "7": 0,
+       "28": null
+      },
+      "61f8c8f8": {
+       "23": 4,
+       "31": 0
+      },
+      "60159905": {
+       "4": 0,
+       "8": 1
+      },
+      "ef9cf60a": {
+       "13": 1,
+       "51": 0
+      },
+      "73d42213": {
+       "5": 3,
+       "44": 0
+      },
+      "bc149d6b": {
+       "9": 0,
+       "10": 28
+      },
+      "099778bb": {
+       "6": 5,
+       "42": 0
+      },
+      "09ba9854": {
+       "13": 0,
+       "28": 2
+      },
+      "d6062bb9": {
+       "14": 0,
+       "19": 1
+      },
+      "157a136e": {
+       "37": 0,
+       "44": 10
+      },
+      "c18a7dc8": {
+       "26": 2,
+       "34": 11
+      },
+      "a3332713": {
+       "30": 0,
+       "34": 5
+      },
+      "55241a1f": {
+       "17": 0,
+       "22": 4
+      },
+      "a08a253f": {
+       "28": 11,
+       "36": 0
+      },
+      "f0e564bc": {
+       "11": 2,
+       "34": 0
+      },
+      "078150f1": {
+       "0": 6,
+       "34": 1
+      },
+      "8cf4d046": {
+       "15": 0,
+       "43": 3
+      },
+      "a346bb18": {
+       "1": 2,
+       "23": 1
+      },
+      "37f165cf": {
+       "9": 2,
+       "33": 0
+      },
+      "8e91e7d9": {
+       "18": 40,
+       "22": 31
+      },
+      "87f22b4a": {
+       "12": 0,
+       "34": 1
+      },
+      "e56a43b9": {
+       "12": 5,
+       "31": 0
+      },
+      "efc3f7c2": {
+       "21": 2,
+       "43": 4
+      },
+      "21d02d0d": {
+       "3": 0,
+       "30": 3
+      },
+      "2311e44b_abs": {
+       "13": 0,
+       "48": 1
+      },
+      "6456829e_abs": {
+       "14": 0,
+       "45": 12
+      },
+      "e5ba910e_abs": {
+       "22": 0,
+       "42": 2
+      },
+      "a96c20ee_abs": {
+       "18": 2,
+       "51": 5
+      },
+      "ba358f49_abs": {
+       "8": 0,
+       "36": 9
+      },
+      "09ba9854_abs": {
+       "5": 1,
+       "32": 2
+      }
      }
     }
    },
@@ -3501,6 +4676,578 @@
        "lme:09ba9854_abs:s30:t0",
        "lme:09ba9854_abs:s5:t6"
       ]
+     },
+     "gold_sessions_in_pool": {
+      "d3ab962e": {
+       "8": true,
+       "37": true
+      },
+      "2311e44b": {
+       "37": true,
+       "45": true
+      },
+      "cc06de0d": {
+       "19": true,
+       "32": true
+      },
+      "a11281a2": {
+       "23": true,
+       "37": true
+      },
+      "4f54b7c9": {
+       "21": true,
+       "42": true
+      },
+      "85fa3a3f": {
+       "7": true,
+       "30": true
+      },
+      "9aaed6a3": {
+       "10": true,
+       "15": true
+      },
+      "1f2b8d4f": {
+       "11": true,
+       "12": true
+      },
+      "e6041065": {
+       "3": true,
+       "37": true
+      },
+      "51c32626": {
+       "9": true,
+       "47": true
+      },
+      "d905b33f": {
+       "18": true,
+       "33": true
+      },
+      "7405e8b1": {
+       "10": true,
+       "30": true
+      },
+      "f35224e0": {
+       "32": true,
+       "45": true
+      },
+      "6456829e": {
+       "38": true,
+       "41": true
+      },
+      "a4996e51": {
+       "19": true,
+       "43": true
+      },
+      "3c1045c8": {
+       "24": true,
+       "26": true
+      },
+      "60036106": {
+       "38": true,
+       "39": true
+      },
+      "681a1674": {
+       "6": true,
+       "34": true
+      },
+      "e25c3b8d": {
+       "11": true,
+       "19": true
+      },
+      "4adc0475": {
+       "27": true,
+       "37": true
+      },
+      "4bc144e2": {
+       "5": true,
+       "40": true
+      },
+      "ef66a6e5": {
+       "26": true,
+       "28": true
+      },
+      "5025383b": {
+       "41": true,
+       "45": true
+      },
+      "a1cc6108": {
+       "9": true,
+       "20": true
+      },
+      "9ee3ecd6": {
+       "7": true,
+       "45": true
+      },
+      "3fdac837": {
+       "16": true,
+       "38": true
+      },
+      "91b15a6e": {
+       "14": true,
+       "28": true
+      },
+      "27016adc": {
+       "11": true,
+       "31": true
+      },
+      "720133ac": {
+       "22": true,
+       "45": true
+      },
+      "77eafa52": {
+       "1": true,
+       "34": true
+      },
+      "8979f9ec": {
+       "20": true,
+       "29": true
+      },
+      "0100672e": {
+       "36": true,
+       "45": true
+      },
+      "a96c20ee": {
+       "8": true,
+       "12": true
+      },
+      "92a0aa75": {
+       "29": true,
+       "33": true
+      },
+      "3fe836c9": {
+       "16": true,
+       "40": true
+      },
+      "1c549ce4": {
+       "21": true,
+       "33": true
+      },
+      "6c49646a": {
+       "17": true,
+       "28": true
+      },
+      "1192316e": {
+       "3": true,
+       "11": true
+      },
+      "0ea62687": {
+       "0": true,
+       "24": true
+      },
+      "67e0d0f2": {
+       "6": true,
+       "37": true
+      },
+      "bb7c3b45": {
+       "14": true,
+       "42": true
+      },
+      "ba358f49": {
+       "7": true,
+       "28": false
+      },
+      "61f8c8f8": {
+       "23": true,
+       "31": true
+      },
+      "60159905": {
+       "4": true,
+       "8": true
+      },
+      "ef9cf60a": {
+       "13": true,
+       "51": true
+      },
+      "73d42213": {
+       "5": true,
+       "44": true
+      },
+      "bc149d6b": {
+       "9": true,
+       "10": true
+      },
+      "099778bb": {
+       "6": true,
+       "42": true
+      },
+      "09ba9854": {
+       "13": true,
+       "28": true
+      },
+      "d6062bb9": {
+       "14": true,
+       "19": true
+      },
+      "157a136e": {
+       "37": true,
+       "44": true
+      },
+      "c18a7dc8": {
+       "26": true,
+       "34": true
+      },
+      "a3332713": {
+       "30": true,
+       "34": true
+      },
+      "55241a1f": {
+       "17": true,
+       "22": true
+      },
+      "a08a253f": {
+       "28": true,
+       "36": true
+      },
+      "f0e564bc": {
+       "11": true,
+       "34": true
+      },
+      "078150f1": {
+       "0": true,
+       "34": true
+      },
+      "8cf4d046": {
+       "15": true,
+       "43": true
+      },
+      "a346bb18": {
+       "1": true,
+       "23": true
+      },
+      "37f165cf": {
+       "9": true,
+       "33": true
+      },
+      "8e91e7d9": {
+       "18": true,
+       "22": true
+      },
+      "87f22b4a": {
+       "12": true,
+       "34": true
+      },
+      "e56a43b9": {
+       "12": true,
+       "31": true
+      },
+      "efc3f7c2": {
+       "21": true,
+       "43": true
+      },
+      "21d02d0d": {
+       "3": true,
+       "30": true
+      },
+      "2311e44b_abs": {
+       "13": true,
+       "48": true
+      },
+      "6456829e_abs": {
+       "14": true,
+       "45": true
+      },
+      "e5ba910e_abs": {
+       "22": true,
+       "42": true
+      },
+      "a96c20ee_abs": {
+       "18": true,
+       "51": true
+      },
+      "ba358f49_abs": {
+       "8": true,
+       "36": true
+      },
+      "09ba9854_abs": {
+       "5": true,
+       "32": true
+      }
+     },
+     "gold_session_best_rank": {
+      "d3ab962e": {
+       "8": 8,
+       "37": 1
+      },
+      "2311e44b": {
+       "37": 2,
+       "45": 0
+      },
+      "cc06de0d": {
+       "19": 13,
+       "32": 0
+      },
+      "a11281a2": {
+       "23": 1,
+       "37": 0
+      },
+      "4f54b7c9": {
+       "21": 0,
+       "42": 6
+      },
+      "85fa3a3f": {
+       "7": 0,
+       "30": 1
+      },
+      "9aaed6a3": {
+       "10": 14,
+       "15": 2
+      },
+      "1f2b8d4f": {
+       "11": 0,
+       "12": 2
+      },
+      "e6041065": {
+       "3": 3,
+       "37": 0
+      },
+      "51c32626": {
+       "9": 1,
+       "47": 0
+      },
+      "d905b33f": {
+       "18": 9,
+       "33": 0
+      },
+      "7405e8b1": {
+       "10": 2,
+       "30": 0
+      },
+      "f35224e0": {
+       "32": 1,
+       "45": 5
+      },
+      "6456829e": {
+       "38": 12,
+       "41": 2
+      },
+      "a4996e51": {
+       "19": 4,
+       "43": 0
+      },
+      "3c1045c8": {
+       "24": 0,
+       "26": 4
+      },
+      "60036106": {
+       "38": 3,
+       "39": 0
+      },
+      "681a1674": {
+       "6": 1,
+       "34": 0
+      },
+      "e25c3b8d": {
+       "11": 3,
+       "19": 0
+      },
+      "4adc0475": {
+       "27": 0,
+       "37": 2
+      },
+      "4bc144e2": {
+       "5": 2,
+       "40": 0
+      },
+      "ef66a6e5": {
+       "26": 1,
+       "28": 0
+      },
+      "5025383b": {
+       "41": 2,
+       "45": 0
+      },
+      "a1cc6108": {
+       "9": 0,
+       "20": 16
+      },
+      "9ee3ecd6": {
+       "7": 0,
+       "45": 1
+      },
+      "3fdac837": {
+       "16": 1,
+       "38": 0
+      },
+      "91b15a6e": {
+       "14": 2,
+       "28": 0
+      },
+      "27016adc": {
+       "11": 1,
+       "31": 0
+      },
+      "720133ac": {
+       "22": 0,
+       "45": 1
+      },
+      "77eafa52": {
+       "1": 0,
+       "34": 4
+      },
+      "8979f9ec": {
+       "20": 10,
+       "29": 4
+      },
+      "0100672e": {
+       "36": 0,
+       "45": 9
+      },
+      "a96c20ee": {
+       "8": 0,
+       "12": 2
+      },
+      "92a0aa75": {
+       "29": 1,
+       "33": 3
+      },
+      "3fe836c9": {
+       "16": 1,
+       "40": 2
+      },
+      "1c549ce4": {
+       "21": 3,
+       "33": 0
+      },
+      "6c49646a": {
+       "17": 1,
+       "28": 0
+      },
+      "1192316e": {
+       "3": 0,
+       "11": 1
+      },
+      "0ea62687": {
+       "0": 0,
+       "24": 4
+      },
+      "67e0d0f2": {
+       "6": 0,
+       "37": 1
+      },
+      "bb7c3b45": {
+       "14": 1,
+       "42": 0
+      },
+      "ba358f49": {
+       "7": 0,
+       "28": null
+      },
+      "61f8c8f8": {
+       "23": 4,
+       "31": 0
+      },
+      "60159905": {
+       "4": 0,
+       "8": 1
+      },
+      "ef9cf60a": {
+       "13": 1,
+       "51": 0
+      },
+      "73d42213": {
+       "5": 3,
+       "44": 0
+      },
+      "bc149d6b": {
+       "9": 0,
+       "10": 30
+      },
+      "099778bb": {
+       "6": 5,
+       "42": 0
+      },
+      "09ba9854": {
+       "13": 0,
+       "28": 2
+      },
+      "d6062bb9": {
+       "14": 0,
+       "19": 1
+      },
+      "157a136e": {
+       "37": 0,
+       "44": 10
+      },
+      "c18a7dc8": {
+       "26": 2,
+       "34": 11
+      },
+      "a3332713": {
+       "30": 0,
+       "34": 5
+      },
+      "55241a1f": {
+       "17": 0,
+       "22": 4
+      },
+      "a08a253f": {
+       "28": 11,
+       "36": 0
+      },
+      "f0e564bc": {
+       "11": 2,
+       "34": 0
+      },
+      "078150f1": {
+       "0": 6,
+       "34": 1
+      },
+      "8cf4d046": {
+       "15": 0,
+       "43": 3
+      },
+      "a346bb18": {
+       "1": 2,
+       "23": 1
+      },
+      "37f165cf": {
+       "9": 2,
+       "33": 0
+      },
+      "8e91e7d9": {
+       "18": 43,
+       "22": 34
+      },
+      "87f22b4a": {
+       "12": 0,
+       "34": 1
+      },
+      "e56a43b9": {
+       "12": 5,
+       "31": 0
+      },
+      "efc3f7c2": {
+       "21": 2,
+       "43": 4
+      },
+      "21d02d0d": {
+       "3": 0,
+       "30": 3
+      },
+      "2311e44b_abs": {
+       "13": 0,
+       "48": 1
+      },
+      "6456829e_abs": {
+       "14": 0,
+       "45": 12
+      },
+      "e5ba910e_abs": {
+       "22": 0,
+       "42": 2
+      },
+      "a96c20ee_abs": {
+       "18": 2,
+       "51": 5
+      },
+      "ba358f49_abs": {
+       "8": 0,
+       "36": 9
+      },
+      "09ba9854_abs": {
+       "5": 1,
+       "32": 2
+      }
      }
     }
    },
@@ -4558,6 +6305,578 @@
        "lme:09ba9854_abs:s30:t0",
        "lme:09ba9854_abs:s5:t6"
       ]
+     },
+     "gold_sessions_in_pool": {
+      "d3ab962e": {
+       "8": true,
+       "37": true
+      },
+      "2311e44b": {
+       "37": true,
+       "45": true
+      },
+      "cc06de0d": {
+       "19": true,
+       "32": true
+      },
+      "a11281a2": {
+       "23": true,
+       "37": true
+      },
+      "4f54b7c9": {
+       "21": true,
+       "42": true
+      },
+      "85fa3a3f": {
+       "7": true,
+       "30": true
+      },
+      "9aaed6a3": {
+       "10": true,
+       "15": true
+      },
+      "1f2b8d4f": {
+       "11": true,
+       "12": true
+      },
+      "e6041065": {
+       "3": true,
+       "37": true
+      },
+      "51c32626": {
+       "9": true,
+       "47": true
+      },
+      "d905b33f": {
+       "18": true,
+       "33": true
+      },
+      "7405e8b1": {
+       "10": true,
+       "30": true
+      },
+      "f35224e0": {
+       "32": true,
+       "45": true
+      },
+      "6456829e": {
+       "38": true,
+       "41": true
+      },
+      "a4996e51": {
+       "19": true,
+       "43": true
+      },
+      "3c1045c8": {
+       "24": true,
+       "26": true
+      },
+      "60036106": {
+       "38": true,
+       "39": true
+      },
+      "681a1674": {
+       "6": true,
+       "34": true
+      },
+      "e25c3b8d": {
+       "11": true,
+       "19": true
+      },
+      "4adc0475": {
+       "27": true,
+       "37": true
+      },
+      "4bc144e2": {
+       "5": true,
+       "40": true
+      },
+      "ef66a6e5": {
+       "26": true,
+       "28": true
+      },
+      "5025383b": {
+       "41": true,
+       "45": true
+      },
+      "a1cc6108": {
+       "9": true,
+       "20": true
+      },
+      "9ee3ecd6": {
+       "7": true,
+       "45": true
+      },
+      "3fdac837": {
+       "16": true,
+       "38": true
+      },
+      "91b15a6e": {
+       "14": true,
+       "28": true
+      },
+      "27016adc": {
+       "11": true,
+       "31": true
+      },
+      "720133ac": {
+       "22": true,
+       "45": true
+      },
+      "77eafa52": {
+       "1": true,
+       "34": true
+      },
+      "8979f9ec": {
+       "20": true,
+       "29": true
+      },
+      "0100672e": {
+       "36": true,
+       "45": true
+      },
+      "a96c20ee": {
+       "8": true,
+       "12": true
+      },
+      "92a0aa75": {
+       "29": true,
+       "33": true
+      },
+      "3fe836c9": {
+       "16": true,
+       "40": true
+      },
+      "1c549ce4": {
+       "21": true,
+       "33": true
+      },
+      "6c49646a": {
+       "17": true,
+       "28": true
+      },
+      "1192316e": {
+       "3": true,
+       "11": true
+      },
+      "0ea62687": {
+       "0": true,
+       "24": true
+      },
+      "67e0d0f2": {
+       "6": true,
+       "37": true
+      },
+      "bb7c3b45": {
+       "14": true,
+       "42": true
+      },
+      "ba358f49": {
+       "7": true,
+       "28": false
+      },
+      "61f8c8f8": {
+       "23": true,
+       "31": true
+      },
+      "60159905": {
+       "4": true,
+       "8": true
+      },
+      "ef9cf60a": {
+       "13": true,
+       "51": true
+      },
+      "73d42213": {
+       "5": true,
+       "44": true
+      },
+      "bc149d6b": {
+       "9": true,
+       "10": true
+      },
+      "099778bb": {
+       "6": true,
+       "42": true
+      },
+      "09ba9854": {
+       "13": true,
+       "28": true
+      },
+      "d6062bb9": {
+       "14": true,
+       "19": true
+      },
+      "157a136e": {
+       "37": true,
+       "44": true
+      },
+      "c18a7dc8": {
+       "26": true,
+       "34": true
+      },
+      "a3332713": {
+       "30": true,
+       "34": true
+      },
+      "55241a1f": {
+       "17": true,
+       "22": true
+      },
+      "a08a253f": {
+       "28": true,
+       "36": true
+      },
+      "f0e564bc": {
+       "11": true,
+       "34": true
+      },
+      "078150f1": {
+       "0": true,
+       "34": true
+      },
+      "8cf4d046": {
+       "15": true,
+       "43": true
+      },
+      "a346bb18": {
+       "1": true,
+       "23": true
+      },
+      "37f165cf": {
+       "9": true,
+       "33": true
+      },
+      "8e91e7d9": {
+       "18": true,
+       "22": true
+      },
+      "87f22b4a": {
+       "12": true,
+       "34": true
+      },
+      "e56a43b9": {
+       "12": true,
+       "31": true
+      },
+      "efc3f7c2": {
+       "21": true,
+       "43": true
+      },
+      "21d02d0d": {
+       "3": true,
+       "30": true
+      },
+      "2311e44b_abs": {
+       "13": true,
+       "48": true
+      },
+      "6456829e_abs": {
+       "14": true,
+       "45": true
+      },
+      "e5ba910e_abs": {
+       "22": true,
+       "42": true
+      },
+      "a96c20ee_abs": {
+       "18": true,
+       "51": true
+      },
+      "ba358f49_abs": {
+       "8": true,
+       "36": true
+      },
+      "09ba9854_abs": {
+       "5": true,
+       "32": true
+      }
+     },
+     "gold_session_best_rank": {
+      "d3ab962e": {
+       "8": 4,
+       "37": 1
+      },
+      "2311e44b": {
+       "37": 2,
+       "45": 0
+      },
+      "cc06de0d": {
+       "19": 13,
+       "32": 0
+      },
+      "a11281a2": {
+       "23": 1,
+       "37": 0
+      },
+      "4f54b7c9": {
+       "21": 0,
+       "42": 2
+      },
+      "85fa3a3f": {
+       "7": 0,
+       "30": 1
+      },
+      "9aaed6a3": {
+       "10": 4,
+       "15": 2
+      },
+      "1f2b8d4f": {
+       "11": 0,
+       "12": 2
+      },
+      "e6041065": {
+       "3": 2,
+       "37": 0
+      },
+      "51c32626": {
+       "9": 1,
+       "47": 0
+      },
+      "d905b33f": {
+       "18": 9,
+       "33": 0
+      },
+      "7405e8b1": {
+       "10": 2,
+       "30": 0
+      },
+      "f35224e0": {
+       "32": 1,
+       "45": 4
+      },
+      "6456829e": {
+       "38": 4,
+       "41": 2
+      },
+      "a4996e51": {
+       "19": 2,
+       "43": 0
+      },
+      "3c1045c8": {
+       "24": 0,
+       "26": 4
+      },
+      "60036106": {
+       "38": 2,
+       "39": 0
+      },
+      "681a1674": {
+       "6": 1,
+       "34": 0
+      },
+      "e25c3b8d": {
+       "11": 2,
+       "19": 0
+      },
+      "4adc0475": {
+       "27": 0,
+       "37": 2
+      },
+      "4bc144e2": {
+       "5": 2,
+       "40": 0
+      },
+      "ef66a6e5": {
+       "26": 1,
+       "28": 0
+      },
+      "5025383b": {
+       "41": 2,
+       "45": 0
+      },
+      "a1cc6108": {
+       "9": 0,
+       "20": 16
+      },
+      "9ee3ecd6": {
+       "7": 0,
+       "45": 1
+      },
+      "3fdac837": {
+       "16": 1,
+       "38": 0
+      },
+      "91b15a6e": {
+       "14": 2,
+       "28": 0
+      },
+      "27016adc": {
+       "11": 1,
+       "31": 0
+      },
+      "720133ac": {
+       "22": 0,
+       "45": 1
+      },
+      "77eafa52": {
+       "1": 0,
+       "34": 2
+      },
+      "8979f9ec": {
+       "20": 10,
+       "29": 2
+      },
+      "0100672e": {
+       "36": 0,
+       "45": 4
+      },
+      "a96c20ee": {
+       "8": 0,
+       "12": 2
+      },
+      "92a0aa75": {
+       "29": 1,
+       "33": 3
+      },
+      "3fe836c9": {
+       "16": 1,
+       "40": 2
+      },
+      "1c549ce4": {
+       "21": 2,
+       "33": 0
+      },
+      "6c49646a": {
+       "17": 1,
+       "28": 0
+      },
+      "1192316e": {
+       "3": 0,
+       "11": 1
+      },
+      "0ea62687": {
+       "0": 0,
+       "24": 4
+      },
+      "67e0d0f2": {
+       "6": 0,
+       "37": 1
+      },
+      "bb7c3b45": {
+       "14": 1,
+       "42": 0
+      },
+      "ba358f49": {
+       "7": 0,
+       "28": null
+      },
+      "61f8c8f8": {
+       "23": 2,
+       "31": 0
+      },
+      "60159905": {
+       "4": 0,
+       "8": 1
+      },
+      "ef9cf60a": {
+       "13": 1,
+       "51": 0
+      },
+      "73d42213": {
+       "5": 2,
+       "44": 0
+      },
+      "bc149d6b": {
+       "9": 0,
+       "10": 30
+      },
+      "099778bb": {
+       "6": 2,
+       "42": 0
+      },
+      "09ba9854": {
+       "13": 0,
+       "28": 2
+      },
+      "d6062bb9": {
+       "14": 0,
+       "19": 1
+      },
+      "157a136e": {
+       "37": 0,
+       "44": 4
+      },
+      "c18a7dc8": {
+       "26": 2,
+       "34": 11
+      },
+      "a3332713": {
+       "30": 0,
+       "34": 4
+      },
+      "55241a1f": {
+       "17": 0,
+       "22": 2
+      },
+      "a08a253f": {
+       "28": 4,
+       "36": 0
+      },
+      "f0e564bc": {
+       "11": 2,
+       "34": 0
+      },
+      "078150f1": {
+       "0": 6,
+       "34": 1
+      },
+      "8cf4d046": {
+       "15": 0,
+       "43": 2
+      },
+      "a346bb18": {
+       "1": 2,
+       "23": 1
+      },
+      "37f165cf": {
+       "9": 2,
+       "33": 0
+      },
+      "8e91e7d9": {
+       "18": 43,
+       "22": 34
+      },
+      "87f22b4a": {
+       "12": 0,
+       "34": 1
+      },
+      "e56a43b9": {
+       "12": 4,
+       "31": 0
+      },
+      "efc3f7c2": {
+       "21": 2,
+       "43": 3
+      },
+      "21d02d0d": {
+       "3": 0,
+       "30": 3
+      },
+      "2311e44b_abs": {
+       "13": 0,
+       "48": 1
+      },
+      "6456829e_abs": {
+       "14": 0,
+       "45": 2
+      },
+      "e5ba910e_abs": {
+       "22": 0,
+       "42": 2
+      },
+      "a96c20ee_abs": {
+       "18": 2,
+       "51": 4
+      },
+      "ba358f49_abs": {
+       "8": 0,
+       "36": 9
+      },
+      "09ba9854_abs": {
+       "5": 1,
+       "32": 2
+      }
      }
     }
    }
@@ -5617,6 +7936,578 @@
        "lme:09ba9854_abs:s30:t0",
        "lme:09ba9854_abs:s5:t6"
       ]
+     },
+     "gold_sessions_in_pool": {
+      "d3ab962e": {
+       "8": true,
+       "37": true
+      },
+      "2311e44b": {
+       "37": true,
+       "45": true
+      },
+      "cc06de0d": {
+       "19": true,
+       "32": true
+      },
+      "a11281a2": {
+       "23": true,
+       "37": true
+      },
+      "4f54b7c9": {
+       "21": true,
+       "42": true
+      },
+      "85fa3a3f": {
+       "7": true,
+       "30": true
+      },
+      "9aaed6a3": {
+       "10": true,
+       "15": true
+      },
+      "1f2b8d4f": {
+       "11": true,
+       "12": true
+      },
+      "e6041065": {
+       "3": true,
+       "37": true
+      },
+      "51c32626": {
+       "9": true,
+       "47": true
+      },
+      "d905b33f": {
+       "18": true,
+       "33": true
+      },
+      "7405e8b1": {
+       "10": true,
+       "30": true
+      },
+      "f35224e0": {
+       "32": true,
+       "45": true
+      },
+      "6456829e": {
+       "38": true,
+       "41": true
+      },
+      "a4996e51": {
+       "19": true,
+       "43": true
+      },
+      "3c1045c8": {
+       "24": true,
+       "26": true
+      },
+      "60036106": {
+       "38": true,
+       "39": true
+      },
+      "681a1674": {
+       "6": true,
+       "34": true
+      },
+      "e25c3b8d": {
+       "11": true,
+       "19": true
+      },
+      "4adc0475": {
+       "27": true,
+       "37": true
+      },
+      "4bc144e2": {
+       "5": true,
+       "40": true
+      },
+      "ef66a6e5": {
+       "26": true,
+       "28": true
+      },
+      "5025383b": {
+       "41": true,
+       "45": true
+      },
+      "a1cc6108": {
+       "9": true,
+       "20": true
+      },
+      "9ee3ecd6": {
+       "7": true,
+       "45": true
+      },
+      "3fdac837": {
+       "16": true,
+       "38": true
+      },
+      "91b15a6e": {
+       "14": true,
+       "28": true
+      },
+      "27016adc": {
+       "11": true,
+       "31": true
+      },
+      "720133ac": {
+       "22": true,
+       "45": true
+      },
+      "77eafa52": {
+       "1": true,
+       "34": true
+      },
+      "8979f9ec": {
+       "20": true,
+       "29": true
+      },
+      "0100672e": {
+       "36": true,
+       "45": true
+      },
+      "a96c20ee": {
+       "8": true,
+       "12": true
+      },
+      "92a0aa75": {
+       "29": true,
+       "33": true
+      },
+      "3fe836c9": {
+       "16": true,
+       "40": true
+      },
+      "1c549ce4": {
+       "21": true,
+       "33": true
+      },
+      "6c49646a": {
+       "17": true,
+       "28": true
+      },
+      "1192316e": {
+       "3": true,
+       "11": true
+      },
+      "0ea62687": {
+       "0": true,
+       "24": true
+      },
+      "67e0d0f2": {
+       "6": true,
+       "37": true
+      },
+      "bb7c3b45": {
+       "14": true,
+       "42": true
+      },
+      "ba358f49": {
+       "7": true,
+       "28": false
+      },
+      "61f8c8f8": {
+       "23": true,
+       "31": true
+      },
+      "60159905": {
+       "4": true,
+       "8": true
+      },
+      "ef9cf60a": {
+       "13": true,
+       "51": true
+      },
+      "73d42213": {
+       "5": true,
+       "44": true
+      },
+      "bc149d6b": {
+       "9": true,
+       "10": true
+      },
+      "099778bb": {
+       "6": true,
+       "42": true
+      },
+      "09ba9854": {
+       "13": true,
+       "28": true
+      },
+      "d6062bb9": {
+       "14": true,
+       "19": true
+      },
+      "157a136e": {
+       "37": true,
+       "44": true
+      },
+      "c18a7dc8": {
+       "26": true,
+       "34": true
+      },
+      "a3332713": {
+       "30": true,
+       "34": true
+      },
+      "55241a1f": {
+       "17": true,
+       "22": true
+      },
+      "a08a253f": {
+       "28": true,
+       "36": true
+      },
+      "f0e564bc": {
+       "11": true,
+       "34": true
+      },
+      "078150f1": {
+       "0": true,
+       "34": true
+      },
+      "8cf4d046": {
+       "15": true,
+       "43": true
+      },
+      "a346bb18": {
+       "1": true,
+       "23": true
+      },
+      "37f165cf": {
+       "9": true,
+       "33": true
+      },
+      "8e91e7d9": {
+       "18": true,
+       "22": true
+      },
+      "87f22b4a": {
+       "12": true,
+       "34": true
+      },
+      "e56a43b9": {
+       "12": true,
+       "31": true
+      },
+      "efc3f7c2": {
+       "21": true,
+       "43": true
+      },
+      "21d02d0d": {
+       "3": true,
+       "30": true
+      },
+      "2311e44b_abs": {
+       "13": true,
+       "48": true
+      },
+      "6456829e_abs": {
+       "14": true,
+       "45": true
+      },
+      "e5ba910e_abs": {
+       "22": true,
+       "42": true
+      },
+      "a96c20ee_abs": {
+       "18": true,
+       "51": true
+      },
+      "ba358f49_abs": {
+       "8": true,
+       "36": true
+      },
+      "09ba9854_abs": {
+       "5": true,
+       "32": true
+      }
+     },
+     "gold_session_best_rank": {
+      "d3ab962e": {
+       "8": 1,
+       "37": 22
+      },
+      "2311e44b": {
+       "37": 2,
+       "45": 0
+      },
+      "cc06de0d": {
+       "19": 13,
+       "32": 0
+      },
+      "a11281a2": {
+       "23": 1,
+       "37": 0
+      },
+      "4f54b7c9": {
+       "21": 0,
+       "42": 6
+      },
+      "85fa3a3f": {
+       "7": 0,
+       "30": 1
+      },
+      "9aaed6a3": {
+       "10": 14,
+       "15": 2
+      },
+      "1f2b8d4f": {
+       "11": 0,
+       "12": 2
+      },
+      "e6041065": {
+       "3": 3,
+       "37": 0
+      },
+      "51c32626": {
+       "9": 1,
+       "47": 0
+      },
+      "d905b33f": {
+       "18": 9,
+       "33": 0
+      },
+      "7405e8b1": {
+       "10": 2,
+       "30": 0
+      },
+      "f35224e0": {
+       "32": 1,
+       "45": 5
+      },
+      "6456829e": {
+       "38": 12,
+       "41": 2
+      },
+      "a4996e51": {
+       "19": 4,
+       "43": 0
+      },
+      "3c1045c8": {
+       "24": 0,
+       "26": 4
+      },
+      "60036106": {
+       "38": 3,
+       "39": 0
+      },
+      "681a1674": {
+       "6": 1,
+       "34": 0
+      },
+      "e25c3b8d": {
+       "11": 3,
+       "19": 0
+      },
+      "4adc0475": {
+       "27": 0,
+       "37": 2
+      },
+      "4bc144e2": {
+       "5": 2,
+       "40": 0
+      },
+      "ef66a6e5": {
+       "26": 1,
+       "28": 0
+      },
+      "5025383b": {
+       "41": 2,
+       "45": 0
+      },
+      "a1cc6108": {
+       "9": 0,
+       "20": 16
+      },
+      "9ee3ecd6": {
+       "7": 0,
+       "45": 1
+      },
+      "3fdac837": {
+       "16": 1,
+       "38": 0
+      },
+      "91b15a6e": {
+       "14": 2,
+       "28": 0
+      },
+      "27016adc": {
+       "11": 1,
+       "31": 0
+      },
+      "720133ac": {
+       "22": 0,
+       "45": 1
+      },
+      "77eafa52": {
+       "1": 0,
+       "34": 4
+      },
+      "8979f9ec": {
+       "20": 10,
+       "29": 4
+      },
+      "0100672e": {
+       "36": 0,
+       "45": 9
+      },
+      "a96c20ee": {
+       "8": 0,
+       "12": 2
+      },
+      "92a0aa75": {
+       "29": 1,
+       "33": 3
+      },
+      "3fe836c9": {
+       "16": 1,
+       "40": 2
+      },
+      "1c549ce4": {
+       "21": 3,
+       "33": 0
+      },
+      "6c49646a": {
+       "17": 1,
+       "28": 0
+      },
+      "1192316e": {
+       "3": 0,
+       "11": 1
+      },
+      "0ea62687": {
+       "0": 0,
+       "24": 4
+      },
+      "67e0d0f2": {
+       "6": 0,
+       "37": 1
+      },
+      "bb7c3b45": {
+       "14": 1,
+       "42": 0
+      },
+      "ba358f49": {
+       "7": 0,
+       "28": null
+      },
+      "61f8c8f8": {
+       "23": 4,
+       "31": 0
+      },
+      "60159905": {
+       "4": 0,
+       "8": 1
+      },
+      "ef9cf60a": {
+       "13": 1,
+       "51": 0
+      },
+      "73d42213": {
+       "5": 3,
+       "44": 0
+      },
+      "bc149d6b": {
+       "9": 0,
+       "10": 28
+      },
+      "099778bb": {
+       "6": 5,
+       "42": 0
+      },
+      "09ba9854": {
+       "13": 0,
+       "28": 2
+      },
+      "d6062bb9": {
+       "14": 0,
+       "19": 1
+      },
+      "157a136e": {
+       "37": 0,
+       "44": 10
+      },
+      "c18a7dc8": {
+       "26": 2,
+       "34": 11
+      },
+      "a3332713": {
+       "30": 0,
+       "34": 5
+      },
+      "55241a1f": {
+       "17": 0,
+       "22": 4
+      },
+      "a08a253f": {
+       "28": 11,
+       "36": 0
+      },
+      "f0e564bc": {
+       "11": 2,
+       "34": 0
+      },
+      "078150f1": {
+       "0": 6,
+       "34": 1
+      },
+      "8cf4d046": {
+       "15": 0,
+       "43": 3
+      },
+      "a346bb18": {
+       "1": 2,
+       "23": 1
+      },
+      "37f165cf": {
+       "9": 2,
+       "33": 0
+      },
+      "8e91e7d9": {
+       "18": 40,
+       "22": 31
+      },
+      "87f22b4a": {
+       "12": 0,
+       "34": 1
+      },
+      "e56a43b9": {
+       "12": 5,
+       "31": 0
+      },
+      "efc3f7c2": {
+       "21": 2,
+       "43": 4
+      },
+      "21d02d0d": {
+       "3": 0,
+       "30": 3
+      },
+      "2311e44b_abs": {
+       "13": 0,
+       "48": 1
+      },
+      "6456829e_abs": {
+       "14": 0,
+       "45": 12
+      },
+      "e5ba910e_abs": {
+       "22": 0,
+       "42": 2
+      },
+      "a96c20ee_abs": {
+       "18": 2,
+       "51": 5
+      },
+      "ba358f49_abs": {
+       "8": 0,
+       "36": 9
+      },
+      "09ba9854_abs": {
+       "5": 1,
+       "32": 2
+      }
      }
     }
    },
@@ -6674,6 +9565,578 @@
        "lme:09ba9854_abs:s30:t0",
        "lme:09ba9854_abs:s5:t6"
       ]
+     },
+     "gold_sessions_in_pool": {
+      "d3ab962e": {
+       "8": true,
+       "37": true
+      },
+      "2311e44b": {
+       "37": true,
+       "45": true
+      },
+      "cc06de0d": {
+       "19": true,
+       "32": true
+      },
+      "a11281a2": {
+       "23": true,
+       "37": true
+      },
+      "4f54b7c9": {
+       "21": true,
+       "42": true
+      },
+      "85fa3a3f": {
+       "7": true,
+       "30": true
+      },
+      "9aaed6a3": {
+       "10": true,
+       "15": true
+      },
+      "1f2b8d4f": {
+       "11": true,
+       "12": true
+      },
+      "e6041065": {
+       "3": true,
+       "37": true
+      },
+      "51c32626": {
+       "9": true,
+       "47": true
+      },
+      "d905b33f": {
+       "18": true,
+       "33": true
+      },
+      "7405e8b1": {
+       "10": true,
+       "30": true
+      },
+      "f35224e0": {
+       "32": true,
+       "45": true
+      },
+      "6456829e": {
+       "38": true,
+       "41": true
+      },
+      "a4996e51": {
+       "19": true,
+       "43": true
+      },
+      "3c1045c8": {
+       "24": true,
+       "26": true
+      },
+      "60036106": {
+       "38": true,
+       "39": true
+      },
+      "681a1674": {
+       "6": true,
+       "34": true
+      },
+      "e25c3b8d": {
+       "11": true,
+       "19": true
+      },
+      "4adc0475": {
+       "27": true,
+       "37": true
+      },
+      "4bc144e2": {
+       "5": true,
+       "40": true
+      },
+      "ef66a6e5": {
+       "26": true,
+       "28": true
+      },
+      "5025383b": {
+       "41": true,
+       "45": true
+      },
+      "a1cc6108": {
+       "9": true,
+       "20": true
+      },
+      "9ee3ecd6": {
+       "7": true,
+       "45": true
+      },
+      "3fdac837": {
+       "16": true,
+       "38": true
+      },
+      "91b15a6e": {
+       "14": true,
+       "28": true
+      },
+      "27016adc": {
+       "11": true,
+       "31": true
+      },
+      "720133ac": {
+       "22": true,
+       "45": true
+      },
+      "77eafa52": {
+       "1": true,
+       "34": true
+      },
+      "8979f9ec": {
+       "20": true,
+       "29": true
+      },
+      "0100672e": {
+       "36": true,
+       "45": true
+      },
+      "a96c20ee": {
+       "8": true,
+       "12": true
+      },
+      "92a0aa75": {
+       "29": true,
+       "33": true
+      },
+      "3fe836c9": {
+       "16": true,
+       "40": true
+      },
+      "1c549ce4": {
+       "21": true,
+       "33": true
+      },
+      "6c49646a": {
+       "17": true,
+       "28": true
+      },
+      "1192316e": {
+       "3": true,
+       "11": true
+      },
+      "0ea62687": {
+       "0": true,
+       "24": true
+      },
+      "67e0d0f2": {
+       "6": true,
+       "37": true
+      },
+      "bb7c3b45": {
+       "14": true,
+       "42": true
+      },
+      "ba358f49": {
+       "7": true,
+       "28": false
+      },
+      "61f8c8f8": {
+       "23": true,
+       "31": true
+      },
+      "60159905": {
+       "4": true,
+       "8": true
+      },
+      "ef9cf60a": {
+       "13": true,
+       "51": true
+      },
+      "73d42213": {
+       "5": true,
+       "44": true
+      },
+      "bc149d6b": {
+       "9": true,
+       "10": true
+      },
+      "099778bb": {
+       "6": true,
+       "42": true
+      },
+      "09ba9854": {
+       "13": true,
+       "28": true
+      },
+      "d6062bb9": {
+       "14": true,
+       "19": true
+      },
+      "157a136e": {
+       "37": true,
+       "44": true
+      },
+      "c18a7dc8": {
+       "26": true,
+       "34": true
+      },
+      "a3332713": {
+       "30": true,
+       "34": true
+      },
+      "55241a1f": {
+       "17": true,
+       "22": true
+      },
+      "a08a253f": {
+       "28": true,
+       "36": true
+      },
+      "f0e564bc": {
+       "11": true,
+       "34": true
+      },
+      "078150f1": {
+       "0": true,
+       "34": true
+      },
+      "8cf4d046": {
+       "15": true,
+       "43": true
+      },
+      "a346bb18": {
+       "1": true,
+       "23": true
+      },
+      "37f165cf": {
+       "9": true,
+       "33": true
+      },
+      "8e91e7d9": {
+       "18": true,
+       "22": true
+      },
+      "87f22b4a": {
+       "12": true,
+       "34": true
+      },
+      "e56a43b9": {
+       "12": true,
+       "31": true
+      },
+      "efc3f7c2": {
+       "21": true,
+       "43": true
+      },
+      "21d02d0d": {
+       "3": true,
+       "30": true
+      },
+      "2311e44b_abs": {
+       "13": true,
+       "48": true
+      },
+      "6456829e_abs": {
+       "14": true,
+       "45": true
+      },
+      "e5ba910e_abs": {
+       "22": true,
+       "42": true
+      },
+      "a96c20ee_abs": {
+       "18": true,
+       "51": true
+      },
+      "ba358f49_abs": {
+       "8": true,
+       "36": true
+      },
+      "09ba9854_abs": {
+       "5": true,
+       "32": true
+      }
+     },
+     "gold_session_best_rank": {
+      "d3ab962e": {
+       "8": 1,
+       "37": 25
+      },
+      "2311e44b": {
+       "37": 40,
+       "45": 0
+      },
+      "cc06de0d": {
+       "19": 13,
+       "32": 0
+      },
+      "a11281a2": {
+       "23": 1,
+       "37": 0
+      },
+      "4f54b7c9": {
+       "21": 0,
+       "42": 6
+      },
+      "85fa3a3f": {
+       "7": 0,
+       "30": 1
+      },
+      "9aaed6a3": {
+       "10": 14,
+       "15": 2
+      },
+      "1f2b8d4f": {
+       "11": 0,
+       "12": 2
+      },
+      "e6041065": {
+       "3": 3,
+       "37": 0
+      },
+      "51c32626": {
+       "9": 1,
+       "47": 0
+      },
+      "d905b33f": {
+       "18": 9,
+       "33": 0
+      },
+      "7405e8b1": {
+       "10": 2,
+       "30": 0
+      },
+      "f35224e0": {
+       "32": 1,
+       "45": 5
+      },
+      "6456829e": {
+       "38": 12,
+       "41": 2
+      },
+      "a4996e51": {
+       "19": 4,
+       "43": 0
+      },
+      "3c1045c8": {
+       "24": 0,
+       "26": 4
+      },
+      "60036106": {
+       "38": 3,
+       "39": 0
+      },
+      "681a1674": {
+       "6": 1,
+       "34": 0
+      },
+      "e25c3b8d": {
+       "11": 3,
+       "19": 0
+      },
+      "4adc0475": {
+       "27": 0,
+       "37": 2
+      },
+      "4bc144e2": {
+       "5": 2,
+       "40": 0
+      },
+      "ef66a6e5": {
+       "26": 1,
+       "28": 0
+      },
+      "5025383b": {
+       "41": 2,
+       "45": 0
+      },
+      "a1cc6108": {
+       "9": 0,
+       "20": 16
+      },
+      "9ee3ecd6": {
+       "7": 0,
+       "45": 1
+      },
+      "3fdac837": {
+       "16": 1,
+       "38": 0
+      },
+      "91b15a6e": {
+       "14": 2,
+       "28": 0
+      },
+      "27016adc": {
+       "11": 1,
+       "31": 0
+      },
+      "720133ac": {
+       "22": 0,
+       "45": 1
+      },
+      "77eafa52": {
+       "1": 0,
+       "34": 4
+      },
+      "8979f9ec": {
+       "20": 10,
+       "29": 4
+      },
+      "0100672e": {
+       "36": 0,
+       "45": 9
+      },
+      "a96c20ee": {
+       "8": 0,
+       "12": 2
+      },
+      "92a0aa75": {
+       "29": 1,
+       "33": 3
+      },
+      "3fe836c9": {
+       "16": 1,
+       "40": 2
+      },
+      "1c549ce4": {
+       "21": 3,
+       "33": 0
+      },
+      "6c49646a": {
+       "17": 1,
+       "28": 0
+      },
+      "1192316e": {
+       "3": 0,
+       "11": 1
+      },
+      "0ea62687": {
+       "0": 0,
+       "24": 4
+      },
+      "67e0d0f2": {
+       "6": 0,
+       "37": 1
+      },
+      "bb7c3b45": {
+       "14": 1,
+       "42": 0
+      },
+      "ba358f49": {
+       "7": 0,
+       "28": null
+      },
+      "61f8c8f8": {
+       "23": 4,
+       "31": 0
+      },
+      "60159905": {
+       "4": 0,
+       "8": 1
+      },
+      "ef9cf60a": {
+       "13": 1,
+       "51": 0
+      },
+      "73d42213": {
+       "5": 3,
+       "44": 0
+      },
+      "bc149d6b": {
+       "9": 0,
+       "10": 30
+      },
+      "099778bb": {
+       "6": 5,
+       "42": 0
+      },
+      "09ba9854": {
+       "13": 0,
+       "28": 2
+      },
+      "d6062bb9": {
+       "14": 0,
+       "19": 1
+      },
+      "157a136e": {
+       "37": 0,
+       "44": 10
+      },
+      "c18a7dc8": {
+       "26": 2,
+       "34": 11
+      },
+      "a3332713": {
+       "30": 0,
+       "34": 5
+      },
+      "55241a1f": {
+       "17": 0,
+       "22": 4
+      },
+      "a08a253f": {
+       "28": 11,
+       "36": 0
+      },
+      "f0e564bc": {
+       "11": 2,
+       "34": 0
+      },
+      "078150f1": {
+       "0": 6,
+       "34": 1
+      },
+      "8cf4d046": {
+       "15": 0,
+       "43": 3
+      },
+      "a346bb18": {
+       "1": 2,
+       "23": 1
+      },
+      "37f165cf": {
+       "9": 2,
+       "33": 0
+      },
+      "8e91e7d9": {
+       "18": 43,
+       "22": 34
+      },
+      "87f22b4a": {
+       "12": 0,
+       "34": 1
+      },
+      "e56a43b9": {
+       "12": 5,
+       "31": 0
+      },
+      "efc3f7c2": {
+       "21": 2,
+       "43": 4
+      },
+      "21d02d0d": {
+       "3": 0,
+       "30": 3
+      },
+      "2311e44b_abs": {
+       "13": 0,
+       "48": 1
+      },
+      "6456829e_abs": {
+       "14": 0,
+       "45": 12
+      },
+      "e5ba910e_abs": {
+       "22": 0,
+       "42": 2
+      },
+      "a96c20ee_abs": {
+       "18": 2,
+       "51": 5
+      },
+      "ba358f49_abs": {
+       "8": 0,
+       "36": 9
+      },
+      "09ba9854_abs": {
+       "5": 1,
+       "32": 2
+      }
      }
     }
    },
@@ -7731,6 +11194,578 @@
        "lme:09ba9854_abs:s30:t0",
        "lme:09ba9854_abs:s5:t6"
       ]
+     },
+     "gold_sessions_in_pool": {
+      "d3ab962e": {
+       "8": true,
+       "37": true
+      },
+      "2311e44b": {
+       "37": true,
+       "45": true
+      },
+      "cc06de0d": {
+       "19": true,
+       "32": true
+      },
+      "a11281a2": {
+       "23": true,
+       "37": true
+      },
+      "4f54b7c9": {
+       "21": true,
+       "42": true
+      },
+      "85fa3a3f": {
+       "7": true,
+       "30": true
+      },
+      "9aaed6a3": {
+       "10": true,
+       "15": true
+      },
+      "1f2b8d4f": {
+       "11": true,
+       "12": true
+      },
+      "e6041065": {
+       "3": true,
+       "37": true
+      },
+      "51c32626": {
+       "9": true,
+       "47": true
+      },
+      "d905b33f": {
+       "18": true,
+       "33": true
+      },
+      "7405e8b1": {
+       "10": true,
+       "30": true
+      },
+      "f35224e0": {
+       "32": true,
+       "45": true
+      },
+      "6456829e": {
+       "38": true,
+       "41": true
+      },
+      "a4996e51": {
+       "19": true,
+       "43": true
+      },
+      "3c1045c8": {
+       "24": true,
+       "26": true
+      },
+      "60036106": {
+       "38": true,
+       "39": true
+      },
+      "681a1674": {
+       "6": true,
+       "34": true
+      },
+      "e25c3b8d": {
+       "11": true,
+       "19": true
+      },
+      "4adc0475": {
+       "27": true,
+       "37": true
+      },
+      "4bc144e2": {
+       "5": true,
+       "40": true
+      },
+      "ef66a6e5": {
+       "26": true,
+       "28": true
+      },
+      "5025383b": {
+       "41": true,
+       "45": true
+      },
+      "a1cc6108": {
+       "9": true,
+       "20": true
+      },
+      "9ee3ecd6": {
+       "7": true,
+       "45": true
+      },
+      "3fdac837": {
+       "16": true,
+       "38": true
+      },
+      "91b15a6e": {
+       "14": true,
+       "28": true
+      },
+      "27016adc": {
+       "11": true,
+       "31": true
+      },
+      "720133ac": {
+       "22": true,
+       "45": true
+      },
+      "77eafa52": {
+       "1": true,
+       "34": true
+      },
+      "8979f9ec": {
+       "20": true,
+       "29": true
+      },
+      "0100672e": {
+       "36": true,
+       "45": true
+      },
+      "a96c20ee": {
+       "8": true,
+       "12": true
+      },
+      "92a0aa75": {
+       "29": true,
+       "33": true
+      },
+      "3fe836c9": {
+       "16": true,
+       "40": true
+      },
+      "1c549ce4": {
+       "21": true,
+       "33": true
+      },
+      "6c49646a": {
+       "17": true,
+       "28": true
+      },
+      "1192316e": {
+       "3": true,
+       "11": true
+      },
+      "0ea62687": {
+       "0": true,
+       "24": true
+      },
+      "67e0d0f2": {
+       "6": true,
+       "37": true
+      },
+      "bb7c3b45": {
+       "14": true,
+       "42": true
+      },
+      "ba358f49": {
+       "7": true,
+       "28": false
+      },
+      "61f8c8f8": {
+       "23": true,
+       "31": true
+      },
+      "60159905": {
+       "4": true,
+       "8": true
+      },
+      "ef9cf60a": {
+       "13": true,
+       "51": true
+      },
+      "73d42213": {
+       "5": true,
+       "44": true
+      },
+      "bc149d6b": {
+       "9": true,
+       "10": true
+      },
+      "099778bb": {
+       "6": true,
+       "42": true
+      },
+      "09ba9854": {
+       "13": true,
+       "28": true
+      },
+      "d6062bb9": {
+       "14": true,
+       "19": true
+      },
+      "157a136e": {
+       "37": true,
+       "44": true
+      },
+      "c18a7dc8": {
+       "26": true,
+       "34": true
+      },
+      "a3332713": {
+       "30": true,
+       "34": true
+      },
+      "55241a1f": {
+       "17": true,
+       "22": true
+      },
+      "a08a253f": {
+       "28": true,
+       "36": true
+      },
+      "f0e564bc": {
+       "11": true,
+       "34": true
+      },
+      "078150f1": {
+       "0": true,
+       "34": true
+      },
+      "8cf4d046": {
+       "15": true,
+       "43": true
+      },
+      "a346bb18": {
+       "1": true,
+       "23": true
+      },
+      "37f165cf": {
+       "9": true,
+       "33": true
+      },
+      "8e91e7d9": {
+       "18": true,
+       "22": true
+      },
+      "87f22b4a": {
+       "12": true,
+       "34": true
+      },
+      "e56a43b9": {
+       "12": true,
+       "31": true
+      },
+      "efc3f7c2": {
+       "21": true,
+       "43": true
+      },
+      "21d02d0d": {
+       "3": true,
+       "30": true
+      },
+      "2311e44b_abs": {
+       "13": true,
+       "48": true
+      },
+      "6456829e_abs": {
+       "14": true,
+       "45": true
+      },
+      "e5ba910e_abs": {
+       "22": true,
+       "42": true
+      },
+      "a96c20ee_abs": {
+       "18": true,
+       "51": true
+      },
+      "ba358f49_abs": {
+       "8": true,
+       "36": true
+      },
+      "09ba9854_abs": {
+       "5": true,
+       "32": true
+      }
+     },
+     "gold_session_best_rank": {
+      "d3ab962e": {
+       "8": 1,
+       "37": 25
+      },
+      "2311e44b": {
+       "37": 2,
+       "45": 0
+      },
+      "cc06de0d": {
+       "19": 13,
+       "32": 0
+      },
+      "a11281a2": {
+       "23": 1,
+       "37": 0
+      },
+      "4f54b7c9": {
+       "21": 0,
+       "42": 2
+      },
+      "85fa3a3f": {
+       "7": 0,
+       "30": 1
+      },
+      "9aaed6a3": {
+       "10": 4,
+       "15": 2
+      },
+      "1f2b8d4f": {
+       "11": 0,
+       "12": 2
+      },
+      "e6041065": {
+       "3": 2,
+       "37": 0
+      },
+      "51c32626": {
+       "9": 1,
+       "47": 0
+      },
+      "d905b33f": {
+       "18": 9,
+       "33": 0
+      },
+      "7405e8b1": {
+       "10": 2,
+       "30": 0
+      },
+      "f35224e0": {
+       "32": 1,
+       "45": 4
+      },
+      "6456829e": {
+       "38": 4,
+       "41": 2
+      },
+      "a4996e51": {
+       "19": 2,
+       "43": 0
+      },
+      "3c1045c8": {
+       "24": 0,
+       "26": 4
+      },
+      "60036106": {
+       "38": 2,
+       "39": 0
+      },
+      "681a1674": {
+       "6": 1,
+       "34": 0
+      },
+      "e25c3b8d": {
+       "11": 2,
+       "19": 0
+      },
+      "4adc0475": {
+       "27": 0,
+       "37": 2
+      },
+      "4bc144e2": {
+       "5": 2,
+       "40": 0
+      },
+      "ef66a6e5": {
+       "26": 1,
+       "28": 0
+      },
+      "5025383b": {
+       "41": 2,
+       "45": 0
+      },
+      "a1cc6108": {
+       "9": 0,
+       "20": 16
+      },
+      "9ee3ecd6": {
+       "7": 0,
+       "45": 1
+      },
+      "3fdac837": {
+       "16": 1,
+       "38": 0
+      },
+      "91b15a6e": {
+       "14": 2,
+       "28": 0
+      },
+      "27016adc": {
+       "11": 1,
+       "31": 0
+      },
+      "720133ac": {
+       "22": 0,
+       "45": 1
+      },
+      "77eafa52": {
+       "1": 0,
+       "34": 2
+      },
+      "8979f9ec": {
+       "20": 10,
+       "29": 2
+      },
+      "0100672e": {
+       "36": 0,
+       "45": 4
+      },
+      "a96c20ee": {
+       "8": 0,
+       "12": 2
+      },
+      "92a0aa75": {
+       "29": 1,
+       "33": 3
+      },
+      "3fe836c9": {
+       "16": 1,
+       "40": 2
+      },
+      "1c549ce4": {
+       "21": 2,
+       "33": 0
+      },
+      "6c49646a": {
+       "17": 1,
+       "28": 0
+      },
+      "1192316e": {
+       "3": 0,
+       "11": 1
+      },
+      "0ea62687": {
+       "0": 0,
+       "24": 4
+      },
+      "67e0d0f2": {
+       "6": 0,
+       "37": 1
+      },
+      "bb7c3b45": {
+       "14": 1,
+       "42": 0
+      },
+      "ba358f49": {
+       "7": 0,
+       "28": null
+      },
+      "61f8c8f8": {
+       "23": 2,
+       "31": 0
+      },
+      "60159905": {
+       "4": 0,
+       "8": 1
+      },
+      "ef9cf60a": {
+       "13": 1,
+       "51": 0
+      },
+      "73d42213": {
+       "5": 2,
+       "44": 0
+      },
+      "bc149d6b": {
+       "9": 0,
+       "10": 30
+      },
+      "099778bb": {
+       "6": 2,
+       "42": 0
+      },
+      "09ba9854": {
+       "13": 0,
+       "28": 2
+      },
+      "d6062bb9": {
+       "14": 0,
+       "19": 1
+      },
+      "157a136e": {
+       "37": 0,
+       "44": 4
+      },
+      "c18a7dc8": {
+       "26": 2,
+       "34": 11
+      },
+      "a3332713": {
+       "30": 0,
+       "34": 4
+      },
+      "55241a1f": {
+       "17": 0,
+       "22": 2
+      },
+      "a08a253f": {
+       "28": 4,
+       "36": 0
+      },
+      "f0e564bc": {
+       "11": 2,
+       "34": 0
+      },
+      "078150f1": {
+       "0": 6,
+       "34": 1
+      },
+      "8cf4d046": {
+       "15": 0,
+       "43": 2
+      },
+      "a346bb18": {
+       "1": 2,
+       "23": 1
+      },
+      "37f165cf": {
+       "9": 2,
+       "33": 0
+      },
+      "8e91e7d9": {
+       "18": 43,
+       "22": 34
+      },
+      "87f22b4a": {
+       "12": 0,
+       "34": 1
+      },
+      "e56a43b9": {
+       "12": 4,
+       "31": 0
+      },
+      "efc3f7c2": {
+       "21": 2,
+       "43": 3
+      },
+      "21d02d0d": {
+       "3": 0,
+       "30": 3
+      },
+      "2311e44b_abs": {
+       "13": 0,
+       "48": 1
+      },
+      "6456829e_abs": {
+       "14": 0,
+       "45": 2
+      },
+      "e5ba910e_abs": {
+       "22": 0,
+       "42": 2
+      },
+      "a96c20ee_abs": {
+       "18": 2,
+       "51": 4
+      },
+      "ba358f49_abs": {
+       "8": 0,
+       "36": 9
+      },
+      "09ba9854_abs": {
+       "5": 1,
+       "32": 2
+      }
      }
     }
    }
@@ -8441,6 +12476,8 @@
  },
  "derivation": {
   "recall_all@5": "mean over questions of (session_recall@5 == 1.0)",
+  "gold_sessions_in_pool": "per-question map {gold-session haystack index: did that session contribute >=1 row to THIS arm's RANKED candidate pool (the arm's ranked_ids, whose head is ranked_ids_top5 \u2014 NOT the ingested point count recorded as pool_size)?}; a False entry is the (A) not-reachable class",
+  "gold_session_best_rank": "per-question map {gold-session haystack index: best (smallest, 0-based) rank of any of that session's pool rows, null == ABSENT from the pool}; >= 5 with every gold session in-pool is the (B) reachable-but-dropped class",
   "session_recall@5": "per-question mean of outcome session_recall@k['5']",
   "evidence_recall@5": "per-question mean of outcome evidence_recall@k['5']",
   "reader_surface@5": "per-question mean of outcome reader_surface@k['5']",
@@ -8495,7 +12532,19 @@
      "cap10": 0.9225,
      "cap15": 0.9155
     },
-    "per_question_movement": "exactly ONE question (d3ab962e: 1.0 -> 0.5, a REGRESSION at the higher cap, while it still reports total_cap_hit=True at cap=15)"
+    "per_question_movement": {
+     "improved": [],
+     "regressed": [
+      [
+       "d3ab962e",
+       1.0,
+       0.5
+      ]
+     ],
+     "regressed_total_cap_hit_at_cap15": {
+      "d3ab962e": true
+     }
+    }
    },
    "verdict": "0.8592 IS NOT A TRUNCATION LOWER BOUND. Raising the total cap 10 -> 15 cuts total_cap_hit from 30/71 (42.3%) to 6/71 (8.5%) and admits ~80 more injected-and-merged items, yet the delta does NOT move UP \u2014 it moves marginally DOWN (recall_all@5 0.8592 -> 0.8451). The truncation was not what limited the arm; the shipped cap is not suppressing it, and on this cohort the extra injected volume is (weakly, on one question) harmful \u2014 consistent with rank displacement / context dilution at a saturated reader window."
   },
@@ -8506,14 +12555,9 @@
      "cap10_on": 7799.2,
      "cap15_on": 7768.6
     },
-    "reader_token_cap": 8000,
-    "sr_block_latency_ms": {
-     "mean": 19.01,
-     "p95": 53.92,
-     "max": 149.13
-    }
+    "reader_token_cap": 8000
    },
-   "verdict": "NO CONTEXT-TOKEN REGRESSION at the shipped cap (7795.5 -> 7799.2, +3.7 tokens; the window is already 97.4% of the 8000-token cap in EVERY arm, so the reader is saturated before any injection). At cap=15 the token mean DROPS (7768.6) because the extra injected items displace base items. The arm's own block cost is 19.0 ms mean / 53.9 ms p95 \u2014 process-level retrieval latency is NOT a cost proxy in this campaign (host contention)."
+   "verdict": "NO CONTEXT-TOKEN REGRESSION at the shipped cap (7795.5 -> 7799.2, +3.7 tokens; the window is already 97.4% of the 8000-token cap in EVERY arm, so the reader is saturated before any injection). At cap=15 the token mean DROPS (7768.6) because the extra injected items displace base items. The arm's own block latency was measured at run time but is NOT in any surviving artifact and is not re-derivable from this receipt, so it is deliberately not cited here \u2014 process-level retrieval latency is NOT a cost proxy in this campaign (host contention)."
   },
   "4_inertness_and_isolation": {
    "measured": {
@@ -8523,7 +12567,7 @@
     "off_vs_off_b_ranked_ids_identical": "71/71",
     "off_vs_off_b_graded_metric_flips": "0/0 on every metric",
     "cap10_off_vs_cap15_off_top5_identical": "70/71",
-    "cap10_off_vs_cap15_off_graded_metric_flips": "0/0"
+    "cap10_off_vs_cap15_off_graded_metric_flips": "0/0 on every metric"
    },
    "verdict": "NOT INERT: the fetch fires on every question with seeds (71/71 fetch_ok), seeds 354 sessions and injects-and-merges 617 items (617/617) at cap=10, both injected arms. ISOLATION IS PROVEN, NOT ASSUMED: two OFF runs on two dedicated servers produce byte-identical ranked_ids on 71/71 questions (the deterministic ingest is reproducible across servers), and the cap=10 and cap=15 OFF runs are metric-identical on all 71. This run does NOT reproduce the harness-side pool-order instability the superseded receipt documented."
   },
@@ -8536,13 +12580,18 @@
     "n71_full_class": {
      "off": 0.6761,
      "on": 0.8592
-    },
-    "prior_receipt_n20": {
-     "off": 0.65,
-     "on": 0.9
     }
    },
-   "verdict": "THE n=20 SAMPLE OVERSTATED THE CLASS RATE BY 4.1 POINTS. On the first 20 questions of this cohort the run reproduces the superseded receipt EXACTLY (OFF 0.65 -> ON 0.90); on the full 71-question class the same arm gives OFF 0.6761 -> ON 0.8592. A sample fixes the point estimate it measured; it does not establish the class rate, and here it did not."
+   "verdict": "THE n=20 SAMPLE OVERSTATED THE CLASS RATE BY 4.1 POINTS. On the first 20 questions of this cohort the run reproduces the superseded receipt EXACTLY (OFF 0.65 -> ON 0.90); on the full 71-question class the same arm gives OFF 0.6761 -> ON 0.8592. A sample fixes the point estimate it measured; it does not establish the class rate, and here it did not.",
+   "cited_not_measured": {
+    "prior_receipt_n20": {
+     "value": {
+      "off": 0.65,
+      "on": 0.9
+     },
+     "provenance": "literal, read at seal from the superseded receipt (see `supersedes`); that artifact is NOT at HEAD or on origin/main, so it cannot be re-derived here"
+    }
+   }
   },
   "6_evidence_surface_guardrail": {
    "measured": {
@@ -8568,12 +12617,12 @@
   "THE 'ingest_cached=true PAYS INGEST ONCE' PREMISE DOES NOT HOLD IN THIS LANE. run.py's _cache_armed requires ingest_mode == 'v2'; this campaign is ingest_mode='deterministic' (as the superseded campaign was), so the #2080 ingest cache is INERT: no outcome carries ingest_cached and EVERY arm paid its own ~141 s/question deterministic ingest. Ingest was NOT paid once. Switching to v2 would have changed the substrate (LLM-extracted graph) and broken comparability with the superseded receipt.",
   "'ONE DB PER ARM' IS IMPLEMENTED AS ONE SERVER PER ARM, because it is the only mechanism that actually isolates: the graph NAME is namespace-derived (team_default__default__<qid>) and the docker:// URI path is DECORATIVE, so three different DB names on one server share graph names and are isolated only by a per-question wipe. Each arm here ran against its own dedicated container (same image digest/config), which is why the off-vs-off_b identity is meaningful.",
   "cap=20 \u2014 a plateau control ABOVE the structural fan-out (5 seeds x 3 per session = 15), where total_cap_hit must be False by construction \u2014 was NOT run (budget). The sweep has exactly two settings, 10 (shipped) and 15 (max reachable).",
-  "PROCESS-LEVEL LATENCY IS NOT A COST PROXY IN THIS CAMPAIGN. The host was under extreme fleet contention (1-min load 110-230 on 10 CPUs; 5+ concurrent pi sessions plus Chrome/OrbStack); ingest measured 141 s/question versus 28 s for the same work in a low-load 3-question smoke. Use the ISOLATED SR block latency (19.0 ms mean / 53.9 ms p95).",
+  "PROCESS-LEVEL LATENCY IS NOT A COST PROXY IN THIS CAMPAIGN. The host was under extreme fleet contention (1-min load 110-230 on 10 CPUs; 5+ concurrent pi sessions plus Chrome/OrbStack); ingest measured 141 s/question versus 28 s for the same work in a low-load 3-question smoke. The isolated SR-block latency was recorded only in this receipt's original narrative; it is NOT in any surviving artifact and cannot be re-derived, so it is not cited as evidence here.",
   "THE CAP-15 REGRESSION RESTS ON ONE QUESTION (d3ab962e, session_recall@5 1.0 -> 0.5). The defensible claim is 'the delta does not improve when the cap is raised', NOT 'raising the cap hurts' \u2014 one question cannot carry an effect size.",
   "--retrieval-only --mock exits rc=1 in _print_summary (pre-existing bug, TypeError on acc['overall']); the report JSON is written before that, so every artifact here is complete (n=71, n_failed=0, integrity.valid=true in all 7 runs).",
   "A pre-existing FLAKY test was observed while verifying this change: tests/test_eval_retrieval_budget.py::test_deadline_degradation_records_timeout_reason failed once (redislite socket in a tmpdir) and passed on rerun; it does not touch the re-injection arm. Recorded, not filed (category B: test flakiness of the machinery, nothing but time lost).",
   "The 88 pre-existing __pycache__ byte-caches under tortoise/ and tools/ were removed before the guard would pass (guard class 16, #3712). All runs were launched with -B + PYTHONDONTWRITEBYTECODE=1 so the measured surface stayed byte-code-free.",
-  "R2 (RESIDUAL, NOT VERDICT-CHANGING): the recorded `command` uses `--checkpoint <arm>.cp.json` with NO cap component in the filename. Under the PRE-fix revision the cap was not part of the checkpoint fingerprint, so the cap-15 arms were RESUME-ELIGIBLE against the cap-10 checkpoint file \u2014 a resume would have blended two injection volumes into one artifact while it declared one config. It is refuted in fact, not by construction: the recorded census still separates the arms (cap10 on dropped_by_cap 879 / total_cap_hit_questions 30 vs cap15 on 823 / 6, i.e. the cap-15 arms really did admit MORE volume and trip the total budget LESS often, which a wholesale resume of cap-10 outcomes could not produce), and every arm paid its own ~141 s/question deterministic ingest (the #2080 ingest cache is inert in this lane), so a full resume was not what happened. The numbers are therefore NOT wholesale-blended. The delta review's fix DOES close this class going forward: the resolved cap now rides the checkpoint fingerprint, so the pre-fix resume this limitation describes is now REFUSED by `CheckpointStaleError` (and the seam is pinned end to end by `tests/test_eval_reinjection_cap_resume.py`)."
+  "R2 (RESIDUAL, NOT VERDICT-CHANGING): the recorded `command` uses `--checkpoint <arm>.cp.json` with NO cap component in the filename. Under the PRE-fix revision the cap was not part of the checkpoint fingerprint, so the cap-15 arms were RESUME-ELIGIBLE against the cap-10 checkpoint file \u2014 a resume would have blended two injection volumes into one artifact while it declared one config. It is refuted in fact, not by construction: the recorded census still separates the arms (cap10 on dropped_by_cap 879 / total_cap_hit_questions 30 vs cap15 on 823 / 6, i.e. the cap-15 arms really did admit MORE volume and trip the total budget LESS often, which a wholesale resume of cap-10 outcomes could not produce), and every arm paid its own ~141 s/question deterministic ingest (the #2080 ingest cache is inert in this lane), so a full resume was not what happened. The numbers are therefore NOT wholesale-blended. The delta review's fix DOES close this class going forward: the resolved cap now rides the checkpoint fingerprint, so the pre-fix resume this limitation describes is now REFUSED by `CheckpointStaleError`. CAVEAT: the seam test that pins that end to end, `tests/test_eval_reinjection_cap_resume.py`, is NOT at HEAD or on origin/main either \u2014 it exists only on the unmerged commit 195c4186a9db95dff976360892f1f9ea8613e8f5 (branch fix/2513-retrieval-evidence, PR #3577), so read it by commit."
  ],
- "supersedes": "the sample this run supersedes: docs/scoping/receipts/2026-09-16-2517-reinjection-turn-c1e6f7f2d.json (n=20 = ms_tail[0:20], pooled recall_all@5 OFF 0.65 -> ON 0.90, total_cap_hit 7/20, cap=10 only)"
+ "supersedes": "the sample this run supersedes: docs/scoping/receipts/2026-09-16-2517-reinjection-turn-c1e6f7f2d.json (n=20 = ms_tail[0:20], pooled recall_all@5 OFF 0.65 -> ON 0.90, total_cap_hit 7/20, cap=10 only). CAVEAT: that path is NOT at HEAD or on origin/main \u2014 it exists only on the unmerged branch fix/2513-retrieval-evidence (PR #3577), which first added it at commit 8f1af7f62a922c321f49c774e5f7dfba70e1c9a6 (blob e673d855e02b7db2483d813802d42e99b348d4df at that commit; blob 74b14069306e2d634ad6df9a75c17f681742eedd at the branch tip). Read it by commit, not by path."
 }

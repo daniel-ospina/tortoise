@@ -16,24 +16,24 @@ The LIVE registered surface (``mcp._list_tools()`` — the tools an agent is
 actually served) is resolved a second, independent way, so "resolves to a live
 method" is asserted on the surface an agent calls, not only on the declaration.
 
-RED BY DESIGN for the five known-dead entries (#4282): their ``sdk_method``
+RED BY DESIGN for the known-dead entries recorded in ``_DEAD_LINKS_AWAITING_4282`` (#4282): their ``sdk_method``
 names an attribute ``TortoiseSDK`` does not have. The dead thing is the DECLARED
 SDK BINDING, not the capability — this is registry drift, not a missing feature:
 the behaviour already exists one import away (``pack_state.get_tenant_packs``,
 ``pack_manifest_store.upsert_tenant_manifest``, ``navigation.entityProfile``,
-``monitoring.metrics``, ``analyze.analyze``) and the MCP handlers already call it.
+``analyze.analyze``) and the MCP handlers already call it.
 Do NOT fix, stub, rename or delete them here — the owner-approved canonical list
 (``docs/product/canonical-mcp-tools.md``, merged ``8375c7921``) names this surface,
 and #4282 is the implementation epic that repairs these declarations. Until #4282
 lands, this test is the instrument that keeps the surface measurable. #3835 and
 #3838 were superseded by #3863, which is now CLOSED.
 
-Those five carry ``xfail(strict=True)``, and that marker is what closes the gate
+Those entries carry ``xfail(strict=True)``, and that marker is what closes the gate
 in BOTH directions:
 
-* a **sixth** dead entry is not in the ledger below, so it **FAILS the build** —
+* an UNLISTED dead entry is not in the ledger below, so it **FAILS the build** —
   the surface cannot rot further while the curated list is pending; and
-* **repairing** one of the five turns its case into XPASS, and ``strict=True``
+* **repairing** one turns its case into XPASS, and ``strict=True``
   **reds the build** — no expected-failure marker outlives the defect it records.
 
 The case set is guarded in two layers: the collection gate below runs at IMPORT
@@ -43,7 +43,7 @@ no invocation can hide a shrunken or orphaned case set), and
 declared cases must actually EXECUTE, not merely be declared or collected.
 
 So this file is red evidence by construction: it is green only while the dead set
-is exactly the five recorded in ``_DEAD_LINKS_AWAITING_4282``. Do NOT add a name
+is exactly the set recorded in ``_DEAD_LINKS_AWAITING_4282``. Do NOT add a name
 to that ledger to silence a failure, and do NOT remove a name to accommodate a
 repair — the ledger is the pending-decision record, not a suppression list.
 
@@ -83,25 +83,30 @@ def _resolve(entry):
 
 
 # --- the pending ledger (#4282) --------------------------------------------
-# The five entries whose declared ``sdk_method`` names an attribute TortoiseSDK
+# The entries whose declared ``sdk_method`` names an attribute TortoiseSDK
 # does not have. #3835 and #3838 were SUPERSEDED by #3863 and are CLOSED; #3863's
 # curation decision landed as the approved list in
 # ``docs/product/canonical-mcp-tools.md`` (merged 8375c7921), and the binding for
-# repairing these five is now #4282, the implementation epic. See the module
+# repairing these is now #4282, the implementation epic. See the module
 # docstring for the two-directional fail-closed property these markers implement.
 _DEAD_LINKS_AWAITING_4282 = frozenset({
     "tortoise_packs_list",
     "tortoise_pack_install",
     "tortoise_entity_profile",
-    "tortoise_health",
     "tortoise_analyze",
+    # `tortoise_health` is RE-POINTED, not deleted to silence a failure: #3883
+    # retired the NAME from the advertised surface (#3863's curation), so it no
+    # longer has a case here to carry its pending #4282 repair — the repair
+    # follows the entry. Its replacement is `tortoise_overview(section="health")`,
+    # and the dead declared binding stays visible in the retired half of the
+    # baseline (`config/surface-manifest.yml::retired`).
 })
 
 
 def _marks(entry):
     """``xfail(strict=True)`` for a known-dead entry, and nothing for any other.
 
-    Returning NO mark for an unlisted entry is the fail-closed half: a sixth dead
+    Returning NO mark for an unlisted entry is the fail-closed half: an unlisted dead
     entry reaches the assertion unmarked and FAILS the build.
     """
     if entry.name not in _DEAD_LINKS_AWAITING_4282:
@@ -114,7 +119,7 @@ def _marks(entry):
                 f"TortoiseSDK does not have. Repairing it is #4282's work on the "
                 f"owner-approved canonical list (docs/product/canonical-mcp-tools.md). "
                 f"Repairing it XPASSes this case, which "
-                f"strict=True reds; a sixth dead entry is not listed here and fails. "
+                f"strict=True reds; an unlisted dead entry is not listed here and fails. "
                 f"When the #4282 redesign lands ({_EXPECTED_MCP_TOOLS} MCP tools from 98, "
                 f"{_EXPECTED_SDK_METHODS} SDK methods from 150), re-point this ledger at "
                 f"the new surface and RETARGET the instrument at Phase 0.4 — do NOT "
@@ -229,9 +234,9 @@ def test_every_registered_entry_resolves_to_a_live_method(entry, target, where):
 
     Mutation that REDs this assertion: rename/delete the target it names (e.g.
     rename ``TortoiseSDK.create_point`` in ``tortoise/sdk.py``) — the getattr
-    then returns ``None`` and this case fails. The five ``#4282`` entries below
+    then returns ``None`` and this case fails. The ``#4282`` entries below
     are the first red cases — carried as ``xfail(strict=True)``, so repairing one
-    reds the build and a sixth dead entry fails it.
+    reds the build and an unlisted dead entry fails it.
     """
     _EXECUTED.add(entry.name)
     assert callable(target), (
@@ -241,7 +246,7 @@ def test_every_registered_entry_resolves_to_a_live_method(entry, target, where):
         f"the DECLARED SDK BINDING — registry drift, not a missing capability. For the #4282 "
         f"entries the behaviour already exists one import away "
         f"(pack_state.get_tenant_packs, pack_manifest_store.upsert_tenant_manifest, "
-        f"navigation.entityProfile, monitoring.metrics, analyze.analyze) and the MCP "
+        f"navigation.entityProfile, analyze.analyze) and the MCP "
         f"handlers already call it; what is absent is the SDK name the registry declares. "
         f"Declared sdk_method={entry.sdk_method!r}."
         f"{_rendezvous()}"

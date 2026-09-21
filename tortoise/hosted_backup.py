@@ -811,6 +811,24 @@ def _r2_endpoint_from_env() -> str:
     return f"https://{account}.r2.cloudflarestorage.com"
 
 
+def _r2_config_from_env() -> tuple[str, str, str, str]:
+    """Resolve the DEFAULT R2 settings from env, as
+    ``(endpoint, access_key_id, secret_access_key, bucket)``.
+
+    The endpoint is DERIVED from ``R2_ACCOUNT_ID`` (see
+    ``_r2_endpoint_from_env``), so the tuple changes iff any ``R2_*`` var does.
+    It is BOTH what ``R2Storage.__init__`` builds the default store from AND the
+    cache key ``hosted_api._backup_storage`` keys its process-wide store on
+    (#3968) — one function, so the key and the store can never disagree about
+    what "the same R2 config" means."""
+    return (
+        _r2_endpoint_from_env(),
+        os.environ.get("R2_ACCESS_KEY_ID", ""),
+        os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+        os.environ.get("R2_BUCKET", ""),
+    )
+
+
 def _is_no_such_key_error(e: Exception) -> bool:
     """True when ``e`` is a botocore ClientError for a missing S3/R2 key."""
     try:
@@ -833,10 +851,11 @@ class R2Storage:
         secret_access_key: str | None = None,
         bucket: str | None = None,
     ):
-        self._endpoint = endpoint_url or _r2_endpoint_from_env()
-        self._ak = access_key_id or os.environ.get("R2_ACCESS_KEY_ID", "")
-        self._sk = secret_access_key or os.environ.get("R2_SECRET_ACCESS_KEY", "")
-        self._bucket = bucket or os.environ.get("R2_BUCKET", "")
+        env_endpoint, env_ak, env_sk, env_bucket = _r2_config_from_env()
+        self._endpoint = endpoint_url or env_endpoint
+        self._ak = access_key_id or env_ak
+        self._sk = secret_access_key or env_sk
+        self._bucket = bucket or env_bucket
         if not all([self._endpoint, self._ak, self._sk, self._bucket]):
             raise RuntimeError(
                 "R2 not configured — set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, "
