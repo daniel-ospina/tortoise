@@ -997,7 +997,10 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_get_entity",
         id="surface.get_entity",
-        description="Get any entity by ID, eventId, or url.",
+        description="Get any entity by ID, eventId, or url. `type` selects the node kind "
+                    "(point | entity | operator | events | governance), dispatching exactly as "
+                    "the retired per-type getters did; omit it to look the entity up by id. "
+                    "The canonical fetch-by-id tool.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="get_entity",
