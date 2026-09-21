@@ -669,7 +669,10 @@ class TestLaneMarkers:
             self, sb, monkeypatch):
         """Production JWT branch of get_current_org_session attaches
         session_user_id (the #2297/#2380 gate predicate) + the explicit
-        auth_lane='session' documentation marker — in Supabase mode."""
+        auth_lane='session' documentation marker — in Supabase mode. #4504:
+        it also attaches the VERIFIED session email (the signed JWT's email
+        claim) under session_user_email, which the billing email chain reads
+        before its 400."""
         _, fake = sb
         _sb_membership(fake, _SB_TEAM, _U1, "owner")
         monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
@@ -682,6 +685,8 @@ class TestLaneMarkers:
             get_current_org_session_ungated(_make_request(_SESSION_HEADERS)))
         assert team["session_user_id"] == _U1
         assert team["auth_lane"] == "session"
+        # #4504: verified session email travels with the resolved org dict.
+        assert team["session_user_email"] == "owner@example.com"
         assert team["org_id"] == _SB_TEAM
 
     def test_override_seam_dicts_pass_through_unchanged(self, sb):

@@ -3868,6 +3868,15 @@ async def get_current_org_gated(request: Request) -> dict:
 # _require_owner_admin_if_session helper reads it once).
 _SESSION_USER_ID_KEY = "session_user_id"
 
+# #4504: the VERIFIED session email rides the same JWT branch, under its own
+# named key, so surfaces that need the signed-in human's contact identity
+# (billing checkout) can read it without a second token decode. It is sourced
+# ONLY from ``get_current_user`` (the signature-verified Supabase JWT's
+# ``email`` claim, shape-checked in session_auth.verify_session_jwt) — NEVER
+# from a request body/header/query value a caller could forge. Key-auth and
+# dependency-override dicts carry none, exactly like session_user_id.
+_SESSION_USER_EMAIL_KEY = "session_user_email"
+
 
 async def get_current_org_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
@@ -3930,6 +3939,14 @@ async def get_current_org_session(request: Request, gate_key_login: bool = True)
     # their org dicts carry no session_user_id (create_api_key falls back
     # to "api").
     org[_SESSION_USER_ID_KEY] = user["user_id"]
+    # #4504: attach the VERIFIED session email (the signed JWT's ``email``
+    # claim, already shape-checked string|None by verify_session_jwt). This is
+    # the signed-in human's own identity — not a client-supplied value — and
+    # is the fallback the billing email chain reads before its 400. Absent /
+    # blank (e.g. a phone-only identity) → key omitted, chain falls through.
+    _session_email = user.get("email")
+    if isinstance(_session_email, str) and _session_email.strip():
+        org[_SESSION_USER_EMAIL_KEY] = _session_email.strip()
     # #2380 (Task 4): explicit auth_lane marker — documentation-in-code for
     # the session-vs-key distinction the #2297/#2380 role gates predicate
     # on. THE GATE PREDICATE STAYS ON session_user_id PRESENCE, NOT this
@@ -24723,7 +24740,14 @@ def _billing_customer_email(sdk, org: dict) -> str:
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
        request, fall back to any org key.
-    3. 400 last resort — clear message, no crash.
+    3. The VERIFIED session user's email (#4504) — OAuth/session users whose
+       org carries no ``Team.email`` and whose keys carry no ``created_by``
+       (a dashboard/provisioned org) were refused a checkout they are
+       entitled to. ``org[_SESSION_USER_EMAIL_KEY]`` is attached ONLY on the
+       JWT branch of ``get_current_org_session``, from the signature-verified
+       Supabase JWT's ``email`` claim — never a client-supplied body/header.
+       Last in the chain: the existing resolutions keep precedence.
+    4. 400 last resort — clear message, no crash.
     """
     org_id = org["org_id"]
     row = sdk._get_registry().query(
@@ -24744,6 +24768,11 @@ def _billing_customer_email(sdk, org: dict) -> str:
     ).result_set
     if row and row[0][0]:
         return row[0][0]
+    # #4504: verified session email — before the 400, after the existing
+    # resolutions (precedence unchanged).
+    session_email = org.get(_SESSION_USER_EMAIL_KEY)
+    if isinstance(session_email, str) and session_email.strip():
+        return session_email.strip()
     raise HTTPException(
         status_code=400,
         detail="No customer email for this team — register with an email or "
