@@ -2224,6 +2224,54 @@ class TestRestoreSwapReadBound:
         # caused by it is attributable (the #3845 fork_slot precedent).
         assert result.get("copy_read_bound_overrun") is True
 
+    def test_pre_restore_copy_overrun_is_surfaced(self, client, monkeypatch):
+        """#4233 — the PRE-RESTORE safety copy's overrun is surfaced too.
+
+        A restore runs TWO bounded copies, so the flag must not be satisfiable
+        only by the swap. Overrun ONLY the pre-restore copy (its destination is
+        the ``_pre_restore_`` scratch graph) and assert the flag is set while
+        the swap copy completes normally.
+
+        RED (mutation): pass ``settled=None`` for the pre-restore copy — the
+        flag is then absent and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "2")
+        seen: list[str] = []
+
+        def pre_only_timeout(redis_client, src_name, dst_name):
+            from falkordb import Graph
+            seen.append(dst_name)
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+            if "_pre_restore_" not in dst_name:
+                return  # the swap copy completes cleanly
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", pre_only_timeout)
+        db = _held_proj_db()
+        source = db.select_graph("org_settle_source")
+        source.query("MATCH (n) DETACH DELETE n")
+        source.query("CREATE (p:Point {id:'pt-0'})")
+        payload = hb.dump_graph(source)
+        target = db.select_graph("org_settle_target")
+        target.query("MATCH (n) DETACH DELETE n")
+        target.query("CREATE (p:Point {id:'stale'})")  # live_nodes > 0
+
+        result = hb._restore_into_temp_verify_swap(
+            db, payload, live_name="org_settle_target")
+
+        # the pre-restore copy actually ran, and it is the one that overran
+        assert any("_pre_restore_" in d for d in seen), seen
+        assert result.get("copy_read_bound_overrun") is True
+        rows = db.select_graph("org_settle_target").query(
+            "MATCH (n:Point) RETURN n.id").result_set
+        assert [r[0] for r in rows] == ["pt-0"]
+
     def test_drill_record_carries_the_copy_overrun(self, client, dr_env,
                                                    mem_storage, monkeypatch):
         """#4233 — the overrun is attributed from the PERSISTED drill record.

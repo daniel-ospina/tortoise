@@ -24499,11 +24499,11 @@ def _drill_execute(
         pass
     within_rto = duration_s <= _DRILL_RTO_S
     # #3845: surface a wedge distinctly — "fork slot wedged" must never be
-    # readable as a plain "copy failed". #4233: surface a swap copy that
-    # outlived the restore's read bound the same way, so an RTO breach caused
-    # by it is attributable from the PERSISTED record/incident, not only the
-    # immediate response. Both absent on the clean path, so a healthy drill
-    # record is unchanged.
+    # readable as a plain "copy failed". #4233: surface a copy (either the
+    # pre-restore safety copy or the swap) that outlived the restore's read
+    # bound the same way, so an RTO breach caused by it is attributable from
+    # the PERSISTED record/incident, not only the immediate response. Both
+    # absent on the clean path, so a healthy drill record is unchanged.
     detail = {k: v for k, v in (
         ("restored", result.get("restored")),
         ("fork_slot", result.get("fork_slot")),
@@ -24670,8 +24670,9 @@ async def backups_drill_scheduled(request: Request):
                     "rto_s": result.get("rto_s"),
                     "org_id": (result.get("record") or {}).get("org_id"),
                     "backup_key": (result.get("record") or {}).get("backup_key"),
-                    # #4233: if the swap's GRAPH.COPY outlived the restore's
-                    # read bound, name it — that is the attributable cause.
+                    # #4233: if either GRAPH.COPY (pre-restore safety copy or
+                    # swap) outlived the restore's read bound, name it — that
+                    # is the attributable cause.
                     "copy_read_bound_overrun": result.get(
                         "copy_read_bound_overrun"),
                 },

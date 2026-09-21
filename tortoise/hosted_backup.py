@@ -2208,7 +2208,7 @@ def count_data_nodes(db, graph_name: str) -> int:
     the org graph MERGEs its ``point_fts_v2`` marker into that graph, and a raw
     ``MATCH (n)`` then reports 4 for a 3-point graph (the false-red that blocked
     unrelated PRs). The DATA_LOSS_CANDIDATE detector
-    (``backup_sweep._sweep_graph``) consumes the same ``node_count``, so excluding
+    (``backup_sweep._backup_graph``) consumes the same ``node_count``, so excluding
     the marker is also what keeps a marker-only change from reading as data
     loss.
 
