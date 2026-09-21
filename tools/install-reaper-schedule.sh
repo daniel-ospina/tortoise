@@ -43,7 +43,18 @@
 #                   directly; cron divides by 60), default REAPER_TIMEOUT + 300
 #   REAPER_TIMEOUT  sweep budget in seconds; default 900
 #   REAPER_JOBS     parallel CLIENT LIST probe workers; default 16
-#   AGENTS_DIR      launchd install dir (default $HOME/Library/LaunchAgents)
+#   AGENTS_DIR      launchd install dir (default the LOGIN ACCOUNT's
+#                   ~/Library/LaunchAgents, resolved from the password
+#                   database — not the mutable $HOME).
+#                   ⛔ A THROWAWAY $HOME/AGENTS_DIR DOES NOT SANDBOX THIS
+#                   SCRIPT. `launchctl` addresses the user domain BY UID
+#                   (`gui/$(id -u)`), so a bootstrap here re-points the LIVE
+#                   agent launchd holds for that label whatever HOME says.
+#                   A non-standard AGENTS_DIR — including one derived from a
+#                   throwaway $HOME — is REFUSED unless
+#                   REAPER_ALLOW_NONSTANDARD_AGENTS_DIR=1 (see below).
+#   REAPER_ALLOW_NONSTANDARD_AGENTS_DIR  set to 1 to permit a non-standard
+#                   AGENTS_DIR — at your own risk; it re-points the live agent
 #   CRONTAB_CMD     crontab binary (default: crontab)
 #
 # Exit codes: 0 = ok (or clean skip), 1 = failure (loud), 2 = usage error.
@@ -80,12 +91,23 @@ fi
 #     the #4438 fix.
 REAPER_TIMEOUT="${REAPER_TIMEOUT:-900}"
 REAPER_JOBS="${REAPER_JOBS:-16}"
+# #4438 review P2: bound the digit length BEFORE any arithmetic, and compare
+# FAIL-CLOSED. `[ "$X" -lt 1 ]` ERRORS on a value too large for the shell's
+# integer type (status 2, which `if` reads as false), so the >= 1 guard was
+# bypassed and the wrapped value then passed the digit `case` — installing a
+# corrupt `--timeout` that raises OverflowError in `signal.alarm()` on every
+# fire. `! [ "$X" -ge 1 ]` turns that exact overflow into the refusal branch.
+_MAX_DIGITS=9
 case "$REAPER_TIMEOUT" in
     ''|*[!0-9]*)
         echo "ERROR: REAPER_TIMEOUT must be a whole number of seconds, got '$REAPER_TIMEOUT'" >&2
         exit 2 ;;
 esac
-if [ "$REAPER_TIMEOUT" -lt 1 ]; then
+if [ "${#REAPER_TIMEOUT}" -gt "$_MAX_DIGITS" ]; then
+    echo "ERROR: REAPER_TIMEOUT out of range (max ${_MAX_DIGITS} digits), got '$REAPER_TIMEOUT'" >&2
+    exit 2
+fi
+if ! [ "$REAPER_TIMEOUT" -ge 1 ] 2>/dev/null; then
     echo "ERROR: REAPER_TIMEOUT must be >= 1, got '$REAPER_TIMEOUT'" >&2
     exit 2
 fi
@@ -94,7 +116,11 @@ case "$REAPER_JOBS" in
         echo "ERROR: REAPER_JOBS must be a whole number, got '$REAPER_JOBS'" >&2
         exit 2 ;;
 esac
-if [ "$REAPER_JOBS" -lt 1 ]; then
+if [ "${#REAPER_JOBS}" -gt "$_MAX_DIGITS" ]; then
+    echo "ERROR: REAPER_JOBS out of range (max ${_MAX_DIGITS} digits), got '$REAPER_JOBS'" >&2
+    exit 2
+fi
+if ! [ "$REAPER_JOBS" -ge 1 ] 2>/dev/null; then
     echo "ERROR: REAPER_JOBS must be >= 1, got '$REAPER_JOBS'" >&2
     exit 2
 fi
@@ -107,16 +133,31 @@ case "$REAPER_INTERVAL" in
         echo "ERROR: REAPER_INTERVAL must be a whole number of seconds, got '$REAPER_INTERVAL'" >&2
         exit 2 ;;
 esac
+if ! [ "$REAPER_INTERVAL" -ge 1 ] 2>/dev/null; then
+    echo "ERROR: REAPER_INTERVAL must be >= 1, got '$REAPER_INTERVAL'" >&2
+    exit 2
+fi
 if [ "$REAPER_INTERVAL" -le "$REAPER_TIMEOUT" ]; then
     echo "WARNING: REAPER_INTERVAL ($REAPER_INTERVAL) must exceed REAPER_TIMEOUT ($REAPER_TIMEOUT); a fire may be refused mid-sweep" >&2
 fi
-case "$REAPER_INTERVAL" in
-    *[!0-9]*|'') : ;;
-    *)
-        if [ "$REAPER_INTERVAL" -lt 60 ] || [ $((10#$REAPER_INTERVAL % 60)) -ne 0 ]; then
-            echo "WARNING: cron takes REAPER_INTERVAL in whole minutes; $REAPER_INTERVAL s floors to $(( 10#$REAPER_INTERVAL / 60 < 1 ? 1 : 10#$REAPER_INTERVAL / 60 )) min" >&2
-        fi ;;
-esac
+# #4438 review: cron's minute step is only 0-59, so `*/N` with N >= 60 is
+# evaluated over the minute range and matches minute 0 only — SILENTLY hourly,
+# while launchd still gets N seconds. Render exact whole-hour intervals in the
+# hour field; warn when cron cannot express the interval exactly. Computed
+# once here so the warning and the emitted field cannot drift.
+CRON_MINUTES=$(( 10#$REAPER_INTERVAL / 60 ))
+[ "$CRON_MINUTES" -lt 1 ] && CRON_MINUTES=1
+if [ "$CRON_MINUTES" -lt 60 ]; then
+    CRON_SCHEDULE="*/$CRON_MINUTES * * * *"
+    if [ $(( 10#$REAPER_INTERVAL % 60 )) -ne 0 ]; then
+        echo "WARNING: cron takes REAPER_INTERVAL in whole minutes; ${REAPER_INTERVAL}s floors to ${CRON_MINUTES} min" >&2
+    fi
+elif [ $(( CRON_MINUTES % 60 )) -eq 0 ] && [ $(( CRON_MINUTES / 60 )) -le 23 ]; then
+    CRON_SCHEDULE="0 */$(( CRON_MINUTES / 60 )) * * *"
+else
+    CRON_SCHEDULE="0 * * * *"
+    echo "WARNING: cron cannot express REAPER_INTERVAL ${REAPER_INTERVAL}s exactly (${CRON_MINUTES} min); scheduling hourly at minute 0" >&2
+fi
 REAPER_CMD="$PYTHON_BIN -m tortoise.embedded_reaper --no-dry-run --only-safe --timeout $REAPER_TIMEOUT --jobs $REAPER_JOBS"
 
 usage() {
@@ -155,14 +196,10 @@ PLIST
 }
 
 cron_line() {
-    # every REAPER_INTERVAL SECONDS (default 1200 = 20 min); cron takes
-    # interval/60 minutes, so a non-multiple-of-60 floors to the minute
-    # (a warning is emitted at install time — see REAPER_INTERVAL).
-    local interval="${REAPER_INTERVAL:-1200}"
-    local minutes=$(( 10#$interval / 60 ))
-    [ "$minutes" -lt 1 ] && minutes=1
+    # CRON_SCHEDULE is computed once at startup (see REAPER_INTERVAL), so the
+    # warning and the emitted field share one source of truth.
     echo "$CRON_LINE_RAW"
-    echo "*/$minutes * * * * cd $REPO && $REAPER_CMD >> \$HOME/.tortoise/reaper.log 2>&1"
+    echo "$CRON_SCHEDULE cd $REPO && $REAPER_CMD >> \$HOME/.tortoise/reaper.log 2>&1"
 }
 
 status() {
@@ -190,7 +227,50 @@ status() {
     return 0
 }
 
+# #4438 review P1: `launchctl` addresses the user domain BY UID
+# (`gui/$(id -u)`), never by HOME — so overriding HOME/AGENTS_DIR with a
+# throwaway does NOT sandbox a Darwin install. A `bootstrap` (or a
+# label-scoped `bootout`) here re-points the LIVE agent launchd holds for
+# `gui/<uid>/$LABEL`, whatever HOME says. Not theoretical: two review runs on
+# this host left the live agent pointing at a deleted temp plist (interpreter
+# `/path/to/venv/bin/python`, failing EX_CONFIG).
+#
+# The authority for “where the live agent lives” is the LOGIN ACCOUNT's home
+# from the password database — NOT the exported $HOME, which a caller can
+# point anywhere. Refuse any AGENTS_DIR other than that account's
+# ~/Library/LaunchAgents unless explicitly opted in.
+_login_home() {
+    local user
+    user="$(id -un)"
+    if command -v getent >/dev/null 2>&1; then
+        getent passwd "$user" 2>/dev/null | cut -d: -f6
+    elif command -v dscl >/dev/null 2>&1; then
+        dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null \
+            | awk '{print $2}'
+    else
+        eval echo "~$user"
+    fi
+}
+
+require_standard_agents_dir() {
+    local expected
+    expected="$(_login_home)/Library/LaunchAgents"
+    [ "$AGENTS_DIR" = "$expected" ] && return 0
+    if [ "${REAPER_ALLOW_NONSTANDARD_AGENTS_DIR:-0}" = "1" ]; then
+        echo "WARNING: AGENTS_DIR '$AGENTS_DIR' is not the login account's '$expected'; launchctl acts on gui/$(id -u)/$LABEL regardless (REAPER_ALLOW_NONSTANDARD_AGENTS_DIR=1)" >&2
+        return 0
+    fi
+    echo "ERROR: refusing to install/uninstall to non-standard AGENTS_DIR '$AGENTS_DIR'." >&2
+    echo "  launchctl addresses the user domain BY UID, so a throwaway HOME/AGENTS_DIR" >&2
+    echo "  does NOT sandbox this install — it would re-point the LIVE" >&2
+    echo "  gui/$(id -u)/$LABEL agent (login account dir: '$expected')." >&2
+    echo "  Set REAPER_ALLOW_NONSTANDARD_AGENTS_DIR=1 to override." >&2
+    return 2
+}
+
 install_darwin() {
+    # Refuse BEFORE any plist is written or any launchctl call is made.
+    require_standard_agents_dir || return $?
     mkdir -p "$AGENTS_DIR"
     render_plist > "$PLIST_PATH.tmp"
     local changed=0
@@ -226,8 +306,12 @@ install_linux() {
     new_line="$(cron_line | tail -1)"
     if printf '%s\n' "$current" | grep -qF "$CRON_MARKER"; then
         # Replace any prior tortoise-reaper block (marker + schedule lines).
+        # #4438 review: the old ERE never matched the marker (it omitted the
+        # space in "# ... reaper (#1642)"), so re-running the installer
+        # ACCUMULATED markers and broke --status. Match the exact marker and
+        # any schedule line by FIXED string.
         current="$(printf '%s\n' "$current" \
-            | grep -vE "^# tortoise-embedded-reaper\\(#1642\\)$|tortoise\\.embedded_reaper")"
+            | grep -vF -e "$CRON_MARKER" -e "tortoise.embedded_reaper")"
         printf '%s\n%s\n%s\n' "$current" "$CRON_MARKER" "$new_line" \
             | $CRONTAB_CMD - || return 1
         echo "updated cron entry: $new_line"
@@ -242,6 +326,7 @@ install_linux() {
 uninstall() {
     case "$(uname -s)" in
         Darwin)
+            require_standard_agents_dir || return $?
             launchctl bootout "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || true
             rm -f "$PLIST_PATH"
             echo "removed $PLIST_PATH"
@@ -250,7 +335,7 @@ uninstall() {
             local current
             current="$($CRONTAB_CMD -l 2>/dev/null || true)"
             printf '%s\n' "$current" \
-                | grep -vE "^# tortoise-embedded-reaper\\(#1642\\)$|tortoise\\.embedded_reaper" \
+                | grep -vF -e "$CRON_MARKER" -e "tortoise.embedded_reaper" \
                 | $CRONTAB_CMD - || return 1
             echo "removed cron entry ($CRON_MARKER)"
             ;;
@@ -265,8 +350,10 @@ case "${1:-}" in
     --help|-h) usage ;;
     "")
         case "$(uname -s)" in
-            Darwin) install_darwin ;;
-            Linux) install_linux ;;
+            # Propagate the installer's exit code — a refusal (exit 2) must
+            # never be followed by a "reaper schedule installed" message.
+            Darwin) install_darwin || exit $? ;;
+            Linux) install_linux || exit $? ;;
             *) echo "ERROR: unsupported platform: $(uname -s) (launchd/cron only)" >&2; exit 1 ;;
         esac
         echo "reaper schedule installed. Verify: $(dirname "$0")/install-reaper-schedule.sh --status"

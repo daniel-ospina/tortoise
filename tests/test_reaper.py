@@ -4607,3 +4607,52 @@ def test_run_sweep_forwards_jobs_to_reap(monkeypatch):
     # The other kwargs the caller owns must still be forwarded unchanged.
     assert captured.get("only_safe") is True
     assert captured.get("dry_run") is True
+
+
+def test_reap_nonpositive_jobs_does_not_crash(monkeypatch):
+    """#4438 review P2: `--jobs 0` / `--jobs -1` must not crash reap().
+
+    `reap()` builds `ThreadPoolExecutor(max_workers=min(jobs, len(cands)))`
+    for its parallel CLIENT LIST pre-probe; a non-positive `jobs` makes that
+    `max_workers=0` -> `ValueError: max_workers must be greater than 0`.
+
+    Mutation: delete the `jobs = max(1, jobs)` clamp in reap() and this raises.
+    """
+    import tortoise.embedded_reaper as R
+
+    records = [
+        {"classification": "candidate", "socket_path": "/nonexistent/a.sock"},
+        {"classification": "candidate", "socket_path": "/nonexistent/b.sock"},
+    ]
+    monkeypatch.setattr(R, "_active_client_count", lambda path: None)
+    for jobs in (0, -1):
+        acted = R.reap(records, dry_run=True, jobs=jobs)
+        assert isinstance(acted, list)
+
+
+def test_run_sweep_clamps_nonpositive_jobs_to_one(monkeypatch):
+    """`_run_sweep` clamps a non-positive `jobs` before reap() sees it.
+
+    Pins the CLI `--jobs 0` / `--jobs -1` path (`_run_sweep` is the only
+    caller of `reap` from main()). Mutation: delete the clamp in
+    `_run_sweep` and `captured["jobs"]` is 0/-1.
+    """
+    import tortoise.embedded_reaper as R
+
+    captured: dict = {}
+
+    def _fake_reap(records, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(R, "discover", lambda jobs=1, **kw: [])
+    monkeypatch.setattr(R, "_mark_orphan_confirmation", lambda records: None)
+    monkeypatch.setattr(R, "_sweep_quarantine_dirs", lambda dry_run=False: [])
+    monkeypatch.setattr(R, "reap", _fake_reap)
+
+    for jobs in (0, -1):
+        captured.clear()
+        R._run_sweep(dry_run=True, batch_size=None, only_safe=True, jobs=jobs,
+                     sweep_pid_files=False)
+        assert captured.get("jobs") == 1, (
+            f"non-positive jobs reached reap(): {captured.get('jobs')!r}")

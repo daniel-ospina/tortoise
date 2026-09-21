@@ -1749,6 +1749,14 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     #1005 guarantee: a concurrent suite's between-tests idle server is
     never disturbed.
     """
+    # #4438 review P2: `jobs` reaches `ThreadPoolExecutor(max_workers=...)`
+    # below, where `min(jobs, len(...))` makes a non-positive `--jobs`
+    # (0 or -1) a hard crash (`max_workers must be greater than 0`). The
+    # documented CLI flag must be safe on its own — the same standard as
+    # `_parse_timeout` — so clamp here too, for direct callers.
+    if jobs < 1:
+        logger.warning("jobs=%r must be >= 1 — using 1", jobs)
+        jobs = 1
     acted = []
     killed = 0
     stale_removed = 0  # #1383: stale removals budgeted separately from kills
@@ -2699,6 +2707,12 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # finished scan. The returned list is a `_ScanAwareList` carrying
     # `.complete` (False = at least one bounded scan returned a partial set).
     """
+    # #4438 review P2: a non-positive `--jobs` (0 or -1) would reach reap()'s
+    # `ThreadPoolExecutor(min(jobs, len(records)))` as 0 and crash with
+    # `max_workers must be greater than 0`. Clamp before anything uses it.
+    if jobs < 1:
+        logger.warning("jobs=%r must be >= 1 — using 1", jobs)
+        jobs = 1
     records = _as_scan_aware(discover(jobs=jobs, full_scan=full_scan))
     discovery_complete = records.complete
     # #1383: reapable classes are candidate (live orphan -> kill) and
