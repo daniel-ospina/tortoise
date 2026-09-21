@@ -475,6 +475,22 @@ def test_collision_preflight_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_embedded_evidence_tool_change_fails_closed_to_full():
+    # #3827: tools/embedded_evidence.py owns tests/test_embedded_evidence.py.
+    # Same silent-drop class as the preflight carve-out above: the flat "tools/"
+    # prefix swallowed the path, `changed` came back empty, and select() took the
+    # docs-only return (surfaces=[], tier-1 smoke only) — so the harness's own
+    # guard test never ran on the PR that changed the harness. That is precisely
+    # the "proxy silent in the case it exists to cover" class the harness is
+    # written to detect, and it applied to the harness itself.
+    # No SOURCE_PATTERNS entry matches the path, so it takes the unknown-path
+    # branch -> full matrix (fail closed), like tools/collision_preflight.py.
+    r = _sel(["tools/embedded_evidence.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_backfill_script_only_change_selects_eval():
     # graph-scripts/backfill_embeddings.py is a SOURCE_PATTERNS["eval"]
     # path — a backfill-only PR selects the eval surface (its test,
@@ -1272,10 +1288,12 @@ def test_expect_uri_gated_iff_uri():
     assert "--manifest /tmp/expected-nodeids.txt" in guard["run"]
     # The canary producer is gated to half b + post-merge (cycle-5 P1-7
     # option (b): exactly ONE leg writes, no last-writer-wins clobber).
+    # #4367: the nightly schedule trigger was removed, so post-merge is
+    # `push` alone — the gate no longer names the retired event.
     producer = next(s for s in steps
                     if s.get("name", "").startswith("Canary producer"))
-    assert producer["if"] == "github.event_name == 'push' || " \
-        "github.event_name == 'schedule'", "producer must be post-merge only"
+    assert producer["if"] == "github.event_name == 'push'", \
+        "producer must be post-merge only"
     assert 'if [ "${{ matrix.half }}" = "b" ]; then' in producer["run"], \
         "the producer must be gated on half b (one writer)"
 
@@ -1555,7 +1573,7 @@ def test_slow_selected_echo_transform_roundtrips_into_legs():
 
 def test_canary_streak_job_consumes_half_b_artifacts_only():
     """Task 9 Step 6 (cycle-5 P1-7/cycle-6 P1-7): the canary-streak job is
-    post-merge only (push/schedule), needs [test] (matrix fan-in), consumes
+    post-merge only (push), needs [test] (matrix fan-in), consumes
     the HALF-B artifact set + the previous streak artifact via the
     classifier, and uploads the new streak. It must never read a
     steps-output value (the classifier's own pin lives in
@@ -1741,7 +1759,7 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     assert runs_integrity("manifest-integrity"), \
         "the drift job must actually run the integrity check"
     assert drift.get("if", "always()") in _always, (
-        "the drift job must be unconditional (push/PR/schedule) — an `if:` "
+        "the drift job must be unconditional (push/PR) — an `if:` "
         "would silently drop drift enforcement on the events it excludes")
     assert not drift.get("continue-on-error"), (
         "the drift job must not be continue-on-error: a failed check would "

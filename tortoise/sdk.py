@@ -3446,14 +3446,14 @@ class TortoiseSDK:
         # mirrors this same per-turn store (id, `[role] ` framing, prop set,
         # CONTAINS edge) to seed the ask fixtures — the ONE copy every ask
         # seeder writes through since #3914 (#3910 had it in `_seed_memory`,
-        # which is now a delegating caller). It deliberately omits
-        # Source/extraction and — until #4197's backfill decision — the
-        # embedding, because it must keep modelling the un-backfilled /
-        # no-embedder store the shipping ask lane still reads; the turn write
-        # shape itself (id, `[role] ` framing, prop set, CONTAINS edge) must
-        # stay identical, or the fixtures teach a shape capture no longer
-        # produces (#3910). #3551 tracks collapsing all three onto one
-        # shared primitive.
+        # which is now a delegating caller). It omits Source/extraction, but
+        # since W7A it EMBEDS every turn BY DEFAULT through the shared store
+        # seam (`_capture_turn_embeddings` + `required_embedding_dim`,
+        # #4194/#4304) and retains `embed=False` for #4197's un-backfilled
+        # backlog; the turn write shape itself (id, `[role] ` framing, prop
+        # set, CONTAINS edge) must stay identical, or the fixtures teach a
+        # shape capture no longer produces (#3910). #3551 tracks collapsing
+        # all three onto one shared primitive.
         # #4194: embed the window BEFORE the loop — the stored text of each
         # turn, exactly as the loop writes it — in ONE local-model call.
         # Batched so the added work on this already-hot synchronous path (#3086

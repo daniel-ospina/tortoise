@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""W6C supplementary diagnostic — per-question GOLD-TURN RANK of the five
-window-miss questions, measured twice on the SAME graph shape:
+"""W7A supplementary diagnostic — per-question GOLD-TURN RANK of the five
+window-miss questions, on the REPAIRED seeder.
 
-  * ``capture`` arm — the frozen instrument's own seeder
-    (``ask_spotcheck._seed_memory``) seeded ``embed=False``: the pre-#4194 /
-    un-backfilled store shape. Pinned EXPLICITLY because since W7A the
-    seeder's default is ``embed=True`` — an un-pinned call would silently
-    collapse this arm into the ``dense`` one.
-  * ``dense`` arm — the identical graph, with the turn Points' ``embedding``
-    set by the PRODUCT'S OWN ``tortoise.embeddings.compute_embeddings`` over
-    the PRODUCT'S OWN stored-turn text (``sdk._capture_turn_texts``) — i.e.
-    exactly what the real capture write path (#4202 / d51306c51) now stores.
-    The dense leg is the ONLY difference between the two arms.
+The W7A repair makes ``tools.ask_spotcheck.seed_capture_turn_store`` store
+the product's OWN turn embedding by default. This diagnostic shows what that
+changes for the five questions whose gold turns the keyword-only ranking
+placed beyond the 40-item cut. It measures the SAME retrieval the instrument
+uses (``TortoiseSDK.tortoise_fts_query``, the ask lane's pool), in two arms:
 
-This is a NEW read-only diagnostic. It does NOT change
-``tools/ask_shape_rate.py``'s legs, thresholds, fixture, reader pin or
-pre-registered rule.
+  * ``backlog`` — ``_seed_memory(..., embed=False)``: the pre-#4194 /
+    no-embedder store (what the old default seeded, and what a capture made
+    before #4194 actually has). The dense leg is inert.
+  * ``dense`` — ``_seed_memory(...)`` with the repaired DEFAULT
+    (``embed=True``): the seeder stores the product's own vector, so the
+    dense leg sees captured turns.
 
-Usage: w6c_gold_rank_diagnostic.py <out.json>
+The ONLY difference between the arms is the seeder's ``embed`` switch — there
+is no manual vector attachment (W6C's diagnostic had to attach vectors by
+hand; the repair makes that native). Read-only; zero paid reader calls. It
+changes NOTHING in ``tools/ask_shape_rate.py`` (legs, thresholds, fixture,
+reader pin, pre-registered rule) — it is a new diagnostic, not the ruler.
+
+Usage: w7a_gold_rank_diagnostic.py <out.json>
 """
 from __future__ import annotations
 
@@ -31,7 +35,6 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 sys.path.insert(0, _REPO_ROOT)
 
 from tools.ask_spotcheck import _seed_memory  # noqa: E402
-from tortoise.embeddings import compute_embeddings  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 FIXTURE = os.path.join(_REPO_ROOT, "tests", "fixtures",
@@ -53,31 +56,6 @@ def gold_turn_ids(q: dict) -> list[str]:
     return out
 
 
-def _attach_dense_vectors(sdk) -> dict:
-    """Set ``p.embedding`` on every episodic turn Point from the product's own
-    ``compute_embeddings`` over the product's own stored-turn text."""
-    rows = sdk._get_proj().g.query(
-        "MATCH (p:Point) WHERE p.is_episodic = true "
-        "RETURN p.id, p.content ORDER BY p.id").result_set
-    ids = [r[0] for r in rows]
-    texts = [r[1] or "" for r in rows]
-    vecs = compute_embeddings(texts)
-    written = 0
-    # strict=True: compute_embeddings is length-preserving by contract (one
-    # entry per input text, None where the model is unavailable), and ids/vecs
-    # are both built 1:1 from the same query rows — a length mismatch means a
-    # violated embedder contract and would silently under-populate the dense
-    # arm this diagnostic exists to measure. Raise instead.
-    for pid, vec in zip(ids, vecs, strict=True):
-        if vec is None:
-            continue
-        sdk._get_proj().g.query(
-            "MATCH (p:Point {id:$id}) SET p.embedding = vecf32($e)",
-            params={"id": pid, "e": vec})
-        written += 1
-    return {"turn_points": len(ids), "vectors_written": written}
-
-
 def _ids_of(hits: list[dict]) -> list[str]:
     out = []
     for h in hits:
@@ -86,12 +64,14 @@ def _ids_of(hits: list[dict]) -> list[str]:
     return out
 
 
-def measure(q: dict, dense: bool) -> dict:
-    db = os.path.join(tempfile.mkdtemp(prefix="w6c_rank_"), "t.db")
+def measure(q: dict, *, embed: bool) -> dict:
+    db = os.path.join(tempfile.mkdtemp(prefix="w7a_rank_"), "t.db")
     sdk = TortoiseSDK(db)
     try:
-        _seed_memory(sdk, q, embed=False)
-        attach = _attach_dense_vectors(sdk) if dense else None
+        _seed_memory(sdk, q, embed=embed)
+        n_embedded = sdk._get_proj().g.query(
+            "MATCH (p:Point) WHERE p.embedding IS NOT NULL "
+            "RETURN count(p)").result_set[0][0]
         leg_trace: list[dict] = []
         hits = sdk.tortoise_fts_query(
             q["question"], limit=LIMIT, pool_size=LEG_DEPTH,
@@ -103,8 +83,8 @@ def measure(q: dict, dense: bool) -> dict:
         for gid in gold_turn_ids(q):
             ranks[gid] = (order.index(gid) + 1) if gid in order else "ABSENT"
         return {
-            "arm": "dense" if dense else "capture",
-            "attach": attach,
+            "arm": "dense" if embed else "backlog",
+            "seeded_embedded_points": n_embedded,
             "n_hits": len(order),
             "gold_turn_ranks": ranks,
             "gold_in_cut40": {g: (r != "ABSENT" and r <= CUT)
@@ -121,17 +101,31 @@ def main() -> int:
         data = json.load(f)
     questions = data["questions"] if isinstance(data, dict) else data
     by_id = {q["question_id"]: q for q in questions}
-    result: dict = {"questions": {}}
+    result: dict = {
+        # A receipt that does not name its seeding mode is not evidence: this
+        # diagnostic measures BOTH arms, and only the ``dense`` arm is the
+        # product's post-#4194 shape. The ranks are only comparable within an
+        # arm.
+        "seeding_mode": {
+            "dense": "_seed_memory(embed=True) — product's own turn vector "
+                     "via encode_batch_for_store/required_embedding_dim "
+                     "(#4194/#4304); the DEFAULT",
+            "backlog": "_seed_memory(embed=False) — pre-#4194/no-embedder "
+                       "store (#4197)",
+        },
+        "questions": {},
+    }
     for qid in FIVE:
         q = by_id[qid]
         entry = {"question": q["question"],
                  "gold_sessions": q.get("answer_session_ids"),
                  "gold_turns": gold_turn_ids(q)}
-        for dense in (False, True):
-            m = measure(q, dense)
+        for embed in (False, True):
+            m = measure(q, embed=embed)
             entry[m["arm"]] = m
             print(f"{qid:12s} {m['arm']:8s} gold={m['gold_turn_ranks']} "
-                  f"n_hits={m['n_hits']}", flush=True)
+                  f"n_hits={m['n_hits']} embedded={m['seeded_embedded_points']}",
+                  flush=True)
         result["questions"][qid] = entry
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, default=str)
