@@ -1,53 +1,109 @@
 manifest_version: 1
 issue: 3863
-cut_at_commit: 1aecface1
+cut_at_commit: 1af4a0f83
 allowed_transforms:
 - _HTTPToolFilter
+- _RetiredToolTransform
 approval_status: pending-owner-approval
 approval_principal: null
 approval_pr: null
 counts:
-  tools: 98
+  tools: 82
   sdk_public_methods: 150
+  retired: 16
   keyword_distribution:
-    fetch: 22
-    create: 20
+    fetch: 14
+    create: 18
     update: 8
     delete: 6
-    list: 12
+    list: 9
     find: 6
     trace: 2
-    check: 9
+    check: 8
     link: 4
-    operate: 9
-rows:
-- name: tortoise_get_point
-  served_from: tortoise/mcp_server.py:6ba4820ec0af6d7d
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: get_point
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get a single Point by ID. Returns all properties, or empty dict.
-  dependency: declares TortoiseSDK.get_point (resolves)
-  lifecycle: active
-  used_by: agents, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
+    operate: 7
+retired:
+- name: tortoise_get
+  use_instead: tortoise_get_entity(id, type=...)
+  sdk_method: null
+  http_policy: true
   approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
+- name: tortoise_get_events
+  use_instead: tortoise_get_entity(None, type="events")
+  sdk_method: get_events
+  http_policy: true
+  approval: null
+- name: tortoise_get_governance
+  use_instead: tortoise_get_entity(id, type="governance")
+  sdk_method: get_owned_entities
+  http_policy: true
+  approval: null
+- name: tortoise_get_operator
+  use_instead: tortoise_get_entity(id, type="operator")
+  sdk_method: get_point
+  http_policy: true
+  approval: null
+- name: tortoise_get_point
+  use_instead: tortoise_get_entity(id, type="point")
+  sdk_method: get_point
+  http_policy: true
+  approval: null
+- name: tortoise_health
+  use_instead: tortoise_overview(section="health")
+  sdk_method: health
+  http_policy: true
+  approval: null
+- name: tortoise_index_sessions
+  use_instead: tortoise_index_files(directory)
+  sdk_method: index_sessions
+  http_policy: false
+  approval: null
+- name: tortoise_ingest_corpus
+  use_instead: tortoise_index_files(directory)
+  sdk_method: ingest_corpus
+  http_policy: false
+  approval: null
+- name: tortoise_list_pointkinds
+  use_instead: tortoise_overview(section="pointkinds")
+  sdk_method: list_pointkinds
+  http_policy: true
+  approval: null
+- name: tortoise_list_sources
+  use_instead: tortoise_overview(section="sources")
+  sdk_method: list_sources
+  http_policy: true
+  approval: null
+- name: tortoise_list_tags
+  use_instead: tortoise_overview(section="tags")
+  sdk_method: list_tags
+  http_policy: true
+  approval: null
+- name: tortoise_paginated_query
+  use_instead: tortoise_query(offset=..., limit=...)
+  sdk_method: paginated_query
+  http_policy: true
+  approval: null
+- name: tortoise_query_points_by_tag
+  use_instead: tortoise_query(tag=...)
+  sdk_method: query_points_by_tag
+  http_policy: true
+  approval: null
+- name: tortoise_stale
+  use_instead: tortoise_overview(section="stale")
+  sdk_method: stale_points
+  http_policy: true
+  approval: null
+- name: tortoise_status
+  use_instead: tortoise_overview(section="status")
+  sdk_method: status
+  http_policy: true
+  approval: null
+- name: tortoise_taxonomy
+  use_instead: tortoise_overview(section="taxonomy")
+  sdk_method: taxonomy
+  http_policy: true
+  approval: null
+rows:
 - name: tortoise_query
   served_from: tortoise/mcp_server.py:7dc2585e3d3af508
   family: memory
@@ -75,58 +131,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_query
-- name: tortoise_paginated_query
-  served_from: tortoise/mcp_server.py:9ed7e6a0c0bc1c81
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: paginated_query
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: query
-  canonical: false
-  job: 'DEPRECATED (Epic #888) — thin alias for tortoise_query(offset=, limit=). Kept for one release; will be removed
-    in the next release — migrate now.'
-  dependency: declares TortoiseSDK.paginated_query (resolves)
-  lifecycle: deprecated alias
-  used_by: never called, tooling, docs
-  recommendation: kill
-  basis: decided
-  reason: 'already deprecated and no warning is emitted to callers today (#3876); its own description names the
-    replacement: tortoise_query'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_query
-- name: tortoise_query_points_by_tag
-  served_from: tortoise/mcp_server.py:e3c08c205c6a3c33
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: query_points_by_tag
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: query
-  canonical: false
-  job: 'DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). Kept for one release; will be removed in the
-    next release — migrate now.'
-  dependency: declares TortoiseSDK.query_points_by_tag (resolves)
-  lifecycle: deprecated alias
-  used_by: never called, tooling, docs
-  recommendation: kill
-  basis: decided
-  reason: 'already deprecated and no warning is emitted to callers today (#3876); its own description names the
-    replacement: tortoise_query'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_query
 - name: tortoise_belief_timeline
   served_from: tortoise/mcp_server.py:c98791122a8ac095
   family: memory
@@ -142,10 +146,10 @@ rows:
     priors visible.
   dependency: declares TortoiseSDK.belief_timeline (resolves)
   lifecycle: active
-  used_by: never called, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by skill-docs — removing it would break that
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -167,11 +171,10 @@ rows:
     list/expand split — search returns bounded state entries; use this to read a neighbor''s full text on demand).'
   dependency: declares TortoiseSDK.expand_relationships (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -192,11 +195,10 @@ rows:
   job: 'Get EP confidence for a claim: {mean, variance, alpha, beta}.'
   dependency: declares TortoiseSDK.get_confidence (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -218,11 +220,10 @@ rows:
     cache on the Source node (write-through projection), so not read-only.'
   dependency: declares TortoiseSDK.get_source_reliability (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -303,7 +304,7 @@ rows:
   job: Entity resolution — NL query → matching entities from the graph.
   dependency: declares TortoiseSDK.suggest_entry_points (resolves)
   lifecycle: active
-  used_by: agents, skill-docs, docs
+  used_by: agents, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -335,14 +336,12 @@ rows:
   recommendation: keep
   basis: observed
   reason: called by agents
-  recommended_family: memory
-  proposed: true
+  recommended_family: null
+  proposed: false
   exemption: false
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_index_files
-  cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
-    — waits for your approval
 - name: tortoise_create_point
   served_from: tortoise/mcp_server.py:3d72f7a7b56da6d0
   family: memory
@@ -365,10 +364,7 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  # Served-surface change (#3949): the write now OBSERVES whether the caller
-  # filed a decision-shaped point instead of claiming the step on any write.
-  # Fingerprint a6d828573b6efd9e -> 3d72f7a7b56da6d0. Row refresh only — no
-  # tool added, removed or renamed; approved in #3949 by @daniel-ospina.
+  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
   approval: '#3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
@@ -386,11 +382,10 @@ rows:
   job: Audit graph calibration state. Returns per-point guidance.
   dependency: declares TortoiseSDK.calibrate_summary (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -411,10 +406,10 @@ rows:
   job: Set Beta prior evidence for a claim.
   dependency: declares TortoiseSDK.set_point_baseline (resolves)
   lifecycle: active
-  used_by: never called, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by skill-docs — removing it would break that
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -435,11 +430,10 @@ rows:
   job: Set (or change) a Source's credibility tier (T0-T4). Non-destructive — never overwrites sourceKind type strings.
   dependency: declares TortoiseSDK.set_source_tier (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -563,10 +557,10 @@ rows:
   job: Mark a Point outdated with a CORRECTS edge from the correcting Point.
   dependency: declares TortoiseSDK.invalidate_point (resolves)
   lifecycle: active
-  used_by: never called, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by skill-docs — removing it would break that
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -588,11 +582,10 @@ rows:
     cannot retract operators or already-terminal points.
   dependency: declares TortoiseSDK.retract_point (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -615,10 +608,10 @@ rows:
     edge only, no edge transfer.'
   dependency: declares TortoiseSDK.supersede (resolves)
   lifecycle: active
-  used_by: never called, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by skill-docs — removing it would break that
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -643,7 +636,7 @@ rows:
     point_kinds: optional pointKind list to scope the audit.'
   dependency: declares TortoiseSDK.audit (resolves)
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -669,11 +662,10 @@ rows:
     Completeness holds across rebuild_all.'
   dependency: declares TortoiseSDK.list_batch (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -695,59 +687,10 @@ rows:
     by newest stamp, capped at limit, default 20).
   dependency: declares TortoiseSDK.list_batches (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
-  basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_list_pointkinds
-  served_from: tortoise/mcp_server.py:61f5707847d7d44a
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: list_pointkinds
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: List all pointKinds present in the graph with counts. What EXISTS.
-  dependency: declares TortoiseSDK.list_pointkinds (resolves)
-  lifecycle: active
-  used_by: agents, skill-docs, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_list_tags
-  served_from: tortoise/mcp_server.py:d3e8b91af6ac4b50
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: list_tags
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: List all Tag names with count of tagged Points. Where tags are USED.
-  dependency: declares TortoiseSDK.list_tags (resolves)
-  lifecycle: active
-  used_by: agents, docs
-  recommendation: keep
-  basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -769,11 +712,10 @@ rows:
     failure rate, region_attempts, warm-start savings). Embedded call-triggered evaluator.'
   dependency: declares TortoiseSDK.dream_health_check (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -797,7 +739,7 @@ rows:
     repo_not_indexed.'
   dependency: declares TortoiseSDK.issue_insight (resolves)
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -822,7 +764,7 @@ rows:
     Point; latest per (url, assessor) wins; weighted by assessor reputation.
   dependency: declares TortoiseSDK.assess_source (resolves)
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -851,7 +793,7 @@ rows:
     alone (explicit opt-out).'
   dependency: declares TortoiseSDK.compute_confidence (resolves)
   lifecycle: active
-  used_by: agents, skill-docs, docs
+  used_by: agents, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -861,36 +803,8 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_get
-  served_from: tortoise/mcp_server.py:6efd10a1ed4b5f91
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: true
-  job: 'Fetch a node by id — consolidates get_point/get_entity/get_operator/get_events/get_session/get_governance.
-    type: point|operator|entity|event|session|events|governance. Omitted type → auto-detect by id lookup (id|eventId|url,
-    then session_id/sessionId).'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, skill-docs, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
 - name: tortoise_get_entity
-  served_from: tortoise/mcp_server.py:226a2c6087c5beb3
+  served_from: tortoise/mcp_server.py:faaf6508b2146468
   family: graph
   family_rank: 2
   served: http
@@ -899,77 +813,24 @@ rows:
   keyword: fetch
   keyword_rank: 1
   cluster: fetch-by-id
-  canonical: false
-  job: Get any entity by ID, eventId, or url.
+  canonical: true
+  job: Get any entity by ID, eventId, or url. `type` selects the node kind (point | entity | operator | events |
+    governance), dispatching exactly as the retired per-type getters did; omit it to look the entity up by id. The
+    canonical fetch-by-id tool.
   dependency: declares TortoiseSDK.get_entity (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
+  recommendation: keep
+  basis: observed
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: graph
   proposed: true
   exemption: false
   approval: null
   class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
-- name: tortoise_get_events
-  served_from: tortoise/mcp_server.py:61fa9cfe602dc001
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: get_events
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').
-  dependency: declares TortoiseSDK.get_events (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
-- name: tortoise_get_operator
-  served_from: tortoise/mcp_server.py:66627366cbc06960
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: get_point
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get an operator Point by ID. Returns all properties including annotation dimensions.
-  dependency: declares TortoiseSDK.get_point (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
+  cluster_canonical: tortoise_get_entity
+  cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
+    approval
 - name: tortoise_create_entity
   served_from: tortoise/mcp_server.py:79f1a88a819f3e87
   family: graph
@@ -1090,11 +951,10 @@ rows:
     via operator_action when mitigation is needed. Returns {edge, created, nudges}.'
   dependency: declares TortoiseSDK.create_edge (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1115,10 +975,10 @@ rows:
   job: 'Create an operator connecting Points. op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps.'
   dependency: declares TortoiseSDK.create_operator (resolves)
   lifecycle: active
-  used_by: never called, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by skill-docs — removing it would break that
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1304,7 +1164,7 @@ rows:
     Omit section → compact combined summary. topics requires entity_id.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -1328,36 +1188,10 @@ rows:
   job: Provenance chain — 'Who decided this?' Follows authoredBy → Subject → delegation.
   dependency: declares TortoiseSDK.provenance (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_stale
-  served_from: tortoise/mcp_server.py:9839dd7369f6a135
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: stale_points
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: null
-  canonical: null
-  job: Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
-  dependency: declares TortoiseSDK.stale_points (resolves)
-  lifecycle: active
-  used_by: never called, docs
-  recommendation: review
-  basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1379,11 +1213,10 @@ rows:
     relationship, depth}]}.'
   dependency: declares TortoiseSDK.traverse (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1405,7 +1238,7 @@ rows:
     by node type. Use for deep entity analysis; for a fast neighbor list use tortoise_list_topics.
   dependency: 'declares TortoiseSDK.entity_profile, WHICH DOES NOT EXIST — see the #3838 note'
   lifecycle: active
-  used_by: agents, skill-docs, docs
+  used_by: agents, tooling, skill-docs, docs
   recommendation: fix-declaration
   basis: decided
   reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
@@ -1431,11 +1264,10 @@ rows:
     for multi-hop filtered BFS use tortoise_entity_profile.
   dependency: declares TortoiseSDK.list_topics (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1457,7 +1289,7 @@ rows:
     ''what supports claim X?'''
   dependency: 'declares TortoiseSDK.analyze, WHICH DOES NOT EXIST — see the #3838 note'
   lifecycle: active
-  used_by: never called, docs
+  used_by: never called, tooling, docs
   recommendation: fix-declaration
   basis: decided
   reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
@@ -1484,7 +1316,7 @@ rows:
     operator cap.'
   dependency: declares TortoiseSDK.dream (resolves)
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -1514,11 +1346,10 @@ rows:
     to see (D8).'
   dependency: declares TortoiseSDK.get_cross_lens_candidates (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1569,11 +1400,10 @@ rows:
     similarity_threshold; mode=prune has no similarity bar).'
   dependency: declares TortoiseSDK.review_connections (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1622,34 +1452,10 @@ rows:
     ref, message, fix}) + drift warnings. Never modifies the graph; violations are warnings, not blocks.'
   dependency: declares TortoiseSDK.validate_domain (resolves)
   lifecycle: active
-  used_by: never called, skill-docs, docs
+  used_by: never called, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by skill-docs — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_taxonomy
-  served_from: tortoise/mcp_server.py:947386396377b09c
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: taxonomy
-  group_source: mapped
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: 'Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.'
-  dependency: declares TortoiseSDK.taxonomy (resolves)
-  lifecycle: active
-  used_by: agents, docs
-  recommendation: keep
-  basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1673,16 +1479,16 @@ rows:
   used_by: never called, tooling, docs
   recommendation: merge
   basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
+  reason: '`tortoise_get_entity` in the same group already does this job (its own description names what it consolidates),
     so this is one name too many — the caller keeps working either way'
   recommended_family: graph
   proposed: true
   exemption: false
   approval: null
   class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
+  cluster_canonical: tortoise_get_entity
+  cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
+    approval
 - name: tortoise_search_sessions
   served_from: tortoise/mcp_server.py:16bcff0396c5ce23
   family: sessions
@@ -1697,45 +1503,16 @@ rows:
   job: Search indexed agent sessions. Returns Events with narrative_arc snippets.
   dependency: declares TortoiseSDK.search_sessions (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_index_sessions
-  served_from: tortoise/mcp_server.py:545b96fe987b8865
-  family: sessions
-  family_rank: 4
-  served: stdio-only
-  sdk_method: index_sessions
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: deprecated-index
-  canonical: false
-  job: DEPRECATED — use tortoise_index_files. Index session .md files as AgentSession Events. EXCLUDED from tenant
-    HTTP — walks server filesystem with user-supplied path.
-  dependency: declares TortoiseSDK.index_sessions (resolves)
-  lifecycle: deprecated alias
-  used_by: never called, tooling, docs
-  recommendation: kill
-  basis: decided
-  reason: 'already deprecated and no warning is emitted to callers today (#3876); its own description names the
-    replacement: tortoise_index_files'
-  recommended_family: memory
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_index_files
-  cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
-    — waits for your approval
 - name: tortoise_session_capture
   served_from: tortoise/mcp_server.py:20fc9c5db96c8fd3
   family: sessions
@@ -1750,15 +1527,14 @@ rows:
   job: 'File an agent session into the graph (epic #909 capture path): turns become episodic Points, the conversation
     is LLM-extracted into epistemic Points, and the Session links to subject/project entities. #1927: session_recording
     is default-ON (ToS-covered) with an optional off-switch — returns 409 when the team disabled capture; 402 at
-    quota; a missing LLM provider key is NOT a refusal — the capture is STORED and only extraction is skipped
-    (extraction_mode "no-provider"); 422 for an invalid harness. session_id is the idempotency key (re-filing
-    the same id mints zero new nodes). Only call this when the team has session recording enabled (the dashboard
-    ''Memory sources > Agent sessions'' toggle); if the call fails, tell the user it wasn''t filed and do NOT retry.
-    Requires hosted mode — stdio/self-hosted returns an honest error (no local fallback that bypasses the capture
-    pipeline).'
+    quota; a missing LLM provider key is NOT a refusal — the capture is STORED and only extraction is skipped (extraction_mode
+    "no-provider"); 422 for an invalid harness. session_id is the idempotency key (re-filing the same id mints zero
+    new nodes). Only call this when the team has session recording enabled (the dashboard ''Memory sources > Agent
+    sessions'' toggle); if the call fails, tell the user it wasn''t filed and do NOT retry. Requires hosted mode
+    — stdio/self-hosted returns an honest error (no local fallback that bypasses the capture pipeline).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -1768,6 +1544,7 @@ rows:
   # Genuine served-surface change (#4009): the ERR_QUOTA 402-mapping added by
   # fced38374 (#3665), carried by PR #3780 — 03a29c8a37a39663 -> 20fc9c5db96c8fd3.
   # A line shift is not a fingerprint change since #4170, so no line-only row exists.
+  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
   approval: '#3780 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
@@ -1789,7 +1566,7 @@ rows:
     here; call this tool to turn recording back on, then retry the capture.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -1813,7 +1590,7 @@ rows:
   job: List all graph names in the database. Useful for namespace discovery.
   dependency: declares TortoiseSDK.list_graphs (resolves)
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -1837,11 +1614,10 @@ rows:
   job: List installed pack namespaces.
   dependency: declares TortoiseSDK.list_namespaces (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1864,11 +1640,10 @@ rows:
     OperatorPromoted, DedupeRecorded, DedupeRejected, ObjectSuperseded, PointInvalidated).'
   dependency: declares TortoiseSDK.events_poll (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1899,33 +1674,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_get_governance
-  served_from: tortoise/mcp_server.py:1b5743d0dcad2acc
-  family: admin
-  family_rank: 5
-  served: http
-  sdk_method: get_owned_entities
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get all entities owned by a Subject.
-  dependency: declares TortoiseSDK.get_owned_entities (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
 - name: tortoise_backfill_v25
   served_from: tortoise/mcp_server.py:11a11ccddfc39a61
   family: admin
@@ -1940,11 +1688,10 @@ rows:
   job: Backfill database to ONTOLOGY v2.5 schema. EXCLUDED from tenant HTTP — schema-level migration (operator-only).
   dependency: declares TortoiseSDK.backfill_v25 (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -1966,7 +1713,7 @@ rows:
     /internal/provision behind FASTAPI_INTERNAL_KEY.
   dependency: declares TortoiseSDK.org_create (resolves)
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -1992,32 +1739,7 @@ rows:
     packs are never observable).'
   dependency: 'declares TortoiseSDK.get_tenant_packs, WHICH DOES NOT EXIST — see the #3838 note'
   lifecycle: active
-  used_by: agents, docs
-  recommendation: fix-declaration
-  basis: decided
-  reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
-    is a false declaration to correct (or a tool to retire — that part is the owner's call)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_health
-  served_from: tortoise/mcp_server.py:aa6ea9d0e9e4dae4
-  family: admin
-  family_rank: 5
-  served: http
-  sdk_method: health
-  group_source: mapped
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: 'Health check + basic metrics: graph_size, last_ingest, error_count, uptime.'
-  dependency: 'declares TortoiseSDK.health, WHICH DOES NOT EXIST — see the #3838 note'
-  lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: fix-declaration
   basis: decided
   reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
@@ -2045,35 +1767,11 @@ rows:
     CLI).'
   dependency: 'declares TortoiseSDK.upsert_tenant_manifest, WHICH DOES NOT EXIST — see the #3838 note'
   lifecycle: active
-  used_by: never called, docs
+  used_by: never called, tooling, docs
   recommendation: fix-declaration
   basis: decided
   reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
     is a false declaration to correct (or a tool to retire — that part is the owner's call)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_status
-  served_from: tortoise/mcp_server.py:7ddacd14a9129af0
-  family: admin
-  family_rank: 5
-  served: http
-  sdk_method: status
-  group_source: mapped
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: Graph health + entity counts + FalkorDB connectivity. Returns {connected, counts, total_entities}.
-  dependency: declares TortoiseSDK.status (resolves)
-  lifecycle: active
-  used_by: agents, skill-docs, docs
-  recommendation: keep
-  basis: observed
-  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -2094,7 +1792,7 @@ rows:
   job: Create the demo epistemic graph (4 layers) for this team. Idempotent (Q4).
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -2118,11 +1816,10 @@ rows:
   job: Start background GitHub indexing of an org's issues/PRs (Q2).
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2145,7 +1842,7 @@ rows:
     names to file.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -2169,7 +1866,7 @@ rows:
   job: Return GitHub connection status for this team (Q1 verify).
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -2193,7 +1890,7 @@ rows:
   job: Initiate GitHub OAuth — returns authorize URL + CSRF state (Q1).
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -2217,7 +1914,7 @@ rows:
   job: Toggle automatic session recording for this team (Q3).
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -2241,7 +1938,7 @@ rows:
   job: Return this team's onboarding progress (Q6 verification).
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -2265,11 +1962,10 @@ rows:
   job: Write an agent diary entry (AAAK format suggested). Creates a Point with pointKind=diary, authoredBy=agent.
   dependency: declares TortoiseSDK.diary_write (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2291,11 +1987,10 @@ rows:
     M}.'
   dependency: declares TortoiseSDK.checkpoint (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2316,11 +2011,10 @@ rows:
   job: Read recent diary entries for an agent, newest first.
   dependency: declares TortoiseSDK.diary_read (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2341,18 +2035,14 @@ rows:
   job: File a simple decision directly to the graph. Creates decision + options + evidence + IMPL edges atomically.
   dependency: declares TortoiseSDK.file_decision (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
-  # Served-surface change (#3949): this call IS the observation, so it declares
-  # it rather than letting the helper infer one. Fingerprint
-  # d687db94a7343283 -> 5b94130694a2f699. Row refresh only — no tool added,
-  # removed or renamed; approved in #3949 by @daniel-ospina.
+  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
   approval: '#3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
@@ -2371,7 +2061,7 @@ rows:
     Point (pointKind: humanApproval) + unidirectional IMPL fan-out (label approvedBy) so dependent claims strengthen.'
   dependency: declares TortoiseSDK.file_human_approval (resolves)
   lifecycle: active
-  used_by: agents, docs
+  used_by: agents, tooling, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -2407,35 +2097,6 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_create_entity
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
-- name: tortoise_ingest_corpus
-  served_from: tortoise/mcp_server.py:593a2e253de4bf63
-  family: sources
-  family_rank: 8
-  served: stdio-only
-  sdk_method: ingest_corpus
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: deprecated-index
-  canonical: false
-  job: DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter
-    from .md files, create/update Document nodes. EXCLUDED from tenant HTTP — walks server filesystem with user-supplied
-    path.
-  dependency: declares TortoiseSDK.ingest_corpus (resolves)
-  lifecycle: deprecated alias
-  used_by: agents, tooling, docs
-  recommendation: kill
-  basis: decided
-  reason: 'already deprecated and no warning is emitted to callers today (#3876); its own description names the
-    replacement: tortoise_index_files'
-  recommended_family: memory
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_index_files
-  cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
-    — waits for your approval
 - name: tortoise_create_source
   served_from: tortoise/mcp_server.py:0446433ba3bdbc83
   family: sources
@@ -2451,35 +2112,10 @@ rows:
     permalink key. tier (T0-T4 / legacy alias) stores the credibility tier; sourceDate is the evidence-age clock.
   dependency: declares TortoiseSDK.create_source (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
-  basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_list_sources
-  served_from: tortoise/mcp_server.py:731de1e7b186b0af
-  family: sources
-  family_rank: 8
-  served: http
-  sdk_method: list_sources
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: List all Sources with point counts. Where data came FROM.
-  dependency: declares TortoiseSDK.list_sources (resolves)
-  lifecycle: active
-  used_by: agents, skill-docs, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: called by agents
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2501,11 +2137,10 @@ rows:
     R16 operator promotion, deferred dedup/temporal wiring). WRITES status + wires edges.
   dependency: declares TortoiseSDK.promote_point (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2526,11 +2161,10 @@ rows:
   job: Review queue for dedup/temporal candidates (candidate_type=content|temporal|entity).
   dependency: declares TortoiseSDK.list_dedup_candidates (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2552,11 +2186,10 @@ rows:
     review flags + wires edges (idempotent for repeats).
   dependency: declares TortoiseSDK.approve_merge (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2579,11 +2212,10 @@ rows:
     to the graph; corpus mode walks the server filesystem — stdio/CLI only (excluded from tenant HTTP).
   dependency: declares TortoiseSDK.mine_corpus (resolves)
   lifecycle: active
-  used_by: never called, docs
-  recommendation: review
+  used_by: never called, tooling, docs
+  recommendation: keep
   basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -2736,7 +2368,7 @@ rows:
   job: Public SDK method TortoiseSDK.approve_merge.
   dependency: 'reached by 1 registered tool(s): tortoise_approve_merge'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -2758,7 +2390,7 @@ rows:
   job: Public SDK method TortoiseSDK.assess_source.
   dependency: 'reached by 1 registered tool(s): tortoise_assess_source'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -2846,7 +2478,7 @@ rows:
   job: Public SDK method TortoiseSDK.backfill_v25.
   dependency: 'reached by 1 registered tool(s): tortoise_backfill_v25'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -2890,7 +2522,7 @@ rows:
   job: Public SDK method TortoiseSDK.belief_timeline.
   dependency: 'reached by 1 registered tool(s): tortoise_belief_timeline'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -2912,7 +2544,7 @@ rows:
   job: Public SDK method TortoiseSDK.calibrate_summary.
   dependency: 'reached by 1 registered tool(s): tortoise_calibrate_summary'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3042,11 +2674,12 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.close.
-  dependency: 'reached by no registered MCP tool; caller categories: cli, engine, eval-harness, other-tooling, tenant-rest'
+  dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
+    tenant-rest'
   lifecycle: active
   used_by: eval-harness, tooling, skill-docs, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: cli, engine, eval-harness, other-tooling, tenant-rest'
+  reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false
@@ -3374,7 +3007,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_source.
   dependency: 'reached by 1 registered tool(s): tortoise_create_source'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3506,7 +3139,7 @@ rows:
   job: Public SDK method TortoiseSDK.diary_read.
   dependency: 'reached by 1 registered tool(s): tortoise_diary_read'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3528,7 +3161,7 @@ rows:
   job: Public SDK method TortoiseSDK.diary_write.
   dependency: 'reached by 1 registered tool(s): tortoise_diary_write'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3616,7 +3249,7 @@ rows:
   job: Public SDK method TortoiseSDK.events_poll.
   dependency: 'reached by 1 registered tool(s): tortoise_events_poll'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3638,7 +3271,7 @@ rows:
   job: Public SDK method TortoiseSDK.expand_relationships.
   dependency: 'reached by 1 registered tool(s): tortoise_expand_relationships'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3660,7 +3293,7 @@ rows:
   job: Public SDK method TortoiseSDK.file_decision.
   dependency: 'reached by 1 registered tool(s): tortoise_file_decision'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3682,7 +3315,7 @@ rows:
   job: Public SDK method TortoiseSDK.file_human_approval.
   dependency: 'reached by 1 registered tool(s): tortoise_file_human_approval'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3704,7 +3337,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_confidence.
   dependency: 'reached by 1 registered tool(s): tortoise_get_confidence'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3768,11 +3401,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_events.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_events'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_events (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3812,11 +3445,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_owned_entities.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_governance'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_governance (retired)'
   lifecycle: active
   used_by: docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3834,11 +3467,12 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_point.
-  dependency: 'reached by 2 registered tool(s): tortoise_get_operator, tortoise_get_point'
+  dependency: 'reached by 0 registered tool(s) and 2 retired name(s): tortoise_get_operator (retired), tortoise_get_point
+    (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 2 registered tool(s)
+  reason: reached by 0 registered tool(s) and 2 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3902,7 +3536,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_source_reliability.
   dependency: 'reached by 1 registered tool(s): tortoise_get_source_reliability'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4078,7 +3712,7 @@ rows:
   job: Public SDK method TortoiseSDK.graph_set_recording.
   dependency: 'reached by no registered MCP tool; caller categories: tenant-rest'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
   recommended_family: null
@@ -4142,11 +3776,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.index_sessions.
-  dependency: 'reached by 1 registered tool(s): tortoise_index_sessions'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_index_sessions (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4186,11 +3820,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.ingest_corpus.
-  dependency: 'reached by 1 registered tool(s): tortoise_ingest_corpus'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_ingest_corpus (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4364,7 +3998,7 @@ rows:
   job: Public SDK method TortoiseSDK.issue_insight.
   dependency: 'reached by 1 registered tool(s): tortoise_issue_insight'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4408,7 +4042,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_batch.
   dependency: 'reached by 1 registered tool(s): tortoise_list_batch'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4430,7 +4064,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_batches.
   dependency: 'reached by 1 registered tool(s): tortoise_list_batches'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4452,7 +4086,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_dedup_candidates.
   dependency: 'reached by 1 registered tool(s): tortoise_list_dedup_candidates'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4518,7 +4152,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_namespaces.
   dependency: 'reached by 1 registered tool(s): tortoise_list_namespaces'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4538,11 +4172,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_pointkinds.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_pointkinds'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_pointkinds (retired)'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4582,11 +4216,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_sources.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_sources'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_sources (retired)'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4604,11 +4238,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_tags.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_tags'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_tags (retired)'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4628,7 +4262,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_topics.
   dependency: 'reached by 1 registered tool(s): tortoise_list_topics'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4956,11 +4590,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.paginated_query.
-  dependency: 'reached by 1 registered tool(s): tortoise_paginated_query'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_paginated_query (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5066,11 +4700,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.query_points_by_tag.
-  dependency: 'reached by 1 registered tool(s): tortoise_query_points_by_tag'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_query_points_by_tag (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5288,7 +4922,7 @@ rows:
   job: Public SDK method TortoiseSDK.review_connections.
   dependency: 'reached by 1 registered tool(s): tortoise_review_connections'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5310,7 +4944,7 @@ rows:
   job: Public SDK method TortoiseSDK.search_sessions.
   dependency: 'reached by 1 registered tool(s): tortoise_search_sessions'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5398,7 +5032,7 @@ rows:
   job: Public SDK method TortoiseSDK.set_source_tier.
   dependency: 'reached by 1 registered tool(s): tortoise_set_source_tier'
   lifecycle: active
-  used_by: docs
+  used_by: tooling, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5484,11 +5118,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.stale_points.
-  dependency: 'reached by 1 registered tool(s): tortoise_stale'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_stale (retired)'
   lifecycle: active
   used_by: docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5506,11 +5140,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.status.
-  dependency: 'reached by 1 registered tool(s): tortoise_status'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_status (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5530,7 +5164,7 @@ rows:
   job: Public SDK method TortoiseSDK.suggest_entry_points.
   dependency: 'reached by 1 registered tool(s): tortoise_suggest_entry_points'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5638,11 +5272,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.taxonomy.
-  dependency: 'reached by 1 registered tool(s): tortoise_taxonomy'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_taxonomy (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5860,7 +5494,7 @@ rows:
   job: Public SDK method TortoiseSDK.validate_domain.
   dependency: 'reached by 1 registered tool(s): tortoise_validate_domain'
   lifecycle: active
-  used_by: skill-docs, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
