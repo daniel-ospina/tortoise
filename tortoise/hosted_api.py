@@ -24816,9 +24816,11 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
 
     Order matters (scoping P1-2, review fix 1): resolve/validate price →
     stored-mirror guard → resolve email → create-or-reuse Stripe customer →
-    SYNC-PERSIST ``stripe_customer_id`` + ``customer_email`` on the Org node
-    → stale-mirror race guard (list_subscriptions) → create Checkout session.
-    A missed first webhook event leaves a reconcilable mirror (Task 8).
+    SYNC-PERSIST ``stripe_customer_id`` on the Org node (plus ``customer_email``
+    on first bind, or as a backfill when the stored one is empty — a reused
+    customer keeps its stored email, see below) → stale-mirror race guard
+    (list_subscriptions) → create Checkout session. A missed first webhook
+    event leaves a reconcilable mirror (Task 8).
     """
     from tortoise.billing import StripeClient
     org_id = org["org_id"]
