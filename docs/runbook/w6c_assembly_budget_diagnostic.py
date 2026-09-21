@@ -9,8 +9,11 @@ The caps are read from ``resolve_ask_retrieval_caps()`` — the SAME resolution
 the lane it drives enforces — so the emitted receipt cannot pair a live token
 cap with a stale byte cap. NOTE: the recorded 2026-09-19 receipt
 (``w6c-assembly-budget-2026-09-19.json``) PREDATES #4105 and was measured
-against the historical 8000-token / 32 KiB caps; re-running this script after
-#4105 measures the resolved 16000-token / 128000-byte caps.
+against the historical 8000-token / 32 KiB caps. The post-#4105 DEFAULTS
+are 16000 tokens / 128000 bytes, but the value is resolved at run time —
+``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` / ``TORTOISE_ASK_CONTEXT_BYTE_CAP``
+override it, so the receipt's own ``context_token_cap`` / ``byte_cap``
+fields are the only authoritative record of what a given run used.
 
 The real ask-lane retrieval + dedup + boost + rerank + assembly runs; only the
 READER TRANSPORT is a deterministic stub that returns a fixed non-empty string,
