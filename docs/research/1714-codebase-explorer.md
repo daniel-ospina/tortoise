@@ -40,7 +40,7 @@ All paths relative to worktree root; line refs approximate (re-anchor at plan ti
 
 ## Deliverable 4 — Quota
 
-- tortoise/quota.py: MAX_SESSION_TURNS 500 `:94`, DEFAULT_MAX_SESSIONS 1000 `:118`, count_team_usage `:267` (points = non-episodic only `:394-401`), enforce_team_limit `:381`. hosted_api.py `_check_team_limit` `:1487-1520` (402). Sessions gated `:4029-4039`; index ungated `:8116-8155` (the asymmetry).
+- tortoise/quota.py: MAX_SESSION_TURNS 500 `:94`, DEFAULT_MAX_SESSIONS 1000 `:118`, count_org_usage `:267` (points = non-episodic only `:394-401`), enforce_org_limit `:381`. hosted_api.py `_check_team_limit` `:1487-1520` (402). Sessions gated `:4029-4039`; index ungated `:8116-8155` (the asymmetry).
 
 ## Patterns
 - Quota-gate an endpoint: _check_team_limit (request-time). Index job is a BACKGROUND task — needs explicit limit resolution before first create_point.

@@ -396,6 +396,14 @@ def _trace_entry(leg: str, *, ran: bool, degraded: bool,
             "reason": reason, "count": count}
 
 
+#: #4028 — leg-trace reason recorded when the vector leg RAN but the
+#: relevance floor removed every hit. Distinct from `empty_results` (the
+#: graph simply had no near neighbour): this says "there were hits and none
+#: of them was relevant", which the search surface must NOT mistake for a
+#: leg failure and answer from the TF-IDF fallback.
+BELOW_RELEVANCE_FLOOR = "below_relevance_floor"
+
+
 # ── (C) #2952: declared degraded reads ──────────────────────────────────────
 # The leg trace records WHAT each leg did; a consumer that would otherwise
 # label the result "hybrid" needs an explicit DECLARATION that the vector
@@ -709,6 +717,7 @@ def run_vector_query(
     is_embedded: bool = True, entity_type: str = "point",
     vector_index_api: str | None = None, excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
+    min_similarity: float | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -763,6 +772,17 @@ def run_vector_query(
 
     if not query_vec:
         return []
+    # #4028 — the retrieval relevance floor. Expressed in COSINE terms
+    # (embeddings.VECTOR_RELEVANCE_FLOOR); each return branch below converts
+    # it into that branch's own score unit. A nearest neighbour below the
+    # floor is not evidence of relevance (short generic strings sit near the
+    # embedding centroid and score ~0.5 against anything), so it is dropped
+    # rather than fused at rank-1 weight. Default None = no floor, i.e.
+    # byte-identical to pre-#4028 for every caller that does not pass one.
+    _floor_distance: float | None = None
+    if min_similarity is not None:
+        # L2-normalized embeddings: cos = 1 - d^2/2  =>  d = sqrt(2(1-cos)).
+        _floor_distance = (2.0 * (1.0 - min_similarity)) ** 0.5
     if not _breaker_allow("vector"):
         logger.warning("Vector circuit breaker OPEN — skipping vector strategy")
         _record(ran=False, degraded=True, reason="breaker_open", count=0)
@@ -862,11 +882,27 @@ def run_vector_query(
                     except (IndexError, TypeError, ValueError):
                         score = 0.0
                     out.append((row[0], max(0.0, min(1.0, score))))
+                if min_similarity is not None and out:
+                    # Score IS cosine here — filter directly. Only claim the
+                    # FLOOR when there was something to filter: a zero-row
+                    # index result is `empty_results`, not a relevance verdict
+                    # (claiming the floor there would suppress the caller's
+                    # legitimate degraded fallback, #4028 review P1).
+                    kept = [(pid, s) for pid, s in out if s >= min_similarity]
+                    if not kept:
+                        _record(ran=True, degraded=False,
+                                reason=BELOW_RELEVANCE_FLOOR, count=0)
+                        return []
+                    out = kept
                 _record(ran=True, degraded=False, reason="ok", count=len(out))
                 return out
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
             # gets reasonable descending ordering.
+            # #4028: signature A returns NO absolute similarity, only a
+            # rank-ordered id list, so the relevance floor cannot be applied
+            # on this branch (an engine artefact, declared in the PR: the
+            # measured defect is the embedded/brute-force lane).
             total = len(rows)
             _record(ran=True, degraded=False, reason="ok", count=total)
             return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
@@ -917,8 +953,19 @@ def run_vector_query(
             logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
         _breaker_record("vector", True)
         if rows:
-            _record(ran=True, degraded=False, reason="ok", count=len(rows))
-            return [(row[0], float(row[1])) for row in rows]
+            out = [(row[0], float(row[1])) for row in rows]
+            if _floor_distance is not None:
+                # Brute-force score is 1/(1+euclidean distance); invert it
+                # exactly to the distance so the cosine floor compares on the
+                # same quantity the index scored.
+                out = [(pid, s) for pid, s in out
+                       if s > 0 and (1.0 / s - 1.0) <= _floor_distance]
+                if not out:
+                    _record(ran=True, degraded=False,
+                            reason=BELOW_RELEVANCE_FLOOR, count=0)
+                    return out
+            _record(ran=True, degraded=False, reason="ok", count=len(out))
+            return out
         # R3 (#1542) D4: the explicit zero-row guard — an all-no-embedding
         # graph returns [] WITHOUT raising (the except catch below never
         # fires for the real empty case). Cheap count(p.embedding) guard
@@ -1213,6 +1260,8 @@ def degradation_chain(
     excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
     keep_numeric: bool = False,
+    min_vector_similarity: float | None = None,
+    floored_legs: set[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -1251,12 +1300,25 @@ def degradation_chain(
     on ``TimeoutError`` it is discarded and self-recorded as
     ``reason="timeout", ran=True, degraded=True`` (never absent). Default
     None = no trace (byte-identical behavior).
+
+    min_vector_similarity (#4028): optional COSINE relevance floor for the
+        vector leg, forwarded to :func:`run_vector_query`. A nearest
+        neighbour below it carries no relevance signal and is dropped rather
+        than fused at rank-1 weight. Default None = no floor (byte-identical
+        for every pre-#4028 caller).
+    floored_legs (#4028): optional set that receives the name of any leg
+        which RAN but was emptied by ``min_vector_similarity`` — lets the
+        caller distinguish "no relevant neighbour" from "leg failed" (the
+        distinction the search surface needs to avoid answering from the
+        TF-IDF fallback). Default None = not reported.
     """
     import concurrent.futures
 
     results: dict[str, list[tuple[str, float]]] = {}
     futures: dict[concurrent.futures.Future, str] = {}
-    trace_active = leg_trace is not None
+    trace_active = (leg_trace is not None
+                    or min_vector_similarity is not None
+                    or floored_legs is not None)
     #: per-strategy private lists (workers record here, never into the
     #: caller's shared trace — the data-race guard, review P1).
     private: dict[str, list[dict]] = {}
@@ -1286,11 +1348,18 @@ def degradation_chain(
             )] = "fts"
 
         if strategies.get("vector") and query_vec:
+            # #4028: merge the floor kwarg ONLY when one is supplied — the
+            # pinned contract is that a default caller sees byte-identical
+            # submit kwargs (tests/bench/test_degradation_chain.py's doubles
+            # do not accept the new kwarg).
+            _vec_kwargs = _runner_kwargs("vector")
+            if min_vector_similarity is not None:
+                _vec_kwargs["min_similarity"] = min_vector_similarity
             futures[executor.submit(
                 run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
                 vector_index_api=vector_index_api, excluded_statuses=excluded_statuses,
-                **_runner_kwargs("vector"),
+                **_vec_kwargs,
             )] = "vector"
 
         if strategies.get("structural"):
@@ -1347,7 +1416,7 @@ def degradation_chain(
         # must not follow it. Timed-out strategies get their self-recorded
         # timeout entry here (fixed order too); a cancelled-but-running
         # worker's late append to its PRIVATE list cannot land in the trace.
-        if trace_active:
+        if trace_active and leg_trace is not None:
             for strategy_name in ("fts", "vector", "structural"):
                 if strategy_name in timed_out:
                     leg_trace.append(_trace_entry(
@@ -1357,6 +1426,22 @@ def degradation_chain(
                 entries = private.get(strategy_name)
                 if entries:
                     leg_trace.extend(entries)
+
+    # #4028: report which legs RAN but were emptied by the relevance floor.
+    # The search surface uses this to avoid treating a floor-emptied vector
+    # leg as a leg FAILURE and answering from the TF-IDF fallback (which
+    # returns hits for any query — the very leak being fixed). Read from the
+    # per-strategy PRIVATE traces, never the caller's shared list.
+    if floored_legs is not None:
+        for strategy_name in ("fts", "vector", "structural"):
+            if strategy_name in timed_out:
+                # A leg the collector discarded as TIMED OUT is not a floor
+                # verdict, however its worker finished later (#4028 review P2).
+                continue
+            if any(e.get("leg") == strategy_name
+                   and e.get("reason") == BELOW_RELEVANCE_FLOOR
+                   for e in private.get(strategy_name, [])):
+                floored_legs.add(strategy_name)
 
     # #2952: return the legs in FIXED strategy order (fts, vector, structural).
     # ``results`` above is populated inside ``as_completed`` — i.e. in thread

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import sys
 import tempfile
 from urllib.parse import urlparse
@@ -57,18 +58,24 @@ EXPECTED_POINT_STALENESS_DOCKER = ("lastDreamedAt",)
 
 @pytest.fixture
 def proj():
-    p = FalkorProjection(f"{tempfile.mkdtemp(prefix='tt_idx_')}/t.db",
+    tmpdir = tempfile.mkdtemp(prefix="tt_idx_")
+    p = FalkorProjection(f"{tmpdir}/t.db",
                          allow_nonstandard_path=True)
     yield p
     p.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture
 def sdk():
     from tortoise.sdk import TortoiseSDK
-    s = TortoiseSDK(f"{tempfile.mkdtemp(prefix='tt_sdkidx_')}/t.db")
+    tmpdir = tempfile.mkdtemp(prefix="tt_sdkidx_")
+    s = TortoiseSDK(f"{tmpdir}/t.db")
     yield s
     s.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _range_indexes(proj):

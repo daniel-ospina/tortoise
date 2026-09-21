@@ -11,7 +11,7 @@ per retry). That froze the SINGLE event loop, so:
 2. ``tortoise-y4mjjq`` runs one machine, so the proxy found no healthy
    candidate and dropped ALL traffic
    (``[PR01] no known healthy instances found for route tcp/443``);
-3. every dashboard boot call (``/v1/user/identity``, ``/v1/teams``,
+3. every dashboard boot call (``/v1/user/identity``, ``/v1/organizations``,
    ``/v1/onboarding/state``) failed together → the user-visible
    "Failed to fetch".
 
@@ -48,7 +48,7 @@ import pytest
 # fixture (temp-DB SDK patching + the session-recording consent seed), which
 # also installs the module-level env (pepper/encryption key) on import.
 from tests.test_hosted_api import (
-    TEST_TEAM_ID,
+    TEST_ORG_ID,
 )
 from tests.test_hosted_api import (
     client as client,
@@ -66,6 +66,13 @@ LOOP_BUDGET_S = 3.0
 # loop yields 0 (the next tick can only happen once the freeze releases); a
 # free loop yields ~STALL_S/0.05 ≈ 80.
 MIN_TICKS_IN_STALL = 10
+# Bound on the wait for the fake to report that the capture entered its stall,
+# before the /health probe is issued (the liveness test below). Generous and
+# only reached on the failure path: the endpoint's pre-stall synchronous setup
+# is legitimately slow on a loaded runner (measured ~4.75s for a max-size
+# 500-turn capture, #3086), and a capture that never starts must fail on the
+# `"entered" in state` assertion rather than hang the suite.
+STALL_START_WAIT_S = 60.0
 # NOTE: this endpoint ALSO does bounded synchronous graph work on the event
 # loop (turn upserts, session MERGE, tenant-vocab build). That is a SEPARATE,
 # tracked defect — measured at ~4.75s for a max-size 500-turn capture (#3086)
@@ -188,7 +195,12 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
       monotonic clock read only after the worker completed. The probe must
       still complete inside the stall, whose ``STALL_S`` budget is orders of
       magnitude above the in-memory /health path; a probe that merely queues
-      behind a blocking capture fails.
+      behind a blocking capture fails. The endpoint's pre-stall synchronous
+      setup can run for seconds on a loaded runner (and #4304 lengthens it),
+      so the probe is issued only after the fake reports the stall has
+      STARTED — waiting on the fake's own ENTRY event, not a fixed sleep,
+      puts it inside the freeze window by construction and keeps both signals
+      measuring what they claim to.
 
     Mutation check (must stay true): calling the extraction inline
     (`return fn(*args, **kwargs)` instead of dispatching to the pool) makes the
@@ -239,28 +251,39 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             await asyncio.sleep(0.05)
             capture = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
-            # Wait for the capture to actually ENTER the extraction (the fake's
-            # own flag) instead of sleeping a fixed guess. Under load the
-            # endpoint's setup before the extraction takes longer than any
-            # guess, and /health would then be served before the stall began —
-            # the timestamp inversion this test used to fail on (#3581).
-            for _ in range(600):  # 30s, generously clear of loaded-runner setup
-                if entered_evt.is_set():
-                    break
+            # Issue the probe only once the capture is INSIDE its stall. The
+            # endpoint does bounded synchronous setup BEFORE the extraction
+            # starts (seconds on a loaded runner — and #4304 lengthens it — the
+            # very interval the tick-interval check above excludes). Probing
+            # concurrently races that setup: on a slow runner the probe is
+            # already answered before the stall begins, so the run proves
+            # nothing about liveness (#3060). Waiting on the fake's own ENTRY
+            # event (not a fixed sleep, and not the worker's ``state`` dict, so
+            # no cross-thread clock ordering is read — #3581) makes the probe
+            # land inside the freeze window by construction. Bounded, and it
+            # also stops as soon as the capture has SETTLED without reaching
+            # the extraction (a fast endpoint error), so a failure here stays
+            # fast instead of burning the whole bound before the guard below
+            # reports it.
+            _stall_deadline = time.perf_counter() + STALL_START_WAIT_S
+            while (not entered_evt.is_set()
+                   and not capture.done()
+                   and time.perf_counter() < _stall_deadline):
                 await asyncio.sleep(0.05)
             # Asserted HERE, before the probe: on an exhausted wait the request
             # below would be served BEFORE the stall opened and the run would
             # pass vacuously on the exit-event read (#3581 review) — the
             # unconditional run-validity guard the old ordering assert carried.
             assert entered_evt.is_set(), (
-                "the capture never reached the extraction within the 30s wait "
-                "(600 x 0.05s) — the stall window never opened, so this run "
-                "proves nothing (#3060)"
+                "the capture never reached the extraction within "
+                f"{STALL_START_WAIT_S:.0f}s — the stall window never opened, "
+                "so this run proves nothing (#3060)"
                 + (
                     " — the capture finished without entering the extraction: "
                     f"{capture.exception() or capture.result()!r}"
                     if capture.done()
-                    else " — the capture is still pending after 30s"
+                    else f" — the capture is still pending after "
+                         f"{STALL_START_WAIT_S:.0f}s"
                 ))
             health = await ac.get("/health")
             # The invariant, read the moment the response is in hand: the stall
@@ -675,7 +698,7 @@ def test_capture_capacity_limit_fails_fast_instead_of_queueing(
     # must not land in the team-visible last-error slot (the dashboard sub-line
     # reads it, and the advertised retry would then clear it — misreporting
     # capacity as a team fault and masking any genuine prior error).
-    state = ha_mod._get_onboarding_state(TEST_TEAM_ID)
+    state = ha_mod._get_onboarding_state(TEST_ORG_ID)
     assert state.get(f"session_capture_last_error_{_HARNESS}") in (None, ""), state
 
 
@@ -849,9 +872,9 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
         _current_graph_id,
         _current_graph_namespace,
         _current_legacy_full_access,
+        _current_org_id,
+        _current_org_limits,
         _current_scopes,
-        _current_team_id,
-        _current_team_limits,
     )
     from tortoise.mcp_server import tortoise_session_capture
 
@@ -870,12 +893,13 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
         # The MCP tool reads the RESOLVED team from ContextVars (mcp_auth); a
         # fresh thread starts with an empty context, so set them there (same
         # shape as the delivery-tenancy MCP test).
-        ctx_vars = [_current_team_id, _current_team_limits, _current_graph_id,
+        ctx_vars = [_current_org_id, _current_org_limits, _current_graph_id,
                     _current_graph_namespace, _current_scopes,
                     _current_legacy_full_access]
         toks = [v.set(val) for v, val in zip(
             ctx_vars,
-            [TEST_TEAM_ID, {}, None, None, ["graphs:read", "graphs:write"],
+            [TEST_ORG_ID, {"max_points": 100000, "max_sessions": None},
+             None, None, ["graphs:read", "graphs:write"],
              False],
             strict=True)]
         try:
@@ -1020,7 +1044,7 @@ def test_same_session_retry_during_an_in_flight_capture_is_refused(
                 # Sampled BEFORE the first capture is released, so a receipt
                 # written by the second request is unambiguous evidence.
                 receipt_during = ha_mod._get_onboarding_state(
-                    TEST_TEAM_ID).get(receipt_key)
+                    TEST_ORG_ID).get(receipt_key)
             finally:
                 release.set()
             first_resp = await first
@@ -1191,7 +1215,7 @@ def test_cancelled_after_extraction_marks_the_attempt_failed(client, monkeypatch
     drained = asyncio.run(_run())
     assert drained == [], drained
 
-    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+    rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
         params={"sid": "s-postextract-cancel-3129"}).result_set
     assert rows, "the capture never merged its Session row"
@@ -1401,7 +1425,7 @@ def test_cancelled_capture_keeps_the_key_and_leaves_a_retryable_attempt(
         f"{getattr(while_parked, 'status_code', 'a timeout')} — it must be "
         f"refused at admission, not queued (#3129)")
     assert drained == [], drained
-    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+    rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
         params={"sid": "s-cancel-3129"}).result_set
     assert rows, "the capture never merged its Session row"
@@ -1475,7 +1499,7 @@ def test_cancelled_m2_capture_records_the_m2_lane(client, monkeypatch):
     assert held == [key], held
     assert drained == [], drained
 
-    rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+    rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
         params={"sid": "s-m2-cancel-3129"}).result_set
     assert rows, "the m2 capture never merged its Session row"
@@ -1501,12 +1525,12 @@ def test_in_flight_session_keys_are_scoped_to_their_tenant():
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import _capture_session_key, _reserve_capture_slot
 
-    team_a = {"team_id": "team-a", "graph_id": None}
-    team_b = {"team_id": "team-b", "graph_id": None}
+    team_a = {"org_id": "team-a", "graph_id": None}
+    team_b = {"org_id": "team-b", "graph_id": None}
     key_a = _capture_session_key(team_a, "shared-id")
     key_b = _capture_session_key(team_b, "shared-id")
     key_a_g1 = _capture_session_key(
-        {"team_id": "team-a", "graph_id": "g_1"}, "shared-id")
+        {"org_id": "team-a", "graph_id": "g_1"}, "shared-id")
     assert _capture_session_key(team_a, None) is None
     assert len({key_a, key_b, key_a_g1}) == 3, (key_a, key_b, key_a_g1)
 

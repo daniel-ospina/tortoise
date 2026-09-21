@@ -294,6 +294,43 @@ def test_v2_noop_gate_only_surfaces_capture_provenanced_identical(sdk, monkeypat
     assert any("not surfaced" in w for w in res2["warnings"]), res2["warnings"]
 
 
+def test_v2_fold_lane_reports_stored_passthrough_props(sdk, monkeypatch):
+    """#2949 (review F3): a surfaced consolidation fold is a dedup HIT — the
+    same lane class as the points-loop resolution — so it reports the
+    canonical's STORED passthrough props, not a hardcoded {}. Emitting {} for
+    the SAME canonical the points loop describes with its four E3 fields was
+    the asymmetry this PR set out to remove.
+
+    MUTATION THAT REDS THIS TEST: restore ``"props": {}`` on the fold lane.
+    """
+    import tortoise.extractor_v2 as ev2
+    content = "the fold lane must report the canonical's stored props"
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        _stub_extractor([content]))
+    first = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert len(first["points"]) == 1, first["points"]
+    canonical_id = first["points"][0]["id"]
+    assert canonical_id.startswith("pt_"), canonical_id
+    # The created canonical stores the stub's quote and capture provenance.
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.quote, n.eventId",
+        params={"id": canonical_id}).result_set[0]
+    assert row[0] == content[:200], row
+    assert row[1], "capture-minted canonical must carry provenance (eventId)"
+
+    # Re-capture with NO payload points and an 'identical' fold onto it.
+    fold = _stub_extractor([], noops=[
+        {"point_id": canonical_id, "reason": "identical",
+         "overlap": 1.0, "evidence": "exact"}])
+    monkeypatch.setattr(ev2, "extract_session_v2", fold)
+    second = sdk.capture_session([{"role": "user", "content": "hello"}])
+    assert len(second["points"]) == 1, second["points"]
+    entry = second["points"][0]
+    assert entry["id"] == canonical_id, entry
+    assert entry["dedup"] == DEDUP_CONTENT_HASH_HIT, entry
+    assert entry["props"] == {"quote": content[:200]}, entry
+
+
 # ── EP pass targeting (first-time calibration of folded canonicals) ─────────
 
 

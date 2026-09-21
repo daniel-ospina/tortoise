@@ -7,12 +7,14 @@
 // whose length is asserted non-zero first, so a moved/renamed region breaks
 // the anchor instead of silently passing.
 //
-// The last case is a DIST-SYNC guard: CI never builds the dashboard bundle
-// (`ci.yml` documents the blind spot), so a source-only change ships the old
-// bundle with a green suite. That case fails until `npm run build` is run.
+// The last case is an ARTIFACT guard: since #3775 the dashboard bundle is
+// untracked and BUILD-time generated, so CI builds it before this suite runs
+// (`dashboard-js-tests` → `npm ci && npm run build && node --test`). The case
+// asserts the FRESH vite output carries this column's current copy — run
+// `npm run build` before this suite locally or it fails on a missing dist/.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -117,14 +119,16 @@ test('#2784 tripwire: the cell carries an accessible name (its explanation lives
   assert.match(cellBody, /title=\{state\.title\}/, 'the hover tooltip stays')
 })
 
-test('#2784 tripwire: the committed dist bundle ships the CURRENT column copy (rebuild guard)', () => {
+test('#2784 tripwire: the built dist bundle ships the CURRENT column copy (build guard)', () => {
   // Structural artifact checks (dist/index.html's entry chunk exists, every
-  // referenced asset is committed, no orphaned index-*.js) already live in
+  // referenced asset exists, no orphaned index-*.js) already live in
   // `distBundle.test.js` (#2865) — do not duplicate them here. This case adds
-  // only what that guard cannot know: whether the shipped bundle carries THIS
+  // only what that guard cannot know: whether the built bundle carries THIS
   // column's current copy. The expected strings come from the live module, so
-  // changing a label in source without `npm run build` fails here.
+  // changing a label in source without rebuilding fails here.
   const distDir = join(HERE, '..', 'dist')
+  assert.ok(existsSync(join(distDir, 'index.html')),
+    'dist/ is a build artifact since #3775 — run `npm run build` before this suite')
   const html = readFileSync(join(distDir, 'index.html'), 'utf8')
   const ref = html.match(/assets\/(index-[A-Za-z0-9_-]+\.js)/)
   assert.ok(ref, 'dist/index.html references an index-*.js bundle')

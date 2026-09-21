@@ -428,9 +428,9 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # probe below compares against the STORED (truncated) form so a
         # long same-successor re-ingest dedups instead of warning. The FULL
         # name is kept for the journaled event (round-2 review, ISSUE 2 —
-        # §11: the event log is truth; replay re-truncates identically at
-        # the fold, so journal fidelity costs nothing at storage). No
-        # truncation happens here — only at the compare and the fold.
+        # §11: the event log is the reconstruction source; replay re-truncates
+        # identically at the fold, so journal fidelity costs nothing at
+        # storage). No truncation happens here — only at the compare and fold.
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
             "RETURN o.id, o.name, o.status, o.supersededBy",
