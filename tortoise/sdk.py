@@ -13330,8 +13330,9 @@ class TortoiseSDK:
         lane's ``dedup_pool`` bucket key, so widening the identity join (e.g.
         taking the ``:Session`` ``CONTAINS`` edge id as a ``session_id`` — the
         eval ingest writes those with INTERNAL ``lme:{qid}:s{si}`` ids)
-        re-buckets the pool and changes which hits fit the 8k/32KiB reader
-        window. #4106 adds ONE source, the session's own recorded
+        re-buckets the pool and changes which hits fit the resolved ask-lane
+        reader window (200/200/16000/derived since #4105; 8k/32KiB before it).
+        #4106 adds ONE source, the session's own recorded
         ``created_at``, and it is read for ``session_date`` ONLY — the
         attached ``session_id`` set is byte-identical with and without it
         (pinned by ``tests/test_ask_sdk.py``).
@@ -13350,16 +13351,18 @@ class TortoiseSDK:
         from the hit's own ``sessionId`` (populated by the point fetch from
         the Point prop / ``:Session`` edge) / ``session_id``. That derivation
         does NOT re-bucket the pool — but it does widen rendered blocks, so it
-        changes 32 KiB byte-cap admission (see the ``retrieved_session_ids``
-        row in ``docs/product/answer-surface.md``), unlike widening THIS join,
-        which is what re-buckets the pool.
+        changes byte-cap admission under the resolved ceiling (see the
+        ``retrieved_session_ids`` row in ``docs/product/answer-surface.md``),
+        unlike widening THIS join, which is what re-buckets the pool.
 
         D8 supersession/validity keys are ALREADY attached to point hits by
         ``tortoise_fts_query`` via ``fetch_point_epistemic_state`` — this
         method MUST NOT re-fetch them; they ride through untouched (no drift
         risk, no duplicate join). ``has_answer`` and every other passthrough
         key survive unchanged. The annotation covers the full returned set
-        (the ask lane retrieves with ``limit=DEFAULT_CONTEXT_ITEM_CAP``).
+        (the ask lane retrieves with ``limit=resolve_ask_retrieval_caps()
+        ["limit"]``, ``DEFAULT_ASK_RETRIEVAL_LIMIT=200`` since #4105 — NOT
+        ``DEFAULT_CONTEXT_ITEM_CAP``, which is still 40).
         """
         if not hits:
             return hits

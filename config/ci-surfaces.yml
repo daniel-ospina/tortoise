@@ -726,6 +726,7 @@ surfaces:
   - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_evidence_assembly.py      # #2683: Slice-A evidence-package assembly hermetic rules
+  - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
   - test_aggregative_intent.py          # #2521: hermetic detector + coverage-math table (C5)
   - test_retrieval.py
@@ -998,6 +999,7 @@ surfaces:
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm — drives ask_lane.run_ask_assembled/run_ask_lane (also under `eval`)
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
+  - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_ask_sdk.py
   - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
   - test_ask_spotcheck_judge.py
@@ -1007,6 +1009,7 @@ surfaces:
   - test_cross_lens.py
   - test_crypto.py
   - test_d3_session_identity.py   # D3/#3800: retrieved-session identity — ask `retrieved_session_ids` + `[session <id>]` evidence tag + wire `sessionId`
+  - test_ask_shape_rate_receipt_redaction.py   # #4105: the D3 instrument's receipt label never echoes the DB credential (hermetic)
   - test_eval_ingest_cache.py  # #2080 ingest-cache seam (docker-lane leg — the retriever/namespace surface, mirrors test_retrieval.py)
   - test_operator_dedup_parity.py
   - test_postmerge_dedup.py
@@ -1562,6 +1565,8 @@ durations:
   eval/retrieval/test_bootstrap.py: 0.9
   test_agent_ops_pack.py: 0.9
   test_ask_retrieval_levers.py: 0.9
+  test_ask_retrieval_budget.py: 2.0
+  test_ask_shape_rate_receipt_redaction.py: 2.0
   test_battery_arms_real.py: 0.9
   test_capability_catalog.py: 0.9
   test_capture_session_supersession_e2e.py: 0.9
