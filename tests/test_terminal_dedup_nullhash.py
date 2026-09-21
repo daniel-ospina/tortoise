@@ -293,3 +293,30 @@ class TestLegacyPropertyAbsentShape:
         self._create_legacy_point(sdk, "legacy-plain-ingest-2949", content)
         TestIngestGuardAfterRebuild._assert_bundle_local_ref_rejected(
             sdk, content)
+
+
+class TestDedupClauseSeam:
+    """The shared-predicate seam (``_dedup_match_clauses``) exists so that no
+    dedup path can re-narrow the non-operator predicate. Cycle 2 of the #2949
+    review found the seam still ADMITTED a caller-supplied re-narrowing clause
+    — which would silently re-create the guard/writer drift the seam was
+    extracted to remove, one radius smaller. It now fails fast."""
+
+    def test_extra_clauses_may_not_redefine_the_predicate(self, sdk):
+        for clause in ("n.is_operator = false",
+                       "(n.op_type IS NULL OR n.is_operator = false)",
+                       "n.op_type IS NULL"):
+            with pytest.raises(ValueError, match="may not redefine"):
+                sdk._dedup_match_clauses(point_kind="statement",
+                                         extra_clauses=(clause,))
+
+    def test_the_legitimate_extra_clauses_are_still_accepted(self, sdk):
+        """The resolver's own fallback extras — the seam's intended use —
+        must keep working, or the guard above would have broken the fix."""
+        clauses, params = sdk._dedup_match_clauses(
+            point_kind="statement",
+            extra_clauses=("n.content_hash IS NULL", "n.content = $content"))
+        assert "n.content_hash IS NULL" in clauses
+        assert "n.content = $content" in clauses
+        assert params["kind"] == "statement"
+        assert not any("is_operator" in c for c in clauses[2:])

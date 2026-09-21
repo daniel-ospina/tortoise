@@ -7867,12 +7867,15 @@ class TortoiseSDK:
             # hash-less — without this scan the cycle-17/18 guard cannot see
             # it. (#2795 D2 now recomputes the hash on replay, so a rebuild no
             # longer produces this state.)
-            fallback_clauses = [*base_clauses, "n.content_hash IS NULL",
-                                "n.content = $content", *status_clauses]
+            fallback_clauses, fallback_params = self._dedup_match_clauses(
+                point_kind=kind,
+                extra_clauses=("n.content_hash IS NULL",
+                               "n.content = $content"))
+            fallback_clauses = [*fallback_clauses, *status_clauses]
             rows = proj.g.query(
                 "MATCH (n:Point) WHERE "
                 f"{' AND '.join(fallback_clauses)} RETURN n.id LIMIT 1",
-                params={**base_params, "content": content,
+                params={**fallback_params, "content": content,
                         "terminal": terminal},
             ).result_set
         return rows[0][0] if rows else None
@@ -12087,6 +12090,16 @@ class TortoiseSDK:
         if exclude_id:
             clauses.append("n.id <> $exclude")
             params["exclude"] = exclude_id
+        # The seam exists so no dedup path can re-narrow the shared predicate;
+        # a caller passing its own is_operator/op_type clause would silently
+        # re-create the exact drift this helper was extracted to remove
+        # (code-review cycle 2). Fail fast rather than admit it.
+        for clause in extra_clauses:
+            if "is_operator" in clause or "op_type" in clause:
+                raise ValueError(
+                    "_dedup_match_clauses: extra_clauses may not redefine the "
+                    f"non-operator predicate (got {clause!r}) — a shared "
+                    "predicate is the whole point of #2949")
         clauses.extend(extra_clauses)
         return clauses, params
 
