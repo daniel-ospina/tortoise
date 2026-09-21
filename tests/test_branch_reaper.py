@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -403,6 +404,100 @@ class ReaperTestCase(unittest.TestCase):
         # The bundle really carries the deleted tip.
         verify = _run(["git", "bundle", "verify", str(bundle)], cwd=self.repo, check=False)
         self.assertEqual(verify.returncode, 0, verify.stderr)
+
+    def test_backup_bundle_failure_aborts_deletion(self):
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        blocker = self.tmp / "blocker"
+        blocker.write_text("not a directory\n")
+        bad = blocker / "backup.bundle"  # parent is a FILE -> cannot be created
+        report = self.tmp / "r.md"
+        rc, out, err = self.run_tool(
+            ["--apply", "--report", str(report), "--backup-bundle", str(bad)],
+            repo=self.driver)
+        self.assertEqual(rc, 2, err + out)
+        self.assertIn("INCOMPLETE", err)
+        # fail-closed: nothing deleted
+        self.assertIn("merged/branch", self.branches())
+        # and the recovery record was written BEFORE the (aborted) delete phase
+        rec = report.parent / (report.name + ".recovery.json")
+        self.assertTrue(rec.exists())
+        self.assertIn(sha, [b["oid"] for b in json.loads(rec.read_text())["branches"]])
+
+    def test_backup_bundle_symlink_path_is_refused(self):
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        victim = self.tmp / "victim.txt"
+        victim.write_text("do not clobber\n")
+        link = self.tmp / "backup.bundle"
+        os.symlink(victim, link)
+        rc, out, err = self.run_tool(
+            ["--apply", "--backup-bundle", str(link)], repo=self.driver)
+        self.assertEqual(rc, 2, err + out)
+        self.assertIn("symlink", err)
+        self.assertIn("merged/branch", self.branches())
+        self.assertEqual(victim.read_text(), "do not clobber\n")
+
+    def test_engine_that_frees_a_held_branch_deletes_and_records_it(self):
+        # The recovery record must be derived from the POST-teardown held set:
+        # a branch the delegate frees and the reaper then deletes must be recorded.
+        sha = self.commit_on("held/branch", "safe work")
+        self.add_pr("merged", "held/branch", sha)
+        self.write_fixtures()
+        wt = self.tmp / "wt-clean"
+        _git(self.repo, "worktree", "add", str(wt), "held/branch")  # clean
+        engine = _write_exec(
+            self.driver / "scripts" / "pi-reap-worktrees.sh",
+            "#!/usr/bin/env bash\nset -e\n"
+            f"git -C {shlex.quote(str(self.driver))} worktree remove {shlex.quote(str(wt))}\n"
+            "echo 'REMOVED=1'\nexit 0\n")
+        report = self.tmp / "r.md"
+        rc, out, err = self.run_tool(
+            ["--apply", "--report", str(report), "--reap-worktrees",
+             "--worktree-engine", str(engine)], repo=self.driver)
+        self.assertEqual(rc, 0, err + out)
+        self.assertNotIn("held/branch", self.branches())  # freed, then deleted
+        rec = report.parent / (report.name + ".recovery.json")
+        self.assertIn(sha, [b["oid"] for b in json.loads(rec.read_text())["branches"]])
+
+    def test_clean_worktree_reports_not_dirty(self):
+        sha = self.commit_on("held/branch", "safe work")
+        self.add_pr("merged", "held/branch", sha)
+        self.write_fixtures()
+        wt = self.tmp / "wt-clean"
+        _git(self.repo, "worktree", "add", str(wt), "held/branch")
+        self.assertFalse(self.rows()["held/branch"]["dirty"])
+
+    def test_ignored_only_worktree_is_not_dirty(self):
+        # An ignored-only checkout is NOT dirt: `git worktree remove` does not
+        # refuse ignored files, so treating a regenerable .venv as dirt would
+        # make every worktree unreapable.
+        (self.repo / ".gitignore").write_text("ignored.txt\n")
+        _git(self.repo, "add", ".gitignore")
+        _git(self.repo, "commit", "-q", "-m", "ignore")
+        self.main_sha = _git_out(self.repo, "rev-parse", "HEAD")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", self.main_sha)
+        sha = self.commit_on("held/branch", "safe work")
+        self.add_pr("merged", "held/branch", sha)
+        self.write_fixtures()
+        wt = self.tmp / "wt-ignored"
+        _git(self.repo, "worktree", "add", str(wt), "held/branch")
+        (wt / "ignored.txt").write_text("regenerable\n")
+        self.assertFalse(self.rows()["held/branch"]["dirty"])
+
+    def test_tool_carveout_pins_the_reaper_tests(self):
+        # A tools/branch_reaper.py-only diff must still run this file (the flat
+        # tools/ prefix otherwise drops it to tier-1 smoke).
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("ci_selection", ROOT / "tools" / "ci_selection.py")
+        cs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cs)
+        self.assertIn("tools/branch_reaper.py", cs.TOOL_CARVEOUTS)
+        sel = cs.select(["tools/branch_reaper.py"], "pull_request", cs.load_manifest())
+        self.assertTrue(sel["full"], "a reaper-only diff must fail closed to the full matrix")
 
 
 if __name__ == "__main__":

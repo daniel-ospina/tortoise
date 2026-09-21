@@ -590,7 +590,7 @@ TOOL_CARVEOUTS = (
     # tests/test_branch_reaper.py. Same silent-drop class as the preflight
     # carve-out above: the flat "tools/" prefix would swallow a reaper-only
     # change, `changed` comes back empty, select() takes the docs-only path and
-    # the reaper's 15 mutation tests never run on the PR that changes it. No
+    # the reaper's mutation tests never run on the PR that changes it. No
     # SOURCE_PATTERNS entry matches it, so it lands in the unknown-path branch
     # -> FULL matrix (fail closed) — the safe default for a destructive-ref tool.
     "tools/branch_reaper.py",

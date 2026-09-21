@@ -11,6 +11,15 @@ aboutObjects: tortoise
 
 # branch-reaper dry-run report — #4408
 
+> **Provenance.** Generated at commit `c98c4fbc0` with the tool as of that
+> revision: the dry-run classification below precedes the actual reaping pass
+> whose results appear in the Post-apply section. Round 2 of code review later
+> changed the tool's report format (a `dirty` column on the held table, HEAD-age
+> ranking for detached worktrees, and the Recovery record promoted to its own
+> H2 before the results), so a fresh `--report` run renders slightly differently.
+> The classification numbers and the deleted count are the historical evidence
+> of the pass and are unchanged.
+
 Generated: 2026-09-21 · repo `/Users/danielospina/Documents/GitHub/tortoise/.worktrees/4408-branch-reaper` · slug `daniel-ospina/tortoise` · main ref `origin/main`
 
 Tool: `tools/branch_reaper.py`. Dry-run by default; this report is the evidence a reviewer reads before any `--apply`.

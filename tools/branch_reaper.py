@@ -462,30 +462,64 @@ def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
 
     ``git bundle create <file> <sha>`` is rejected ("Refusing to create empty
     bundle") because a bundle records REF names, not bare commits — so temporary
-    refs under ``refs/branch-reaper-backup/`` are created for the tips, the
-    bundle is written from them, and the temp refs are removed immediately.
-    They are deliberately NOT the persistent ``refs/reaped/*`` shape, which
-    would collide with ``pi-reap-worktrees.sh``'s ``refs/heads/*``-only survival
-    doctrine.
+    refs under a UNIQUE per-process namespace are created for the tips, the
+    bundle is written, its heads are verified to be exactly the expected tips,
+    and the refs are removed immediately. They are deliberately NOT the
+    persistent ``refs/reaped/*`` shape, which would collide with
+    ``pi-reap-worktrees.sh``'s ``refs/heads/*``-only survival doctrine.
+
+    Symlink-safe and atomic: ``git bundle create`` follows a symlink and truncates
+    its target, so a pre-check alone is not enough — the bundle is written to a
+    private temp file in the destination directory and ``os.replace``d into place
+    (which replaces a planted link, never its target). A relative ``path`` is
+    resolved against ``repo_root``, the same directory ``git -C repo_root`` uses,
+    so the check and the write agree.
     """
-    if Path(path).is_symlink():
-        raise Incomplete(f"refusing to write a symlinked bundle path: {path}")
+    dest = Path(path)
+    if not dest.is_absolute():
+        dest = Path(repo_root) / dest
+    if dest.is_symlink():
+        raise Incomplete(f"refusing to write a symlinked bundle path: {dest}")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise Incomplete(f"cannot create bundle directory {dest.parent}: {exc}") from exc
+    fd, tmp = tempfile.mkstemp(prefix=dest.name + ".tmp.", dir=str(dest.parent))
+    os.close(fd)
+    os.unlink(tmp)  # git bundle create must create the file itself
+    prefix = f"refs/branch-reaper-backup/{os.getpid()}-{os.urandom(4).hex()}"
     refs: list[str] = []
     try:
         for i, r in enumerate(targets):
-            ref = f"refs/branch-reaper-backup/{i:06d}"
+            ref = f"{prefix}/{i:06d}"
             upd = _run(["git", "-C", repo_root, "update-ref", ref, r["oid"]])
             if upd.returncode != 0:
                 raise Incomplete(f"could not stage backup ref {ref}: {upd.stderr.strip()}")
             refs.append(ref)
         if not refs:
             return
-        res = _run(["git", "-C", repo_root, "bundle", "create", path, *refs], timeout=900)
+        res = _run(["git", "-C", repo_root, "bundle", "create", tmp, *refs], timeout=900)
         if res.returncode != 0:
             raise Incomplete(f"git bundle create failed: {res.stderr.strip()}")
+        heads = _run(["git", "-C", repo_root, "bundle", "list-heads", tmp], timeout=120)
+        got = {ln.split()[0] for ln in heads.stdout.splitlines() if ln.strip()}
+        expected = {r["oid"] for r in targets}
+        if got != expected:
+            raise Incomplete("backup bundle does not expose the expected tips")
+        os.replace(tmp, dest)
     finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        # Cleanup must never raise (a timeout here must not replace the real
+        # error) — a stranded temp ref only makes the worktree engine PRESERVE.
         for ref in refs:
-            _run(["git", "-C", repo_root, "update-ref", "-d", ref])
+            try:
+                _run(["git", "-C", repo_root, "update-ref", "-d", ref], timeout=60)
+            except Exception:
+                pass
 
 
 # ── reporting ───────────────────────────────────────────────────────────────
@@ -735,7 +769,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # A single top-level handler: ANY Incomplete (from resolve_repo, the main
+    # checkout probe, enumeration, dirty probes, or the post-teardown re-read)
+    # must surface as the documented exit 2, never an uncaught traceback.
+    try:
+        return _run_main(args)
+    except Incomplete as exc:
+        print(f"branch_reaper: INCOMPLETE — {exc}.", file=sys.stderr)
+        return EXIT_INCOMPLETE
 
+
+def _run_main(args) -> int:
     try:
         repo_root, slug = resolve_repo(args.repo)
     except ValueError as exc:
@@ -809,8 +853,14 @@ def main(argv: list[str] | None = None) -> int:
                 worktrees = enum_worktrees(repo_root)
 
             # Recompute the worktree-held set AFTER any delegated teardown — this
-            # is the checked-out guard for the CAS delete phase.
+            # is the checked-out guard for the CAS delete phase — and refresh each
+            # row's worktree so the recovery record and the report are derived from
+            # the SAME snapshot deletion uses (a stale pre-teardown `r["worktree"]`
+            # silently omitted a freed-then-deleted branch from the recovery record).
             held = {wt["branch"] for wt in worktrees if wt.get("branch")}
+            held_map = {wt["branch"]: wt["path"] for wt in worktrees if wt.get("branch")}
+            for r in rows:
+                r["worktree"] = held_map.get(r["branch"])
             recovery = [{"branch": r["branch"], "oid": r["oid"], "verdict": r["reason"],
                          "pr_number": r["pr_number"]}
                         for r in rows if r["verdict"] == VERDICT_SAFE and not r["worktree"]]
@@ -835,7 +885,8 @@ def main(argv: list[str] | None = None) -> int:
             if any(r["result"] == "refused" for r in apply_results):
                 result = EXIT_PARTIAL
         except Incomplete as exc:
-            print(f"branch_reaper: INCOMPLETE — {exc}. Nothing was deleted.", file=sys.stderr)
+            print(f"branch_reaper: INCOMPLETE — {exc}. Delete phase aborted; the "
+                  f"pre-delete recovery record is on disk.", file=sys.stderr)
             return EXIT_INCOMPLETE
 
     report = build_report(rows, worktrees, ancestors, repo_root=repo_root, slug=slug,
