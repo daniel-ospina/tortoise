@@ -81,6 +81,19 @@ _FLY_RENAMES = {
     "GITHUB_CLIENT_ID": "GH_CLIENT_ID",
     "GITHUB_CLIENT_SECRET": "GH_CLIENT_SECRET",
     "GITHUB_CALLBACK_URL": "GH_CALLBACK_URL",
+    # #4126: the Fly variable keeps the RuntimeEnv name the app reads, while the
+    # GitHub secret keeps its legacy name (see fly-managed-secrets.txt).
+    "SUPABASE_SERVICE_ROLE_KEY": "SUPABASE_SERVICE_KEY",
+}
+
+# #4126: names whose flyctl assignment is deliberately UNCONDITIONAL. The value
+# is versioned NON-SECRET config (a model id), so it MUST overwrite a hand-set
+# Fly value on every deploy — an unset GitHub secret pushes the recorded default,
+# never an empty string, so the clobber risk the `-n` guard exists for cannot
+# occur. Kept as an explicit name→default map so the exemption also pins the
+# constant: a dropped default would leave `KEY=` to clobber the Fly value.
+_UNCONDITIONAL_BY_DECISION = {
+    "TORTOISE_SESSION_LLM_MODEL": "openrouter:google/gemini-2.5-flash",
 }
 # A step env binding to a single secret: `KEY: ${{ secrets.KEY }}`.
 _ENV_SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}")
@@ -344,7 +357,9 @@ def test_optional_fly_appends_are_n_guarded(workflow_text):
     shapes are deliberately exempt: the two multi-pair appends (the base
     three-key array and the Stripe pair), and
     `TORTOISE_GIT_SHA="${GITHUB_SHA}"` — GITHUB_SHA is a GitHub built-in that is
-    always set, not an env-bound secret, so it needs no guard (`_NON_SECRET_PAIRS`)."""
+    always set, not an env-bound secret, so it needs no guard (`_NON_SECRET_PAIRS`).
+    A third is the #4126 versioned default (`_UNCONDITIONAL_BY_DECISION`), which
+    pushes a recorded non-secret constant, never an empty value."""
     run = _steps()[_SET_STEP]["run"]
     for line in run.splitlines():
         m = re.search(r"ARGS\+=\(([^)]*)\)", line)
@@ -356,6 +371,20 @@ def test_optional_fly_appends_are_n_guarded(workflow_text):
         if pairs[0] in _NON_SECRET_PAIRS:
             continue  # GITHUB_SHA is always set by GitHub — deliberately unconditional
         _fly, shell_var = pairs[0]
+        if shell_var in _UNCONDITIONAL_BY_DECISION:
+            # #4126: the service must overwrite a hand-set Fly value with the
+            # versioned default, so this assignment is unconditional BY
+            # DECISION. The eligibility test (a GitHub secret exists) still
+            # chooses the value, and the default branch pushes the constant.
+            default = _UNCONDITIONAL_BY_DECISION[shell_var]
+            assert f"ARGS+=({_fly}={default})" in run, (
+                f"{_fly} is assigned unconditionally (#4126), but the recorded "
+                f"default {default!r} is missing from the run — with the GitHub "
+                f"secret absent the deploy would push an empty value and clobber "
+                f"the Fly secret (and the provenance gate blocks on precisely "
+                f"that state)."
+            )
+            continue
         assert f'[ -n "${shell_var}" ]' in line, (
             f"optional append ARGS+=({pairs[0][0]}=\u0022${shell_var}\u0022) is not "
             f'guarded by [ -n "${shell_var}" ] — an unset secret would be pushed '

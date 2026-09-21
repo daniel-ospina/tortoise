@@ -155,6 +155,34 @@ export const onRequest: PagesFunction = async (context) => {
     });
   }
 
+  // ── The BFF's OWN endpoints, same move (#4054) ────────────────────────
+  // `/auth/start`, `/auth/callback`, `/auth/confirm`, `/auth/update-password`,
+  // `/auth/reset`, `/auth/resend`, `/auth/link`, `/auth/api-key` and
+  // `/auth/set-email` moved to the app origin with the BFF. The exact-path rule
+  // above does NOT cover them, so without this branch they fall through to a
+  // DELETED asset and answer 404 — which is what a stale bookmark, a
+  // pre-cutover email link, or a relative link resolved against the marketing
+  // host used to hit.
+  //
+  // 302, NOT 301 — a deliberate departure from the ordinary "moved ⇒ 301"
+  // practice, which is why the OVERRIDES marker for it lives on #3501 / #3521
+  // and in `SCOPE.md` §12: a 301 is browser-persistent and CANNOT be reclaimed
+  // by a later deploy, so every NEW branch for the moved surface is 302
+  // (`SCOPE.md` §12 “302, never a new 301”; F12 “302 only”). The already-served
+  // `/auth` 301 directly above is grandfathered by §12's *falsified-if* hedge
+  // (“the served 301 can be reclaimed”) and is deliberately left alone.
+  //
+  // Query-preserving and single-hop, both per W2. The bare `/auth/` collapses
+  // onto `/auth` here rather than bouncing through `_redirects` first, which
+  // also removes the old two-hop chain (`/auth/` → `/auth` → app).
+  if (url.pathname.startsWith("/auth/")) {
+    const path = url.pathname === "/auth/" ? "/auth" : url.pathname;
+    return new Response(null, {
+      status: 302,
+      headers: { Location: APP_ORIGIN + path + url.search, ...HSTS },
+    });
+  }
+
   // ── The blog admin console lives on the APP origin (#4171) ────────────
   // #4054 moved the BFF (and the `__Host-session` cookie) to
   // app.premiselabs.co, but the console stayed on this project — so its
