@@ -463,6 +463,7 @@ surfaces:
   # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
+  - test_dry_run_preview.py
   - test_embedder_provision.py
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
