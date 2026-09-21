@@ -1226,16 +1226,68 @@ def _build_record(args: argparse.Namespace) -> dict:
     reviewed_head = _git("rev-parse", "HEAD")
     _, review_dirty = _porcelain_digest(REPO_ROOT, exclude=args.record_out)
 
-    red_run = next((r for r in runs if r["bucket"] in BUCKETS_RED), None)
+    # D16: when a pairing ref is declared, the RED is re-run AT THE PAIRING REF
+    # inside this invocation, so `at_fixed_commit` becomes a MEASURED claim (the
+    # red appeared at the pairing ref; it did not appear at the measured, fixed
+    # commit). The producer previously hardcoded `attempted: False` /
+    # `appeared: None` / `rate_change: False`, which made `no-rate-change`
+    # unreachable for EVERY record the producer could emit.
+    baseline_run = None
+    pair_ref = None
+    if args.pairing_ref:
+        pair_ref = _git("rev-parse", f"{args.pairing_ref}^{{commit}}")
+        pair_root = run_root / "pairing"
+        pair_root.mkdir(parents=True, exist_ok=True)
+        pair_measured, pair_added = _worktree_at(pair_ref, run_root, "pairing-worktree")
+        try:
+            baseline_run = _run_once(files, pair_measured, pair_root, 1, args.marker,
+                                     args.run_timeout)
+        finally:
+            if pair_added:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(pair_measured)],
+                    capture_output=True, text=True, cwd=str(REPO_ROOT),
+                )
+
     bands = {r["load"]["band"] for r in runs}
-    green_runs = [r for r in runs if r["bucket"] in BUCKETS_PASSING]
-    red_runs = [r for r in runs if r["bucket"] in BUCKETS_RED]
-    # F4a: derived from the red runs' own recorded file lists, never a literal.
-    same_file_list = _red_file_list_matches(red_runs, files)
-    red_band = (red_run or runs[-1])["load"]["band"]
-    green_band = (green_runs[0]["load"]["band"] if green_runs else red_band)
-    cause = red_run["redis_log_cause"] if red_run else None
-    cause_evidence = red_run["cause_evidence"] if red_run else {}
+    measured_red_runs = [r for r in runs if r["bucket"] in BUCKETS_RED]
+    measured_green_runs = [r for r in runs if r["bucket"] in BUCKETS_PASSING]
+    measured_red_run = next(iter(measured_red_runs), None)
+
+    if baseline_run is not None:
+        # The red the record attests to is the pairing-ref re-run, never the
+        # measured runs' own red: a closing record's runs are green by definition,
+        # so its red identity can only come from the baseline.
+        attested_red_runs = (
+            [baseline_run] if baseline_run["bucket"] in BUCKETS_RED else []
+        )
+        attested_red_run = attested_red_runs[0] if attested_red_runs else None
+        red_ref = pair_ref
+        red_ref_tree = _git("rev-parse", f"{pair_ref}^{{tree}}")
+        red_green_mix = {"red": len(attested_red_runs),
+                         "green": 0 if attested_red_runs else 1}
+    else:
+        attested_red_runs = measured_red_runs
+        attested_red_run = measured_red_run
+        red_ref = requested_ref or commit
+        red_ref_tree = tree
+        red_green_mix = {"red": len(measured_red_runs),
+                         "green": len(measured_green_runs)}
+
+    # F4a: derived from the attested red runs' own recorded file lists, never a
+    # literal.
+    same_file_list = _red_file_list_matches(attested_red_runs, files)
+    red_band = (measured_red_run or runs[-1])["load"]["band"]
+    green_band = (measured_green_runs[0]["load"]["band"] if measured_green_runs else red_band)
+    cause = attested_red_run["redis_log_cause"] if attested_red_run else None
+    cause_evidence = attested_red_run["cause_evidence"] if attested_red_run else {}
+    # D9 conjunct 11 (`no-rate-change`): MEASURED — the red was re-attempted at
+    # the fixed commit (`attempted`), it did NOT appear there (`appeared`), and it
+    # DID appear at the pairing ref (`rate_change`). Without a pairing ref there is
+    # no baseline red, so `rate_change` is False and the conjunct cannot pass.
+    attempted = bool(runs)
+    appeared = bool(measured_red_runs)
+    rate_change = bool(attested_red_run) and not appeared
     # DERIVED from the label it summarises, never a literal (it was `True`).
     # `attributable` is a claim ABOUT `red.cause`, so a record with `red.cause ==
     # null` (no red run) or `unattributed` was claiming an attribution it does not
@@ -1261,7 +1313,7 @@ def _build_record(args: argparse.Namespace) -> dict:
             "post_review_dirty": review_dirty,
             "tree_object": tree,
             "requested_ref": requested_ref,
-            "pairing_ref": None,
+            "pairing_ref": pair_ref,
             "worktree_clean": not dirty,
             "porcelain_digest": porcelain,
             "record_out_excluded": str(args.record_out) if args.record_out else None,
@@ -1271,7 +1323,7 @@ def _build_record(args: argparse.Namespace) -> dict:
         "n": {
             "requested": args.n,
             "mode": "explicit",
-            "observed_failure_rate": (len(red_runs) / len(runs)) if runs else 0.0,
+            "observed_failure_rate": (len(measured_red_runs) / len(runs)) if runs else 0.0,
             "max_runs": DEFAULT_MAX_RUNS,
             "declared_local": True,
             "note": "N=10 is DECLARED LOCAL — no source makes any N canonical.",
@@ -1296,28 +1348,32 @@ def _build_record(args: argparse.Namespace) -> dict:
             "ledger_root": str(run_root),
         },
         "red": {
-            "ref": requested_ref or commit,
+            "ref": red_ref,
             "ref_role": "pinned-head-pre-fix" if not args.pairing_ref else "last-before-first-family-fix",
-            "ref_tree_object": tree,
+            "ref_tree_object": red_ref_tree,
             "cause": cause,
             "cause_evidence": cause_evidence,
-            "red_green_mix": {"red": len(red_runs), "green": len(green_runs)},
+            "red_green_mix": red_green_mix,
             "at_fixed_commit": {
-                "attempted": False,
-                "appeared": None,
-                "rate_change": False,
+                "attempted": attempted,
+                "appeared": appeared,
+                "rate_change": rate_change,
                 "mutation": None,
                 "mutation_operator": None,
                 "mutation_target_is_fix_branch": False,
                 "mutation_red_returned": False,
-                "surface": None,
-                "surface_assertion": None,
+                # R1/D23: caller-declared, so the conjunct can be REACHED (a
+                # produced record can pass) and can FAIL (an internal seam or an
+                # empty assertion). Left as literals these were `None` in every
+                # produced record, so the conjunct could never pass.
+                "surface": getattr(args, "surface", None),
+                "surface_assertion": getattr(args, "surface_assertion", None),
             },
             "same_file_list": same_file_list,
         },
         "verdict": {
-            "status": "RED-AT-PINNED-REF" if red_runs else "ALL-GREEN",
-            "green_only": not red_runs,
+            "status": "RED-AT-PINNED-REF" if measured_red_runs else "ALL-GREEN",
+            "green_only": not measured_red_runs,
             "attributable": attributable_,
             "environment_error": False,
             "closes_issue": False,
@@ -1334,7 +1390,7 @@ def _build_record(args: argparse.Namespace) -> dict:
     rec["verdict"]["violations"] = reasons
     rec["verdict"]["status"] = (
         "PAIRED-RED-DEMONSTRATED" if ok else
-        ("RED-AT-PINNED-REF" if red_runs else "ALL-GREEN")
+        ("RED-AT-PINNED-REF" if measured_red_runs else "ALL-GREEN")
     )
     rec["exit_code"] = exit_code(rec)
     return rec
@@ -1356,6 +1412,15 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--record-role", default="historical-attestation",
                        choices=["historical-attestation", "closing"])
         p.add_argument("--record-out", default=None)
+        # R1/D23: the consumer shipping surface the mutation/rate-change proof is
+        # asserted against, and the resolving test-ID that pins it. Both are
+        # CALLER-declared: the tool cannot infer which test exercises
+        # `tortoise_search` vs an internal helper. The conjunct
+        # `certification-not-on-shipping-surface` rejects anything that is not a
+        # member of SHIPPING_SURFACES with a non-empty assertion, so the free-form
+        # values are the falsifiable input, not an argparse allowlist.
+        p.add_argument("--surface", default=None)
+        p.add_argument("--surface-assertion", default=None, dest="surface_assertion")
     c = sub.add_parser("classify")
     c.add_argument("--redis-log", required=True)
     args = parser.parse_args(argv)
