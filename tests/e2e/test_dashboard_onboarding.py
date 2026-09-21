@@ -1139,8 +1139,9 @@ def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:
             "onboarding_complete": False,
             "completed_steps": ["team-named", "harness-connected", "first-points-filed"],
             "session_recording": True}
-    # the pin: the completion evidence is EXACTLY the two acts, never a catalog.
-    assert "catalog-presented" not in proj["completed_steps"]
+    # The projection handed to the app carries ONLY the two observed acts. That is
+    # a fixture premise, not an assertion — the app-derived pin is the done screen
+    # below, which must render without a catalog step anywhere in it.
     _wire(page, role="owner", onboarding_projection=proj)
     _walk_to_fork(page)  # fork already chosen server-side → Continue is present
     page.get_by_role("button", name="Continue →").click()

@@ -19238,9 +19238,11 @@ class OnboardingStatePatchRequest(BaseModel):
     github_docs_scope: list[dict] | None = None
     # #2001 (W5): FLOW keys DECLARED on the PATCH surface so a stray client
     # send is REJECTED loudly (403/422) instead of silently dropped — and
-    # catalog-presented, the ONE step key the dashboard writes (W1/W8 on a
-    # BUILD fork pick, step-edge MERGE — an optional record since #3913,
-    # never a completion requirement). All other FLOW keys are
+    # catalog-presented, the ONE step key a client may still PATCH (step-edge
+    # MERGE — an optional record, never a completion requirement). Since #3913
+    # (owner ruling 2026-09-20) NO dashboard path sends it: the fork pick
+    # writes {fork} only, and the id stays accepted for agent/external callers
+    # and for existing orgs' completed_steps. All other FLOW keys are
     # server-owned / checkpoint-owned on this surface.
     catalog_presented: bool | None = None
     harness_connected: bool | None = None
@@ -19300,10 +19302,11 @@ async def get_capabilities(org: dict = Depends(get_current_org_session_ungated))
     The indexers+extractors registry rows from tool_registry.py
     ``CAPABILITY_CATALOG`` (R2-9 — no new infra): one canonical list for the
     registry endpoint AND the dashboard's build-path catalog read (W8
-    replaced W1's static placeholder source with this endpoint; a BUILD pick
-    in the fork card records the catalog-presented checkpoint via the
-    existing W1/W5 mechanism — presentation only, never a billing gate, and
-    since #3913 never a build-completion requirement). Org-independent static
+    replaced W1's static placeholder source with this endpoint; the BUILD
+    fork pick records the FORK ONLY — since #3913 (owner ruling 2026-09-20)
+    no dashboard path writes catalog-presented, and the id stays accepted for
+    agent/external callers. Presentation only, never a billing gate, never a
+    build-completion requirement). Org-independent static
     registry data (no graph
     touch — never 'unavailable'); dual-auth like the onboarding state reads.
 
@@ -19420,7 +19423,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     updates = _validate_scope_payload(updates)
     # #2001 (W5): per-key-type write-surface ownership at the PATCH
     # boundary — server-owned FLOW keys 403, agent-step keys 422, the one
-    # dashboard step (catalog-presented) MERGEs the step edge.
+    # client-writable step (catalog-presented) MERGEs the step edge. Since
+    # #3913 the dashboard no longer sends it; the surface stays open for
+    # agent/external callers.
     _sent_owned = [k for k in _PATCH_SERVER_OWNED_KEYS if k in updates]
     if _sent_owned:
         raise HTTPException(
@@ -19479,8 +19484,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 # #2001 (W5): agent/internal checkpoint — the ONLY surface for the agent
 # steps + fork/compact set-once + last_decide_attempt LWW + member_progress.
-# Per-step write-surface ownership (scope pin 8): the dashboard PATCHes only
-# operational keys + catalog-presented; agents checkpoint everything else.
+# Per-step write-surface ownership (scope pin 8): the PATCH surface accepts
+# operational keys + catalog-presented (no dashboard path has sent the latter
+# since #3913); agents checkpoint everything else.
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)

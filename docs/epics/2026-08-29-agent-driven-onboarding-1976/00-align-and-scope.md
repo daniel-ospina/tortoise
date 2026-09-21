@@ -315,6 +315,8 @@ The cut is **user-visible journey first, infrastructure second** (align Rail 1):
 **Then:** every step of E2E-1 through E2E-6 passes in one sitting, W11 fires seed_complete + decide_complete once per org (deduped), and onboarding_complete is set only on the fork-aware completion gate
 **And:** completion semantics are FORK-AWARE (self: two Subjects + one decide + connected; build: org-anchor Subject + connected + catalog-presented-once; compact: org-anchor Subject + harness-connected) — dismissal alone never completes
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
+
 > **Superseded-semantics note (verify P2 fix):** the original single-gate wording ("set only on the aha + checklist done") was SUPERSEDED by plan §7 DE2E-12's fork-aware gates (P1 fix). This scope row is amended to match; the capstone #2008 walks the fork-aware version.
 
 ---

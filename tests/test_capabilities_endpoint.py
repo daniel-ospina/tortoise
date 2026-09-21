@@ -155,8 +155,11 @@ class TestBuildForkGate:
         org_id, _ = self._build_fork_org(client)
         r = client.patch("/v1/onboarding/state", json={"catalog_presented": True})
         assert r.status_code == 200, r.text
+        # The edge MERGE is the meaningful assertion here (the negative — the PATCH
+        # alone on a fresh build org — is test_catalog_presented_alone_never_completes).
+        # No `status == "complete"` assert: this org was already completed by
+        # `_build_fork_org`, so it would restate the fixture, not test the app.
         assert "catalog-presented" in _completed(org_id)
-        assert r.json()["onboarding"]["status"] == "complete", r.text
 
     def test_catalog_presented_alone_never_completes_a_build_org(self, client):
         """#3913 endpoint-level negative: a FRESH build org that PATCHes

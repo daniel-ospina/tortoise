@@ -27,6 +27,8 @@ Ship the pullable builder capability catalog:
 
 **Indicators:** endpoint returns the accurate list; catalog-presented step-edge set once per build org; every swept module carries the note (inventory test); no new infra.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** one or more rows in this doc still state the old build gate (`catalog-presented` as a required step edge) and/or the old dashboard writer (a render-time `POST {step:'catalog-presented'}`). The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input and no dashboard path writes it. The rows are kept verbatim as the historical record.
+
 ## 2. Design decisions
 
 ### D1 — Catalog data model (`tortoise/tool_registry.py`)

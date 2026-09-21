@@ -124,6 +124,8 @@ Post-connect trigger → read node → anchor data: hosted → JWT (user_id/emai
   edge new-creation); on failure: write last_decide_attempt: 'failed' (never decide-completed)
 → set onboarding_complete ONLY on the fork's gate (self: two Subjects + decide + connected;
   build: org-anchor Subject + connected + catalog-presented-once; compact: org-anchor Subject + harness-connected)
+
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
 Failure modes: anchor merge collision (resolved via disambiguation), decide dismissed (no completion — guide stays),
   LLM provider missing (decide fails closed → honest surface + decide-attempted-failed recorded, distinct from
   dismissed; retry reachable — P1 fix).
@@ -184,6 +186,8 @@ Failure modes: delete orphans graph data (receipt not cleaned), delete during ca
 ```
 Build fork → catalog presented once (W1-rendered placeholder until W8 endpoint; WF-6/W8 marks
   catalog-presented step edge on first render — P2 fix: storage slot defined, build gate evaluable)
+
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
 W8: extend tool_registry.py → pullable registry endpoint → dashboard-side catalog read
 W8b: per-module note sweep — every extractor/indexer module docstring carries: "referenced in the builder capability catalog — update on add/rename"
 Failure modes: registry stale (module added w/o note), endpoint 404/empty, catalog re-presents on every visit (once-only flag in state).
@@ -334,6 +338,8 @@ Write surfaces: PATCH /v1/onboarding/state retargeted — allowlist filter re-ho
   member_progress = POST-checkpoint-only FLOW key (user-scoped map-merge; NOT a PATCH allowlist entry — P2 fix, kept in I-1's checkpoint contract)
   PATCH writes of completed_steps translate entries into step-edge MERGEs (never stores the array — DM-1's
   "not a second store" rule; catalog-presented written dashboard-side via PATCH on first catalog render — P2 fix);
+
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
   underscore→hyphen translation and team_created strip PRESERVED. WRITE ORDER + DIVERGENCE (P2 fix): jsonb first,
   graph second; on graph write failure the orphan/divergence sweep reconciles flow keys from jsonb (fork, completion
   status); negative test: jsonb succeeds / graph fails → next read consistent, no lost fork/completed_steps.
