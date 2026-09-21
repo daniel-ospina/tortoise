@@ -925,15 +925,19 @@ class TestS3:
                      "impossible no matter how we roll out", "kind": "event"},
                     {"id": "s1_t4", "content": "[assistant] then we re-plan",
                      "kind": "event"},
+                    # a caller-minted Point in the session's turn namespace, but
+                    # NOT transcript content — must survive the prior set
+                    {"id": "s1_t9", "content": "the lease forbids it",
+                     "kind": "statement"},
                     {"id": "pt_real", "content": "a real claim",
                      "kind": "statement"},
                 ]
 
         res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
-        assert [p["id"] for p in res["points"]] == ["pt_real"]
+        assert [p["id"] for p in res["points"]] == ["s1_t9", "pt_real"]
 
     def test_turn_echo_filter_is_anchored_not_shape_based(self):
-        """The predicate is ``^{session_id}_t\\d+$``, never a shape-only guess.
+        """The id leg is exactly ``^{session_id}_t\\d+$``, never a shape guess.
 
         ``create_point`` accepts explicit caller ids and ``retrieval.py``
         records the D3 decision that "the shape of an id is not evidence that a
@@ -948,22 +952,62 @@ class TestS3:
         # a session id that PREFIXES another's must not over-match
         assert not v2._is_turn_echo_id("s1", "s10_t3")
         # caller-minted ids that merely LOOK like the shape — the class
-        # tests/test_d3_session_identity.py:387 documents as reachable
+        # tests/test_d3_session_identity.py documents as reachable
         assert not v2._is_turn_echo_id("s1", "acme_t5")
         assert not v2._is_turn_echo_id("s1", "note_t12")
         assert not v2._is_turn_echo_id("s1", "pt_foo_t3")
+        # exactly ``\d`` — NOT ``str.isdigit()``, which also accepts category-No
+        # numerics (superscript 2, circled 1) for which ``\d`` is False
+        assert not v2._is_turn_echo_id("s1", "s1_t\u00b2")
+        assert not v2._is_turn_echo_id("s1", "s1_t\u2460")
+        assert not v2._is_turn_echo_id("s1", "s1_t")        # no digits
+        assert not v2._is_turn_echo_id("s1", "s1_t3\n")    # no trailing NL
         # content-addressed memory ids
         assert not v2._is_turn_echo_id(
             "s1",
             "pt_e3f831d86cf073e2af58d9b542c5ca7be19ec7c114d307f675fce08b1672a8")
+        # regex metacharacters in the session id are escaped, not interpreted
+        assert v2._is_turn_echo_id("s.1", "s.1_t2")
+        assert not v2._is_turn_echo_id("s.1", "sx1_t2")
         # no session named -> never drop (an unanchored match would be a guess)
         assert not v2._is_turn_echo_id(None, "s1_t8")
         assert not v2._is_turn_echo_id("", "s1_t8")
         assert not v2._is_turn_echo_id("s1", None)
 
+    def test_turn_echo_filter_requires_the_transcript_content(self):
+        """Both legs must hold: a caller-minted Point carrying the session's
+        turn-namespace id but ordinary claim content is NOT a turn echo."""
+        assert v2._is_turn_echo_row("s1", {"id": "s1_t3",
+                                           "content": "[user] hello there"})
+        assert not v2._is_turn_echo_row(
+            "s1", {"id": "s1_t3", "content": "the lease forbids it"})
+        assert not v2._is_turn_echo_row(
+            "s1", {"id": "s2_t3", "content": "[user] hello"})
+        assert not v2._is_turn_echo_row(
+            None, {"id": "s1_t3", "content": "[user] hello"})
+
+    def test_turn_echo_content_pattern_matches_retrieval(self):
+        """The content leg mirrors ``retrieval._ROLE_PREFIX_RE`` (the production
+        "is this a transcript turn" test) — pinned so the two cannot drift."""
+        from tortoise.retrieval import _ROLE_PREFIX_RE
+        for text in ("[user] x", "[assistant] y", "[system] z", "[tool] t",
+                     "[unknown] u", "[USER] x", "[user]x", "plain claim",
+                     "  [user] padded", ""):
+            assert bool(v2._TURN_ECHO_CONTENT_RE.match(text.strip())) == \
+                bool(_ROLE_PREFIX_RE.match(text.strip())), text
+
+    def test_turn_echo_id_agrees_with_the_graded_layer_pattern(self):
+        """The id leg is the graded layer's ``_turn_id_pattern`` identity —
+        pinned so the two implementations cannot drift apart silently."""
+        from tests.eval.write_path.runner import _turn_id_pattern
+        pat = _turn_id_pattern("s1")
+        for pid in ("s1_t0", "s1_t12", "s2_t1", "s10_t1", "s1_t", "s1_tx",
+                    "pt_ab_t3", "acme_t5"):
+            assert v2._is_turn_echo_id("s1", pid) == bool(pat.match(pid)), pid
+
     def test_turn_echo_filter_is_point_only(self, monkeypatch):
-        """An echo-shaped id on the event leg is untouched — the drop is
-        confined to ``entity_type == "point"``."""
+        """An echo-shaped id on the event/entity legs is untouched — the drop
+        is confined to ``entity_type == "point"``."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
@@ -971,18 +1015,23 @@ class TestS3:
                 if entity_type == "event":
                     return [{"id": "s1_t3", "content": "[user] owner paused",
                              "kind": "core:decision"}]
+                if entity_type in ("object", "subject"):
+                    return [{"id": "s1_t4", "content": "a named entity",
+                             "kind": "core:plan"}]
                 return []
 
         res = v2.search_graph(MockSDK(), S2_FIXTURE, "The story. First para.",
                               session_id="s1")
         assert [e["id"] for e in res["events"]] == ["s1_t3"]
+        assert [e["id"] for e in res["entities"]] == ["s1_t4"]
         assert res["points"] == []
 
     def test_turn_echo_drop_refills_the_prior_window(self, monkeypatch):
         """The drop runs AFTER the SDK's own ``[:limit]`` truncation (#898's
         filter-before-truncation contract, applied here by hand), so the point
-        leg over-fetches and refills — a window full of echoes must not starve a
-        real prior ranked below them."""
+        leg over-fetches and refills. The mock HONOURS ``limit`` exactly as
+        ``tortoise_fts_query`` does, so the behavioural assertion can only pass
+        if the refill is real."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
@@ -993,20 +1042,104 @@ class TestS3:
                 self.asked.append((entity_type, limit))
                 if entity_type != "point":
                     return []
-                # echoes own the top of the fused window
-                return ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
+                rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
                           "kind": "event"} for i in range(5)]
                         + [{"id": "pt_real", "content": "a real claim",
                             "kind": "statement"}])
+                return rows[:limit]  # the real callee truncates to `limit`
 
         sdk = MockSDK()
         res = v2.search_graph(sdk, S2_FIXTURE, "STORY", session_id="s1")
         assert [p["id"] for p in res["points"]] == ["pt_real"]
-        # the point leg asked for a window wider than `limit` (the refill pool);
-        # every other leg kept the exact window it always had
+        # the point leg asked for exactly `limit + _PRIOR_OVERFETCH`; every other
+        # leg kept the exact window it always had
         assert sdk.asked, "no queries ran"
-        assert all(l > 3 for t, l in sdk.asked if t == "point"), sdk.asked
-        assert all(l == 3 for t, l in sdk.asked if t != "point"), sdk.asked
+        assert {l for t, l in sdk.asked if t == "point"} == \
+            {3 + v2._PRIOR_OVERFETCH}, sdk.asked
+        assert {l for t, l in sdk.asked if t != "point"} == {3}, sdk.asked
+
+    def test_turn_echo_drop_refills_a_single_slot(self, monkeypatch):
+        """``limit=1`` — the minimal refill: one echo dropped, the real prior
+        still returned."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                rows = [{"id": "s1_t0", "content": "[user] hi",
+                         "kind": "event"},
+                        {"id": "pt_real", "content": "a real claim",
+                         "kind": "statement"}]
+                return rows[:limit]
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", limit=1,
+                              session_id="s1")
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
+
+    def test_turn_echo_window_bound_is_documented(self, monkeypatch):
+        """The refill pool is FINITE and its exhaustion is pinned, not implied.
+
+        A capture can hold ``MAX_SESSION_TURNS`` (500) turns; when more echoes
+        than the pool outrank a real prior, the prior is still starved. The
+        durable fix is a pre-truncation exclusion in the retrieval layer
+        (#4509); until then the boundary behaviour is asserted here so it cannot
+        change silently."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
+                          "kind": "event"}
+                         for i in range(3 + v2._PRIOR_OVERFETCH)]
+                        + [{"id": "pt_real", "content": "a real claim",
+                            "kind": "statement"}])
+                return rows[:limit]
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
+        assert res["points"] == []  # documented starvation at the pool bound
+
+    def test_over_fetch_is_clamped_to_the_sdk_limit_bound(self, monkeypatch):
+        """The over-fetch must not push the callee past its documented bound
+        (``limit`` must be 1-10000), or a large ``limit`` would raise."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                return []
+
+        sdk = MockSDK()
+        v2._fts_rows(sdk, "point", "q", limit=v2._FTS_LIMIT_MAX - 1,
+                     session_id="s1")
+        assert sdk.asked == [("point", v2._FTS_LIMIT_MAX)], sdk.asked
+
+    def test_extract_session_forwards_the_session_id_to_the_prior_search(
+            self, monkeypatch):
+        """The filter is inert unless ``extract_session_v2`` hands its session
+        id to ``search_graph`` — the wiring that activates #2552's fix. Pinned
+        because dropping that kwarg re-introduces the bug with the suite green."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        seen = {}
+
+        class _ReachedS3(Exception):
+            pass
+
+        def _fake_search_graph(sdk, embed_list, story, **kw):
+            seen.update(kw)
+            raise _ReachedS3()
+
+        monkeypatch.setattr(v2, "search_graph", _fake_search_graph)
+        conv = [{"role": "user", "content": "we should ship the cache"},
+                {"role": "assistant", "content": "agreed"}]
+        with pytest.raises(_ReachedS3):
+            v2.extract_session_v2(MockModel([]), conv, session_id="sess-42")
+        assert seen.get("session_id") == "sess-42"
 
     def test_degrades_on_backend_error(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
