@@ -1435,6 +1435,38 @@ def test_raw_construction_abnormal_exit_leaves_a_confirmable_record(tmp_path):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_fork_hook_drops_the_inherited_start_cache():
+    """#4487 review (fail-open): `_own_start_cache` is inherited across
+    `fork()`. A stale entry for a pid the kernel later reassigns to the child
+    would make `record_owner` stamp the child's record with a DEAD ancestor's
+    start — `_owner_records` compares it against the real start, reads the
+    record dead, and the reaper kills a live owner's server (the #1642 FIX 5
+    class). The at-fork hook must drop the cache so the child resolves its
+    own start fresh.
+
+    Mutation: delete `_own_start_cache.clear()` from
+    `_adopt_owner_records_after_fork` and this fails."""
+    from tortoise.embedded_lifecycle import (
+        _adopt_owner_records_after_fork,
+        _own_start_cache,
+    )
+    _own_start_cache.clear()
+    me = os.getpid()
+    try:
+        _own_start_cache[me] = 1.0          # a dead ancestor's start
+        _own_start_cache[99999999] = 2.0    # any other inherited key
+        _adopt_owner_records_after_fork()
+        # The hook may legitimately RE-populate `me` (re-recording an inherited
+        # socket resolves the real start), so assert the STALE VALUE is gone —
+        # not that the key is absent.
+        assert _own_start_cache.get(me) != 1.0, (
+            "the child must not keep a stale start for its own pid — a "
+            "dead-ancestor start stamps a live owner's record as DEAD")
+        assert 99999999 not in _own_start_cache
+    finally:
+        _own_start_cache.clear()
+
+
 def test_shared_server_keeps_co_tenant_owner_record(tmp_path):
     """#3599 P0 guard, end-to-end: two clients in ONE process on ONE server
     each own a record claim; closing the first must NOT drop the shared
