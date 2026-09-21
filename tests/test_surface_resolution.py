@@ -43,7 +43,7 @@ no invocation can hide a shrunken or orphaned case set), and
 declared cases must actually EXECUTE, not merely be declared or collected.
 
 So this file is red evidence by construction: it is green only while the dead set
-is exactly the five recorded in ``_DEAD_LINKS_AWAITING_4282``. Do NOT add a name
+is exactly the set recorded in ``_DEAD_LINKS_AWAITING_4282``. Do NOT add a name
 to that ledger to silence a failure, and do NOT remove a name to accommodate a
 repair — the ledger is the pending-decision record, not a suppression list.
 
@@ -93,8 +93,13 @@ _DEAD_LINKS_AWAITING_4282 = frozenset({
     "tortoise_packs_list",
     "tortoise_pack_install",
     "tortoise_entity_profile",
-    "tortoise_health",
     "tortoise_analyze",
+    # `tortoise_health` is RE-POINTED, not deleted to silence a failure: #3883
+    # retired the NAME from the advertised surface (#3863's curation), so it no
+    # longer has a case here to carry its pending #4282 repair — the repair
+    # follows the entry. Its replacement is `tortoise_overview(section="health")`,
+    # and the dead declared binding stays visible in the retired half of the
+    # baseline (`config/surface-manifest.yml::retired`).
 })
 
 
