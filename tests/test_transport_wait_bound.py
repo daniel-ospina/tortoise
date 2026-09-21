@@ -5,8 +5,12 @@ Owner ruling 2026-09-20 (issue #3834, comment 5752962331) re-homed the cold/busy
 question from the removed ask route onto the TRANSPORT. This file pins the two
 properties that ruling actually asks for:
 
-* **one bound, at the transport** — not per-route, so it covers the mounted MCP
-  app (and therefore the tools) by construction, with no per-tool edit;
+* **one bound, at the transport** — not per-route. The REST routes are bounded
+  by ``WaitBoundMiddleware``; MCP tool calls are bounded at the single MCP
+  dispatch seam (``mcp.call_tool``), because FastMCP's Streamable-HTTP
+  transport starts the SSE response BEFORE dispatching the tool, which makes
+  the middleware inert for exactly that population (round-2 P1). Either way the
+  bound applies across the surface with no per-tool edit;
 * **a readable refusal on breach** — what happened, whether to retry, how long —
   and the retry signal (`Retry-After` / ``error.data.retry_after``) ships in the
   SAME unit, because a bound alone turns an invisible failure into a visible one
@@ -38,7 +42,6 @@ from starlette.testclient import TestClient
 
 from tortoise import hosted_api as ha
 from tortoise.mcp_auth import ERR_TIMEOUT
-
 
 # ── a minimal ASGI harness ────────────────────────────────────────────────
 # The bound is a transport concern, so most cases are pinned against a tiny app
@@ -147,7 +150,7 @@ def test_the_only_exemption_is_post_context_and_it_is_method_scoped():
     """The ruling exempts `POST /v1/context` because its fail-open ceiling is a
     recorded decision. `GET /v1/context` is a DIFFERENT handler with no such
     record, so exempting it would widen the ruling past its evidence."""
-    assert ha._TRANSPORT_WAIT_BOUND_EXEMPT == frozenset({("POST", "/v1/context")})
+    assert frozenset({("POST", "/v1/context")}) == ha._TRANSPORT_WAIT_BOUND_EXEMPT
     assert ("GET", "/v1/context") not in ha._TRANSPORT_WAIT_BOUND_EXEMPT
 
 
@@ -222,6 +225,21 @@ async def test_refusal_carries_cors_headers(fast_bound):
     assert h["access-control-allow-origin"] == "https://app.premiselabs.co"
     assert h["access-control-allow-credentials"] == "true"
     assert "retry-after" in h["access-control-expose-headers"].lower()
+
+
+@pytest.mark.asyncio
+async def test_refusal_carries_security_headers(fast_bound):
+    """The bound is OUTERMOST, so ``HSTSMiddleware`` and
+    ``SecurityHeadersMiddleware`` never see its response. They document these
+    headers as present on "every response" — a breach response must not be the
+    one response missing them (code-review round 2)."""
+    mw = ha.WaitBoundMiddleware(_slow_app(5.0))
+    rec = await _drive(mw, _scope())
+    h = rec.headers()
+    assert h["strict-transport-security"] == "max-age=31536000; includeSubDomains"
+    assert h["x-content-type-options"] == "nosniff"
+    assert h["x-frame-options"] == "DENY"
+    assert h["x-xss-protection"] == "1; mode=block"
 
 
 @pytest.mark.asyncio
@@ -301,7 +319,9 @@ async def test_an_already_started_response_is_never_replaced(monkeypatch):
 async def test_breach_is_recorded_off_the_request_path(fast_bound, monkeypatch):
     """`_track_analytics_event` does a BLOCKING httpx POST. On the request path
     it would create the very latency this bound exists to cut, so it is
-    dispatched exactly as `tortoise/mcp_server.py:184-207` does."""
+    dispatched fire-and-forget onto the EXISTING best-effort control-plane
+    telemetry seam (`monitoring.control_plane_worker("telemetry")`, #3498 —
+    daemon workers, bounded backlog), never the loop's shared default pool."""
     seen = []
 
     def _blocking_writer(org_id, event_name, properties):
@@ -370,6 +390,128 @@ def test_real_app_breach_refusal_is_the_same_shape(monkeypatch):
     assert r.json() == {"detail": ha._TRANSPORT_WAIT_BOUND_MESSAGE}
 
 
+# ── the MCP surface: the bound is enforced at the DISPATCH ────────────────
+# Round-2 P1: the ASGI middleware is INERT for MCP tool calls. FastMCP runs
+# Streamable-HTTP in SSE mode and starts the EventSourceResponse BEFORE
+# dispatching the tool, so `http.response.start` is already on the wire when
+# the deadline fires and the middleware can only let the request finish. These
+# tests drive the REAL MCP dispatch — in process and through the mounted SSE
+# transport — and are RED for a middleware-only bound (the P1's exact
+# failure mode: a bound that reports success while bounding nothing).
+
+_MCP_HEADERS = {"Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json"}
+
+
+def _parse_sse(text: str):
+    """Parse an MCP Streamable-HTTP body that may be SSE-framed."""
+    if text.startswith("event:") or "\ndata: " in text:
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                return json.loads(line[len("data: "):])
+        return None
+    return json.loads(text)
+
+
+@pytest.fixture
+def mcp_slow_tool():
+    """Register a slow test tool on the shared mcp instance; remove after.
+
+    Yields a list the tool appends to on completion, so a test can prove the
+    breached dispatch was ABANDONED (ran to completion) rather than cancelled.
+    """
+    from fastmcp.tools import FunctionTool
+
+    from tortoise import mcp_server as ms
+
+    finished: list = []
+
+    async def _bound_slow() -> dict:
+        await asyncio.sleep(0.3)
+        finished.append(True)
+        return {"ok": True}
+
+    ms.mcp.add_tool(FunctionTool.from_function(
+        _bound_slow, name="_bound_slow", description="wait-bound test: slow"))
+    try:
+        yield finished
+    finally:
+        try:  # noqa: SIM105
+            ms.mcp.local_provider.remove_tool("_bound_slow")
+        except Exception:
+            pass
+        # A TestClient's loop closes with the abandoned task still pending;
+        # drop the leftover reference so it cannot bleed into a later test.
+        ms._pending_mcp_wait_bound.clear()
+
+
+@pytest.mark.asyncio
+async def test_mcp_dispatch_is_bounded_with_the_shipped_refusal(
+        fast_bound, mcp_slow_tool, monkeypatch):
+    """The MCP dispatch itself is bounded — this is the function that fires for
+    the measured `mcp_tool_call` population. The refusal carries the SHIPPED
+    message and the advertised delay (no second vocabulary)."""
+    from tortoise import mcp_server as ms
+
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: None)
+    result = await ms.mcp.call_tool("_bound_slow")
+    assert result.is_error is True
+    assert result.meta == {ms._WAIT_BOUND_META_KEY: True}
+    payload = result.structured_content["error"]
+    assert payload["code"] == ERR_TIMEOUT
+    assert payload["message"] == ha._TRANSPORT_WAIT_BOUND_MESSAGE
+    assert payload["data"]["retry_after"] == ha._TRANSPORT_WAIT_RETRY_AFTER_S
+    # Abandoned, never cancelled: the handler runs to completion.
+    for _ in range(100):
+        if mcp_slow_tool:
+            break
+        await asyncio.sleep(0.02)
+    assert mcp_slow_tool == [True], "the breached dispatch was cancelled, not abandoned"
+
+
+def test_mcp_http_sse_path_delivers_the_refusal(
+        fast_bound, mcp_slow_tool, monkeypatch):
+    """END-TO-END through the real mounted Streamable-HTTP app in its default
+    SSE mode — the mode in which the middleware is inert. A tool call past the
+    bound comes back as a legible refusal carrying the retry signal, not as a
+    late success. This is the test the P1 says was missing."""
+    from contextlib import asynccontextmanager
+
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from starlette.testclient import TestClient
+
+    from tortoise import mcp_server as ms
+
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: None)
+    app = ms.create_http_app(auth_mode="none")
+
+    @asynccontextmanager
+    async def _lifespan(parent_app):
+        async with app.lifespan(app):
+            yield
+
+    parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=app)])
+    with TestClient(parent) as client:
+        r = client.post("/mcp", headers=_MCP_HEADERS, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "_bound_slow", "arguments": {}}})
+    assert r.status_code == 200, r.text
+    body = _parse_sse(r.text)
+    assert body is not None, r.text
+    payload = body["result"]
+    assert payload["isError"] is True, (
+        "the MCP call returned a success — the bound did not fire on the SSE "
+        "path, which is the round-2 P1")
+    assert payload["_meta"][ms._WAIT_BOUND_META_KEY] is True
+    err = payload["structuredContent"]["error"]
+    assert err["code"] == ERR_TIMEOUT
+    assert err["message"] == ha._TRANSPORT_WAIT_BOUND_MESSAGE
+    assert err["data"]["retry_after"] == ha._TRANSPORT_WAIT_RETRY_AFTER_S
+
+
 # ── the cold half: a VERIFICATION, not a build ────────────────────────────
 
 def test_cold_half_readiness_gate_holds_or_is_reported():
@@ -414,13 +556,16 @@ async def test_breach_path_is_sanitized_before_the_log_and_the_sink(
     """The ASGI server percent-DECODES the path, so a request to
     `/v1/x/%0d%0aFORGED` arrives with embedded CR/LF — logged verbatim that
     forges log lines, and stored verbatim it reaches the analytics sink. The
-    refusal path sanitizes ONCE, for both (the same #1591-class fix the
-    unhandled-exception handler in the same file already carries)."""
+    refusal path sanitizes ONCE, for both. The class is not CR/LF alone
+    (code-review round 2): VT/FF/ESC/NUL and U+2028/U+2029 forge lines or inject
+    terminal escapes too, so the full C0 range is escaped (`tortoise/schemas.py`
+    is the repo's control-char convention)."""
     seen = []
     monkeypatch.setattr(ha, "_track_analytics_event",
                         lambda org, ev, props: seen.append(props))
     mw = ha.WaitBoundMiddleware(_slow_app(5.0))
-    rec = await _drive(mw, _scope("/v1/points/foo\r\nFORGED LINE"))
+    raw = "/v1/points/foo\r\nFORGED\x1b[31m\x0b\x0c\x00\u2028\u2029"
+    rec = await _drive(mw, _scope(raw))
     assert rec.status == 504
     for _ in range(200):
         if seen:
@@ -428,9 +573,12 @@ async def test_breach_path_is_sanitized_before_the_log_and_the_sink(
         await asyncio.sleep(0.02)
     assert seen, "breach telemetry never fired"
     stored = seen[0]["path"]
-    assert "\r" not in stored and "\n" not in stored, (
-        f"raw CR/LF reached the analytics sink: {stored!r}")
-    assert stored == "/v1/points/foo\\r\\nFORGED LINE"
+    for ch in ("\r", "\n", "\x1b", "\x0b", "\x0c", "\x00", "\u2028", "\u2029"):
+        assert ch not in stored, (
+            f"raw control char {ch!r} reached the analytics sink: {stored!r}")
+    assert stored == (
+        "/v1/points/foo\\r\\nFORGED\\x1b[31m\\x0b\\x0c\\x00\\u2028\\u2029"), (
+            f"unexpected sanitized form: {stored!r}")
 
 
 @pytest.mark.asyncio

@@ -2016,14 +2016,28 @@ class ForwardedProtoMiddleware(BaseHTTPMiddleware):
 app.add_middleware(ForwardedProtoMiddleware)
 
 
+#: Security headers the response-stamping middleware below add to every
+#: response. Named here because the wait-bound refusal is emitted from OUTSIDE
+#: that middleware stack (the bound is outermost), so it re-applies them itself
+#: — a breach response must not be the one response missing what those
+#: middlewares document as universal.
+_HSTS_HEADERS = (
+    ("Strict-Transport-Security", "max-age=31536000; includeSubDomains"),
+)
+_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("X-XSS-Protection", "1; mode=block"),
+)
+
+
 class HSTSMiddleware(BaseHTTPMiddleware):
     """Add Strict-Transport-Security header to every response."""
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers["Strict-Transport-Security"] = (
-            "max-age=31536000; includeSubDomains"
-        )
+        for _name, _value in _HSTS_HEADERS:
+            response.headers[_name] = _value
         return response
 
 app.add_middleware(HSTSMiddleware)
@@ -2034,9 +2048,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
+        for _name, _value in _SECURITY_HEADERS:
+            response.headers[_name] = _value
         return response
 
 
@@ -2105,11 +2118,14 @@ class InFlightMiddleware:
     killing the process there would destroy the very request that is making
     progress and turn ordinary provider latency into a restart loop.
 
-    Deliberately pure ASGI and OUTERMOST (registered last):
-      * it must increment BEFORE any middleware can short-circuit (a 429/404 is
-        still work in progress from the loop's point of view);
-      * no request/response wrapping, so it costs a lock acquire + a plain
-        increment on the hot path.
+    Deliberately pure ASGI (no request/response wrapping, so it costs a lock
+    acquire + a plain increment on the hot path). It is NO LONGER the outermost
+    middleware: ``WaitBoundMiddleware`` (#3834) is registered after it and so
+    wraps it from the outside, which is required — a bounded-and-abandoned
+    request must keep counting on the gauge until it genuinely finishes, or the
+    #2850 self-kill predicate reads idle while abandoned work still runs.
+    Being second-outermost, the gauge still increments before every
+    short-circuiting middleware (auth, rate limit) can return.
 
     The decrement is in a ``finally`` so a raised handler cannot leak a slot and
     permanently disarm the watchdog's idle predicate.
@@ -2208,18 +2224,18 @@ _TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
 _pending_wait_bound_requests: set = set()
 _pending_wait_bound_telemetry: set = set()
 
-#: Breach telemetry gets its OWN single-worker pool, not the loop's shared
-#: default executor. `_track_analytics_event` is a BLOCKING httpx POST (5 s),
-#: and this module's #3060 doctrine keeps such work off the default pool
-#: precisely because ~80 sites plus the auth abuse hooks share it. A breach
-#: burst happens under exactly the overload that CAUSES breaches, so parking
-#: default-pool workers here could stall unrelated requests. One worker, and a
-#: hard ceiling on the pending set: past it the event is DROPPED — the refusal
-#: is what the caller needs, and telemetry must never become the latency this
-#: unit exists to bound.
-_WAIT_BOUND_TELEMETRY_EXECUTOR = ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="wait-bound-telemetry")
-_WAIT_BOUND_TELEMETRY_MAX_PENDING = 16
+#: Breach telemetry reuses the EXISTING best-effort control-plane seam,
+#: ``monitoring.control_plane_worker("telemetry")`` (#3498): a process-wide pool
+#: of 4 DAEMON workers with a 256-slot bounded backlog, already carrying
+#: ``_track_analytics_event``. It is the right home because
+#: ``_track_analytics_event`` is a BLOCKING ``httpx`` POST (5 s) and this
+#: module's #3060 doctrine keeps such work off the loop's shared default pool.
+#: A dedicated executor was tried and is a duplication: it adds no isolation
+#: the existing post-auth/telemetry split lacks, and its non-daemon
+#: ``ThreadPoolExecutor`` workers can delay interpreter exit by up to ~85 s.
+#: The seam's own backlog bound is the drop rule — a breach burst happens under
+#: exactly the overload that CAUSES breaches, and telemetry must never become
+#: the latency this unit exists to bound.
 
 
 def _is_jsonrpc_surface(route_path: str) -> bool:
@@ -2229,6 +2245,36 @@ def _is_jsonrpc_surface(route_path: str) -> bool:
     canonicalizer's exact `/mcp` match — `/mcp/…` is not a path the canonical
     layer rewrites, it is one the mounted app serves."""
     return route_path == "/mcp" or route_path.startswith("/mcp/")
+
+
+def _sanitize_for_log(value: str) -> str:
+    """Escape the control characters that can forge a log line or an ANSI
+    escape, for the log AND the analytics sink (the sanitized form is passed to
+    both).
+
+    The ASGI server percent-DECODES the path, so ``/v1/x/%0d%0aFORGED`` arrives
+    with embedded CR/LF; escaped verbatim it forges log lines. CR/LF alone is
+    not the whole class (code-review round 2): VT/FF/ESC/NUL and the Unicode
+    line separators U+2028/U+2029 do the same, and ESC additionally injects
+    terminal control sequences. The C0 range is the repo's own control-char
+    convention (``tortoise/schemas.py``); CR/LF/TAB keep their readable
+    backslash escapes so existing log greps still match.
+    """
+    out = []
+    for ch in value:
+        if ch == "\r":
+            out.append("\\r")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch < " " or ch == "\x7f":
+            out.append(f"\\x{ord(ch):02x}")
+        elif ch in ("\u2028", "\u2029"):
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _cors_headers_for_scope(scope) -> list[tuple[bytes, bytes]]:
@@ -2289,23 +2335,35 @@ async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
     headers = [(k.lower().encode("latin-1"), v.encode("latin-1"))
                for k, v in resp.headers.items()]
     headers.extend(_cors_headers_for_scope(scope))
+    # This middleware is OUTERMOST, so ``HSTSMiddleware`` /
+    # ``SecurityHeadersMiddleware`` never see the refusal — re-apply what they
+    # document as present on "every response" (code-review round 2: without
+    # this, a breach response is the one response missing them).
+    headers.extend((_n.lower().encode("latin-1"), _v.encode("latin-1"))
+                   for _n, _v in (_HSTS_HEADERS + _SECURITY_HEADERS))
     await send({"type": "http.response.start", "status": resp.status_code,
                 "headers": headers})
     await send({"type": "http.response.body", "body": resp.body})
 
 
 def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
-                            latency_ms: int) -> None:
+                            latency_ms: int, *, tool_name: str | None = None) -> None:
     """Fire-and-forget breach telemetry — OFF the request path.
 
     ``_track_analytics_event`` does a BLOCKING ``httpx`` POST (5 s timeout), so
     putting it on the request path would create the very latency this bound
-    exists to cut. Dispatched off-loop in the shape ``tortoise/mcp_server.py:184-207``
-    uses, refined to a DEDICATED executor by this module's #3060 doctrine (see
-    ``_WAIT_BOUND_TELEMETRY_EXECUTOR``), or a daemon thread when there is no
-    loop. Never raises, never blocks.
+    exists to cut. Dispatched to the EXISTING best-effort control-plane seam
+    (``monitoring.control_plane_worker("telemetry")`` — daemon, 4 workers, a
+    bounded backlog; #3498), the same seam that already carries this writer.
+    Never raises, never blocks.
+
+    ``tool_name`` is supplied by the MCP-level bound (``tortoise/mcp_server.py``)
+    so a breach on the MCP surface is attributable to the tool, not just to
+    ``/mcp``. Both prop keys are registered in ``_ALLOWED_ANALYTICS_PROPS``.
     """
     props = {"path": route_path, "method": method, "latency_ms": latency_ms}
+    if tool_name is not None:
+        props["tool_name"] = tool_name
 
     def _write() -> None:
         try:
@@ -2314,26 +2372,13 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
             _logger.debug("wait-bound telemetry write failed", exc_info=True)
 
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None and not loop.is_closed():
-        if (len(_pending_wait_bound_telemetry)
-                >= _WAIT_BOUND_TELEMETRY_MAX_PENDING):
-            _logger.debug("wait-bound telemetry queue full — dropping breach")
-            return
-        try:
-            fut = loop.run_in_executor(_WAIT_BOUND_TELEMETRY_EXECUTOR, _write)
-            _pending_wait_bound_telemetry.add(fut)
-            fut.add_done_callback(_pending_wait_bound_telemetry.discard)
-            return
-        except Exception:
-            _logger.debug("wait-bound telemetry schedule failed", exc_info=True)
-            return
-    try:
-        threading.Thread(target=_write, daemon=True).start()
+        from tortoise.monitoring import control_plane_worker
+        fut = control_plane_worker("telemetry").submit(_write)
     except Exception:
-        _logger.debug("wait-bound telemetry thread start failed", exc_info=True)
+        _logger.debug("wait-bound telemetry schedule failed", exc_info=True)
+        return
+    _pending_wait_bound_telemetry.add(fut)
+    fut.add_done_callback(_pending_wait_bound_telemetry.discard)
 
 
 def _abandon_wait_bound_request(task) -> None:
@@ -2361,12 +2406,21 @@ class WaitBoundMiddleware:
     """The transport-level wait bound (#3834) — one bound, every route but the
     one recorded exemption.
 
-    Pure ASGI and OUTERMOST (registered last), for the same reasons
-    ``InFlightMiddleware`` is: it must see the request before any middleware can
-    short-circuit it, and it must cost no request/response wrapping on the hot
-    path. It covers the 126 REST routes AND the mounted MCP app by construction
-    — so it applies to the tools with no per-tool edit, which is the property
-    the ruling asks for.
+    Pure ASGI and OUTERMOST (registered last): it must see the request before
+    any middleware can short-circuit it, and it must cost no request/response
+    wrapping on the hot path.
+
+    ⚠️ Its scope is the REST routes ONLY. It does NOT bound MCP tool calls, and
+    the earlier claim that it "covers the mounted MCP app by construction" was
+    false: FastMCP's Streamable-HTTP transport runs in SSE mode and starts the
+    ``EventSourceResponse`` BEFORE dispatching the tool
+    (``mcp/server/streamable_http.py`` — "Start the SSE response (this will send
+    headers immediately)"), so ``http.response.start`` is already on the wire
+    when the deadline fires and the middleware's ``response_started`` branch can
+    only let the request finish. A bound that reported success while bounding
+    nothing is why the MCP half lives in ``tortoise/mcp_server.py``'s dispatch
+    (``_await_under_mcp_wait_bound``), where it is enforced across the registry
+    rather than per tool.
 
     On breach the caller gets a readable refusal (what happened, whether to
     retry, how long) and the handler is left running rather than cancelled. The
@@ -2434,7 +2488,7 @@ class WaitBoundMiddleware:
         # the unhandled-exception handler already carries (#1591 class) — and
         # the sanitized form also reaches the analytics prop, so neither the log
         # nor the sink can be forged.
-        safe_route_path = route_path.replace("\r", "\\r").replace("\n", "\\n")
+        safe_route_path = _sanitize_for_log(route_path)
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))

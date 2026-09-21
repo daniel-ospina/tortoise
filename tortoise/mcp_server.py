@@ -15,6 +15,7 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
                                 ValidationError as FastMCPValidationError)
+from fastmcp.tools import ToolResult
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
@@ -26,7 +27,7 @@ from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
                                _get_org_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
-                               ERR_EXCLUDED, SELFHOST_ORG_ID)
+                               ERR_EXCLUDED, ERR_TIMEOUT, SELFHOST_ORG_ID)
 
 _log = logging.getLogger(__name__)
 
@@ -214,10 +215,101 @@ async def _flush_mcp_telemetry() -> None:
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+# ── #3834: the MCP-level wait bound ────────────────────────────────
+# The HTTP transport's WaitBoundMiddleware bounds the REST routes, but it is
+# INERT for MCP tool calls: FastMCP 3.4.6 runs Streamable-HTTP in SSE mode and
+# starts the EventSourceResponse BEFORE dispatching the tool
+# (``mcp/server/streamable_http.py`` — "Start the SSE response (this will send
+# headers immediately)"), so ``http.response.start`` is on the wire within
+# milliseconds and there is no refusal left to substitute. The measured
+# population — the 7,795 ``mcp_tool_call`` events, p99 22.5 s, max 157 s — is
+# exactly this dispatch, so the bound is enforced HERE, at ``mcp.call_tool``:
+# the single seam every transport funnels through. It is applied across the
+# registry rather than per tool (no tool name is referenced), so the 98→25
+# surface rebuild (#4282) cannot throw it away.
+
+#: Tool dispatches abandoned past the bound, held only so their late
+#: result/exception is retrieved (never "exception was never retrieved") and so
+#: a test can await them. Entries remove themselves on completion.
+_pending_mcp_wait_bound: set = set()
+
+#: The breach marker on a refused result's ``_meta``. A client can branch on it
+#: without parsing prose; ``_wrapped_call_tool`` reads it to classify the
+#: accompanying ``mcp_tool_call`` telemetry as ``timeout`` rather than ``ok``.
+_WAIT_BOUND_META_KEY = "tortoise_wait_bound"
+
+
 # Captured before wrapping — the middleware chain re-dispatches
 # call_tool(run_middleware=False) internally; the wrapper passes those
 # through untouched so exactly ONE event is emitted per client tool call.
 _original_call_tool = mcp.call_tool
+
+
+async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
+                                     task_meta):
+    """Await the real tool dispatch under the transport wait bound (#3834).
+
+    On breach the caller gets a legible refusal that REUSES the shipped
+    vocabulary: the message and the advertised delay are hosted_api's single
+    source for the REST 504 (``_TRANSPORT_WAIT_BOUND_MESSAGE`` /
+    ``_TRANSPORT_WAIT_RETRY_AFTER_S``), and ``retry_after`` rides the result.
+
+    ⚠️ Why the refusal is a ``CallToolResult(isError=True)`` and NOT a JSON-RPC
+    ``error`` object: the MCP SDK's ``tools/call`` handler wraps every handler
+    exception except ``UrlElicitationRequiredError`` into exactly that shape
+    (``mcp/server/lowlevel/server.py::_make_error_result``), so a raised
+    ``McpError`` loses its code and ``data`` on this surface. The result channel
+    is the only one the SDK exposes once the SSE stream has started; carrying
+    the same message plus ``error.data.retry_after`` inside the result keeps the
+    retry signal shipped WITH the bound instead of dropping it.
+
+    The dispatch is ABANDONED, never cancelled: cancelling an ``asyncio`` await
+    runs every ``finally`` the handler owns, and this module's handlers close
+    their SDK in one (#2988 / #3718).
+    """
+    from tortoise import hosted_api as _ha  # late: keeps import order acyclic
+
+    t0 = _time.perf_counter()
+    task = asyncio.ensure_future(
+        _original_call_tool(name, arguments, version=version,
+                            run_middleware=True, task_meta=task_meta))
+    done, _ = await asyncio.wait({task}, timeout=_ha._TRANSPORT_WAIT_BOUND_S)
+    if task in done:
+        return task.result()  # re-raises exactly as a plain await would
+
+    _pending_mcp_wait_bound.add(task)
+
+    def _done(t) -> None:
+        _pending_mcp_wait_bound.discard(t)
+        if not t.cancelled():
+            t.exception()  # retrieve, so it is never reported as un-retrieved
+
+    task.add_done_callback(_done)
+    try:
+        # The SAME breach writer the REST arm uses — one emit site, one prop
+        # vocabulary. Fire-and-forget off the request path (it submits to the
+        # daemon telemetry pool); "tool_name" is already allowlisted there.
+        _ha._emit_wait_bound_breach(
+            _current_org_id.get() or "", "/mcp", "POST",
+            int((_time.perf_counter() - t0) * 1000), tool_name=name)
+    except Exception:  # telemetry must never turn a refusal into an error
+        _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
+    _log.warning(
+        "transport wait bound (%.0fs) exceeded: MCP tools/call %s — refusing "
+        "legibly", _ha._TRANSPORT_WAIT_BOUND_S, name)
+    retry_after = _ha._TRANSPORT_WAIT_RETRY_AFTER_S
+    return ToolResult(
+        content=_ha._TRANSPORT_WAIT_BOUND_MESSAGE,
+        # The REST JSON-RPC error payload, carried on the channel this surface
+        # has: same code, same message, same `data.retry_after`.
+        structured_content={"error": {
+            "code": ERR_TIMEOUT,
+            "message": _ha._TRANSPORT_WAIT_BOUND_MESSAGE,
+            "data": {"retry_after": retry_after},
+        }},
+        meta={_WAIT_BOUND_META_KEY: True},
+        is_error=True,
+    )
 
 
 def _enforce_mcp_tool_scope(name: str) -> None:
@@ -297,8 +389,14 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
     try:
-        result = await _original_call_tool(name, arguments, version=version,
-                                           run_middleware=True, task_meta=task_meta)
+        result = await _await_under_mcp_wait_bound(
+            name, arguments, version=version, task_meta=task_meta)
+        if getattr(result, "meta", None) and result.meta.get(_WAIT_BOUND_META_KEY):
+            # #3834: the transport wait bound refused this dispatch. Its own
+            # status (not exec_error) so "how often are we breaching 10 s" is
+            # answerable from the SAME mcp_tool_call series the bound was
+            # justified by.
+            status, error_kind = "timeout", "wait_bound"
         # The stdio auth gate (#236) returns an error dict instead of raising
         # (TORTOISE_API_KEY set → every call is rejected). Classify it so
         # unauthenticated stdio calls don't masquerade as ok.

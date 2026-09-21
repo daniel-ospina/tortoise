@@ -559,7 +559,8 @@ class TestHealthEndpoints:
         import tortoise.hosted_api as ha_mod
         import tortoise.monitoring as monitoring
 
-        # (a) registered, and OUTERMOST. Starlette's add_middleware INSERTS at
+        # (a) registered, and second-outermost: WaitBoundMiddleware (#3834) is
+        # registered last and so wraps it. Starlette's add_middleware INSERTS at
         # index 0, so the LAST-registered middleware is first in the list.
         classes = [m.cls for m in ha_mod.app.user_middleware]
         assert ha_mod.InFlightMiddleware in classes, (

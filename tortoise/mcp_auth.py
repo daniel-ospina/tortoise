@@ -112,11 +112,15 @@ ERR_REGISTRY = -32005
 # #308 (R5): suspended org — mirrors REST 403 SUSPENDED (appeal link in data)
 ERR_SUSPENDED = -32006
 # #3834: the transport-level wait bound was breached — the server stopped
-# waiting before a response was ready. The JSON-RPC twin of the REST 504 the
-# hosted transport returns for the same condition (`hosted_api.py`,
-# ``WaitBoundMiddleware``); the MCP surface has no HTTP body of its own, so the
-# advertised delay rides ``error.data.retry_after`` alongside the
-# ``Retry-After`` header (#3851's shape).
+# waiting before a response was ready. On the REST surface this is the code in
+# the JSON-RPC 504 body returned by ``hosted_api.WaitBoundMiddleware``. On the
+# MCP surface it is the code in the refused tool result's
+# ``structuredContent.error`` (``mcp_server._await_under_mcp_wait_bound``): the
+# MCP SDK converts tool-handler exceptions to ``CallToolResult(isError=True)``
+# (``mcp/server/lowlevel/server.py::_make_error_result``), so once the SSE
+# stream is open a raised ``McpError`` loses its code and ``data`` — the result
+# is the only channel that can still carry the retry signal. Either way the
+# advertised delay is ``error.data.retry_after`` (#3851's shape).
 #
 # -32009, NOT -32007: the ERR_* namespace is split across this module and
 # ``mcp_server.py``, and -32007 is already ``ERR_QUOTA_SERVER`` there (the
