@@ -15,6 +15,7 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import hmac
@@ -39,6 +40,11 @@ from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: bi
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import tortoise
+
+# #3834: the wait-bound vocabulary's single home — read as a module attribute so
+# a monkeypatch/override of the canonical constant reaches BOTH surfaces instead
+# of leaving a stale copy in this module.
+from tortoise import mcp_auth as _mcp_auth
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
@@ -2045,14 +2051,28 @@ class ForwardedProtoMiddleware(BaseHTTPMiddleware):
 app.add_middleware(ForwardedProtoMiddleware)
 
 
+#: Security headers the response-stamping middleware below add to every
+#: response. Named here because the wait-bound refusal is emitted from OUTSIDE
+#: that middleware stack (the bound is outermost), so it re-applies them itself
+#: — a breach response must not be the one response missing what those
+#: middlewares document as universal.
+_HSTS_HEADERS = (
+    ("Strict-Transport-Security", "max-age=31536000; includeSubDomains"),
+)
+_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("X-XSS-Protection", "1; mode=block"),
+)
+
+
 class HSTSMiddleware(BaseHTTPMiddleware):
     """Add Strict-Transport-Security header to every response."""
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers["Strict-Transport-Security"] = (
-            "max-age=31536000; includeSubDomains"
-        )
+        for _name, _value in _HSTS_HEADERS:
+            response.headers[_name] = _value
         return response
 
 app.add_middleware(HSTSMiddleware)
@@ -2063,9 +2083,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
+        for _name, _value in _SECURITY_HEADERS:
+            response.headers[_name] = _value
         return response
 
 
@@ -2134,11 +2153,14 @@ class InFlightMiddleware:
     killing the process there would destroy the very request that is making
     progress and turn ordinary provider latency into a restart loop.
 
-    Deliberately pure ASGI and OUTERMOST (registered last):
-      * it must increment BEFORE any middleware can short-circuit (a 429/404 is
-        still work in progress from the loop's point of view);
-      * no request/response wrapping, so it costs a lock acquire + a plain
-        increment on the hot path.
+    Deliberately pure ASGI (no request/response wrapping, so it costs a lock
+    acquire + a plain increment on the hot path). It is NO LONGER the outermost
+    middleware: ``WaitBoundMiddleware`` (#3834) is registered after it and so
+    wraps it from the outside, which is required — a bounded-and-abandoned
+    request must keep counting on the gauge until it genuinely finishes, or the
+    #2850 self-kill predicate reads idle while abandoned work still runs.
+    Being second-outermost, the gauge still increments before every
+    short-circuiting middleware (auth, rate limit) can return.
 
     The decrement is in a ``finally`` so a raised handler cannot leak a slot and
     permanently disarm the watchdog's idle predicate.
@@ -2159,6 +2181,417 @@ class InFlightMiddleware:
 
 
 app.add_middleware(InFlightMiddleware)
+
+
+# ── #3834: ONE transport-level wait bound across the surviving routes ────
+# Owner ruling 2026-09-20 (issue #3834, comment 5752962331): the cold/busy
+# question is re-homed from the removed ask route onto the TRANSPORT, because
+# it is transport-general and 126 routes survive on the hosted API. Cold waits
+# in the edge's ingress queue (an application bound cannot help it — see the
+# cold-half verification in `tests/test_transport_wait_bound.py`); the busy half
+# is bounded here.
+#
+# The bound's VALUE and refusal vocabulary are NOT defined here: they live in
+# ``tortoise/mcp_auth.py`` (``_TRANSPORT_WAIT_BOUND_S`` /
+# ``_TRANSPORT_WAIT_RETRY_AFTER_S`` / ``_TRANSPORT_WAIT_BOUND_MESSAGE``), because
+# the MCP seam (``mcp_server._await_under_mcp_wait_bound``) needs them and
+# ``mcp_auth`` is the only module both surfaces can import without a cycle. This
+# module owns only the REST-only exemption below.
+#
+# OVERRIDES: uniform per-route timeout bounds (the common server practice) — we
+# apply ONE bound at the transport and deliberately EXEMPT `POST /v1/context`,
+# which keeps its recorded 300ms-p95 / 2.4s-ceiling / reduced-answer-on-breach
+# behaviour. Cited by SYMBOL, never by line number (line numbers re-stale — an
+# earlier citation of this exemption had already gone wrong): the exempt handler
+# is ``@app.post("/v1/context")`` in this module, its hard ceiling is the
+# ``asyncio.wait_for(..., timeout=SLO_MS * 8 / 1000.0)`` call inside it, and the
+# p95 budget is ``tortoise.volunteer.SLO_MS``. That fallback-instead-of-error is
+# a RECORDED DECISION, not an oversight, and a uniform bound would silently
+# reverse it. The exemption is intentional — do not "fix" it by making the
+# bounds uniform.
+#
+#: The one deliberate exemption, METHOD-scoped: the ruling exempts
+#: `POST /v1/context` because that handler's fail-open ceiling is a recorded
+#: decision. `GET /v1/context` (`session_context`, a different handler with no
+#: recorded fallback) is NOT exempt — exempting it would widen the ruling past
+#: its record.
+_TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
+
+#: Analytics event name for a breach. Recorded through the EXISTING writer (no
+#: new table, no new metric endpoint). The `org_id` comes from
+#: ``scope["state"]["org_id"]`` — populated by the auth dependency, which has
+#: normally resolved long before a 10 s deadline, so the REST arm usually
+#: carries the real org and is empty only when the breach precedes resolution.
+#: The MCP arm (`mcp_server._await_under_mcp_wait_bound`) passes the resolved
+#: `_current_org_id`. The `path` (and the MCP `tool_name`) prop is what makes
+#: "which routes breach" answerable.
+_TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
+
+#: Handlers abandoned past the bound, held only so their late exception is
+#: retrieved (never "exception was never retrieved"). Entries remove themselves
+#: on completion — the set self-drains. (This is the BREACH path only; a
+#: cancelled request is drained in the ``except asyncio.CancelledError`` branch,
+#: not
+#: tracked here. No test awaits this set.)
+_pending_wait_bound_requests: set = set()
+_pending_wait_bound_telemetry: set = set()
+
+#: Breach telemetry reuses the EXISTING best-effort control-plane seam,
+#: ``monitoring.control_plane_worker("telemetry")`` (#3498): a process-wide pool
+#: of 4 DAEMON workers with a 256-slot bounded backlog, already carrying
+#: ``_track_analytics_event``. It is the right home because
+#: ``_track_analytics_event`` is a BLOCKING ``httpx`` POST (5 s) and this
+#: module's #3060 doctrine keeps such work off the loop's shared default pool.
+#: A dedicated executor was tried and is a duplication: it adds no isolation
+#: the existing post-auth/telemetry split lacks, and its non-daemon
+#: ``ThreadPoolExecutor`` workers can delay interpreter exit by up to ~85 s.
+#: The seam's own backlog bound is the drop rule — a breach burst happens under
+#: exactly the overload that CAUSES breaches, and telemetry must never become
+#: the latency this unit exists to bound.
+
+
+def _is_jsonrpc_surface(route_path: str) -> bool:
+    """True for the mounted MCP app's route path: `/mcp` and every `/mcp/…`
+    subpath (the app is mounted there). This agrees with the path canonicalizer
+    on excluding the `/mcpfoo` sibling, but is deliberately BROADER than the
+    canonicalizer's exact `/mcp` match — `/mcp/…` is not a path the canonical
+    layer rewrites, it is one the mounted app serves."""
+    return route_path == "/mcp" or route_path.startswith("/mcp/")
+
+
+def _cors_headers_for_scope(scope) -> list[tuple[bytes, bytes]]:
+    """Re-apply the CORS headers a refusal sent from OUTSIDE ``CORSMiddleware``
+    would otherwise lose.
+
+    This middleware is OUTERMOST, so ``CORSMiddleware`` (innermost) never sees
+    the refusal it emits — the same position problem ``#1591`` documents for the
+    unhandled-exception handler, where a browser client reads a header-less
+    response as "CORS blocked" instead of the real error. For THIS unit the
+    consequence would be worse than a 500: the whole point is that a caller can
+    READ why it was made to wait, and without ``Access-Control-Allow-Origin`` a
+    dashboard client cannot read the body at all. ``Retry-After`` is not a
+    CORS-safelisted response header, so ``Access-Control-Expose-Headers`` is the
+    other half — it is what ``CORSMiddleware(expose_headers=...)`` already adds
+    for the session-auth 503 (#3284).
+    """
+    origin = None
+    for name, value in scope.get("headers") or ():
+        if name == b"origin":
+            origin = value.decode("latin-1")
+            break
+    acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
+    return [
+        (b"access-control-allow-origin", acao.encode("latin-1")),
+        (b"access-control-allow-credentials", b"true"),
+        (b"access-control-expose-headers", b"Retry-After"),
+        (b"vary", b"Origin"),
+    ]
+
+
+async def _send_wait_bound_refusal(send, scope, route_path: str) -> None:
+    """Answer a breached request with the transport's OWN 504 refusal.
+
+    No new format: the REST arm is the §6.1 shape the rest of this app already
+    speaks (``JSONResponse`` with ``{"detail"}`` + ``Retry-After`` — see
+    ``RateLimitMiddleware`` and the trash-restore 503), and the MCP arm is
+    ``mcp_auth._jsonrpc_error`` — the primitive #3851 shipped the auth-plane
+    ``Retry-After`` through. Both responses are rendered by those existing
+    builders and only transported here as raw ASGI messages.
+    """
+    retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
+    if _is_jsonrpc_surface(route_path):
+        # Function-local: mcp_auth reaches back into this module (late, from a
+        # function body), so a module-level edge here would be a needless
+        # import-order coupling.
+        from tortoise.mcp_auth import ERR_TIMEOUT, _jsonrpc_error
+
+        resp = _jsonrpc_error(
+            ERR_TIMEOUT, _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
+            data={"retry_after": retry_after}, status=504,
+            headers={"Retry-After": str(retry_after)})
+    else:
+        resp = JSONResponse(
+            status_code=504,
+            content={"detail": _mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE},
+            headers={"Retry-After": str(retry_after)})
+    headers = [(k.lower().encode("latin-1"), v.encode("latin-1"))
+               for k, v in resp.headers.items()]
+    headers.extend(_cors_headers_for_scope(scope))
+    # This middleware is OUTERMOST, so ``HSTSMiddleware`` /
+    # ``SecurityHeadersMiddleware`` never see the refusal — re-apply what they
+    # document as present on "every response" (code-review round 2: without
+    # this, a breach response is the one response missing them).
+    headers.extend((_n.lower().encode("latin-1"), _v.encode("latin-1"))
+                   for _n, _v in (_HSTS_HEADERS + _SECURITY_HEADERS))
+    await send({"type": "http.response.start", "status": resp.status_code,
+                "headers": headers})
+    await send({"type": "http.response.body", "body": resp.body})
+
+
+def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
+                            latency_ms: int, *, tool_name: str | None = None) -> None:
+    """Fire-and-forget breach telemetry — OFF the request path.
+
+    ``_track_analytics_event`` does a BLOCKING ``httpx`` POST (5 s timeout), so
+    putting it on the request path would create the very latency this bound
+    exists to cut. Dispatched to the EXISTING best-effort control-plane seam
+    (``monitoring.control_plane_worker("telemetry")`` — daemon, 4 workers, a
+    bounded backlog; #3498), the same seam that already carries this writer.
+    Never raises, never blocks.
+
+    ``tool_name`` is supplied by the MCP-level bound (``tortoise/mcp_server.py``)
+    so a breach on the MCP surface is attributable to the tool, not just to
+    ``/mcp``. Both prop keys are registered in ``_ALLOWED_ANALYTICS_PROPS``.
+    """
+    props = {"path": route_path, "method": method, "latency_ms": latency_ms}
+    if tool_name is not None:
+        props["tool_name"] = tool_name
+
+    def _write() -> None:
+        try:
+            _track_analytics_event(org_id, _TRANSPORT_WAIT_BOUND_EVENT, props)
+        except Exception:
+            _logger.debug("wait-bound telemetry write failed", exc_info=True)
+
+    try:
+        from tortoise.monitoring import control_plane_worker
+        fut = control_plane_worker("telemetry").submit(_write)
+    except Exception:
+        _logger.debug("wait-bound telemetry schedule failed", exc_info=True)
+        return
+    _pending_wait_bound_telemetry.add(fut)
+
+    def _telemetry_done(f) -> None:
+        _pending_wait_bound_telemetry.discard(f)
+        # `submit` returns a PRE-FAILED future when the seam's bounded backlog
+        # is full (`_WorkerBacklogFull`). Observing it turns a silent drop into
+        # a traceable one — a telemetry storm under the overload that causes
+        # breaches is exactly when the drop rate matters.
+        if not f.cancelled() and f.exception() is not None:
+            _logger.debug("wait-bound telemetry dropped: %r", f.exception())
+
+    fut.add_done_callback(_telemetry_done)
+
+
+def _track_wait_bound_request(task) -> None:
+    """Register an abandoned dispatch so its late exception is retrieved.
+
+    Called on the BREACH path only. Deliberately NOT ``task.cancel()`` there:
+    this module's own doctrine (#2988, #3718) is that cancelling the await stops
+    the AWAITABLE, not the worker thread, while running every ``finally`` the
+    handler owns — and 14 handlers here close their SDK in a ``finally``, so a
+    cancel would tear the projection down under work that is still using it
+    (exactly the #3718 P1). Unwinding normally keeps the handler's own
+    bookkeeping (and the ``InFlightMiddleware`` gauge the #2850 self-kill
+    predicate reads) consistent.
+
+    NOT used on the CANCELLATION path, where the opposite is required: see the
+    ``except asyncio.CancelledError`` branch in ``WaitBoundMiddleware.__call__``.
+    """
+    _pending_wait_bound_requests.add(task)
+
+    def _done(t) -> None:
+        _pending_wait_bound_requests.discard(t)
+        if not t.cancelled():
+            t.exception()  # retrieve, so it is never reported as un-retrieved
+
+    task.add_done_callback(_done)
+
+
+class WaitBoundMiddleware:
+    """The transport-level wait bound (#3834) — one bound, every route but the
+    one recorded exemption.
+
+    Pure ASGI and OUTERMOST (registered last): it must see the request before
+    any middleware can short-circuit it. It is deliberately NOT wrapping-free
+    (unlike ``InFlightMiddleware``, whose docstring this class no longer
+    inherits): on every non-exempt request ``__call__`` re-binds ``send`` to a
+    guarded closure and runs the app as a child task. Owning ``send`` is what
+    lets it substitute a refusal for a response that has not started, so that
+    cost is the bound's price, not an accident. ⚠️ Only the SIBLING MCP seam's
+    cost is measured (``tests/test_mcp_telemetry.py::TestOverhead`` drives
+    ``mcp.call_tool`` directly — no ASGI app, no middleware stack); THIS
+    middleware's own re-bind + child-task overhead is not measured by any test.
+
+    ⚠️ What it does NOT bound is MCP *tool calls*, and the earlier claim that
+    it "covers the mounted MCP app by construction" was false: FastMCP's
+    Streamable-HTTP transport runs in SSE mode and starts the
+    ``EventSourceResponse`` BEFORE dispatching the tool
+    (``mcp/server/streamable_http.py`` — "Start the SSE response (this will send
+    headers immediately)"), so ``http.response.start`` is already on the wire
+    when the deadline fires and the middleware's ``response_started`` branch can
+    only let the request finish. A bound that reported success while bounding
+    nothing is why the MCP half lives in ``tortoise/mcp_server.py``'s dispatch
+    (``_await_under_mcp_wait_bound``), where it is enforced across the registry
+    rather than per tool.
+
+    The middleware still owns the ``/mcp`` refusal for a request that stalls
+    BEFORE its SSE response begins (``_is_jsonrpc_surface`` /
+    ``mcp_auth._jsonrpc_error``) — e.g. a slow org resolution that consumes the
+    bound. That arm answers a standard HTTP 504 with a JSON-RPC error body and
+    ``Retry-After``: a client that raises on the status still has the HTTP-level
+    retry signal, while the guaranteed legible-per-tool-call refusal is the
+    post-SSE one from the MCP dispatch.
+
+    On breach the caller gets a readable refusal (what happened, whether to
+    retry, how long) and the handler is left running rather than cancelled. The
+    two cases where a refusal cannot be substituted are handled honestly: a
+    response that has already STARTED streaming is allowed to finish (an ASGI
+    response cannot be replaced mid-flight), and the abandoned handler's late
+    response is DROPPED rather than sent over a reply it no longer owns.
+
+    ⚠️ What this bound CANNOT do: an ``asyncio`` deadline only fires while the
+    loop runs. A handler that blocks the loop synchronously (``time.sleep``, a
+    direct FalkorDB call — a live class in this module, #3060/#3718) finishes
+    before the timer callback can run, so it is NOT converted into a refusal.
+    The bound is strictly additive there, never a cure; removing that class is
+    #3718's direction (move the blocking work off-loop). Pinned so the limit is
+    visible rather than assumed —
+    ``test_synchronous_handler_is_not_bounded_it_is_stated_not_assumed``.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        from starlette.routing import get_route_path
+
+        route_path = get_route_path(scope)
+        if (scope.get("method", ""), route_path) in _TRANSPORT_WAIT_BOUND_EXEMPT:
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+        refused = False
+
+        async def _guarded_send(message):
+            nonlocal response_started
+            if refused:
+                # The caller already has the refusal. An ASGI send after
+                # response.end is a protocol violation, so the abandoned
+                # handler's late response is dropped here.
+                return
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        t0 = time.monotonic()
+        # #3834 F1: stamp the TRANSPORT arrival so the MCP dispatch seam —
+        # ``mcp_server._await_under_mcp_wait_bound``, which is what actually
+        # bounds a tool call because Streamable-HTTP starts the SSE response
+        # BEFORE dispatching the tool — spends the SAME deadline instead of
+        # starting a fresh one. Without this the caller-visible wait is
+        # pre-SSE cost + bound (measured: 0.522 s for an advertised 0.3 s), and
+        # a slow org resolution pushes the total past the 15 s client budget
+        # with NO legible refusal — the exact failure #3834 exists to eliminate.
+        # ``scope["state"]`` is the dict the auth dependency already writes
+        # ``org_id`` into, and Starlette's ``Mount`` passes the same mapping
+        # through to the sub-app, so the MCP seam can read it via
+        # ``fastmcp.server.http._current_http_request``.
+        state = scope.get("state")
+        if not isinstance(state, dict):
+            state = {}
+            scope["state"] = state
+        state["_wait_bound_t0"] = t0
+
+        task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
+        try:
+            # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
+            # ``wait_for`` is a single deadline around ``await fut``, and the two
+            # are cost-neutral (measured on the sibling MCP seam: 198 µs vs
+            # 199 µs p50). The cost THIS boundary pays is the per-call
+            # ``ensure_future`` task it must OWN — ABANDON-never-cancel requires
+            # an owned task — measured there as ~+0.48 ms p50 / +1.7 ms p95 over
+            # the unwrapped call. The ``shield`` is REQUIRED: ``wait_for`` alone
+            # CANCELS the awaited future on timeout, and this bound must
+            # ABANDON, never cancel (the SDK-closing ``finally`` doctrine below).
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_mcp_auth._TRANSPORT_WAIT_BOUND_S)
+        except asyncio.CancelledError:
+            # The caller was cancelled (client disconnect, server shutdown).
+            # Propagate the cancellation INTO the handler and await it: the
+            # app's own cancellation path is where its cleanup and abandonment
+            # markers live (#3129 — a capture cancelled after its extraction
+            # must still record the failed attempt), and the direct
+            # ``await self.app(...)`` this middleware replaced ran exactly that
+            # path. ABANDONING here instead would silently keep a disconnected
+            # capture running and leave its marker unset. Cancelling is correct
+            # ONLY on this path; the breach path below abandons on purpose.
+            #
+            # Suppress only the child's CANCELLATION. A genuine error raised by
+            # its cleanup (a raising ``finally``, a send on a dead socket) must
+            # surface, exactly as it did through the old direct await —
+            # ``suppress(BaseException)`` would retrieve and discard it.
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise
+        except TimeoutError:
+            if task.done():
+                # The dispatch finished as the deadline expired. Surface its
+                # result/exception exactly as a plain await would — a handler's
+                # OWN ``TimeoutError`` must not be rewritten into a wait-bound
+                # refusal (``asyncio.TimeoutError`` IS builtin ``TimeoutError``).
+                return task.result()
+            # The deadline fired with the dispatch still running: ``shield``
+            # kept the inner task ALIVE and the breach path below abandons it.
+        if response_started:
+            # The response already began; a refusal can no longer be
+            # substituted, so the request is allowed to finish.
+            await task
+            return
+
+        refused = True
+        state = scope.get("state")
+        # #3834 F-2 (exactly-once breach telemetry): the MCP dispatch seam
+        # shares this ``scope["state"]`` dict (Starlette's ``Mount`` forwards
+        # the same mapping) and reads this flag before emitting its own breach
+        # event. Without it a pre-SSE stall (pre-SSE cost >= bound) produced
+        # TWO ``transport_wait_bound_exceeded`` rows for one request — the
+        # middleware's here and the seam's, where the seam's own deadline had
+        # already collapsed to 0. The middleware is the one that ANSWERED the
+        # caller on this path, so its event is the truthful one; the seam's
+        # refusal below is redundant. On the SSE-started path this branch is
+        # never reached (``response_started`` returns above) and the seam's
+        # event is the only one — which is why this is a FLAG and not a
+        # ``remaining <= 0`` guard at the seam.
+        if isinstance(state, dict):
+            state["_wait_bound_refused"] = True
+        org_id = state.get("org_id") if isinstance(state, dict) else None
+        # The ASGI server percent-DECODES the path, so `/v1/x/%0d%0a…` arrives
+        # with embedded CR/LF; logged verbatim that forges log lines. This is
+        # the FULLER form of the CR/LF fix the unhandled-exception handler at
+        # ``_unhandled_exception_handler`` (#1591 class) carries — the C0 range
+        # plus DEL/C1 and the Unicode line separators — and the sanitized form
+        # also reaches the analytics prop, so neither the log nor the sink can
+        # be forged. The helper lives in ``mcp_auth`` (#3834 F-3) so the MCP
+        # arm shares it without importing this module.
+        safe_route_path = _mcp_auth._sanitize_for_log(route_path)
+        _emit_wait_bound_breach(org_id or "", safe_route_path,
+                                scope.get("method", ""),
+                                int((time.monotonic() - t0) * 1000))
+        _logger.warning(
+            "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
+            _mcp_auth._TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
+        # The task has already outlived the refusal decision, so register it
+        # BEFORE the send: the send happens 10 s in, where a client that has
+        # already gone makes uvicorn raise (ConnectionResetError /
+        # ClientDisconnected); if that raise skipped this call the still-running
+        # handler would never be drained. The send is then best-effort.
+        _track_wait_bound_request(task)
+        try:
+            await _send_wait_bound_refusal(send, scope, route_path)
+        except Exception:
+            _logger.debug(
+                "wait-bound refusal send failed (client disconnected?)",
+                exc_info=True)
+
+
+app.add_middleware(WaitBoundMiddleware)
 
 
 # Internal auth key for Edge Function → API communication
@@ -20546,6 +20979,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     # Registering them here repairs that shipped, silent loss; the structural
     # registration test is what keeps the two sets from drifting again.
     "plan", "tier",
+    # #3834: the transport-level wait bound's breach event. `method` and
+    # `latency_ms` are already registered above; `path` is the one new key.
+    # Without it the refusal would be counted but the ROUTE would be stripped
+    # here — the documented #3359/#3824 silent-loss mode, which would make the
+    # "which routes actually breach 10 s" question unanswerable in production.
+    "path",
 }
 
 # ── #3821: the unregistered-key choke point ─────────────────────────────

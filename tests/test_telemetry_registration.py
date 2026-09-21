@@ -635,7 +635,7 @@ def test_every_emitted_prop_key_is_allowlisted():
     # be resolved would otherwise be filtered out by `if c.keys` and pass the
     # subset check. Any addition must update this inventory (and register its
     # props), which is exactly the review the gate exists to force.
-    assert len(calls) == 11, (
+    assert len(calls) == 12, (
         f"emit-site inventory changed — {len(calls)} calls found: {calls}")
     resolved = [c for c in calls if c.keys]
     assert len(resolved) >= 10, (
