@@ -1034,6 +1034,58 @@ class _EntityHandlers:
             )
         return len(result.result_set)
 
+    def _fold_confidence_changed(self, ev: dict) -> int:
+        """#2884 D3: fold a journaled EP/dream belief-state write-back.
+
+        ``ConfidenceChanged`` is the durability record for the four properties
+        the EP/dream write-backs mutate directly (``confidence``,
+        ``posterior_alpha``, ``posterior_beta``, ``lastDreamedAt``). Before
+        this fold it was listed in ``_NO_PROJECTION_FOLD`` as an "audit-only,
+        no graph effect" no-op, so a JSONL wipe+rebuild silently discarded
+        every posterior and reset the dream schedule.
+
+        PRESENCE-CONDITIONAL: only the keys the record actually carries are
+        applied. An EP flush journals ``confidence`` + both posteriors; a
+        dream stamp journals ``confidence`` (+ ``lastDreamedAt`` when the run
+        converged); the run-evidence pre-write journals the posteriors AS
+        JSON null (the clear). A key absent from the record is never written —
+        so a dream record cannot clobber the posteriors the flush recorded,
+        and a record cannot invent a value its writer never set. A key present
+        with null writes null (removes the property), mirroring the live SET.
+
+        Returns the MATCHED-ROW count (the #2164/#2423 additive fold-miss
+        signal): 1 = the target Point was found and folded, 0 = no Point
+        matched (hard-deleted / never re-created) or the record carries no
+        foldable value. Idempotent — a replayed/duplicate event re-applies the
+        same SET.
+        """
+        oid = ev.get("id")
+        if not isinstance(oid, str) or not oid:
+            return 0
+        set_parts: list[str] = []
+        params: dict = {"id": oid}
+        for key in ("confidence", "posterior_alpha", "posterior_beta",
+                    "lastDreamedAt"):
+            if key not in ev:
+                continue
+            value = ev[key]
+            # Reject value shapes FalkorDB cannot take as a parameter (a
+            # corrupt journal line must not abort rebuild_all AFTER the wipe
+            # — the #331/_writable_id precedent). ``None`` is valid: it is
+            # the journaled clear.
+            if value is not None and not _is_persistable_prop_value(value):
+                continue
+            set_parts.append(f"n.{key} = ${key}")
+            params[key] = value
+        if not set_parts:
+            return 0
+        result = self.g.query(
+            "MATCH (n:Point {id:$id}) SET " + ", ".join(set_parts) +
+            " RETURN n.id LIMIT 1",
+            params=params,
+        )
+        return len(result.result_set)
+
     # ── Entity nodes ───────────────────────────────────────────────
 
     def _upsert_subject(self, ev: dict) -> None:

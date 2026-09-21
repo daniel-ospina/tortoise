@@ -1316,7 +1316,6 @@ def _annotator_dims(ev: dict, *, aliases: bool = False) -> dict:
 # real fold branch below (the branch would win anyway, but the set would then
 # mislead the next reader about what is unknown).
 _NO_PROJECTION_FOLD = frozenset({
-    "ConfidenceChanged",    # audit-only, no graph effect (pre-existing no-op)
     "IngestStarted",        # audit-only, no graph effect (pre-existing no-op)
     "BatchIdStamped",       # JSONL-only; replayed from the batch snapshot
                             # (rebuild_all pass-2b), not via this dispatcher
@@ -1476,6 +1475,24 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             rid = ev.get("id")
             if isinstance(rid, str) and _owns_point(ev.get("label")):
                 points.pop(rid, None)
+    elif t == "ConfidenceChanged":
+        # #2884 D3: the EP/dream belief-state write-back — parity with the
+        # graph folds (`FalkorProjection.apply` / `rebuild_all`).
+        # Presence-conditional, exactly like `_fold_confidence_changed`: only
+        # keys the record carries are written; a key present with null writes
+        # null. Same value-shape gate so the pure fold and the graph fold
+        # cannot disagree on a corrupt line (#330 parity).
+        rid = ev.get("id")
+        p = points.get(rid) if _writable_id(rid) else None
+        if p:
+            for key in ("confidence", "posterior_alpha", "posterior_beta",
+                        "lastDreamedAt"):
+                if key not in ev:
+                    continue
+                value = ev[key]
+                if value is not None and not _is_persistable_prop_value(value):
+                    continue
+                p[key] = value
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
         # audit markers, the JSONL-only records replayed by a dedicated pass,
@@ -2491,6 +2508,13 @@ class FalkorProjection(
             # popped here so it never reaches _persist_extra_props.
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+        elif t == "ConfidenceChanged":
+            # #2884 D3: the EP/dream belief-state write-back. Inline (a
+            # non-terminalizing property SET — parity with the PointRevised
+            # branch above); no edge/graph-shape effect, so no deferred
+            # sweep. No return: keep ``apply()``'s declared ``-> None``
+            # contract.
+            self._fold_confidence_changed(ev)
         elif t in _NO_PROJECTION_FOLD:
             # Recognized, intentionally folded elsewhere or not at all: the
             # audit-only markers, the JSONL-only batch snapshot replayed in
@@ -3409,6 +3433,22 @@ class FalkorProjection(
                         "(event_id=%s id=%r) — operator not re-created by "
                         "any journaled event, or the record carried no "
                         "annotator dim",
+                        ev.get("event_id"), ev.get("id"))
+            elif t == "ConfidenceChanged":
+                # #2884 D3: pass-1b rebuild parity — the EP/dream write-back's
+                # durability record. Folded INLINE (chronological, journal
+                # order): pass-1a already re-created every Point, so the
+                # target always exists, and an id's LAST record must win (a
+                # dream stamp after an EP flush). The fold may match 0 rows
+                # when the target was hard-deleted / never re-created —
+                # audible, mirroring the PointSuperseded / EntityMutated /
+                # OperatorAnnotated fold-miss warnings.
+                if self._fold_confidence_changed(ev) == 0:
+                    logger.warning(
+                        "rebuild: ConfidenceChanged fold matched no Point "
+                        "(event_id=%s id=%r) — point not re-created by any "
+                        "journaled event (legacy journal, unjournaled "
+                        "producer, or delete race)",
                         ev.get("event_id"), ev.get("id"))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
