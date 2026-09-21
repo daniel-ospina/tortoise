@@ -88,12 +88,12 @@ _SEEDED_SESSION = "read-loop-3718-session"
 def _seed_read_surface():
     """Seed one Point + one Session and WARM the embedded anchors.
 
-    Warming matters: ``_make_sdk`` eagerly connects a brand-new keepalive
-    anchor (``anchor._get_proj()`` at construction, so the redislite server
-    survives between requests). That eager connect runs on the loop by design
-    and has nothing to do with the handler under test — if the first request
-    in a test created the anchor, the observation below would see it.
-    Pre-warming both namespaces removes that confound.
+    Warming matters only for EMBEDDED-SERVER liveness: ``_make_sdk`` eagerly
+    connects a brand-new keepalive anchor so the redislite server survives
+    between requests. That eager connect is NOT observable by the probe below —
+    the anchor is a direct ``TortoiseSDK(...)`` inside ``_make_sdk``, never the
+    object ``_make_sdk`` returns, so the request-scoped ownership gate already
+    excludes it. Warming both namespaces simply keeps the embedded daemon up.
     """
     import tortoise.hosted_api as ha_mod
 
@@ -148,11 +148,20 @@ class _RequestScopedProbe:
     """A ``TortoiseSDK._get_proj`` probe that only sees REQUEST-owned SDKs.
 
     ``_get_proj`` is the graph ATTACH every read handler under test reaches
-    (the registry reads get there through ``_get_registry``), which makes it
-    the one seam that discriminates off-loop from on-loop for the whole class
-    without patching each handler's query shape. But it is also used by
-    background daemon-thread sweeps, so the probe scopes itself to the SDK
+    (the registry reads get there through ``_get_registry``; ``dream_health``
+    reaches it through ``dream_health_check`` -> ``_hydrate_dirty_roots``),
+    which makes it the one seam that discriminates off-loop from on-loop for
+    the attach without patching each handler's query shape. But it is also used
+    by background daemon-thread sweeps, so the probe scopes itself to the SDK
     instances the REQUEST created on the main thread.
+
+    LIMIT, stated rather than implied: this observes the ATTACH, not the query
+    round trip. A read reverted to inline on an ALREADY-ATTACHED projection
+    (e.g. ``get_session_detail``'s four ``proj.g.query(...)`` calls after its
+    one off-loaded ``_get_proj``) is NOT caught behaviourally — the AST pin's
+    ``.g.query`` rule is the guard for that (and it fails on exactly that
+    revert). Reads made through a SYNC helper are outside both gates (the AST
+    scan walks async bodies only); those are part of the declared residual.
     """
 
     def __init__(self, monkeypatch, ha_mod, state: dict, *, block: bool):
@@ -243,8 +252,8 @@ def test_read_route_offloads_graph_io(client, monkeypatch, label, handler,
     loop), not a source-grep for ``to_thread`` — a refactor that puts the read
     back on the loop fails here regardless of how it is written.
     """
-    from tortoise.hosted_api import app
     import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
 
     _seed_read_surface()
     _arm_session_endpoints(monkeypatch)
@@ -260,6 +269,10 @@ def test_read_route_offloads_graph_io(client, monkeypatch, label, handler,
 
     response = asyncio.run(_run())
 
+    assert "ran_on_loop" in state, (
+        f"[{label}] {handler}'s graph seam was never reached — the request "
+        f"short-circuited before its read (or errored earlier), so this run "
+        f"proves nothing about the off-load (#3718)")
     assert state.get("ran_on_loop") is False, (
         f"[{label}] {handler} ran its synchronous FalkorDB read ON the event "
         f"loop (thread={state.get('thread')!r}) — one slow graph round trip "
@@ -364,21 +377,31 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 # times (#2988, #3035, #3086) before anyone noticed.
 #
 # BOUNDARY, stated rather than implied: the scanned names are the DECLARED
-# FalkorDB seams — `_get_proj`, `_get_registry`, and `.g.query`. A blocking call
-# reached through some other helper is not visible here (e.g.
-# `_control_plane_source()`-mediated reads); those are enumerated in the
-# residual below by their OWNing async body where the seam is one of the three.
-# Calls inside an offload boundary (`asyncio.to_thread`, `_run_off_loop`,
-# `_run_dream_on_pool`, `_cp_offload`, ...) are not on the loop and are skipped.
-_GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry"})
+# FalkorDB seams — `_get_proj`, `_get_registry`, `dream_health_check`, and any
+# `.g.query` on a graph handle. A blocking call reached through some sync helper
+# (e.g. `_graph_has_org_namespace` -> `_registry_existing_graphs().list_graphs()`,
+# or the onboarding writers) is NOT visible here — the scan walks async bodies
+# and a sync helper's own graph I/O is one level down. Those helper-mediated
+# sites are part of the declared residual below. Calls inside an offload
+# boundary (`asyncio.to_thread`, `run_in_executor`, `_run_off_loop`,
+# `_run_with_close`, `_run_dream_on_pool`, `_cp_offload`, ...) are not on the
+# loop and are skipped — including a callable REFERENCE argument at any
+# position (the callable is arg 0 for `to_thread`, arg 1 for `run_in_executor`).
+_GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_check"})
 _OFFLOAD_BOUNDARY_CALLEES = frozenset({
     "to_thread", "_run_off_loop", "_submit_off_loop", "_run_dream_on_pool",
+    "_run_with_close", "run_in_executor",
     "_cp_offload", "_oauth_offload", "run_control_plane_call",
     "run_on_daemon_worker",
 })
 
 #: Async bodies this change OFF-LOADS. A subset assertion: a rename or a
 #: refactor that drops one back onto the loop fails `test_graph_io_is_offloaded`.
+#: NOTE: the assertion is about the SEAMS THE SCAN SEES. ``patch_onboarding_state``
+#: has its detected seams off-loaded (the ``read_onboarding_node`` read and the
+#: ``_graph_has_org_namespace`` probe), but its later onboarding WRITES still run
+#: through sync helpers the scan cannot see — those are part of the residual, not
+#: covered by this set.
 _OFFLOADED_ASYNC_BODIES = frozenset({
     "list_points", "get_point", "org_info", "list_sessions",
     "get_session_detail", "dream_health",
@@ -426,11 +449,20 @@ def _callee_name(func: ast.expr) -> str | None:
 
 
 def _graph_bound_names(node: ast.AST) -> set[str]:
-    """Names bound to a ``_get_proj()`` / ``_get_registry()`` call in the body."""
+    """Names bound to a graph handle via a ``_get_proj()`` / ``_get_registry()``
+    (or ``dream_health_check``) call ANYWHERE in the assigned expression —
+    including the offload-wrapped shape ``proj = await asyncio.to_thread(
+    sdk._get_proj)`` that ``get_session_detail`` uses. Matching the Call only
+    when it is the direct ``Assign.value`` (the first revision) missed that
+    shape, so a later inline call on the handle was invisible (#3718 review).
+    """
     names: set[str] = set()
     for n in ast.walk(node):
-        if (isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
-                and _callee_name(n.value.func) in _GRAPH_SEAM_CALLEES):
+        if not isinstance(n, ast.Assign):
+            continue
+        if any(isinstance(sub, ast.Call)
+               and _callee_name(sub.func) in _GRAPH_SEAM_CALLEES
+               for sub in ast.walk(n.value)):
             for target in n.targets:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
@@ -445,15 +477,19 @@ def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
     def visit(current: ast.AST) -> None:
         if isinstance(current, ast.Call):
             if _callee_name(current.func) in _OFFLOAD_BOUNDARY_CALLEES:
-                # The callable argument runs on the worker — skip it. Every
-                # OTHER argument is evaluated EAGERLY on the loop, so scan it.
-                for idx, arg in enumerate(current.args):
-                    if idx == 0 and isinstance(arg, (ast.Lambda, ast.Name)):
+                # An argument that is a callable REFERENCE (Lambda / Name /
+                # Attribute) runs on the worker — skip it, at ANY position (the
+                # callable sits at index 0 for ``to_thread`` but at index 1 for
+                # ``run_in_executor`` / ``_run_with_close``). Every other
+                # argument (a Call, a comprehension, ...) is evaluated EAGERLY
+                # on the loop, so it must still be scanned.
+                for arg in current.args:
+                    if isinstance(arg, (ast.Lambda, ast.Name, ast.Attribute)):
                         continue
                     visit(arg)
                 for kw in current.keywords:
-                    if kw.arg in ("fn", "func") and isinstance(
-                            kw.value, (ast.Lambda, ast.Name)):
+                    if isinstance(kw.value,
+                                  (ast.Lambda, ast.Name, ast.Attribute)):
                         continue
                     visit(kw.value)
                 return
@@ -463,9 +499,7 @@ def _has_inline_graph_io(node: ast.AsyncFunctionDef) -> list[int]:
             elif isinstance(current.func, ast.Attribute):
                 base = current.func.value
                 if (name == "query" and isinstance(base, ast.Attribute)
-                        and base.attr == "g"):
-                    hits.append(current.lineno)
-                elif isinstance(base, ast.Name) and base.id in bound:
+                        and base.attr == "g") or (isinstance(base, ast.Name) and base.id in bound):
                     hits.append(current.lineno)
         for child in ast.iter_child_nodes(current):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,

@@ -1607,6 +1607,47 @@ _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="activation-scorecard")
 
 
+async def _run_with_close(executor: ThreadPoolExecutor, fn, sdk, /, *args, **kwargs):
+    """Run one blocking graph call on a DEDICATED executor; the item owns ``sdk.close()``.
+
+    #3718 (code review): the call AND ``sdk.close()`` are ONE worker hand-off.
+    Letting the coroutine's ``finally`` close instead runs the close on the
+    LOOP while the worker is still inside the call whenever the request is
+    cancelled — cancelling the await stops the AWAITABLE, not the thread
+    (CPython #87185, quoted at length in this file's #2988 timeout note: the
+    worker "is never cancelled and continues running forever despite the
+    timeout error") — and the SDK owns the projection/connection that call is
+    reading.
+
+    The close therefore travels WITH THE WORK ITEM rather than with the
+    future: the submitted closure closes ``sdk`` in its own ``finally``, so
+    whoever ends up running the call closes the SDK exactly once — on the
+    worker thread, so a cancellation can no longer tear the SDK down mid-call,
+    and no caller can forget it (``TortoiseSDK.close()`` is idempotent —
+    ``_t_closed``).
+
+    Not the ``add_done_callback`` shape: ``ThreadPoolExecutor.submit`` puts the
+    work item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't
+    start new thread", so a submit ``RuntimeError`` does NOT prove the call
+    never ran. Attaching the close to the ITEM makes the submit outcome
+    irrelevant, and — as ``_run_dream_on_pool`` records in full below (#3773
+    round 3) — there is deliberately NO loop-side close on a submit failure:
+    closing a caller-supplied SDK there could tear it down under a call an
+    existing worker had already picked up (the CPython #87185 class this design
+    removes). A pre-enqueue failure instead strands the caller's SDK to GC —
+    bounded and transient, and the same lifecycle the sibling write handlers'
+    SDKs already have (they never close explicitly).
+    """
+    def _call_and_close():
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sdk.close()
+
+    cfut = _submit_off_loop(executor, _call_and_close)
+    return await asyncio.wrap_future(cfut)
+
+
 async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
     """Run one long dream pass on the dream pool; the WORK ITEM owns the close.
 
@@ -6024,15 +6065,17 @@ async def dream_health(
     region_attempts (C5) and warm-start savings (C4)."""
     _require_scope(org, "graphs:read", "dream_health")
     sdk = _data_sdk(org)
-    try:
-        # #3718 residual 2: `dream_health_check` hydrates graph-persisted dirty
-        # roots first (#1163) — a synchronous FalkorDB read — then evaluates the
-        # in-memory alarm. The whole call is short and sync, so it rides one
-        # worker hand-off (the /v1/search precedent); `close()` stays on the loop
-        # in the finally below, as it does for every other read surface here.
-        return await asyncio.to_thread(sdk.dream_health_check)
-    finally:
-        sdk.close()
+    # #3718 residual 2 (code review): `dream_health_check` first runs
+    # `_hydrate_dirty_roots()` — an UNBOUNDED all-`Point` `ep_dirty` scan with
+    # no index — so it is the "long/stallable" class the module's #3060
+    # criterion keeps OFF the shared default executor (the same scan, reached
+    # through `sdk.dream`, already runs on `_DREAM_EXECUTOR`). It therefore
+    # runs on that pool via `_run_with_close`, which also makes the close travel
+    # with the work item: with a plain `asyncio.to_thread(...)` + a loop-side
+    # `finally: sdk.close()`, cancelling the request would close the projection
+    # on the LOOP while the worker was still inside the scan (CPython #87185 —
+    # the same race `_run_dream_on_pool` was built to remove).
+    return await _run_with_close(_DREAM_EXECUTOR, sdk.dream_health_check, sdk)
 
 
 @app.get("/v1/search")
@@ -20161,7 +20204,11 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     # presence cannot be confirmed, and dropping would lose the client's
     # intent against the legacy fallback path.
     if (_ACCEPT_AND_DROP and "onboarding_complete" in updates
-            and _graph_has_org_namespace(org["org_id"])):
+            # #3718 residual 2 (review): `_graph_has_org_namespace` reads the
+            # server-wide graph list through the registry projection — sync
+            # FalkorDB I/O on this hot PATCH path, so off-load it too.
+            and await asyncio.to_thread(
+                _graph_has_org_namespace, org["org_id"])):
         try:
             # review (#1997): the SDK is explicitly closed (the projection
             # handle leaks a connection per PATCH otherwise — the writers'
@@ -20173,14 +20220,28 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             # unchanged. Closed in the finally below either way.
             _node_sdk = (_open_org_graph_sdk(org["org_id"])
                          or _make_sdk(namespace=org["org_id"]))
+            # #3718 residual 2 (review): the read touches the graph
+            # (`_get_proj` attach + node read) on the hot PATCH path — off-load
+            # both, and gate the close on the WORKER FINISHING (the
+            # `volunteer_context` precedent at :18686): a loop-side
+            # `finally: close()` after the await would tear the projection down
+            # under a worker that is still inside the read whenever the request
+            # is cancelled (CPython #87185 — cancelling the await stops the
+            # awaitable, not the thread).
+            _node_done = False
             try:
-                # #3718 residual 2: the read touches the graph (`_get_proj`
-                # attach + node read) on the hot PATCH path — off-load both.
-                _node = await asyncio.to_thread(
-                    lambda: _os.read_onboarding_node(
-                        _node_sdk._get_proj(), org["org_id"]))
+                def _read_node():
+                    nonlocal _node_done
+                    try:
+                        return _os.read_onboarding_node(
+                            _node_sdk._get_proj(), org["org_id"])
+                    finally:
+                        _node_done = True
+
+                _node = await asyncio.to_thread(_read_node)
             finally:
-                _node_sdk.close()
+                if _node_done:
+                    _node_sdk.close()
         except Exception:
             _node = None
         if _node is not None:
