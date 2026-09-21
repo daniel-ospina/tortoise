@@ -393,6 +393,7 @@ surfaces:
   - test_client_status_vocabulary.py
   - test_embedder_provision.py
   - test_embedded_evidence.py
+  - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -575,6 +576,17 @@ surfaces:
   # SOURCE_PATTERNS surface, so a change to either falls through to core.
   - test_fork_safety_3845.py
   - test_fly_machines_guard.py
+  # #4126: the Fly secret *provenance* guard (check-fly-secret-drift.py). It
+  # exists because a Fly secret with no managing source is invisible — the #4126
+  # incident (a hand-set TORTOISE_SESSION_LLM_MODEL plus a stale
+  # OPENROUTER_API_KEY inside Fly-only env) produced a total extraction outage
+  # that the API reported as 200/partial, and nothing in CI could see the drift.
+  # Registered in `core` alongside its sibling deploy-time guards
+  # (test_fly_machines_guard.py, test_deploy_workflow.py). It is hermetic but
+  # multi-minute, so it carries an explicit `durations:` weight (see the
+  # durations map) — an unmeasured entry would also drop fast-pool coverage
+  # below the 90% floor (#4259 review).
+  - test_fly_secret_drift.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_diagnostics.py
@@ -605,6 +617,10 @@ surfaces:
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
+  # #4366: the consumer-skills licence assertion (validation/check-license-surface.py)
+  # — DB-free marker/surface unit tests; `core` is the fallback for a validation/
+  # -only change, which is the only way that script selects a surface.
+  - test_license_surface_consumer.py
   - test_linear_connector.py
   - test_lint_config.py
   - test_lint_tripwire.py
@@ -1205,6 +1221,16 @@ durations:
 # instead of silently dropping the six back to the default anyway, and cannot
 # mis-balance the LPT pack. Refresh these six from the first post-merge main
 # run that includes them.
+#
+# #4259: test_fly_secret_drift.py is hermetic but multi-minute (60 subprocess
+# bash invocations plus the shipped-artifact end-to-end). Its first CI run has
+# not produced a junit measurement yet, so the value below is a LOCAL
+# measurement (the 3-file focused run 712.9s minus the two sibling files'
+# 278.9s ≈ 434s). An unmeasured file still leaves fast-pool coverage BELOW the
+# 90% floor once this file enters the pool, so a weight is required — the flat
+# default is what the floor exists to reject. Refresh from junit once the file
+# lands on main.
+  test_fly_secret_drift.py: 434.0
   # #3827: new file in this pool — no CI junit measurement exists yet, so it takes
   # the flat 2.0s default under the #3400 policy above rather than the local timings
   # measured on this host (257s/627s at load 64-136, ~81s of which is the autouse
@@ -1217,6 +1243,17 @@ durations:
   test_shared_state_imports.py: 2.0
   test_shared_state_monitoring.py: 2.0
   test_shared_state_recovery.py: 2.0
+# #4366: the consumer-skills licence assertion's unit file — no CI junit
+# measurement yet, so it enters at the same flat 2.0s default as the #4221 six
+# above (the conservative floor: it keeps coverage at 100% instead of dropping
+# the file back to the default anyway, and cannot mis-balance the LPT pack).
+# Refresh from the first post-merge main run that includes it.
+  test_license_surface_consumer.py: 2.0
+  # #4327: no CI junit measurement yet (new file), so enter at the flat 2.0s
+  # default per the #3400/#4221 convention — the conservative floor keeps the
+  # 90% durations-coverage floor satisfied; refresh from the first post-merge
+  # main run that includes it.
+  test_installer_preserves_foreign_skill_content.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3

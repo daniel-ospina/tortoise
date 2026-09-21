@@ -186,7 +186,11 @@ def main() -> None:
     seed_q = next(q for q in fixture if q["question_id"] == "e9327a54")
     sdk = TortoiseSDK(db_path=":memory:")
     proj = sdk._get_proj()
-    spot._seed_memory(sdk, seed_q)
+    # W7A pinned ``embed=False``: the profile's recorded corpus carries NO
+    # embedding (docs/research/2026-09-19-m1-read-path-latency-profile.md); the
+    # seeder now defaults to embedded, so leaving this un-pinned would silently
+    # change the measured corpus.
+    spot._seed_memory(sdk, seed_q, embed=False)
     n_points = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
     print(f"seeded haystack: {n_points} Points")
 
