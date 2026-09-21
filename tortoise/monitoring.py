@@ -674,12 +674,14 @@ async def run_on_daemon_worker(fn, *, name: str, timeout: float | None = None):
 # probe workers (its own name) so the /health probe budget and the auth path
 # can never starve each other.
 #
-# #3498 review P1: it is ALSO split into two named pools. Best-effort work
+# #3498 review P1: it is ALSO split into named pools. Best-effort work
 # (``update_last_used``, the analytics emit, the GitHub repo count) must not
 # occupy the auth slots — a telemetry burst or a hung display-only GitHub call
 # parking every auth worker is the same total-auth-outage blast radius this
 # issue is about. ``best_effort=True`` protects the CALLER; the separate pool
-# protects the AUTH CALLERS sharing capacity.
+# protects the AUTH CALLERS sharing capacity. #3669 adds a THIRD pool for the
+# attacker-reachable OAuth client-resolution lane (see
+# ``CONTROL_PLANE_OAUTH_WORKER_NAME``).
 CONTROL_PLANE_WORKER_NAME = "tortoise-control-plane"
 
 #: The best-effort pool's name — never shares slots with ``auth``.
@@ -701,6 +703,22 @@ CONTROL_PLANE_BACKLOG = 128
 #: Best-effort backlog — larger, because best-effort submissions that are
 #: refused are simply dropped (never a user-visible failure).
 CONTROL_PLANE_TELEMETRY_BACKLOG = 256
+
+#: #3669: a THIRD pool, for the OAuth client-resolution lane. A CIMD fetch is
+#: attacker-reachable (an unauthenticated ``client_id`` URL), so sharing the
+#: ``auth`` pool would let a fetch flood occupy every auth slot — the same
+#: isolation argument that split ``telemetry`` out (#3498 review P1), applied
+#: to a new attacker class. Sized ABOVE ``cimd.MAX_IN_FLIGHT_FETCHES`` so the
+#: CIMD in-flight cap is the binding constraint on FETCHES (defence in depth),
+#: with the remaining workers carrying the token grants and registry reads.
+#: NOTE the token grants share this pool and are awaited with no offload wait
+#: bound, so N concurrent grants can occupy N workers; a resolution submitted
+#: while the pool is saturated waits on the shared backlog and fails closed at
+#: its own bound. That read-lane pressure is accepted (bounded by the backlog
+#: and the grant's httpx phase timeouts), not hidden.
+CONTROL_PLANE_OAUTH_WORKER_NAME = "tortoise-oauth"
+CONTROL_PLANE_OAUTH_WORKERS = 8
+CONTROL_PLANE_OAUTH_BACKLOG = 64
 
 #: Wait bound for ONE offloaded control-plane resolution. Sits ABOVE a normal
 #: round-trip's several phases but below the edge/proxy budget, so a
@@ -740,12 +758,19 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
 
     ``pool="auth"`` (default) is the AUTH-CRITICAL pool; ``pool="telemetry"``
     is a SEPARATE pool for best-effort work, so telemetry can never park the
-    auth slots (#3498 review P1).
+    auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
+    for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
+    flood cannot park the auth slots either.
 
     An UNKNOWN selector raises rather than falling back to auth: the pool
-    choice is the only thing keeping best-effort work off the auth-critical
-    capacity, so a typo must fail closed, not silently revert the split.
+    choice is the only thing keeping best-effort or attacker-reachable work
+    off the auth-critical capacity, so a typo must fail closed, not silently
+    revert the split.
     """
+    if pool == "oauth":
+        return daemon_worker(CONTROL_PLANE_OAUTH_WORKER_NAME,
+                             workers=CONTROL_PLANE_OAUTH_WORKERS,
+                             max_backlog=CONTROL_PLANE_OAUTH_BACKLOG)
     if pool == "telemetry":
         return daemon_worker(CONTROL_PLANE_TELEMETRY_WORKER_NAME,
                              workers=CONTROL_PLANE_TELEMETRY_WORKERS,
@@ -808,7 +833,8 @@ async def run_control_plane_call(fn, *, op: str,
 
     ``pool`` selects the worker: ``"auth"`` (default) for auth-critical
     resolutions, ``"telemetry"`` for best-effort work that must never consume
-    auth capacity.
+    auth capacity, ``"oauth"`` (#3669) for the attacker-reachable OAuth
+    client-resolution lane.
 
     Fail-closed: a missed bound or a saturated backlog raises
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by

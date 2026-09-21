@@ -683,9 +683,12 @@
     function renderPricing() {
       const grid = document.getElementById('pricing-grid');
       const names = ['free', 'solo', 'pro', 'team'];
+      // #4336: display names — the tier KEY stays `pro` (mirror parity,
+      // Stripe ids, pricing.json); only the rendered name changes.
+      const labels = { free: 'Free', solo: 'Solo', pro: 'Builder', team: 'Team' };
       grid.innerHTML = names.map((name) => {
         const t = PRICING.tiers[name];
-        const label = name.charAt(0).toUpperCase() + name.slice(1);
+        const label = labels[name] || (name.charAt(0).toUpperCase() + name.slice(1));
         const popular = t.popular ? '<span class="popular-tag">Most popular</span>' : '';
         const features = t.features.map((f) => `<div class="feature">${checkSvg()} <span>${f}</span></div>`).join('');
         const excluded = t.excluded.map((f) => `<div class="feature"><span class="x">✕</span> <span class="muted">${f}</span></div>`).join('');
@@ -699,7 +702,7 @@
           <a href="/auth" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
         </div>`;
       }).join('');
-      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Pro and Team`;
+      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Builder and Team`;
     }
 
     function renderSelfHost() {

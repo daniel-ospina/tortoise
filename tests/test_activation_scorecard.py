@@ -634,9 +634,14 @@ def test_retrieval_allowlist_is_pinned_by_name_and_cannot_be_silently_widened():
         RETRIEVAL_TOOL_ALLOWLIST,
         RETRIEVAL_TOOL_ALLOWLIST_WIDE,
     )
-    from tortoise.tool_registry import TOOL_REGISTRY
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
-    names = {t.name for t in TOOL_REGISTRY}
+    # Every name must still RESOLVE — live, or retired through the #3883 warning
+    # shim. A retired name is deliberately KEPT in the allowlist: it still answers
+    # and still emits `mcp_tool_call`, and the retirement warning's purpose is to
+    # MEASURE who still calls the old name. Dropping it here would stop counting
+    # exactly the legacy traffic the retirement is meant to expose.
+    names = {t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)}
     assert names >= RETRIEVAL_TOOL_ALLOWLIST, RETRIEVAL_TOOL_ALLOWLIST - names
     assert names >= RETRIEVAL_TOOL_ALLOWLIST_WIDE, RETRIEVAL_TOOL_ALLOWLIST_WIDE - names
 

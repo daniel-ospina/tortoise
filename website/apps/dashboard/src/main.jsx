@@ -2,6 +2,8 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
+// #4336: TIER_LABELS is the display-name map; its parity against
+// product.html's `labels` map is pinned by tests/test_website_static.py.
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
@@ -2963,36 +2965,22 @@ function claimIntentInFlight() {
   // affordance sitting next to the primary action. Members (no in-dashboard
   // mint) always see the paste box: it is their only path.
   const [wizardShowPaste, setWizardShowPaste] = React.useState(false)
-  // #1997 (W1): catalog-presented is marked when the build catalog
-  // RENDERS (not just on pick) — re-entry with fork=build already set must
-  // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
-  // the checkpoint is keyed-MERGE (replay no-op), but a per-ORG guard keeps
-  // the network quiet on re-renders (the latch is keyed by team id so a
-  // second build org in the same session still marks its own catalog —
-  // review P2, #1997).
-  const catalogMarkedRef = React.useRef({})
-  React.useEffect(() => {
-    if (wizardStep !== 2) return
-    const teamKey = orgIdRef.current || 'default'
-    const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
-    if (buildFork && !catalogMarkedRef.current[teamKey]) {
-      catalogMarkedRef.current[teamKey] = true
-      api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ step: 'catalog-presented' }),
-      }).catch(() => {})
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
+  // #1997 (W1) / #3913: the dashboard writes NO `catalog-presented` mark. The
+  // render-time effect that marked it when the catalog rendered was removed,
+  // and the build-fork PICK handler's optional mark is gone too (owner ruling
+  // 2026-09-20: the build fork completes on the two acts the server OBSERVES —
+  // harness-connected + first-points-filed — so nothing the browser does is a
+  // completion input). The step id stays ACCEPTED server-side (existing orgs
+  // carry it), which is why no client writer is needed.
 
   // #2004 (W8): the registry-backed builder catalog — fetched ONCE per
   // session from GET /v1/capabilities (tortoise/tool_registry.py
   // CAPABILITY_CATALOG) when the build branch renders on step 2. The static
   // placeholder in wizardFlow.js renders until the fetch resolves and stays
   // as the OFFLINE fallback (same names — never a blank catalog; the
-  // registry-presented mark above is untouched: this swap is SOURCE-only,
-  // the once-per-org catalog-presented step edge still fires on first
-  // build-fork render and is a keyed-MERGE no-op on replay).
+  // registry-presented swap is SOURCE-only; the dashboard fires NO
+  // catalog-presented step edge at all — #3913, it is an accepted server id,
+  // never a client write).
   const [wizardCatalog, setWizardCatalog] = React.useState(null)
   const catalogFetchedRef = React.useRef(false)
   React.useEffect(() => {
@@ -4698,12 +4686,13 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
-  // branch: the catalog render marks catalog-presented via W5's checkpoint
-  // (surface 4 write contract — the build-fork gate is evaluable; W8 #2004
-  // replaced the placeholder SOURCE with the registry endpoint, the
-  // mark/mechanism is unchanged). Fork SEMANTICS are W2-owned — W1 renders
-  // the shell only.
+  // #1997 (W1): fork-card step handler — checkpoint fork (set-once). #3913
+  // (owner ruling 2026-09-20): a BUILD pick records the fork and NOTHING else —
+  // the build gate completes on the two acts the server OBSERVES
+  // (harness-connected + first-points-filed), so no client step write is a
+  // completion input. W8 #2004 replaced the placeholder catalog SOURCE with
+  // the registry endpoint; the CARD still renders on a build pick. Fork
+  // SEMANTICS are W2-owned — W1 renders the shell only.
   async function handleWizardFork(forkId) {
     setWizardForkBusy(true)
     setWizardForkError('')
@@ -4728,25 +4717,14 @@ function claimIntentInFlight() {
         return
       }
       setWizardForkChosen(forkId)
-      // review P1 (#1997): the catalog-presented mark fires HERE, not in a
-      // step-2 effect — React batches setWizardForkChosen + setWizardStep(3)
-      // into ONE render where wizardStep===3, so the effect's step-2 guard
-      // never observes the fresh build pick. Fire-and-forget; keyed-MERGE
-      // (replay no-op). The step-2 effect above still covers RE-ENTRY with a
-      // persisted build fork (onboarding.fork === 'build').
-      // A build pick also STAYS on step 2 so the catalog renders (the user
-      // sees what they can build on before continuing) — the Continue button
-      // appears once a fork is chosen; self picks advance.
-      if (forkId === 'build') {
-        const teamKey = orgIdRef.current || 'default'
-        if (!catalogMarkedRef.current[teamKey]) {
-          catalogMarkedRef.current[teamKey] = true
-          api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-            method: 'POST', useSession: true,
-            body: JSON.stringify({ step: 'catalog-presented' }),
-          }).catch(() => {})
-        }
-      } else {
+      // #3913 (owner ruling 2026-09-20): a BUILD pick writes NO checkpoint step.
+      // The catalog-presented mark that used to fire here was deleted with the
+      // render-time effect — the build gate is the two acts the server OBSERVES
+      // (harness-connected + first-points-filed), so picking a fork must not
+      // record anything the gate could read. The catalog CARD still renders: a
+      // build pick stays on the fork step (the chosen state shows it) and the
+      // Continue button appears; a self pick advances to the connect step.
+      if (forkId !== 'build') {
         setWizardStep(2)
       }
     } catch (e) {
@@ -5551,7 +5529,7 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite members.')
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.')
           setBusy(false)
           return
         }
@@ -5629,17 +5607,31 @@ function claimIntentInFlight() {
 
   async function loadBackups(key) {
     const _teamAtCall = orgIdRef.current // Round-10: staleness guard
-    // #2167 (rule 2): session-mode /backups pins ?org_id=<selected> and
+    // #2167 (rule 2): session-mode /v1/backups pins ?org_id=<selected> and
     // sends NO key header — the old shape team-scoped by the KEY header
     // (a zero-key session whose selected team ≠ first membership rendered
-    // the first membership's backups: /backups is ungated server-side, so
+    // the first membership's backups: /v1/backups is ungated server-side, so
     // _session_user_org resolves memberships[0] without the param).
-    // Key-mode (authMode 'apikey' — no session JWT exists there) keeps the
-    // key header as its authenticator.
-    // #1842 P1-2: /backups is session-dual-auth (get_current_org_session_ungated).
+    // #1842 P1-2: /v1/backups is session-dual-auth (get_current_org_session_ungated).
+    // Only the SESSION lane reaches this route: the BFF proxy requires the
+    // `__Host-session` cookie, strips any client-built `authorization` header and
+    // attaches its own Bearer, so key-mode (authMode 'apikey') cannot authenticate
+    // here at all — it does not render the backups surface.
+    // #4144: the `/v1/` prefix is REQUIRED, not cosmetic. `api()` targets the
+    // same-origin BFF proxy, whose TypeScript route is `functions/api/v1/[[path]].ts`
+    // and which rebuilds the upstream URL as `${API_ORIGIN}/v1/${rest}`. This call
+    // predates the #3501/#4054 migration to the proxy and was the one call site left
+    // without the prefix, so it asked `/api/backups` — a path with no Pages Function
+    // — and the Backups card silently read as empty (404 in the console). Every other
+    // call site in this file that reaches the HOSTED API goes through `/v1/…` (paths
+    // like `/session` and `/profile` are Pages Functions and are served directly).
+    // The route-side regression pin for this fix is tests/test_backups_v1_alias.py:
+    // it reads the LIVE route table and requires every public backup route to have a
+    // `/v1` alias. A file-wide guard over the dashboard's literal call paths is
+    // proposed in #4446 (a runtime-derived check, not a static text scan).
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
-      const b = await api(`/backups${q}`, { useSession: true })
+      const b = await api(`/v1/backups${q}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       // #2784: retain the whole array — the Graphs tab derives a per-graph
@@ -8309,7 +8301,7 @@ function claimIntentInFlight() {
                     {(currentOrgName || 'O').charAt(0).toUpperCase()}
                   </span>
                   <span className="account-org-name">{currentOrgName || 'No organization'}</span>
-                  {team?.tier && <span className="tier-badge">{team.tier}</span>}
+                  {team?.tier && <span className="tier-badge">{TIER_LABELS[team.tier] || team.tier}</span>}
                 </div>
                 {teams.length > 1 && (
                   <>
@@ -8480,7 +8472,7 @@ function claimIntentInFlight() {
         )}
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {team.tier || 'free'} tier · Upgrade
+            {(TIER_LABELS[team.tier] || team.tier || 'free')} tier · Upgrade
           </a>
         )}
         {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
@@ -9502,7 +9494,7 @@ function claimIntentInFlight() {
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
+              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
