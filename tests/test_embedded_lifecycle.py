@@ -1166,34 +1166,39 @@ def test_raw_client_owner_record_released_by_the_fallback(tmp_path):
             raw.close()
 
 
-def test_close_embedded_clients_releases_a_raw_clients_claim(tmp_path):
-    """#4487 review (cycle 2): `close_embedded_clients` is the signal-teardown
-    seam and its `_release_owner` fallback must release a RAW client's claim
-    even though its teardown nulls `socket_file` first. Pre-fix the fallback
-    re-derived `owner_socket_of(inner)` AFTER teardown, got None, and stranded
-    the refcount — which then makes `record_owner` short-circuit forever, so a
+def test_release_owner_uses_the_captured_socket_after_teardown(tmp_path):
+    """#4487 review (cycle 2): `close_embedded_clients` captures the socket
+    BEFORE its teardown (redislite `_cleanup()` nulls `socket_file`) and hands
+    it to `_release_owner`. Pre-fix the fallback re-derived
+    `owner_socket_of(inner)` AFTER teardown, got None, and stranded the
+    refcount — which then makes `record_owner` short-circuit forever, so a
     later LIVE server on the same path got NO record (the #4487
-    uninstrumented-live-server class)."""
+    uninstrumented-live-server class).
+
+    The seam itself is deliberately NOT called: `close_embedded_clients()` is
+    process-wide and consumes the process-global atexit budget (#4214), which
+    broke the fast-atexit tests that follow it in the carve-out lane. The
+    captured-socket contract is what the seam calls into, and that is what is
+    pinned here."""
     from redislite.client import Redis as RawRedis
 
-    from tortoise.embedded_lifecycle import (
-        _embedded_clients,
-        _owner_refcounts,
-        close_embedded_clients,
-    )
+    from tortoise.embedded_lifecycle import _owner_refcounts, _release_owner
     from tortoise.embedded_reaper import _owner_records
 
-    raw = RawRedis(str(tmp_path / "close_raw.db"))
-    sock = raw.socket_file
-    assert _owner_records(sock) == (1, 1), "the patch must have recorded it"
-    _embedded_clients.add(raw)
+    raw = RawRedis(str(tmp_path / "captured_sock.db"))
     try:
-        close_embedded_clients()
+        sock = raw.socket_file
+        assert _owner_records(sock) == (1, 1), "the patch must have recorded it"
+        # The seam's post-teardown shape: `socket_file` is already gone, so the
+        # caller-captured `sock` is the ONLY way to resolve the claim.
+        _release_owner(raw, raw, sock)
+        assert sock not in _owner_refcounts, (
+            "the captured-socket path must release a raw client's claim; "
+            "pre-fix the post-teardown owner_socket_of resolved None and "
+            "stranded it")
     finally:
-        _embedded_clients.discard(raw)
-    assert sock not in _owner_refcounts, (
-        "close_embedded_clients must release a raw client's claim; pre-fix the "
-        "post-teardown owner_socket_of resolved None and stranded it")
+        with contextlib.suppress(Exception):
+            raw.close()
 
 
 def test_owner_record_written_on_construction_removed_on_close(tmp_path):
