@@ -32,6 +32,11 @@ surfaces:
   # the same reason: the file it guards is tortoise/hosted_api.py, which
   # selects the `api` surface.
   - test_graph_write_loop_responsiveness.py
+  # #3498: the control-plane auth/session HTTP must not run on the event loop.
+  # Same dual registration as the three loop-responsiveness guards above, for
+  # the same reason: the file it guards is tortoise/hosted_api.py (and
+  # tortoise/monitoring.py), which selects the `api` surface.
+  - test_control_plane_offload_3498.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
@@ -387,6 +392,8 @@ surfaces:
   - test_analytics_fallback_alert.py
   - test_client_status_vocabulary.py
   - test_embedder_provision.py
+  - test_embedded_evidence.py
+  - test_installer_preserves_foreign_skill_content.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -411,6 +418,7 @@ surfaces:
   - test_collision_preflight.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
+  - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
@@ -568,6 +576,17 @@ surfaces:
   # SOURCE_PATTERNS surface, so a change to either falls through to core.
   - test_fork_safety_3845.py
   - test_fly_machines_guard.py
+  # #4126: the Fly secret *provenance* guard (check-fly-secret-drift.py). It
+  # exists because a Fly secret with no managing source is invisible — the #4126
+  # incident (a hand-set TORTOISE_SESSION_LLM_MODEL plus a stale
+  # OPENROUTER_API_KEY inside Fly-only env) produced a total extraction outage
+  # that the API reported as 200/partial, and nothing in CI could see the drift.
+  # Registered in `core` alongside its sibling deploy-time guards
+  # (test_fly_machines_guard.py, test_deploy_workflow.py). It is hermetic but
+  # multi-minute, so it carries an explicit `durations:` weight (see the
+  # durations map) — an unmeasured entry would also drop fast-pool coverage
+  # below the 90% floor (#4259 review).
+  - test_fly_secret_drift.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_diagnostics.py
@@ -1202,6 +1221,22 @@ durations:
 # instead of silently dropping the six back to the default anyway, and cannot
 # mis-balance the LPT pack. Refresh these six from the first post-merge main
 # run that includes them.
+#
+# #4259: test_fly_secret_drift.py is hermetic but multi-minute (60 subprocess
+# bash invocations plus the shipped-artifact end-to-end). Its first CI run has
+# not produced a junit measurement yet, so the value below is a LOCAL
+# measurement (the 3-file focused run 712.9s minus the two sibling files'
+# 278.9s ≈ 434s). An unmeasured file still leaves fast-pool coverage BELOW the
+# 90% floor once this file enters the pool, so a weight is required — the flat
+# default is what the floor exists to reject. Refresh from junit once the file
+# lands on main.
+  test_fly_secret_drift.py: 434.0
+  # #3827: new file in this pool — no CI junit measurement exists yet, so it takes
+  # the flat 2.0s default under the #3400 policy above rather than the local timings
+  # measured on this host (257s/627s at load 64-136, ~81s of which is the autouse
+  # session-fixture baseline every lane pays — local values are not the input here).
+  # Refresh from the first post-merge main run that includes it.
+  test_embedded_evidence.py: 2.0
   test_shared_state_concurrency.py: 2.0
   test_shared_state_events.py: 2.0
   test_shared_state_events_claim.py: 2.0
@@ -1214,6 +1249,11 @@ durations:
 # the file back to the default anyway, and cannot mis-balance the LPT pack).
 # Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 2.0
+  # #4327: no CI junit measurement yet (new file), so enter at the flat 2.0s
+  # default per the #3400/#4221 convention — the conservative floor keeps the
+  # 90% durations-coverage floor satisfied; refresh from the first post-merge
+  # main run that includes it.
+  test_installer_preserves_foreign_skill_content.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
@@ -1364,6 +1404,7 @@ durations:
   test_battery_corpus_v11.py: 3.2
   test_tenancy_spine.py: 3.2
   test_collision_preflight.py: 3.0
+  test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam
   test_free_team_entitlement.py: 3.0
   test_integration_search.py: 3.0
   test_kind_classifier.py: 3.0

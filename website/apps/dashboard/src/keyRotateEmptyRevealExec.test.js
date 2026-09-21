@@ -106,7 +106,7 @@ function build(deps, decls) {
 }
 
 // ── regenerateKey ───────────────────────────────────────────────────────────
-function rotateEnv({ mintKey, loadAll } = {}) {
+function rotateEnv({ mintKey, loadAll, orgIdRef } = {}) {
   const calls = { rotatedKey: [], error: [], capNotice: [], loadAll: 0, revoke: [], order: [] }
   const rows = [
     { id: 'k-old', key_id: 'k-old', name: 'residue row', key_prefix: 'tt_live_re',
@@ -117,7 +117,7 @@ function rotateEnv({ mintKey, loadAll } = {}) {
     busy: false,
     keys: rows,
     currentOrgId: 'org-A',
-    orgIdRef: { current: 'org-A' },
+    orgIdRef: orgIdRef || { current: 'org-A' },
     team: { tier: 'free' },
     _MS_PER_DAY: 86400000,
     // Pure helpers — irrelevant to the plaintext guard; stubs keep the file
@@ -141,7 +141,7 @@ function rotateEnv({ mintKey, loadAll } = {}) {
     setBusy: () => {},
     setRotatedKey: (v) => calls.rotatedKey.push(v),
   }
-  return { deps, calls, regenerateKey: build(deps, ['function revealablePlaintext', 'async function regenerateKey']).regenerateKey }
+  return { deps, calls, regenerateKey: build(deps, ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function regenerateKey']).regenerateKey }
 }
 
 test('#4342: a plaintext-less rotate 2xx latches NO reveal and states the old key is revoked', async () => {
@@ -177,7 +177,7 @@ test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused
   // A bare `!plaintext` check let these through: `mk.key = 42` and
   // `mk.key = '   '` are both NON-falsy, so the reveal rendered a value the
   // user could not use (a blank box, or a copied blank) with no error surfaced.
-  for (const value of [42, {}, [], '   ', '\n\t']) {
+  for (const value of [42, {}, [], '   ', '\n\t', '\u200b', '\u3164', '\u2800', '\u00ad', '\u061c', '\u180e', '\ufe0f']) {
     const { calls, regenerateKey } = rotateEnv({ mintKey: async () => ({ key: value }) })
     await regenerateKey('k-old')
     assert.deepEqual(calls.rotatedKey, [],
@@ -219,6 +219,22 @@ test('#4342: a successful rotate still latches the plaintext and its expiry echo
   assert.equal(calls.loadAll, 1)
 })
 
+test('#4342/#4359: a team switch during the rotate refusal refresh suppresses the refusal', async () => {
+  // Mirrors the create-path guard (`createKey`): the refusal names the row and
+  // the already-revoked old key, so a switch mid-refresh must not carry it
+  // under the new team's header.
+  const orgIdRef = { current: 'org-A' }
+  const { calls, regenerateKey } = rotateEnv({
+    orgIdRef,
+    mintKey: async () => ({ id: 'k-new', key_prefix: 'tt_rot_new' }),
+    loadAll: async () => { orgIdRef.current = 'org-B' },
+  })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.rotatedKey, [], 'still no reveal')
+  assert.deepEqual(calls.error.filter(Boolean), [],
+    'a refusal whose team changed mid-refresh must not be surfaced under the new team')
+})
+
 // ── copyRotatedKey ──────────────────────────────────────────────────────────
 function copyEnv(rotatedKey, clipboard = {}) {
   const written = []
@@ -255,7 +271,9 @@ test('#4342: the rotate copy NEVER hands a non-string/empty value to the clipboa
   // handler cleared the reveal). Reproduce the coercion at the exact seam.
   assert.equal(String(''), '', 'the coercion this bug rode on: an empty writeText is a no-op')
   for (const bad of [null, undefined, {}, { plaintext: '' }, { plaintext: null },
-    { plaintext: undefined }, { plaintext: 42 }, { plaintext: '   ' }, { plaintext: '\n\t' }]) {
+    { plaintext: undefined }, { plaintext: 42 }, { plaintext: '   ' }, { plaintext: '\n\t' },
+    { plaintext: '\u200b' }, { plaintext: '\u3164' }, { plaintext: '\u2800' },
+    { plaintext: '\u061c' }, { plaintext: '\u00ad' }, { plaintext: '\ufe0f' }]) {
     const { written, cleared, copyRotatedKey } = copyEnv(bad)
     await copyRotatedKey()
     assert.deepEqual(written, [], `writeText must not be reached with ${JSON.stringify(bad)}`)
@@ -290,8 +308,8 @@ test('#4342: the rotate reveal is gated on a derived non-empty string, and the r
     /const rotatedKeyReveal = \(rotatedKey && revealablePlaintext\(rotatedKey\.plaintext\)\) \|\| ''/,
     'the reveal key must be derived once from a non-empty, non-blank string')
   assert.match(mainJsxCode,
-    /function revealablePlaintext\(value\) \{\s*return \(typeof value === 'string' && value\.trim\(\)\) \? value : ''/,
-    'the shared predicate must require a non-blank string (a number/object/blank is not a reveal)')
+    /function revealablePlaintext\(value\) \{\s*return \(typeof value === 'string' && value\.replace\([^\n]*\)\.trim\(\)\) \? value : ''/,
+    'the shared predicate must reject a blank (including zero-width/invisible) string, not just a falsy one')
   assert.match(mainJsxCode, /\{rotatedKeyReveal && \(/,
     'the JSX must gate on the derived string, not the truthy object')
   assert.equal((mainJsxCode.match(/\{rotatedKey && \(/g) || []).length, 0,
