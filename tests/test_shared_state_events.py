@@ -16,9 +16,25 @@ from tortoise.shared_state.events import EventCodec, event_types, register_event
 
 @pytest.fixture(autouse=True)
 def _clear_registry():
-    """Isolate tests from global state."""
+    """Isolate tests from global state — for THIS test only.
+
+    ``_event_types`` is a process-global. Clearing it without restoring leaves
+    every LATER test in the same pytest session reading a truncated
+    {type: version} map, so any of them that validates a type against
+    ``event_types()`` raises ``ValueError: unknown event type``. A CI session is
+    ~270 files in ONE process, so the leak is invisible until the pack split
+    changes and a victim file lands behind this one — which is exactly how it
+    surfaced: ``test_subscriptions.py::test_types_filter`` passes alone and reds
+    here. Restore in a finally so the fixture cannot leak even on test error.
+    """
     import tortoise.shared_state.events as _ev
+    _saved = dict(_ev._event_types)
     _ev._event_types.clear()
+    try:
+        yield
+    finally:
+        _ev._event_types.clear()
+        _ev._event_types.update(_saved)
 
 
 class TestEventCodecEncode:

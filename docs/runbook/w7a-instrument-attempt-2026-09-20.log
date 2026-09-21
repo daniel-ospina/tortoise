@@ -1,0 +1,24 @@
+# W7A — the D3 instrument live-arm launch attempts (2026-09-20).
+# Every attempt was pinned to the branch head and reached NO question before
+# being stopped: the host was saturated (load 40 -> 362 on 10 CPUs) and each
+# attempt spent >10 min seeding one question. Headers are the exact first lines
+# of each run's log (the log file was reused per attempt, so only the last
+# attempt's full log survives).
+#
+# pin=07fff7fd4e3f41e0dcbd6dd0abd806f1e737ef5d start=2026-09-20T17:48:42Z mode=live device=mps nice=10
+# pin=07fff7fd4e3f41e0dcbd6dd0abd806f1e737ef5d start=2026-09-20T18:18:05Z mode=live device=mps nice=10 load=153.83 141.22 110.12
+# pin=f31aea5c62dc78b7f975e4a15b4d5f1bae2d56b8 start=2026-09-20T18:41:27Z mode=live device=mps(default) nice=10 load=50.24 47.51 57.57
+# pin=74c9b79978b2860ece75f3de489b16cc94652e04 start=2026-09-20T19:02:24Z mode=live device=mps(default) nice=0  load=93.52 78.05 68.75
+# pin=74c9b79978b2860ece75f3de489b16cc94652e04 start=2026-09-20T19:13:14Z mode=live device=CPU(forced via shim) nice=0 load=119.98 105.61 90.00
+# pin=74c9b79978b2860ece75f3de489b16cc94652e04 start=2026-09-20T19:41:12Z mode=live device=mps(default) nice=0  load=149.29 141.43 122.62
+#
+# Per-question seed cost measured directly on this host (CPU-forced, question
+# 0a995998, 484 turns): wall = 412.2 s -> ~2.4 h for a 21-question pass.
+#
+# Last attempt's surviving log:
+pin=74c9b79978b2860ece75f3de489b16cc94652e04 start=2026-09-20T19:41:12Z mode=live device=mps(default) nice=0 load=149.29 141.43 122.62
+tree pin OK: 74c9b79978b2860ece75f3de489b16cc94652e04
+fixture OK: sha256=7f4062643323af4e... n=21 sessions=1004 turns=10470 abs=3
+Loading weights: 100%|##########| 199/199
+Warning: You are sending unauthenticated requests to the HF Hub.
+(no per-question line — stopped while seeding question 1 of 21)

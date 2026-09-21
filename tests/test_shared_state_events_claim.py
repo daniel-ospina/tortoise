@@ -33,9 +33,21 @@ CLAIM_TYPES = (
 
 @pytest.fixture(autouse=True)
 def _clear_registry():
-    """Isolate tests from global state (mirrors test_events.py)."""
+    """Isolate tests from global state (mirrors test_events.py) — for THIS test only.
+
+    Same process-global leak as the fixture of the same name in
+    test_shared_state_events.py: ``_event_types`` must be restored, not just
+    cleared, or every later test in the session reads a truncated registry and
+    any that validates a type against ``event_types()`` raises instead.
+    """
     import tortoise.shared_state.events as _ev
+    _saved = dict(_ev._event_types)
     _ev._event_types.clear()
+    try:
+        yield
+    finally:
+        _ev._event_types.clear()
+        _ev._event_types.update(_saved)
 
 
 @pytest.fixture(autouse=True)

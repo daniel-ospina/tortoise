@@ -20,6 +20,7 @@ webhook emits ``plan``/``tier``, which were never registered (the live,
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -189,8 +190,10 @@ def test_strict_mode_does_not_break_the_capture_path(tmp_path, monkeypatch):
     monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
     with pytest.raises(ha.UnregisteredTelemetryKey):
         ha._track_analytics_event("team-1", "capture_cost", {"aha": True})
+    # #3498: _track_onboarding_event is async (its emit is offloaded off the
+    # event loop), so the strict-mode exception is observed by awaiting it.
     with pytest.raises(ha.UnregisteredTelemetryKey):
-        ha._track_onboarding_event({"org_id": "team-1"}, "cap", aha=True)
+        asyncio.run(ha._track_onboarding_event({"org_id": "team-1"}, "cap", aha=True))
 
 
 def test_non_dict_properties_is_tolerated(tmp_path, monkeypatch):

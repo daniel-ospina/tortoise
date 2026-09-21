@@ -90,13 +90,11 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: '0 4 * * *'   # nightly full run — tier-3 backstop (#1021)
 
 # #1008/#1021: the `changes` job runs the tiered selector
 # (tools/ci_selection.py) — always runs, always emits the audit artifact.
-# PRs run tier 1 (curated smoke) + matched-surface tests; push/schedule run
-# the full matrix. The REQUIRED check is `python-ci-gate` (branch
+# PRs run tier 1 (curated smoke) + matched-surface tests; push runs the
+# full matrix. The REQUIRED check is `python-ci-gate` (branch
 # protection), which aggregates the matrix. Job id `python-ci-gate` is
 # load-bearing: do NOT rename it or add a `name:` field. welcome-e2e
 # (#801 live-signup monitor) lives in its own scheduled workflow.
@@ -106,8 +104,11 @@ on:
 # PRs skip both; tier-2 PRs run only their surface's slow files. NOTE:
 # config/* falls through to the core surface, so config-only PRs (the
 # manifest edits) run both legs — conservative and correct.
-# trunk (push) + nightly (schedule) + unknown/shared-module PRs keep the
-# full runs (the coverage backstop is never weakened).
+# trunk (push) + unknown/shared-module PRs keep the full runs.
+# #4367: the nightly schedule was removed — push-to-main is now the ONLY
+# full-matrix trigger (tests run when the functionality they cover changes,
+# not on a timer). The selector still accepts --event schedule for any
+# future caller; nothing in this workflow emits that event.
 
 concurrency:
   # Per-PR cancel only: on `pull_request` github.ref is refs/pull/N/merge so
@@ -151,7 +152,7 @@ jobs:
   changes:
     # #1008/#1021: selection job — always runs, always emits the artifact.
     # Runs the tiered selector (tools/ci_selection.py): tier 1 smoke always;
-    # matched surfaces on code PRs; full on push/schedule/shared/unknown.
+    # matched surfaces on code PRs; full on push/shared/unknown.
     runs-on: ubuntu-latest
     outputs:
       python: ${{ steps.select.outputs.python }}
@@ -178,7 +179,7 @@ jobs:
       - name: Tiered selection
         id: select
         run: |
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
             SEL=$(python3 tools/ci_selection.py --event "${{ github.event_name }}")
             echo "python=true" >> "$GITHUB_OUTPUT"
           else
@@ -196,11 +197,11 @@ jobs:
           echo "test_files=$(echo "$SEL" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["test_files"]))')" >> "$GITHUB_OUTPUT"
           # #1371: slow files run ONLY in test-slow — single source of truth is
           # config/ci-surfaces.yml (the selector emits them on every path, so
-          # this echo is safe for push/schedule too).
+          # this echo is safe for push too).
           echo "slow_files=$(echo "$SEL" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["slow_files"]))')" >> "$GITHUB_OUTPUT"
           # #2147/#2148: the selector emits the diff-gate keys on EVERY path
           # (full selections + tier-2 + docs-only) so these echoes are safe for
-          # push/schedule too. slow_selected is space-joined BARE names (the
+          # push too. slow_selected is space-joined BARE names (the
           # test-slow matrix format — no .py suffix) so a leg can case-match it
           # against ${{ matrix.files }} in the tier-2 shape.
           echo "slow_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["slow_run"]).lower())')" >> "$GITHUB_OUTPUT"
@@ -301,7 +302,7 @@ jobs:
     # Cost: one extra job (~20s: checkout + setup-python + pyyaml), against a
     # 25-minute suite that used to be silently withheld.
     #
-    # Unconditional on every event (push/PR/schedule) — same as before. Needs
+    # Unconditional on every event (push/PR) — same as before. Needs
     # pyyaml only: tools/ci_selection.py imports it locally.
     #
     # timeout-minutes: this job now owns a network install (`pip install
@@ -556,11 +557,11 @@ jobs:
         # The D-3=A instrumented streak's producer half: the fast-matrix job
         # runs PER-LEG, so exactly ONE leg must write the producer marker or
         # last-writer-wins clobbers (cycle-5 P1-7 option (b)). Gated on
-        # half==b AND the post-merge trigger (push/schedule — PR runs never
-        # mutate the canary artifact). The marker rides the artifact upload
-        # (below) and is consumed by the canary-streak job (needs: [test],
-        # artifacts-only — cycle-6 P1-7).
-        if: github.event_name == 'push' || github.event_name == 'schedule'
+        # half==b AND the post-merge trigger (push — PR runs never mutate the
+        # canary artifact). The marker rides the artifact upload (below) and
+        # is consumed by the canary-streak job (needs: [test], artifacts-only
+        # — cycle-6 P1-7).
+        if: github.event_name == 'push'
         run: |
           if [ "${{ matrix.half }}" = "b" ]; then
             python3 - <<'EOF'
@@ -835,8 +836,8 @@ jobs:
     # #2148 (2026-09-02-ci-audit F2): diff-gated — the full committed slow
     # list used to run on EVERY PR (docs-only PR #2132 paid 29m43 + 29m08
     # runner-min for a 1-file docs change). Runs when the selector says so:
-    # full selections (push to main / nightly schedule / unknown-path or
-    # shared-module PRs — the trunk + nightly backstop, NEVER dropped) or a
+    # full selections (push to main / unknown-path or
+    # shared-module PRs — the trunk backstop, NEVER dropped) or a
     # PR whose matched surfaces own slow-leg files (slow_run). Tier-2 PRs
     # run only their surface's slow files (slow_selected, intersected with
     # each leg's committed list in the manifest/run steps); docs/website/
@@ -1501,8 +1502,8 @@ jobs:
     # diff-unaware — a docs-only PR (#2132) paid 23m31 for the full 23-file
     # embedded set, and the job was the critical path of every main push.
     # Diff-gated on the selector's carve_out_run: full selections (push to
-    # main / nightly schedule / unknown-path or shared-module PRs — the
-    # trunk + nightly backstop, NEVER dropped) or a PR whose matched
+    # main / unknown-path or shared-module PRs — the
+    # trunk backstop, NEVER dropped) or a PR whose matched
     # surfaces own carve-out files (core/api/sdk/eval — the embedded /
     # daemon / registry / guard surfaces; a carve-out TEST file change
     # selects its owning surface, so it re-runs here too). docs/website/
@@ -1711,7 +1712,7 @@ jobs:
     # Epic #1647 Task 9 Step 6 (D-3=A): the instrumented canary-drop streak.
     # Separate job (needs: [test] — the matrix jobs fan in; a step inside the
     # matrix job cannot run after both halves — cycle-5 P1-7). POST-MERGE
-    # ONLY (push/schedule — PR runs never mutate the canary artifact).
+    # ONLY (push — PR runs never mutate the canary artifact).
     # Downloads the half-b artifact set (junitxml + expected-nodeids +
     # step_wall + the canary-producer marker), finds the PREVIOUS streak
     # artifact, runs the deterministic classifier (tools/testdb_canary_classify
@@ -1728,7 +1729,7 @@ jobs:
     # always() + the post-merge gate = the classifier receives red runs too
     # (the half-b artifact upload is if: always() + continue-on-error, so
     # failed runs still ship their junitxml/manifest/step_wall evidence).
-    if: always() && (github.event_name == 'push' || github.event_name == 'schedule')
+    if: always() && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1747,8 +1748,8 @@ jobs:
           path: artifacts
       - name: Download previous streak artifact (chain continuity)
         # The streak chains across post-merge runs via the previous run's
-        # `testdb-canary-streak` artifact. Walk the most recent push/schedule
-        # runs and take the FIRST non-current run that actually has the
+        # `testdb-canary-streak` artifact. Walk the most recent push runs
+        # and take the FIRST non-current run that actually has the
         # artifact (a run before the flip has none -> try the next). The gh
         # run-list query FAILS LOUD (review finding #2: a silent query failure
         # would read as "no previous streak" and wrongly reset a real streak
@@ -1764,6 +1765,12 @@ jobs:
           gh run list --workflow python-ci.yml --branch main --event push --limit 5 \
             --json databaseId --jq '.[].databaseId' > /tmp/prev-runs.txt
           set +e
+          # #4367: the nightly schedule trigger was removed, so this query can
+          # only ever return HISTORICAL scheduled runs. It is kept as a
+          # one-time continuity bridge for the streak chain (a missing prev
+          # streak resets consecutive_green to 0 per testdb_canary_classify);
+          # it is `|| true`-guarded and becomes unreachable once the old
+          # nightly runs age out of the run-list window.
           gh run list --workflow python-ci.yml --branch main --event schedule --limit 3 \
             --json databaseId --jq '.[].databaseId' >> /tmp/prev-runs.txt 2>/dev/null || true
           CUR="${{ github.run_id }}"
