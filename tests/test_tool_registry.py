@@ -566,18 +566,45 @@ class TestCapabilityModel:
         assert write_classification_violations(served_registry()) == []
 
     def test_bindings_resolve(self):
-        from tool_surface_capabilities import binding_resolution_violations
+        from tool_surface_capabilities import (
+            binding_resolution_violations,
+            served_registry,
+        )
 
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert binding_resolution_violations(TOOL_REGISTRY) == []
+        assert binding_resolution_violations(served_registry()) == []
 
     def test_declared_sets_are_live(self):
         """Every declared set entry resolves — a rename fails loudly, it does
         not silently drop out of its check."""
-        from tool_surface_capabilities import declared_set_violations
+        from tool_surface_capabilities import declared_set_violations, served_registry
 
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert declared_set_violations(TOOL_REGISTRY) == []
+        assert declared_set_violations(served_registry()) == []
+
+    def test_guards_cover_the_served_set_not_only_the_live_one(self):
+        """#3883: a retired name is still resolvable and callable by name, so the
+        capability guards must see it. A live-only default left a retired entry's
+        handler and binding outside every guard — the exact hole that let a
+        retired writer's `writes` flag go unchecked."""
+        from tool_surface_capabilities import (
+            all_handler_operations,
+            registry_entries_by_method,
+            served_registry,
+        )
+
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        retired = {e.name for e in RETIRED_TOOL_REGISTRY}
+        live = {e.name for e in TOOL_REGISTRY}
+        assert retired, "the retirement set is empty — this test would be vacuous"
+        served = {e.name for e in served_registry()}
+        assert served == live | retired
+
+        # The guard defaults must cover the retired half, not just the live half.
+        assert retired <= set(all_handler_operations())
+        by_method = registry_entries_by_method()
+        bound = {e.name for entries in by_method.values() for e in entries}
+        assert retired & bound, (
+            "no retired entry is reachable through the binding index — the guards "
+            "would not see a retired entry's declared binding")
 
     # ── falsifiability — each declared threat class must be able to fail ──
 

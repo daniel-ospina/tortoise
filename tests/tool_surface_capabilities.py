@@ -628,9 +628,10 @@ def handler_operations(tool_name: str, source: str | None = None) -> HandlerOper
 
 
 def all_handler_operations(source: str | None = None) -> dict[str, HandlerOperations]:
-    from tortoise.tool_registry import TOOL_REGISTRY
-
-    return {e.name: handler_operations(e.name, source) for e in TOOL_REGISTRY}
+    # The SERVED set (#3883): a retired name is still resolvable and callable by name,
+    # so a guard that reads the live list alone leaves a retired entry's handler
+    # unchecked. `served_registry()` is live + retired.
+    return {e.name: handler_operations(e.name, source) for e in served_registry()}
 
 
 # ── Wrap-site analysis ──────────────────────────────────────────────────────
@@ -678,21 +679,18 @@ def quota_gated_wrap_sites(source: str | None = None) -> WrapSites:
 
 
 def registry_entries_by_method() -> dict[str, list]:
-    from tortoise.tool_registry import TOOL_REGISTRY
-
+    # Served set (#3883) — see all_handler_operations().
     out: dict[str, list] = {}
-    for entry in TOOL_REGISTRY:
+    for entry in served_registry():
         if entry.sdk_method:
             out.setdefault(entry.sdk_method, []).append(entry)
     return out
 
 
 def tools_reaching(operation: str, source: str | None = None) -> set[str]:
-    """Registry tool names whose handler reaches `operation`."""
-    from tortoise.tool_registry import TOOL_REGISTRY
-
+    """Served tool names whose handler reaches `operation` (retired included, #3883)."""
     return {
-        e.name for e in TOOL_REGISTRY
+        e.name for e in served_registry()
         if operation in handler_operations(e.name, source).operations
     }
 
@@ -974,10 +972,11 @@ def write_surface_map_violations(method_to_tool: dict[str, str] | None = None,
     every mapped name resolves, and every wrap site's tool is write-classified.
     A stale entry fails LOUDLY — never silently stops being checked."""
     import tortoise.mcp_server as _ms
-    from tortoise.tool_registry import TOOL_REGISTRY
 
     mapping = DECLARED_WRITE_SURFACE_MAP if method_to_tool is None else method_to_tool
-    entries = list(entries) if entries is not None else list(TOOL_REGISTRY)
+    # Served set (#3883): the default must cover retired entries too, or a retired
+    # write tool's binding silently stops being checked.
+    entries = list(entries) if entries is not None else list(served_registry())
     wrapped = {m for m, _, _ in quota_gated_wrap_sites(mcp_src).sites}
     out: list[str] = []
     forward = wrapped - set(mapping)
