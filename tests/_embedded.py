@@ -38,10 +38,11 @@ from tortoise.projection import FalkorProjection
 # on those triggers. A short-lived fixture that writes little never reaches
 # one (which is why small-graph RDB snapshots are known not to fire — see
 # `tortoise/projection/__init__.py`); the servers that DO reach the triggers
-# are the long-lived LEAKED fixtures (#4299), whose data is discarded by
-# definition. On a loaded box holding hundreds of them that fork storm is the
-# single largest CPU consumer (#4439). A harness fixture never needs an
-# automatic snapshot:
+# are the long-lived fixtures — the leaked #4299 population and the
+# session-scoped shared projection — whose data is discarded by definition.
+# On a loaded box holding hundreds of them that fork storm is the single
+# largest CPU consumer (#4439). A harness fixture never needs an automatic
+# snapshot:
 # explicit `SAVE`/`BGSAVE`, a graceful explicit `close()` (redislite's
 # `shutdown(save=True)`), and the AOF path (`TORTOISE_EMBEDDED_AOF=1`) are the
 # persistence contracts the suite actually asserts. (Interpreter-exit teardown
@@ -93,10 +94,10 @@ from tortoise.projection import FalkorProjection
 #
 # Residual (tracked, not absorbed): servers spawned by a test's own SUBPROCESS
 # (`python -c '... FalkorDB() ...'`) do not import this module and keep the
-# default schedule — follow-up issue #4497. Those spawns are short-lived and
-# far below the smallest trigger's floor (the reaper/lifecycle ones write
-# nothing; the concurrency writer spawns write a handful of keys — orders of
-# magnitude under 100 changes / 300 s), so none fires; the fork cost is
+# default schedule — follow-up issue #4497. Such a spawn exits long before
+# `900 1`'s 900 s window and writes at most a handful of keys (the
+# reaper/lifecycle ones write nothing; the concurrency writer spawns write a
+# few), so no change-count or time trigger is reached; the fork cost is
 # produced by the long-lived in-process fixtures this patch covers. Servers
 # constructed with an explicit `serverconfig={'save': ...}` keep that explicit
 # value (`settings()` applies kwargs over the default).
