@@ -140,13 +140,14 @@ export function existingKeyNoteFrom(team, rows, now = Date.now()) {
 
 // #4353: the paste-validation rejections tell an owner/admin how to get a key
 // they can actually use. AT the cap every one of those routes — create and
-// rotate alike — mints through the SAME capped POST /v1/team/keys (rotate
-// mints the replacement before the old row is revoked), so the remedy must
-// name revoke first. Empty below the cap, and empty when the server has not
-// supplied a limit: the clause is added, never substituted, so no surface
+// rotate alike — needs a slot the gate has already spent: `create` is refused
+// by _check_org_limit before the mint, and `rotate` mints its replacement
+// through that SAME capped route before the old row is revoked. So the remedy
+// must name revoke first. Empty below the cap, and empty when the server has
+// not supplied a limit: the clause is added, never substituted, so no surface
 // gains a promise it cannot keep.
 export function capRevokeFirstClause(team, rows, now = Date.now()) {
   const a = keyAllowance(team, rows, now)
   if (!a || !a.exhausted) return ''
-  return " You are at your plan's key limit, so revoke a key in the API Keys tab first — a rotate or create mints its replacement before the old key is freed."
+  return " You are at your plan's key limit, so revoke a key in the API Keys tab first — a create needs a free slot, and a rotate mints its replacement before the old key is freed."
 }

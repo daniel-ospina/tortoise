@@ -6774,7 +6774,11 @@ function claimIntentInFlight() {
             }
             const check = durableConnectKey('', pasted, keys)
             if (check.source === 'unknown') {
-              setWizardDurableError('That key does not match any key in this organization. Paste a key from this organization\'s API Keys tab, or ask an owner/admin to create one.')
+              // #4353: the owner arm names a create, which 402s at the cap for
+              // the same reason the other three rejections do — so it carries
+              // the same clause. The member arm routes to the owner/admin, the
+              // actor who sees the corrected at-cap remedy on the key surfaces.
+              setWizardDurableError(`That key does not match any key in this organization. ${isOwnerAdmin ? 'Paste a key from this organization\'s API Keys tab, or create one here.' + capRevokeFirstClause(team, keys) : 'Paste a key from this organization\'s API Keys tab, or ask an owner or admin to create one.'}`)
               return
             }
             if (check.source === 'bootstrap') {

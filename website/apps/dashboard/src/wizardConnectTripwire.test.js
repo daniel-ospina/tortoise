@@ -1581,15 +1581,18 @@ test('#4353: the connect step’s existing-key note is DERIVED, not an inline li
 })
 
 test('#4353: the paste-validation owner remedies APPEND the at-cap clause', () => {
-  // wizardPasteRow's "Use this key" handler has three owner/admin remedies
-  // (bootstrap / expiring / revoked-disabled). Each names a route — create or
-  // rotate — that mints through the SAME capped POST /v1/team/keys, so each
-  // must append the pure clause rather than promise a mint that 402s. The
+  // wizardPasteRow's "Use this key" handler has four owner/admin remedies
+  // (unknown / bootstrap / expiring / revoked-disabled). Each names a route —
+  // create or rotate — that needs a slot the gate has spent at the cap, so
+  // each must append the pure clause rather than promise a mint that 402s. The
   // slice is marker-guarded on both ends (a renamed/removed handler fails
   // loudly instead of silently widening).
   const paste = slice('const wizardPasteRow = (', 'const wizardNoKeyAffordance = (',
                       'wizardPasteRow handler')
   // MUTATION: dropping the interpolation from one arm fails its own assert.
+  assert.match(paste,
+    /or create one here\.' \+ capRevokeFirstClause\(team, keys\)/,
+    'the unknown rejection’s owner remedy must append the at-cap clause')
   assert.match(paste,
     /'Create a new key in the API Keys tab\.' \+ capRevokeFirstClause\(team, keys\)/,
     'the bootstrap rejection’s owner remedy must append the at-cap clause')
@@ -1599,10 +1602,12 @@ test('#4353: the paste-validation owner remedies APPEND the at-cap clause', () =
   assert.match(paste,
     /'Create or rotate a key in the API Keys tab and paste the new one\.' \+ capRevokeFirstClause\(team, keys\)/,
     'the revoked/disabled rejection’s owner remedy must append the at-cap clause')
-  // The member arms route to an owner/admin — the only actor who can revoke —
-  // so they must NOT carry the clause: exactly three occurrences, one per arm.
-  assert.equal((paste.match(/capRevokeFirstClause\(team, keys\)/g) || []).length, 3,
-    'exactly the three owner/admin remedies carry the clause (member arms do not)')
+  // The member arms route to an owner/admin — the only actor who can revoke,
+  // and the actor who then sees the corrected at-cap remedy on the key
+  // surfaces — so they must NOT carry the clause: exactly four occurrences,
+  // one per owner arm.
+  assert.equal((paste.match(/capRevokeFirstClause\(team, keys\)/g) || []).length, 4,
+    'exactly the four owner/admin remedies carry the clause (member arms do not)')
   assert.match(mainJsx,
     /import \{[^}]*capRevokeFirstClause[^}]*\} from '\.\/keyAllowance\.js'/,
     'the clause is imported from the pure module')
