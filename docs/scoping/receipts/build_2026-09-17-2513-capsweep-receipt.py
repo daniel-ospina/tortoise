@@ -19,12 +19,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import statistics
 import subprocess
 from pathlib import Path
 
-import os
+
+def _read_json(path: Path):
+    with open(path) as fh:
+        return json.load(fh)
 
 # The worktree the measurement ran in: the receipt records ITS HEAD branch, so
 # re-running the generator from a different checkout must set LME_WT to a
@@ -41,7 +45,7 @@ ARMS = ("off", "off_b", "inj_only", "on")
 
 # Gold-session census support. The cohort is the ONLY source of gold labels;
 # the arm artifact is the only source of the candidate pool.
-COHORT_DATA = {q["question_id"]: q for q in json.load(open(COHORT))}
+COHORT_DATA = {q["question_id"]: q for q in _read_json(COHORT)}
 POINT_SESSION_RE = re.compile(r"^lme:(?P<qid>[0-9A-Za-z_]+):s(?P<sid>\d+):")
 GRADED_K = 5
 
@@ -288,10 +292,10 @@ def main():
             "subject": git("log", "-1", "--format=%s", SHA),
             "tree": "clean at launch",
             "verified_by": ("tools/longmem_eval/guard_measured_revision.py "
-                            "--rev %s --paths tortoise/ tools/ -> rc=0 after "
+                            f"--rev {SHA} --paths tortoise/ tools/ -> rc=0 after "
                             "removing 88 pre-existing __pycache__ byte-caches "
                             "(guard class 16, #3712); all runs launched with "
-                            "-B + PYTHONDONTWRITEBYTECODE=1" % SHA),
+                            "-B + PYTHONDONTWRITEBYTECODE=1"),
         },
         "substrate": {
             "embedder": "BAAI/bge-small-en-v1.5 (384-dim, local "
@@ -324,8 +328,8 @@ def main():
                       "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
                       " (verified against SPLIT_DIGESTS['s'])",
             "provenance_sidecar": str(PROV),
-            "n": len(json.load(open(COHORT))),
-            "composition": {"multi-session": len(json.load(open(COHORT)))},
+            "n": len(_read_json(COHORT)),
+            "composition": {"multi-session": len(_read_json(COHORT))},
             "built_by": "tools/longmem_eval/build_cohorts.py --cohort ms_tail",
             "superset_of_prior_sample": ("ms10 == ms_tail[0:10] and ms20 == "
                                          "ms_tail[10:20] — the superseded "
@@ -345,7 +349,8 @@ def main():
                                            "— all OFF (defaults)"),
         },
         "caps": {
-            "knob": "TORTOISE_LME_REINJECTION_TOTAL_CAP (eval-side, committed in %s)" % SHA,
+            "knob": ("TORTOISE_LME_REINJECTION_TOTAL_CAP (eval-side, "
+                     f"committed in {SHA})"),
             "product_constant": 10,
             "per_session_cap": 3,
             "seed_sessions": 5,
@@ -604,7 +609,7 @@ def main():
     dest = Path(os.environ.get(
         "LME_RECEIPT_DEST",
         str(WT / "docs/scoping/receipts" / (
-            "2026-09-17-2513-reinjection-capsweep-%s.json" % SHA))))
+            f"2026-09-17-2513-reinjection-capsweep-{SHA}.json"))))
     dest.write_text(json.dumps(out, indent=1, default=str) + "\n")
     print("wrote", dest)
     for cap, arms in sorted(caps.items(), key=lambda kv: int(kv[0])):
