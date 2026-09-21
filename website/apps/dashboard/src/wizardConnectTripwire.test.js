@@ -4,7 +4,8 @@
 // has no React runtime harness, so — mirroring graphRenameDeleteTripwire
 // (#2701) and the other main.jsx tripwires — regressions that can be expressed
 // as source structure are pinned HERE. The RUNTIME outcomes are measured in
-// tests/e2e/test_dashboard_onboarding.py (Playwright over the committed dist);
+// tests/e2e/test_dashboard_onboarding.py (Playwright over the built dist —
+// `npm run build` first; dist/ is a build artifact since #3775);
 // these assertions are the cheap regression net for refactors.
 //
 // Test-review hardening (2026-09-10): every slice is marker-guarded (a lost
@@ -87,8 +88,9 @@ test('#2710/#2912: the no-key state renders the mint CTA as the KEY block’s no
   const connect = connectStep()
   assert.match(
     connect,
-    /<p className="dim small">Create an API key to see the setup prompt\.<\/p>/,
-    'the promised sentence is kept verbatim (copy is human-owned — never reworded)',
+    /<p className="dim small">\{isBuildFork\n\s*\? 'Create an API key to call the SDK from your application\.'\n\s*: 'Create an API key to see the setup prompt\.'\}<\/p>/,
+    'the self-arm sentence is kept verbatim (copy is human-owned — never reworded) while the ' +
+    'build fork keeps its own SDK sentence — the shared affordance now serves both',
   )
   // The AFFORDANCE slice: the whole connect step also holds the build-fork CTA
   // (same handler + label), so asserting over `connect` would not pin THIS
@@ -145,9 +147,16 @@ test('#2710/#2912: the no-key affordance is the KEY block branch — never a pla
     'the key block condition is harnessKey (else the no-key branch is dead code)')
   // #2865: the no-key branch is now role-aware. Only an owner/admin can mint
   // (POST /v1/team/keys is `_require_owner_admin`), so a member on a keyed leaf
-  // gets the paste escape instead of a CTA that would 403.
-  assert.match(owner, /\)\s*:\s*\(\s*isOwnerAdmin \? wizardNoKeyAffordance : wizardPasteRow\s*\)/,
-    'the key block renders the mint affordance for owner/admins and the paste row for members')
+  // gets the paste escape instead of a CTA that would 403. #3783: the branch is
+  // ALSO source-aware — the role/source/affordance derivation is one const and
+  // the arm renders it.
+  assert.match(owner, /\bwizardKeyAffordance\b/,
+    'the key block renders the derived role+source affordance')
+  assert.match(connectStep(),
+    /const wizardKeyAffordance = connectGate\.mode === 'error'\n\s*\|\| \(connectGate\.mode === 'loading' && keysLoadSlow\)\n\s*\? wizardKeysUnavailableKeyAffordance\n\s*: connectGate\.mode === 'loading'\n\s*\? wizardLoadingKeyAffordance\n\s*: isOwnerAdmin\n\s*\? \(connectGate\.mode === 'existing' \? wizardExistingKeyAffordance : wizardNoKeyAffordance\)\n\s*: wizardPasteRow/,
+    'the derivation is load-, role- AND source-aware: an unresolved read (failed, or a wait past ' +
+    'the bound) shows the retryable state, an in-flight read shows the wait state, a usable existing ' +
+    'key routes to the reuse path, and only the mint mode mints')
   assert.doesNotMatch(owner, /YOUR_API_KEY/, 'no placeholder key may remain')
   assert.doesNotMatch(owner, /wizardKeyCodeStyle\}>\{harnessKey \|\| '…'\}/,
     'no fake key row may render before a key exists')
@@ -445,8 +454,9 @@ test('#2912: the step announcement re-renders when the paused state is resolved'
 // ── #3428 / #2937 (lane B3): the wizard cannot falsely claim connected ────
 // The lane's exit evidence is negative: a completed wizard must be UNABLE to
 // claim `harness-connected` without a server-observed connection. The runtime
-// proof lives in tests/e2e/test_dashboard_onboarding.py (over the committed
-// dist); these are the cheap structural net for refactors.
+// proof lives in tests/e2e/test_dashboard_onboarding.py (over the built dist
+// — `npm run build` first, #3775); these are the cheap structural net for
+// refactors.
 
 test('#3428: the connect-step advance no longer writes the harness-connected checkpoint', () => {
   // The human writer is DELETED. Pinning its absence matters because re-adding
@@ -481,8 +491,8 @@ test('#3428: the connect-step advance no longer writes the harness-connected che
 // replacement scans EVERY non-test source module under src/, collapses literal
 // string concatenation first, and judges the serialized body by its VALUE (not
 // by deep-equality against the duplicated pair), so a whitespace reformat or a
-// behaviour-identical DRY dedupe of the two `catalog-presented` bodies stays
-// green while a split URL or a parameterized step does not.
+// behaviour-identical reformat of the fork body stays green while a split URL,
+// a parameterized step, or a reinstated catalog-presented write does not.
 function sourceModules() {
   const files = []
   const walk = (dir) => {
@@ -516,14 +526,14 @@ function normalizeBodyValue(v) {
   return v.replace(/['"`\s]/g, '')
 }
 
-test('#3428/#2937: exactly the three known checkpoint call sites may exist, each with an allowlisted body', () => {
+test('#3428/#2937 / #3913: exactly ONE checkpoint call site may exist across src/ — the fork write', () => {
   // review cycle 7 (item 1-ii): the dist-level probe audits ONE serialized
   // literal, so a writer can be reinstated by moving the POST into a small
   // helper — the body becomes `{step:r}`, the exact probe never appears, and a
   // reviewer BUILT that mutation: 33/33 tripwire + 4/4 distBundle green with the
   // click-writer fully reinstated. This is the SOURCE-side backstop, hardened in
   // review cycle 8 (items 3 + 4): cross-file, concatenation-collapsed, and
-  // VALUE-based. MUTATIONS that fail here: a 4th site; a split URL
+  // VALUE-based. MUTATIONS that fail here: a 2nd site; a split URL
   // ('/v1/onboarding/' + 'state/checkpoint'); a step carried as a value
   // (['harness','connected'].join('-') or a `{ step: param }` object); a writer in
   // a sibling module; `JSON.stringify(checkpointBody(step))` (uninspectable).
@@ -534,14 +544,16 @@ test('#3428/#2937: exactly the three known checkpoint call sites may exist, each
       sites.push({ file: mod.file, index: m.index, window: mod.src.slice(m.index, m.index + 400) })
     }
   }
-  assert.equal(sites.length, 3,
-    `exactly THREE /v1/onboarding/state/checkpoint call sites may exist across src/ — found ` +
+  assert.equal(sites.length, 1,
+    `exactly ONE /v1/onboarding/state/checkpoint call site may exist across src/ — found ` +
     `${sites.length} (${[...new Set(sites.map((s) => s.file.replace(`${here}/`, '')))].join(', ') || 'none'}). ` +
     // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
-    // even when the count was LOWER than three, describing the wrong failure.
-    (sites.length > 3
-      ? 'A 4th means a checkpoint writer was re-introduced'
-      : 'Fewer than three means a legitimate checkpoint site is missing (or the src walk lost a module)'))
+    // even when the count was LOWER than expected, describing the wrong failure.
+    // #3913 removed the render-time catalog-presented effect AND the build-fork
+    // pick handler's mark, leaving the fork write alone.
+    (sites.length > 1
+      ? 'A 2nd means a checkpoint STEP writer was re-introduced — #3913 removed both the render effect and the build-fork pick mark'
+      : 'Zero means the fork write is missing (or the src walk lost a module)'))
   for (const site of sites) {
     const rel = site.file.replace(`${here}/`, '')
     assert.doesNotMatch(site.window, /harness-connected/,
@@ -571,22 +583,21 @@ test('#3428/#2937: exactly the three known checkpoint call sites may exist, each
     value = collapseStringConcat(value)
     const norm = normalizeBodyValue(value)
     const step = norm.match(/step:([^,}]+)/)
-    if (step) {
-      assert.equal(step[1], 'catalog-presented',
-        `${rel}:${site.index} serializes a step other than catalog-presented (${norm}) — ` +
-        'the click-writer is back (#3428/#2937)')
-    } else {
-      assert.match(norm, /fork/,
-        `${rel}:${site.index} checkpoint body is neither a catalog-presented step nor the fork write`)
-      assert.doesNotMatch(norm, /harness-connected/,
-        `${rel}:${site.index} checkpoint body serializes harness-connected`)
-    }
+    assert.equal(step, null,
+      `${rel}:${site.index} serializes a checkpoint step (${norm}) — #3913 deleted every ` +
+      'client step writer; the only checkpoint left is the fork pick itself')
+    assert.match(norm, /fork/,
+      `${rel}:${site.index} checkpoint body is not the fork write`)
+    assert.doesNotMatch(norm, /harness-connected/,
+      `${rel}:${site.index} checkpoint body serializes harness-connected`)
   }
   // the fork site's `body` derivation, so re-pointing the variable at a
   // harness-connected step cannot hide behind the allowlisted `body` name
   const src = sourceModules().map((m) => m.src).join('\n')
   assert.match(src, /const body = forkId === 'unsure' \? \{ fork_unsure_at: true \} : \{ fork: forkId \}/,
     'the fork checkpoint body is the fork write, never a harness-connected step')
+  assert.doesNotMatch(src, /catalog-presented/,
+    'no src module may serialize a catalog-presented checkpoint — #3913 removed the dashboard writer')
 })
 
 test('#3428/#2937 (cycle 8 item 4, M4): completed_steps is never written client-side', () => {
@@ -639,6 +650,9 @@ test('#3428: the done screen is gated on the SERVER-observed connection, not a c
   // the approved screen's sentences: the capture tense is derived, never fixed
   assert.match(done, /doneCaptureClaim === 'present'/, 'present tense is claim-gated')
   assert.match(done, /doneCaptureClaim === 'future'/, 'future tense is claim-gated')
+  // #3782: the unobserved state renders the honest pending sentence (the same
+  // string Settings prints) rather than falling into the future-tense promise.
+  assert.match(done, /doneCaptureClaim === 'install-pending'/, 'the nothing-observed state is claim-gated')
   // #3428 requirements 1-2: the harness name is dynamic with a neutral
   // fallback — naming a harness we did not install for is a false claim.
   // review cycle 3 (P1-A): the name is now the DERIVED `doneHarnessName`, which
@@ -1347,8 +1361,11 @@ test('#2865: the two Claude tabs are no longer hidden from members', () => {
   assert.match(src, /\)\s*:\s*\(!capNotice \? \(/,
     'the connect-step gate is the cap remedy alone (capNotice is owner/admin-only)')
   // a member on a KEYED leaf keeps a paste escape, never a mint CTA that 403s
-  assert.match(ownerBranch(), /isOwnerAdmin \? wizardNoKeyAffordance : wizardPasteRow/,
-    'the keyed-leaf no-key branch is role-aware')
+  assert.match(connectStep(),
+    /const wizardKeyAffordance = connectGate\.mode === 'error'[\s\S]{0,400}?: wizardPasteRow/,
+    'the keyed-leaf no-key branch is load- and role-aware (members get the paste row)')
+  assert.match(ownerBranch(), /\bwizardKeyAffordance\b/,
+    'the key block renders the derived affordance')
   // the member-only dead-end subtree must be gone, not left unreachable
   assert.doesNotMatch(src, /Only owners and admins can create API keys in this dashboard/,
     'the pre-#2865 member paste-only subtree is deleted (no unreachable branch)')
@@ -1382,4 +1399,127 @@ test('#2865: a user holding a key does NOT get a key row on a key-less OAuth lea
     'no key-mode pills on a key-less OAuth leaf')
   assert.doesNotMatch(keylessBlock, /\{harnessKey &&/,
     'the key-less leaf block is not key-gated')
+})
+
+// ── #3783: the connect step offers the EXISTING key instead of minting ───────
+// The behavioral contract (which mode the gate resolves) is EXECUTED in
+// connectKeyGate.test.js. These are the cheap structural backstops: the
+// affordance exists, its primary action routes to the existing key rather than
+// minting, and the API Keys table gives the unnamed provisioned key an identity.
+test('#3783: the existing-key affordance routes to the key instead of minting', () => {
+  const connect = connectStep()
+  // the affordance exists and names the existing key
+  assert.match(connect, /const wizardExistingKeyAffordance = \(/,
+    'the existing-key affordance is defined in the connect step')
+  assert.match(connect, /Your organization already has an API key/,
+    'it names the key that already exists')
+  // the PRIMARY action is the reuse route (keys tab), not the mint
+  assert.match(connect,
+    /className="btn-primary small"\s*\n\s*onClick=\{\(\) => \{ setWelcomeMode\(false\); setWizardDurableKey\(''\); setWizardDurablePaste\(''\); setWizardDurableError\(''\); setWizardDurableCapped\(false\); setWizardShowPaste\(false\); setTab\('keys'\) \}\}>\s*\n\s*Use an existing key →/,
+    'the primary action leaves for the API Keys tab (where the key can be rotated), clearing the in-memory plaintext')
+  // the mint is DEMOTED and its cost named
+  assert.match(connect, /Create a new key instead/,
+    'a fresh mint is still offered, but as an explicit secondary choice')
+  assert.match(connect, /spends another of your plan&apos;s key slots/,
+    'the copy names the allowance cost of the fresh mint')
+  // review P1: the BUILD fork's step-2 no-key branch rendered its OWN raw mint
+  // CTA (and its own member dead-end copy) — the arm the first fix missed, so an
+  // owner whose org already held a usable durable row still burned a second slot
+  // there. The DECISION is executed in connectKeyGate.test.js; this pins that the
+  // build arm CONSUMES that one derivation instead of re-implementing it.
+  const buildFork = slice('{wizardStep === 2 && (isBuildFork ? (', ') : (!capNotice ? (',
+                          'build fork connect arm')
+  assert.match(buildFork, /\{wizardKeyAffordance\}/,
+    'the build fork renders the shared gate-derived affordance (never a raw mint CTA)')
+  assert.doesNotMatch(buildFork, /onClick=\{wizardMintDurableKey\}/,
+    'the build fork must not own a mint CTA outside the gate — a usable existing key ' +
+    'would be bypassed and a second slot minted (#3783)')
+  // review P2: the Overview answered "is a key live" with its own
+  // `durableConnect.source === 'rows-durable'` — a second derivation that agreed
+  // today but could drift. One question, one gate.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
+    'no surface may re-derive the rows-durable source outside connectKeyGate')
+  assert.match(src, /\{snippetKey \|\| connectGate\.mode === 'existing'/,
+    'the re-entry Overview routes its live-key claim through the gate')
+  // BOTH keyed arms render the derived affordance (no drift between them)
+  assert.equal((src.match(/\bwizardKeyAffordance\b/g) || []).length, 4,
+    'one definition + exactly three render sites (build fork + shared arm + Codex Desktop arm)')
+})
+
+test('#3783 (review P2): an unloaded rows payload is a WAIT state — never a mint CTA', () => {
+  // The gate's decision is EXECUTED in connectKeyGate.test.js; this pins the
+  // main.jsx wiring: `keysLoaded` starts false, flips on a successful keys load,
+  // resets on logout/switch, is passed to the gate, and the derivation renders
+  // the wait state (no mint, no paste) while the mode is 'loading'.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src, /const \[keysLoaded, setKeysLoaded\] = React\.useState\(false\)/,
+    'the rows-loaded flag starts unknown, not empty')
+  assert.match(src, /setKeys\(Array\.isArray\(k\) \? k : k\.keys \|\| \[\]\)\n\s*setKeysLoaded\(true\)/,
+    'a successful keys fetch marks the rows loaded')
+  assert.equal((src.match(/setKeysLoaded\(false\)/g) || []).length, 2,
+    'logout and team-switch both reset the flag (the switch then reloads)')
+  assert.match(src, /const connectGate = connectKeyGate\(welcomeKey, keys, keysLoaded, !!keysLoadError\)/,
+    'the live load state — and its failure — are passed to the gate')
+  assert.match(connectStep(), /const wizardLoadingKeyAffordance = \(/,
+    'the wait affordance exists')
+  assert.doesNotMatch(slice('const wizardLoadingKeyAffordance = (',
+                            'const wizardKeysUnavailableKeyAffordance = (',
+                            'loading affordance'),
+    /wizardMintDurableKey/,
+    'the wait state must not offer the mint')
+})
+
+test('#3783 (review P2): a FAILED or stalled rows read is ACTIONABLE — a retry, never a dead wait', () => {
+  // The dead end this closes: `keysLoaded` flips on SUCCESS only, so a failed
+  // GET left the wizard on the wait state with no action and no failure exit —
+  // the only recovery was a full page reload. Pins: the failure is recorded,
+  // the wait is bounded, and BOTH unresolved states route to a retryable
+  // affordance that still withholds the mint (offering one re-opens the
+  // slot burn #3783 fixed).
+  //
+  // The BOUND's re-arm (the effect, its deps, the nonce bump) is NOT pinned
+  // here: the second pass pinned it as source text and a reviewer showed the
+  // pin survives reverting the deps array to `[keysLoaded]` — it reports a
+  // spelling, not a behaviour. It is EXECUTED in keysLoadRearmExec.test.js.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  // (1) the failure is RECORDED where the gate can see it, and cleared on a
+  // later success (a stale failure must not survive a successful retry).
+  assert.match(src, /setKeysLoadError\(\s*\n\s*\(e && e\.message\)/,
+    'a failed keys read records its error (the gate resolves the retryable error state)')
+  assert.match(src, /setKeysLoaded\(true\)\n\s*setKeysLoadError\(''\)/,
+    'a successful keys read clears the recorded failure')
+  assert.match(src, /function resetKeysLoadUnresolved\(\) \{\n\s*setKeysLoadError\(''\)/,
+    'ONE shared reset clears the failure for every fresh read (logout, team switch, retry)')
+  assert.equal((src.match(/setKeysLoadError\(''\)/g) || []).length, 2,
+    'the only clears are the shared reset helper and a successful read — a stale failure ' +
+    'must never render as the new state (a hand-rolled clear elsewhere would also lose the re-arm)')
+  // (2) the wait is BOUNDED — a request that never settles produces no
+  // rejection, so the timer is the only thing that turns a hang into a retry.
+  // (Its RE-ARM is executed in keysLoadRearmExec.test.js.)
+  assert.match(src, /const t = setTimeout\(\(\) => setKeysLoadSlow\(true\), KEYS_LOAD_SLOW_MS\)/,
+    'an unresolved keys read is bounded — a hang degrades to the retryable state')
+  assert.match(src, /const KEYS_LOAD_SLOW_MS = \d+/,
+    'the bound is a named constant')
+  // (3) the retryable affordance offers the retry and withholds the mint.
+  const unavailable = slice('const wizardKeysUnavailableKeyAffordance = (',
+                            'const wizardKeyAffordance = connectGate.mode',
+                            'keys-unavailable affordance')
+  assert.match(unavailable, /onClick=\{wizardRetryKeysLoad\}/,
+    'the unresolved state offers the in-place retry (the dead end had no action at all)')
+  assert.doesNotMatch(unavailable, /wizardMintDurableKey/,
+    'the unresolved state must NOT offer the mint — an unread inventory is not "no key" (#3783)')
+  // (4) the retry re-issues the load the mount used, through the shared reset
+  // (which clears the failure, RE-ARMS the wait bound, and is executed in
+  // keysLoadRearmExec.test.js).
+  assert.match(src, /function wizardRetryKeysLoad\(\) \{\n\s*resetKeysLoadUnresolved\(\)\n\s*loadAll\(''\)\.catch/,
+    'the retry re-arms the wait bound and re-issues loadAll')
+})
+
+test('#3783: the API Keys table names the auto-provisioned key instead of rendering it as —', () => {
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src, /\{keyDisplayName\(k\) \? keyDisplayName\(k\) : <span className="dim">—<\/span>\}/,
+    'the keys table resolves a display name before falling back to the dash')
+  assert.match(src, /import \{ isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName \} from '\.\/sessionKey\.js'/,
+    'the display-name helper is imported from the pure module')
 })

@@ -83,6 +83,14 @@ jobs:
         # overrides the implicit status check; the rc compare still gates.
         # Same pattern as post-merge-validation.yml (#1438).
         if: always() && steps.reconcile.outputs.rc == '1'
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable. `${{ secrets.X }}` must never appear in a `run:` body —
+        # GitHub substitutes it into the shell SOURCE before bash parses it, so
+        # a value containing `"` loses its quotes (the #4334 outage) and one
+        # containing `$(…)`/backticks would EXECUTE. An expanded variable's
+        # contents are data, never re-parsed.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # #2140: --fail-with-body so a failed issue create (403/429/etc.)
           # fails the step loudly instead of silently skipping the file
@@ -137,7 +145,7 @@ jobs:
           PY
           )"
           curl --fail-with-body -sS -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/issues" \
             -d "$PAYLOAD"
@@ -148,6 +156,11 @@ jobs:
         # This is a distinct "check could not run" issue, NOT an "N orphaned
         # rows" one (no counts exist on exit 2).
         if: always() && steps.reconcile.outputs.rc == '2'
+        # #4361: the token is bound in `env:` and read as a QUOTED shell
+        # variable — never interpolated into the `run:` text (a value with `"`
+        # loses its quotes; `$(…)`/backticks would execute).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PAYLOAD="$(python3 - <<'PY'
           import json
@@ -173,7 +186,7 @@ jobs:
           # #2144: --fail-with-body so a failed issue create fails the step
           # loudly (never the #2140 deaf-monitor class).
           curl --fail-with-body -sS -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/issues" \
             -d "$PAYLOAD"

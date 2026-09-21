@@ -261,6 +261,9 @@ class TestPatchRefusesFabricatedReceipt:
 _CAPTURE_TEAM = {
     "org_id": "team-truth", "tier": "free", "key_id": "k-capture",
     "legacy_full_access": True, "max_points": 100000,
+    # #4010: the resolved-limits contract carries EVERY resource — sessions is
+    # unlimited (explicit None), and a MISSING key is fail-closed.
+    "max_sessions": None,
 }
 # A GRAPH-BOUND variant of the same agent key (C5 #2114): the Session it
 # captures lives in its OWN graph (`graph_namespace`), never the org DEFAULT

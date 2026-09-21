@@ -1,8 +1,9 @@
 """#1997 (W1) onboarding wizard e2e (RUN_DASHBOARD_E2E opt-in, two-origin harness).
 
 Journey coverage: the 4 HUMAN wizard steps (org-create →
-fork card → connect-consent → done), the fork checkpoint (self + build /
-catalog-presented), the connect step's key affordances, and the re-entry card.
+fork card → connect-consent → done), the fork checkpoint (self + build;
+the build pick records NO catalog-presented step — #3913), the connect step's
+key affordances, and the re-entry card.
 The done step exits WITHOUT patching onboarding_complete (accept-and-drop).
 
 #2710 / #2711 / #2755 / #2756 (2026-09-09 connect-step fixes) brought this spec
@@ -15,7 +16,10 @@ to the SHIPPED post-#2698 UI and added the owner/admin connect branch:
     WizardPromptCard with its own Copy control;
   - an owner/admin who lands on the connect step with no in-memory key gets an
     in-flow mint CTA (never-expiring) + a paste escape, and leaving the wizard
-    must NOT pop the shared key-create modal (either exit path);
+    must NOT pop the shared key-create modal (either exit path); #3783: when the
+    org ALREADY holds a usable durable key (its plaintext is shown once and is
+    not in memory), the step offers that existing key instead of the mint CTA —
+    minting a second there spent the free tier's whole key allowance;
   - #2865: the connect chooser is no longer owner/admin-only — a member with
     no key reaches the key-less OAuth Claude Desktop/Web leaves (asserted in
     `test_member_without_key_reaches_keyless_claude_connectors`); on a KEYED
@@ -39,13 +43,11 @@ actually made, the clipboard assert compares against the card's own text, the
 build fork's FOURTH key row, and the catalog check is backed by a registry-only
 mock name (not the offline fallback).
 
-**CI lane (known gap — issue filed):** this spec is opt-in (`RUN_DASHBOARD_E2E`)
-and is NOT wired into `.github/workflows/ci.yml` — its `dashboard-e2e` step runs
-only `test_keys_table_mixed.py` + `test_graphs_management.py`. On CI the only
-automated guard for these four fixes is the static source-scan tripwire
-(`website/apps/dashboard/src/wizardConnectTripwire.test.js`), which cannot
-observe a runtime stray modal or a clipboard overwrite. Run this spec locally
-against a fresh `dist/` whenever the connect step changes.
+**CI lane:** this spec is opt-in (`RUN_DASHBOARD_E2E`) and, since #4221, IS
+wired into `.github/workflows/ci.yml` — the `dashboard-e2e` job's step runs it
+alongside `test_keys_table_mixed.py` / `test_graphs_management.py` /
+`test_ship_test_onboarding.py`, against the same two-origin harness. Run it
+locally against a fresh `dist/` whenever the connect step changes.
 """
 from __future__ import annotations
 
@@ -64,7 +66,9 @@ from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
     DASHBOARD_URL,
+    _bff_path,
     _goto_local_dashboard,
+    _is_bff_api,
     _preflight_local_servers,
     _proxy_body,
     _seed_local_session_cookie,
@@ -155,8 +159,8 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
         method = route.request.method
         # #1828: loadAll pins ?org_id= on overview reads — match on the
         # query-stripped path so /v1/team/keys?org_id=… still resolves.
-        path = url.split("?", 1)[0]
-        if "api.premiselabs.co" in url:
+        path = _bff_path(url)
+        if _is_bff_api(url):
             if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([org_row]))
@@ -250,7 +254,9 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 route.fulfill(status=409, content_type="application/json",
                               body=json.dumps({"detail": "Sub-team already created"}))
                 return
-            # #1997 (W1): fork set-once + catalog-presented checkpoint writes.
+            # #1997 (W1), revised by #3913: the fork checkpoint is the ONLY
+            # client write — `catalog-presented` must never appear here (the
+            # assertions below pin exactly that).
             if path.endswith("/v1/onboarding/state/checkpoint") and method == "POST":
                 body = json.loads(route.request.post_data or "{}")
                 cap["checkpoint"].append(body)
@@ -289,7 +295,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
 
 def _walk_to_fork(page: Page) -> None:
     """Re-entry → step 0 (read-only org summary) → the fork card."""
-    # #2744: the DOCUMENT always loads from the local committed-dist preview.
+    # #2744: the DOCUMENT always loads from the local built-dist preview.
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
@@ -570,12 +576,19 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
 
 def test_owner_connect_step_paste_toggle_reaches_prompt_card(page: Page) -> None:
     """#2710: the owner/admin paste escape — an owner who holds a durable key's
-    plaintext can paste it without leaving the wizard."""
+    plaintext can paste it without leaving the wizard. #3783: an org that
+    ALREADY has a usable durable row must be offered that key, not a mint CTA
+    that would spend the free tier's last key slot."""
     _seed_cookie(page, "u-owner2")
     cap = _wire(page, role="admin", key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
-    # No in-memory key → the mint CTA + the paste toggle are both offered.
-    expect(page.get_by_role("button", name="Create an API key")).to_be_visible()
+    # No in-memory key + a usable durable row → the EXISTING-key affordance.
+    # (Pre-#3783 this rendered the mint CTA, which is the reported defect.)
+    assert page.get_by_role("button", name="Create an API key").count() == 0, \
+        "#3783: an existing usable key must not present the mint CTA"
+    expect(page.get_by_role("button", name="Use an existing key")).to_be_visible()
+    assert "already has an API key" in page.locator("body").inner_text(), \
+        "#3783: the step must name the key that already exists"
     page.get_by_role("button", name="I already have a key — paste it instead").click()
     expect(page.locator("#wizard-paste-row")).to_be_visible(timeout=5_000)
     page.get_by_label("Paste an API key").fill(PASTED_KEY)
@@ -689,7 +702,7 @@ def test_build_fork_key_row_has_no_horizontal_overflow(page: Page) -> None:
     page.get_by_role("button", name=re.compile("Build an application on top")).click()
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
-    page.get_by_role("button", name=re.compile("Create an API key for")).click()
+    page.get_by_role("button", name="Create an API key", exact=True).click()
     expect(page.locator("code", has_text="tt_")).to_be_visible(timeout=10_000)
     m = _measure_key_row(page)
     assert m["scrollWidth"] == m["clientWidth"], \
@@ -1056,13 +1069,14 @@ def test_3218_key_row_states_the_visibility_window(page: Page) -> None:
         "exactly ONE visibility note may render (not one per key surface)"
 
 
-def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
-    """#1997 (W1, review P1 regression): picking the BUILD fork on the fork
-    card must mark catalog-presented via the checkpoint (the render-time
-    effect cannot observe the fresh pick — React batches the fork-chosen +
-    advance states — so the handler fires it directly). The build-fork gate
-    (harness-connected + first-points-filed + catalog-presented) must be
-    evaluable. #2323: the org-holding journey never mints a second org.
+def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) -> None:
+    """#3913 (owner ruling 2026-09-20): picking the BUILD fork records the fork
+    and NO checkpoint step. The build-fork gate is the two acts the server
+    OBSERVES — harness-connected + first-points-filed — so the dashboard must
+    not write `catalog-presented` (the render-time effect is gone and the pick
+    handler's optional mark is gone with it). This is the runtime half of that
+    removal: the ONLY client checkpoint on the journey is the set-once fork.
+    #2323: the org-holding journey never mints a second org.
 
     The catalog pin is deliberately two-sided (#2763): the fork card renders the
     STATIC placeholder because the registry fetch is gated on the connect step
@@ -1071,7 +1085,7 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     name when #2763 lands."""
     _seed_cookie(page, "u-bld")
     cap = _wire(page, role="owner")
-    # #2744: the DOCUMENT always loads from the local committed-dist preview.
+    # #2744: the DOCUMENT always loads from the local built-dist preview.
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
@@ -1101,25 +1115,67 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
                 message="the registry catalog fetch (exactly once)")
     assert cap["capabilities"] == 1, \
         f"#2004 (W8): the registry catalog must be fetched exactly once: {cap['capabilities']}"
-    assert any(c.get("fork") == "build" for c in cap["checkpoint"]), \
-        f"build fork not checkpointed: {cap['checkpoint']}"
-    assert any(c.get("step") == "catalog-presented" for c in cap["checkpoint"]), \
-        f"catalog-presented not marked: {cap['checkpoint']}"
+    # #3913: the fork is the ONLY checkpoint the dashboard writes. The old
+    # assertion here was the opposite — it required the catalog-presented mark;
+    # that write is deleted, so the meaningful pin is now its ABSENCE, and the
+    # exact capture proves no OTHER step write was smuggled in beside the fork.
+    assert cap["checkpoint"] == [{"fork": "build"}], \
+        f"#3913: the build pick must record the fork and NO step: {cap['checkpoint']}"
+    assert [c for c in cap["checkpoint"] if c.get("step")] == [], \
+        f"#3913: no checkpoint step may be written by the dashboard: {cap['checkpoint']}"
+    # the PATCH surface is the other way a catalog mark could return.
+    assert [b for b in cap["state"] if b.get("catalog_presented")] == [], \
+        f"#3913: no PATCH may record catalog_presented: {cap['state']}"
     assert cap["org_create"] == [], f"#2323 violated: org_create fired: {cap['org_create']}"
+
+
+def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:
+    """#3913: the wizard's build path reaches the connected done screen on a
+    projection carrying the two OBSERVED acts (harness-connected +
+    first-points-filed) and NOT `catalog-presented`, with no catalog row on the
+    way. This pins the UI path only — the wizard cursor advances client-side, so
+    it would walk the same way before the gate change. The assertions that
+    actually pin #3913 live elsewhere: the exact checkpoint capture in
+    `test_first_timer_wizard_build_fork_records_no_catalog_presented` above
+    (the fork is the ONLY thing written), the per-fork counted rows in the
+    dashboard JS unit tests, and the server-side gate in
+    test_capabilities_endpoint.py / test_onboarding_auto_complete.py."""
+    _seed_cookie(page, "u-bld-2acts")
+    proj = {"org_id": "team_o", "fork": "build", "status": "active",
+            "onboarding_complete": False,
+            "completed_steps": ["team-named", "harness-connected", "first-points-filed"],
+            "session_recording": True}
+    # The projection handed to the app carries ONLY the two observed acts. That is
+    # a fixture premise, not an assertion — the app-derived pin is the done screen
+    # below, which must render without a catalog step anywhere in it.
+    _wire(page, role="owner", onboarding_projection=proj)
+    _walk_to_fork(page)  # fork already chosen server-side → Continue is present
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
+    _advance_to_done(page)
+    expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
+    done = page.locator("div.done")
+    expect(done).to_contain_text("Connected", timeout=10_000)
+    # No "catalog" text assert here: the done body contains none on any branch,
+    # so it would pass unchanged on origin/main and pin nothing (cycle-3 finding).
 
 
 # ── #3428/#2937 (lane B3, review cycle 2 P2-2): runtime coverage for the ──
 # Connected branch and its derived capture tense. Before this seam the GET
 # /v1/onboarding/state call was unmocked and 401'd, so `serverHarnessConnected`
 # was always false and the whole success screen was only pinned by source text.
-def _connected_projection(*, receipt: str | None = None) -> dict:
+def _connected_projection(*, receipt: str | None = None, probe: str | None = None) -> dict:
     """A server-observed connection for GET /v1/onboarding/state.
 
     `completed_steps` carries `harness-connected`; `session_recording` is ON so
     "no sentence" on a key-less leaf is a TRUTH decision (no capture install
     path), never a missing-capability accident. `receipt` names the harness
-    whose capture receipt was observed. The projection must be WRAPPED by
-    `_wire` (`{"onboarding": …}`) — the app reads `st.onboarding`.
+    whose capture receipt was observed; `probe` names the harness whose install
+    PROBE was observed (install confirmed server-side, capture not fired yet).
+    With NEITHER, the projection is the #3782 live state — recording on with
+    nothing observed for the harness — which must read "not installed yet",
+    never a future promise. The projection must be WRAPPED by `_wire`
+    (`{"onboarding": …}`) — the app reads `st.onboarding`.
 
     `fork` is deliberately ABSENT: a projection carrying it disables the fork
     card's option buttons (set-once), so `_walk_to_connect`'s own pick would be
@@ -1132,6 +1188,8 @@ def _connected_projection(*, receipt: str | None = None) -> dict:
             "session_recording": True}
     if receipt:
         proj[f"session_capture_receipt_{receipt}"] = True
+    if probe:
+        proj[f"install_probe_{probe}"] = True
     return proj
 
 
@@ -1160,12 +1218,14 @@ def test_connected_screen_states_capture_in_present_tense_on_an_observed_receipt
         "a receipt must yield the PRESENT tense, never the future one"
 
 
-def test_connected_screen_states_capture_in_future_tense_without_a_receipt(page: Page) -> None:
-    """#3428/#2937 (lane B3, review cycle 2 P2-2b): `harness-connected` with
-    capture available but NO receipt must state what WILL happen and must NOT
-    print the present-tense sentence."""
+def test_connected_screen_states_capture_in_future_tense_after_an_install_probe(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 2 P2-2b), corrected by #3782: capture
+    available, NO receipt, but an install PROBE was observed server-side. The
+    probe is exactly what makes the future tense honest — the screen states what
+    WILL happen, must NOT print the present-tense sentence, and must NOT claim
+    the honest "not installed yet" state (the install was observed)."""
     _seed_cookie(page, "u-b3-no-receipt")
-    _wire(page, role="owner", onboarding_projection=_connected_projection())
+    _wire(page, role="owner", onboarding_projection=_connected_projection(probe="claude"))
     _walk_to_connect(page)
     _advance_to_done(page)
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
@@ -1174,6 +1234,30 @@ def test_connected_screen_states_capture_in_future_tense_without_a_receipt(page:
     expect(done).to_contain_text("Tortoise will capture your agent's sessions.")
     assert "Tortoise is capturing your agent's sessions." not in done.inner_text(), \
         "no receipt means the present-tense claim is false"
+    assert "not installed yet" not in done.inner_text(), \
+        "#3782: an observed install probe means the install IS installed — not installed yet is false"
+
+
+def test_connected_screen_without_probe_or_receipt_reports_not_installed(page: Page) -> None:
+    """#3782: the live defect. `harness-connected` (a real server-observed
+    connection) with recording ON but NEITHER an install probe NOR a capture
+    receipt must not promise a capture the server never observed. The screen
+    states the honest "not installed yet" — the identical string Settings
+    renders for the same state — and neither the present- nor the future-tense
+    sentence."""
+    _seed_cookie(page, "u-b3-no-probe-no-receipt")
+    _wire(page, role="owner", onboarding_projection=_connected_projection())
+    _walk_to_connect(page)
+    _advance_to_done(page)
+    expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
+    done = page.locator("div.done")
+    expect(done).to_contain_text("Connected", timeout=10_000)
+    expect(done).to_contain_text("not installed yet")
+    text = done.inner_text()
+    assert "Tortoise is capturing your agent's sessions." not in text, \
+        "#3782: no receipt — the present-tense claim is false"
+    assert "Tortoise will capture your agent's sessions." not in text, \
+        "#3782: no probe — the future-tense promise is not server-observed"
 
 
 def test_keyless_no_capability_leaf_prints_no_capture_sentence(page: Page) -> None:

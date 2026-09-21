@@ -1,13 +1,19 @@
-// distBundle.test.js — the COMMITTED-BUNDLE tripwire (#2865).
+// distBundle.test.js — the SHIPPED-BUNDLE tripwire (#2865).
 //
-// Why this file exists: `website/apps/dashboard/dist/` is tracked (`.gitignore`
-// says so) and is what every runtime surface actually serves — `deploy-pages.yml`
-// publishes it as-is and `ci.yml`'s `dashboard-e2e` job starts `wrangler pages
-// dev dist` against it. That job runs only two e2e files and, crucially, NEVER
-// compares the committed bundle to a fresh build, so a src render change that
-// forgets `npm run build` ships a STALE bundle and every gate stays green. The
-// unit suite (`node --test 'src/*.test.js'`) reads `src/` as text and cannot see
-// this either.
+// #3775: `website/apps/dashboard/dist/` is no longer tracked — it is a build
+// artifact. Both deploy paths (`website/apps/dashboard/deploy.sh` and
+// `deploy-pages.yml`'s deploy-dashboard job) and the `dashboard-js-tests` CI
+// job build it with `vite 6.4.3` immediately before it is served. That removes
+// this file's ORIGINAL premise: there is no committed bundle that "a src render
+// change which forgets `npm run build`" could leave stale, so the staleness
+// tripwire is obsolete by construction. The file is KEPT because its
+// assertions are about the artifact that is actually SERVED, which
+// `src/`-as-text tripwires cannot fully replace — `shippedScripts()` walks
+// every `.js` the build emits, including the ones copied verbatim from
+// `public/` (never bundler-processed), and the #3428/#2937 probes below are the
+// only scan that sees a client-side writer hidden in one of those. They now run
+// against a FRESH build (the `dashboard-js-tests` job builds first, #3775),
+// which is byte-identical to what deploy ships.
 //
 // So this reads what is actually SERVED: `dist/index.html`, the entry chunk it
 // references, AND every other script the dist ships — every `.js` under
@@ -34,17 +40,17 @@ const dist = resolve(here, '..', 'dist')
 
 function shippedBundle() {
   const htmlPath = join(dist, 'index.html')
-  assert.ok(existsSync(htmlPath), 'dist/index.html must be committed (it is a tracked artifact)')
+  assert.ok(existsSync(htmlPath), 'dist/index.html must exist — run `npm run build` (the bundle is a build artifact since #3775)')
   const html = readFileSync(htmlPath, 'utf8')
   const entry = html.match(/src="\/assets\/(index-[A-Za-z0-9_-]+\.js)"/)
   assert.ok(entry, 'dist/index.html must reference the built entry chunk')
   const entryPath = join(dist, 'assets', entry[1])
   assert.ok(existsSync(entryPath),
-    `dist/index.html references ${entry[1]}, which is NOT committed — the bundle is stale`)
+    `dist/index.html references ${entry[1]}, which the build did not emit — the bundle is incomplete`)
   return { html, entryPath, entryName: entry[1], js: readFileSync(entryPath, 'utf8') }
 }
 
-// Every script the committed dist actually SERVES, as dist-relative names:
+// Every script the built dist actually SERVES, as dist-relative names:
 //   (i)   EVERY `.js` under the WHOLE `dist/` tree, recursively — not just
 //         `dist/assets/**` (review cycle 8 item 3: a writer copied by `public/`
 //         to `dist/<anything>.js` was shipped and executed and never scanned);
@@ -57,11 +63,11 @@ function shippedBundle() {
 //         neither `index.html` nor a `.js` walk on its own: `import("…")` and
 //         `new Worker("…")` (mutations M6/M9 shipped a writer in a copied
 //         public/ file reached only through those).
-// A missing reference is a hard fail (a stale/half-committed bundle), never a
+// A missing reference is a hard fail (a broken/half-written build), never a
 // silently skipped file — that is the whole point of this guard.
 function shippedScripts() {
   const htmlPath = join(dist, 'index.html')
-  assert.ok(existsSync(htmlPath), 'dist/index.html must be committed (it is a tracked artifact)')
+  assert.ok(existsSync(htmlPath), 'dist/index.html must exist — run `npm run build` (the bundle is a build artifact since #3775)')
   const html = readFileSync(htmlPath, 'utf8')
   const out = []
   const seen = new Set()
@@ -70,7 +76,7 @@ function shippedScripts() {
     seen.add(name)
     if (text === undefined) {
       assert.ok(existsSync(path),
-        `dist/${name} is referenced by the shipped bundle but is NOT committed — the bundle is stale`)
+        `dist/${name} is referenced by the shipped bundle but the build did not emit it — the bundle is incomplete`)
       text = readFileSync(path, 'utf8')
     }
     out.push({ name, path, js: text })
@@ -107,7 +113,7 @@ function shippedScripts() {
   return out
 }
 
-test('#2865: the committed dist ships the key-less OAuth Claude connector recipe', () => {
+test('#2865: the built dist ships the key-less OAuth Claude connector recipe', () => {
   const { js, entryName } = shippedBundle()
   // The canonical CONNECTOR url: no trailing slash, equal to the server's
   // RFC 8707 resource indicator (#2864). The keyed `…/mcp/` form lives in the
@@ -123,30 +129,30 @@ test('#2865: the committed dist ships the key-less OAuth Claude connector recipe
   }
 })
 
-test('#2865: the committed dist no longer carries the beta Request-headers caveat', () => {
+test('#2865: the built dist no longer carries the beta Request-headers caveat', () => {
   const { js, entryName } = shippedBundle()
   // The string was unique to WIZARD's live claude-desktop/claude-web branch (the
   // whole blocker: the field is absent on many accounts). Nothing else in the
-  // repo ever contained it, so its presence means a stale bundle.
+  // repo ever contained it, so its presence means a stale/unrebuilt bundle.
   assert.ok(!js.includes('rolling out in Anthropic'),
     `${entryName} still carries the removed beta caveat — rebuild dist/`)
   assert.ok(!js.includes('use the Claude Code surface instead'),
     `${entryName} still diverts users off the connector surfaces — rebuild dist/`)
 })
 
-test('#2865: every asset dist/index.html references is committed (no orphan or missing chunk)', () => {
+test('#2865: every asset dist/index.html references exists in the build (no orphan or missing chunk)', () => {
   const { html, entryName } = shippedBundle()
   const refs = [...new Set([...html.matchAll(/(?:src|href)="\/assets\/([^"]+)"/g)].map((m) => m[1]))]
   assert.ok(refs.length > 0, 'dist/index.html must reference at least one asset')
   for (const ref of refs) {
     assert.ok(existsSync(join(dist, 'assets', ref)),
-      `dist/index.html references /assets/${ref}, which is not committed`)
+      `dist/index.html references /assets/${ref}, which the build did not emit`)
   }
   // Every `index-*.js` on disk must be the referenced entry — an orphaned chunk
-  // is a half-committed rebuild (the old entry left behind, the new one added).
+  // is a half-written build (the old entry left behind, the new one added).
   const chunks = readdirSync(join(dist, 'assets')).filter((f) => /^index-.*\.js$/.test(f))
   assert.deepEqual(chunks, [entryName],
-    `dist/assets has an orphaned entry chunk — exactly ${entryName} may be committed`)
+    `dist/assets has an orphaned entry chunk — exactly ${entryName} may exist`)
 })
 
 test('#3428/#2937: the shipped bundle does not carry the deleted click-writer', () => {
@@ -230,7 +236,7 @@ test('#3428/#2937: the shipped-script scan covers every asset chunk AND every in
   }
 })
 
-test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three checkpoint sites across EVERY shipped script', () => {
+test('#3428/#2937 / #3913 (cycle 8 item 1): the artifact is authoritative — exactly ONE checkpoint site across EVERY shipped script', () => {
   // The source pin can be split ('/v1/onboarding/' + 'state/checkpoint') and a
   // sibling/public module can move the URL out of main.jsx entirely (M3/M10/
   // M6/M9). A *src* literal cannot be split past the bundler: esbuild folds an
@@ -239,10 +245,13 @@ test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three chec
   // hold for a `public/`-copied file, which is never bundler-processed and is
   // exactly the root the widening added (review cycle 9 code F2: mutation
   // MUT-D split the path inside a copied public/ file and this probe stayed
-  // green). Count the literal across everything served and reject a site whose
-  // serialized body is not a literal `catalog-presented` step, so a
-  // parameterized step (`['harness','connected'].join('-')`) reds even when the
-  // count happens to match. The behaviour is owned by the executing test
+  // green). #3913 (owner ruling 2026-09-20) removed the render-time
+  // catalog-presented effect AND the build-fork PICK handler's optional mark,
+  // so the ONLY checkpoint a shipped script may fire is the fork pick itself.
+  // Count the literal across everything served and reject a site whose
+  // serialized body carries a `step`, so a parameterized step
+  // (`['harness','connected'].join('-')`) or a reinstated mark reds even when
+  // the count happens to match. The behaviour is owned by the executing test
   // (onboardingContinueExec.test.js); this is the shipped-artifact backstop.
   const scripts = shippedScripts()
   const sites = []
@@ -251,19 +260,24 @@ test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three chec
       sites.push({ name: s.name, index: m.index, js: s.js })
     }
   }
-  assert.equal(sites.length, 3,
-    `exactly THREE checkpoint call sites may exist across every shipped script — found ${sites.length} ` +
+  assert.equal(sites.length, 1,
+    `exactly ONE checkpoint call site may exist across every shipped script — found ${sites.length} ` +
     `(${[...new Set(sites.map((s) => s.name))].join(', ') || 'none'}). ` +
     // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
-    // even when the count was LOWER than three, which describes the wrong failure.
-    (sites.length > 3
-      ? 'A 4th means a checkpoint writer was re-introduced (M3/M6/M9/M10 all shipped one and passed the old entry-only scan)'
-      : 'Fewer than three means a legitimate checkpoint site is missing from the shipped bundle — check the build'))
+    // even when the count was LOWER than expected, which describes the wrong failure.
+    // #3913 removed the render-time catalog-presented effect and the build-fork
+    // handler mark, leaving the fork write alone.
+    (sites.length > 1
+      ? 'A 2nd means a checkpoint STEP writer was re-introduced — #3913 removed both the render effect and the build-fork pick mark, leaving only the fork write'
+      : 'Zero means the fork write is missing from the shipped bundle — check the build'))
   for (const site of sites) {
     const window = site.js.slice(site.index, site.index + 400)
     assert.doesNotMatch(window, /harness-connected/,
       `dist/${site.name} checkpoint at ${site.index} sits next to a harness-connected literal — ` +
       'a client writer cannot serialize that step (#3428/#2937)')
+    assert.doesNotMatch(window, /catalog-presented/,
+      `dist/${site.name} checkpoint at ${site.index} still serializes catalog-presented — ` +
+      '#3913 deleted that writer from the dashboard')
     const body = window.match(/body:\s*JSON\.stringify\(\s*(\{[^}]{0,160}\}|[A-Za-z_$][\w$]*)\s*\)/)
     assert.ok(body,
       `dist/${site.name} checkpoint at ${site.index} must serialize an inspectable ` +
@@ -271,11 +285,10 @@ test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three chec
     const arg = body[1]
     if (arg.startsWith('{')) {
       const step = arg.match(/step:\s*([^,}]+)/)
-      if (step) {
-        assert.equal(step[1].trim().replace(/^["'`]|["'`]$/g, ''), 'catalog-presented',
-          `dist/${site.name} checkpoint at ${site.index} serializes a step that is not ` +
-          `catalog-presented (${step[1].trim()}) — the writer is back (#3428/#2937)`)
-      }
+      assert.ok(!step,
+        `dist/${site.name} checkpoint at ${site.index} serializes a \`step\` ` +
+        `(${step && step[1].trim()}) — #3913 deleted every client step writer; the only ` +
+        'checkpoint left is the fork pick itself')
     }
   }
 })

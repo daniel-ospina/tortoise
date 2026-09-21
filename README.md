@@ -20,9 +20,7 @@ superseded — and confidence) + points (the logic: claims connected to the
 state, the arguments that move confidence) + events (what happened, including
 the decision moment as an Event node, so the decision dimension stays
 queryable as a timeline). The graph says "this state is based on these
-reasons" — never "this decision was made because of these reasons". The
-narrative lives in the graph's content **and** its metadata; agents are the
-computational layer that reads and maintains it; semantic summaries are
+reasons". The narrative lives in the graph's content, structure, **and** its metadata; agents are the computational layer that reads and maintains it; semantic summaries are
 derived projections, never the record. Evidence stays authoritative: every
 Point keeps its quoted source span, and the graph is an auditable index over
 unrewritten evidence.
@@ -42,7 +40,7 @@ A product of [Premise Labs](https://premiselabs.co).
 
 ### 1. Install
 
-New to Tortoise? Choose a path:
+New to Tortoise? There are two ways to run it:
 
 - **Hosted (managed)** — no install, just connect your agent: [docs/quickstart-cloud.md](docs/quickstart-cloud.md)
 - **Self-hosted — durable (recommended): Docker compose.** Runs the daemon
@@ -57,7 +55,9 @@ New to Tortoise? Choose a path:
   path. For a single-agent eval without Docker, use the pip path below —
   embedded FalkorDBLite is SINGLE-WRITER / EVAL-ONLY (concurrent writers lose data).
 
-- **Self-hosted — single-agent eval (no Docker):** requires **Python ≥ 3.12**:
+- **Eval substrate only — embedded, no Docker (NOT a way to run the product):**
+  This is what evals and parity runs execute on; a deployment is the compose
+  path above. Requires **Python ≥ 3.12**:
 
   ```bash
   git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise

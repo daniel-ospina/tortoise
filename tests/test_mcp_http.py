@@ -16,7 +16,7 @@ import os
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 import tempfile  # noqa: F401
-import time  # noqa: F401
+import time
 
 import pytest
 
@@ -242,6 +242,253 @@ class TestAuthPreLeak:
             assert r.status_code == 401
 
 
+# ── #3144 / #3812: the auth-plane 503's Retry-After contract, EXECUTED ──────
+
+class TestAuthRetryAfterContract:
+    """#3144 / #3812 — the idle → first-request path, executed end to end.
+
+    #3144's reported symptom is the **MCP startup connect**: a client connects
+    eagerly at session start (Pi's ``mcp-client``: a 15s connect budget and NO
+    retry), a single ``503`` during org resolution is logged, and the whole
+    session runs with **zero** Tortoise tools. The app-side lever is therefore
+    the response CONTRACT on the auth-plane 503: a retryable failure a client
+    can act on, not a bodyless rejection it cannot distinguish from an outage.
+
+    #3812's acceptance is that the contract is asserted by EXECUTING the path:
+    a header assertion pinned to source text cannot fail and is not evidence.
+    These tests drive the real mounted MCP ASGI app through the real sequence
+    (warm resolution → idle past the 60s cache TTL → cold re-resolve → retry),
+    so removing the ``Retry-After`` header makes them red.
+    """
+
+    @pytest.fixture
+    def idle_mcp_client(self, tmp_path, monkeypatch):
+        """Mounted MCP app plus a handle on its OrgResolutionMiddleware.
+
+        The middleware instance owns the per-token 60s resolution cache, so
+        holding a reference to it is how the test reaches the
+        idle → first-request path deterministically (no real 60s sleep).
+        """
+        import tortoise.mcp_auth as ma
+        from tortoise.mcp_server import create_http_app
+
+        db_path = str(tmp_path / "retry.db")
+        reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg_sdk.org_create("retry-team")
+        key = reg_sdk.apikey_create(team["id"], "retry")["api_key"]
+
+        made: list = []
+        orig_init = ma.OrgResolutionMiddleware.__init__
+
+        def _capture(self, *a, **kw):
+            orig_init(self, *a, **kw)
+            made.append(self)
+
+        monkeypatch.setattr(ma.OrgResolutionMiddleware, "__init__", _capture)
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg_sdk)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            yield tc, key, made, reg_sdk
+
+    @staticmethod
+    def _warm_and_age_idle_cache(idle_mcp_client):
+        """Warm the token→org cache, then age it past the 60s TTL.
+
+        Returns the live middleware, whose cache entry is now stale — the
+        state the process is in for the first request after an idle period,
+        which forces a fresh control-plane resolution: the cold path #3144
+        reports. (The middleware is instantiated lazily on the warm request,
+        as it is in production.)
+        """
+        tc, key, made, _reg_sdk = idle_mcp_client
+        # 1) A warm request resolves and caches the token → org mapping.
+        warm, _ = _mcp_post(tc, {"jsonrpc": "2.0", "method": "tools/list",
+                                 "id": 1})
+        assert warm.status_code == 200, warm.text
+        assert made, "OrgResolutionMiddleware was never instantiated"
+        middleware = made[0]
+        assert key in middleware._cache, "the warm request did not cache"
+        # 2) Idle: age the cached resolution past the middleware's 60s TTL.
+        ts, org, limits = middleware._cache[key]
+        middleware._cache[key] = (ts - 61.0, org, limits)
+        return middleware
+
+    @staticmethod
+    def _first_503_after_idle(tc, monkeypatch, rid: int, configured):
+        """Drive the idle→first-request path once; return ``(raw, seconds)``.
+
+        ``configured is None`` DELETES ``TORTOISE_MCP_AUTH_RETRY_AFTER`` —
+        the production default — so the unset path is proven on the WIRE and
+        not only against the resolver unit test. Without this a change that
+        emits the header only when the knob is explicitly set stays green
+        while the common deployment advertises no back-off at all (#3144).
+
+        Re-armed for each call: the failed resolution does NOT write the
+        cache, so the seeded stale entry is still stale and every request
+        here takes the cold re-resolve path.
+        """
+        import tortoise.mcp_auth as ma
+        if configured is None:
+            monkeypatch.delenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raising=False)
+        else:
+            monkeypatch.setenv("TORTOISE_MCP_AUTH_RETRY_AFTER", configured)
+        resp, body = _mcp_post(
+            tc, {"jsonrpc": "2.0", "method": "tools/list", "id": rid})
+        assert resp.status_code == 503, resp.text
+        # A real HTTP response with a JSON-RPC body — the zero-byte shape
+        # in #3144's field report is proxy-generated, never app-side
+        # (#3709).
+        assert resp.content, "zero-byte 503 body"
+        assert body is not None and body["error"]["code"] == ma.ERR_REGISTRY, body
+        raw = resp.headers.get("Retry-After")
+        assert raw is not None, (
+            "the auth-plane 503 carries no Retry-After — an MCP client "
+            "has no instruction to back off and gives up on the startup "
+            "connect")
+        # int() raises on an HTTP-date or garbage → not parseable.
+        seconds = int(raw)
+        return raw, seconds
+
+    def test_idle_first_request_503_is_retryable_and_the_retry_resolves(
+            self, idle_mcp_client, monkeypatch):
+        tc, _key, _made, reg_sdk = idle_mcp_client
+        self._warm_and_age_idle_cache(idle_mcp_client)
+
+        # 3) The control plane / registry is cold or unreachable on the
+        #    re-resolve (twice: it recovers for the retry leg).
+        calls = {"n": 0}
+        real_verify = reg_sdk.apikey_verify
+
+        def _cold_then_healthy(token):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise ConnectionError("control plane cold / connection refused")
+            return real_verify(token)
+
+        monkeypatch.setattr(reg_sdk, "apikey_verify", _cold_then_healthy)
+
+        # 4) The contract: a parseable Retry-After in a sane range, pinned to
+        #    the CONFIGURED value. Removing the header makes this RED (#3812's
+        #    acceptance). The value is read back off the wire and slept below
+        #    — the test honours what the SERVER advertised, not a number it
+        #    chose itself. (The clamp itself is proven separately, on the
+        #    wire, in test_default_and_out_of_range_knobs_reach_the_wire.)
+        _, first = self._first_503_after_idle(tc, monkeypatch, 2, "3")
+        assert 1 <= first <= 3600, f"Retry-After out of sane range: {first}"
+        # PIN the advertised value. A range check alone would let a hardcoded
+        # in-range literal pass — and a value at the 3600s ceiling would hang
+        # the `time.sleep` below for an hour.
+        assert first == 3, (
+            f"the 503 advertised {first}s, not the configured "
+            "TORTOISE_MCP_AUTH_RETRY_AFTER=3 — the knob is not wired to the wire")
+        assert calls["n"] == 1, (
+            "the stale cache entry was served — this is not the idle path")
+
+        # A SECOND configured value: together with the first this pins the
+        # knob→wire wiring against ANY hardcoded literal (no single literal can
+        # satisfy both 3 and 2), which a one-value pin cannot.
+        _, advertised = self._first_503_after_idle(tc, monkeypatch, 3, "2")
+        assert advertised == 2, (
+            f"the 503 advertised {advertised}s, not the configured "
+            "TORTOISE_MCP_AUTH_RETRY_AFTER=2 — the value is not read at CALL time")
+        assert calls["n"] == 2, "the second request did not re-resolve"
+
+        # 5) The retry leg, after EXACTLY the advertised delay: the dependency
+        #    has recovered, and the request must RESOLVE — not be served a
+        #    mocked back-off acknowledgement, and not be answered from a
+        #    refreshed stale cache without re-consulting the dependency.
+        time.sleep(advertised)
+        retry, retry_body = _mcp_post(
+            tc, {"jsonrpc": "2.0", "method": "tools/list", "id": 4})
+        assert retry.status_code == 200, retry.text
+        assert retry_body is not None and "result" in retry_body, retry_body
+        assert retry_body["result"]["tools"], "tools/list resolved empty"
+        assert calls["n"] == 3, (
+            "the retry did not re-consult the recovered dependency — it was "
+            "served from cache, so this proves no resolution")
+
+    def test_default_and_out_of_range_knobs_reach_the_wire(
+            self, idle_mcp_client, monkeypatch):
+        """The UNSET default and the CLAMP must be proven ON THE WIRE.
+
+        Two regressions the configured-value test above cannot see:
+
+        * **unset** — the production default. If the header is emitted only
+          when the knob is explicitly set, the common deployment advertises
+          NO ``Retry-After``: exactly the defect #3144 removes.
+        * **out of range** — the resolver clamps, but nothing above ties the
+          value actually emitted to it. A raw ``os.environ.get(..., "5")``
+          keeps every configured-value assertion green while the server
+          advertises ``Retry-After: 0`` (a busy-retry hammer against a down
+          dependency) or an absurd ``99999``.
+
+        No sleep on the advertised delay here — this asserts the bytes the
+        server hands a client, it does not wait them out.
+        """
+        import tortoise.mcp_auth as ma
+
+        tc, _key, _made, reg_sdk = idle_mcp_client
+        self._warm_and_age_idle_cache(idle_mcp_client)
+
+        calls = {"n": 0}
+
+        def _always_cold(token):
+            calls["n"] += 1
+            raise ConnectionError("control plane cold / connection refused")
+
+        monkeypatch.setattr(reg_sdk, "apikey_verify", _always_cold)
+
+        # (a) UNSET → the production default, on the wire.
+        raw, seconds = self._first_503_after_idle(tc, monkeypatch, 2, None)
+        assert raw == "5", (
+            f"with TORTOISE_MCP_AUTH_RETRY_AFTER unset the 503 advertised "
+            f"{raw!r}, not the default 5 — the header is emitted only when the "
+            "knob is explicitly set, so a default deployment advertises no "
+            "back-off at all (#3144)")
+        assert seconds == 5
+
+        # (b) Below the floor: never advertise 0 (a busy-retry hammer).
+        raw, _ = self._first_503_after_idle(tc, monkeypatch, 3, "0")
+        assert raw == "1", (
+            f"TORTOISE_MCP_AUTH_RETRY_AFTER=0 reached the wire as {raw!r} — "
+            "the clamp is not applied to the value the server emits")
+        assert raw == str(ma._resolve_auth_retry_after_s()), (
+            "the emitted header is not the clamped resolver's output")
+
+        # (c) Above the ceiling: never advertise an absurd window.
+        raw, _ = self._first_503_after_idle(tc, monkeypatch, 4, "99999")
+        assert raw == "3600", (
+            f"TORTOISE_MCP_AUTH_RETRY_AFTER=99999 reached the wire as {raw!r} "
+            "— the clamp is not applied to the value the server emits")
+        assert raw == str(ma._resolve_auth_retry_after_s()), (
+            "the emitted header is not the clamped resolver's output")
+        assert calls["n"] == 3, "a request did not take the cold re-resolve path"
+
+    @pytest.mark.parametrize("raw,expected", [
+        (None, 5),        # unset → default
+        ("1", 1),        # floor is allowed (a 1s back-off is honest)
+        ("45", 45),
+        ("0", 1),         # never advertise 0 (a busy-retry hammer)
+        ("-9", 1),
+        ("99999", 3600),  # never advertise an absurd window
+        ("nonsense", 5),  # unparseable → default
+    ])
+    def test_auth_retry_after_resolver_clamps_to_a_sane_range(
+            self, monkeypatch, raw, expected):
+        import tortoise.mcp_auth as ma
+        if raw is None:
+            monkeypatch.delenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raising=False)
+        else:
+            monkeypatch.setenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raw)
+        assert ma._resolve_auth_retry_after_s() == expected
+
+
 # ── #2202: tortoise_health truth on the hosted surface ────────────────
 
 class TestTortoiseHealthTruth:
@@ -260,8 +507,11 @@ class TestTortoiseHealthTruth:
         depending on the FastMCP call path — handle both."""
         result = body.get("result", {}) if body else {}
         if isinstance(result, dict) and "content" in result:
+            # A RETIRED tool's result carries an extra trailing block with the #3883
+            # warning; it is not part of the payload and is skipped here.
             text = "".join(c.get("text", "") for c in result["content"]
-                           if isinstance(c, dict))
+                           if isinstance(c, dict)
+                           and not c.get("text", "").startswith("RETIRED TOOL"))
             if text:
                 import json
                 try:
@@ -956,7 +1206,7 @@ class TestAdvertisedToolsAllServed:
         the module-bottom register_all resolves a handler for every registry
         entry (its 'no handler — skipped' warning must never fire). Uses the
         RAW provider listing (bypasses the HTTP _HTTPToolFilter transform,
-        which intentionally hides HTTP-excluded/ask-gated tools)."""
+        which intentionally hides HTTP-excluded/curation-group-scoped tools)."""
         import asyncio
 
         from tortoise import mcp_server
@@ -1421,15 +1671,16 @@ class TestSC5IndexFilesSurface:
             "index_files creates nodes AND edges — must be quota-gated")
 
     def test_legacy_tools_deprecation_markers(self):
-        """Both legacy tools carry the MCP tool-description DEPRECATED marker
-        naming the replacement (plan §6.3 — behavior unchanged, SC4)."""
-        from tortoise.tool_registry import TOOL_REGISTRY
-        by_name = {t.name: t for t in TOOL_REGISTRY}
+        """Both legacy tools are RETIRED (#3883): they keep the DEPRECATED
+        description naming the replacement, and stay http-excluded."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
         for legacy in ("tortoise_index_sessions", "tortoise_ingest_corpus"):
             d = by_name[legacy].description
             assert d.startswith("DEPRECATED"), f"{legacy} missing DEPRECATED marker: {d}"
             assert "tortoise_index_files" in d, f"{legacy} marker must name the replacement"
             assert by_name[legacy].http_policy is False, f"{legacy} must stay http-excluded"
+            assert by_name[legacy].retired_use_instead == "tortoise_index_files(directory)"
 
     def test_index_files_absent_from_http_tools_list(self, mcp_client):
         """E2E-17(e) structural half: the filesystem-walk tool is not

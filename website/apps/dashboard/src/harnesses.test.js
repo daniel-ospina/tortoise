@@ -9,7 +9,8 @@ import {
   HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS,
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
-  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT,
+  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
+  PI_CAPTURE_INSTALL,
   HARNESS_OAUTH, CANONICAL_MCP_URL,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
@@ -288,4 +289,117 @@ test('A0 rollback: legacy HARNESS_* exports preserved (archived #1643 wizard + c
   assert.equal(typeof HARNESS_CAPTURE_SUPPORT, 'object')
   // the legacy exports still render a per-harness command for the archived surface
   assert.match(HARNESS_INSTALL.claude(KEY), /claude mcp add/)
+})
+
+// #3575: the capture-INSTALL seam — `HARNESS_CAPTURE_SUPPORT[h] === true` is a
+// capability claim, and it is only honest when the product actually INSTALLS a
+// capture step. These pin the three legs (declared seam ⟺ in-repo artifact ⟺
+// install step) so the Pi false PASS — `pi: true` with no capture install —
+// cannot regress.
+test('#3575: capture support is derived from the seam, and every supported harness installs it', () => {
+  const seamHarnesses = Object.keys(HARNESS_CAPTURE_SEAM)
+  for (const h of HARNESS_ORDER) {
+    assert.equal(
+      HARNESS_CAPTURE_SUPPORT[h],
+      seamHarnesses.includes(h),
+      `${h}: HARNESS_CAPTURE_SUPPORT must equal seam presence (derived, not asserted)`,
+    )
+    if (!HARNESS_CAPTURE_SUPPORT[h]) continue
+    const artifact = HARNESS_CAPTURE_SEAM[h]
+    assert.match(artifact, /^tortoise\//, `${h}: seam artifact must be in-repo`)
+    // The install step may live in the MCP-setup copy (Pi/Codex embed it) or
+    // in the capture-install surface (Cursor's copy is a JSON file, so its
+    // capture step is a connect-wizard step + the Memory-sources row).  Either
+    // surface must name the declared artifact — capability is not a claim.
+    const surface = `${HARNESS_INSTALL[h](KEY)}\n${HARNESS_CAPTURE_INSTALL[h] || ''}`
+    assert.ok(
+      surface.includes(artifact),
+      `HARNESS_INSTALL/${h} capture-install surface must install its declared seam ${artifact}`,
+    )
+  }
+})
+
+test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  assert.match(pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+  assert.match(pi, /\.pi\/agent\/extensions/)
+  // the Memory-sources inline row installs the SAME seam (one shared constant)
+  assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
+  assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+})
+
+// #3818 (P2-4): the copy-paste Codex capture install must honour the SAME
+// `$CODEX_HOME` override the installer does. A hardcoded `~/.codex` command
+// writes the hook into a file Codex never reads on a non-default setup — the
+// silent no-capture the seam exists to prevent, on the surface most likely to
+// be read.
+test('#3818: the Codex capture install copy honours $CODEX_HOME', () => {
+  const codex = HARNESS_CAPTURE_INSTALL.codex
+  assert.ok(codex, 'HARNESS_CAPTURE_INSTALL.codex present')
+  assert.match(codex, /\$\{CODEX_HOME:-\$HOME\/\.codex\}/,
+    'the copy must use the ${CODEX_HOME:-$HOME/.codex} default the installer honours')
+  // Pin the COMMANDS, not just the prose: a comment naming $CODEX_HOME left
+  // the actual mkdir/cp/chmod lines hardcoded to ~/.codex.
+  const commandLines = codex.split('\n').filter((l) => /^(mkdir|cp|chmod)\b/.test(l))
+  assert.ok(commandLines.length >= 3, commandLines)
+  for (const line of commandLines) {
+    assert.ok(line.includes('CODEX_HOME'),
+      `command ignores $CODEX_HOME: ${line}`)
+    assert.ok(!line.includes('~/.codex'),
+      `command hardcodes ~/.codex: ${line}`)
+  }
+})
+
+// #3819: the Cursor capture install. Cursor's MCP copy is a JSON file (so the
+// capture step lives in HARNESS_CAPTURE_INSTALL + HARNESS_STEPS.cursor), the
+// registration is HOME-scoped at `~/.cursor` (Cursor has no config-dir env
+// var), and the IDE-ONLY limitation is disclosed — Cursor's own docs say
+// cloud agents have no editor-lifetime session boundary, and the disclosure
+// must sit where the user chooses Cursor, not in a footnote.
+test('#3819: the Cursor capture install is home-scoped, flat, and discloses the IDE-only limit', () => {
+  const cursor = HARNESS_CAPTURE_INSTALL.cursor
+  assert.ok(cursor, 'HARNESS_CAPTURE_INSTALL.cursor present')
+  assert.match(cursor, /tortoise\/cursor-hooks\/session-end\.sh/,
+    'the capture step must name the declared seam artifact')
+  assert.match(cursor, /~\/\.cursor\/hooks\.json/,
+    'the copy must name ~/.cursor/hooks.json, the one path Cursor reads')
+  assert.doesNotMatch(cursor, /CURSOR_HOME:-/,
+    'Cursor has NO config-dir env var — do not teach a ${CURSOR_HOME:-…} default')
+  assert.match(cursor, /sessionEnd/, 'the copy must name the sessionEnd event')
+  // the flat entry shape is load-bearing — a nested matcher group invalidates
+  // Cursor's WHOLE hooks.json (its validator rejects a non-string command)
+  assert.match(cursor, /FLAT/,
+    'the copy must warn that the entry is flat (a nested entry disables all Cursor hooks)')
+  // Cursor's validator also requires a document `version`
+  assert.match(cursor, /version/,
+    'the copy must warn that hooks.json needs a numeric version')
+  // the IDE-only limitation is disclosed on the install surface
+  assert.match(cursor, /IDE-ONLY/)
+  assert.match(cursor, /[Cc]loud [Aa]gent/,
+    'the disclosure must name cloud agents explicitly')
+  assert.match(cursor, /no editor-lifetime session boundary/,
+    'the disclosure quotes the constraint that makes the gap real')
+})
+
+// #3713 P2-3 (review of #3721): Pi loads a top-level `tortoise-capture.ts` AND
+// a `tortoise-capture/index.ts` as TWO extensions (no basename dedupe), so a
+// pre-existing agent-infra `tortoise-capture/` double-POSTs every session_id
+// alongside the seam. The install step must disable the legacy entry, and it
+// must do so non-destructively. Structure-only: this pins the guard text, not
+// the shell's behaviour (the guard is a copy-paste snippet, not an executed
+// unit). Removing any leg REDs this test.
+test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double-register)', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  // the colliding legacy path is named...
+  assert.match(pi, /~\/\.pi\/agent\/extensions\/tortoise-capture\b/,
+    'the guard must name the legacy entry Pi loads as a second extension')
+  // ...a symlink (the usual agent-infra bootstrap shape) is unlinked...
+  assert.match(pi, /\[ -L ~\/\.pi\/agent\/extensions\/tortoise-capture \]/,
+    'the symlink leg must be guarded by -L (unlink the link, never the target)')
+  // ...and a real directory is renamed to a name the loader SKIPS (dotfile).
+  assert.match(pi, /\.tortoise-capture\.disabled/,
+    'a real directory must be renamed to a dot-prefixed name `collectAutoExtensionEntries` skips')
+  // non-negotiable: never recursively delete user files from the install snippet.
+  assert.doesNotMatch(pi, /rm\s+-/,
+    'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
 })
