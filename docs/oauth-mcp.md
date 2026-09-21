@@ -160,7 +160,7 @@ is a server-side request forgery surface, so the fetch lives in
 | 4 | Size + timeout | 64 KiB body cap, 3 s connect/read |
 | 5 | Cache | successes only, 300 s TTL, LRU cap 128; errors and malformed documents are **never** cached (§4.3) |
 | 6 | Rate limit | per-host 60/hr + aggregate 600/hr + live-store cap 256 |
-| 7 | Total occupancy (#3669) | in-flight fetches capped process-wide (4), a per-fetch deadline bounding the connect loop and the body read (6 s; the 3 s read timeout is per-socket-read, not total), and a per-window wall-clock budget (120 s / 3600 s) whose worst case is RESERVED at admission |
+| 7 | Total occupancy (#3669) | in-flight fetches capped process-wide (4), a per-fetch deadline bounding every phase (6 s: connect loop, TLS, status/header and body reads — the 3 s read timeout is per-socket-read, not total), and a per-window wall-clock budget (120 s / 3600 s) whose worst case is RESERVED at admission |
 
 Control 2 is closed against **DNS rebinding** rather than narrowed: a custom
 `httpcore` `NetworkBackend` resolves the host, refuses the whole resolution if
@@ -247,15 +247,15 @@ Before #4097 an empty value silently disabled `TORTOISE_OAUTH_CIMD` (and, worse,
   four unauthenticated front doors reach through `resolve_client`: a
   process-wide **in-flight cap** (`cimd.MAX_IN_FLIGHT_FETCHES`), a **per-fetch
   deadline** (`cimd.FETCH_MAX_S`; the per-read `READ_TIMEOUT_S` does not bound a
-  trickled body, so the body read carries an absolute deadline and the pinning
-  backend caps each connect attempt by the remaining deadline — the OS
-  resolver's own `getaddrinfo` timeout is the one unbounded tail), and a
+  trickled response, so `_DeadlineStream` caps every read/write/TLS timeout by
+  the remaining deadline and the pinning backend caps each connect attempt — the
+  OS resolver's own `getaddrinfo` timeout is the one unbounded tail), and a
   **wall-clock budget per window** (`cimd.FETCH_BUDGET_S`) whose worst case is
   reserved at admission and settled to the actual duration on return. Fetch
   COUNT alone never bounded the product (distinct `client_id` URLs share one
   aggregate budget; 600 fetches at the 6 s ceiling is ~the whole window).
-  Ordering: `FETCH_MAX_S + READ_TIMEOUT_S < CONTROL_PLANE_OFFLOAD_TIMEOUT_S`, so
-  a fetch normally returns before its caller's offload bound.
+  Ordering: `FETCH_MAX_S < CONTROL_PLANE_OFFLOAD_TIMEOUT_S`, so a fetch returns
+  before its caller's offload bound.
 - **The window budget is an admitted cost, and it is the reason a sustained
   attack can still starve a legitimate CIMD client.** It is a single
   process-wide 120 s / 3600 s allowance, so a hostile host that keeps ~20

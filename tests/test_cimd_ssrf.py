@@ -594,13 +594,15 @@ def test_budget_reservation_is_refunded_when_the_rate_limiter_refuses(monkeypatc
 def test_an_unsettled_reservation_stays_charged(monkeypatch):
     """An ABANDONED fetch (its caller's offload bound expired while the worker
     kept running) never reaches ``_budget_settle``, so its reservation stays
-    charged — that is what keeps the budget a worst-case upper bound."""
+    charged — that is what keeps the budget a worst-case upper bound. There is
+    no settle here on purpose."""
     monkeypatch.setattr(cimd, "FETCH_MAX_S", 5.0)
-    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 100.0)
-    cimd._budget_reserve()
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 6.0)
+    cimd._budget_reserve()          # abandoned: never settles
     assert cimd._BUDGET_SPENT == 5.0
-    cimd._budget_settle(0.0)
-    assert cimd._BUDGET_SPENT == 0.0
+    with pytest.raises(cimd.CimdError, match="wall-clock budget"):
+        # Only 1s of the window remains — no second reservation can fit.
+        cimd._budget_reserve()
 
 
 def test_settle_cannot_reopen_a_rolled_over_window(monkeypatch):
@@ -809,6 +811,71 @@ def test_connect_loop_refuses_past_the_deadline(monkeypatch):
                                           deadline=time.monotonic() - 1)
     with pytest.raises(httpcore.ConnectTimeout):
         backend.connect_tcp("h", 443, timeout=cimd.CONNECT_TIMEOUT_S)
+
+
+class _StubStream:
+    """Records the timeout of each op; ``start_tls`` hands back the same shape."""
+
+    def __init__(self):
+        self.reads: list = []
+        self.writes: list = []
+        self.tls: list = []
+
+    def read(self, max_bytes, timeout=None):
+        self.reads.append(timeout)
+        return b""
+
+    def write(self, buffer, timeout=None):
+        self.writes.append(timeout)
+
+    def close(self):
+        pass
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        self.tls.append(timeout)
+        return self
+
+    def get_extra_info(self, info):
+        return None
+
+
+def test_pinning_backend_wraps_the_stream_in_the_deadline_proxy(monkeypatch):
+    """The deadline must travel WITH the stream, or TLS/header reads (which
+    happen after connect) stay on the per-read timeout (#3669 cycle-3)."""
+    monkeypatch.setattr(cimd, "public_addresses", lambda h, p: ["1.1.1.1"])
+    inner = _StubStream()
+    backend = cimd._PinningNetworkBackend(
+        inner=type("I", (), {"connect_tcp": lambda self, *a, **k: inner})(),
+        deadline=time.monotonic() + 5)
+    stream = backend.connect_tcp("h", 443, timeout=cimd.CONNECT_TIMEOUT_S)
+    assert isinstance(stream, cimd._DeadlineStream)
+
+
+def test_deadline_stream_caps_every_op_and_refuses_when_spent():
+    stub = _StubStream()
+    stream = cimd._DeadlineStream(stub, time.monotonic() + 1.0)
+    stream.read(10, timeout=30.0)
+    stream.write(b"x", timeout=30.0)
+    stream.start_tls(object(), timeout=30.0)
+    assert stub.reads and stub.reads[0] <= 1.0
+    assert stub.writes and stub.writes[0] <= 1.0
+    assert stub.tls and stub.tls[0] <= 1.0
+
+    expired = cimd._DeadlineStream(_StubStream(), time.monotonic() - 1)
+    with pytest.raises(httpcore.ReadTimeout):
+        expired.read(10, timeout=30.0)
+    with pytest.raises(httpcore.WriteTimeout):
+        expired.write(b"x", timeout=30.0)
+    with pytest.raises(httpcore.ConnectTimeout):
+        expired.start_tls(object(), timeout=30.0)
+
+
+def test_deadline_stream_rewraps_after_start_tls():
+    stub = _StubStream()
+    stream = cimd._DeadlineStream(stub, time.monotonic() + 5.0)
+    wrapped = stream.start_tls(object(), timeout=cimd.CONNECT_TIMEOUT_S)
+    assert isinstance(wrapped, cimd._DeadlineStream)
+    assert wrapped._deadline == stream._deadline
 
 
 # ── Feature gate ───────────────────────────────────────────────────────────

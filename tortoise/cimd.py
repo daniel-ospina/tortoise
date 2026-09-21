@@ -40,10 +40,10 @@ implemented here:
 6. **Fetch rate limiting** — per-host + aggregate + store cap, mirroring the
    DCR limiter's bucket idiom in ``hosted_api``.
 7. **Total occupancy** (#3669) — a process-wide in-flight cap, a per-fetch
-   deadline bounding the connect loop and the body read (the per-op timeouts do
-   not bound a trickled body), and a wall-clock budget per window whose worst
-   case is RESERVED at admission, so the product (fetches x duration) is bounded
-   and not just the fetch count.
+   deadline bounding every network phase (connect loop, TLS, status/header and
+   body reads; the per-op timeouts do not bound a trickled response), and a
+   wall-clock budget per window whose worst case is RESERVED at admission, so
+   the product (fetches x duration) is bounded and not just the fetch count.
 
 Control (2) is closed against **DNS rebinding** by connecting the TCP socket to
 the *validated* address while TLS SNI and the HTTP ``Host`` header stay on the
@@ -119,15 +119,14 @@ STORE_CAP = 256
 # escape the accounting.
 MAX_IN_FLIGHT_FETCHES = 4
 FETCH_BUDGET_S = 120.0
-#: Wall-clock deadline for the CONNECT loop and the body read of ONE fetch.
-#: ``READ_TIMEOUT_S`` is a per-socket-read timeout, not a total one, so a server
-#: that trickles the body keeps resetting it; the deadline is what actually
-#: bounds the read, and ``_PinningNetworkBackend`` caps EACH connect attempt by
-#: the remaining deadline (a host with several blackholed addresses would
-#: otherwise burn ``CONNECT_TIMEOUT_S`` per address). The budget RESERVES this
-#: at admission (see ``_budget_reserve``), so a fetch that never returns cannot
-#: be reset out of the accounting. One stalled per-socket read may still add up
-#: to ``READ_TIMEOUT_S`` on top; ``FETCH_MAX_S + READ_TIMEOUT_S`` is kept below
+#: Wall-clock deadline for ONE fetch, across EVERY phase. ``READ_TIMEOUT_S``
+#: is a per-socket-read timeout, not a total one, so a server that trickles the
+#: status line, the headers, or the body keeps resetting it; ``_DeadlineStream``
+#: caps each read/write/TLS timeout by the remaining deadline (and
+#: ``_PinningNetworkBackend`` caps each connect attempt), so the CONNECT loop,
+#: TLS handshake, header read and body read are all bounded. The budget RESERVES
+#: this at admission (see ``_budget_reserve``), so a fetch that never returns
+#: cannot be reset out of the accounting. Kept BELOW
 #: ``monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` so a fetch returns before its
 #: caller's offload bound. The OS resolver's own timeout on ``getaddrinfo`` is
 #: the one unbounded tail (pre-existing; see the module docstring).
@@ -304,6 +303,49 @@ def public_addresses(host: str, port: int) -> list[str]:
     return addresses
 
 
+class _DeadlineStream(httpcore.NetworkStream):
+    """Wrap a ``NetworkStream`` so EVERY blocking op honours an absolute deadline.
+
+    #3669 review: ``READ_TIMEOUT_S`` is a per-socket-read timeout, so a server
+    that trickles the STATUS LINE, the HEADERS, or the body resets it on every
+    byte and can hold a worker — and an in-flight permit — indefinitely. The
+    body alone was deadline-checked, and ``httpcore``'s ``close()`` cannot
+    interrupt a blocked ``recv``, so the header phase was unbounded. Capping
+    each ``read``/``write``/``start_tls`` timeout by the deadline's remainder
+    (and refusing once it is spent) is what actually bounds the whole exchange.
+    """
+
+    def __init__(self, inner, deadline: float) -> None:
+        self._inner = inner
+        self._deadline = deadline
+
+    def _bound(self, timeout: float | None, exc: type[Exception]) -> float:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise exc("CIMD fetch deadline exceeded.")
+        return remaining if timeout is None else min(timeout, remaining)
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self._inner.read(
+            max_bytes, timeout=self._bound(timeout, httpcore.ReadTimeout))
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        return self._inner.write(
+            buffer, timeout=self._bound(timeout, httpcore.WriteTimeout))
+
+    def close(self) -> None:
+        return self._inner.close()
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        inner = self._inner.start_tls(
+            ssl_context, server_hostname=server_hostname,
+            timeout=self._bound(timeout, httpcore.ConnectTimeout))
+        return _DeadlineStream(inner, self._deadline)
+
+    def get_extra_info(self, info: str):
+        return self._inner.get_extra_info(info)
+
+
 class _PinningNetworkBackend(httpcore.NetworkBackend):
     """``httpcore`` network backend that connects to the **validated** address.
 
@@ -324,6 +366,9 @@ class _PinningNetworkBackend(httpcore.NetworkBackend):
 
     def connect_tcp(self, host, port, timeout=None, local_address=None,
                     socket_options=None):
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise httpcore.ConnectTimeout(
+                f"CIMD fetch deadline exceeded before resolving {host!r}")
         addresses = public_addresses(host, int(port))
         last_error: Exception | None = None
         for address in addresses:
@@ -342,11 +387,17 @@ class _PinningNetworkBackend(httpcore.NetworkBackend):
                 address_timeout = (remaining if timeout is None
                                    else min(timeout, remaining))
             try:
-                return self._inner.connect_tcp(
+                stream = self._inner.connect_tcp(
                     address, port, timeout=address_timeout,
                     local_address=local_address, socket_options=socket_options)
             except Exception as exc:            # try the next vetted address
                 last_error = exc
+                continue
+            # Every later phase (TLS, status line, headers, body) goes through
+            # the same stream, so the deadline must travel with it.
+            if self._deadline is None:
+                return stream
+            return _DeadlineStream(stream, self._deadline)
         raise httpcore.ConnectError(
             f"no vetted address for {host!r} accepted the connection"
         ) from last_error
