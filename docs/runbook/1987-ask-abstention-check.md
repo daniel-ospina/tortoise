@@ -80,7 +80,8 @@ Shipped as an optimisation loop (baseline → lever → measure → keep/revert)
   product graphs currently carry none — zero marks = no-op),
 - **A3** ask-lane fusion weights/k knobs (default = shared global),
 - **A6** measurement-gated cap review (retrieval-window `limit` threaded in
-  tandem with `context_item_cap`; default OFF = 40/40/8000),
+  tandem with `context_item_cap`; #4105 defaults 200/200/16000 with the
+  byte ceiling derived; raising one half alone changes nothing),
 - **A7** eval-lane cross-encoder rerank behind `TORTOISE_ASK_RERANK` (default
   OFF, gated phase 2, degrade-to-untouched contract).
 
@@ -218,7 +219,7 @@ three non-abstention failure classes:
 | class | failures | cause (verified) |
 |---|---|---|
 | reader-MODEL content error | gpt4_8279ba02 (commits purchase date, no day count), gpt4_7a0daae1 (hedge), gpt4_6ed717ea (wrong order), 830ce83f (recency noise: commits the older Chicago mention; gold = the suburbs), 0100672e ($60 total vs $12 each), e831120c (hedge), b0479f84 (commits wrong recs) | deepseek-v4-flash answers wrong content — arithmetic, ordering, recency, per-unit reasoning |
-| retrieval gap (FTS top-40) | ceb54acb (answer turn ranks ~70: 'sexual fixations' list never retrieved), 1de5cff2 ('veja' turn not in top-40), gpt4_d84a3211 (dollar amounts not in top-40), 1d4e3b97 (chain/cassette turn not retrieved) | the product ask lane is FTS-only; the gold turns rank below the 8k/40 caps on these long haystacks |
+| retrieval gap (pre-#4105 FTS top-40) | ceb54acb (answer turn ranks ~70: 'sexual fixations' list never retrieved), 1de5cff2 ('veja' turn not in top-40), gpt4_d84a3211 (dollar amounts not in top-40), 1d4e3b97 (chain/cassette turn not retrieved) | the product ask lane is FTS-only; at the HISTORICAL 8k/40 caps the gold turns ranked below the window (fused ranks 67-153) on these long haystacks. The #4105 resolved defaults (200/200/16000) admit the answer-bearing turn for 1de5cff2 (rank 67), 1d4e3b97 (84), e9327a54 (89), ceb54acb (93) and 0a995998 (147). 0a995998's THIRD gold turn (rank 153) is inside the 200-wide window and stays out because the resolved 16k TOKEN budget fills first (~97 hits) — a budget bound, not pool depth; only that turn needs a wider budget. |
 | containment-judge bar | d6233ab6 (long synthesis gold: needs ~45-word overlap), 1d4e3b97 (same) | the judge's `max(2, len(gold_words)//2)` word-overlap bar on ~70-90-word synthesis golds is structurally unreachable |
 
 qwen3.8-max diagnostic (same evidence, `qwen/qwen3.8-max` via the

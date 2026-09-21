@@ -273,6 +273,11 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         # #1695 extraction session: FTS-lane probe via a module-level helper
         r"from_uri\(_FTS_LANE_URI\)",
     ],
+    # #4290: declared per the new-test-file registration rule. ZERO sites by
+    # construction — the finding-provenance gate opens no graph (hermetic temp
+    # git repo, subprocess git only); test_from_uri_routing_table_keys_exist
+    # pins that the module really exists.
+    "test_finding_provenance.py": [],
 }
 
 _FROM_URI_EXEMPT_FILES = {

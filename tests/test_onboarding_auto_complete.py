@@ -26,12 +26,15 @@ Two layers are tested here:
 2. the CALL SITES — a point write must not claim a decision, a decision write
    must (this is the layer that actually reds on the pre-fix code).
 
-19 of the 24 tests below red on the pre-fix code (verified against `origin/main`);
-the 5 that do not are regression/no-op guards
-(`test_cache_true_only_on_real_completion`, `test_decision_observed_is_keyword_only`,
-`test_failed_write_never_reaches_the_auto_complete`,
-`test_compact_org_completes_on_the_two_inferred_steps`,
-`test_grandfathered_node_write_preserves_the_mirror`).
+#3913 RED evidence (measured 2026-09-21 by running THIS file against the
+merge-base tree, where the build gate still required `catalog-presented`):
+exactly ONE test reds — `test_build_fork_completes_on_the_two_observed_acts`.
+`test_build_fork_fail_closed_when_an_observed_act_is_missing` and the #3784-era
+guards pass on both sides of the ruling. The census that previously stood here
+("19 of the 24 tests below red on the pre-fix code", verified against
+`origin/main`) does not reproduce at the merge base — 24 passed, 1 failed — so
+it is replaced by the measurement above and must not be read as this PR's
+evidence.
 """
 from __future__ import annotations
 
@@ -332,21 +335,40 @@ class TestRealGateIntegration:
         assert g.node["status"] == "active"
         assert g.status_writes == []
 
-    def test_build_fork_needs_the_catalog_observation(
+    def test_build_fork_completes_on_the_two_observed_acts(
             self, monkeypatch, org_ctx):
-        """#3784 residual 1: the build gate requires `catalog-presented`,
-        which this function must never fabricate."""
+        """#3913 (owner ruling 2026-09-20): the build gate is the two acts the
+        server OBSERVES (harness-connected + first-points-filed). It no longer
+        requires `catalog-presented` — RED on origin/main."""
         g = _FakeGraph(fork="build")
         g.install(monkeypatch)
-        mcp._maybe_onboarding_auto_complete(decision_observed=True)
+        mcp._maybe_onboarding_auto_complete()
+        assert g.steps == {"team-named", "harness-connected",
+                           "first-points-filed"}
         assert "catalog-presented" not in g.steps
-        assert g.node["status"] == "active"
-        # …and the real catalog observation completes it (#3913 owns the
-        # pure-REST surface gap; the gate itself is correct).
-        onboarding_state.write_completed_step(None, ORG, "catalog-presented")
-        from tortoise.hosted_api import _maybe_apply_completion
-        assert _maybe_apply_completion(ORG) is True
         assert g.node["status"] == "complete"
+        assert g.status_writes == ["complete"]
+        assert mcp._onboarding_state_cache[ORG][1] is True
+
+    def test_build_fork_fail_closed_when_an_observed_act_is_missing(
+            self, monkeypatch, org_ctx):
+        """#3913 fail-closed: a build org carrying only ONE of the two observed
+        acts stays active — the gate never completes on half the evidence."""
+        g = _FakeGraph(fork="build")
+        g.install(monkeypatch)
+
+        def _partial(proj, org_id, step_id, *, status_from_mirror=None):
+            # simulate a graph that stored only the harness act
+            if step_id == "first-points-filed":
+                return {"created": False, "step_id": step_id}
+            g.steps.add(step_id)
+            return {"created": True, "step_id": step_id}
+        monkeypatch.setattr(onboarding_state, "write_completed_step", _partial)
+        mcp._maybe_onboarding_auto_complete()
+        assert g.steps == {"team-named", "harness-connected"}
+        assert g.node["status"] == "active"
+        assert g.status_writes == []
+        assert mcp._onboarding_state_cache.get(ORG) is None
 
     def test_compact_org_completes_on_the_two_inferred_steps(
             self, monkeypatch, org_ctx):

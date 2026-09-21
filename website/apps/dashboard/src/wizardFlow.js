@@ -17,8 +17,9 @@
 //   validation below mirrors POST /v1/onboarding/team (server regex).
 // - the fork card is once-per-org (set-once server-side); build branch
 //   renders the registry-backed capability catalog (W8 — the offline
-//   fallback lives in BUILD_CATALOG_PLACEHOLDER) whose render marks the
-//   catalog-presented step edge (surface 4).
+//   fallback lives in BUILD_CATALOG_PLACEHOLDER). #3913: rendering the
+//   catalog performs NO write — the dashboard records no `catalog-presented`
+//   step edge (the build fork completes on the two acts the server OBSERVES).
 
 export const WIZARD_STEPS = Object.freeze([
   {
@@ -141,9 +142,9 @@ export const WIZARD_FORK_OPTIONS = Object.freeze([
 // endpoint is unreachable. The names/kinds/descriptions are kept
 // byte-identical to the registry's 3 launch rows (the JS unit tests pin
 // this shape; a registry rename must be mirrored here + in the Python
-// test_capability_catalog.py CANONICAL_NAMES). The fallback's render marks
-// the catalog-presented step edge via POST /v1/onboarding/state/checkpoint
-// (surface 4 write contract — unchanged by W8).
+// test_capability_catalog.py CANONICAL_NAMES). The fallback's render records
+// NOTHING: #3913 removed the `catalog-presented` step edge from the dashboard
+// entirely (the only client checkpoint write is the fork pick itself).
 export const BUILD_CATALOG_PLACEHOLDER = Object.freeze([
   { name: 'Session recorder', kind: 'indexer', description: 'Files agent conversations to the graph.' },
   { name: 'Session extractor', kind: 'extractor', description: 'Pulls decisions and findings out of recorded sessions.' },
