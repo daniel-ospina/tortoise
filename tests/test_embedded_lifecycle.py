@@ -1107,6 +1107,95 @@ def test_owner_socket_of_resolves_the_inner_client():
     assert owner_socket_of(type("NoSocket", (), {"socket_file": None})()) is None
 
 
+def test_owner_socket_of_reads_own_socket_and_never_a_callable_client():
+    """#4487 review: a raw embedded redislite `Redis` exposes `.client` as a
+    BOUND METHOD (its self-constructing clone helper), so the old
+    `getattr(client, "client", ...) or client` resolved 'inner' to that
+    method, found no `socket_file`, and returned None — silently breaking
+    the RELEASE fallback for raw clients whose record the #4487 constructor
+    patch now writes. The client's OWN `.socket_file` must win, and a
+    callable `.client` is never an inner client."""
+    from tortoise.embedded_lifecycle import owner_socket_of
+
+    class RawRedis:
+        socket_file = "/tmp/raw/redis.socket"
+
+        def client(self):  # redislite's clone helper — a callable attribute
+            return object()
+
+    assert owner_socket_of(RawRedis()) == "/tmp/raw/redis.socket"
+
+    class Wrapper:
+        socket_file = None  # the guarded wrapper has no socket of its own
+
+        class Inner:
+            socket_file = "/tmp/wrapped/redis.socket"
+
+        client = Inner()
+
+    assert owner_socket_of(Wrapper()) == "/tmp/wrapped/redis.socket"
+
+
+def test_raw_client_owner_record_released_by_the_fallback(tmp_path):
+    """#4487 review: the constructor patch writes a record for a RAW client;
+    the release fallback (`forget_owner(owner_socket_of(db))`) must be able
+    to release it. Pre-fix `owner_socket_of` returned None for a raw Redis,
+    so the claim was stranded with a LIVE pid and pinned the server."""
+    from redislite.client import Redis as RawRedis
+
+    from tortoise.embedded_lifecycle import (
+        _owner_refcounts,
+        _release_owner_quietly,
+    )
+    from tortoise.embedded_reaper import _owner_records
+
+    raw = RawRedis(str(tmp_path / "raw_release.db"))
+    try:
+        sock = raw.socket_file
+        assert _owner_records(sock) == (1, 1), "patch must have recorded it"
+        assert _owner_refcounts.get(sock) == 1
+        # No captured sock argument: this is exactly the fallback path.
+        _release_owner_quietly(raw)
+        assert sock not in _owner_refcounts, (
+            "the release fallback must resolve a raw client's socket — "
+            "pre-fix it resolved None and stranded the claim")
+        assert _owner_records(sock) in (None, (0, 1)), (
+            "after release the record must be gone (or count as dead)")
+    finally:
+        with contextlib.suppress(Exception):
+            raw.close()
+
+
+def test_close_embedded_clients_releases_a_raw_clients_claim(tmp_path):
+    """#4487 review (cycle 2): `close_embedded_clients` is the signal-teardown
+    seam and its `_release_owner` fallback must release a RAW client's claim
+    even though its teardown nulls `socket_file` first. Pre-fix the fallback
+    re-derived `owner_socket_of(inner)` AFTER teardown, got None, and stranded
+    the refcount — which then makes `record_owner` short-circuit forever, so a
+    later LIVE server on the same path got NO record (the #4487
+    uninstrumented-live-server class)."""
+    from redislite.client import Redis as RawRedis
+
+    from tortoise.embedded_lifecycle import (
+        _embedded_clients,
+        _owner_refcounts,
+        close_embedded_clients,
+    )
+    from tortoise.embedded_reaper import _owner_records
+
+    raw = RawRedis(str(tmp_path / "close_raw.db"))
+    sock = raw.socket_file
+    assert _owner_records(sock) == (1, 1), "the patch must have recorded it"
+    _embedded_clients.add(raw)
+    try:
+        close_embedded_clients()
+    finally:
+        _embedded_clients.discard(raw)
+    assert sock not in _owner_refcounts, (
+        "close_embedded_clients must release a raw client's claim; pre-fix the "
+        "post-teardown owner_socket_of resolved None and stranded it")
+
+
 def test_owner_record_written_on_construction_removed_on_close(tmp_path):
     """A guarded construction records THIS process as the server's owner;
     close() releases it. A SIGKILL cannot run close(), which is exactly why
@@ -1202,6 +1291,143 @@ def test_forked_child_reclaims_ownership_of_inherited_server(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             db.close()
+
+
+# ── #4487: EVERY redislite construction writes an owner record ────────────
+# The guarded `tortoise.FalkorDB` used to be the only writer, so a RAW
+# `redislite.falkordb_client.FalkorDB(...)` / `redislite.client.Redis(...)`
+# spawn was uninstrumented — the reaper's per-server "all owners dead"
+# signal then had no input and `--only-safe` failed closed forever on a host
+# whose suites are continuously active. `embedded_lifecycle` now patches
+# redislite's own `RedisMixin.__init__` so the raw constructions below record
+# too. Every test here fails on the pre-fix code.
+
+def test_raw_redislite_construction_writes_an_owner_record(tmp_path):
+    """A RAW redislite construction (guarded class NOT involved) must record
+    its owner — the #4487 gap. Both shapes redislite offers are covered:
+    `falkordb_client.FalkorDB` (server on `.client`) and `client.Redis`.
+
+    Positive control for the writer side: delete the `RedisMixin.__init__`
+    patch and this reads (None) instead of (1, 1)."""
+    from redislite.client import Redis as RawRedis
+    from redislite.falkordb_client import FalkorDB as RawFalkorDB
+
+    from tortoise.embedded_lifecycle import _owner_refcounts, owner_socket_of
+    from tortoise.embedded_reaper import _owner_records
+
+    raw_fdb = RawFalkorDB(str(tmp_path / "raw_fdb.db"))
+    raw_redis = RawRedis(str(tmp_path / "raw_redis.db"))
+    try:
+        for label, client in (("FalkorDB", raw_fdb), ("Redis", raw_redis)):
+            # The patch reads `.socket_file` off the constructed object first
+            # (an embedded `Redis` carries its own `.client` attribute, so
+            # `owner_socket_of` is only the fallback); resolve it the same way
+            # here, as later assertions do.
+            sock = getattr(client, "socket_file", None) or owner_socket_of(client)
+            assert sock, f"raw {label} should expose a socket"
+            entries = _owner_entries(sock)
+            assert entries, (
+                f"raw {label} construction wrote NO owner record — the "
+                f"uninstrumented-spawn gap #4487 exists to close")
+            assert all(e.startswith(f"{os.getpid()}-") for e in entries), \
+                entries
+            assert _owner_records(sock) == (1, 1), (
+                f"raw {label}: the reaper must read exactly one LIVE owner "
+                f"from what the patch wrote")
+            assert _owner_refcounts.get(sock) == 1, \
+                f"raw {label}: one client, one claim"
+    finally:
+        with contextlib.suppress(Exception):
+            raw_fdb.close()
+        with contextlib.suppress(Exception):
+            raw_redis.close()
+
+
+def test_guarded_construction_writes_exactly_one_owner_record(tmp_path):
+    """#4487 single-writer invariant: the guarded `tortoise.FalkorDB` and the
+    redislite patch must not BOTH record. `record_owner` is refcounted per
+    (process, socket path); two writers for one client would leave the record
+    (with a LIVE pid) pinning the server after close() released only one
+    claim — a fail-closed leak the reaper could never clear.
+
+    Positive control: restore the guard's own `record_owner` call and the
+    refcount reads 2."""
+    from tortoise.embedded_lifecycle import _owner_refcounts, owner_socket_of
+    from tortoise.embedded_reaper import _owner_records
+
+    db = FalkorDB(str(tmp_path / "one_claim.db"))
+    try:
+        sock = owner_socket_of(db)
+        assert sock
+        assert _owner_refcounts.get(sock) == 1, (
+            "exactly one writer must claim the server — 2 means the guard and "
+            "the patch both recorded (close() then strands the record)")
+        assert _owner_records(sock) == (1, 1)
+    finally:
+        with contextlib.suppress(Exception):
+            db.close()
+    assert _owner_refcounts.get(sock) is None, \
+        "close() must release the single claim"
+    assert _owner_entries(sock) in (None, []), \
+        "close() must remove the record it claimed"
+
+
+def test_raw_construction_abnormal_exit_leaves_a_confirmable_record(tmp_path):
+    """#4487 end-to-end, the generator the issue proved: a RAW construction
+    whose process dies ABNORMALLY (no close seam runs) must leave an owner
+    record with a DEAD pid, so the reaper's per-server signal reads
+    ``(0, 1)`` — all owners dead — and can confirm the orphan WITHOUT the
+    global suite-marker gate ever opening.
+
+    `os._exit` skips every atexit/close seam (the SIGKILL analogue that
+    stays deterministic under pytest). Pre-fix the child writes no record at
+    all, so the parent would read ``None`` and never confirm."""
+    import shutil
+
+    from tortoise.embedded_reaper import _owner_records
+
+    child = (
+        "import os, tempfile\n"
+        "import tortoise\n"  # installs the RedisMixin owner-record patch
+        "from redislite.falkordb_client import FalkorDB\n"
+        "d = tempfile.mkdtemp(prefix='p4487kill_')\n"
+        "db = FalkorDB(os.path.join(d, 'kill.db'))\n"
+        "print(db.client.socket_file, flush=True)\n"
+        "os._exit(0)\n"  # no close seam: exactly the abnormal-exit generator
+    )
+    proc = _subprocess.Popen([sys.executable, "-c", child],
+                             stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
+                             text=True)
+    try:
+        out, err = proc.communicate(timeout=120)
+    except _subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        pytest.fail(f"child hung: out={out!r} err={err!r}")
+    assert proc.returncode == 0, err
+    sock = out.strip().splitlines()[-1]
+    d = os.path.dirname(sock)
+    try:
+        assert os.path.exists(sock), f"child never started its server: {out!r}"
+        owners = _owner_records(sock)
+        assert owners == (0, 1), (
+            f"an abnormally-exited RAW spawn must leave exactly one DEAD "
+            f"owner record so the orphan is confirmable; got {owners!r}")
+        # The record's pid is the dead child — the #1642 FIX 5 identity read
+        # must therefore count it dead (that is what makes (0, 1) an orphan
+        # verdict rather than a live-owner protection).
+        entries = _owner_entries(sock)
+        assert entries and len(entries) == 1, entries
+        assert entries[0].split("-", 1)[0] == str(proc.pid), entries
+    finally:
+        pidfile = os.path.join(d, "redis.pid")
+        try:
+            server_pid = int(Path(pidfile).read_text().strip())
+        except (OSError, ValueError):
+            server_pid = None
+        if server_pid:
+            _kill_quiet(server_pid)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_shared_server_keeps_co_tenant_owner_record(tmp_path):

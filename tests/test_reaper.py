@@ -1565,6 +1565,69 @@ def test_active_suite_markers_recycled_pid_is_stale(monkeypatch, tmp_path):
     assert tokens == ["legacy-no-start", "right-identity"], tokens
 
 
+def test_dead_suite_marker_does_not_hold_the_only_safe_gate(
+        monkeypatch, tmp_path):
+    """#4487 directive (verified ALREADY satisfied): the only-safe gate must be
+    honest about corpse markers.
+
+    A suite that dies abnormally leaves its marker behind and nothing on this
+    host unlinks it (measured 2026-09-21 12:4x: 100 marker files, 95 with a
+    dead pid). The gate must treat a marker whose PID is dead as ABSENT — by
+    the guard itself, not a separate janitor — so a pile of corpses can never
+    keep ``suites_active`` True forever. A LIVE marker must still hold the
+    gate shut (#1005/#1557).
+
+    This is a REGRESSION test, not a mutation test: the filter already exists
+    (``active_suite_markers`` skips ``not _pid_identity_matches``), so it
+    passes pre-fix. It pins the property against future edits.
+    """
+    from tortoise.embedded_reaper import (
+        ZERO_CLIENT_CONFIRM_MINUTES,  # noqa: F401
+        _mark_orphan_confirmation,
+        _process_start_time,
+        active_suite_tokens,
+    )
+    marker_dir = tmp_path / "active_suites"
+    marker_dir.mkdir()
+    # A SIGKILLed suite's corpse: pid provably dead on both platforms, and a
+    # recorded start so the identity read is the one under test.
+    (marker_dir / "99999999-dead").write_text("pid=99999999\nstart=1.0\n")
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)  # confirm on the SECOND sweep
+    assert active_suite_tokens() == [], (
+        "a dead-pid corpse must not count as a live suite (the gate must "
+        "not be pinned shut by SIGKILLed suites)")
+
+    # A server dir that exists (not the socketless path) with 0 clients.
+    sockdir = tmp_path / "sockdir"
+    sockdir.mkdir()
+    sock = str(sockdir / "redis.socket")
+    for _ in range(2):
+        rec = _zero_client_candidate(sock, os.getpid())
+        rec["path_based"] = False
+        _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True, (
+        "with an empty LIVE suite set (corpses ignored) the window path must "
+        "confirm — otherwise a corpse pile re-shuts the #4487 gate")
+
+    # A LIVE suite marker re-shuts the gate for a fresh 0-client server.
+    start = _process_start_time(os.getpid())
+    assert start is not None
+    (marker_dir / f"{os.getpid()}-live").write_text(
+        f"pid={os.getpid()}\nstart={start}\n")
+    assert active_suite_tokens(), "the live marker must be seen"
+    sock2 = str(tmp_path / "sockdir2" / "redis.socket")
+    (tmp_path / "sockdir2").mkdir()
+    for _ in range(2):
+        rec2 = _zero_client_candidate(sock2, os.getpid())
+        rec2["path_based"] = False
+        _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is not True, (
+        "a LIVE suite's marker must still hold the gate shut (#1557)")
+
+
 def test_parse_lstart_both_platform_formats():
     """#1642 FIX 5: ps -o lstart= formats differ between macOS (day before
     month) and Linux (month before day); both must parse, plus a
