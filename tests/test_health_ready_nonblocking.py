@@ -32,6 +32,7 @@ from fastapi import HTTPException
 REPO = Path(__file__).resolve().parent.parent
 HOSTED_API = REPO / "tortoise" / "hosted_api.py"
 SELFHOST = REPO / "tortoise" / "selfhost.py"
+SUPABASE_CONTROL = REPO / "tortoise" / "supabase_control.py"
 
 
 def _handler(name: str, source: Path = HOSTED_API) -> ast.AsyncFunctionDef:
@@ -76,6 +77,447 @@ def test_handler_makes_no_direct_query_call():
         f"health_ready calls .query(...) directly at line(s) {offenders} — "
         "that runs synchronous network I/O on the event loop and freezes every "
         "other request (#2988)"
+    )
+
+
+# ── #3498: NAME-BASED control-plane offload inventory ──────────────────────
+#
+# The #2988 pin above matches ``ast.Attribute`` / ``attr == "query"`` inside
+# ONE handler. It cannot see a bare ``Name`` call (``user_memberships(cp, uid)``),
+# it cannot see a middleware body, and it cannot see any handler but
+# ``health_ready`` — which is exactly how the #3498 auth/REST blockers survived
+# it. This pin is NAME-BASED: every ``AsyncFunctionDef`` body (a Starlette
+# middleware ``dispatch`` is one) is scanned for a direct call to a declared
+# blocking control-plane seam helper. Such a call is allowed only inside an
+# offload boundary — the #3498 ``_cp_offload`` / ``monitoring.run_control_plane_call``
+# seam, or the pre-existing ``run_on_daemon_worker`` / ``asyncio.to_thread``.
+#
+# BOUNDARY, stated rather than implied: the inventory is the DECLARED
+# auth/REST seam of #3498 (§A1 of the design review) plus the session/DI and
+# key-write helpers this change routes — not every blocking call in the file.
+# The data-plane FalkorDB ``.query(...)`` sites are #3086's lane; the remaining
+# on-loop control-plane helper calls in other endpoints (invitations, members,
+# identity linking, agent signup) are #4350; and the in-lock mint calls in
+# ``_session_key_supabase`` cannot await under the synchronous ``_org_mint_lock``.
+# A pin claiming to cover all of them would have to enumerate ~50 call sites and
+# restructure the mint lock — a rewrite, not a guard. What this pin DOES do is
+# fail on the *next* call site that uses one of these seam helpers — the way
+# this defect regrew three times (#2988, #3035, #3086).
+#
+# LIMIT, stated: the scan walks ASYNC bodies, so a blocking call inside a SYNC
+# helper reached from an async body is not visible here (that was the removed
+# ``_session_pinned_org`` lazy-read shape; it is pinned directly by
+# ``test_session_pinned_org_is_a_pure_predicate``). The dynamic
+# ``test_no_new_on_loop_control_plane_helper_calls`` names the residual
+# explicitly so a new on-loop helper call still fails.
+CONTROL_PLANE_OFFLOAD_INVENTORY = frozenset({
+    "resolve_api_key",          # key-auth: 2-3 dependent PostgREST round-trips
+    "update_last_used",         # key-auth: the last_used_at PATCH (best-effort)
+    "user_memberships",         # session lane: membership rows
+    "membership_for_user_org",  # session/DI + login/claim lanes
+    "_orgs_row_fail_soft",      # session/DI lane: the orgs additive ladder
+    "org_by_id",                # session/DI + invite/onboarding lanes
+    "_org_node_sync_limits",    # session/DI lane: org limit props (org_by_id)
+    "api_key_by_id",            # key-write lanes: the key lookup
+    "set_dashboard_key_login",  # dashboard-login + provisioning flag write
+    "set_api_key_enabled",       # key-write lane: the enabled PATCH
+    "set_api_key_name",          # key-write lane: the label PATCH
+    "set_api_key_scopes",        # key-write lane: the scopes PATCH
+    "_resolve_signup_token",    # recovery lane: signup-token resolution
+    "_track_analytics_event",   # analytics lane: fresh httpx.Client per event
+    "_github_repos_count",      # github_status: blocking api.github.com call
+})
+
+#: The §A1-confirmed seam helpers that must never be silently dropped from the
+#: inventory (a subset assertion, so the pin cannot shrink to nothing).
+_A1_CONFIRMED_SEAMS = frozenset({
+    "resolve_api_key", "update_last_used", "user_memberships",
+    "_orgs_row_fail_soft", "_track_analytics_event", "_github_repos_count",
+})
+
+#: Helpers this change ROUTES in addition to §A1 (the session/DI seams
+#: ``_membership_org`` / ``_org_node`` / ``_require_owner_admin`` and the
+#: key-write/login/claim lanes). If a name leaves the inventory its routed
+#: sites lose their regression guard, so the pin asserts they stay.
+_ROUTED_SESSION_SEAMS = frozenset({
+    "membership_for_user_org", "org_by_id", "api_key_by_id",
+    "set_dashboard_key_login", "set_api_key_enabled", "set_api_key_name",
+    "set_api_key_scopes", "_org_node_sync_limits", "_resolve_signup_token",
+})
+
+#: Blocking ``supabase_control`` helpers that are STILL called directly
+#: (un-offloaded) from an async body. This is the DECLARED residual of #4350
+#: plus the in-lock mint calls in ``_session_key_supabase`` (which cannot await
+#: under the synchronous ``_org_mint_lock``). It is deliberately explicit and
+#: reviewed: a NEW on-loop call to a helper outside this set fails
+#: ``test_no_new_on_loop_control_plane_helper_calls`` — which is the design's
+#: "fail on the next call site" guard, with the residual named rather than
+#: implied. Burn it down in #4350.
+_KNOWN_ON_LOOP_RESIDUAL = frozenset({
+    "active_api_keys", "claim_membership", "consume_link_intent",
+    "consume_unlink_permit", "count_active_free_memberships",
+    "count_graph_keys", "decline_invitation_by_email",
+    "expired_bootstrap_keys", "graph_key_ids", "insert_api_key",
+    "invitation_accept", "invitation_accept_by_id", "invitation_expire",
+    "invitation_info_by_token", "invitation_mint", "invitation_rescind",
+    "invitation_resend", "invitation_row_by_token", "is_anon_org",
+    "membership_by_identity", "membership_count_since", "membership_role",
+    "mint_target_user_for_key", "org_api_keys", "org_by_email",
+    "org_by_name", "org_members", "org_tier", "owned_free_org_ids",
+    "pending_invitations", "pending_invitations_for_email",
+    "provision_org", "provision_org_with_token", "recover_org_key",
+    "reserve_unlink", "revoke_api_key", "set_graph_name",
+    "set_graph_recording", "set_membership", "set_org_onboarding_email_sent",
+    "signup_token_row", "soft_delete_graph", "store_github_credentials",
+    "store_link_intent", "user_identity_inventory", "webhook_event_marker",
+})
+
+#: Callees that OFFLOAD their argument — a call nested inside one of these is
+#: not on the loop, so the walk does not descend into it. ``_oauth_offload``
+#: (#3669) is the OAuth-lane wrapper over the same seam (it calls ``_cp_offload``
+#: on the dedicated ``oauth`` pool), so it is a boundary for the same reason.
+OFFLOAD_BOUNDARY_CALLEES = frozenset({
+    "_cp_offload", "_oauth_offload", "run_control_plane_call",
+    "run_on_daemon_worker", "to_thread",
+})
+
+
+def _callee_name(func: ast.expr) -> str | None:
+    """The bare name of a call target — ``Name.id``, or the attribute for
+    ``asyncio.to_thread`` / ``monitoring.run_control_plane_call``."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _module_aliases(tree: ast.AST) -> dict[str, str]:
+    """Module-level ``from ... import X as Y`` aliases (Y → X)."""
+    aliases: dict[str, str] = {}
+    for stmt in getattr(tree, "body", []):
+        if isinstance(stmt, ast.ImportFrom):
+            for alias in stmt.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+    return aliases
+
+
+def _unoffloaded_calls(node: ast.AST,
+                       module_aliases: dict[str, str] | None = None) -> list[tuple[str, ast.Call]]:
+    """Every ``ast.Call`` in ``node``'s OWN body that is not itself an offload
+    boundary and is not nested inside one, as ``(resolved_callee, call)``.
+
+    The callee name is RESOLVED through ``from ... import X as Y`` aliases
+    (module-level and local to the body), so ``_sb_memberships(...)`` (an alias
+    of ``user_memberships``) is seen for what it is — an alias is exactly how
+    the session lane smuggles one of these calls past a naive name match.
+
+    Nested ``def``/``async def``/``class`` bodies are skipped: a blocking call
+    in a nested function belongs to that function's own inventory entry (and
+    the pre-existing #2988 pin covers the probe case deliberately).
+    """
+    aliases = dict(module_aliases or {})
+    for stmt in getattr(node, "body", []):
+        if isinstance(stmt, ast.ImportFrom):
+            for alias in stmt.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+
+    def resolved(func: ast.expr) -> str | None:
+        name = _callee_name(func)
+        if name is None:
+            return None
+        return aliases.get(name, name)
+
+    found: list[tuple[str, ast.Call]] = []
+
+    def visit(current: ast.AST) -> None:
+        if isinstance(current, ast.Call):
+            if _callee_name(current.func) in OFFLOAD_BOUNDARY_CALLEES:
+                # The CALLABLE argument runs on the worker — skip it. Every
+                # OTHER argument is evaluated EAGERLY on the loop, so it must
+                # still be scanned (#3498 review): a
+                # ``_cp_offload(user_memberships(cp, uid))`` call (a Call, not
+                # a Lambda/Name) would otherwise hide an on-loop call.
+                for idx, arg in enumerate(current.args):
+                    if idx == 0 and isinstance(arg, (ast.Lambda, ast.Name)):
+                        continue
+                    visit(arg)
+                for kw in current.keywords:
+                    # The callable may be passed by KEYWORD (``fn=``/``func=``)
+                    # — it still runs on the worker, so skip it the same way.
+                    if kw.arg in ("fn", "func") and isinstance(
+                            kw.value, (ast.Lambda, ast.Name)):
+                        continue
+                    visit(kw.value)
+                return
+            name = resolved(current.func)
+            if name is not None:
+                found.append((name, current))
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            visit(child)
+
+    for stmt in getattr(node, "body", []):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        visit(stmt)
+    return found
+
+
+def _async_bodies(tree: ast.AST):
+    """Every async function/method — Starlette middleware ``dispatch`` included."""
+    return [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)]
+
+
+def test_control_plane_seam_calls_are_all_offloaded():
+    """#3498 item 3: a NAME-BASED inventory over EVERY async body.
+
+    This is the pin the #2988 guard should have been: it sees
+    ``user_memberships(cp, uid)`` (a bare ``Name``, invisible to the
+    ``attr == "query"`` match), it sees middleware bodies, and it sees every
+    handler — so the #3498 shape cannot reappear on the next call site.
+    """
+    tree = ast.parse(HOSTED_API.read_text())
+    bodies = _async_bodies(tree)
+    aliases = _module_aliases(tree)
+    assert len(bodies) > 50, (
+        f"only {len(bodies)} async bodies parsed — the scan is not seeing the "
+        "hosted surface it is supposed to guard"
+    )
+    offenders = [
+        (node.name, call.lineno, name)
+        for node in bodies
+        for name, call in _unoffloaded_calls(node, aliases)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert not offenders, (
+        "synchronous control-plane call(s) made directly from an async body "
+        f"(name, line, callee): {offenders} — route them through _cp_offload / "
+        "run_control_plane_call so PostgREST I/O never runs on the event loop "
+        "(#3498)"
+    )
+
+
+def test_no_async_body_builds_a_synchronous_httpx_client():
+    """A DIRECT ``httpx.Client(...)`` construction inside a coroutine.
+
+    This catches only that shape — a client built in a sync helper (as
+    ``_track_analytics_event`` and ``_github_repos_count`` do) is covered by
+    the name inventory above, not here."""
+    tree = ast.parse(HOSTED_API.read_text())
+    aliases = _module_aliases(tree)
+    offenders = [
+        (node.name, call.lineno)
+        for node in _async_bodies(tree)
+        for _name, call in _unoffloaded_calls(node, aliases)
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "Client"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "httpx"
+    ]
+    assert not offenders, (
+        f"async body constructs a synchronous httpx.Client at {offenders} — "
+        "that runs blocking I/O on the event loop (#3498)"
+    )
+
+
+def test_offload_inventory_names_still_exist():
+    """A rename or deletion must fail HERE, not silently vacate the pin."""
+    defined = {
+        n.name
+        for path in (SUPABASE_CONTROL, HOSTED_API)
+        for n in ast.walk(ast.parse(path.read_text()))
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    missing = CONTROL_PLANE_OFFLOAD_INVENTORY - defined
+    assert not missing, (
+        f"the #3498 offload inventory names {sorted(missing)}, which no longer "
+        "exist — a rename must update the inventory, or the pin silently "
+        "guards nothing"
+    )
+    assert _A1_CONFIRMED_SEAMS <= CONTROL_PLANE_OFFLOAD_INVENTORY, (
+        "a §A1-confirmed seam helper was dropped from the offload inventory"
+    )
+    assert _ROUTED_SESSION_SEAMS <= CONTROL_PLANE_OFFLOAD_INVENTORY, (
+        "a session/DI seam helper this change routed was dropped from the "
+        "offload inventory"
+    )
+
+
+def _supabase_control_blocking_names() -> set[str]:
+    """Module-level ``supabase_control`` functions that transitively reach the
+    synchronous HTTP client (``cp.query`` / ``cp.rpc`` / ``cp.rpc_value``).
+
+    This is the DYNAMIC half of the pin: a new helper enters this set
+    automatically, so a new on-loop call site cannot hide behind a name that
+    was simply never added to a hand-written list.
+    """
+    tree = ast.parse(SUPABASE_CONTROL.read_text())
+    fns = {n.name: n for n in tree.body
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    blocking: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, fn in fns.items():
+            if name in blocking:
+                continue
+            calls: set[str | None] = set()
+            for stmt in fn.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                calls |= {_callee_name(c.func) for c in ast.walk(stmt)
+                          if isinstance(c, ast.Call)}
+            if (calls & blocking) or (calls & {"query", "rpc", "rpc_value"}):
+                blocking.add(name)
+                changed = True
+    return blocking
+
+
+def test_no_new_on_loop_control_plane_helper_calls():
+    """The design's "fail on the NEXT call site" guard, with an explicit
+    residual rather than an implied one.
+
+    An un-offloaded direct call from an async body to ANY blocking
+    ``supabase_control`` helper must be either (a) covered by the inventory
+    (which fails the test above) or (b) in the reviewed ``_KNOWN_ON_LOOP_RESIDUAL``
+    set (#4350). A NEW call to a helper outside that set fails here.
+    """
+    blocking = _supabase_control_blocking_names()
+    assert len(blocking) > 50, (
+        f"the blocking-helper derivation saw only {len(blocking)} functions — "
+        "it is not seeing supabase_control's HTTP surface"
+    )
+    tree = ast.parse(HOSTED_API.read_text())
+    aliases = _module_aliases(tree)
+    offenders = [
+        (node.name, call.lineno, name)
+        for node in _async_bodies(tree)
+        for name, call in _unoffloaded_calls(node, aliases)
+        if name in blocking
+        and name not in CONTROL_PLANE_OFFLOAD_INVENTORY
+        and name not in _KNOWN_ON_LOOP_RESIDUAL
+    ]
+    assert not offenders, (
+        "NEW on-loop control-plane helper call(s) from an async body "
+        f"(function, line, callee): {offenders} — route them through "
+        "_cp_offload, or add the site to #4350's residual inventory "
+        "(_KNOWN_ON_LOOP_RESIDUAL) with a reason"
+    )
+    # A helper cannot be both routed and allowlisted: if it were, the routed
+    # sites would silently lose the guard above.
+    assert not (CONTROL_PLANE_OFFLOAD_INVENTORY & _KNOWN_ON_LOOP_RESIDUAL), (
+        "the offload inventory and the declared residual overlap: "
+        f"{sorted(CONTROL_PLANE_OFFLOAD_INVENTORY & _KNOWN_ON_LOOP_RESIDUAL)}"
+    )
+
+
+def test_detector_flags_a_bare_name_call_and_ignores_an_offloaded_one():
+    """Self-test of the detector (a pin that can never fail is not a pin).
+
+    The first call is the exact #3498 shape the attribute-based guard missed;
+    the second is the same helper behind the offload seam; the third is the
+    SAME call under a ``from ... import ... as`` alias — the session lane's
+    ``user_memberships as _sb_memberships``.
+    """
+    src = (
+        "from tortoise.supabase_control import user_memberships as _sb\n"
+        "async def handler():\n"
+        "    rows = user_memberships(cp, uid)\n"
+        "    more = await _cp_offload(lambda: user_memberships(cp, uid))\n"
+        "    alias = _sb(cp, uid)\n"
+    )
+    node = ast.parse(src).body[1]
+    aliases = _module_aliases(ast.parse(src))
+    hits = [
+        (call.lineno, name)
+        for name, call in _unoffloaded_calls(node, aliases)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == [(3, "user_memberships"), (5, "user_memberships")], (
+        f"detector must flag the un-offloaded bare-Name AND aliased calls, got {hits}"
+    )
+
+
+def test_detector_scans_a_middleware_dispatch_body():
+    """The inventory must cover a middleware body — the issue's other stated
+    gap in the #2988 pin."""
+    src = (
+        "class M:\n"
+        "    async def dispatch(self, request, call_next):\n"
+        "        _track_analytics_event('', 'x')\n"
+        "        return await call_next(request)\n"
+    )
+    bodies = _async_bodies(ast.parse(src))
+    assert [b.name for b in bodies] == ["dispatch"]
+    hits = [
+        name
+        for name, _call in _unoffloaded_calls(bodies[0])
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == ["_track_analytics_event"]
+
+
+def test_detector_flags_an_eagerly_evaluated_boundary_argument():
+    """A boundary call whose callable argument is NOT a lambda/name reference
+    evaluates that argument on the loop — the detector must still see it."""
+    src = (
+        "async def handler():\n"
+        "    rows = await _cp_offload(user_memberships(cp, uid), op='x')\n"
+    )
+    node = ast.parse(src).body[0]
+    hits = [
+        (call.lineno, name)
+        for name, call in _unoffloaded_calls(node)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == [(2, "user_memberships")]
+
+
+def test_detector_ignores_a_keyword_callable_argument():
+    """``fn=lambda: user_memberships(...)`` runs on the worker — the callable
+    slot is skipped whether positional or keyword."""
+    src = (
+        "async def handler():\n"
+        "    await _cp_offload(fn=lambda: user_memberships(cp, uid), op='x')\n"
+    )
+    node = ast.parse(src).body[0]
+    hits = [
+        name
+        for name, _call in _unoffloaded_calls(node)
+        if name in CONTROL_PLANE_OFFLOAD_INVENTORY
+    ]
+    assert hits == []
+
+
+def test_session_pinned_org_is_a_pure_predicate():
+    """The #3498 regression shape was a SYNC helper that read the control
+    plane lazily (``_session_pinned_org``'s old ``user_memberships`` call).
+    The name-based scan walks async bodies, so pin that removed shape
+    directly: the helper must not import or call a control-plane seam."""
+    tree = ast.parse(HOSTED_API.read_text())
+    node = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_session_pinned_org"
+    )
+    imported = {
+        alias.name
+        for imp in ast.walk(node)
+        if isinstance(imp, ast.ImportFrom)
+        for alias in imp.names
+    }
+    called = {
+        _callee_name(c.func)
+        for c in ast.walk(node)
+        if isinstance(c, ast.Call)
+    }
+    offenders = (imported | called) & CONTROL_PLANE_OFFLOAD_INVENTORY
+    assert not offenders, (
+        f"_session_pinned_org references control-plane helper(s) {sorted(offenders)} "
+        "— it must stay a pure in-memory predicate (the #3498 lazy-read regression)"
     )
 
 

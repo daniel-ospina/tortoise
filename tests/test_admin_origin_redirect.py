@@ -119,3 +119,115 @@ def test_admin_is_not_a_prefix_false_positive() -> None:
     """`/administer` must NOT redirect — the guard is a path-prefix, not a string one."""
     (res,) = _run([_case("/administrator")])
     assert res["status"] != 301, f"/administrator was treated as /admin: {res}"
+
+
+# ---------------------------------------------------------------------------
+# #4346 — the BFF's OWN endpoints (`/auth/*`) also moved, and must 302.
+#
+# The exact-path rule above covers `/auth` and `/auth.html` only, so
+# `/auth/start`, `/auth/callback`, `/auth/confirm` … fell through to a DELETED
+# asset and answered 404 on the marketing host — verified live:
+#   tortoise.premiselabs.co/auth/start -> 404
+#   app.premiselabs.co/auth/start      -> 302 (correct)
+#
+# 302 and NOT 301, which is a deliberate departure from the ordinary
+# "moved ⇒ 301" practice and the reason the OVERRIDES marker for it lives on
+# #3501/#3521 and in `SCOPE.md` §12: a 301 is browser-persistent and cannot be
+# reclaimed by a later deploy, so a NEW branch for the moved surface is 302
+# (§12 "302, never a new 301"; F12 "302 only").
+#
+# The already-served `/auth` 301 below is grandfathered and asserted AS-IS so a
+# future change to it is a visible edit, not a silent drift. The `/admin` 301 in
+# the tests above predates this and reads W2 as permitting a single-hop 301;
+# that difference is real and is tracked separately rather than quietly retuned
+# here — changing a shipped permanent redirect is its own decision.
+# ---------------------------------------------------------------------------
+
+AUTH_ENDPOINTS = [
+    "/auth/start",
+    "/auth/callback",
+    "/auth/confirm",
+    "/auth/update-password",
+    "/auth/reset",
+    "/auth/resend",
+    "/auth/link",
+    "/auth/api-key",
+    "/auth/set-email",
+]
+
+
+@pytest.mark.parametrize("path", AUTH_ENDPOINTS)
+def test_every_auth_endpoint_302s_to_the_app_origin(path: str) -> None:
+    """Before #4346 these were 404s on the marketing host.
+
+    A 301 fails here deliberately: it is browser-persistent, so it cannot be
+    reclaimed by a later deploy (`SCOPE.md` §12/F12).
+    """
+    (res,) = _run([_case(path)])
+    assert res["status"] == 302, (
+        f"{path} -> {res['status']}, want 302 (§12/F12: a NEW branch for the moved "
+        "auth surface is 302 — never a 301, never a 404)"
+    )
+    assert res["location"] == f"{APP_ORIGIN}{path}", (
+        f"{path} -> {res['location']!r}; want exactly {APP_ORIGIN + path!r}"
+    )
+    assert res["hsts"], f"{path}: the redirect lost the HSTS header (#1003)"
+
+
+def test_auth_subtree_preserves_the_query_string() -> None:
+    """`next=`/`provider=`/`token=`/`type=` must survive the hop.
+
+    A dropped query on `/auth/start` loses the provider; on `/auth/confirm` it
+    loses the token — both are user-visible dead ends, and neither shows up in a
+    status-code assertion.
+    """
+    (res,) = _run([_case("/auth/start?provider=github&next=%2Fwelcome%3Fclaim%3D1")])
+    assert res["status"] == 302 and res["location"] == (
+        f"{APP_ORIGIN}/auth/start?provider=github&next=%2Fwelcome%3Fclaim%3D1"
+    ), res
+
+
+def test_bare_auth_slash_collapses_to_one_hop() -> None:
+    """`/auth/` must reach the app origin in ONE hop.
+
+    It used to be a two-hop chain (`/auth/` -> `/auth` on the marketing host ->
+    app). W2 asks for the app origin directly; a chain is what F12 forbids
+    because the intermediate link is the one that sticks.
+    """
+    (res,) = _run([_case("/auth/")])
+    assert res["status"] == 302, f"/auth/ -> {res['status']}, want a single-hop 302"
+    assert res["location"] == f"{APP_ORIGIN}/auth", (
+        f"/auth/ -> {res['location']!r}; want {APP_ORIGIN + '/auth'!r} — a "
+        "same-host intermediate hop is the chained redirect F12 forbids"
+    )
+
+
+def test_company_host_auth_endpoints_also_302_to_the_app_origin() -> None:
+    """#4054 moved the surface off BOTH marketing hosts."""
+    (res,) = _run([_case("/auth/start", host=COMPANY_HOST)])
+    assert res["status"] == 302 and res["location"] == f"{APP_ORIGIN}/auth/start", res
+
+
+def test_the_exact_auth_rule_is_grandfathered_at_301() -> None:
+    """Pinned AS-IS, on purpose.
+
+    §12's *falsified-if* column reads "the served 301 can be reclaimed", so this
+    one is kept. Asserting it here means a future change to it is visible.
+    """
+    (res,) = _run([_case("/auth")])
+    assert res["status"] == 301 and res["location"] == f"{APP_ORIGIN}/auth", (
+        "the grandfathered /auth 301 changed — if that is deliberate, change this "
+        "pin in the same commit so it is not a silent drift"
+    )
+
+
+@pytest.mark.parametrize("path", ["/authorize", "/authentication", "/author", "/authx"])
+def test_auth_subtree_is_not_a_prefix_false_positive(path: str) -> None:
+    """Only the `/auth/` SUBTREE moves — the guard is a path-segment prefix.
+
+    `/authorize` is an OAuth-standard-looking path a reader might expect to be
+    swept up; it must fall through untouched.
+    """
+    (res,) = _run([_case(path)])
+    assert res["location"] is None, f"{path} was swept into the /auth redirect: {res}"
+    assert res["status"] != 302 or res["next"] == "next", f"{path} was redirected: {res}"
