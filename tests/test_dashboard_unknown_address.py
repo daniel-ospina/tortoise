@@ -29,8 +29,13 @@ REDIRECTS = PUBLIC / "_redirects"
 NOT_FOUND = PUBLIC / "404.html"
 SRC = PUBLIC.parent / "src"
 
-# The console the /admin path genuinely means (#3501/#3952).
-CONSOLE = "https://tortoise.premiselabs.co/admin/"
+# This origin's Functions (website/apps/dashboard/functions). A matching
+# Function is consulted BEFORE `_redirects` on inbound routing — verified on the
+# real runtime, not inferred (#4104) — so a Function is a routing owner in its
+# own right, and a `_redirects` rule on the same pathname never fires for a
+# visitor. Routing has two mechanisms; this guard must know both, or it reports
+# a served pathname as unrouted.
+FUNCTIONS = PUBLIC.parent / "functions"
 
 # Pathnames that are app routes even though they are not the root — they are
 # not derived from main.jsx (Stripe builds /team from the server side), so
@@ -232,6 +237,58 @@ def _first_wins() -> dict[str, tuple[str, int]]:
     return routed
 
 
+def _function_routes() -> tuple[set[str], set[str]]:
+    """Pathname shapes owned by a Function on this origin.
+
+    Routing SHAPES, never a blanket prefix. `[[path]].ts` catches its whole
+    subtree, but a plain `foo.ts` serves `/foo` (and its trailing-slash twin
+    `/foo/`) ONLY — `/foo/bar` is a 404. Modelling a file Function as a subtree
+    made this guard fail OPEN: a branch on a nested pathname under any existing
+    Function prefix (`/auth/totally-unrouted`) was reported as routed while
+    Cloudflare answered 404, verified against `wrangler pages dev dist`
+    (#4104 review, cycle 2).
+
+    Returns (exact, subtree).
+    """
+    exact: set[str] = set()
+    subtree: set[str] = set()
+    for path in FUNCTIONS.rglob("*.ts"):
+        parts = list(path.relative_to(FUNCTIONS).parts)
+        # `_shared/`, `_middleware.ts` are not routes.
+        if any(part.startswith("_") for part in parts):
+            continue
+        name = parts[-1]
+        if len(parts) > 1 and name == "[[path]].ts":
+            subtree.add("/" + "/".join(parts[:-1]))
+        elif name == "index.ts":
+            base = "/" + "/".join(parts[:-1])
+            exact.update((base, base + "/"))
+        else:
+            base = "/" + "/".join([*parts[:-1], name[: -len(".ts")]])
+            exact.update((base, base + "/"))
+    return exact, subtree
+
+
+def _is_routed(pathname: str) -> bool:
+    """True when the pathname is SERVED rather than handed to 404.html.
+
+    `/` is the index.html asset and never needs a rule. Everything else is
+    routed by a `_redirects` rule, an exact Function (plus its trailing-slash
+    twin), or a catch-all Function's subtree.
+    """
+    if pathname in ("/", ""):
+        return True
+    if pathname in _first_wins():
+        return True
+    exact, subtree = _function_routes()
+    if pathname in exact:
+        return True
+    return any(
+        pathname == prefix or pathname.startswith(prefix + "/")
+        for prefix in subtree
+    )
+
+
 def test_no_duplicate_rule_sources() -> None:
     """Pages is FIRST-match, so a duplicated source is ambiguous: the higher
     line wins and the lower one is dead. That shadowing pair is how the bug
@@ -401,28 +458,83 @@ def test_no_index_html_rewrite_destination() -> None:
     )
 
 
-def test_admin_redirects_to_the_console() -> None:
-    """/admin genuinely means the console (#3501/#3952) — it must send the
-    visitor there, not render the dashboard overview."""
-    admin_rules = {source: rule for source, rule in _first_wins().items()
-                   if source.startswith("/admin")}
-    for source in ("/admin", "/admin/", "/admin/*"):
-        assert source in admin_rules, f"no routing rule for {source}"
-        dest, code = admin_rules[source]
-        assert code == 301, f"{source} must be a permanent redirect, got {code}"
-        assert dest.startswith(CONSOLE), (
-            f"{source} must target the console {CONSOLE!r}, got {dest!r}"
+def test_admin_is_owned_by_its_function_not_a_redirect_rule() -> None:
+    """/admin genuinely means the console (#3501/#3952) — and since #4104/#4171
+    the console is SERVED ON THIS ORIGIN by the gate, not redirected to the
+    marketing origin.
+
+    This replaces an assertion that /admin carried a 301 to
+    https://tortoise.premiselabs.co/admin/. That rule both pointed the opposite
+    way from the architecture this change implements AND was dead code: a
+    matching Function is consulted before `_redirects`, so it never fired. The
+    gate existing is the load-bearing half; a rule here would only be a second,
+    losing owner.
+    """
+    gate = FUNCTIONS / "admin" / "[[path]].ts"
+    assert gate.is_file(), (
+        "website/apps/dashboard/functions/admin/[[path]].ts is missing — /admin "
+        "has no owner on this origin, so it falls through to 404.html and the "
+        "console is unreachable (#3523/#4171)"
+    )
+    body = gate.read_text()
+    assert "verifySession" in body and "isAdmin" in body, (
+        "the /admin gate no longer gates — expected the session and admin "
+        "checks to still be there (#3501/#4171)"
+    )
+    admin_rules = [s for s in _first_wins() if s.startswith("/admin")]
+    assert not admin_rules, (
+        f"public/_redirects carries {admin_rules!r} for a pathname a Function "
+        "already owns. The Function wins inbound, so the rule is dead for "
+        "visitors; and a rule crossing to another origin is exactly the "
+        "cross-origin bounce this change removes (#4104)"
+    )
+
+
+def test_function_ownership_models_routing_shapes_not_subtrees() -> None:
+    """A plain `foo.ts` Function owns `/foo` and `/foo/` — NOT `/foo/bar`.
+
+    Regression pin. The first version of `_is_routed` treated EVERY Function
+    prefix as a subtree, so it answered True for `/auth/totally-unrouted` and
+    `/welcome/foo` while Cloudflare Pages answered 404 — and because
+    `test_every_pathname_the_app_branches_on_is_routed` asks it the same
+    question, the anti-drift gate FAILED OPEN for the whole class "a pathname
+    nested under an existing Function prefix", which is the drift it exists to
+    catch. Verified at runtime against `wrangler pages dev dist`: `/welcome` and
+    `/welcome/` → 302 (served), `/welcome/foo` and `/auth/xyz` → 404 (#4104
+    review, cycle 2).
+    """
+    # Subtree owners: the dynamic catch-alls, and only those.
+    assert _is_routed("/admin/anything"), "admin/[[path]].ts owns its subtree"
+    assert _is_routed("/api/v1/graphs/1"), "api/v1/[[path]].ts owns its subtree"
+    # Exact owners, plus their trailing-slash twin.
+    assert _is_routed("/welcome") and _is_routed("/welcome/")
+    assert _is_routed("/auth/reset")
+    # …and NOTHING deeper under an exact owner: these all 404 in production.
+    for unrouted in ("/welcome/foo", "/auth/xyz", "/welcome/foo/bar"):
+        assert not _is_routed(unrouted), (
+            f"{unrouted!r} is served by no Function and no rule — Cloudflare "
+            "answers 404, so reporting it as routed makes the anti-drift guard "
+            "fail open (#4104)"
         )
-    # A prefix redirect without the splat would drop the console sub-path.
-    assert admin_rules["/admin/*"][0] == CONSOLE + ":splat"
 
 
 def test_valid_app_routes_still_serve_the_app() -> None:
-    """The app's own pathnames must keep serving the app (200), with the URL
-    intact — /welcome is what welcome mode keys on, and /team carries the
-    Stripe ?session_id= handoff in the query string."""
+    """The app's own pathnames must keep serving the app, with the URL intact —
+    /welcome is what welcome mode keys on, and /team carries the Stripe
+    ?session_id= handoff in the query string.
+
+    /welcome is served by `functions/welcome.ts`, NOT by a rule, and that
+    distinction is load-bearing rather than cosmetic. The Function's recovery
+    branch calls `env.ASSETS.fetch`, which re-enters the ASSET router — where
+    `_redirects` DOES apply, unlike inbound routing. A `/welcome / 200` rewrite
+    therefore answered the Function itself with the shell document instead of
+    `welcome.html`, and the reset panel silently disappeared (#4104).
+
+    /team keeps its rule: Stripe builds that page from the server side, so it is
+    a 200 rewrite of the app document, not a Function.
+    """
     routed = _first_wins()
-    for source in ("/welcome", "/welcome/", *SERVER_BUILT_ROUTES):
+    for source in SERVER_BUILT_ROUTES:
         assert source in routed, f"valid app pathname {source} is not routed"
         dest, code = routed[source]
         assert code == 200, (
@@ -430,19 +542,41 @@ def test_valid_app_routes_still_serve_the_app() -> None:
             "(a redirect would drop the pathname or the query)"
         )
         assert dest == "/", f"{source} must serve the app document, got {dest!r}"
+    welcome_rules = [s for s in routed if s.startswith("/welcome")]
+    assert not welcome_rules, (
+        f"public/_redirects routes {welcome_rules!r}. `functions/welcome.ts` owns "
+        "/welcome and wins on inbound routing, so the rule is dead for visitors "
+        "— but not for the Function's own `env.ASSETS.fetch`, which re-enters "
+        "the asset router where `_redirects` applies. That is how the recovery "
+        "landing lost its reset panel (#4104)"
+    )
+    assert _is_routed("/welcome"), "functions/welcome.ts must own /welcome"
 
 
 def test_every_pathname_the_app_branches_on_is_routed() -> None:
     """Anti-drift: the app decides behavior from location.pathname, and any
     such pathname is an app route. Adding a branch in ANY source module
-    without a routing rule would 404 the user who lands on it.
+    without a routing owner would 404 the user who lands on it.
+
+    "Routed" now means a `_redirects` rule OR a Function on this origin — a
+    Function is consulted first, so it is an owner in its own right. A
+    `_redirects`-only view reported /welcome as unrouted while
+    `functions/welcome.ts` was serving it (#4104).
 
     SCOPE, stated so this is not read as more than it is (#4006 review): the
     matcher recognises the `pathname === '<literal>'` form ONLY. A branch
     written with `startsWith`, `!==`, a `switch`, or a pathname built from a
-    constant is NOT detected — add its rule to `_redirects` by hand, and add
-    the pathname to SERVER_BUILT_ROUTES if the server builds it.
+    constant is NOT detected — give it a routing owner by hand, and add the
+    pathname to SERVER_BUILT_ROUTES if the server builds it.
     """
+    # Non-vacuity: if the Function scan found nothing, every branch would be
+    # reported missing and this guard would be asserting the wrong thing.
+    # Both shapes must be present, or the owner check is only half-modelled.
+    exact, subtree = _function_routes()
+    assert exact and subtree, (
+        f"the Function scan is incomplete ({len(exact)} exact, {len(subtree)} "
+        "subtree) — the routing-owner check would misreport"
+    )
     branches: set[str] = set()
     # Scope to the module extensions the app ships, and exclude every test
     # flavour. `*.js*` also matched `.json` and missed `.test.tsx` (#4006
@@ -458,10 +592,8 @@ def test_every_pathname_the_app_branches_on_is_routed() -> None:
             r"""pathname\s*===\s*['"]([^'"]+)['"]""", source.read_text()
         ))
     assert branches, "expected the app to branch on location.pathname"
-    # `/` is served by the index.html asset, never by a rule — always routed.
-    routed = {source for source in _first_wins()} | {"/", ""}
-    missing = sorted(b for b in branches if b not in routed)
+    missing = sorted(b for b in branches if not _is_routed(b))
     assert not missing, (
-        f"the app branches on {missing!r} but public/_redirects has no rule — "
-        "that pathname would 404 (#3523)"
+        f"the app branches on {missing!r} but neither public/_redirects nor a "
+        "Function on this origin serves it — that pathname would 404 (#3523)"
     )

@@ -121,10 +121,16 @@ SHARED_MODULES = (
 # from the manifest).
 SOURCE_PATTERNS = {
     "battery": ("battery/",),
-    "onboarding": ("tortoise/onboarding/", "website/welcome.html",
+    "onboarding": ("tortoise/onboarding/",
+                   # #4054: the auth surface moved to the app project — the BFF's
+                   # pages now live in the dashboard's `public/` tree (vite copies
+                   # them to `dist/`, the deployed root). `website/signin.html` was
+                   # deleted outright (it 301'd to /auth and was dead).
+                   "website/apps/dashboard/public/welcome.html",
+                   "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
-                   "website/index.html", "website/signup.html",
-                   "website/signin.html", "website/privacy.html",
+                   "website/index.html",
+                   "website/privacy.html",
                    # #3485: the shared cross-subdomain session bridge is a
                    # website asset whose guard test
                    # (test_cross_subdomain_cookie_sync.py) reads it directly.
@@ -155,6 +161,57 @@ SOURCE_PATTERNS = {
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
                    "website/apps/blog-admin/dist/index.html",
+                   # The guards read the moved Functions themselves — and not only
+                   # the gate: `test_admin_return_to.py` reads the gate by exact
+                   # path and derives the console's mount path from its directory,
+                   # `test_pages_bindings.py` rglob-scans the ENTIRE tree for env
+                   # reads (`_env_names_read_by_the_bff`), and
+                   # `test_website_docs_consistency.py` resolves routes from both
+                   # function roots. The directory is therefore the correct
+                   # granularity — not the two files that happened to break.
+                   #
+                   # #4171: this block previously named
+                   # `website/functions/admin/[[path]].ts`, which the admin-origin
+                   # move DELETED. An entry is matched by `startswith`, never
+                   # against the filesystem, so the dead path stayed "alive": a PR
+                   # touching the moved gate selected NO surface and
+                   # `test_admin_return_to.py` silently stopped guarding the file it
+                   # was written for (#1349/#3332 class, one level up — the ratchet
+                   # caught the reverse direction only). Naming single files also
+                   # left every OTHER moved Function unselectable: `auth/signup.ts`,
+                   # `_shared/auth/csrf.ts`, `api/session.ts` and the rest all
+                   # selected surfaces=[] — so a change adding an env read shipped
+                   # green with the binding guard never running. The directory
+                   # closes both holes. `test_source_patterns_all_name_something_real`
+                   # (tests/test_ci_selection.py) now fails on a dead entry.
+                   "website/apps/dashboard/functions/",
+                   # The SPA files the migrated-surface invariant reads by exact
+                   # path (`test_no_legacy_token_path.py` -> MIGRATED_SURFACES)
+                   # and that `test_admin_return_to.py` opens by name. Each of
+                   # these selected surfaces=[] before this commit, so the
+                   # (`website/apps/dashboard/src/main.jsx` is covered by the
+                   # `website/apps/dashboard/src/` directory entry below.)
+                   # legacy-token invariant could not fail on the very files it
+                   # exists to guard — including `main.jsx`, which THIS PR
+                   # rewrites (logout teardown, CSRF content-type). Same
+                   # #1349/#3332 class as the entry above; both are now covered by
+                   # `test_source_patterns_all_name_something_real`.
+                   "website/apps/blog-admin/src/lib/blog-api.ts",
+                   "website/apps/blog-admin/src/hooks/useAuth.ts",
+                   # #4171: two more guarded files this branch MODIFIED while leaving
+                   # them unselectable, found by review after the directory entry
+                   # landed. `supabase.ts` is read by exact constant in
+                   # `test_cross_subdomain_cookie_sync.py` (four STORAGE_KEY/cookie
+                   # scope assertions) and by
+                   # `test_session_bridge_fragment_retention.py`;
+                   # `blog/_shared/admin-auth.ts` by
+                   # `test_no_legacy_token_path.py`'s store-fault-vs-signed-out
+                   # semantics guard. Both are non-tier-1 `onboarding` guards, so
+                   # editing these files shipped green with their guard never
+                   # running — the same #1349/#3332 class, and inconsistent with
+                   # the sibling entries directly above.
+                   "website/apps/blog-admin/src/lib/supabase.ts",
+                   "website/functions/blog/_shared/admin-auth.ts",
                    # #3523: the dashboard's unknown-address guard
                    # (tests/test_dashboard_unknown_address.py) reads the Pages
                    # routing inputs for app.premiselabs.co plus the app's
@@ -172,11 +229,6 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/_redirects",
                    "website/apps/dashboard/public/404.html",
                    "website/apps/dashboard/src/",
-                   # The guard also reads the gate Function itself (it extracts
-                   # returnToPath/gateDecision from it, and derives the console's
-                   # mount path from its directory), so a change to the gate must
-                   # run the guard too.
-                   "website/functions/admin/[[path]].ts",
                    # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
                    # the Stripe ?session_id= return) are BUILT here, so a change to
                    # the server-side return path must run the guard too — otherwise
@@ -204,7 +256,7 @@ SOURCE_PATTERNS = {
                    "website/security.html", "website/tos.html",
                    "website/license.html", "website/dpa.html",
                    "website/aviso-privacidad.html",
-                   # #3436: the two remaining top-level pages, listed for the
+                   # #3436: the remaining top-level page, listed for the
                    # same reason as every other page entry in this tuple — they
                    # are covered by the site-wide element-id uniqueness guard
                    # (tests/test_website_docs_consistency.py), whose scope is
@@ -217,7 +269,13 @@ SOURCE_PATTERNS = {
                    # the blog guard's scope, not out of this one: a noindex page
                    # is still a served document, and duplicate ids are invalid in
                    # it.
-                   "website/404.html", "website/invite-accept.html",
+                   # #4054: `invite-accept.html` moved to the app project with the
+                   # rest of the auth pages, so its entry follows it —
+                   # `website/invite-accept.html` no longer exists, and the stale
+                   # entry was caught by `test_source_patterns_all_name_something_real`
+                   # (tests/test_ci_selection.py) the moment this branch merged main.
+                   "website/404.html",
+                   "website/apps/dashboard/public/invite-accept.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
@@ -245,6 +303,18 @@ SOURCE_PATTERNS = {
                    # derivation's own inputs rather than to its output.
                    "website/_redirects",
                    "website/functions/blog/[[path]].ts",
+                   # #4316: the agent API Function (create / edit / DELETE) owns
+                   # the guard in tests/test_blog_agent_delete_guard.py, which
+                   # executes it under Node. Without this entry a PR touching
+                   # ONLY the DELETE guard (posts/[[path]].ts) selects NO surface
+                   # (surfaces=[], full=False) and the guard never runs on the
+                   # very PR that owns it — the #1349/#3332/#3616 silent-drop
+                   # class the entries above exist to close, one level down.
+                   # Directory granularity, deliberately: the sibling Functions
+                   # (generate-seo/-cover, purge) share the API's auth + env
+                   # reads, and naming single files is what left every other
+                   # moved Function unselectable in #4171.
+                   "website/functions/blog/api/",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that
@@ -279,7 +349,7 @@ SOURCE_PATTERNS = {
     # a future core-registered test reading it would silently stop running on
     # the PR that edits it. Fail-closed is the right default for the file that
     # owns the deploy.
-    "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
+    "ep": ("tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
             "tortoise/reader.py", "tortoise/retrieval.py",
@@ -353,7 +423,17 @@ SOURCE_PATTERNS = {
             # test_1162_add_operator_local_svbp.py). Paired with CORE_ALSO:
             # its pinning tests are registered across api, core AND ep, so the
             # named-surface match must not drop `core` (see CORE_ALSO).
-            "tortoise/api.py"),
+            "tortoise/api.py",
+            # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
+            # and `test_bridge_table.py` (registered in `api`) is the drift gate
+            # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
+            # generator-only edit selected NO surface (`surfaces: []`, `full:
+            # false`) and the gate never ran on precisely the PR that can break
+            # it. Named here because a SOURCE_PATTERNS match beats the
+            # non-python skip. A docs-only hand-edit of the generated file still
+            # skips the matrix by the repo's deliberate docs-PR policy — see
+            # tortoise #4454.
+            "tools/bridge_table.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
@@ -479,6 +559,25 @@ TOOL_CARVEOUTS = (
     # tier-1 smoke) and its own wiring/behaviour tests would never run on the
     # PR that edits it.
     "tools/embedder_provision.py",
+    # #4290: the finding-provenance gate (tools/finding_provenance.py) owns
+    # tests/test_finding_provenance.py. Same silent-drop class as the
+    # collision-preflight carve-out above: the flat "tools/" prefix in
+    # NON_PYTHON_PREFIXES swallows the path, `changed` comes back empty, and
+    # select() takes the docs-only return — so the gate's own falsification
+    # suite would never run on the PR that changes the gate. No SOURCE_PATTERNS
+    # entry matches it, so it lands in the unknown-path branch -> FULL matrix
+    # (fail closed). Pinned by
+    # test_ci_selection.test_finding_provenance_tool_change_fails_closed_to_full.
+    "tools/finding_provenance.py",
+    # #3827: the embedded-lane evidence harness owns
+    # tests/test_embedded_evidence.py. Same silent-drop class as the preflight
+    # carve-out above: no SOURCE_PATTERNS entry matches the path, so a
+    # harness-only change is swallowed by the flat "tools/" prefix, `changed`
+    # comes back empty, and select() takes the docs-only return — the harness's
+    # own guard test never runs on the PR that edits the harness. That is the
+    # exact "proxy silent in the case it exists to cover" class this harness is
+    # written to detect, so it must not apply to the harness itself.
+    "tools/embedded_evidence.py",
 )
 
 

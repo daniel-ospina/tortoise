@@ -497,6 +497,25 @@ def _enforce_quota(resource: str = "points") -> None:
     enforce_org_limit(limits, resource, sdk=_get_org_sdk())
 
 
+def _alert_unmetered(lane: str, org_id: str | None,
+                     error: BaseException) -> None:
+    """Emit the #3981 operator alert for a dropped increment, never raising.
+
+    The import is itself guarded: ``tortoise.metering`` may be the thing that
+    failed, and an unguarded import inside an ``except`` would turn a
+    bookkeeping fault into the user-facing failure the owner's ruling forbids.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+    except Exception:  # noqa: BLE001, RUF100 — the alert must never raise
+        logging.getLogger("tortoise.metering").error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
+            "(metering module unavailable)", lane, org_id or "<none>",
+            type(error).__name__, error)
+        return
+    report_unmetered_increment(lane=lane, org_id=org_id, error=error)
+
+
 def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     """Wrap a bound SDK method with a pre-write quota check + metering.
 
@@ -505,8 +524,12 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     error dicts (see _safe's QuotaExceededError/QuotaCheckError mapping).
 
     #681: after a successful write (fn returns without raising), records a
-    write op for overage metering. Best-effort — metering failures are
-    swallowed and never block the tool.
+    write op for overage metering. Best-effort — the increment never blocks the
+    tool, and the drop is never silent (#3981): when the increment cannot be
+    recorded the operator is alerted (lane=mcp_write_op) and the error is
+    absorbed. The raise from an unresolvable metering window is a SIGNAL, not a
+    refusal; the user-facing refusal here is ``_enforce_quota`` above, which
+    runs BEFORE the write.
 
     #308 (R1, scoping delta 8): ``abuse_weight`` records a WEIGHTED
     point_create event after a successful Point-creating write — int for a
@@ -517,24 +540,33 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     def _gated(*args, **kwargs):
         _enforce_quota(resource)
         result = fn(*args, **kwargs)
-        # Metering (#681): best-effort, after successful write
         try:
-            from tortoise.mcp_auth import _current_org_id, _current_org_limits
+            from tortoise.mcp_auth import _current_org_id
             org_id = _current_org_id.get()
-            if org_id:
+        except Exception:  # noqa: BLE001, RUF100 — no org context; metering is skipped
+            org_id = None
+        # Metering (#681): best-effort, after successful write
+        if org_id:
+            try:
+                from tortoise.mcp_auth import _current_org_limits
                 limits = _current_org_limits.get() or {}
                 from tortoise.metering import record_write_ops
                 record_write_ops(org_id, tier=limits.get("tier"))
-                # #308 (R1): weighted point_create recording + evaluation.
-                # The engine piggybacks R2 evaluation on the same call.
+            except Exception as e:  # noqa: BLE001, RUF100 — never block the tool
+                _alert_unmetered("mcp_write_op", org_id, e)
+            # #308 (R1): weighted point_create recording + evaluation. The
+            # engine piggybacks R2 evaluation on the same call. Its OWN
+            # best-effort block — an abuse-recording failure is not a dropped
+            # increment and must never be reported as one (#3981).
+            try:
                 if abuse_weight is not None and not _abuse_off():
                     n = (int(abuse_weight(result, args, kwargs) or 0)
                          if callable(abuse_weight) else int(abuse_weight))
                     if n > 0:
                         from tortoise import abuse as _abuse
                         _abuse.get_engine().record_point_create(org_id, n)
-        except Exception:
-            pass  # best-effort — never block the tool
+            except Exception:
+                pass  # best-effort — never block the tool
         return result
     return _gated
 
@@ -761,9 +793,11 @@ def tortoise_create_point(kind: str, content: str,
                           dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
-    On first successful write from an incomplete org, auto-completes
-    onboarding (files remaining step edges + flips status to complete) —
-    no separate ceremony needed.
+    On a successful write from an incomplete org, records the onboarding
+    steps this write is evidence for (`harness-connected`,
+    `first-points-filed`, plus `decide-completed` for a decision-shaped
+    write) and hands completion to the canonical fork-aware gate — no
+    separate ceremony needed, and no step the write did not observe (#3784).
 
     dedup=True (default): idempotent — returns existing Point if content matches.
     dedup=False: force-create even if content is identical.
@@ -803,7 +837,17 @@ def tortoise_create_point(kind: str, content: str,
     merged["dedup"] = dedup
     result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
     if "error" not in result:
-        _maybe_onboarding_auto_complete()
+        # #3784: only a decision-shaped write observes the decision step —
+        # `decision` is the pointKind the documented EP decide protocol
+        # files (tortoise/onboarding/SKILL.md §5) and the one file_decision
+        # creates. Read the PERSISTED pointKind when the write returned one
+        # (the server must observe what was recorded, not what was asked
+        # for); any other kind observes no decision.
+        _recorded_kind = (result.get("pointKind") if isinstance(result, dict)
+                          else kind)
+        _maybe_onboarding_auto_complete(
+            decision_observed=(str(_recorded_kind or kind).strip().lower()
+                               == "decision"))
     return result
 
 
@@ -1517,7 +1561,8 @@ def tortoise_file_decision(options: Any, evidence: Any,
     result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
     if "error" not in result:
-        _maybe_onboarding_auto_complete()
+        # #3784: this call IS the observation — a decision was filed.
+        _maybe_onboarding_auto_complete(decision_observed=True)
     return result
 
 
@@ -2891,16 +2936,57 @@ def tortoise_onboarding_github_status() -> dict:
 
 # ── Auto-complete onboarding on first real write ────────────────
 # When an agent makes its first successful graph write (create_point or
-# file_decision), the server auto-files the remaining onboarding steps and
-# flips status to complete — no agent-side state machine ceremony needed.
+# file_decision), the server records the onboarding steps THAT WRITE IS
+# EVIDENCE FOR, then hands the completion decision to the canonical
+# fork-aware gate — no agent-side state machine ceremony needed.
+#
+# #3784: a step edge is a record of something the server OBSERVED. Filing a
+# step the write does not evidence records a fact the user never produced,
+# and the Setup guide then reports complete for work that did not happen.
 
-def _maybe_onboarding_auto_complete() -> None:
-    """After a successful agent write, auto-complete onboarding if not
-    already done. Idempotent: steps are FWW edges, replay is a no-op.
+def _maybe_onboarding_auto_complete(*,
+                                    decision_observed: bool = False) -> None:
+    """After a successful agent write, record the onboarding facts that
+    write is itself evidence for, then let the canonical gate decide
+    completion. Idempotent: steps are FWW edges, replay is a no-op.
 
-    Files harness-connected, first-points-filed, and decide-completed step
-    edges and flips status to complete. Invalidates the 60s TTL cache so
-    the MCP tools/list filter picks up the change immediately.
+    Observed steps (#3784) — the step's own label is the claim, so the
+    server may file it only on the event the label describes:
+    - ``harness-connected`` + ``first-points-filed``: a successful agent
+      tool call IS the observation for both — the harness reached the
+      server, and the two triggering tools file points (label: "Seed your
+      first memory").
+    - ``decide-completed`` (label: "Make your first decision"): filed ONLY
+      when the caller observed a decision — ``tortoise_file_decision``
+      succeeded, or ``tortoise_create_point(kind="decision")`` (the
+      documented EP decide protocol, ``tortoise/onboarding/SKILL.md`` §5).
+      A plain point write observes no decision and must not claim one.
+      (``skills/tortoise-decide/SKILL.md``'s option/criterion/evidence flow
+      is a DELIBERATE false negative — claiming a decision at the refinement
+      step would be the same unobserved fact, inverted. See #3916.)
+    - ``catalog-presented`` (label: "Review the catalog"): NEVER inferred
+      from a write. Its presentation is observed by the agent catalog
+      checkpoint (``hosted_api._CHECKPOINT_STEPS``), or asserted by an
+      external caller through ``PATCH /v1/onboarding/state``
+      (``catalog_presented``). The dashboard used to render-mark it on a
+      build-fork pick, but that writer is deleted; the id stays an accepted,
+      OPTIONAL record either way. #3913 (owner ruling 2026-09-20): it is NO
+      LONGER a build-gate requirement — the build fork completes on the two
+      observed acts above — so it is never a completion input.
+
+    Status is SERVER-OWNED and fork-aware: completion is delegated to
+    ``hosted_api._maybe_apply_completion`` (the canonical
+    ``state.completion_gate_satisfied`` eval, honouring fork=None→self,
+    compact-first and fork_unsure_at), so this function can never flip an
+    org to complete while a required step is missing.
+
+    ``decision_observed`` is keyword-only and defaults to False: a caller
+    that forgets to declare its observation fails CLOSED (claims no
+    decision), never open.
+
+    Caches the ``tools/list`` verdict ``True`` only when ``_maybe_apply_completion``
+    reports a real transition to complete; that helper pops the entry itself,
+    so a completion is visible immediately.
 
     Only fires in HTTP (hosted) mode with a real org_id — stdio and
     self-host calls are no-ops."""
@@ -2915,18 +3001,15 @@ def _maybe_onboarding_auto_complete() -> None:
         return  # already known complete
     try:
         from tortoise.hosted_api import (
+            _emit_onboarding_step_events,
             _get_onboarding_projection,
             _get_onboarding_state,
+            _maybe_apply_completion,
+            _onboarding_distinct_id,
             _org_proj,
         )
         from tortoise.onboarding.state import (
-            STATUS_COMPLETE as _OS_COMPLETE,
-        )
-        from tortoise.onboarding.state import (
             write_completed_step as _os_write_step,
-        )
-        from tortoise.onboarding.state import (
-            write_status as _os_write_status,
         )
         proj = _org_proj(org_id)
         projection = _get_onboarding_projection(org_id)
@@ -2934,24 +3017,34 @@ def _maybe_onboarding_auto_complete() -> None:
         if isinstance(prog, bool) and prog:
             _onboarding_state_cache[org_id] = (now, True)
             return  # already complete
-        # File all remaining step edges (idempotent FWW) — safe if some
-        # already exist, skips nothing.
-        # Fork-aware: self fork needs decide-completed, build fork needs
-        # catalog-presented (unknown fork defaults to self behavior).
-        fork = projection.get("fork") or "self"
-        steps = ("harness-connected", "first-points-filed",
-                 "catalog-presented" if fork == "build" else "decide-completed")
+        # File ONLY the steps this write observed (#3784). Idempotent FWW
+        # edges — a replay is a no-op.
+        observed = ["harness-connected", "first-points-filed"]
+        if decision_observed:
+            observed.append("decide-completed")
         legacy_mirror = bool(
             _get_onboarding_state(org_id).get("onboarding_complete"))
-        for step in steps:
-            _os_write_step(proj, org_id, step,
-                           status_from_mirror=legacy_mirror)
-        # Flip status (monotonic — no-op if already complete).
-        _os_write_status(proj, org_id, _OS_COMPLETE,
-                         status_from_mirror=legacy_mirror)
-        # Invalidate cache so tools/list retires onboarding tools
-        # immediately.
-        _onboarding_state_cache[org_id] = (now, True)
+        # #2006 (W11): emit IMMEDIATELY after each creating write, so a later
+        # step's failure cannot discard an edge creation this call already
+        # observed. Fail-safe (capture never raises, and the helper guards each
+        # emit), so this can never block the agent's write.
+        for step in observed:
+            res = _os_write_step(proj, org_id, step,
+                                 status_from_mirror=legacy_mirror)
+            if res.get("created"):
+                _emit_onboarding_step_events(
+                    [step],
+                    distinct_id=_onboarding_distinct_id(org_id),
+                    org_id=org_id, source="mcp_auto")
+        # Server-owned status → the canonical fork-aware gate decides, never
+        # this function (monotonic; a no-op if already complete).
+        if _maybe_apply_completion(org_id):
+            # The helper returned a real TRANSITION to complete — cache the
+            # tools/list verdict. An already-complete org never reaches here
+            # (the projection short-circuit above cached it), and caching
+            # True for an incomplete org would retire the onboarding tools
+            # from tools/list — a second false "you're all set".
+            _onboarding_state_cache[org_id] = (now, True)
     except Exception:
         # Fail-open: a transient graph/control-plane error must NOT block
         # the agent's write. Next write re-triggers this check.
@@ -2963,7 +3056,9 @@ def _maybe_onboarding_auto_complete() -> None:
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
 # gate order: admission 429 (#3060) → session_recording opt-out 409 → empty
-# 422 → provider 503 → quota 402. Stdio/self-host returns an honest "requires
+# 422 → quota 402. A missing provider key is NOT a gate (#3892): the capture
+# is STORED and only the LLM extraction is skipped, reported as
+# `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
 # hosted mode" error —
 # there is deliberately NO local fallback that bypasses the capture pipeline
 # (a prompt-injection exfiltration surface must not exist).

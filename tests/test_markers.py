@@ -95,6 +95,10 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_mcp_http.py": {"registry": "prod-coupled"},
     "test_mcp_server_auth_modes.py": {"registry": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern (the #2657 TestAskConnectedAssemblyExposure selfhost site went with the ask surface, #3849)
     "test_metering.py": {"registry": "prod-coupled"},
+    # #3825: the metering-WINDOW tests put a real billing anchor on an org's
+    # ``:Team`` node and drive the ledger through the production writer; the
+    # registry store IS the coupling under test (same class as test_metering).
+    "test_metering_period_window.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
@@ -238,6 +242,12 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # and no production seam resolves the name.
         '"registry_3895"': "test-constructed",  # scratch registry handle for create_backup's stamp seam
     },
+    # #4290: declared per the new-test-file registration rule. ZERO sites by
+    # construction — the finding-provenance gate is hermetic over a temp git
+    # repo and never calls select_graph; the key is a deliberate "considered,
+    # nothing to route" statement, and test_select_graph_routing_table_keys_exist
+    # pins that the module really exists.
+    "test_finding_provenance.py": {},
 }
 
 # Carve-out / non-migrated files exempt from both guards.
@@ -1097,3 +1107,537 @@ def test_ci_runs_the_embedded_only_marker_selection():
             f"{job_name}: the marker selection must target the tests tree "
             f"(`tests/` as a pytest argument, not a word in the surrounding "
             f"prose): {run[:120]!r}")
+
+
+# ── platform-gated tests: evidence CI can never execute ─────────────────────
+# A test skipped by a PLATFORM gate is invisible in a green run: the job passes
+# and nothing in the result says the gate did not execute. #4162 is the case
+# that matters — `tests/test_fork_safety_3845.py`'s producer + mutation-proof
+# pair, which is dev-machine evidence ONLY because the hazard it reproduces
+# belongs to macOS libsystem.
+#
+# The gate is not a defect and must not be "fixed" by loosening it: a fork that
+# lands while libc's process-global timezone rwlock is held wedges the child on
+# darwin, and does NOT on glibc or musl. Measured 2026-09-19 (#4162), same
+# mechanism (owned zone file, mtime bumped before every call, six spinning
+# threads, then fork):
+#     macOS (libsystem, clang)   -> WEDGED on the first fork
+#     glibc 2.36 (debian bookworm) -> 20/20 children completed
+#     musl (alpine)                -> 20/20 children completed
+# So no Linux job can produce this evidence, and a "Linux variant" would be
+# testing a different mechanism — not a mutation proof for the #3845 fix.
+#
+# Declared boundary: what the scan above does NOT see, so the registry reads
+# as the floor it is. A platform-conditional `os.name`/`sysconfig` check; a
+# `collect_ignore` written through `globals()[…]`; a platform value computed at
+# runtime; a helper that early-returns so its test passes vacuously; a skip mark
+# imported from a module the scan does not read; and any spelling nobody has
+# written yet — which is why the guard's last resort is a runtime check (see
+# #4215) rather than this list getting longer. Those are recorded here rather
+# than guessed at.
+#
+# What this registry buys: a platform gate cannot be added silently in the
+# shapes the scan reads — a skip-like call naming the platform, a skip-like call
+# or a test definition under a condition that names the platform (whichever
+# container the condition is written in), and the `skipif(...)` calls that are
+# the idiomatic spellings in both pytest and unittest. Declared OUT of the
+# scan's reach, deliberately: a helper that early-returns so its test passes
+# vacuously (there is no call to recognise), a platform value computed at
+# runtime, and a skip mark defined in another file and imported
+# (`from helpers import macos_only`) — a mark imported from a module the scan
+# does not read is invisible to it. (`conftest.py` IS read, so a mark defined
+# there is covered.) Those are recorded here rather than guessed at — the
+# registry is a floor, not a proof.
+PLATFORM_GATED_TESTS: dict[str, str] = {
+    "test_fork_safety_3845.py": (
+        "#3845 producer + MUTATION PROOF. `_build_holder()` skips unless "
+        "sys.platform == 'darwin', and every CI job is ubuntu-latest (12/12), "
+        "so `test_fork_child_does_not_hang_with_the_production_config` (the "
+        "fix) and `test_without_the_fix_the_same_race_hangs_a_child` (the "
+        "mutation that proves it) execute on a dev-machine macOS run only. "
+        "CI still runs this file's other two tests "
+        "(`test_embedded_choke_point_runs_at_the_proven_fork_safe_level`, "
+        "`test_env_override_is_honoured_and_loud`), so a green carve-out leg "
+        "means 'the choke point is wired', NEVER 'the fork hazard is "
+        "reproduced here'. The provenance of that gap is measured, not "
+        "assumed — see the table above."
+    ),
+}
+
+
+def _call_name(func) -> str:
+    """`pytest.skipif` / `skip` / `unittest.SkipTest` -> the bare name."""
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+# Every spelling that makes a test not run, in the case each library uses:
+# `pytest.skip`/`skipif`/`importorskip`/`xfail` and `unittest.skipIf`/
+# `skipUnless`/`SkipTest`. Compared case-folded, so `skipIf` is `skipif`.
+_SKIP_LIKE_NAMES = frozenset({
+    "skip", "skipif", "skipunless", "skiptest", "importorskip", "xfail",
+})
+
+
+def _skip_kind(func, aliases=None) -> str | None:
+    """What this callable is, or None.
+
+    A callable can also arrive under another name — `skipper = pytest.skip`,
+    `from pytest import skip as s`, `getattr(pytest, "skip")`, and (for a mark)
+    `skipper = pytest.mark.skipif` — and a gate spelled that way is the same
+    gate. The RESOLVED name is returned, not the surface one, because a caller
+    has to know whether it is a `skipif` (whose first argument is a condition)
+    or a `skip` (whose arguments are messages).
+    """
+    name = _call_name(func)
+    if name.casefold() in _SKIP_LIKE_NAMES:
+        return name.casefold()
+    if aliases and name in aliases:
+        return aliases[name]
+    if isinstance(func, ast.Call) and _call_name(func.func) == "partial" \
+            and func.args:
+        # `macos_only = functools.partial(pytest.mark.skipif, reason="macOS")`
+        # then `@macos_only(sys.platform != "darwin")` is the same gate.
+        return _skip_kind(func.args[0], aliases)
+    if isinstance(func, ast.Call) and _call_name(func.func) == "getattr" \
+            and len(func.args) == 2 \
+            and isinstance(func.args[1], ast.Constant) \
+            and isinstance(func.args[1].value, str):
+        kind = func.args[1].value.casefold()
+        if kind in _SKIP_LIKE_NAMES:
+            return kind
+    return None
+
+
+def _is_skip_like(func, aliases=None) -> bool:
+    return _skip_kind(func, aliases) is not None
+
+
+# The spellings whose first positional argument is a CONDITION, not a message:
+# `skipif(cond, reason)` versus `skip(msg)`. They are the only ones where a
+# string literal is a condition, so they are the only ones where the string
+# route applies — `pytest.skip("… on this platform.")` is prose.
+_SKIPIF_NAMES = frozenset({"skipif", "skipunless"})
+
+
+# A parametrization whose argument list is platform-conditional is a gate with
+# no skip call: an empty parameter set makes pytest SKIP the test.
+_PARAMETRIZE_NAMES = frozenset({"parametrize", "fixture"})
+
+
+# A collection hook or `collect_ignore` target that filters on the platform is
+# the same hole with no skip call at all: the test is not skipped, it is never
+# collected, and the run is green.
+_COLLECT_EXCLUSION_HOOKS = frozenset({
+    "pytest_ignore_collect", "pytest_collection_modifyitems",
+})
+
+
+def _has_skip_mark(node, aliases=None) -> bool:
+    """Whether a skip-like callable or mark appears anywhere in this subtree.
+
+    A binding is not a call: `pytestmark = pytest.mark.skip`,
+    `pytestmark = [pytest.mark.skip]`, and
+    `pytestmark = pytest.mark.skip if <condition> else []` are the same gate
+    written three ways, and only the first was visible to a call scan.
+    """
+    return any(_skip_kind(sub, aliases) is not None for sub in ast.walk(node))
+
+
+def _skip_names(tree) -> dict[str, str]:
+    """Module-scope names bound to a skip-like callable -> its resolved kind."""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ("pytest", "unittest"):
+            for alias in node.names:
+                if alias.name.casefold() in _SKIP_LIKE_NAMES:
+                    aliases[alias.asname or alias.name] = alias.name.casefold()
+    for node in _iter_module_scope(getattr(tree, "body", None) or []):
+        targets, value = None, None
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if targets is None or value is None:
+            continue
+        kind = _skip_kind(value, aliases)
+        if kind is not None:
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    aliases[target.id] = kind
+    return aliases
+
+
+# Names that mean the platform, as (the `sys` module, a platform VALUE, the
+# `platform` module). Each is a set because any of them can be imported under
+# another name — `import sys as s`, `from sys import platform as plat`,
+# `import platform as p` — and an alias is not a weaker gate.
+_DEFAULT_PLATFORM_NAMES = ({"sys"}, {"platform"}, {"platform"})
+
+
+def _mentions_platform(node, platform_names=None, strings=True) -> bool:
+    """Whether an expression refers to the platform.
+
+    Four ways, in the order they are written: `sys.platform` (or its `sys`
+    alias); the bare name `platform` (which means a value only when it came
+    from `sys`, alias included); a `platform.<attr>` module query —
+    `platform.system() != "Darwin"` is the stdlib spelling of the same gate;
+    and a STRING condition that names it, because pytest's documented form is
+    `@pytest.mark.skipif("sys.platform != 'darwin'")` — a static literal a
+    source scan can read, unlike a computed value.
+
+    The module-query and string routes are deliberately over-inclusive: a
+    non-platform call that happens to mention `platform`
+    (`platform.python_version()`) also matches, and costs one line of
+    registration. The opposite direction — missing a gate, and leaving a test
+    that runs nowhere with a green job — is the hole this exists to close.
+
+    `strings=False` turns the string route off, for the positions where a
+    literal is prose rather than a condition: `reason="runs on every
+    platform."` is not a gate, and pytest's documented string condition
+    `skipif("sys.platform != 'darwin'")` is.
+    """
+    sys_names, value_names, module_names = platform_names \
+        if platform_names is not None else _DEFAULT_PLATFORM_NAMES
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and sub.attr == "platform" \
+                and isinstance(sub.value, ast.Name) \
+                and sub.value.id in sys_names:
+            return True
+        if isinstance(sub, ast.Attribute) \
+                and isinstance(sub.value, ast.Name) \
+                and sub.value.id in module_names:
+            return True
+        # `from sys import platform`, or a module-level alias derived from it
+        # (`IS_DARWIN = sys.platform == "darwin"`)
+        if isinstance(sub, ast.Name) and sub.id in value_names:
+            return True
+        if strings and isinstance(sub, ast.Constant) \
+                and isinstance(sub.value, str) \
+                and ("sys.platform" in sub.value or "platform." in sub.value):
+            return True
+        # `getattr(sys, "platform")` — the attribute named by a literal.
+        if isinstance(sub, ast.Call) and _call_name(sub.func) == "getattr" \
+                and len(sub.args) == 2 \
+                and isinstance(sub.args[0], ast.Name) \
+                and sub.args[0].id in sys_names \
+                and isinstance(sub.args[1], ast.Constant) \
+                and sub.args[1].value == "platform":
+            return True
+    return False
+
+
+def _platform_aliases(tree):
+    """What means "the platform" in this file, under whatever names.
+
+    Bound names are collected, not just the `sys`/`platform` literals: a module
+    imported under another name is the same module, and a module-level alias
+    (`IS_DARWIN = sys.platform == "darwin"`) is the same gate written twice.
+    """
+    sys_names, value_names, module_names = ({"sys"}, {"platform"}, {"platform"})
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "sys":
+                    sys_names.add(alias.asname or alias.name)
+                elif alias.name == "platform":
+                    module_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "sys":
+            for alias in node.names:
+                if alias.name == "platform":
+                    value_names.add(alias.asname or alias.name)
+    names = (sys_names, value_names, module_names)
+    for node in _iter_module_scope(getattr(tree, "body", None) or []):
+        targets, value = None, None
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if targets and value is not None and _mentions_platform(value, names):
+            value_names.update(t.id for t in targets if isinstance(t, ast.Name))
+    return names
+
+
+def _under_platform_condition(node, parents, platform_names) -> bool:
+    """Whether `node` sits under a condition that names the platform.
+
+    Ancestor walk instead of a fixed list of container shapes: an earlier
+    version enumerated `ast.If` and was defeated three times in a row by the
+    spellings nobody had thought of — a decorator, then the stdlib's
+    case-sensitive `skipIf`, then `match`/`BoolOp`/`IfExp`. The container a
+    condition is written in is not the interesting part; *that it is a platform
+    condition* is.
+    """
+    cur = parents.get(node)
+    while cur is not None:
+        if isinstance(cur, (ast.If, ast.While, ast.IfExp)):
+            if _mentions_platform(cur.test, platform_names):
+                return True
+        elif isinstance(cur, ast.BoolOp):
+            # `sys.platform == "darwin" or pytest.skip("macOS only")`
+            if _mentions_platform(cur, platform_names):
+                return True
+        elif isinstance(cur, ast.Match) \
+                and _mentions_platform(cur.subject, platform_names):
+            # `match sys.platform:` + a `case _:` that skips
+            return True
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            break  # a condition in another function is another function's gate
+        cur = parents.get(cur)
+    return False
+
+
+def _platform_gates(path: Path) -> list[str]:
+    """Names of test files that are dev-machine-only evidence.
+
+    A file is gated if, anywhere in its source:
+      * a skip-like call names the platform in its own arguments — the
+        `@pytest.mark.skipif(sys.platform …)` decorator,
+        `pytestmark = pytest.mark.skipif(…)`, `unittest.skipIf`/
+        `skipUnless`/`SkipTest` (names compared case-folded), `importorskip`;
+      * a skip-like call sits under a condition that names the platform,
+        whichever container the condition is written in (`if`, `match`, a
+        boolean short-circuit, a conditional expression);
+      * a test function is DEFINED under such a condition, so it is never
+        collected off that platform — a gate with no skip call at all;
+      * a COLLECTION EXCLUSION is applied under such a condition — a
+        module-level `collect_ignore`/`collect_ignore_glob` target, or a
+        `pytest_ignore_collect`/`pytest_collection_modifyitems` hook that
+        mentions the platform. The test is not skipped, it is never collected,
+        and the run is green;
+      * a whole-module skip is BOUND under such a condition (`pytestmark =
+        pytest.mark.skip` has no call for a skip scan to find), or a
+        parametrization is platform-conditional (`parametrize`/`fixture`
+        with an argument naming the platform), since an empty parameter set
+        skips the test rather than running it.
+
+    Naming the platform includes `from sys import platform`, a one-hop module
+    alias (`IS_DARWIN = sys.platform == "darwin"`), an import under another
+    name (`import sys as s`, `from sys import platform as plat`), a
+    `platform.<attr>` module query, and pytest's string condition
+    (`skipif("sys.platform != 'darwin'")`).
+
+    Deliberately over-inclusive where it is unsure: the module query and the
+    string condition count as naming the platform (`platform.system() !=
+    "Darwin"` is the stdlib spelling of the same gate), so a non-platform
+    condition that merely mentions `platform` can red this and want a one-line
+    registration. That direction is chosen: a false red costs a line, a false
+    green leaves tests running nowhere under a job that looks healthy.
+
+    Unreadable source yields no gates rather than an exception: a file pytest
+    cannot parse cannot be collected either, so the suite is already red.
+    """
+    try:
+        tree = ast.parse(path.read_bytes())
+    except (SyntaxError, UnicodeDecodeError):
+        return []
+    platform_names = _platform_aliases(tree)
+    skip_names = _skip_names(tree)
+    parents = {child: parent for parent in ast.walk(tree)
+               for child in ast.iter_child_nodes(parent)}
+    try:
+        relative = path.resolve().relative_to(_TESTS_ROOT).as_posix()
+    except ValueError:  # a path outside the tests tree (a unit-test probe)
+        relative = path.name
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_skip_like(node.func, skip_names):
+            # A skipif's condition is its first positional argument; for
+            # `skip(msg)` every positional is a message. Strings are a
+            # condition only in the former — and the KIND is the resolved one,
+            # so an aliased `skipper = pytest.mark.skipif` still counts.
+            first_is_condition = _skip_kind(node.func, skip_names) \
+                in _SKIPIF_NAMES
+            named = bool(node.args) and _mentions_platform(
+                node.args[0], platform_names, strings=first_is_condition)
+            named = named or any(
+                _mentions_platform(arg, platform_names, strings=False)
+                for arg in node.args[1:])
+            # `skipif` takes its condition by NAME too — `skipif(condition=
+            # "sys.platform == 'darwin'")` is the same string condition, while
+            # `reason=` beside it is prose.
+            named = named or any(
+                _mentions_platform(kw.value, platform_names,
+                                   strings=first_is_condition
+                                   and kw.arg == "condition")
+                for kw in node.keywords)
+            if named or _under_platform_condition(node, parents,
+                                                 platform_names):
+                return [relative]
+        elif isinstance(node, ast.Call) \
+                and _call_name(node.func) in _PARAMETRIZE_NAMES \
+                and _mentions_platform(node, platform_names):
+            # `parametrize("x", [] if sys.platform != "darwin" else [1])` — an
+            # empty parameter set SKIPS the test off that platform, and the
+            # same trick works through `fixture(params=…)`.
+            return [relative]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name.startswith("test") \
+                and _under_platform_condition(node, parents, platform_names):
+            return [relative]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name in _COLLECT_EXCLUSION_HOOKS \
+                and _mentions_platform(node, platform_names, strings=False):
+            # `pytest_ignore_collect` / `pytest_collection_modifyitems` that
+            # filters on the platform: the test is never collected.
+            return [relative]
+        elif isinstance(node, ast.Name) \
+                and node.id.startswith("collect_ignore") \
+                and _under_platform_condition(node, parents, platform_names):
+            return [relative]
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            # The binding itself, for the spellings where the condition is the
+            # VALUE rather than an enclosing statement —
+            # `collect_ignore = ["x"] if sys.platform != "darwin" else []` puts
+            # the platform condition beside the target, not above it.
+            targets = node.targets if isinstance(node, ast.Assign) \
+                else [node.target]
+            value = getattr(node, "value", None)
+            guarding = _under_platform_condition(node, parents, platform_names)
+            if value is not None and any(
+                    isinstance(t, ast.Name)
+                    and t.id.startswith("collect_ignore")
+                    for t in targets) \
+                    and (guarding or _mentions_platform(value,
+                                                        platform_names)):
+                return [relative]
+            # `pytestmark = pytest.mark.skip` — a whole-module skip with no
+            # CALL to see, so only the binding gives it away. The mark can be
+            # nested (`[pytest.mark.skip]`) or conditional in the VALUE
+            # (`… if sys.platform != "darwin" else []`), so the whole subtree is
+            # searched — the same shape `collect_ignore` already handles.
+            if value is not None and any(
+                    (isinstance(t, ast.Name) and t.id == "pytestmark")
+                    or (isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == "pytestmark")
+                    for t in targets) \
+                    and _has_skip_mark(value, skip_names) \
+                    and (guarding or _mentions_platform(value,
+                                                        platform_names)):
+                return [relative]
+        elif isinstance(node, ast.Expr) \
+                and isinstance(node.value, ast.Call) \
+                and isinstance(node.value.func, ast.Attribute) \
+                and node.value.func.attr in ("append", "extend", "insert") \
+                and isinstance(node.value.func.value, ast.Name) \
+                and node.value.func.value.id == "pytestmark" \
+                and _has_skip_mark(node.value, skip_names) \
+                and _under_platform_condition(node, parents, platform_names):
+            # `pytestmark.append(pytest.mark.skip)` under a platform condition
+            return [relative]
+    return []
+
+
+def test_platform_gated_tests_are_registered():
+    """Every platform-gated test file (in the shapes the scan reads) is
+    enumerated, with what CI cannot verify.
+
+    An unregistered gate is not a bug in the gate — it is a silent hole in the
+    EVIDENCE: the job stays green and nothing distinguishes "verified" from
+    "skipped on this platform" (#4162). Registering it does not make CI run it;
+    it makes the gap findable by the next lane that reads a green carve-out leg.
+
+    The entry is keyed by FILE, deliberately: the gate usually lives in a
+    fixture or helper, so a per-test key would mean call-graph analysis, and a
+    second gated test added to an already-registered file is covered by the
+    entry that is already there.
+
+    `conftest.py` is scanned alongside the tests, and keys are PATHS relative to
+    the tests root: a fixture gate in a conftest is exactly the "gate lives in a
+    fixture" case this is keyed for, and three conftest.py files plus two
+    same-named test modules exist, so a bare filename collides.
+    """
+    found: set[str] = set()
+    for path in sorted(_TESTS_ROOT.rglob("*.py")):
+        if not (path.name.startswith("test_")
+                or path.name == "conftest.py"):
+            continue
+        found.update(_platform_gates(path))
+
+    registered = set(PLATFORM_GATED_TESTS)
+    assert not (found - registered), (
+        "these files carry a `sys.platform` skip that runs nowhere on this "
+        "platform (CI is ubuntu-latest for every job) and are not registered "
+        f"in PLATFORM_GATED_TESTS: {sorted(found - registered)} — add it with "
+        "what CI therefore does NOT verify (#4162)")
+    assert not (registered - found), (
+        "PLATFORM_GATED_TESTS lists a file with no platform gate any more — "
+        f"delete the entry (or the gate was spelled differently): "
+        f"{sorted(registered - found)}")
+    for name, reason in PLATFORM_GATED_TESTS.items():
+        assert isinstance(reason, str) and len(reason) > 80, (
+            f"{name}: the registry entry must say what CI cannot verify, not "
+            f"just that a gate exists: {reason!r}")
+
+
+# Every spelling a review cycle demonstrated that `_platform_gates` missed, and
+# every look-alike that must stay unflagged. They live here, as a test, because
+# eight cycles each narrowed the scan and each fix was verified by hand — a
+# battery that runs nowhere is how the next narrowing ships. When this reds, the
+# scanner lost a shape it once had.
+_PLATFORM_GATE_SPELLINGS: tuple[tuple[str, bool], ...] = (
+    ('import sys, pytest\n@pytest.mark.skipif(sys.platform != "darwin", reason="m")\ndef test_x(): pass\n', True),
+    ('import sys, unittest\n@unittest.skipIf(sys.platform != "darwin", "m")\ndef test_x(self): pass\n', True),
+    ('import sys, unittest\n@unittest.skipUnless(sys.platform == "darwin", "m")\ndef test_x(self): pass\n', True),
+    ('import sys, unittest\ndef f():\n    if sys.platform != "darwin":\n        raise unittest.SkipTest("m")\n', True),
+    ('import pytest\n@pytest.mark.skipif("sys.platform != \'darwin\'", reason="m")\ndef test_x(): pass\n', True),
+    ('import sys, pytest\npytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="m")\n', True),
+    ('import pytest\nsk = pytest.mark.skipif\n@sk("sys.platform != \'darwin\'")\ndef test_x(): pass\n', True),
+    ('import sys, pytest\nIS_DARWIN = sys.platform == "darwin"\ndef f():\n    if not IS_DARWIN:\n        pytest.skip("m")\n', True),
+    ('import pytest\nfrom sys import platform as plat\ndef f():\n    if plat != "darwin":\n        pytest.skip("m")\n', True),
+    ('import sys as s, pytest\ndef f():\n    if s.platform != "darwin":\n        pytest.skip("m")\n', True),
+    ('import platform as p, pytest\ndef f():\n    if p.system() != "Darwin":\n        pytest.skip("m")\n', True),
+    ('import sys, pytest\ndef f():\n    if sys.platform != "darwin":\n        pytest.importorskip("maconly")\n', True),
+    ('import sys, pytest\ndef f():\n    match sys.platform:\n        case _:\n            pytest.skip("m")\n', True),
+    ('import sys, pytest\ndef f():\n    sys.platform == "darwin" or pytest.skip("m")\n', True),
+    ('import sys, pytest\ndef f():\n    pytest.skip("m") if sys.platform != "darwin" else None\n', True),
+    ('import sys, pytest\nskipper = pytest.skip\ndef f():\n    if sys.platform != "darwin":\n        skipper("m")\n', True),
+    ('import sys, pytest\ndef f():\n    if sys.platform != "darwin":\n        getattr(pytest, "skip")("m")\n', True),
+    ('import sys, pytest\n@pytest.fixture(autouse=True)\ndef _f():\n    if sys.platform != "darwin":\n        pytest.skip("m")\n', True),
+    ('import sys\ndef f():\n    if sys.platform == "darwin":\n        def test_x():\n            pass\n', True),
+    ('import sys\ncollect_ignore = []\nif sys.platform != "darwin":\n    collect_ignore.append("t.py")\n', True),
+    ('import sys\ncollect_ignore = ["t.py"] if sys.platform != "darwin" else []\n', True),
+    ('import sys\ndef pytest_ignore_collect(collection_path, config):\n    if sys.platform != "darwin":\n        return True\n', True),
+    ('import sys, pytest\nif sys.platform != "darwin":\n    pytestmark = pytest.mark.skip\n', True),
+    ('import sys, pytest\npytestmark = pytest.mark.skip if sys.platform != "darwin" else []\n', True),
+    ('import sys, pytest\npytestmark = [pytest.mark.skip] if sys.platform != "darwin" else []\n', True),
+    ('import sys, pytest\n@pytest.mark.skipif(condition="sys.platform != \'darwin\'", reason="m")\ndef test_x(): pass\n', True),
+    ('import sys, pytest\n@pytest.mark.parametrize("x", [] if sys.platform != "darwin" else [1])\ndef test_x(x): pass\n', True),
+    ('import sys, pytest\n@pytest.fixture(params=[] if sys.platform != "darwin" else [1])\ndef f(request): pass\n', True),
+    ('import sys, functools, pytest\nmacos_only = functools.partial(pytest.mark.skipif, reason="macOS")\n@macos_only(sys.platform != "darwin")\ndef test_x(): pass\n', True),
+    ('import sys, functools, pytest\nskip_mac = functools.partial(pytest.skip, "needs macOS")\ndef f():\n    if sys.platform != "darwin":\n        skip_mac()\n', True),
+    ('import sys, pytest\ndef f():\n    if getattr(sys, "platform") != "darwin":\n        pytest.skip("m")\n', True),
+    ('import sys, pytest\nif sys.platform != "darwin":\n    pytestmark.append(pytest.mark.skip)\n', True),
+    # Look-alikes: prose, plain non-platform gates, and unreadable source.
+    ('import pytest\n@pytest.mark.skipif(True, reason="runs on every platform.")\ndef test_x(): pass\n', False),
+    ('import pytest\npytestmark = pytest.mark.skip\n', False),
+    ('import pytest\npytestmark = pytest.mark.skipif(True, reason="slow")\n', False),
+    ('import pytest\n@pytest.mark.parametrize("x", [1, 2])\ndef test_x(x): pass\n', False),
+    ('import functools, pytest\nonly_slow = functools.partial(pytest.mark.skipif, reason="slow")\n@only_slow(True)\ndef test_x(): pass\n', False),
+    ('import pytest\n@pytest.mark.skipif(condition=True, reason="slow")\ndef test_x(): pass\n', False),
+    ('import pytest\ndef f():\n    pytest.skip("not supported on this platform.")\n', False),
+    ('import pytest\ndef f():\n    if 1 == 1:\n        pytest.skip("no")\n', False),
+    ('import unittest\n@unittest.skip("no")\ndef test_x(self): pass\n', False),
+    ('import slow\ncollect_ignore = ["t.py"] if slow.flag else []\n', False),
+    ('collect_ignore = ["test_slow.py"]\n', False),
+    ('def pytest_ignore_collect(collection_path, config):\n    return True\n', False),
+    ('def broken(:\n', False),
+)
+
+
+def test_platform_gate_scan_covers_the_known_spellings(tmp_path):
+    """Each spelling a review found, in the scanner's own regression net."""
+    probe = tmp_path / "test_probe.py"
+    missed, overreach = [], []
+    for source, gated in _PLATFORM_GATE_SPELLINGS:
+        probe.write_text(source)
+        if bool(_platform_gates(probe)) != gated:
+            (missed if gated else overreach).append(source)
+    assert not missed, (
+        "these platform gates are no longer detected, so the file would run "
+        f"nowhere in CI unregistered: {missed}")
+    assert not overreach, (
+        f"these are not platform gates but are now flagged: {overreach}")

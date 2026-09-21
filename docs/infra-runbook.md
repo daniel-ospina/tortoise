@@ -7,10 +7,12 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-09-19
+updated: 2026-09-20
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
+
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
 
 **Epic:** #7711 (legacy provisioning epic — provenance) · availability watchdog: #2850
 **Last updated:** 2026-09-19
@@ -67,8 +69,10 @@ agree on that spelling — `.mcp.json`, `README.md`, `client/README.md`,
 `docs/INGEST_CONTRACT.md`, `docs/data-safety.md`, and the availability watchdog's
 `DEFAULT_PROBE_URL` (`.github/scripts/availability-watchdog.sh`). Other hostnames are
 different surfaces, **not** competing client-facing API bases —
-`tortoise.premiselabs.co` (landing / legal / auth, Cloudflare Pages),
-`app.premiselabs.co` (dashboard), and `tortoise-y4mjjq.fly.dev` (the Fly app host, also
+`tortoise.premiselabs.co` (landing / legal, Cloudflare Pages — its `/auth/start`
+answers **404 by design**: the sign-in BFF moved off this origin in #4054),
+`app.premiselabs.co` (dashboard — and the BFF/auth surface since #4054), and
+`tortoise-y4mjjq.fly.dev` (the Fly app host, also
 used as a server-side/internal base such as `INTERNAL_API_URL`).
 
 ⛔ **`tortoise.dev` is a third party's zone. Never point a client, a doc, or a DNS
@@ -232,12 +236,15 @@ Do **not** commit `.env` (gitignored) and do **not** put DB credentials in
 
 ## 4.6 Session Capture — LLM Provider Configuration (#1197)
 
-`POST /v1/sessions` — the beta testers' most-critical feature — runs the M2
-LLM extractor over the conversation and **fails closed with 503 when no LLM
-provider key is configured**: the regex extraction loop was removed as a
-product path (#822) and there is no fallback. No key = capture disabled =
-silent 503s for every tester. This section is the ops contract for making
-sure that never happens.
+`POST /v1/sessions` — the beta testers' most-critical feature — runs the LLM
+extractor over the conversation. **A capture is stored unconditionally**:
+with no LLM provider key configured the Session + its turn Points are STORED
+and stay searchable, and only the LLM extraction into memory points is
+skipped — the receipt carries `extraction_mode: "no-provider"` plus a warning
+(#3892 owner ruling, 2026-09-18). The regex extraction loop was removed as a
+product path (#822) and there is no fallback, so with no key no memory points
+are produced. This section is the ops contract for making sure extraction is
+enabled.
 
 ### Env keys (set on `tortoise-api`/Fly; GitHub Actions secrets are the source)
 
@@ -247,8 +254,8 @@ sure that never happens.
 | `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-chat` | Cheapest-tier default; matches the analyzer's historical default |
 | `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
 | `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
-| `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set |
-| `TORTOISE_SESSION_LLM_MOCK` | — | unset | **TEST-ONLY** seam (`1` = offline MockModel). **NEVER set on Fly** — it COUNTS as *configured* for the 503 gate, so a deploy with it set passes every gate while captures silently write offline MockModel points (see Verification procedure step 1) |
+| `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set. **On the hosted deployment `deploy-hosted.yml` now sets this unconditionally** — from the GitHub secret if present, else the versioned default `openrouter:google/gemini-2.5-flash` — so hosted extraction requires `OPENROUTER_API_KEY` (or a GitHub secret overriding the model). It is deliberately NOT left optional: an absent GitHub secret used to leave the hand-set Fly value in place forever (#4126). Unset for self-hosters, where the per-provider default applies. |
+| `TORTOISE_SESSION_LLM_MOCK` | — | unset | **TEST-ONLY** seam (`1` = offline MockModel). **NEVER set on Fly** — it counts as *configured* for the extraction gate, so a deploy with it set passes the gate while captures silently write offline MockModel points (see Verification procedure step 1) |
 
 Provider priority when MULTIPLE keys are set (first configured wins):
 `openrouter → deepseek → openai → gemini` (`sdk._SESSION_LLM_PROVIDER_PRIORITY`).
@@ -266,21 +273,26 @@ provider/model and fails in hosted mode when the key is missing.
   cost control.
 - The key must exist on BOTH GitHub Actions secrets (deploy source —
   `deploy-hosted.yml` sets Fly secrets from GH secrets) and the running app
-  (`fly secrets list -a tortoise-api`). A GH-secret miss silently ships a
-  503-on-every-capture deploy; the deploy workflow now fails the job when no
-  provider key is present.
+  (`fly secrets list -a tortoise-api`). A GH-secret miss ships a deploy whose
+  captures STORE turns but never extract into memory; the deploy workflow
+  warns (warn-only by design, #1346 — a fail-closed gate here held ALL deploys
+  for 2+ days) so the miss is visible without blocking the rest of the API.
 
 ### Cost bounds per capture
 
-Bounds are enforced IN ORDER by `capture_session` (tortoise/hosted_api.py):
+Bounds enforced by `capture_session` (tortoise/hosted_api.py). **A missing
+provider key is not a gate** (#3892): a keyless capture is STORED (turns only)
+with extraction skipped, so it never refuses and never reaches the 402
+estimate below (the keyless path mints zero non-episodic points). The
+extraction-bearing path is bounded IN ORDER:
 
-1. **Provider gate** — no key → `503` (fail-closed).
-2. **Turn cap** — `MAX_SESSION_TURNS = 500` → `400` above it.
-3. **Points quota (pre-write estimate)** — `402` when the extraction-aware
+1. **Turn cap** — `MAX_SESSION_TURNS = 500` → `400` above it.
+2. **Points quota (pre-write estimate)** — `402` when the extraction-aware
    estimate exceeds the team's points quota. Estimate:
-   `est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
-   (the ×2 covers the M2 relations stage's IMPL/NAND operator nodes; sentence
-   count is capped per turn — the #329 flood gate).
+   `est = 3 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
+   (`sdk._session_extraction_estimate` — the default v2 lane; sentence count
+   is capped per turn — the #329 flood gate). Skipped entirely on the keyless
+   path, which extracts nothing.
 
 No sessions quota: the flat `max_sessions = 1000` was removed in **#4010** —
 sessions are unlimited for every tier, and a stored `Team.max_sessions` is
@@ -290,8 +302,9 @@ Free-tier interplay (product/pricing.json): `max_graph_nodes: 10000` is the
 points-quota numerator for NON-episodic Points only (turn Points / Session /
 Event are episodic and don't count), and `included_write_ops_per_month: 10000`
 is the write-ops budget. Worst-case node amplification per turn: 200
-sentences × 2 = 400 nodes, so a full 500-turn session is ~200K estimated
-nodes — always stopped by the 402 gate BEFORE any write. In practice the
+sentences × 3 = 600 nodes (v2 default), so a full 500-turn session is ~300K
+estimated nodes — for an extraction-bearing capture, always stopped by the 402
+gate BEFORE any write. In practice the
 cheap-tier models extract far fewer points than the cap; the estimate is the
 fail-closed upper bound.
 
@@ -306,7 +319,7 @@ stop, not spend; monitor spend via the provider dashboard.
 
 ```bash
 # 1. Provider key present on the running app AND the MOCK test seam ABSENT.
-#    MOCK=1 counts as 'configured' for the 503 gate — a deploy with it set
+#    MOCK=1 counts as 'configured' for the extraction gate — a deploy with it set
 #    passes the gate but every capture writes offline MockModel points. The
 #    deploy workflow's verify-secrets step cannot check this (MOCK lives on
 #    Fly's env, not GitHub secrets) — it is an operator checklist item:
@@ -322,7 +335,8 @@ fly ssh console -a tortoise-y4mjjq -C "python -m tortoise doctor"
 # 3. Live capture smoke (needs FalkorDB up + a real team JWT):
 curl -s https://api.premiselabs.co/health/ready    # {"status":"ok","db":"connected"}
 # POST /v1/sessions with a team token → expect 200 + "extraction_mode":"llm".
-# A 503 with detail containing "LLM provider key" = provider missing.
+# A 200 with "extraction_mode":"no-provider" = no key: turns stored,
+# extraction skipped.
 
 # 4. Local hermetic E2E (offline — MockModel seam, exercises the full path):
 RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ -q -rs
@@ -337,8 +351,8 @@ before relying on a capture smoke (#1197).
 
 **Deploy checklist (operator, before/after each deploy-hosted run):**
 
-- [ ] ≥1 LLM provider key in GitHub secrets (deploy gate hard-fails otherwise)
-- [ ] `TORTOISE_SESSION_LLM_MOCK` is NOT set on Fly (`fly secrets list -a tortoise-y4mjjq | grep TORTOISE_SESSION_LLM_MOCK` → empty). MOCK=1 is a TEST-ONLY seam that *counts as configured* for the 503 gate — a deploy with it set passes every gate while captures write offline MockModel points. NEVER set it on Fly.
+- [ ] ≥1 LLM provider key in GitHub secrets (the deploy warns if absent — warn-only per #1346, so without one every capture STORES its turns but extracts nothing into memory)
+- [ ] `TORTOISE_SESSION_LLM_MOCK` is NOT set on Fly (`fly secrets list -a tortoise-y4mjjq | grep TORTOISE_SESSION_LLM_MOCK` → empty). MOCK=1 is a TEST-ONLY seam that counts as configured for the extraction gate — a deploy with it set passes the gate while captures write offline MockModel points. NEVER set it on Fly.
 
 ## 5. Dashboard Deploy
 
@@ -988,8 +1002,10 @@ before the run declares DOWN, so a single transient blip cannot fire an alarm.
 
 #### 7.1b The Pages auth target (#3628)
 
-The second step probes `GET https://tortoise.premiselabs.co/auth/start`
-(Cloudflare Pages). It exists because of the **#3616 sign-in outage** (~35 min):
+The second step probes `GET https://app.premiselabs.co/auth/start`
+(the `tortoise-dashboard` Pages project — the SESSION-BEARING origin; #4054 moved
+the BFF there, so the marketing origin answers **404 by design**).
+It exists because of the **#3616 sign-in outage** (~35 min):
 only `/auth/start` revealed it. The other candidate routes stayed GREEN the
 whole time — this is the trap to remember when tempted to probe something
 cheaper:
@@ -1007,7 +1023,7 @@ The auth target's UP contract is **narrower and stronger** than the API's:
 |---|---|---|
 | `PROBE_EXPECT_STATUS` | `302` | A healthy `/auth/start` is a redirect, not a 200. The watchdog's built-in arms classify 3xx as UNEXPECTED, so **without this allow-list a healthy site would page** — the #1 way to get this wrong |
 | `PROBE_REQUIRE_HEADER` | `code_challenge_method=s256` | Proof the PKCE flow row was actually written to D1. A 302 **without** it is an *answered-but-wrong* (UNEXPECTED → `PROD DEGRADED`) verdict, not an outage — “the site is up but nobody can sign in”, the entire lesson of #3616 |
-| `PROBE_HOST_LABEL` | `tortoise.premiselabs.co` | The incident **title is the dedupe key**. Two production targets must not share one label or they would fight over a single issue |
+| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed; renaming it **orphans incidents filed under the old title** (closed by hand, not auto-resolved). Two production targets must not share one label, or they fight over a single issue |
 
 The allow-list replaces **only** the UP arms: `000`/`5xx` are checked **first**
 and stay **DOWN** even if listed, and any other status stays **UNEXPECTED**. A
@@ -1038,7 +1054,7 @@ table either way.
    `[monitor] PROD DOWN — api.premiselabs.co is not answering the availability
    probe` (or `PROD DEGRADED` for the UNEXPECTED class), labelled `auto-filed`.
    The auth target files a **separate** incident with its own host in the title
-   (`[monitor] PROD DOWN — tortoise.premiselabs.co is not answering the
+   (`[monitor] PROD DOWN — app.premiselabs.co is not answering the
    availability probe`). An external page (Telegram) also fires on the
    transition when the paging secrets are set.
 3. The issue **body** is machine-managed and carries the verdict, the first
@@ -1363,7 +1379,6 @@ surface.
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `TORTOISE_SESSION_EXTRACTION` | `auto` | `/v1/sessions` extraction mode (`auto\|required\|regex`). `required` fails closed: **all** session captures return 503 when no LLM provider key (`OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY`) is set — do not enable it until a provider key is deployed. Unknown values fall back to `auto`. |
 | `RESEND_SEND_BUDGET_DAILY` | `100` | In-process hard cap on provider-accepted sends per UTC day (#1138 — Resend free tier 100/day). When reached, further invite sends are skipped with a loud warning instead of silently 429ing. Estimate only — resets on process restart. |
 | `RESEND_SEND_BUDGET_MONTHLY` | `3000` | Same as above for the UTC month (free tier 3,000/month). |
 
@@ -1375,7 +1390,7 @@ Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive 
 - [ ] `app.premiselabs.co` → resolves, serves dashboard placeholder
 - [ ] GitHub push to main → auto-deploys tortoise-api
 - [ ] ≥1 LLM provider key in GitHub secrets → deployed to Fly (`fly secrets list -a tortoise-y4mjjq`) → `tortoise doctor` reports `Session extraction ✅` on the app
-- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (not a 503)
+- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (a keyless `"no-provider"` means turns were stored but extraction was skipped)
 - [ ] `fly.toml` declares `auto_stop_machines` / `auto_start_machines` / `min_machines_running` explicitly (no implicit platform defaults) and `fly config show` matches (§6.2)
 - [ ] Every machine has its own volume (`fly volumes list` count == `fly machines list` count) — a machine sharing `tortoise_api_data` is impossible and must never be attempted (§6.3)
 - [ ] Routing check is `[[services.tcp_checks]]` (kernel-served: **not starved by event-loop/thread-pool scheduling** — it can still fail if the accept backlog saturates) and no `[[services.http_checks]]` entry remains (§6.4)

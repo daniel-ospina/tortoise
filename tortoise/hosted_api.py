@@ -45,11 +45,23 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
     api_key_created,
     first_api_call,
     first_api_call_pending,
+    onboarding_decide_complete,
+    onboarding_seed_complete,
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import API_KEY_PREFIXES, hash_api_key
+from tortoise.capture_receipts import (  # #3809: ONE key definition
+    capture_last_error_key as _capture_last_error_key,
+)
+from tortoise.capture_receipts import (
+    capture_receipt_key as _capture_receipt_key,
+)
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+from tortoise.file_indexer import (  # #4005 shared identity primitives
+    derive_session_source_url,
+    provenance_basename,
+)
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -65,12 +77,14 @@ from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     PROBE_HARD_TIMEOUT,
     PROBE_STALE_AFTER,
+    ControlPlaneOffloadError,
     HealthProbe,
     event_retention_interval,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
+    run_control_plane_call,
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
@@ -82,13 +96,19 @@ from tortoise.projection import (
     _journal_append_product,  # #1686: org_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
+from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.sdk import (
+    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING,  # #3892: shared "stored, never extracted" disclosure
+    _CAPTURE_NO_PROVIDER_MODE,  # #3892: keyless-capture receipt mode (reused, not reinvented)
+    _CAPTURE_NO_PROVIDER_WARNING,  # #3892: the canonical "stored, not extracted" notice
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
+    _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
+    _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
@@ -100,6 +120,13 @@ from tortoise.sdk import (
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.supabase_control import _service_key  # #3677
+
+# #4179: the team-account and user-account restore windows derive from the ONE
+# authority (tortoise/retention.py). Do not hard-code a window here — see
+# docs/retention-and-deletion.md. The user-account constant records the promise
+# for the support/email deletion path (there is no self-service deletion yet).
+TEAM_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
+USER_ACCOUNT_DELETE_GRACE_HOURS = _RESTORE_WINDOW_HOURS
 
 _logger = logging.getLogger(__name__)
 
@@ -265,7 +292,7 @@ class _CaptureSlot:
       while its worker still occupies a pool thread (the shape of
       `quota.run_ask_bounded`, quota.py:791-816); or
     * the request's own teardown (`release()`) — for a replay / opt-out /
-      quota / provider-503 path that never extracts. Without that release the
+      quota / no-provider path that never extracts. Without that release the
       reservation would leak and permanently burn capacity.
 
     #3129: the same slot also owns the request's in-flight SESSION key, but on a
@@ -1263,14 +1290,35 @@ async def _lifespan(app):
 
                 org_source = _control_plane_source()
 
-                def _sweep_orgs() -> list[str]:
+                def _sweep_orgs() -> list[str] | None:
                     from tortoise.backup_sweep import enumerate_orgs
 
                     try:
                         return enumerate_orgs(org_source)
                     except Exception as exc:
+                        # None = UNCONFIRMED census (not an empty universe): the
+                        # watcher evaluates from last-known and never resolves
+                        # incidents off a failed control-plane read.
                         _logger.warning("watcher team enumeration failed: %s", exc)
-                        return []
+                        return None
+
+                # #3658: the watcher's freshness census is the WHOLE org
+                # population, but the eligibility-gated sweep only ever
+                # archives eligible orgs (tier != 'free' AND backup_enabled =
+                # true — `enumerate_eligible_orgs`). Never intersecting the
+                # two sets makes `never` — and therefore NEVER_BACKED_UP —
+                # guaranteed by construction for the entire non-eligible
+                # tail, which floods incidents and makes a genuine
+                # eligible-and-never-backed-up org indistinguishable from
+                # one that was never owed a backup. The provider is wired ONLY
+                # for the eligibility-gated sweep; the legacy all-org sweep
+                # (org_sweep_enabled=False) backs up everyone, so it has no
+                # gate to apply and passes None (gate off). A read failure is
+                # handled by the watcher (last-known-good, then gate off).
+                def _eligible_orgs() -> list[str]:
+                    from tortoise.backup_sweep import enumerate_eligible_orgs
+
+                    return enumerate_eligible_orgs(org_source)
 
                 # #2313 Task 4: the per-graph watcher surface — ACTIVE custom
                 # graphs of an org, read from the SAME control-plane source as
@@ -1310,6 +1358,7 @@ async def _lifespan(app):
                 watcher = BackupWatcher(
                     _backup_storage(), _alert_store_from(cfg),
                     org_provider=_sweep_orgs,
+                    eligible_provider=_eligible_orgs if cfg.org_sweep_enabled else None,
                     graph_provider=_graph_provider,
                     state_reader=read_org_state,
                     driver_heartbeat_reader=lambda: _read_driver_heartbeat(),
@@ -3219,7 +3268,15 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         update_last_used,
     )
     try:
-        org = resolve_api_key(get_control_plane(), token)
+        # #3498: the key resolution is 2-3 sequential PostgREST round-trips
+        # (api_keys + teams rung + the last_used_at PATCH) and is SYNCHRONOUS
+        # by construction — off the loop, or one slow dependency call delays
+        # every request in the process (including /health). The unit of
+        # offload is the RESOLUTION, not each round-trip: one thread hop keeps
+        # the ladder's ordering intact inside one worker.
+        org = await _cp_offload(
+            lambda: resolve_api_key(get_control_plane(), token),
+            op="resolve_api_key")
         if org is None:
             await _audit_auth_failure(request, "invalid_key")
             raise HTTPException(status_code=401, detail="Invalid API key")
@@ -3238,7 +3295,13 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
         # (telemetry must never gate auth). Membership-only resolutions have
         # no api_keys row (key_id=None) → no write.
         if org.get("key_id"):
-            update_last_used(get_control_plane(), org["key_id"])
+            # #3498 review P1: best-effort by contract — an OFFLOAD failure
+            # (pool saturated / bound missed) must NOT become a new way for
+            # telemetry to gate auth. The helper already swallows its own
+            # transport errors; best_effort swallows the seam's too.
+            await _cp_offload(
+                lambda: update_last_used(get_control_plane(), org["key_id"]),
+                op="update_last_used", best_effort=True)
         # #528: activation telemetry — first successful API auth per org.
         # created_by (key creator's user UUID) joins web + server funnels,
         # with org_id fallback for keys that predate created_by.
@@ -3313,8 +3376,8 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
 # the client tripwire (review-guarded, not test-provable by this file).
 
 
-def _session_pinned_org(cp: object, user_id: str, pinned: str | None, *,
-                         memberships: list[dict] | None = None) -> str | None:
+def _session_pinned_org(pinned: str | None, *,
+                        memberships: list[dict]) -> str | None:
     """#2230/#2299: membership-gate a truthy ?org_id= pin (session lane).
 
     A truthy pin must be one of the session user's ACTIVE memberships, else
@@ -3333,27 +3396,17 @@ def _session_pinned_org(cp: object, user_id: str, pinned: str | None, *,
     caller's intrinsic-org default governs — see the #2230 divergence note
     in toggle_api_key_enabled's docstring).
 
-    memberships: optional precomputed user_memberships rows. The DI seam
-    (_session_user_org) and the dashboard-login lane pass their list (they
-    queried it anyway for the empty-check + memberships[0] default — avoids
-    a second control-plane query); the toggle-PATCH lane omits it and the
-    helper queries lazily (only paid when a pin is actually present).
+    memberships: REQUIRED precomputed user_memberships rows. #3498: this used
+    to read ``user_memberships`` LAZILY when a caller omitted the list — a
+    SYNCHRONOUS control-plane call on the event loop, reachable from any
+    session handler that passed a pin. The lazy read is gone; every caller
+    must resolve the rows off-loop (``_cp_offload``) FIRST and pass them, so
+    the gate is a pure in-memory predicate and cannot re-introduce the block.
+    The gate is only consulted when ``pinned`` is truthy, so a caller with no
+    pin may pass an empty list.
     """
     if not pinned:
         return None
-    if memberships is None:
-        from tortoise.supabase_control import user_memberships
-
-        try:
-            memberships = user_memberships(cp, user_id)
-        except RuntimeError:
-            # #1719/#2299: the lazy membership read is a control-plane call —
-            # an outage/schema-cache failure degrades to the repo-standard
-            # 503 control_plane_unavailable (the mint-path map), never a raw
-            # 500 from the global handler. Only this lazy read is wrapped;
-            # the precomputed-membership callers (DI seam) run their own
-            # earlier read — pre-existing, left as-is.
-            raise _control_plane_unavailable() from None
     if pinned not in {m["org_id"] for m in memberships}:
         raise HTTPException(status_code=403, detail="No membership in team")
     return pinned
@@ -3404,7 +3457,12 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     if not is_supabase_enabled():
         raise HTTPException(status_code=401, detail="Session auth is hosted-mode only")
     cp = get_control_plane()
-    memberships = user_memberships(cp, user["user_id"])
+    # #3498: every control-plane read in this DI seam (reached by ~33
+    # session endpoints) runs OFF the loop. The membership read is sequential
+    # and dependent (empty-check → pin gate → the orgs ladder), so the unit of
+    # offload is the RESOLUTION.
+    memberships = await _cp_offload(
+        lambda: user_memberships(cp, user["user_id"]), op="user_memberships")
     if not memberships:
         raise HTTPException(status_code=403, detail="No team membership")
     # #1148 review P1 (gate-closing) + #2299 (consolidation): the session
@@ -3418,7 +3476,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # pin resolves through one implementation. The default (memberships[0])
     # is always a membership, so only a bad PIN can raise here.
     org_id = _session_pinned_org(
-        cp, user["user_id"], request.query_params.get("org_id"),
+        request.query_params.get("org_id"),
         memberships=memberships) or memberships[0]["org_id"]
     from tortoise.supabase_control import (
         _ORG_ADDITIVE_0015_TIER,
@@ -3429,19 +3487,21 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
     )
-    row = _orgs_row_fail_soft(
-        cp, org_id, select=_QUOTA_SELECT,
-        # #1832: the FULL additive ladder (newest migration tier dropped
-        # FIRST — 2040 marker, then import tier), same as resolve_api_key /
-        # recover_team_key. The #1230 import ledger + points-cap columns
-        # (last_import_sha256/max_points, migration 20260817000001) ride
-        # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
-        # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
-        # /v1/sessions, /v1/onboarding/state.
-        additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                         _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
-                         _ORG_ADDITIVE_0015_TIER,
-                         _ORG_ADDITIVE_BILLING_TIER])
+    row = await _cp_offload(
+        lambda: _orgs_row_fail_soft(
+            cp, org_id, select=_QUOTA_SELECT,
+            # #1832: the FULL additive ladder (newest migration tier dropped
+            # FIRST — 2040 marker, then import tier), same as resolve_api_key /
+            # recover_team_key. The #1230 import ledger + points-cap columns
+            # (last_import_sha256/max_points, migration 20260817000001) ride
+            # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
+            # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
+            # /v1/sessions, /v1/onboarding/state.
+            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                            _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
+                            _ORG_ADDITIVE_0015_TIER,
+                            _ORG_ADDITIVE_BILLING_TIER]),
+        op="orgs_row_fail_soft")
     if row is None:
         raise HTTPException(status_code=403, detail="Organization not found")
     # #1828 review P2: a suspended org must 403 on SESSION-authed
@@ -3471,7 +3531,8 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # default — it must never pass a bare None, because a PRESENT-and-None
     # limit means UNLIMITED to the quota gate (enforce_org_limit) and would
     # fail OPEN.
-    _gate_limits = _org_node_sync_limits(org_id)
+    _gate_limits = await _cp_offload(
+        lambda: _org_node_sync_limits(org_id), op="org_node_limits")
     org = {
         "org_id": org_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
@@ -3879,23 +3940,93 @@ def _check_org_limit(org: dict, resource: str) -> None:
         raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
 
 
+def _alert_unmetered(lane: str, org_id: str | None,
+                     error: BaseException) -> None:
+    """Emit the #3981 operator alert for a dropped increment, never raising.
+
+    The alert lives in ``tortoise.metering`` — but that module may be the very
+    thing that failed to import (or a partial deploy may predate
+    ``report_unmetered_increment``). Importing it unguarded inside an
+    ``except`` handler would then turn a bookkeeping fault into the
+    user-facing failure the owner's ruling forbids, so the import gets its own
+    guard and the fallback logs directly.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+    except Exception:  # noqa: BLE001, RUF100 — the alert must never raise
+        logging.getLogger("tortoise.metering").error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s "
+            "(metering module unavailable)", lane, org_id or "<none>",
+            type(error).__name__, error)
+        return
+    report_unmetered_increment(lane=lane, org_id=org_id, error=error)
+
+
 def _record_write_op(org: dict, nodes_written: int = 0) -> None:
     """Best-effort write-op metering for overage billing (#681).
 
-    Call AFTER a successful write. Non-fatal — metering failures are logged
-    and swallowed; they never block the caller.
+    Call AFTER a successful write. The increment never blocks the caller — a
+    bookkeeping fault of ours must not fail a committed write — but the drop is
+    never SILENT (#3981): when the increment cannot be recorded the operator is
+    alerted (lane=write_op) and the error is absorbed here.
+
+    Note what the raise from window resolution IS: a SIGNAL, not a refusal. The
+    user-facing refusal, where one exists, is the pre-spend admission gate
+    (``_check_org_limit`` / the armed cohort cap), which runs BEFORE the write;
+    this function is downstream of it and can refuse nothing.
 
     nodes_written: net-new non-episodic nodes written by this call (the
     value-first commit cost driver, epic #909 §4.4/W-4/PL4 — the commit
     endpoint passes the reconciled net-new delta; hold commits bill 0 and
     skip this entirely).
     """
+    org_id = org.get("org_id", "")
     try:
         from tortoise.metering import record_write_ops
-        record_write_ops(org.get("org_id", ""), tier=org.get("tier"),
+        record_write_ops(org_id, tier=org.get("tier"),
                          nodes_written=nodes_written)
-    except Exception:
-        pass  # best-effort — never block the write path
+    except Exception as e:  # noqa: BLE001, RUF100 — never block the write path
+        _alert_unmetered("write_op", org_id, e)
+
+
+async def _emit_capture_ledger(org_id: str, session_id: str,
+                               meta: dict) -> None:
+    """Write a capture's MEASURED cost onto the durable per-period ledger.
+
+    #3665 (lane B7): the SAME measured cost as the analytics row, beside it.
+    #3359's analytics row is a measurement, not a ledger: nothing keyed by
+    org+period, so a spend CEILING could read it only by scanning every capture
+    row in the period. This row is one per (org, period) — the read side
+    ``cohort_cost.enforce_cohort_cost_cap`` gates on.
+
+    Best-effort by contract: a committed capture is never failed by bookkeeping.
+    The drop is NOT silent (#3981) — ``record_capture_usage`` raises on an
+    unresolvable metering window (a SIGNAL, not a refusal), and the handler
+    below reports lane=capture_ledger to the operator instead of swallowing it.
+
+    Both writes run off the event loop: the Supabase RPC / embedded registry
+    write and ``_track_analytics_event``'s synchronous ``httpx.Client`` POST are
+    blocking I/O, and this API runs a single uvicorn worker (the #2988 / #3498
+    class). The analytics emit keeps its OWN best-effort handler — a ledger
+    failure is not an analytics failure and must not be labelled one.
+    """
+    try:
+        _cost_props = _capture_cost_props(session_id, meta)
+        if _cost_props is None:
+            return
+        from tortoise.metering import record_capture_usage
+        await asyncio.to_thread(
+            record_capture_usage, org_id,
+            cost_usd=float(_cost_props.get("cost_usd") or 0.0))
+    except Exception as e:  # noqa: BLE001, RUF100 — never block a committed capture
+        _alert_unmetered("capture_ledger", org_id, e)
+        return
+    try:
+        await asyncio.to_thread(
+            _track_analytics_event, org_id, "capture_cost", _cost_props)
+    except Exception:  # noqa: BLE001, RUF100 — never block capture
+        logging.getLogger("tortoise.api").exception(
+            "capture_cost analytics emit failed (non-fatal)")
 
 
 def _suspended_detail() -> dict:
@@ -4462,7 +4593,7 @@ def _control_plane_unavailable() -> HTTPException:
     handler as a raw 500, which the client rendered as the misleading
     "Invalid API key.". This 503 carries a structured error_code the client
     maps to the unified unavailable copy (copy-string contract with
-    website/signup.html: "Sign-in is temporarily unavailable — try again in
+    website/apps/dashboard/public/signup.html: "Sign-in is temporarily unavailable — try again in
     a moment.").
     """
     return HTTPException(
@@ -4472,6 +4603,107 @@ def _control_plane_unavailable() -> HTTPException:
             "message": "Sign-in is temporarily unavailable — try again in a moment.",
         },
     )
+
+
+async def _cp_offload(fn, *, op: str, best_effort: bool = False,
+                      pool: str = "auth", timeout: float | None = None,
+                      unavailable=None):
+    """#3498: run ONE blocking control-plane helper off the event loop.
+
+    Thin hosted-side wrapper over ``monitoring.run_control_plane_call``. For
+    an AUTH-CRITICAL call it owns the FAIL-CLOSED ERROR MAPPING: an offload
+    that misses its wait bound — or a saturated worker pool — becomes the
+    repo-standard 503 ``control_plane_unavailable`` the client already renders,
+    never a hang and never a silent pass-through. Domain errors raised by the
+    helper itself propagate UNCHANGED, so each caller's existing error mapping
+    is preserved (e.g. ``_get_current_org_supabase`` still raises a 500 ``Auth
+    error`` on an unexpected helper failure — the seam changes only WHERE the
+    call runs, not what its failure means).
+
+    ``best_effort=True`` is for calls whose CONTRACT is "this must never gate
+    the request path": an OFFLOAD failure (bound missed / pool saturated) is
+    logged and swallowed. Without it, routing a documented never-raise
+    telemetry write through the fail-closed seam would give telemetry a new way
+    to fail auth or an OAuth redirect. Only the OFFLOAD failure is swallowed —
+    an exception from the helper itself (e.g. the strict-mode
+    ``UnregisteredTelemetryKey``) still propagates.
+
+    ``pool`` (#3669) selects the worker pool: ``"auth"`` (default),
+    ``"telemetry"`` for best-effort work, or ``"oauth"`` for the
+    attacker-reachable OAuth client-resolution lane.
+
+    ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
+    auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
+    the OAuth resolution lanes pass a factory raising RFC 6749 §5.2
+    ``temporarily_unavailable`` instead, because their consumers parse the
+    OAuth error body (#2863) and never the FastAPI ``detail`` shape. (The
+    authorize/consent lanes are read-mostly: their only write is the idempotent
+    ``oauth_clients`` provisioning insert, so a retry after a bound miss is
+    safe. The MUTATING token grants do not use this bound at all — see below.)
+
+    ``timeout`` is the WAIT BOUND on the submission (``None`` = the seam's
+    ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``). ``math.inf`` waits WITHOUT a bound —
+    used by the mutating token grants, because ``wait_for`` cancels only the
+    await, never the worker thread (CPython #87185), so abandoning a grant that
+    is mid-write would claim a retryable state it cannot observe (#2863).
+
+    The Auth/REST lane is the blast radius the issue names: a regression here
+    is a total auth outage, so this seam is deliberately the ONLY new thing
+    callers touch, and every routed site is covered by a behavioural test.
+    """
+    # Best-effort work routes to the telemetry pool unless the caller named a
+    # pool explicitly (#3498 review P1, preserved by #3669's ``pool`` param).
+    effective_pool = "telemetry" if (best_effort and pool == "auth") else pool
+    try:
+        return await run_control_plane_call(
+            fn, op=op, pool=effective_pool, timeout=timeout)
+    except ControlPlaneOffloadError as exc:
+        if best_effort:
+            logging.getLogger("tortoise.api").warning(
+                "control-plane offload %r failed (best-effort, swallowed): %s",
+                op, exc)
+            return None
+        if unavailable is not None:
+            raise unavailable() from None
+        raise _control_plane_unavailable() from None
+
+
+async def _oauth_offload(fn, *, op: str, no_wait_bound: bool = False):
+    """#3669: run ONE synchronous OAuth resolution off the event loop.
+
+    The OAuth client-resolution lane is synchronous end to end —
+    ``resolve_client`` makes a blocking PostgREST lookup AND, for a CIMD
+    ``client_id``, a blocking ``httpcore`` fetch — and it is reached from FOUR
+    unauthenticated front doors. Offloading the RESOLUTION (not the fetch) puts
+    the whole resolve on a pool dedicated to this lane, so the event loop is
+    never occupied; the fetch's own in-flight cap, per-fetch deadline and
+    per-window wall-clock budget live in ``tortoise.cimd`` and are therefore
+    charged identically at all four doors.
+
+    A dedicated ``"oauth"`` pool (not ``"auth"``) keeps an attacker-driven
+    CIMD fetch flood from parking the auth slots — the same isolation that
+    split ``telemetry`` out (#3498 review P1).
+
+    ``no_wait_bound=True`` is for the two MUTATING token grants. The seam's
+    wait bound ABANDONS the daemon worker on expiry (``wait_for`` cancels the
+    await, not the thread — CPython #87185), so a bound miss there would answer
+    a retryable ``temporarily_unavailable`` while the abandoned grant may still
+    consume the code or rotate the refresh token. That is exactly what the
+    #2863 contract on ``OAuthTemporarilyUnavailable`` forbids ("Never on an
+    unobserved write state"), so a grant is awaited WITHOUT a wait bound: its
+    own httpx phase timeouts bound it, and the only remaining offload failure
+    is a REFUSED submission (full backlog), where no write started and a
+    retryable 503 is accurate.
+
+    Failure is the OAuth contract (RFC 6749 §5.2 503 ``temporarily_unavailable``),
+    never the FastAPI ``control_plane_unavailable`` body the auth/REST lane uses.
+    """
+    from tortoise.oauth import OAuthTemporarilyUnavailable
+    return await _cp_offload(
+        fn, op=op, pool="oauth",
+        timeout=float("inf") if no_wait_bound else None,
+        unavailable=lambda: OAuthTemporarilyUnavailable(
+            "Client resolution is temporarily unavailable — retry."))
 
 
 def _dashboard_key_login_reason(org: dict) -> str | None:
@@ -4801,10 +5033,14 @@ async def create_object(body: CreateObjectRequest, request: Request,
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     # #1643 (review P2-4): mirror the points handler's bookkeeping — object
     # writes must count toward metering + leave an audit trail.
-    try:  # noqa: SIM105
+    try:
         _record_write_op(org, nodes_written=1)
-    except Exception:
-        pass  # metering is best-effort — never fail the write
+    except Exception as e:  # noqa: BLE001, RUF100
+        # #3981: this outer guard exists so metering can never fail the write.
+        # ``_record_write_op`` already absorbs its own failures and alerts the
+        # operator (lane=write_op); if it ever escapes past that, the increment
+        # is dropped a second time and must not be silent either.
+        _alert_unmetered("object_write_op", org.get("org_id"), e)
     await _async_audit(request, org["org_id"], "object_create",
                        resource_id=node.get("id") or body.name,
                        detail={"name": body.name, "objectKind": body.objectKind})
@@ -4838,10 +5074,11 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
-    try:  # noqa: SIM105
+    try:
         _record_write_op(org, nodes_written=1)
-    except Exception:
-        pass  # metering is best-effort — never fail the write
+    except Exception as e:  # noqa: BLE001, RUF100
+        # #3981: same second-line guard as create_object above.
+        _alert_unmetered("subject_write_op", org.get("org_id"), e)
     await _async_audit(request, org["org_id"], "subject_create",
                        resource_id=node.get("id") or body.name,
                        detail={"name": body.name, "subjectKind": body.subjectKind})
@@ -5553,7 +5790,13 @@ async def _session_login_exchange(
 
     # Post-verify membership backstop (TOCTOU: creator removed mid-mint).
     try:
-        still_member = membership_for_user_org(cp, target, org_id) is not None
+        # #3498: blocking PostgREST read — off the loop. A missed bound/pool
+        # saturation maps to the repo-standard 503 inside _cp_offload; a
+        # helper RuntimeError keeps this lane's 503 mapping.
+        _membership = await _cp_offload(
+            lambda: membership_for_user_org(cp, target, org_id),
+            op="membership_for_user_org")
+        still_member = _membership is not None
     except RuntimeError:
         raise _control_plane_unavailable() from None
     if not still_member:
@@ -5885,7 +6128,9 @@ async def register_user(request: Request, response: Response):
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
-            set_dashboard_key_login(cp, org_id, True)
+            await _cp_offload(
+                lambda: set_dashboard_key_login(cp, org_id, True),
+                op="set_dashboard_key_login")
         except Exception as _provision_err:
             try:  # noqa: SIM105
                 _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name).delete()
@@ -6607,7 +6852,8 @@ async def send_onboarding_offer_email_endpoint(request: Request):
         return {"status": "skipped", "reason": "registry-mode"}
 
     try:
-        org = org_by_id(get_control_plane(), org_id)
+        org = await _cp_offload(
+            lambda: org_by_id(get_control_plane(), org_id), op="org_by_id")
         if org is None:
             _logger.warning("onboarding email: skipped (unknown team %s)",
                             org_id)
@@ -7461,7 +7707,9 @@ async def revoke_api_key(key_id: str, request: Request, org: dict = Depends(get_
     await _require_owner_admin_if_session(org)
     if is_supabase_enabled():
         try:
-            row = api_key_by_id(get_control_plane(), key_id)
+            row = await _cp_offload(
+                lambda: api_key_by_id(get_control_plane(), key_id),
+                op="api_key_by_id")
             if row is None:
                 raise HTTPException(status_code=404, detail="API key not found")
             # #2299: consolidated fail-closed — the DI-resolved org (pinned
@@ -7550,7 +7798,9 @@ async def toggle_dashboard_login(
     )
     if is_supabase_enabled():
         cp = get_control_plane()
-        memberships = user_memberships(cp, user["user_id"])
+        # #3498: membership read + the flag write are blocking PostgREST calls.
+        memberships = await _cp_offload(
+            lambda: user_memberships(cp, user["user_id"]), op="user_memberships")
         if not memberships:
             raise HTTPException(status_code=403, detail="No team membership")
         if org_id is None:
@@ -7561,12 +7811,13 @@ async def toggle_dashboard_login(
         # BEFORE the role gate — no org-state/key existence oracle. A
         # member-but-not-owner/admin pin still 403s at _require_owner_admin
         # below (the role gate is the pin's second enforcement layer).
-        _session_pinned_org(cp, user["user_id"], org_id,
-                             memberships=memberships)
+        _session_pinned_org(org_id, memberships=memberships)
         # verify this user is owner/admin of that org
         await _require_owner_admin(user["user_id"], org_id)
         from tortoise.supabase_control import set_dashboard_key_login as _set_flag
-        _set_flag(cp, org_id, body.enabled)
+        await _cp_offload(
+            lambda: _set_flag(cp, org_id, body.enabled),
+            op="set_dashboard_key_login")
         return {"org_id": org_id, "dashboard_key_login": body.enabled}
     # Registry mode: operators control access directly; flag is a no-op
     # (always true). Return success so the UI doesn't error.
@@ -7629,6 +7880,7 @@ async def toggle_api_key_enabled(
         api_key_by_id,
         get_control_plane,
         is_supabase_enabled,
+        user_memberships,
     )
     from tortoise.supabase_control import (
         set_api_key_enabled as _sb_set_enabled,
@@ -7656,9 +7908,24 @@ async def toggle_api_key_enabled(
         # (the deliberate #2230 divergence from DELETE's memberships[0]
         # default — see the function docstring). Registry lane below is
         # untouched (selfhost keys are org-scoped by the key itself).
-        pinned = _session_pinned_org(
-            cp, user["user_id"], request.query_params.get("org_id"))
-        row = api_key_by_id(cp, key_id)
+        pinned_param = request.query_params.get("org_id")
+        # #3498: the pin gate used to read memberships LAZILY inside
+        # _session_pinned_org — a synchronous control-plane read on the loop.
+        # Resolve them OFF-loop here (only paid when a pin is actually present,
+        # preserving the pre-#3498 cost shape) and keep the gate a pure
+        # in-memory predicate. A control-plane outage keeps the repo-standard
+        # 503 the lazy read mapped (#1719/#2299), not a raw 500.
+        memberships: list[dict] = []
+        if pinned_param:
+            try:
+                memberships = await _cp_offload(
+                    lambda: user_memberships(cp, user["user_id"]),
+                    op="user_memberships")
+            except RuntimeError:
+                raise _control_plane_unavailable() from None
+        pinned = _session_pinned_org(pinned_param, memberships=memberships)
+        row = await _cp_offload(
+            lambda: api_key_by_id(cp, key_id), op="api_key_by_id")
         if row is None:
             raise HTTPException(status_code=404, detail="API key not found")
         org_id = row.get("org_id")
@@ -7706,16 +7973,22 @@ async def toggle_api_key_enabled(
         # Explicit null for enabled is treated as absent (leave untouched) —
         # `None is not False` would silently RE-ENABLE a disabled key.
         if "enabled" in body.model_fields_set and body.enabled is not None:
-            _sb_set_enabled(cp, key_id, body.enabled)
+            await _cp_offload(
+                lambda: _sb_set_enabled(cp, key_id, body.enabled),
+                op="set_api_key_enabled")
             result["enabled"] = body.enabled
         # model_fields_set distinguishes explicit null (clear label) from
         # field-absent (don't touch) — JSON null must clear, not skip.
         if "name" in body.model_fields_set:
             cleaned = _clean_key_label(body.name)
-            _sb_set_name(cp, key_id, cleaned)
+            await _cp_offload(
+                lambda: _sb_set_name(cp, key_id, cleaned),
+                op="set_api_key_name")
             result["name"] = cleaned
         if "scopes" in body.model_fields_set:
-            _sb_set_scopes(cp, key_id, body.scopes or [])
+            await _cp_offload(
+                lambda: _sb_set_scopes(cp, key_id, body.scopes or []),
+                op="set_api_key_scopes")
             result["scopes"] = body.scopes or []
         return result
     # Registry mode (selfhost): no enabled column — enabled is a no-op echo
@@ -7901,10 +8174,12 @@ def _llm_provider_keys() -> tuple[str, ...]:
 
 # Provider env keys the hosted deployment can use for LLM-grade extraction.
 # The provider/model choice is a product decision (deploy-time) — this module
-# only reports availability so capture fails closed when no key is configured.
+# only reports availability, which now decides one thing: whether a capture
+# runs LLM extraction or skips it with a visible "no-provider" receipt (#3892).
 # The regex extraction loop was REMOVED as a product path (#822): LLM
-# extraction is the default (and only) capture extraction, and the no-key
-# case fails closed with 503.
+# extraction is the default (and only) capture extraction. A missing key no
+# longer refuses the capture — the Session + its turn Points are still stored
+# and stay searchable; only the extraction into memory points is skipped.
 _LLM_PROVIDER_KEYS: tuple[str, ...] = _llm_provider_keys()
 
 
@@ -7912,8 +8187,8 @@ def _llm_provider_available() -> bool:
     """True when an LLM provider key is configured (or the TORTOISE_SESSION_
     LLM_MOCK=1 test seam is on — precedent: TORTOISE_BACKUP_STORAGE=memory /
     RATE_LIMIT_DISABLED). Must agree with tortoise.sdk._build_session_llm_extractor
-    (which consumes the same key set); a mismatch would fail the 503 gate open
-    or closed wrongly."""
+    (which consumes the same key set); a mismatch would extract when no
+    extractor can be built, or skip extraction when one can."""
     if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
         return True
     return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
@@ -7924,7 +8199,7 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     """Capture an agent session and extract turns as episodic Points.
 
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
-    the provider 503 / quota 402) so disabled orgs do no quota work at all; any
+    the quota 402) so disabled orgs do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
     dashboard failure sub-line reads this, NOT client state) — except the #3060
     capacity 429 and the #3129 in-flight 409, which are server conditions — and
@@ -8055,12 +8330,12 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     gone). Marking it failed routes that retry into the EXISTING #2335
     TRUE-retry lane, which re-extracts on the convergent v2 ids.
 
-    SCOPE — the retry is closed on the **v2 lane only**, and only for IN-PROCESS
-    cancellation:
+    SCOPE — the retry is closed to the CONVERGENT lanes (v2, and the keyless
+    "none" lane, #3892), and only for IN-PROCESS cancellation:
 
-    * the TRUE-retry gate requires BOTH the prior lane AND the retrying request
-      to be v2 (`prior_capture_extractor == "v2"` **and** the request's
-      `TORTOISE_SESSION_EXTRACTOR != "m2"`, #2473), so an abandoned **m2**
+    * the TRUE-retry gate requires the prior lane to be convergent — v2, or the
+      keyless "none" lane (#3892) — AND the retrying request's
+      `TORTOISE_SESSION_EXTRACTOR != "m2"` (#2473), so an abandoned **m2**
       capture re-POSTed still replays, and so does an abandoned v2 capture
       re-POSTed after the deployment's lane was switched to m2. Both are the
       documented, deliberate consequence of #2473: re-running m2 over a failed
@@ -8105,18 +8380,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
 
-    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old
-    "403 → 422 → 503 → 402" was stale, pre-#1927):
+    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
+    list was stale, pre-#1927):
       1. boundary 422 — invalid harness / conversation shape (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed
          payload;
       2. 409 — session_recording disabled (state-conflict);
-      3. 503 — no LLM provider;
-      4. 400 — turn cap > MAX_SESSION_TURNS;
-      5. 422 — empty/blank stored-window transcript (handler-level);
-      6. 402 — quota (skipped when session_existed).
+      3. 400 — turn cap > MAX_SESSION_TURNS;
+      4. 422 — empty/blank stored-window transcript (handler-level);
+      5. 402 — quota (skipped when session_existed).
+    #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
+    the capture is stored for every request and ONLY the LLM extraction is
+    skipped, reported truthfully as receipt mode "no-provider".
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -8163,18 +8440,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                       "sessions.")
         raise HTTPException(status_code=409, detail=detail)
 
-    # #822: LLM extraction is the default (and only) capture extraction —
-    # the regex loop was removed as a product path. No provider key →
-    # fail-closed 503 (matching today's `required` semantics; the
-    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured).
-    if not _llm_provider_available():
-        raise HTTPException(
-            status_code=503,
-            detail="Session extraction requires an LLM provider key (set "
-                   f"{' / '.join(_LLM_PROVIDER_KEYS)}). The regex extraction "
-                   "loop was removed as a product path (#822) — capture is "
-                   "disabled until a provider is configured.",
-        )
+    # #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL — a missing
+    # provider key does NOT refuse the capture. The Session MERGE and the
+    # mechanical turn Points run UNCHANGED below; ONLY the LLM extraction into
+    # memory points is skipped, and the receipt says so truthfully
+    # (`extraction_mode` "no-provider" + the additive warning). The key gates
+    # EXTRACTION, not STORAGE: the stored turns are searchable with no key at
+    # all (FTS is DB-side; the dense leg is a local model). The
+    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured. Mirrors
+    # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
+    # pre-#3892 503-first refusal.
+    no_provider = not _llm_provider_available()
 
     if len(body.conversation) > MAX_SESSION_TURNS:
         # #2335 WI-1c: the turn-cap refusal is a structured record (the
@@ -8249,19 +8525,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
     # RE-ATTEMPTED — extraction runs again. None (legacy, pre-#2335)
     # replays — backward compat with the #1727 invariant.
-    # Review (PR #2473): TRUE retry is gated to the v2 lane (the ONLY
-    # convergent lane — content-addressed pt_<sha> ids + graph content_hash
-    # resolution fold a re-attempt's partial claims onto the same nodes). The
+    # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, or the
+    # keyless "none" lane, #3892 — content-addressed pt_<sha> ids + graph
+    # content_hash resolution fold a re-attempt's partial claims onto the same
+    # nodes). The
     # M2 lane mints non-deterministic time-ULID ids with in-capture-only dedup
     # and folds partial emissions live on raise — re-running M2 over a failed
     # attempt's LIVE ULID claims would mint DUPLICATES (the #1727 hole the
-    # replay skip closed). Retry fires only when the prior ran v2 AND this
-    # request runs v2 (env != m2) — otherwise replay (safe no-op).
+    # replay skip closed). Retry fires only when the prior ran a CONVERGENT
+    # lane (v2, or the keyless "none" lane, #3892) AND this request runs v2
+    # (env != m2) — otherwise replay (safe no-op).
+    # #3892 / #4007: a keyless capture records lane "none" (no lane ran), and
+    # a FAILED prior is re-attempted (#2335 TRUE retry) — that is how a session
+    # captured without a key gets its memory points once a key appears, on an
+    # EXPLICIT re-capture (never automatically). "none" is retry-eligible for
+    # the same reason "v2" is: it minted no claims of its own, and its turn ids
+    # are deterministic, so the re-attempt converges. The m2 exclusion is
+    # UNCHANGED and deliberate (see tortoise/sdk.py's retry gate).
     prior_capture_ok = session_row[1]
     prior_capture_extractor = session_row[2]
     retry_failed_capture = (
         session_existed and prior_capture_ok is False
-        and prior_capture_extractor == "v2"
+        and prior_capture_extractor in ("v2", "none")
         and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -8282,7 +8567,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #2335 WI-2b: a TRUE-retry re-POST (capture_ok False) re-runs
     # extraction and mints NEW non-episodic points — it is NOT a zero-node
     # replay, so the estimate gate must fire for it too (a retry can 402).
-    if not session_existed or retry_failed_capture:
+    # #3892: a keyless capture mints ZERO non-episodic points (only the
+    # episodic turn Points, which the points quota excludes), so the
+    # extraction estimate must not 402-block it — same rationale as the
+    # replay skip above. `_check_org_limit(org, "sessions")` still runs, but
+    # sessions are unlimited since #4010, so it is vacuous in practice.
+    if (not session_existed or retry_failed_capture) and not no_provider:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
         sdk_org = _data_sdk(org)
@@ -8456,19 +8746,67 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
     # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
     # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
-    # since #3914. #3551 tracks collapsing all three onto one shared
+    # since #3914. It omits Source/extraction, but since W7A it EMBEDS every
+    # turn BY DEFAULT through the shared store seam (#4194/#4304) and retains
+    # `embed=False` for #4197's un-backfilled backlog.
+    # #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    #
+    # #3892: metering truth. The turn loop below runs for EVERY request, so a
+    # re-capture of a GROWN transcript writes NEW turn Points even when the
+    # branch taken extracts nothing (a keyless re-capture, or a keyless retry
+    # on the M2 lane). The write-op/abuse meter keys on the ACTUAL write — the
+    # prior stored-turn count — not on which branch ran (see the meter below).
+    prior_turn_count = 0
+    if session_existed:
+        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
+        # meter, and it sits AFTER the Session MERGE that already committed —
+        # a transient graph error here must never 500 a committed capture
+        # (the file's posture, and every sibling bookkeeping read in this
+        # function). On failure 0 makes the meter OVER-count
+        # (`len(windowed) > 0`), the documented conservative posture, never a
+        # blind spot. It also must not abort the keyless→keyed upgrade this
+        # PR exists to enable.
+        try:
+            _prior_turns = proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true RETURN count(t)",
+                params={"sid": session_id}).result_set
+            prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "prior_turn_count read failed (non-fatal, metering over-counts)",
+                exc_info=True)
+            prior_turn_count = 0
+
+    # #4194: embed the whole window BEFORE the loop — the stored text of each
+    # turn, exactly as the loop writes it — in ONE local-model call, using the
+    # same embedder `create_point` stores from and the read path encodes queries
+    # with. Every turn is re-encoded every capture so a model rotation
+    # self-heals. Fail-soft: `None` per turn when no embedder is available —
+    # the turn is still stored and the read path declares its vector leg
+    # impaired. The write's own MERGE reads the node's pre-write content_hash
+    # to decide preserve-vs-clear, so no external probe can fail.
+    #
+    # #4194/#3086: the encode runs OFF the event loop on the capture pool. The
+    # turn loop itself is a tracked on-loop residual (#3086); the local-model
+    # encode over a capture window must not add to it. SDK `capture_session`
+    # is synchronous (there is no loop to free) and calls the same helper
+    # inline — the two share the helper, not the scheduling.
+    _turn_texts = _capture_turn_texts(windowed)
+    _turn_embs = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
+        proj.required_embedding_dim)
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
-        # P1 #1529 (D10, #721 parity): isinstance-first content coercion — a
-        # non-string content can NEVER crash the loop into a raw 500 after the
-        # Session MERGE (partial write). The window helper already coerced
-        # None/int/bool/dict content and truncated to the 5000-char cap — this
-        # readback is the idempotent same-shape guard.
-        raw_content = turn.get("content", "")
-        content = raw_content if isinstance(raw_content, str) else (
-            "" if raw_content is None else str(raw_content))
+        # P1 #1529 (D10, #721 parity): the stored text (and its isinstance-first
+        # coercion — a non-string content can NEVER crash the loop into a raw
+        # 500 after the Session MERGE) comes from the shared
+        # `_capture_turn_texts`, one definition shared with the embedding batch
+        # above (#4194), so the vector is always computed over the string
+        # actually stored.
 
         # #490: turn Points are the episodic turn stream OF THIS SESSION —
         # keyed deterministically by {session_id}_t{i} so re-capturing the
@@ -8479,19 +8817,32 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # path MERGE (s)-[:CONTAINS]->(t) with a missing edge makes FalkorDB
         # create the whole path from scratch, duplicating the Point node.
         turn_id = f"{session_id}_t{i}"
-        turn_text = f"[{role}] {content[:5000]}"
+        turn_text = _turn_texts[i]
+        turn_embedding = _turn_embs[i]
         _turn_rows = proj.g.query(
             "MERGE (t:Point {id:$id}) "
+            # #4194: capture the node's PRE-write content_hash before the SET
+            # reassigns it (capture-time read, no external probe that can
+            # fail). prior_ch NULL => a new turn, nothing to preserve.
+            "WITH t, t.content_hash AS prior_ch "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
             "    t.speaker=$speaker, "
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch "
+            "    t.updatedAt=$now, t.content_hash=$ch, "
+            # #4194: three-way guard. New vector if we encoded one; else
+            # PRESERVE the stored vector only when the content is UNCHANGED;
+            # else CLEAR it, because a preserved vector for changed text
+            # would rank the turn by text no longer on the node (the
+            # dense-leg lie).
+            "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
+            "        WHEN prior_ch = $ch THEN t.embedding ELSE NULL END "
             "RETURN t.createdAt AS createdAt, t.status AS status",
             params={"id": turn_id, "c": turn_text, "k": "event",
                     "speaker": role, "s": "draft", "now": now,
-                    "ch": _content_hash(turn_text)},
+                    "ch": _content_hash(turn_text),
+                    "emb": turn_embedding},
         ).result_set
         # #3947 review (F4 + parity): the write's COALESCE owns the stored
         # timestamp and status — a RE-capture keeps the original createdAt and
@@ -8553,19 +8904,54 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # warning below — the default vocabulary produces no minted kinds to
     # flag, so a log line alone would leave the degradation invisible).
     tenant_vocab_warning: str | None = None
-    if session_existed and not retry_failed_capture:
+    if no_provider:
+        # #3892 (owner ruling 2026-09-18): no provider key — the capture is
+        # still a capture. The Session MERGE + the mechanical turn loop above
+        # ran UNCHANGED, so the turns are STORED and searchable; only the LLM
+        # extraction into memory points is skipped, with the truthful mode +
+        # additive warning the assembly below reports. Placed BEFORE the
+        # #1727 replay branch ON PURPOSE: a keyless call must ALWAYS be
+        # reported as keyless, never as a silent "replayed" that hides the
+        # missing provider. Byte-parity with sdk.capture_session (#4014) — for
+        # keyless calls this branch defines the behaviour, and keyed behaviour
+        # is byte-identical (no_provider is False for a keyed call).
+        if state is not None and not session_existed:
+            # #3129: arm the abandoned-capture marker for a genuine FRESH
+            # attempt only — a keyless RE-capture of an existing session is
+            # replay-shaped (it records nothing below) and must not arm a write
+            # that could downgrade a succeeded prior to capture_ok=False.
+            state["attempted"] = True
+            state["proj"] = proj
+            state["lane"] = "none"
+        meta = {
+            "provider": None, "route": None, "failover_used": False,
+            "errors": [],
+            "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+            "mode": _CAPTURE_NO_PROVIDER_MODE,
+            # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+            # (additive meta contract), empty here (not fabricated).
+            "stats": {},
+        }
+    elif session_existed and not retry_failed_capture:
         # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
         # (capture_ok True) or the session predates capture_ok (legacy None —
         # presumed captured). A prior FAILED capture falls through to
         # extraction — retry is TRUE.
-        meta = {"errors": [], "warnings": [], "mode": "replayed",
+        _replay_warnings = [
+            "session already captured (same session_id) — no new extraction"]
+        if prior_capture_ok is False and prior_capture_extractor == "none":
+            # #3892 / #4007: the prior was a KEYLESS store — extraction has
+            # NEVER run for it. When this deployment is on the non-convergent
+            # M2 lane the re-attempt is refused, so a bare "already captured"
+            # would be a FALSE statement of this state and would hide the
+            # remedy. Disclose it, in the SAME words as sdk.capture_session.
+            _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+        meta = {"errors": [], "warnings": _replay_warnings,
+                "mode": "replayed",
                 "route": None, "provider": None,
                 # #2335 WI-1a: hosted replayed carries no extractor_v2
                 # telemetry — stats always-present, empty on replay.
                 "stats": {}}
-        extraction_errors: list = []
-        extraction_warnings = [
-            "session already captured (same session_id) — no new extraction"]
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         if state is not None:
             state["attempted"] = True
@@ -8582,8 +8968,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 slot, sdk._extract_session_llm,
                 windowed, session_id, now)
         except ValueError as e:
-            # no-key fail-closed (outer 503 gate normally catches this first;
-            # belt-and-braces so an inner/outer drift never 500s, #1468).
+            # inner provider-gate drift on the M2 lane → a clean fail-closed
+            # 503 (mirrors the v2 branch below; belt-and-braces so an
+            # inner/outer drift never 500s, #1468). A keyless request never
+            # reaches here — it skips extraction entirely (#3892).
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
         if state is not None:
@@ -8656,11 +9044,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extraction failure keeps 200 + additive errors (the mutation already
     # happened — turn points landed — and E2E-8 permits "non-200 OR additive
     # warnings"; a non-200 would hide the partial write).
+    # #3892: the receipt reads the meta of WHICHEVER branch ran — including
+    # the keyless "no-provider" branch and a keyless RE-capture of an EXISTING
+    # session (which the replay-meta block below would otherwise leave with
+    # unset warnings). Mirrors sdk.capture_session's unconditional read.
+    extraction_errors = list(meta.get("errors") or [])
+    extraction_warnings = list(meta.get("warnings") or [])
     if not session_existed or retry_failed_capture:
-        # #2335 WI-2b: a retry's meta errors/warnings must surface (the
-        # re-attempted extraction's outcome, not the failed first attempt's).
-        extraction_errors = list(meta.get("errors") or [])
-        extraction_warnings = list(meta.get("warnings") or [])
         # #2444: partial-extraction failures are the product's live error surface —
         # surface them to Sentry (when enabled) with org/session context so an
         # agent (or the inbound intake) can act on recurring signatures.
@@ -8710,12 +9100,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent
     # writer's create is an idempotent no-op).
-    if not session_existed or retry_failed_capture:
+    if not session_existed or (retry_failed_capture and not no_provider):
         # #2335 WI-2b: a retry re-runs the mint — the deterministic Event id
         # (_session_capture_event_id) converges on the SAME node (MERGE), and
         # the retry-minted points get the provenance stamp + typed-Source
         # upgrade they need. (Refresh of startedAt/endedAt on the retry is
         # CORRECT — the successful retry is the real capture.)
+        # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
+        # materialization — a keyless attempt extracts nothing, so there is
+        # nothing to stamp, while re-minting re-journals EventRecorded and
+        # refreshes startedAt on every call. Byte-parity with
+        # sdk.capture_session.
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
@@ -8857,59 +9252,60 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         logging.getLogger("tortoise.api").exception(
             "session capture audit write failed (non-fatal)")
     # Metering (#681): best-effort write-op count for overage billing. A
-    # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
-    # not inflate metering/abuse with phantom writes (review PR #1827).
-    if not session_existed or retry_failed_capture:
+    # replay (session_existed) with an UNCHANGED transcript writes ZERO nodes —
+    # an idempotent re-POST must not inflate metering/abuse with phantom writes
+    # (review PR #1827). #3892: a re-capture of a GROWN transcript writes new
+    # turn Points even when the branch extracts nothing (keyless re-capture, or
+    # an M2-lane keyless retry), so the meter keys on the ACTUAL write
+    # (`prior_turn_count`), not on which branch ran — otherwise those paths are
+    # a billing/abuse blind spot. The conservative over-count for the abuse leg
+    # is the documented posture.
+    # #3892 (review cycle 1, P2): a KEYLESS re-capture of an UNCHANGED
+    # transcript writes nothing — its turn ids are deterministic, so the loop
+    # MERGEs onto the same Points — yet `retry_failed_capture` is True for it
+    # (prior lane "none"), which would meter a phantom write-op and charge the
+    # full transcript length on the abuse leg. The retry arm therefore applies
+    # only when the retry can EXTRACT (a keyed retry mints points); the
+    # grown-transcript arm still covers the keyless case that really writes.
+    if (not session_existed or (retry_failed_capture and not no_provider)
+            or len(windowed) > prior_turn_count):
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
-        # replay) — metering + abuse records fire for the re-attempt.
+        # replay) — metering + abuse records fire for the re-attempt. A keyless
+        # retry is metered too: see the #3892 lead-in above.
         _record_write_op(org)
-        # #3359: one capture_cost row per capture ATTEMPT that ran an
-        # extraction (successful or errored — a failed extraction that made
-        # provider calls has real spend, and the deadline/deadline_aborts
-        # disclosure depends on that row existing). A ZERO-CALL capture —
-        # the empty-transcript / keyless path — carries no
-        # extractor telemetry and emits nothing; an M2 capture DOES make
+        # #3359/#3665: one measured-cost ledger + analytics row per capture
+        # ATTEMPT that ran an extraction (successful or errored — a failed
+        # extraction that made provider calls has real spend, and the
+        # deadline/deadline_aborts disclosure depends on that row existing).
+        # A ZERO-CALL capture — the empty-transcript / keyless path — carries
+        # no extractor telemetry and emits nothing; an M2 capture DOES make
         # provider calls, so since #3824 it emits a row carrying its call
         # count as ``unattributed`` rather than vanishing into the same
-        # silence as a zero-call capture. Idempotent for free: this
-        # sits behind the SAME replay guard the write-op meter uses, so a
+        # silence as a zero-call capture. Idempotent for free: this sits
+        # behind the SAME replay guard the write-op meter uses, so a
         # zero-node re-POST writes no second row; a genuine retry (#2335
         # WI-2b) does write a second row, which is why the report aggregates
-        # by session_id before percentiling. Best-effort — analytics must
+        # by session_id before percentiling. Best-effort — bookkeeping must
         # never block a committed capture.
-        try:
-            _cost_props = _capture_cost_props(session_id, meta)
-            if _cost_props is not None:
-                # #3665 (lane B7): the SAME measured cost onto the durable
-                # per-period LEDGER, beside the analytics row it already
-                # writes. #3359's analytics row is a measurement, not a
-                # ledger: nothing keyed by org+period, so a spend CEILING
-                # could only read it by scanning every capture row in the
-                # period. The ledger row is one per (org, period) — the read
-                # side `cohort_cost.enforce_cohort_cost_cap` gates on.
-                # Best-effort by contract (record_capture_usage swallows its
-                # own failures): metering never blocks a committed capture.
-                # Off the event loop for the same reason as the emit below —
-                # the Supabase RPC and the embedded registry write are both
-                # blocking I/O and this API runs a single uvicorn worker.
-                from tortoise.metering import record_capture_usage
-                await asyncio.to_thread(
-                    record_capture_usage, org["org_id"],
-                    cost_usd=float(_cost_props.get("cost_usd") or 0.0))
-                # Off the event loop: `_track_analytics_event` POSTs
-                # synchronously (`httpx.Client`), and this API runs a single
-                # uvicorn worker — calling it inline stalls EVERY concurrent
-                # request for the duration of a Supabase round-trip (the
-                # #2988 / #3498 class of sync-HTTP-on-the-loop bug). This is
-                # the first call site on the highest-frequency path, so it is
-                # routed through `asyncio.to_thread` (the house style).
-                await asyncio.to_thread(
-                    _track_analytics_event,
-                    org["org_id"], "capture_cost", _cost_props)
-        except Exception:  # noqa: BLE001, RUF100 — never block capture
-            import logging
-            logging.getLogger("tortoise.api").exception(
-                "capture_cost analytics emit failed (non-fatal)")
+        #
+        # #3665 (lane B7): the SAME measured cost onto the durable per-period
+        # LEDGER, beside the analytics row. #3359's analytics row is a
+        # measurement, not a ledger: nothing keyed by org+period, so a spend
+        # CEILING could only read it by scanning every capture row in the
+        # period. The ledger row is one per (org, period) — the read side
+        # `cohort_cost.enforce_cohort_cost_cap` gates on. Both writes run off
+        # the event loop (`asyncio.to_thread`): the Supabase RPC / embedded
+        # registry write and `_track_analytics_event`'s synchronous
+        # `httpx.Client` POST are blocking I/O, and this API runs a single
+        # uvicorn worker (the #2988 / #3498 class of sync-HTTP-on-the-loop
+        # bug).
+        #
+        # #3825/#3981: the ledger half raises on an unresolvable window; that
+        # raise is a SIGNAL, and ``_emit_capture_ledger`` reports the dropped
+        # increment to the operator (lane=capture_ledger) instead of leaving
+        # a silent short ledger row behind. A ledger failure is not an
+        # analytics failure and is never labelled one.
+        await _emit_capture_ledger(org["org_id"], session_id, meta)
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -8925,19 +9321,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # after the capture). Tracked on the Session node.
     try:
         from .session_link import link_session_entities
-        # The same stored-window text the turn loop wrote (byte-identical
-        # content) drives the link trigger — link what is actually stored.
-        link_texts = []
-        for _, turn in enumerate(windowed):
-            role = _normalize_turn_role(turn.get("role"))
-            raw_content = turn.get("content", "")
-            content = raw_content if isinstance(raw_content, str) else (
-                "" if raw_content is None else str(raw_content))
-            link_texts.append(f"[{role}] {content[:5000]}")
+        # #4194: the shared `_capture_turn_texts` is the ONE stored-text
+        # definition — the link trigger, the stored turn, and the embedded text
+        # cannot drift (#1532 D1/D2).
+        link_texts = _capture_turn_texts(windowed)
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"
-                      for i in range(len(link_texts))])
+                      for i in range(len(link_texts))],
+            sdk=sdk)
         if link_result["attempted"]:
             proj.g.query(
                 "MATCH (s:Session {id:$sid}) SET "
@@ -9153,6 +9545,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     mode = meta.get("mode")
     if extraction_errors:
         effective_mode = "error" if mode != "empty" else "empty"
+    elif mode == _CAPTURE_NO_PROVIDER_MODE:
+        # #3892: the keyless capture — turns stored, extraction skipped.
+        # Reported under its OWN name, never folded into "llm" (which would
+        # claim an extraction that did not happen) nor "replayed". Checked
+        # before `route` for parity with sdk.capture_session.
+        effective_mode = _CAPTURE_NO_PROVIDER_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
     elif mode == "replayed":
@@ -9274,11 +9672,31 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # before the Session MERGE — nothing to record there.
     _capture_ok = (verb_status == STATUS_OK
                    and not extraction_errors and not skipped)
-    if not session_existed or retry_failed_capture:
+    # #3892: what THIS attempt RECORDS on the Session. A keyed attempt records
+    # its real outcome + lane, exactly as before. A KEYLESS attempt records
+    # capture_ok=False + lane "none" (no extraction lane ran) — recording
+    # ok=True / lane "v2" instead would make a LATER capture WITH a key take
+    # the #1727 replay branch, silently extracting nothing and leaving the
+    # stored session permanently points-less. False + "none" is what the #2335
+    # TRUE-retry gate consumes, so the later keyed capture re-attempts and the
+    # deterministic turn ids converge. Byte-parity with sdk.capture_session
+    # (#4014). A keyless attempt records this ONLY when it CREATES the session:
+    # a keyless RE-capture must not rewrite a prior attempt's record (a prior
+    # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
+    _capture_ok_record = False if no_provider else _capture_ok
+    _capture_extractor_record = (
+        "none" if no_provider
+        else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
+              else "v2"))
+    _record_session_state = (
+        (not session_existed) if no_provider
+        else (not session_existed or retry_failed_capture))
+    if _record_session_state:
         # #2335 WI-2b: record the outcome ONLY on a genuine attempt (fresh OR
         # retry) — a replay performs NO Session write (zero-write no-op).
         # Review (PR #2473): the SET records the extractor lane that RAN so
-        # the retry gate can require a v2 prior (M2 partials never retried).
+        # the retry gate can require a convergent prior (M2 partials never
+        # retried).
         # NOTE (documented lane divergence): hosted computes _capture_ok AFTER
         # the post-write enrichment — an enrichment-read failure marks points
         # skipped → verb partial → capture_ok False → retryable. The sdk
@@ -9296,10 +9714,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "MATCH (s:Session {id:$sid}) "
                 "SET s.capture_ok=$ok, "
                 "    s.capture_extractor=$extractor",
-                params={"sid": session_id, "ok": _capture_ok,
-                        "extractor": "m2" if os.environ.get(
-                            "TORTOISE_SESSION_EXTRACTOR") == "m2"
-                        else "v2"})
+                params={"sid": session_id, "ok": _capture_ok_record,
+                        "extractor": _capture_extractor_record})
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")
@@ -9370,20 +9786,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 # REGISTERED onboarding state keys (Task 11's registration table) — an
 # unregistered key would be silently dropped by the _update_onboarding_state
 # allowlist filter.
-
-def _capture_receipt_key(harness: str | None) -> str:
-    """Receipt state key for a harness — per-harness when present, the bare
-    legacy key for no-harness hooks (T1-P3 None-guard)."""
-    return f"session_capture_receipt_{harness}" if harness else \
-        "session_capture_receipt"
-
-
-def _capture_last_error_key(harness: str | None) -> str | None:
-    """Per-harness last-error state key. No bare variant is registered — a
-    legacy no-harness hook has no per-harness dashboard row to read it."""
-    if not harness:
-        return None
-    return f"session_capture_last_error_{harness}"
+#
+# #3809: the key SPELLING lives in ONE place — ``tortoise.capture_receipts``
+# — imported above as ``_capture_receipt_key`` / ``_capture_last_error_key``
+# so both this server and ``tortoise session verify`` derive the same name.
 
 
 def _record_capture_last_error(org_id: str, harness: str | None,
@@ -9487,16 +9893,22 @@ async def session_install_probe(body: InstallProbeRequest,
 # judge_summary dropped from v1).
 
 # Privacy helpers (W-7 / §6.1): provenance paths are BASENAME only — the full
-# local path never leaves the machine; the session Source url derives from the
-# basename (+ contentHash), never the full path.
+# local path never leaves the machine. The session Source's IDENTITY is the
+# canonical ``session:<session_id>`` (ONTOLOGY §4.6, #4005) — the same url the
+# capture path materializes and ``delete_session`` deletes; the W-7 basename
+# rides as a PROPERTY (``sourcePath`` on the Source/Document), never in the url.
 
 
-def _session_source_basename(payload: CommitPayload) -> str:  # noqa: F821
-    """The session Source identity = the FIRST provenance basename (privacy,
-    W-7). Empty when the payload has no provenance_refs (valid empty commit)."""
+def _document_source_basename(payload: CommitPayload) -> str:  # noqa: F821
+    """The payload's W-7 basename (FIRST provenance_ref) — the value written
+    to ``Document.sourcePath``. NOT the session Source identity (that is the
+    canonical ``session:<session_id>``, #4005). Empty when the payload has no
+    provenance_refs (valid empty commit). Derived through the ONE shared
+    ``file_indexer.provenance_basename`` primitive — the same one Layer-1 uses
+    — so Layer-1's accepted set and this value can never disagree."""
     if not payload.provenance_refs:
         return ""
-    return os.path.basename(payload.provenance_refs[0].path.rstrip("/"))
+    return provenance_basename(payload.provenance_refs[0].path)
 
 
 def _commit_response(
@@ -9658,7 +10070,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     reconcile = plan.reconcile
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
-    session_basename = _session_source_basename(payload)
+    document_basename = _document_source_basename(payload)
 
     # ── 1. Session node + budget counters (is_episodic: true — MECE ISSUE 2;
     # the value-chain container is episodic; the VALUE Points below are the
@@ -9688,7 +10100,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         params={"did": doc_id, "title": payload.summary or session_id,
                 "summary": payload.summary, "arc": payload.story_arc,
                 "sid": session_id, "eid": event_id,
-                "srcpath": session_basename, "now": now},
+                "srcpath": document_basename, "now": now},
     )
 
     # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
@@ -9747,19 +10159,50 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 params={"eid": ev.id, "name": name},
             )
 
-    # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
-    # + external artifacts from sources[]; the session Source references the
-    # Document AND the external artifacts (DE2E-5 chain). ──
+    # ── 4. Source bridge: the session Source (#4005 — the canonical
+    # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
+    # the capture path materializes (sdk._materialize_session_source), the
+    # projection stub mints (_mint_source_stub) and delete_session / the
+    # capture orphan sweep delete — so capture, commit and delete converge on
+    # ONE Source, with an alias rule for pre-fix basename nodes tracked in
+    # #4125) + external artifacts from sources[]; the session Source
+    # references the Document AND the external artifacts (DE2E-5 chain). The
+    # contentHash is the client-supplied raw anchor and NEVER hash(url): an
+    # absent anchor is passed through as NULL so _upsert_source's conditional
+    # write PRESERVES the stored hash/version (an anchored re-commit followed
+    # by an anchorless one must not wipe the anchor — see #3998). The raw's
+    # W-7 basename rides as a PROPERTY (Source.sourcePath / Document.sourcePath),
+    # never in the identity. ──
     session_urls: list[str] = []
-    for ref in payload.provenance_refs:
-        url = os.path.basename(ref.path.rstrip("/"))
-        if url not in session_urls:
-            session_urls.append(url)
+    # The payload's point/event source_refs use the W-7 basename; the graph
+    # Source identity is the canonical session url. This maps one to the other
+    # so extractedFrom still resolves. Both sides derive the basename through
+    # the ONE shared file_indexer primitive (Layer-1 uses the same one), so
+    # Layer-1 can never accept a source_ref this map does not know. The stored
+    # point/event `source_ref` PROPERTY keeps the W-7 basename by design — the
+    # provenance resolution surface is the `extractedFrom` edge (J-4), which
+    # this map re-points; no in-repo reader resolves a Source via `source_ref`
+    # (#4005 review, sub-threshold #40).
+    session_ref_urls: dict[str, str] = {}
+    if payload.provenance_refs:
+        session_url = derive_session_source_url(session_id)
+        session_urls.append(session_url)
+        session_spans: list[str] = []
+        for ref in payload.provenance_refs:
+            session_spans.extend(ref.spans)
+            base = provenance_basename(ref.path)
+            if base:
+                session_ref_urls.setdefault(base, session_url)
+        # An absent anchor stays absent: NULL (not "") so the conditional
+        # MERGE preserves a previously stored contentHash/version/title.
+        anchor = next((ref.contentHash for ref in payload.provenance_refs
+                       if ref.contentHash), None)
         sdk.create_source(
-            url, "agentSession",
-            contentHash=content_hash(url) if url else "",
-            provenance_spans=list(ref.spans), is_episodic=True,
+            session_url, "agentSession",
+            contentHash=anchor,
+            provenance_spans=session_spans, is_episodic=True,
             sourceDate=payload.captured_at,
+            source_path=document_basename or None,
         )
     external_urls: list[str] = []
     for src in payload.sources:
@@ -9810,7 +10253,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): the commit-receiver points were
                 # written WITHOUT session_id — the source-session attribution
                 # evidence mark needs the point's session on both capture
@@ -9832,7 +10277,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 search_keys=pr.point.search_keys or None,
                 source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
-                extractedFrom=pr.point.source_ref, is_episodic=False,
+                extractedFrom=session_ref_urls.get(
+                    pr.point.source_ref, pr.point.source_ref),
+                is_episodic=False,
                 # #1526 (M6 owner validation): see above — session_id on the
                 # committed points so both capture paths (SDK + hosted) carry
                 # the same source-session attribution surface.
@@ -10341,6 +10788,25 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             "created_at": er[3],
         })
 
+    # #3809: the session's graph SOURCE node (`session:<id>`, ontology v3.6 §4.6
+    # agentSession) — so `tortoise session verify` can prove the session
+    # "appears in the graph as a source" over the REST surface rather than
+    # inferring it from the presence of turn points. Additive: a degraded
+    # capture that never materialized the Source reports `source: null`,
+    # never a fabricated stub.
+    source = None
+    source_rows = proj.g.query(
+        "MATCH (src:Source {url:$url}) "
+        "RETURN src.url, src.sourceKind, src.eventId",
+        params={"url": f"session:{session_id}"},
+    ).result_set
+    if source_rows:
+        source = {
+            "url": source_rows[0][0],
+            "sourceKind": source_rows[0][1],
+            "eventId": source_rows[0][2],
+        }
+
     return {
         "id": sess[0],
         "created_at": sess[1],
@@ -10357,6 +10823,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "extracted": extracted_count,
         "turn_points": turns,
         "extracted_points": extracted,
+        "source": source,
     }
 
 
@@ -10753,7 +11220,10 @@ async def _user_memberships(user_id: str) -> list[dict]:
         user_memberships as _sb_memberships,
     )
     if is_supabase_enabled():
-        return _sb_memberships(get_control_plane(), user_id)
+        # #3498: the Supabase lane is a blocking PostgREST read — off the loop.
+        return await _cp_offload(
+            lambda: _sb_memberships(get_control_plane(), user_id),
+            op="user_memberships")
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -10779,7 +11249,12 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
         membership_for_user_org as _sb_membership,
     )
     if is_supabase_enabled():
-        return _sb_membership(get_control_plane(), user_id, org_id)
+        # #3498: blocking PostgREST read — off the loop. This seam is reached
+        # by every membership-gated session endpoint; the design's §B names it
+        # (`_membership_team`) as one of the ~six auth/REST seams.
+        return await _cp_offload(
+            lambda: _sb_membership(get_control_plane(), user_id, org_id),
+            op="membership_for_user_org")
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
@@ -10805,7 +11280,10 @@ async def _org_node(org_id: str) -> dict | None:
         org_by_id as _sb_org,
     )
     if is_supabase_enabled():
-        return _sb_org(get_control_plane(), org_id)
+        # #3498: blocking PostgREST read — off the loop (reached by ~10 session
+        # endpoints, and by _require_owner_admin's suspension-stamp check).
+        return await _cp_offload(
+            lambda: _sb_org(get_control_plane(), org_id), op="org_by_id")
     sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -11378,7 +11856,7 @@ async def _provision_preflight(org: dict) -> None:
     if org.get("tier", "free") in _GRAPH_TIER_BLOCKED:
         raise HTTPException(
             status_code=402,
-            detail="Custom graphs require the Pro plan. Upgrade to create "
+            detail="Custom graphs require the Builder plan. Upgrade to create "
                    "multiple graphs.",
             headers={"X-Upgrade-CTA": "pro"},
         )
@@ -12138,7 +12616,7 @@ async def delete_graph(graph_id: str, org_id: str,
 
 # ── #2304 trash surface (delete = quarantine → restore within grace) ───────
 # Owner Option C: a deleted custom graph sits in the org's TRASH for a
-# disclosed recovery window (default 7 days — the purge grace), then is
+# disclosed recovery window (default _TRASH_GRACE_DAYS — the purge grace), then is
 # physically erased. These endpoints are the owner/admin RESTORE surfaces:
 # they are SESSION-ONLY (a revoked graph key can never reach a tombstone)
 # and role-gated owner/admin (mirrors delete_graph's session branch). Keys
@@ -12312,7 +12790,7 @@ async def list_trash(org_id: str,
     graph can never be here. ``deleted_at`` absent = legacy tombstone
     (predates #2304 — treated as past-grace by the purge). Past-window and
     legacy rows remain LISTED (pending the purge) but are NOT restorable:
-    restore 410s them (#2465 — the 7-day window is a hard server-side
+    restore 410s them (#2465 — the _TRASH_GRACE_DAYS window is a hard server-side
     bound); the purge erases them on its cadence."""
     await _require_owner_admin_session(user, org_id)
     org = await _org_node(org_id)
@@ -12406,14 +12884,14 @@ async def _restore_trash_graph_locked(request: Request, user: dict,
             detail="Graph was purged (data physically erased) — not "
                    "restorable; re-create it from scratch")
     # #2465: the recovery window is a HARD server-side bound — a row past
-    # its 7 days (or a legacy tombstone with no deleted_at) is pending
+    # its _TRASH_GRACE_DAYS window (or a legacy tombstone with no deleted_at) is pending
     # permanent erasure and no longer restorable, matching the UI copy and
     # privacy §6 ("refused for restoration once the window has passed").
     # Only the purge clears these rows (operator cadence — #2317).
     if _trash_grace_expired(row.get("deleted_at")):
         raise HTTPException(
             status_code=410,
-            detail="The 7-day recovery window has passed — this graph is "
+            detail=f"The {_TRASH_GRACE_DAYS}-day recovery window has passed — this graph is "
                    "pending permanent erasure and can no longer be restored")
     name = (row.get("name") or "").strip()
     if name and await _trash_name_conflict(org_id, name, graph_id):
@@ -12694,7 +13172,9 @@ async def _require_owner_admin(user_id: str, org_id: str) -> dict:
             # dashboard-login / create / revoke — all inherit 503 parity.
             # Non-outage exceptions propagate untouched (a schema/dialect
             # bug must stay loud, not masquerade as an outage).
-            membership = _sb_membership(get_control_plane(), user_id, org_id)
+            membership = await _cp_offload(
+                lambda: _sb_membership(get_control_plane(), user_id, org_id),
+                op="membership_for_user_org")
         except Exception as _exc:
             _raise_503_if_cp_outage(_exc)
             raise
@@ -12932,7 +13412,8 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
     if is_supabase_enabled():
         try:
             await _require_owner_admin(user["user_id"], org_id)
-            org = org_by_id(get_control_plane(), org_id)
+            org = await _cp_offload(
+                lambda: org_by_id(get_control_plane(), org_id), op="org_by_id")
             if org is None:
                 raise HTTPException(status_code=404, detail="Unknown organization")
             # #1875: tier gate matches pricing (free=1, solo=1, pro=2,
@@ -12943,7 +13424,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             tier = org.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Pro or Team tier — upgrade to invite members")
+                                    detail="Invites require the Builder or Team tier — upgrade to invite members")
             # #1965: per-org lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per org_id; the count
@@ -13015,7 +13496,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Pro or Team tier — upgrade to invite members")
+                                detail="Invites require the Builder or Team tier — upgrade to invite members")
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -14056,7 +14537,7 @@ async def resend_invite(invitation_id: str, org_id: str, request: Request,
 async def expire_invite(invitation_id: str, org_id: str,
                         user: dict = Depends(get_current_user)):  # noqa: B008
     """#2003 (W7): admin expire-now — a PENDING invitation dies immediately
-    (link dead, leaves pending lists, Pro seat freed). Owner/admin only.
+    (link dead, leaves pending lists, a Builder-plan (`pro`) seat freed). Owner/admin only.
     Consumed invitations are not expire-able (409)."""
     from tortoise.supabase_control import (
         InvitationError,
@@ -15747,7 +16228,7 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
 @app.delete("/v1/organizations/{org_id}", status_code=202)
 async def delete_org(org_id: str, request: Request,
                       user: dict = Depends(get_current_user)):  # noqa: B008
-    """E2E-6-D — owner-only org deletion (soft delete → 24h grace → hard delete).
+    """E2E-6-D — owner-only org deletion (soft delete → TEAM_DELETE_GRACE_HOURS grace → hard delete).
 
     Immediate cascade, access-kill first: all API keys revoked (tt_ auth
     fails closed), active memberships marked removed (JWT-session access
@@ -15755,10 +16236,11 @@ async def delete_org(org_id: str, request: Request,
     promised ``grace_hours`` stamped LAST — a partial failure leaves the
     org not marked deleted and retries re-run the full cascade. The boot
     + hourly purge hard-deletes the org graph and control-plane rows once
-    the stored grace window elapses — deletion is irreversible within 24
-    hours (issue #302 indicator); the purge honors the stored window even
-    if the env var changes mid-grace. Immutable audit_events rows are
-    preserved by design (the delete trail survives).
+    the stored grace window elapses — the deletion then becomes irreversible
+    (issue #302 indicator, harmonised by #4179); the purge honors the
+    stored window even if the env default changes mid-grace (the env var is
+    only the fallback for rows with no stored grace). Immutable audit_events
+    rows are preserved by design (the delete trail survives).
 
     AuthZ-first: non-owners get 403 whether or not the org exists or is
     delete-pending (no existence oracle). Idempotent: repeat calls by the
@@ -15776,7 +16258,8 @@ async def delete_org(org_id: str, request: Request,
     if org_node is None:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
+    grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
+                                       str(TEAM_DELETE_GRACE_HOURS)))
     if deleted_at:
         # Idempotent replay: already scheduled — same grace answer (200),
         # using the STORED grace window (promise made at schedule time).
@@ -15971,9 +16454,12 @@ def _purge_deleted_orgs() -> None:
 
     Runs at boot + hourly inside the event-retention loop (via
     asyncio.to_thread — sync DB work must not block the loop, #310). The
-    env cutoff pre-filters, then each org's STORED grace_hours (the
-    promise made at schedule time) decides — a config change mid-grace can
-    never hard-delete an org before its promised hard_delete_after.
+    fetch is a SUPERSET of every soft-deleted row (``deleted_at <= now``);
+    each org's STORED grace_hours (the promise made at schedule time) is
+    the sole authority, and the env var is only the fallback for rows that
+    carry no stored grace. A config change mid-grace therefore neither
+    hard-deletes an org before its promised hard_delete_after NOR defers
+    it past that promise (#4179).
 
     Registry mode cascades Membership/APIKey/Invitation nodes and drops
     the org graph; Supabase mode sweeps the registry nodes provision_tenant
@@ -15987,9 +16473,18 @@ def _purge_deleted_orgs() -> None:
     a purge failure never crashes the loop.
     """
     try:
-        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
-        env_cutoff = (datetime.now(UTC) - timedelta(hours=env_grace)).isoformat()
+        env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS",
+                                          str(TEAM_DELETE_GRACE_HOURS)))
         now_dt = datetime.now(UTC)
+        # #4179 P1: the fetch must be a SUPERSET of every stored promise. The
+        # env default is only the fallback for a row with no stored
+        # grace_hours, so it must never pre-filter a row whose STORED promise
+        # already expired — a `now - env_grace` cutoff deferred a legacy
+        # 24h-stamped org by up to (env - stored) when
+        # TEAM_DELETE_GRACE_HOURS grew 24h→168h, purging it ~144h PAST its
+        # hard_delete_after. `deleted_at <= now` selects every soft-deleted
+        # row; `_past_grace` then decides each one on its own stored window.
+        scan_cutoff = now_dt.isoformat()
 
         def _past_grace(row_deleted_at, row_grace_hours) -> bool:
             """Stored grace (promised at schedule time) wins over env."""
@@ -16013,11 +16508,11 @@ def _purge_deleted_orgs() -> None:
             for row in cp.query(
                 "organizations",
                 select=["id", "graph_name", "grace_hours", "deleted_at"],
-                filters=[("deleted_at", "lte", env_cutoff)],
+                filters=[("deleted_at", "lte", scan_cutoff)],
             ):
                 org_id = row["id"]
                 if not _past_grace(row.get("deleted_at"), row.get("grace_hours")):
-                    continue  # env shrank — honor the stored promise
+                    continue  # stored promise decides (env = fallback only)
                 try:
                     # Registry cascade FIRST, control-plane LAST: the orgs
                     # row is the retry anchor — a failed registry purge or
@@ -16054,11 +16549,11 @@ def _purge_deleted_orgs() -> None:
             "MATCH (t:Team) WHERE t.deleted_at IS NOT NULL "
             "AND t.deleted_at < $cutoff "
             "RETURN t.id, t.graph_name, t.grace_hours, t.deleted_at",
-            params={"cutoff": env_cutoff},
+            params={"cutoff": scan_cutoff},
         ).result_set
         for org_id, graph_name, stored_grace, row_deleted_at in rows:
             if not _past_grace(row_deleted_at, stored_grace):
-                continue  # env shrank — honor the stored promise
+                continue  # stored promise decides (env = fallback only)
             try:
                 _purge_registry_org(sdk, org_id, graph_name)
                 _audit_logger.append(
@@ -16226,22 +16721,26 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
 
     if is_supabase_enabled():
         cp = get_control_plane()
-        org_id = _resolve_signup_token(cp, signup_token)
+        org_id = await _cp_offload(
+            lambda: _resolve_signup_token(cp, signup_token),
+            op="resolve_signup_token")
         if org_id is None:
             raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
-        row = _orgs_row_fail_soft(
-            cp, org_id, select=_QUOTA_SELECT,
-            # #1709 fixer P2.6: the FULL additive ladder (same as
-            # resolve_api_key — newest migration tier dropped FIRST, incl.
-            # the #2040 marker tier) — the recovery emergency path must not
-            # 500 on migration skew (a schema one migration behind the
-            # newest additive drops that tier to safe defaults instead of
-            # raising).
-            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                            _ORG_ADDITIVE_IMPORT_TIER,
-                            _ORG_ADDITIVE_DKL_TIER,
-                            _ORG_ADDITIVE_0015_TIER,
-                            _ORG_ADDITIVE_BILLING_TIER])
+        row = await _cp_offload(
+            lambda: _orgs_row_fail_soft(
+                cp, org_id, select=_QUOTA_SELECT,
+                # #1709 fixer P2.6: the FULL additive ladder (same as
+                # resolve_api_key — newest migration tier dropped FIRST, incl.
+                # the #2040 marker tier) — the recovery emergency path must not
+                # 500 on migration skew (a schema one migration behind the
+                # newest additive drops that tier to safe defaults instead of
+                # raising).
+                additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                                _ORG_ADDITIVE_IMPORT_TIER,
+                                _ORG_ADDITIVE_DKL_TIER,
+                                _ORG_ADDITIVE_0015_TIER,
+                                _ORG_ADDITIVE_BILLING_TIER]),
+            op="orgs_row_fail_soft")
         if row is None or row.get("deleted_at") is not None:
             # soft-deleted org → uniform 422 (indistinguishable from
             # never-existed; the token path never mints on a deleted org).
@@ -16475,7 +16974,9 @@ async def agent_signup(request: Request):
             # #2668: agent-created orgs need API-key dashboard login enabled
             # by default — the agent has no session to log in with.
             from tortoise.supabase_control import set_dashboard_key_login
-            set_dashboard_key_login(get_control_plane(), org_id, True)
+            await _cp_offload(
+                lambda: set_dashboard_key_login(get_control_plane(), org_id, True),
+                op="set_dashboard_key_login")
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
@@ -16905,7 +17406,8 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     # 1. key → org; must be an anon (unclaimed) org
     cp = get_control_plane()
     try:
-        org = resolve_api_key(cp, api_key)
+        org = await _cp_offload(
+            lambda: resolve_api_key(cp, api_key), op="resolve_api_key")
     except RuntimeError:
         # #1737: claim_email's direct resolve shares the control-plane
         # outage class — uniform 503, never a raw 500.
@@ -17003,7 +17505,9 @@ async def claim_status(request: Request):
         # JWKS + RPC) — the welcome guard is a no-op.
         return {"claimable": False, "unsupported": True}
     try:
-        org = resolve_api_key(get_control_plane(), api_key)
+        org = await _cp_offload(
+            lambda: resolve_api_key(get_control_plane(), api_key),
+            op="resolve_api_key")
     except Exception:
         # Fail-closed on control-plane errors: never report claimable.
         return {"claimable": False}
@@ -17022,8 +17526,12 @@ async def claim_status(request: Request):
         # Already claimed — distinguish this-user idempotency for the UI.
         from tortoise.supabase_control import membership_for_user_org
         try:
-            claimed_by_user = membership_for_user_org(
-                get_control_plane(), session["user_id"], org_id) is not None
+            claimed_by_user = (
+                await _cp_offload(
+                    lambda: membership_for_user_org(
+                        get_control_plane(), session["user_id"], org_id),
+                    op="membership_for_user_org")
+            ) is not None
         except RuntimeError:
             raise _control_plane_unavailable() from None
         if claimed_by_user:
@@ -17840,7 +18348,12 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     cp = get_control_plane()
     user_id = user["user_id"]
 
-    memberships = user_memberships(cp, user_id)
+    # #3498: the pre-lock reads are blocking PostgREST calls — off the loop.
+    # (The in-lock cap/revoke/recheck/insert calls below stay synchronous BY
+    # DESIGN: the section runs under the per-org in-process mint lock, which
+    # forbids awaits. That residual is tracked separately.)
+    memberships = await _cp_offload(
+        lambda: user_memberships(cp, user_id), op="user_memberships")
     if not memberships:
         raise HTTPException(status_code=403, detail="No team membership — create a team first")
     if len(memberships) > 1:
@@ -17850,10 +18363,14 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     else:
         tid = memberships[0]["org_id"]
 
-    if not membership_for_user_org(cp, user_id, tid):
+    _is_member = await _cp_offload(
+        lambda: membership_for_user_org(cp, user_id, tid),
+        op="membership_for_user_org")
+    if not _is_member:
         raise HTTPException(status_code=403, detail="No membership in team")
 
-    org_row = org_by_id(cp, tid)
+    org_row = await _cp_offload(
+        lambda: org_by_id(cp, tid), op="org_by_id")
     tier = (org_row or {}).get("tier") or "free"
     # #308 (R5): a suspended org cannot re-mint keys (scoping delta 12).
     if (org_row or {}).get("suspended_at") is not None:
@@ -18481,6 +18998,75 @@ def _maybe_apply_completion(org_id: str) -> bool:
         return False
 
 
+# ── #2006 (W11): onboarding funnel telemetry ──────────────────────────
+# The emission gate is the COMPLETED_STEP edge's NEW CREATION — the
+# ``created`` flag ``onboarding.state.write_completed_step`` already returns
+# for exactly this purpose. That transition is the domain fact itself, so
+# one event per edge creation falls out of it by construction: restart-safe
+# and multi-worker-safe, with NO second dedup store, NO threshold and NO
+# in-process set. Every writer of a W11 step maps its own edge result
+# through ``_emit_onboarding_step_events``; a non-creating replay never
+# reaches the emitter. (``decide-completed`` is the one W11 edge
+# with a sanctioned removal path — the #3912 repair — after which a genuine
+# re-completion re-emits; see ``analytics.onboarding_decide_complete``.)
+#
+# Deliberately NOT instrumented: ``harness-connected`` (the funnel keys off
+# seed/decide) and ``catalog-presented`` (the build fork's display row has
+# no W11 event).
+_ONBOARDING_STEP_EVENTS = {
+    "first-points-filed": onboarding_seed_complete,
+    "decide-completed": onboarding_decide_complete,
+}
+
+
+def _onboarding_distinct_id(org_id: str, org: dict | None = None,
+                            *, user_id: str | None = None) -> str:
+    """Funnel identity for the W11 onboarding events (#2006).
+
+    The Supabase user UUID wherever one is RESOLVABLE, falling back to the
+    org id — matching ``analytics.py``'s identity contract so these server
+    events join the web funnel's ``user_signed_up`` (distinct_id = user
+    UUID, never an email).
+
+    Every candidate passes the SAME predicate the #2600 ``actor_user_id``
+    alias uses (``_is_uuid_shape``): the repo documents that a raw
+    ``created_by`` is NOT always a human id — production mints store the
+    literal ``"api"``, ``st_``-prefixed recovery ids, and registry-lane
+    EMAIL self-signup creators (``tortoise/sdk.py``). Emitting one of those
+    as ``distinct_id`` would push PII into PostHog and collapse unrelated
+    orgs onto one pseudo-person, so a non-UUID candidate is DROPPED."""
+    from tortoise.sdk import _current_actor_user_id, _is_uuid_shape
+    candidates = [user_id]
+    if org is not None:
+        candidates += [org.get("actor_user_id"),
+                       org.get(_SESSION_USER_ID_KEY),
+                       org.get("created_by")]
+    candidates.append(_current_actor_user_id.get())
+    for uid in candidates:
+        if _is_uuid_shape(uid):
+            return uid
+    return org_id
+
+
+def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
+                                 org_id: str, source: str) -> None:
+    """Emit the W11 funnel event for each step edge a write NEWLY created.
+
+    ``created_steps`` must carry ONLY the steps whose ``created`` was True —
+    that filtering is the caller's gate, so a replay is silent and the
+    event is exact-once per edge creation. Fail-safe: ``capture()`` never
+    raises, and each emit is guarded here too, so telemetry can never turn a
+    committed write into an error."""
+    for step in created_steps:
+        emit = _ONBOARDING_STEP_EVENTS.get(step)
+        if emit is None:
+            continue
+        try:  # noqa: SIM105
+            emit(distinct_id, org_id, source)
+        except Exception:
+            pass  # telemetry must never break the write path (R19)
+
+
 def _update_onboarding_state(org_id: str, **fields) -> dict:
     """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
     legacy whole-dict merge — its non-atomicity caveat is pre-existing
@@ -18491,14 +19077,21 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
 
-    NOTE: step-edge writes via this router (PATCH catalog-presented) trigger
-    the post-write gate eval; the checkpoint calls state.py writers directly
-    and evals via _maybe_apply_completion."""
+    NOTE: this router's step-edge branch is NOT on the PATCH catalog path —
+    `patch_onboarding_state` pops `catalog_presented` and writes the edge +
+    evals itself, and the checkpoint path calls the state.py writers directly.
+    Any other caller that hands a step id to this router does get the
+    post-write gate eval."""
     jsonb_fields: dict[str, object] = {}
     wrote_step = False
+    # #2006 (W11): the steps whose COMPLETED_STEP edge THIS call created —
+    # the only steps a funnel event may be emitted for.
+    created_steps: list[str] = []
     for k, v in fields.items():
         if k in _os.STEP_IDS:
-            _os.write_completed_step(_org_proj(org_id), org_id, k)
+            if _os.write_completed_step(
+                    _org_proj(org_id), org_id, k).get("created"):
+                created_steps.append(k)
             wrote_step = True
         elif k in _os.FLOW_KEYS:
             # only step-edge keys are routable here; scalar FLOW keys are
@@ -18521,6 +19114,15 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
         _write_onboarding_state(org_id, state)
     if wrote_step:
         _maybe_apply_completion(org_id)
+        # #2006 (W11): emit for the edges this call NEWLY created (empty on a
+        # replay). No production caller routes a W11 step here today — the
+        # PATCH boundary 422s first-points-filed/decide-completed — but this
+        # generic router accepts any STEP_IDS key, so it is instrumented so a
+        # future routing change cannot silently lose the funnel event.
+        if created_steps:
+            _emit_onboarding_step_events(
+                created_steps, distinct_id=_onboarding_distinct_id(org_id),
+                org_id=org_id, source="state_router")
     # Echo = the MERGED PROJECTION (writer-return-composed — GET/PATCH can
     # never diverge), overlaid with the just-written jsonb fields: the
     # pre-#2001 echo returned the in-memory merged state, and a missing
@@ -18787,8 +19389,11 @@ class OnboardingStatePatchRequest(BaseModel):
     github_docs_scope: list[dict] | None = None
     # #2001 (W5): FLOW keys DECLARED on the PATCH surface so a stray client
     # send is REJECTED loudly (403/422) instead of silently dropped — and
-    # catalog-presented, the ONE step key the dashboard writes (W1/W8 first
-    # catalog render, step-edge MERGE). All other FLOW keys are
+    # catalog-presented, the ONE step key a client may still PATCH (step-edge
+    # MERGE — an optional record, never a completion requirement). Since #3913
+    # (owner ruling 2026-09-20) NO dashboard path sends it: the fork card writes
+    # only the fork (or its unsure marker), never a step, and the id stays
+    # accepted for agent/external callers and for existing orgs' completed_steps. All other FLOW keys are
     # server-owned / checkpoint-owned on this surface.
     catalog_presented: bool | None = None
     harness_connected: bool | None = None
@@ -18848,10 +19453,12 @@ async def get_capabilities(org: dict = Depends(get_current_org_session_ungated))
     The indexers+extractors registry rows from tool_registry.py
     ``CAPABILITY_CATALOG`` (R2-9 — no new infra): one canonical list for the
     registry endpoint AND the dashboard's build-path catalog read (W8
-    replaced W1's static placeholder source with this endpoint; the
-    dashboard's first build-fork render marks the catalog-presented
-    checkpoint via the existing W1/W5 mechanism — presentation only, never
-    a billing gate). Org-independent static registry data (no graph
+    replaced W1's static placeholder source with this endpoint; the BUILD
+    fork pick records the FORK ONLY — since #3913 (owner ruling 2026-09-20)
+    no dashboard path writes catalog-presented, and the id stays accepted for
+    agent/external callers. Presentation only, never a billing gate, never a
+    build-completion requirement). Org-independent static
+    registry data (no graph
     touch — never 'unavailable'); dual-auth like the onboarding state reads.
 
     Contract: ``200 {modules: [{name, kind: indexer|extractor, description,
@@ -18914,8 +19521,13 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     harness = updates.pop("harness", None)
     section = updates.pop("section", None)
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
-        _track_analytics_event(org["org_id"], "artifact_copied",
-                               {"harness": harness, "section": section})
+        # #3498: the analytics write builds a fresh httpx.Client per event —
+        # a blocking PostgREST call; off the loop.
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                org["org_id"], "artifact_copied",
+                {"harness": harness, "section": section}),
+            op="analytics_event", best_effort=True)
     elif harness is not None or section is not None:
         # #3821: an enum-invalid beacon used to produce NO event and NO
         # observer — indistinguishable from a beacon that never fired. The
@@ -18962,7 +19574,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     updates = _validate_scope_payload(updates)
     # #2001 (W5): per-key-type write-surface ownership at the PATCH
     # boundary — server-owned FLOW keys 403, agent-step keys 422, the one
-    # dashboard step (catalog-presented) MERGEs the step edge.
+    # client-writable step (catalog-presented) MERGEs the step edge. Since
+    # #3913 the dashboard no longer sends it; the surface stays open for
+    # agent/external callers.
     _sent_owned = [k for k in _PATCH_SERVER_OWNED_KEYS if k in updates]
     if _sent_owned:
         raise HTTPException(
@@ -19021,8 +19635,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 # #2001 (W5): agent/internal checkpoint — the ONLY surface for the agent
 # steps + fork/compact set-once + last_decide_attempt LWW + member_progress.
-# Per-step write-surface ownership (scope pin 8): the dashboard PATCHes only
-# operational keys + catalog-presented; agents checkpoint everything else.
+# Per-step write-surface ownership (scope pin 8): the PATCH surface accepts
+# operational keys + catalog-presented (no dashboard path has sent the latter
+# since #3913); agents checkpoint everything else.
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
@@ -19203,6 +19818,25 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     except Exception:
         raise HTTPException(status_code=500,
                             detail="Checkpoint failed — retry-safe") from None
+    # #2006 (W11): funnel events for the step edges THIS call newly created.
+    # ``created_steps`` already carries the structural gate — a replay
+    # (created=False) is silent, and the edge-creation transition is
+    # exact-once per edge creation, so this survives restarts and multiple
+    # workers with no in-process set. Emission sits OUTSIDE the write-path
+    # try/except above: telemetry can never turn a committed checkpoint into
+    # a 500.
+    if created_steps:
+        # Off the loop (the analytics.py contract for async handlers) and
+        # guarded HERE too: the write above has already committed, so even a
+        # bug in the emitter itself must not turn a committed checkpoint into
+        # a 500 (R19 — telemetry never degrades the API).
+        try:  # noqa: SIM105
+            await asyncio.to_thread(
+                _emit_onboarding_step_events, created_steps,
+                distinct_id=_onboarding_distinct_id(org_id, org),
+                org_id=org_id, source="checkpoint")
+        except Exception:
+            pass
     return {
         "created_steps": created_steps,
         "noop_steps": noop_steps,
@@ -19263,16 +19897,18 @@ class _OrgSeedSurface:
 
 def _next_onboarding_step(org_id: str, proj) -> str | None:
     """First incomplete fork-aware step after the seed (the decide nudge
-    target): self fork → decide; build → catalog-presented; compact →
-    harness-connected. 'done' when the gate already satisfied the status."""
+    target): self fork → decide; build/compact → harness-connected (the
+    #3913 build gate is the two observed acts; first-points-filed is written
+    by the seed itself, so after a successful seed only harness-connected can
+    still be open). 'done' when the gate already satisfied the status."""
     node = _os.read_onboarding_node(proj, org_id)
     if node is None or node.get("status") == _os.STATUS_COMPLETE:
         return "done"
     steps = set(_os.completed_steps(proj, org_id))
-    if bool(node.get("compact")):
+    # #3913: build no longer trails catalog-presented — build and compact share
+    # the reduced post-seed checklist (the seed files first-points-filed).
+    if bool(node.get("compact")) or node.get("fork") == _os.FORK_BUILD:
         order = ("harness-connected",)
-    elif node.get("fork") == _os.FORK_BUILD:
-        order = ("harness-connected", "catalog-presented")
     else:
         order = ("harness-connected", "decide-completed")
     for step in order:
@@ -19371,6 +20007,14 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
         step = _os.write_completed_step(
             proj, org_id, "first-points-filed",
             status_from_mirror=legacy_mirror)
+        if step.get("created"):
+            # #2006 (W11): the edge's new creation is the once-per-org fact
+            # (a replay reports created=False and emits nothing).
+            _emit_onboarding_step_events(
+                ["first-points-filed"],
+                distinct_id=_onboarding_distinct_id(
+                    org_id, user_id=person_user_id),
+                org_id=org_id, source="seed")
         _maybe_apply_completion(org_id)
     finally:
         sdk.close()
@@ -19534,6 +20178,15 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
             step = _os.write_completed_step(
                 proj, org_id, "first-points-filed",
                 status_from_mirror=legacy_mirror)
+            if step.get("created"):
+                # #2006 (W11): provisioning-time seed step — same structural
+                # gate as the interactive seed (only ONE of the two writers
+                # can ever see created=True for a given org).
+                _emit_onboarding_step_events(
+                    ["first-points-filed"],
+                    distinct_id=_onboarding_distinct_id(
+                        org_id, user_id=person_user_id),
+                    org_id=org_id, source="starter_seed")
         _maybe_apply_completion(org_id)
     finally:
         sdk.close()
@@ -19627,9 +20280,9 @@ async def set_session_recording(body: dict, org: dict = Depends(get_current_org_
     # #1927 semantic drift: the off-switch fires question_answered for
     # continuity with existing analytics — toggle-off is NOT a consent
     # answer (the consent/re-ask machinery was removed).
-    _track_onboarding_event(org, "question_answered",
-                            question_id="session_recording",
-                            answer="yes" if enabled else "no")
+    await _track_onboarding_event(org, "question_answered",
+                                  question_id="session_recording",
+                                  answer="yes" if enabled else "no")
     return {"onboarding": state}
 
 
@@ -19698,15 +20351,19 @@ async def create_onboarding_org(body: dict,
                 status_code=402,
                 detail=_one_free_org_detail(_free_org_ids[0]),
             )
-        return _create_onboarding_org_lane(org, name, owner_user_id)
+        return await _create_onboarding_org_lane(org, name, owner_user_id)
 
 
-def _create_onboarding_org_lane(org: dict, name: str,
+async def _create_onboarding_org_lane(org: dict, name: str,
                                  owner_user_id: str) -> dict:
     """#1954: the onboarding sub-org lane — re-entry guard + provision +
     org_created write. MUST be called holding the caller's
     _org_create_lock (the guard is read-then-write; the lock is what makes
-    a concurrent double-call mint exactly one sub-org)."""
+    a concurrent double-call mint exactly one sub-org).
+
+    #3498: async so its analytics emit can be offloaded (the emit is a
+    blocking PostgREST write); the caller's ``asyncio.Lock`` is held across
+    the await, which is safe."""
     # NOTE (second-model P2, plan deviation): the plan's "reject non-UUID
     # created_by" step is NOT applied — the test fixtures use non-UUID ids
     # by design, and the provision RPC already maps a non-UUID uuid-column
@@ -19765,8 +20422,8 @@ def _create_onboarding_org_lane(org: dict, name: str,
                                     detail="Organization name already exists")
             raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
         _update_onboarding_state(org["org_id"], org_created=True)
-        _track_onboarding_event(org, "question_answered",
-                                question_id="create_team", answer="yes")
+        await _track_onboarding_event(org, "question_answered",
+                                      question_id="create_team", answer="yes")
         return {"org_id": org_id, "name": name, "graph_name": graph_name}
     # #1748: the registry-lane SDK must be the CANONICAL control plane
     # (namespace="registry" → registry_control_plane). The old
@@ -19785,8 +20442,8 @@ def _create_onboarding_org_lane(org: dict, name: str,
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
     _update_onboarding_state(org["org_id"], org_created=True)
-    _track_onboarding_event(org, "question_answered",
-                            question_id="create_team", answer="yes")
+    await _track_onboarding_event(org, "question_answered",
+                                  question_id="create_team", answer="yes")
     return {"org_id": result.get("id"), "name": name,
             "graph_name": result.get("graph_name")}
 
@@ -19811,8 +20468,8 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     ).result_set
     if existing:
         _update_onboarding_state(org["org_id"], demo_created=True)
-        _track_onboarding_event(org, "first_memory_created",
-                                source="demo", point_count=15)
+        await _track_onboarding_event(org, "first_memory_created",
+                                      source="demo", point_count=15)
         return {"status": "already_seeded", "org_id": org["org_id"]}
 
     # #1922: quota-gate the seed like the MCP twin
@@ -20925,16 +21582,25 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     }
 
 
-def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
+async def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
     """Convenience: track with the current org, swallowing errors.
 
     #3821: the ONE exception that must escape this swallow is
     ``UnregisteredTelemetryKey`` — strict mode exists precisely so a
     misregistered prop cannot be silently swallowed by this wrapper.
     Everything else is still swallowed (analytics must never break the
-    onboarding flow)."""
+    onboarding flow).
+
+    #3498: async because the write it wraps is a blocking PostgREST call —
+    ``_track_analytics_event`` builds a fresh ``httpx.Client(timeout=5)`` per
+    event, which used to run ON the event loop from every async caller. The
+    strict-mode ``UnregisteredTelemetryKey`` still escapes (it is raised in the
+    worker thread and re-raised through ``await``)."""
     try:
-        _track_analytics_event(org["org_id"], event_name, props or None)
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                org["org_id"], event_name, props or None),
+            op="analytics_event", best_effort=True)
     except UnregisteredTelemetryKey:
         raise
     except Exception:
@@ -21144,8 +21810,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
     welcome_url = f"{email_link_base()}/welcome.html"
 
     if error:
-        _track_analytics_event("", "onboarding_error",
-                               {"step": "github_connect", "error_type": "oauth_denied"})
+        await _cp_offload(
+            lambda: _track_analytics_event(
+                "", "onboarding_error",
+                {"step": "github_connect", "error_type": "oauth_denied"}),
+            op="analytics_event", best_effort=True)
         return RedirectResponse(f"{welcome_url}?github=denied", status_code=302)
 
     # Validate state — 404 on missing/invalid (don't leak existence)
@@ -21220,8 +21889,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
             _run_indexing(job_id, org_id, org, None))
-    _track_analytics_event(org_id, "question_answered",
-                           {"question_id": "github_connect", "answer": "yes"})
+    await _cp_offload(
+        lambda: _track_analytics_event(
+            org_id, "question_answered",
+            {"question_id": "github_connect", "answer": "yes"}),
+        op="analytics_event", best_effort=True)
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
@@ -21348,7 +22020,11 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     except ValueError:
         return {"connected": False, "org": None, "repos_count": None}
     gh_org = await _heal_github_org(_org_id, encrypted, gh_org)
-    repos_count = _github_repos_count(token)
+    # #3498 (the audit's §A1 item 9): _github_repos_count is a BLOCKING
+    # httpx.Client call to api.github.com — off the loop.
+    repos_count = await _cp_offload(
+        lambda: _github_repos_count(token), op="github_repos_count",
+        best_effort=True)
     return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
@@ -21872,7 +22548,15 @@ def _relink_sessions_after_index(org_id: str) -> None:
     """
     try:
         from .session_link import link_session_entities
-        proj = _make_sdk(namespace=org_id)._get_proj()
+        # #3664: pass the SDK so the re-linked edges CAN be journaled — but on
+        # this lane _make_sdk/_data_sdk set no `event_log_path` and
+        # `EntityLinked` is JSONL-only (absent from _GRAPH_EVENT_TYPES), so
+        # `sdk._emit_event` is a no-op here (the same lane limit the turn
+        # record's note in _capture_session_impl documents). The re-linked
+        # edges are therefore live-only on the hosted lane; the JSONL-journal
+        # gap is filed as #4240. Do NOT read the `sdk=` argument as journaling.
+        _link_sdk = _make_sdk(namespace=org_id)
+        proj = _link_sdk._get_proj()
         rows = proj.g.query(
             "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
             "WHERE t.pointKind='event' "
@@ -21883,7 +22567,8 @@ def _relink_sessions_after_index(org_id: str) -> None:
             by_session[sid][0].append(str(content or ""))
             by_session[sid][1].append(tid)
         for sid, (texts, tids) in by_session.items():
-            result = link_session_entities(proj, sid, texts, turn_ids=tids)
+            result = link_session_entities(proj, sid, texts, turn_ids=tids,
+                                           sdk=_link_sdk)
             if result["attempted"]:
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}) SET "
@@ -22465,7 +23150,7 @@ def _require_backup_tier(org: dict) -> None:
     if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Pro feature — upgrade to enable hourly backups",
+            detail="Backups are a Builder feature — upgrade to enable hourly backups",
         )
 
 
@@ -22570,7 +23255,7 @@ async def backups_list(org: dict = Depends(get_current_org_session_ungated)):  #
     loadBackups call carries NO key when a recoverable mint failure left
     apiKey empty (the overview reads ride the session JWT), so a bare
     get_current_org dependency 401'd and the Backups card silently
-    disappeared for Pro users. Ungated dual-auth accepts session JWT OR
+    disappeared for Builder-plan (`pro`) users. Ungated dual-auth accepts session JWT OR
     tt_ key; only org["org_id"] is read below, so a session-resolved
     dict behaves identically."""
     org_id = org.get("org_id")
@@ -22706,7 +23391,7 @@ async def _org_restore_lock(org_id: str) -> asyncio.Lock:
 
 @app.post("/backups", status_code=201)
 async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """Trigger an on-demand backup of the org graph (Pro tier)."""
+    """Trigger an on-demand backup of the org graph (Builder plan, tier `pro`)."""
     org_id = org.get("org_id")
     if not org_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -22845,7 +23530,7 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
 
 @app.post("/backups/restore")
 async def backups_restore(body: BackupRestoreRequest, request: Request, org: dict = Depends(get_current_org_session)):  # noqa: B008
-    """Restore the org graph from a backup (Pro tier; confirm=true required).
+    """Restore the org graph from a backup (Builder plan, tier `pro`; confirm=true required).
 
     Restores into a temp graph, verifies node/edge counts against the payload,
     then swaps (pre-restore safety copy → delete live → copy temp). The live
@@ -23222,7 +23907,7 @@ async def backups_sweep(request: Request):
 async def backups_purge(request: Request, body: dict | None = None):
     """#2304 — trash purge: physically erase every expired tombstone
     (custom graphs deleted > grace_days ago, plus legacy tombstones).
-    Internal-key only. Optional ``{"grace_days": N}`` overrides the 7-day
+    Internal-key only. Optional ``{"grace_days": N}`` overrides the _TRASH_GRACE_DAYS
     default (operator drills). Ownership-guarded namespace drops, idempotent,
     per-org/`-graph isolation; purged rows are stamped (kept — audit).
     In-flight guard: a concurrent purge returns 202.
@@ -24402,7 +25087,13 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
     """
     import json as _json
 
-    from tortoise.billing import PriceCatalog, StripeClient, apply_limits
+    from tortoise.billing import (
+        PriceCatalog,
+        StripeClient,
+        _subscription_items,
+        apply_limits,
+        subscription_period_bounds,
+    )
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -24426,10 +25117,21 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
 
     def _price_id_from(sub: dict) -> str | None:
         """Extract items[0].price.id handling BOTH Stripe shapes: items may be
-        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter)."""
-        items = sub.get("items") or {}
-        rows = items if isinstance(items, list) else items.get("data") or []
-        return (rows[0].get("price", {}) or {}).get("id") if rows else None
+        a flat list OR {'data': [...]} (FIXTURE_SUB uses the latter).
+
+        EVERY unknown-shape access is guarded so a malformed payload cannot
+        raise here — the checkout call site is outside any try, so a raise
+        would 500 the route and make Stripe redeliver the same bad event
+        forever. Reads ``items`` through ``_subscription_items`` and the
+        ``price`` value through an ``isinstance(..., dict)`` check (the sibling
+        access in ``billing.subscription_plan`` guards the same shapes) —
+        #4216 review.
+        """
+        rows = _subscription_items(sub)
+        if not rows or not isinstance(rows[0], dict):
+            return None
+        price = rows[0].get("price")
+        return price.get("id") if isinstance(price, dict) else None
 
     def _resolve_tier_from_price(price_id: str | None) -> str | None:
         """price → tier; unknown price → None + ops-notify signal."""
@@ -24452,7 +25154,13 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         # client_reference_id; the registry lane returns its own id, so the
         # effective id is adopted for every later write AND reported back to
         # the caller for the dedup marker / tier read / audit.
-        meta = data.get("metadata") or {}
+        # Guard the nested VALUES read out of ``data`` (``metadata`` /
+        # ``customer_details``): a non-dict value would raise AttributeError at
+        # ``.get(...)``, before any try, and the route's handler would 500 →
+        # Stripe redelivers the same bad event forever — the class this PR
+        # hardens for ``items``/``price``.
+        meta = data.get("metadata")
+        meta = meta if isinstance(meta, dict) else {}
         is_new_org = str(meta.get("new_org") or "") == "1"
         if is_new_org:
             # Sync call: _webhook_apply_event itself already runs in a worker
@@ -24460,7 +25168,10 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             # blocking control-plane + graph writes — stays on that thread.
             org_id = _provision_new_org_from_checkout(sdk, org_id, meta)
         cust = data.get("customer")
-        email = (data.get("customer_details") or {}).get("email")
+        customer_details = data.get("customer_details")
+        customer_details = (
+            customer_details if isinstance(customer_details, dict) else {})
+        email = customer_details.get("email")
         sub_id = data.get("subscription")
         updates = {"subscription_status": "active", "stripe_customer_id": cust}
         if email:
@@ -24469,17 +25180,65 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             updates["subscription_id"] = sub_id
         _set(updates)
         resolved_tier = None
+        window_error = None
         if sub_id:
             try:
                 sub = StripeClient().get_subscription(sub_id)
+            except Exception as e:
+                sub = None
+                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
+            if sub is not None:
+                # #4216: checkout is an AUTHORING path for the subscription —
+                # it must persist the METER WINDOW ANCHOR, not only
+                # ``subscription_id``. ``metering._current_period`` needs a
+                # COMPLETE half-open interval
+                # ``[current_period_start, current_period_end)``; without it a
+                # just-checked-out PAYING org is permanently
+                # window-unresolvable — its increments are dropped and the cohort
+                # cost cap cannot be enforced for it (absorbed + alerted per
+                # #3981, but unenforceable, which is the defect this issue
+                # removes). Both bounds come from the SAME authoritative Stripe
+                # subscription object the tier is resolved from. Only the bounds
+                # the payload CARRIES are written; a bound it omits is left
+                # alone (never NULLed).
+                #
+                # FAILURE ORDER (#4216 review): a window-write failure must not
+                # SUPPRESS the tier upgrade (a taken payment must not sit on
+                # free limits, #2789) — but it must also not be SWALLOWED as a
+                # 200, or the org stays window-unresolvable until the next
+                # renewal webhook, which for a checkout-only org may never
+                # arrive. So record the failure and carry on: the tier is
+                # applied, the new-org metadata fallback below still runs, and
+                # the failure is re-raised at the END of this branch. The route
+                # then 500s, Stripe redelivers, and every write is idempotent,
+                # so the window write is retried.
+                #
+                # NOTE (#4216 review): a failure of ``apply_limits`` /
+                # ``_set({"tier": ...})`` now PROPAGATES (the route 500s and
+                # Stripe redelivers) instead of being swallowed as a
+                # "subscription fetch failed" 200 — deliberate and consistent
+                # with #2789: a taken payment must never sit unretried on free
+                # limits. The previous outer except covered the whole block.
+                period_start, period_end = subscription_period_bounds(sub)
+                window = {k: v for k, v in (
+                    ("current_period_start", period_start),
+                    ("current_period_end", period_end),
+                ) if v}
+                window_error = None
+                if window:
+                    try:
+                        _set(window)
+                    except Exception as e:
+                        window_error = e
+                        _logger.warning(
+                            "webhook: period window write failed: %s",
+                            redact_error(e))
                 tier = _resolve_tier_from_price(_price_id_from(sub))
                 if tier:
                     apply_limits(sdk, org_id, tier)
                     _set({"tier": tier})
                     notify_kind = "billing_upgrade"
                     resolved_tier = tier
-            except Exception as e:
-                _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
         if is_new_org and resolved_tier is None:
             # The metadata tier was server-resolved from the price at checkout
             # time and provision_org already wrote the matching quotas, so a
@@ -24505,6 +25264,12 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
                     f"new-org checkout for team {org_id} has no resolvable "
                     f"paid tier (metadata tier={meta_tier!r}, subscription "
                     "tier unresolved) — refusing to ack")
+        if window_error is not None:
+            # The tier upgrade (or the #2789 metadata fallback) above has been
+            # applied — every write is idempotent — so surface the window
+            # failure LAST: the route 500s and Stripe redelivers, retrying the
+            # window write, instead of acking an org left unmeterable.
+            raise window_error
         return notify_kind, org_id
 
     if etype == "invoice.payment_failed":
@@ -24526,8 +25291,22 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
         updates: dict = {}
         if data.get("id"):
             updates["subscription_id"] = data["id"]
-        if data.get("current_period_end"):
-            updates["current_period_end"] = data["current_period_end"]
+        # #4216: read the period through the top-level-then-item helper — a
+        # Basil-or-later Stripe account carries the bounds on the subscription
+        # ITEMS, and reading only the top level would drop the anchor entirely.
+        period_start, period_end = subscription_period_bounds(data)
+        if period_end:
+            updates["current_period_end"] = period_end
+        # #3825 / D10: the METER WINDOW ANCHOR. The cost meter totals usage
+        # over the subscription's OWN billing period so it reconciles with the
+        # invoice line, and only the period END was persisted — leaving the
+        # window half-known, which ``metering._current_period`` refuses to
+        # guess at (a derived start is wrong for annual plans and plan
+        # changes, and a calendar-month fallback would put a paying org's
+        # spend on a row the cap's window read never looks at). This event
+        # carries the authoritative start next to the end already written here.
+        if period_start:
+            updates["current_period_start"] = period_start
         if status:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be
@@ -24652,9 +25431,11 @@ async def webhooks_stripe(request: Request):
                 request, org_id, notify_kind,
                 resource_type="team", resource_id=org_id,
             )
-            _track_analytics_event(org_id, notify_kind, {
-                "plan": tier, "tier": tier, "status": etype,
-            })
+            await _cp_offload(
+                lambda: _track_analytics_event(org_id, notify_kind, {
+                    "plan": tier, "tier": tier, "status": etype,
+                }),
+                op="analytics_event", best_effort=True)
             notify_billing_event(
                 notify_kind, {"org_id": org_id, "tier": tier},
                 {"subscription_status": etype},
@@ -25055,13 +25836,14 @@ async def oauth_authorize(request: Request):
         "resource": request.query_params.get("resource", ""),
     }
     try:
-        client = validate_authorize_params(
-            cp, client_id=params["client_id"],
-            redirect_uri=params["redirect_uri"] or None,
-            response_type=params["response_type"] or None,
-            code_challenge=params["code_challenge"] or None,
-            code_challenge_method=params["code_challenge_method"] or None,
-        )
+        client = await _oauth_offload(
+            lambda: validate_authorize_params(
+                cp, client_id=params["client_id"],
+                redirect_uri=params["redirect_uri"] or None,
+                response_type=params["response_type"] or None,
+                code_challenge=params["code_challenge"] or None,
+                code_challenge_method=params["code_challenge_method"] or None),
+            op="oauth_authorize_params")
     except OAuthError as exc:
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
         # Open-redirect guard: only redirect when the redirect_uri is
@@ -25075,17 +25857,15 @@ async def oauth_authorize(request: Request):
         # `_redirect_uri_matches` also refuses parse-differential input: this is
         # the one place the raw request param is echoed into a Location header,
         # so relaxing the match without that guard would BE the open redirect.
-        from tortoise.oauth import _redirect_uri_matches, resolve_client
-        client = None
-        if params["client_id"]:
-            try:
-                # #2847: the resolver, not `get_client`, so a CIMD client's
-                # in-document redirect_uri is honoured on this path too.
-                # Best-effort: a refused fetch must not turn an OAuth error
-                # response into a 5xx, so this stays non-fatal.
-                client = resolve_client(cp, params["client_id"])
-            except Exception:
-                client = None
+        #
+        # #3669 finding 2: `validate_authorize_params` STAMPS the client it
+        # resolved (None when unresolved) on the raised OAuthError, so this
+        # handler never re-resolves. Re-resolving here cost a SECOND CIMD
+        # fetch and a second rate-limit charge on the FAILURE path (the success
+        # path paid nothing — the cache absorbed it), halving the effective
+        # failure budget.
+        from tortoise.oauth import _redirect_uri_matches
+        client = getattr(exc, "client", None)
         registered_uris = (client.get("redirect_uris") or []) if client else []
         if not isinstance(registered_uris, (list, tuple)):
             registered_uris = [registered_uris]
@@ -25167,13 +25947,14 @@ async def oauth_consent(request: Request):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     try:
-        client = validate_authorize_params(
-            cp, client_id=body.get("client_id", ""),
-            redirect_uri=body.get("redirect_uri") or None,
-            response_type=body.get("response_type") or None,
-            code_challenge=body.get("code_challenge") or None,
-            code_challenge_method=body.get("code_challenge_method") or "S256",
-        )
+        client = await _oauth_offload(
+            lambda: validate_authorize_params(
+                cp, client_id=body.get("client_id", ""),
+                redirect_uri=body.get("redirect_uri") or None,
+                response_type=body.get("response_type") or None,
+                code_challenge=body.get("code_challenge") or None,
+                code_challenge_method=body.get("code_challenge_method") or "S256"),
+            op="oauth_consent_params")
     except OAuthError as exc:
         return _oauth_error_response(exc)
     # The browser session JWT — same JWKS/ES256+RS256 verification the session
@@ -25219,11 +26000,22 @@ async def oauth_token(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     grant = body.get("grant_type")
+    base = _oauth_base(request)
     try:
+        # #3669: the token grant is offloaded as a UNIT — `_verify_client_auth`
+        # resolves the client (a CIMD fetch for an https client_id) and the
+        # grant then makes several blocking PostgREST calls. Offloading the
+        # grant puts both off the loop and charges the CIMD bounds at BOTH
+        # token front doors (auth-code and refresh) as well as the two
+        # authorize/consent doors, because all four reach `resolve_client`.
         if grant == "authorization_code":
-            out = exchange_auth_code(cp, body, _oauth_base(request))
+            out = await _oauth_offload(
+                lambda: exchange_auth_code(cp, body, base),
+                op="oauth_token_exchange", no_wait_bound=True)
         elif grant == "refresh_token":
-            out = refresh_grant(cp, body, _oauth_base(request))
+            out = await _oauth_offload(
+                lambda: refresh_grant(cp, body, base),
+                op="oauth_token_refresh", no_wait_bound=True)
         else:
             raise OAuthError(400, "unsupported_grant_type",
                              "grant_type must be authorization_code or refresh_token")

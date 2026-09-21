@@ -110,6 +110,261 @@ def test_capture_session_shape(sdk):
     assert isinstance(res["warnings"], list)
 
 
+def test_capture_v2_persists_passthrough_props_on_node(sdk, monkeypatch):
+    """#2813: the four E3 fields the v2 extractor emits (quote / when /
+    search_keys / source_turn_id) must land as NODE properties — not merely
+    ride the capture response's ``props`` superset. The extractor is shared
+    with the eval lane (tools/longmem_eval/ingest_v2.py), whose writer DID
+    persist them; the SDK persistence writer was forked and silently dropped
+    them, so the reply looked correct while the node stored nothing."""
+    import tortoise.extractor_v2 as ev2
+
+    payload = {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": "pt_2813_regression",
+            "content": "the auth dead-end is the top issue",
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "We decided to ship serve --http first.",
+            "status": "draft",
+            "search_keys": ["auth", "dead-end"],
+            "source_turn_id": "turn-2813",
+            "when": "2026-08-01",
+        }],
+        "operators": [],
+    }
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    pid = res["points"][0]["id"]
+    # Response shape is deliberately UNCHANGED: the passthrough whitelist
+    # still reports the raw payload values (search_keys stays a list there).
+    assert res["points"][0]["props"] == {
+        "quote": "We decided to ship serve --http first.",
+        "when": "2026-08-01",
+        "search_keys": ["auth", "dead-end"],
+        "source_turn_id": "turn-2813",
+    }
+    # The actual regression: the NODE carries them (search_keys flattened to
+    # the graph's space-joined string by _flatten_search_keys_prop).
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
+        params={"id": pid},
+    ).result_set[0]
+    assert row[0] == "We decided to ship serve --http first.", row
+    assert row[1] == "2026-08-01", row
+    assert row[2] == "auth dead-end", row
+    assert row[3] == "turn-2813", row
+
+
+def _passthrough_payload(content: str) -> dict:
+    """The v2 payload shape the #2813/#2949 tests drive — one point carrying
+    all four E3 passthrough fields."""
+    return {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": "pt_2949_passthrough",
+            "content": content,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "We decided to ship serve --http first.",
+            "status": "draft",
+            "search_keys": ["auth", "dead-end"],
+            "source_turn_id": "turn-2813",
+            "when": "2026-08-01",
+        }],
+        "operators": [],
+    }
+
+
+def _install_fake_extract(monkeypatch, payload: dict) -> None:
+    import tortoise.extractor_v2 as ev2
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+
+def _read_passthrough_props(sdk, pid: str) -> list:
+    return list(sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
+        params={"id": pid},
+    ).result_set[0])
+
+
+def test_capture_dedup_hit_reports_stored_props_not_payload(sdk, monkeypatch):
+    """#2949 (review P2): the v2 seam's dedup step-2 pre-resolves the canonical
+    BEFORE calling create_point, so a dedup hit writes none of the four
+    passthrough props — yet the response used to append the payload's ``props``
+    dict. The response thus
+    advertised quote/when/search_keys/source_turn_id that were ABSENT from the
+    resolved node: the exact #2813 symptom ("the reply looked correct while the
+    node stored nothing") persisting on the dedup path. A canonical written
+    before #2813 — or by a lane that does not pass these fields — carries none
+    of them, so the seam must report the STORED state (the same principle as
+    step 2's "never report a phantom id").
+
+    MUTATION THAT REDS THIS TEST: remove the read-back
+    (``if not created_here:`` → ``if False:``) — the response then echoes the
+    payload and advertises props the node does not have. An UNCONDITIONAL
+    read-back (``→ if True:``) does NOT red this test — it still yields the
+    canonical's empty stored props here; it reds the create-path
+    ``test_capture_v2_persists_passthrough_props_on_node`` instead."""
+    content = "the auth dead-end is the top issue"
+    # Pre-existing canonical with NO passthrough props (pre-#2813 shape).
+    canonical = sdk.create_point("statement", content)
+    assert _read_passthrough_props(sdk, canonical["id"]) == \
+        [None, None, None, None]
+
+    _install_fake_extract(monkeypatch, _passthrough_payload(content))
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    # Resolved to the PRE-EXISTING canonical, no new node minted.
+    assert res["points"][0]["id"] == canonical["id"], res["points"]
+    assert res["points"][0]["dedup"] == "content_hash_hit", res["points"]
+
+    # THE PARITY: the response must not advertise props the node lacks.
+    assert res["points"][0]["props"] == {}, res["points"][0]["props"]
+    assert _read_passthrough_props(sdk, canonical["id"]) == \
+        [None, None, None, None]
+
+
+def test_capture_dedup_hit_reports_stored_values_over_payload(
+        sdk, monkeypatch):
+    """#2949 (review P2), second arm: when the canonical DOES carry stored
+    passthrough props, the dedup-hit response must report THOSE (read back,
+    never re-stamped) — not the payload's. Guards the vacuous alternative fix
+    of blanking ``props`` on every dedup hit: the stored state must survive.
+    ``search_keys`` is reported in its stored flat-string form
+    (``_flatten_search_keys_prop``)."""
+    content = "the auth dead-end is the top issue"
+    canonical = sdk.create_point(
+        "statement", content, quote="ORIGINAL quote", when="2020-01-01",
+        search_keys=["original", "keys"], source_turn_id="turn-0")
+
+    _install_fake_extract(monkeypatch, _passthrough_payload(content))
+    res = sdk.capture_session(CONV)
+    assert res["points"][0]["id"] == canonical["id"], res["points"]
+    assert res["points"][0]["props"] == {
+        "quote": "ORIGINAL quote",
+        "when": "2020-01-01",
+        "search_keys": "original keys",
+        "source_turn_id": "turn-0",
+    }, res["points"][0]["props"]
+    # The canonical was never re-stamped (first-writer).
+    assert _read_passthrough_props(sdk, canonical["id"]) == [
+        "ORIGINAL quote", "2020-01-01", "original keys", "turn-0"]
+
+
+def test_capture_create_path_omits_unstored_passthrough_props(
+        sdk, monkeypatch):
+    """#2949 (re-review P2): the CREATE path must mirror the graph's PRESENCE,
+    not the payload's. Two payload props are never stored on the node:
+      - ``search_keys: []`` — the v2 extractor emits the list unconditionally
+        (``_clean_search_keys(None) -> []``) and create_point's
+        ``_flatten_search_keys_prop`` POPS an empty/blank list;
+      - ``source_turn_id: None`` — emitted unconditionally as ``int|None``
+        and never persisted (the graph drops null props).
+    Both must be omitted from the response; a field the node DOES hold stays
+    advertised.
+
+    MUTATION THAT REDS THIS TEST: delete the presence normalization above the
+    write (the ``if v is not None`` filter and/or the empty-search_keys pop) —
+    the response again advertises a field the node does not hold."""
+    content = "the auth dead-end is the top issue"
+    payload = _passthrough_payload(content)
+    payload["points"][0]["search_keys"] = []
+    payload["points"][0]["source_turn_id"] = None
+
+    _install_fake_extract(monkeypatch, payload)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    pid = res["points"][0]["id"]
+    quote, when, sk, tid = _read_passthrough_props(sdk, pid)
+    assert sk is None, (quote, when, sk, tid)   # popped by _flatten_search_keys_prop
+    assert tid is None, (quote, when, sk, tid)  # a null prop is not stored
+    # ...so the response advertises neither.
+    assert "search_keys" not in res["points"][0]["props"], res["points"]
+    assert "source_turn_id" not in res["points"][0]["props"], res["points"]
+    # The fields the node DOES hold stay advertised.
+    assert res["points"][0]["props"] == {
+        "quote": "We decided to ship serve --http first.",
+        "when": "2026-08-01",
+    }, res["points"][0]["props"]
+
+
+def test_capture_passthrough_read_clause_covers_whitelist():
+    """#2949 (review F4): the dedup-hit read-back field list is DERIVED from
+    the single ordered declaration, so it cannot silently omit a newly
+    whitelisted E3 field — the pre-fix defect, where the create path stored by
+    whitelist membership while a hand-written inline RETURN omitted the field
+    (the #2813 class on the dedup path).
+
+    MUTATION THAT REDS THIS TEST: hand-write the read-back (drop a field from
+    ``_capture_passthrough_read_fields``) — the coverage assertion fails."""
+    from tortoise.sdk import (
+        _CAPTURE_PASSTHROUGH_ORDER,
+        _CAPTURE_PASSTHROUGH_PROPS,
+        _capture_passthrough_read_fields,
+    )
+    clause = _capture_passthrough_read_fields()
+    missing = sorted(
+        k for k in _CAPTURE_PASSTHROUGH_PROPS if f"n.{k}" not in clause)
+    assert missing == [], (
+        f"read-back {clause!r} omits whitelisted props {missing!r}")
+    assert clause.count("n.") == len(_CAPTURE_PASSTHROUGH_PROPS), clause
+    assert set(_CAPTURE_PASSTHROUGH_ORDER) == set(_CAPTURE_PASSTHROUGH_PROPS)
+    assert len(_CAPTURE_PASSTHROUGH_ORDER) == len(_CAPTURE_PASSTHROUGH_PROPS)
+
+
+def test_capture_passthrough_read_helper_reads_every_whitelisted_prop(sdk):
+    """#2949 (review F4) behavioral arm: the shared read-back helper returns
+    EVERY whitelisted field the node holds, through the SAME generated RETURN
+    clause. A runtime drop (a field missing from the derivation) REDs here.
+    ``search_keys`` is read back in its stored flat-string form."""
+    from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
+    pid = sdk.create_point(
+        "statement", "read helper probe", quote="q-2949",
+        when="2026-01-01", search_keys=["a", "b"],
+        source_turn_id="turn-2949")["id"]
+    stored = sdk._read_capture_passthrough_props(sdk._get_proj(), pid)
+    assert set(stored) == set(_CAPTURE_PASSTHROUGH_PROPS), stored
+    assert stored == {
+        "quote": "q-2949",
+        "when": "2026-01-01",
+        "search_keys": "a b",
+        "source_turn_id": "turn-2949",
+    }, stored
+
+
 def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
     """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP-on-ingest is
     USER-VISIBLE — the pre-ingestion (uncalibrated, has_ep False) state
@@ -3830,26 +4085,24 @@ def test_receipt_requires_durable_data(consent_client):
         "bare receipt written on the converged 2xx (harness-less retry)"
 
 
-def test_receipt_2xx_only_and_last_error_lifecycle(consent_client, monkeypatch):
+def test_receipt_2xx_only_and_last_error_lifecycle(consent_client):
     """Task 11 (T1-P12 + cycle-4 P1-2): receipt set ONLY on 2xx; per-harness
-    last-error set on non-2xx and CLEARED on 2xx."""
+    last-error set on non-2xx and CLEARED on 2xx.
+
+    #4188: the non-2xx trigger is the empty-conversation 422 — the old
+    no-provider trigger is now a 2xx (the capture is STORED and only
+    extraction is skipped)."""
     _opt_in()
-    # non-2xx: no provider (mock seam off AND no real keys) → 503 →
-    # last_error set, no receipt
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    # non-2xx: empty conversation → 422 → last_error set, no receipt
     r = consent_client.post("/v1/sessions",
-                            json={"conversation": _CONV, "harness": "claude"})
-    assert r.status_code == 503, r.text
+                            json={"conversation": [], "harness": "claude"})
+    assert r.status_code == 422, r.text
     st = _state()
     assert st.get("session_capture_last_error_claude"), \
-        "503 must set session_capture_last_error_claude"
+        "non-2xx must set session_capture_last_error_claude"
     assert st.get("session_capture_receipt_claude") is None, \
         "no receipt on a non-2xx"
-    # 2xx: mock seam back on → receipt set, last_error cleared
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # 2xx: a real conversation → receipt set, last_error cleared
     r2 = consent_client.post("/v1/sessions",
                              json={"conversation": _CONV, "harness": "claude"})
     assert r2.status_code == 200, r2.text
@@ -3884,7 +4137,8 @@ def test_off_switch_keeps_existing_sessions(consent_client):
 
 def test_off_switch_409_first_before_provider_gate(consent_client, monkeypatch):
     """#1927 (review P2): the 409 opt-out check is FIRST in the gate stack —
-    a disabled team with NO provider key gets 409, not the provider 503."""
+    a disabled team with NO provider key gets 409, never the stored keyless
+    capture path."""
     _opt_in(enabled=False)
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",

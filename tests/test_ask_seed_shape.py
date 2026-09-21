@@ -143,12 +143,164 @@ def test_seed_capture_turn_store_is_capture_exact(sdk):
     assert is_episodic is True, sessions[0]
     assert [list(r) for r in edges] == [["sess-x", i] for i in ids]
 
+    # #4194 / W7A — the seeder now MATCHES capture's turn write by embedding
+    # every turn by DEFAULT, because a fixture without a vector BLINDS the
+    # retrieval measurements to the dense leg (the instrument reported
+    # ``retrieval_degraded`` 21/21 for that reason). The un-embedded
+    # ``embed=False`` variant still models the pre-#4194 / no-embedder store
+    # (#4197's backlog) and is pinned by
+    # ``test_seed_capture_turn_store_embeds_by_default_and_can_model_the_backlog``.
+    # Here we only pin the DEFAULT side; when no embedder is installed the
+    # product cannot embed either, so the fail-soft shape is NULL per turn.
+    from tortoise.embeddings import EmbeddingModel
+    embedded = sdk._get_proj().g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-x_t' "
+        "AND t.embedding IS NOT NULL RETURN count(t)").result_set
+    if EmbeddingModel.get() is None:
+        assert embedded[0][0] == 0, embedded
+    else:
+        assert embedded[0][0] == len(ids), embedded
+
     # Pre-mutation blank gate: nothing at all is written for a blank session.
     assert seed_capture_turn_store(
         sdk, "sess-blank", [{"role": "user", "content": ""}]) == []
     after = sdk._get_proj().g.query(
         "MATCH (s:Session {id:'sess-blank'}) RETURN count(s)").result_set
     assert after[0][0] == 0
+
+
+def test_seed_capture_turn_store_embeds_by_default_and_can_model_the_backlog(
+        sdk):
+    """W7A: the fixture stores the PRODUCT's own turn vector by default.
+
+    The product's turn write now embeds every episodic turn (#4194), so a
+    default fixture without a vector models a store the product no longer
+    writes and BLINDS every retrieval measurement to the dense leg — the
+    frozen instrument reported ``retrieval_degraded`` 21/21 for exactly that
+    reason. ``embed=False`` seeds #4197's BACKLOG state (captured before the
+    backfill, or with no embedder installed): no ``embedding`` at all. Both
+    shapes are pinned here so a later edit cannot silently swap them.
+    """
+    from tortoise.embeddings import EmbeddingModel, compute_embedding
+    from tortoise.search_engine import run_vector_query
+
+    turns = [{"role": "user", "content": "the gym schedule is Monday"},
+             {"role": "assistant", "content": "noted, Monday it is"}]
+    proj = sdk._get_proj()
+    has_embedder = EmbeddingModel.get() is not None
+
+    # (a) DEFAULT — the product's own vector, on every turn of the session.
+    ids = seed_capture_turn_store(sdk, "sess-emb", turns)
+    assert ids == [f"sess-emb_t{i}" for i in range(len(turns))], ids
+    embedded = proj.g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-emb_t' "
+        "AND t.embedding IS NOT NULL RETURN count(t)").result_set[0][0]
+    if not has_embedder:
+        # No embedder installed: the product cannot embed either, and the
+        # fail-soft shape is NULL — never an invented stand-in vector.
+        assert embedded == 0, embedded
+    else:
+        assert embedded == len(ids), (embedded, ids)
+
+        # ... each stored vector IS the product encoder's own output for the
+        # turn's stored text (same model, dimension, normalisation) — never a
+        # stand-in. This also pins the batched composition equal to the single
+        # ``compute_embedding`` the product's read path uses.
+        import numpy as np
+        rows = proj.g.query(
+            "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-emb_t' "
+            "RETURN t.id, t.content, t.embedding ORDER BY t.id").result_set
+        assert len(rows) == len(ids), rows
+        for pid, stored_text, stored in rows:
+            want = compute_embedding(stored_text)
+            assert want is not None and len(want) == 384, (pid, want)
+            assert len(stored) == len(want), (pid, len(stored))
+            assert np.allclose(np.asarray(stored, dtype=float),
+                               np.asarray(want, dtype=float), atol=1e-5), pid
+
+        # ... and the read path's OWN vector leg is non-degraded on it.
+        trace: list[dict] = []
+        hits = run_vector_query(proj.g, compute_embedding("gym schedule"),
+                                limit=10, leg_trace=trace)
+        assert trace and trace[-1]["degraded"] is False, trace
+        assert hits, "the seeded turn vector must be retrievable"
+        assert all(h[0] in ids for h in hits), hits
+
+    # (b) BACKLOG — the pre-#4194 / no-embedder shape: NO ``embedding``.
+    # Asserted whether or not an embedder is installed, so the switch always
+    # has coverage.
+    seed_capture_turn_store(sdk, "sess-backlog", turns, embed=False)
+    backlog = proj.g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH 'sess-backlog_t' "
+        "AND t.embedding IS NOT NULL RETURN count(t)").result_set[0][0]
+    assert backlog == 0, backlog
+
+
+def test_seeder_turn_vectors_go_through_the_store_width_guard(
+        sdk, monkeypatch):
+    """W7A: the seeder routes through #4304's STORE seam, not the raw encoder.
+
+    #4280: the vector-width constraint belongs to the store's Point HNSW index,
+    so a write path must call ``encode_batch_for_store`` with
+    ``proj.required_embedding_dim``. Calling the raw encoder instead has two
+    failure shapes, and this test pins BOTH — only a path that consults
+    ``required_embedding_dim`` can pass:
+
+      * an INDEXED store declares :data:`EMBEDDING_DIM` — a wrong-width vector
+        must degrade to NO vector, because storing it hands ``vecf32`` a
+        vector the index cannot hold (a broken leg, not a near-miss);
+      * the index-less brute-force lane declares ``None`` — a self-consistent
+        vector of ANY width must be KEPT. Dropping it is the #4280 regression
+        that emptied the cross-lens pool (``p.embedding IS NOT NULL``).
+
+    The wrong width comes from a replaced ``EmbeddingModel``, so the test does
+    not depend on the ambient lane or the real encoder's width.
+    """
+    import numpy as np
+
+    from tortoise.embeddings import EMBEDDING_DIM, EmbeddingModel
+    from tortoise.projection import FalkorProjection
+
+    if EmbeddingModel.get() is None:
+        pytest.skip("no embedder installed — the seeder fails soft to NULL")
+
+    class _WrongDim:
+        def encode(self, texts, batch_size=32, show_progress_bar=False):
+            return np.zeros((len(texts), EMBEDDING_DIM - 1))
+
+    turns = [{"role": "user", "content": f"width probe {i}"}
+             for i in range(3)]
+
+    def _stored(sid: str) -> list:
+        return [r[0] for r in sdk._get_proj().g.query(
+            "MATCH (t:Point) WHERE t.id STARTS WITH $p "
+            "RETURN t.embedding ORDER BY t.id",
+            params={"p": f"{sid}_t"}).result_set]
+
+    try:
+        monkeypatch.setattr(
+            EmbeddingModel, "get",
+            classmethod(lambda cls, load_timeout=None: _WrongDim()))
+        EmbeddingModel._reset()
+
+        # (a) INDEXED store: the wrong-width vector is DROPPED; the turn lands.
+        monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                            property(lambda self: EMBEDDING_DIM))
+        ids = seed_capture_turn_store(sdk, "sess-xguard", turns)
+        assert len(ids) == len(turns), ids
+        assert all(v is None for v in _stored("sess-xguard")), (
+            _stored("sess-xguard"))
+
+        # (b) NO index: the encoder's own width governs — the SAME vector is
+        # KEPT (dropping it here is exactly the #4280 failure shape).
+        monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                            property(lambda self: None))
+        seed_capture_turn_store(sdk, "sess-noidx", turns)
+        got = _stored("sess-noidx")
+        assert got and all(v is not None for v in got), got
+        assert all(len(v) == EMBEDDING_DIM - 1 for v in got), got
+    finally:
+        EmbeddingModel._reset()
 
 
 # ── 2. The transcript seeder writes the capture shape ─────────────────────
@@ -226,10 +378,10 @@ def test_transcript_golden_pins_identity_from_the_contains_edge(sdk):
 
 def test_transcript_seed_without_a_date_records_no_time(sdk):
     """#4106: ``_seed``'s date default must not become a session's recorded
-    time. ``seed_capture_turn_store``'s ``now=None`` default is the RUN clock,
-    which the ask-path date annotation would render as the session's date; a
-    seed with no ``session_date`` therefore erases it (session AND turns) and
-    the reader's context carries no date marker."""
+    time. The shared seeder is told ``now=None`` for a seed with no
+    ``session_date``, which since #4156 records NO time (session AND turns)
+    rather than the run clock, so the reader's context carries no date marker
+    and no value has to be erased afterwards."""
     from tools.gen_ask_transcripts import _seed
     from tortoise.retrieval import render_context
 
@@ -244,3 +396,125 @@ def test_transcript_seed_without_a_date_records_no_time(sdk):
     ann = sdk.annotate_ask_hits(hits)
     assert ann and all(not h.get("session_date") for h in ann), ann
     assert "(session date" not in render_context(ann)
+
+
+# ── 5. #4156: ``now=None`` records NO time, the default models a capture ──
+
+def test_now_none_records_no_time_while_the_default_models_a_capture(sdk):
+    """#4156: "no recorded time" and "the capture simulation's clock" must be
+    two distinguishable values, not one.
+
+    ``now`` used to default to ``None`` and be substituted with
+    ``datetime.now()``, so a caller that wanted to record NO time got a
+    fabricated date instead and had to erase it afterwards
+    (``_clear_recorded_time``). The default is now the ``CAPTURE_CLOCK``
+    sentinel — a capture always has a time — and an explicit ``now=None``
+    means the session and its turns record NO time, REMOVING any time already
+    on them.
+    """
+    from tools.ask_spotcheck import (
+        CAPTURE_CLOCK,
+        merge_capture_session,
+    )
+
+    proj = sdk._get_proj()
+
+    # The default models a capture: it resolves the sentinel to the run clock
+    # and WRITES it.
+    resolved = merge_capture_session(sdk, "sess-clock", 2)
+    assert resolved not in (None, CAPTURE_CLOCK), resolved
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-clock'}) RETURN s.created_at",
+    ).result_set == [[resolved]]
+
+    # An explicit None records NO time — and no later call may resurrect one
+    # (the write is a clear, never a coalesce of a fabricated default).
+    assert merge_capture_session(sdk, "sess-notime", 2, now=None) is None
+    assert merge_capture_session(sdk, "sess-notime", 2, now=None) is None
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-notime'}) RETURN s.created_at",
+    ).result_set == [[None]]
+
+    # The turn side obeys the SAME contract.
+    seed_capture_turn_store(
+        sdk, "sess-turns-notime", [{"role": "user", "content": "undated"}],
+        now=None)
+    assert proj.g.query(
+        "MATCH (t:Point {id:'sess-turns-notime_t0'}) "
+        "RETURN t.createdAt, t.updatedAt",
+    ).result_set == [[None, None]]
+
+    # …and a session seeded with the default (no ``now``) still records its
+    # capture time on both the session and its turns — a capture always has
+    # one — so the fix cannot have turned the default into "no time".
+    seed_capture_turn_store(
+        sdk, "sess-turns-clock", [{"role": "user", "content": "dated"}])
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-turns-clock'}) RETURN s.created_at",
+    ).result_set[0][0]
+    assert proj.g.query(
+        "MATCH (t:Point {id:'sess-turns-clock_t0'}) RETURN t.createdAt",
+    ).result_set[0][0]
+
+
+def test_now_none_clears_a_time_already_on_the_node(sdk):
+    """#4156: ``now=None`` must REMOVE a recorded time, not merely skip a write.
+
+    ``_clear_recorded_time`` — the helper this change deletes — actively
+    ``SET … = null`` on the session AND its turns. A "skip the write" reading
+    would pass on a FRESH node and fail on a re-seed: the node keeps the
+    previous call's (possibly fabricated, run-clock) date, which is the exact
+    trap #4156 exists to remove. The contract is therefore enforced against
+    the node, not against this call's write.
+    """
+    proj = sdk._get_proj()
+    two_turns = [{"role": "user", "content": "dated one"},
+                 {"role": "assistant", "content": "dated two"}]
+
+    # First seeded WITH a time (the capture-clock default) and TWO turns.
+    seed_capture_turn_store(sdk, "sess-reseed", two_turns)
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-reseed'}) RETURN s.created_at",
+    ).result_set[0][0]
+    assert proj.g.query(
+        "MATCH (:Session {id:'sess-reseed'})-[:CONTAINS]->(t:Point) "
+        "RETURN count(t.createdAt)",
+    ).result_set == [[2]]
+
+    # Re-seeded as an UNDATED session, with a SHORTER conversation — the
+    # recorded time must be GONE from the session and from EVERY stored turn,
+    # including the one this call does not rewrite.
+    seed_capture_turn_store(
+        sdk, "sess-reseed", two_turns[:1], now=None)
+    assert proj.g.query(
+        "MATCH (s:Session {id:'sess-reseed'}) RETURN s.created_at",
+    ).result_set == [[None]]
+    assert proj.g.query(
+        "MATCH (:Session {id:'sess-reseed'})-[:CONTAINS]->(t:Point) "
+        "RETURN t.id, t.createdAt, t.updatedAt ORDER BY t.id",
+    ).result_set == [
+        ["sess-reseed_t0", None, None],
+        ["sess-reseed_t1", None, None],
+    ]
+
+
+def test_non_none_now_is_recorded_verbatim(sdk):
+    """#4156: only ``None`` means "no recorded time" — the fix must not swap
+    one silent coercion for another.
+
+    The pre-fix ``now = now or datetime.now()`` turned a FALSY string into the
+    run clock; under the new contract the sentinel is the only "use the
+    capture clock" spelling, so any ``str`` is recorded as given (the read
+    path renders a non-date as UNKNOWN, `_iso_date10`).
+    """
+    from tools.ask_spotcheck import merge_capture_session
+
+    assert merge_capture_session(sdk, "sess-empty", 1, now="") == ""
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Session {id:'sess-empty'}) RETURN s.created_at",
+    ).result_set == [[""]]
+    assert merge_capture_session(
+        sdk, "sess-word", 1, now="not-a-date") == "not-a-date"
+    assert sdk._get_proj().g.query(
+        "MATCH (s:Session {id:'sess-word'}) RETURN s.created_at",
+    ).result_set == [["not-a-date"]]

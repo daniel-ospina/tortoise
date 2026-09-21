@@ -346,7 +346,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_index_files
 - name: tortoise_create_point
-  served_from: tortoise/mcp_server.py:a6d828573b6efd9e
+  served_from: tortoise/mcp_server.py:3d72f7a7b56da6d0
   family: memory
   family_rank: 1
   served: http
@@ -367,7 +367,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # Served-surface change (#3949): the write now OBSERVES whether the caller
+  # filed a decision-shaped point instead of claiming the step on any write.
+  # Fingerprint a6d828573b6efd9e -> 3d72f7a7b56da6d0. Row refresh only — no
+  # tool added, removed or renamed; approved in #3949 by @daniel-ospina.
+  approval: '#3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
@@ -1540,7 +1544,8 @@ rows:
   job: 'File an agent session into the graph (epic #909 capture path): turns become episodic Points, the conversation
     is LLM-extracted into epistemic Points, and the Session links to subject/project entities. #1927: session_recording
     is default-ON (ToS-covered) with an optional off-switch — returns 409 when the team disabled capture; 402 at
-    quota; 503 without an LLM provider; 422 for an invalid harness. session_id is the idempotency key (re-filing
+    quota; a missing LLM provider key is NOT a refusal — the capture is STORED and only extraction is skipped
+    (extraction_mode "no-provider"); 422 for an invalid harness. session_id is the idempotency key (re-filing
     the same id mints zero new nodes). Only call this when the team has session recording enabled (the dashboard
     ''Memory sources > Agent sessions'' toggle); if the call fails, tell the user it wasn''t filed and do NOT retry.
     Requires hosted mode — stdio/self-hosted returns an honest error (no local fallback that bypasses the capture
@@ -2042,7 +2047,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_decision
-  served_from: tortoise/mcp_server.py:d687db94a7343283
+  served_from: tortoise/mcp_server.py:5b94130694a2f699
   family: journal
   family_rank: 7
   served: http
@@ -2063,7 +2068,11 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # Served-surface change (#3949): this call IS the observation, so it declares
+  # it rather than letting the helper infer one. Fingerprint
+  # d687db94a7343283 -> 5b94130694a2f699. Row refresh only — no tool added,
+  # removed or renamed; approved in #3949 by @daniel-ospina.
+  approval: '#3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval

@@ -665,33 +665,44 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                               code_challenge_method: str | None) -> dict:
     """Validate the /oauth/authorize request. Returns the client row."""
     client = resolve_client(cp, client_id)
-    if client is None:
-        raise OAuthError(400, "invalid_request", "Unknown or revoked client_id.")
-    if response_type != "code":
-        raise OAuthError(400, "invalid_request",
-                         "Only response_type=code is supported.")
-    # #2846: loopback ports are ignored (RFC 8252 §7.3); every other redirect
-    # keeps the exact-string rule. See `_redirect_uri_matches`.
-    #
-    # A non-list `redirect_uris` can only come from a legacy/hand-corrupted row
-    # (`register_client` requires a list and the column is jsonb). Normalize it
-    # to a single-element list so a bare string stays ONE uri: iterating the
-    # string directly would compare character by character and silently stop
-    # matching it at all.
-    registered_uris = client.get("redirect_uris") or []
-    if not isinstance(registered_uris, (list, tuple)):
-        registered_uris = [registered_uris]
-    if not any(_redirect_uri_matches(u, redirect_uri)
-               for u in registered_uris):
-        raise OAuthError(400, "invalid_request",
-                         "redirect_uri is not registered for this client.")
-    if not code_challenge or not _valid_pkce(code_challenge):
-        raise OAuthError(400, "invalid_request",
-                         "code_challenge (PKCE, 43-128 chars) is required.")
-    if code_challenge_method != "S256":
-        raise OAuthError(400, "invalid_request",
-                         "Only code_challenge_method=S256 is supported.")
-    return client
+    try:
+        if client is None:
+            raise OAuthError(400, "invalid_request", "Unknown or revoked client_id.")
+        if response_type != "code":
+            raise OAuthError(400, "invalid_request",
+                             "Only response_type=code is supported.")
+        # #2846: loopback ports are ignored (RFC 8252 §7.3); every other redirect
+        # keeps the exact-string rule. See `_redirect_uri_matches`.
+        #
+        # A non-list `redirect_uris` can only come from a legacy/hand-corrupted row
+        # (`register_client` requires a list and the column is jsonb). Normalize it
+        # to a single-element list so a bare string stays ONE uri: iterating the
+        # string directly would compare character by character and silently stop
+        # matching it at all.
+        registered_uris = client.get("redirect_uris") or []
+        if not isinstance(registered_uris, (list, tuple)):
+            registered_uris = [registered_uris]
+        if not any(_redirect_uri_matches(u, redirect_uri)
+                   for u in registered_uris):
+            raise OAuthError(400, "invalid_request",
+                             "redirect_uri is not registered for this client.")
+        if not code_challenge or not _valid_pkce(code_challenge):
+            raise OAuthError(400, "invalid_request",
+                             "code_challenge (PKCE, 43-128 chars) is required.")
+        if code_challenge_method != "S256":
+            raise OAuthError(400, "invalid_request",
+                             "Only code_challenge_method=S256 is supported.")
+        return client
+    except OAuthError as exc:
+        # #3669 finding 2: stamp the client resolved ABOVE onto the error
+        # (None when the client itself was unresolvable) so the
+        # /oauth/authorize handler can choose the redirect-vs-JSON shape
+        # WITHOUT resolving a second time. On the FAILURE path that second
+        # resolve cost a second CIMD fetch and a second rate-limit charge
+        # (the success path paid nothing — the fetch cache absorbed it),
+        # halving the effective failure budget.
+        exc.client = client
+        raise
 
 
 def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:

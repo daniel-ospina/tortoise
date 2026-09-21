@@ -43,7 +43,10 @@ captured session's turn store actually has: one episodic turn Point per
 windowed turn of every session that passes the shared blank gate (a session
 with no extractable line writes nothing — capture's pre-mutation gate)
 (deterministic ``f"{sid}_t{i}"`` id, ``pointKind='event'``,
-``is_episodic=true``, ``speaker``, no ``sessionId``/``eventId`` prop) wired
+``is_episodic=true``, ``speaker``, no ``sessionId``/``eventId`` prop, and the
+product's own turn EMBEDDING via the STORE seam
+(``encode_batch_for_store`` + ``proj.required_embedding_dim``, #4304) — #4194;
+dense ON by default, ``embed=False`` for the #4197 backlog state) wired
 to its ``:Session`` (id = the fixture's own ``haystack_session_ids[i]``, or
 the synthetic ``sess-{i}`` placeholder when the fixture carries none) by
 the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance mechanism the
@@ -80,6 +83,7 @@ from tortoise.ingest import _PROVIDERS  # noqa: E402
 from tortoise.sdk import (  # noqa: E402
     _SESSION_LLM_PROVIDER_PRIORITY,
     TortoiseSDK,
+    _capture_turn_embeddings,
     _capture_turn_window,
     _content_hash,
     _normalize_turn_role,
@@ -111,26 +115,36 @@ def _fixture_session_date(raw: str) -> str:
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
 
 
-def _clear_recorded_time(proj, session_id: str) -> None:
-    """Erase a seeded session's recorded time — session AND turns (#4106).
+class _CaptureClock:
+    """Sentinel: *"this caller models a CAPTURE, which always HAS a capture
+    time"* (#4156).
 
-    ``seed_capture_turn_store`` models a CAPTURE, so its ``now=None`` default
-    is the run clock, and capture always writes ``created_at``. A fixture
-    whose dataset records NO date for the session must therefore remove what
-    that default wrote: the ask-path date annotation reads
-    ``:Session.created_at``, so leaving the run clock there would render the
-    test run's date as the session's date. Turn ``createdAt`` is cleared with
-    it to keep the one-``now``-per-session shape intact.
+    ``now`` used to default to a plain ``None`` that was then substituted with
+    the run clock, so ``None`` silently MEANT "the run clock" and a caller that
+    wanted to record **no** time could not say so — it had to erase the
+    fabricated value afterwards (the ``_clear_recorded_time`` convention both
+    seeders carried, and the trap the next seeder would re-discover). The
+    default is now this sentinel: passing nothing still models a capture's own
+    clock, and ``now=None`` is an explicit *"no recorded time"* — which the
+    writers ENFORCE ON THE NODE (any recorded time already present is removed,
+    not merely left unwritten).
     """
-    proj.g.query("MATCH (s:Session {id:$sid}) SET s.created_at = null",
-                 params={"sid": session_id})
-    proj.g.query("MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                 "SET t.createdAt = null",
-                 params={"sid": session_id})
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "CAPTURE_CLOCK"
+
+
+#: The capture-shaped seeders' default ``now``: the run clock, NAMED so that
+#: "no recorded time" (an explicit ``None``) and "the capture simulation's
+#: recorded time" are two distinguishable values rather than one (#4156).
+CAPTURE_CLOCK = _CaptureClock()
 
 
 def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
-                          now: str | None = None) -> str:
+                          now: str | _CaptureClock | None = CAPTURE_CLOCK,
+                          ) -> str | None:
     """MERGE a ``(:Session)`` node in the shape BOTH capture writers write.
 
     The Session is never a bare ``{id}`` in production: both capture surfaces
@@ -142,23 +156,57 @@ def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
     commit reads ``s.is_episodic``) sees ``None`` on any graph seeded without
     them — so no fixture seeded that way can guard those surfaces.
 
+    ``now`` is the session's RECORDED time. The default (``CAPTURE_CLOCK``)
+    models a capture, which always has one, and resolves to the run clock.
+    An explicit ``now=None`` means the session records **NO** time, and that is
+    enforced against the node, not merely against this write: any
+    ``created_at`` already on it is REMOVED. That is the SESSION half of the
+    job the deleted ``_clear_recorded_time`` helper did (#4154 → #4156); its
+    turn half lives in :func:`seed_capture_turn_store`, which sweeps every
+    stored ``CONTAINS`` Point. Calling this function ALONE with ``now=None``
+    therefore undates the session node only — it is not a drop-in replacement
+    for the helper. "Skip the write" alone would have left a stale, possibly
+    fabricated, date on a re-seeded node, i.e. exactly the trap #4156 exists
+    to remove. Any other ``str`` is recorded verbatim (including ``""`` —
+    silently coercing a falsy string to the run clock is the conflation #4156
+    removes; the read path renders a non-date as UNKNOWN).
+
     Shared by every ask-lane seeder so the Session side cannot drift either.
-    Returns the ``now`` used, so a caller writing several sessions or turns
-    can hold ONE timestamp across them.
+    Returns the ``now`` used (``None`` when no time was recorded), so a caller
+    writing several sessions or turns can hold ONE timestamp across them.
     """
-    now = now or datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    if isinstance(now, _CaptureClock):
+        # The sentinel is resolved HERE, so a caller passing no ``now`` (or any
+        # ``_CaptureClock`` instance the annotation admits) gets the capture
+        # simulation's clock and nothing downstream sees the sentinel.
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    sets = "s.turn_count=$tc, s.is_episodic=true"
+    params: dict[str, object] = {"sid": session_id, "tc": turn_count}
+    if now is None:
+        sets = "s.created_at=null, " + sets
+    else:
+        sets = "s.created_at=coalesce(s.created_at, $now), " + sets
+        params["now"] = now
     sdk._get_proj().g.query(
-        "MERGE (s:Session {id:$sid}) "
-        "SET s.created_at=coalesce(s.created_at, $now), "
-        "    s.turn_count=$tc, s.is_episodic=true",
-        params={"sid": session_id, "now": now, "tc": turn_count},
+        f"MERGE (s:Session {{id:$sid}}) SET {sets}",
+        params=params,
     )
     return now
 
 
+#: W7A: the ask lane's DEFAULT seeding mode. ``True`` = the seeder stores the
+#: product's own turn vector (the post-#4194 shape the instrument measures);
+#: ``False`` = the pre-#4194 / no-embedder store (#4197's backlog). Single
+#: source so a receipt can NAME the mode it was produced in without restating
+#: it by hand (a receipt that does not name its seeding mode is not evidence).
+SEED_TURNS_EMBEDDED_BY_DEFAULT = True
+
+
 def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
                             conversation: list[dict], *,
-                            now: str | None = None) -> list[str]:
+                            now: str | _CaptureClock | None = CAPTURE_CLOCK,
+                            embed: bool = SEED_TURNS_EMBEDDED_BY_DEFAULT,
+                            ) -> list[str]:
     """Write ONE session's turns in the CAPTURE shape (#3914, #3910).
 
     The single seeder every ask-lane fixture writes through, so no fixture
@@ -180,6 +228,21 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         and NO ``sessionId`` / ``eventId`` prop (capture writes neither, so
         no prop can satisfy an identity read that the ``CONTAINS`` edge
         alone carries);
+      * the product's OWN turn vector (``embed=True``, the DEFAULT): the
+        stored ``[role] <content>`` text routed through the product's
+        STORE-scoped encoder (``embeddings.encode_batch_for_store`` with
+        ``proj.required_embedding_dim`` — #4304's seam, never the raw
+        encoder) and stored as ``vecf32``. The product's turn write now embeds
+        every turn (#4194), so a fixture seeded without a vector models a
+        store the product no longer writes and BLINDS every retrieval
+        measurement to the dense leg — the frozen instrument reported
+        ``retrieval_degraded`` 21/21 for that reason (W7A). ``embed=False``
+        seeds a PRE-#4194 / no-embedder store instead: a FRESH turn gets
+        ``NULL``, and — mirroring the product's own three-way guard — an
+        unchanged re-seed PRESERVES its vector while a changed one CLEARS it.
+        That is the shape a capture made before #4194 (or with no embedder)
+        actually has; re-embedding such a backlog is part of the saved-backlog
+        decision, #4197;
       * the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance
         mechanism the shipping read resolves identity from
         (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``).
@@ -188,6 +251,21 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     shared primitives (``_capture_turn_window`` / ``_session_llm_transcript``
     — capture's gate is PRE-MUTATION), so a degenerate session contributes no
     Session stub, no turn and no edge, exactly as in capture.
+
+    ``now`` follows :func:`merge_capture_session` exactly: the default
+    (``CAPTURE_CLOCK``) models a capture's own clock and is resolved ONCE so
+    the session and every turn share it. An explicit ``now=None`` means the
+    session records NO time, and that is enforced against the node — the
+    session's ``created_at`` and the ``createdAt``/``updatedAt`` properties of
+    every Point it ``CONTAINS`` are REMOVED, not merely left unwritten
+    (#4156).
+
+    ⚠️ The whole contract is contingent on the blank gate below ADMITTING the
+    session: a degenerate conversation returns before any write, so a
+    re-seed of a previously-timed session with a blank conversation is left
+    completely untouched (its recorded time included). That is deliberate —
+    capture's gate is pre-mutation and a real capture of a blank session
+    writes nothing either; do not "fix" it by moving the gate.
 
     Returns the turn ids WRITTEN, in window order. An EMPTY list means the
     blank gate skipped the session — the caller must not assume a Point
@@ -201,27 +279,77 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         return []
     proj = sdk._get_proj()
     now = merge_capture_session(sdk, session_id, len(windowed), now=now)
+    # #4156: the SAME contract as the Session side — the default models a
+    # capture's clock (already resolved above into one ``now`` shared by the
+    # session and every turn), while an explicit ``now=None`` means the
+    # session records NO time: the two time properties are not written here,
+    # and after the loop the WHOLE stored ``CONTAINS`` set is swept — the
+    # deleted ``_clear_recorded_time`` cleared every stored turn, and a
+    # shorter re-seed must not leave an earlier call's timestamps behind.
+    time_sets = ""
+    time_params: dict[str, object] = {}
+    if now is not None:
+        time_sets = ("t.createdAt=coalesce(t.createdAt, $now), "
+                     "t.updatedAt=$now, ")
+        time_params = {"now": now}
+    # The stored text is composed ONCE — the same string the node stores and
+    # the string that is encoded, so a dense hit always resolves to the turn
+    # whose text was embedded (#4194's own rule).
+    turn_texts = [f"[{_normalize_turn_role(t.get('role'))}] "
+                  f"{t['content'][:5000]}" for t in windowed]
+    # SWITCHABLE SEEDING (W7A): embedded by DEFAULT, because the product's
+    # write path now embeds every episodic turn (#4194) and a fixture without
+    # a vector BLINDS every retrieval measurement to the dense leg — the
+    # frozen instrument reported ``retrieval_degraded`` 21/21 for exactly that
+    # reason. ``embed=False`` RETAINS the pre-#4194 / no-embedder store so the
+    # un-backfilled backlog stays measurable; re-embedding that saved backlog
+    # is the user-facing choice owned by #4197. A receipt produced in either
+    # mode must NAME the mode.
+    # The vectors come from the PRODUCT's own store seam via the SHARED
+    # primitive ``tortoise.sdk._capture_turn_embeddings`` — never a local copy
+    # and never the raw encoder. It applies the STORE's width
+    # (``proj.required_embedding_dim``: ``EMBEDDING_DIM`` on an indexed store,
+    # ``None`` on the index-less brute-force lane, where any self-consistent
+    # width is usable and must NOT be dropped — #4280) and fails soft to
+    # ``None`` per turn when no embedder is installed.
+    embeddings = (
+        _capture_turn_embeddings(turn_texts, proj.required_embedding_dim)
+        if embed else [None] * len(turn_texts))
     turn_ids: list[str] = []
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         turn_id = f"{session_id}_t{i}"
         # `_capture_turn_window` already truncated to the cap; the [:5000]
         # mirrors the live store loop's explicit (idempotent) window.
-        turn_text = f"[{role}] {turn['content'][:5000]}"
+        turn_text = turn_texts[i]
         # Node MERGE BEFORE the edge MERGE — capture's #490 ordering rule: a
         # full-path MERGE whose edge is missing makes FalkorDB create the
         # whole path from scratch, duplicating the Point node.
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
+            # #4194: capture the node's PRE-write content_hash before the SET
+            # reassigns it, so the vector preserve/clear decision is made
+            # against the real prior (the product's own turn write does this).
+            "WITH t, t.content_hash AS prior_ch "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
             "    t.speaker=$speaker, "
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
-            "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch",
+            f"    {time_sets}"
+            "    t.content_hash=$ch, "
+            # The product's own vector, vecf32-wrapped (the read path's
+            # vec.euclideanDistance rejects a plain-list stored embedding),
+            # and the product's OWN three-way guard: new vector when one was
+            # encoded; else PRESERVE an unchanged turn's vector (so
+            # ``embed=False`` models the no-embedder RE-capture too); else
+            # CLEAR it (a preserved vector for changed text is the dense-leg
+            # lie).
+            "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
+            "        WHEN prior_ch = $ch THEN t.embedding ELSE NULL END",
             params={"id": turn_id, "c": turn_text, "k": "event",
-                    "speaker": role, "s": "draft", "now": now,
-                    "ch": _content_hash(turn_text)},
+                    "speaker": role, "s": "draft",
+                    "ch": _content_hash(turn_text), "emb": embeddings[i],
+                    **time_params},
         )
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
@@ -229,10 +357,26 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
             params={"sid": session_id, "tid": turn_id},
         )
         turn_ids.append(turn_id)
+    if now is None:
+        # #4156: the sweep is over the session's STORED ``CONTAINS`` Point
+        # set — not over the window rewritten above, and not only over turns:
+        # the deleted helper ran the same unrestricted match, and a re-seed
+        # with a SHORTER conversation must clear the older turns too, or the
+        # session records a fabricated date again through the back door.
+        # (Capture CONTAINS-wires extracted claim Points as well, so those are
+        # swept with the turns — their ``createdAt`` here, and their
+        # ``updatedAt`` too, which the deleted helper left alone. No caller
+        # passes ``now=None`` for a session holding extracted claims today.)
+        proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+            "SET t.createdAt = null, t.updatedAt = null",
+            params={"sid": session_id},
+        )
     return turn_ids
 
 
-def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
+def _seed_memory(sdk: TortoiseSDK, question: dict, *,
+                 embed: bool = SEED_TURNS_EMBEDDED_BY_DEFAULT) -> None:
     """Seed the haystack in the CAPTURE shape (#3910).
 
     Mirrors the turn-store sub-step of ``_capture_session_impl`` — the part
@@ -272,8 +416,13 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     on a graph where the edge path was entirely broken.
 
     Deliberately NOT reproduced (this seeds a TURN STORE, it is not a
-    capture): no ``embedding`` / ``search_keys`` on turn Points, no
-    ``:Source`` materialization, no extracted claim Points. The per-session
+    capture): no ``search_keys`` on turn Points, no ``:Source``
+    materialization, no extracted claim Points. The turn EMBEDDING **IS**
+    reproduced (``embed=True``, the default) because the product's write path
+    now stores one (#4194) and a fixture without it blinds every retrieval
+    measurement to the dense leg (W7A); ``embed=False`` reproduces the
+    pre-#4194 / no-embedder store (re-embedding that saved backlog is the
+    #4197 owner decision). The per-session
     ``:Event`` write is RETAINED for fixture compatibility (nothing in the
     repo reads ``ev-s{i}``, and it is NOT capture's ``sessionCaptured``
     Event — different id, different prop set): it is a date-only marker, and
@@ -312,15 +461,15 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
         # for the session and all of its turns, as capture writes them.
         turn_ids = seed_capture_turn_store(
             sdk, sid, session or [],
-            now=f"{sdate}T10:00:00Z" if sdate else None)
+            now=f"{sdate}T10:00:00Z" if sdate else None,
+            embed=embed)
         if not turn_ids:
             continue
         if not sdate:
-            # #4106: the fixture records NO date for this session, and
-            # ``seed_capture_turn_store``'s ``now=None`` default is capture's
-            # own RUN clock — erase it (session AND turns), so the read path
-            # reports UNKNOWN instead of fabricating the run date.
-            _clear_recorded_time(proj, sid)
+            # #4106/#4156: the fixture records NO date for this session, so
+            # the seeder is told exactly that (``now=None``) and writes NO
+            # recorded time — the read path reports UNKNOWN instead of a
+            # fabricated run date, with nothing to erase afterwards.
             continue
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",

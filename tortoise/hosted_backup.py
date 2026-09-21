@@ -298,6 +298,12 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
     ``node_count`` and ``edge_count`` therefore describe the SAME node set
     — every exported edge has BOTH endpoints in ``nodes``, so a fresh dump
     always links ``len(edges)/len(edges)``.
+
+    #3902: the ``:GraphEventMeta`` label stays excluded from ``nodes``
+    (#1625), but its counter is carried as the top-level ``event_meta`` key
+    (``{last_seq, first_seq}``) — it is the event log's ordering watermark,
+    not a runtime marker, and a restore that loses it re-issues a colliding
+    ``seq``. Absent when the graph has no counter node yet.
     """
     from tortoise.hosted_api import _is_export_skip_node
 
@@ -396,6 +402,11 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
             graph_name, dropped_skipped, dropped_stale,
             len(nodes), len(edges),
         )
+    # #3902: read the counter LAST, after the content snapshot — a concurrent
+    # append after the event read bumps last_seq ahead of the dumped events
+    # (a gap, never a collision); reading it first could carry a counter
+    # BELOW an event that the dump captured.
+    event_meta = _read_event_meta(g)
     return {
         "format": DUMP_FORMAT,
         # #3895: the writer revision. Rev 2 = node and edge sets restricted to
@@ -415,7 +426,102 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
         "unresolved_edge_count": dropped_stale,
         "nodes": nodes,
         "edges": edges,
+        # #3902: the event-log counter, read OUTSIDE the node set above.
+        **event_meta,
     }
+
+
+def _read_event_meta(g) -> dict:
+    """The per-graph event-log counter as the #3902 ``event_meta`` block.
+
+    ``:GraphEventMeta`` is excluded from the dump's node set by #1625
+    (runtime bookkeeping must not inflate ``node_count``), but ``last_seq``
+    is NOT runtime-only: it is the per-graph monotonic ``seq`` handed to
+    ``event_store.next_seq``, and ``first_seq`` is the purge cursor floor.
+    A restore that drops it rebuilds the ``:GraphEvent`` log and leaves
+    ``next_seq`` to MERGE a fresh counter at 1 — colliding with the restored
+    ``seq`` 1 and under-counting every later event (``events_poll`` cursors
+    and subscribers depend on the ordering key).
+
+    Returns ``{}`` for a graph with no counter node (never emitted an event),
+    so the dump shape is unchanged for those graphs.
+    """
+    rows = g.query(
+        "MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"
+    ).result_set
+    if not rows or rows[0][0] is None:
+        return {}
+    last_seq, first_seq = rows[0]
+    last_seq = int(last_seq)
+    return {
+        "event_meta": {
+            "last_seq": last_seq,
+            # A counter node always carries both (next_seq sets them
+            # together); the fallback keeps the _refresh_first_seq contract
+            # (first_seq = last_seq + 1 when the log is empty) for a
+            # hand-written/legacy node missing it.
+            "first_seq": int(first_seq) if first_seq is not None else last_seq + 1,
+        },
+    }
+
+
+def _restore_event_meta(g, event_meta) -> None:
+    """#3902: re-establish the per-graph event-log counter after a restore.
+
+    ``:GraphEventMeta`` is excluded from the dump's node set (#1625), so the
+    counter must be carried EXPLICITLY (``dump["event_meta"]``) and written
+    back here — otherwise ``next_seq`` MERGEs a fresh counter at 1 and
+    collides with the restored ``seq`` 1, after which every event is
+    under-counted by the restored event count (``events_poll`` cursor
+    ordering, subscription delivery and the ``first_seq`` purge watermark all
+    assume ``seq`` is per-graph monotonic and unique).
+
+    New dumps carry ``{last_seq, first_seq}`` and are written back exactly.
+    OLD dumps — every backup written before this fix — carry nothing, so the
+    counter is re-derived from the restored ``:GraphEvent`` log:
+    ``last_seq = max(restored seq)``, ``first_seq = min(restored seq)``. The
+    next ``next_seq`` then returns ``max(restored seq) + 1`` instead of a
+    colliding 1.
+
+    An empty log with no carried counter leaves the ``:GraphEventMeta`` node
+    absent, exactly like a graph that never emitted an event: ``next_seq``
+    creates it at 1 and ``_refresh_first_seq``'s empty-log contract
+    (``first_seq = last_seq + 1``) still holds. An empty log WITH a carried
+    counter (everything purged) restores the exact watermark — e.g.
+    ``last_seq=3, first_seq=4``, so ``next_seq`` continues at 4.
+
+    Runs in the temp graph, so the later ``GRAPH.COPY`` temp→live carries the
+    watermark (it is written before ``restore_graph`` returns, i.e. before
+    the caller's count verification and swap).
+    """
+    rows = g.query(
+        "MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"
+    ).result_set
+    max_seq, min_seq = (rows[0] if rows else (None, None))
+    max_seq = int(max_seq) if max_seq is not None else None
+    min_seq = int(min_seq) if min_seq is not None else None
+
+    last_seq: int | None = None
+    first_seq: int | None = None
+    if isinstance(event_meta, dict) and event_meta.get("last_seq") is not None:
+        last_seq = int(event_meta["last_seq"])
+        carried_first = event_meta.get("first_seq")
+        first_seq = int(carried_first) if carried_first is not None else last_seq + 1
+    elif max_seq is not None:  # old dump — re-derive from the restored log
+        last_seq = max_seq
+        first_seq = min_seq
+
+    if last_seq is None:
+        return  # old dump, no events, no counter — nothing to seed
+    if max_seq is not None:
+        # Monotonicity guard: whatever the dump claims, the ordering key must
+        # never sit below the restored log's top seq — that IS the collision
+        # this fix exists to prevent.
+        last_seq = max(last_seq, max_seq)
+    g.query(
+        "MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first",
+        params={"last": last_seq, "first": first_seq},
+    )
 
 
 def _first_live_node_id(g, ids: set[int]) -> int | None:
@@ -461,6 +567,12 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     dangling edge is NOT explained by the export-skip class (genuine
     corruption) must keep failing closed, and the reader cannot prove
     provenance for a pre-fix artifact.
+
+    #3902: after the edge phase the per-graph event-log counter is re-seeded
+    (see ``_restore_event_meta``) so a subsequent ``next_seq`` cannot collide
+    with a restored ``seq``. New dumps carry it exactly; old dumps (no
+    ``event_meta`` key) have it re-derived from the restored ``:GraphEvent``
+    log.
     """
     if not isinstance(dump, dict) or dump.get("format") != DUMP_FORMAT:
         raise ValueError(
@@ -653,6 +765,12 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
             "pre-#3895 artifact)",
             len(unlinkable), missing_endpoints,
         )
+    # #3902: re-seed the per-graph event-log counter AFTER the edge phase and
+    # BEFORE the count verification / the caller's temp→live swap, so the
+    # GRAPH.COPY carries the watermark into the live graph. The counter node
+    # is export-skip state — it is excluded from the node count below.
+    _restore_event_meta(g, dump.get("event_meta"))
+
     # ACTUAL node count from the graph (not the dump bookkeeping) — the
     # verification gate must compare real graph state, mirroring the edge check.
     # #1625: count non-skip nodes by applying the SAME predicate as the dump
@@ -2363,7 +2481,7 @@ def prune_backups(
     UTC DAY-bucket for ages between ``keep_hourly`` and ``keep_daily`` days
     (bounded by the daily horizon), then the ``keep_weekly`` weekly anchors.
     This bounds an org at hourly cadence to ~24 hourly + ~7 daily-anchors + 4
-    weekly (≈35 objects/pool) — #2373: the anchor granularity was hour-
+    weekly (≈35 objects/pool; windows: `docs/retention-and-deletion.md`) — #2373: the anchor granularity was hour-
     buckets (retaining ~172/pool over 7 days), contradicting this docstring,
     the DR runbook, and #2319's lock-window premise; day anchors restore the
     documented intent. Newest-first iteration keeps the newest backup of each

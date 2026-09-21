@@ -81,14 +81,14 @@ answer path for search.
 | `abstained` | **Best-effort heuristic label** (phrase list over the answer text) — NOT the abstention guarantee; the two-phase prompt is authoritative |
 | `question_type` | The detected or caller-override type; None possible |
 | `question_date` | The resolved value (see above) |
-| `evidence` | The assembled context the reader saw (trust property as a response field) — **32 KiB byte bound**, `len(evidence.encode("utf-8")) ≤ 32768`, ENFORCED AT ASSEMBLY (whole-hit drop; never splits a character); ≤ 8000 estimated tokens |
-| `context_tokens` | `estimate_tokens_ask(rendered_context)` — a conservative ESTIMATE, not a raw count; ≤ 8000 |
+| `evidence` | The assembled context the reader saw (trust property as a response field) — bounded by BOTH the resolved token cap (default 16 000 estimated tokens, #4105) AND the resolved `TORTOISE_ASK_CONTEXT_BYTE_CAP` byte bound (default derived as `max(32768, token_cap × 8)` = 128 000 bytes), ENFORCED AT ASSEMBLY (whole-hit drop; never splits a character) |
+| `context_tokens` | `estimate_tokens_ask(rendered_context)` — a conservative ESTIMATE, not a raw count; bounded by the resolved `TORTOISE_ASK_CONTEXT_TOKEN_CAP` (default 16 000, #4105) |
 | `model` | The RESOLVED spec (the serving lane's wire id — bare `deepseek-v4-flash` on the direct lane, the full spec on OpenRouter) |
 | `provider` / `route` | The lane that actually served — a FAILOVER answer reports the SURVIVING lane; recovery reports the primary lane again |
 | `cost_estimate_usd` | An ESTIMATE at the ×1.5 over-cover rate (see Cost) — never an exact bill |
 | `duration_ms` | Wall-clock: `run_ask_lane` entry → response |
 | `retrieval_degraded` | True when any retrieval leg degraded or D8 decoration was unavailable → the lane answers on the degraded evidence; a raised retrieval/annotation failure → `AskRetrievalUnavailable` (`.code = retrieval_unavailable`) |
-| `retrieved_session_ids` | The DISTINCT session ids DERIVED for the assembled `evidence`, in the order the evidence presents them (the legacy lane's own post-dedup ranking order — post-boost, and when enabled post-rerank (A7) / post-package (A8) — **not** raw RRF once `apply_evidence_boost` or the A7 rerank reorders the pool; the subject-major `post_cap_lines` order of the connected-assembly fired branch) — built from the same hit list the evidence was rendered from, never inferred from an id's shape. Derived means read from an explicit identity only: an explicit `session_id` already on the hit (the `annotate_ask_hits` Event join — which also supplies a Point's own camel `sessionId` prop whenever the Event arm yields no `sessionId`: no matching Event, or a matching Event without the prop), else the hit's `sessionId` (the Point's own prop, else the `:Session` `CONTAINS` edge). A hit whose identity cannot be derived contributes nothing, so `[]` is honest. Independently, the value is sanitized: anything outside `[A-Za-z0-9._:@+\-]{1,128}` after stripping surrounding whitespace is **dropped** on both surfaces — reported as unknown whenever no other safe identity source exists for that hit (a safe sibling source is used instead). That is a sanitizer rule, not a divergence. This sanitizer covers the **session id only** — `session_date` and `speaker` are interpolated into the same annotation zone unsanitized (a pre-existing, separately-tracked gap: #3844). **The field is NOT a mirror of the tags — only the honest set of identities the retrieved hits carry.** The two should be read together, because a hit carrying the eval/assembly lanes' `lme_session_index` keeps its historical tag (byte-identical to the pre-change expression per the R17 assembly goldens) regardless of the id it names, in both directions: (a) a RENDERING index (`>= 0`) shows `[session <index>]`, so the field can be empty while the evidence names sessions, or can name a session the reader was never shown — the D3 defect (the evidence does not name the true session) still stands for such rows, because the index wins the tag; (b) a NON-RENDERING index (the eval lane's `-1` sentinel, or an explicit `None` — the connected-assembly spine's spelling) shows `[session ?]` while the field still names the id. Consequence for the whole-hit caps — BYTE cap only: the derived tag is part of the byte accounting (`assemble_context` accounts `len(_render_block(h).encode())`), so `[session <uuid>]` is ~35 B wider than `[session ?]` and a pool already at the 32 KiB byte ceiling can admit **fewer** hits than pre-change (measured at the production cap: 40 → 38 of the same 40-hit pool). The 8K token cap is unaffected — it accounts `len(block.split())`, and the tag replaces one word with one word, so it adds bytes, not whitespace words. Cap VALUES and the admission mechanism are unchanged; the post-cap byte outcome is not, and that shrink is the accepted price of naming the session. |
+| `retrieved_session_ids` | The DISTINCT session ids DERIVED for the assembled `evidence`, in the order the evidence presents them (the legacy lane's own post-dedup ranking order — post-boost, and when enabled post-rerank (A7) / post-package (A8) — **not** raw RRF once `apply_evidence_boost` or the A7 rerank reorders the pool; the subject-major `post_cap_lines` order of the connected-assembly fired branch) — built from the same hit list the evidence was rendered from, never inferred from an id's shape. Derived means read from an explicit identity only: an explicit `session_id` already on the hit (the `annotate_ask_hits` Event join — which also supplies a Point's own camel `sessionId` prop whenever the Event arm yields no `sessionId`: no matching Event, or a matching Event without the prop), else the hit's `sessionId` (the Point's own prop, else the `:Session` `CONTAINS` edge). A hit whose identity cannot be derived contributes nothing, so `[]` is honest. Independently, the value is sanitized: anything outside `[A-Za-z0-9._:@+\-]{1,128}` after stripping surrounding whitespace is **dropped** on both surfaces — reported as unknown whenever no other safe identity source exists for that hit (a safe sibling source is used instead). That is a sanitizer rule, not a divergence. This sanitizer covers the **session id only** — `session_date` and `speaker` are interpolated into the same annotation zone unsanitized (a pre-existing, separately-tracked gap: #3844). **The field is NOT a mirror of the tags — only the honest set of identities the retrieved hits carry.** The two should be read together, because a hit carrying the eval/assembly lanes' `lme_session_index` keeps its historical tag (byte-identical to the pre-change expression per the R17 assembly goldens) regardless of the id it names, in both directions: (a) a RENDERING index (`>= 0`) shows `[session <index>]`, so the field can be empty while the evidence names sessions, or can name a session the reader was never shown — the D3 defect (the evidence does not name the true session) still stands for such rows, because the index wins the tag; (b) a NON-RENDERING index (the eval lane's `-1` sentinel, or an explicit `None` — the connected-assembly spine's spelling) shows `[session ?]` while the field still names the id. Consequence for the whole-hit caps — BYTE cap only: the derived tag is part of the byte accounting (`assemble_context` accounts `len(_render_block(h).encode())`), so `[session <uuid>]` is ~35 B wider than `[session ?]` and a pool already at the resolved byte ceiling can admit **fewer** hits than a pool below it (measured at the pre-#4105 production cap — 40 items / 8K tokens / 32 KiB — 40 → 38 of the same 40-hit pool; the resolved default byte ceiling is 128 000 bytes, derived from 16 000 tokens, so the span is wider and the shrink is not expected at the default). The token cap is unaffected — it accounts `len(block.split())` plus the non-ASCII surcharge, and the ASCII tag replaces one word with one word, so it adds bytes, not whitespace words. The post-cap byte outcome is the accepted price of naming the session. |
 
 `/v1/search`'s `sessionId` is populated from the Point's `sessionId` prop, else the `:Session` `CONTAINS` edge, and passes through the same sanitizer (as does the `entity_type='document'` branch of the same agent-consumed MCP/`tortoise_search` path). Because the ask lane additionally prefers an explicit `session_id`, the two surfaces can name a different (both graph-derived) session for the same point. The **self-host** `/v1/search` response (`selfhost_api.PointResponse` = `id`/`content`/`kind`/`created_at`) does not carry a session id — a deliberate pre-existing narrow contract, out of scope for this change.
 
@@ -123,7 +123,7 @@ answer path for search.
 - **Superseded/terminal evidence:** the ask lane always retrieves with
   `include_terminal=True` — superseded points are included WITH their
   `[SUPERSEDED BY]` markers so the reader stays honest about staleness
-  (cost-bounded by the same 8k/40 caps).
+  (cost-bounded by the resolved caps, default 200/200/16000/derived).
 
 ## Retrieval (ask lane — #2070 optimisation loop)
 
@@ -153,17 +153,24 @@ measurement justifies a change.
   weights/damping overrides. Default None/60 = the shared global
   (`TORTOISE_FUSION_WEIGHTS` → `{"vector": 1.5}`) unchanged.
 - **A6 `TORTOISE_ASK_RETRIEVAL_LIMIT` / `_CONTEXT_ITEM_CAP` /
-  `_CONTEXT_TOKEN_CAP` (default 40/40/8000):** the retrieval-window limit
-  (the `result_ids[:limit]` cut inside `tortoise_fts_query`) is threaded IN
-  TANDEM with the assembly caps — raising only the assemble cap changes
-  nothing. Measurement-gated: defaults stay OFF until the runbook
-  baseline justifies a raise.
+  `_CONTEXT_TOKEN_CAP` / `_CONTEXT_BYTE_CAP` / `_POOL_SIZE` (default
+  200/200/16000/derived/200, #4105):** the retrieval-window limit (the
+  `result_ids[:limit]` cut inside `tortoise_fts_query`) is threaded IN
+  TANDEM with the assembly caps AND the pool floor — `limit >= item_cap`
+  and `pool_size >= limit` always hold, so raising one can never be
+  silently half-applied. The BYTE ceiling is resolved, not a literal: when
+  `_CONTEXT_BYTE_CAP` is unset it is DERIVED from the token cap
+  (`max(32768, token_cap × 8)`), so a token raise cannot be neutralised by
+  a fixed 32 KiB ceiling; `assemble_context` reports which bound dropped
+  hits and the lane warns when bytes are the binding constraint.
+  Defaults raised from 40/120/40/8000/32 KiB to the values measured on the
+  frozen D3 fixture (#4105).
 - **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 eval-lane
   cross-encoder rerank (eval R6 port, `tortoise/rerank.py` — the ONE
   implementation, re-exported by the eval lane). Truthy-only; needs the
   `embeddings` extra. Degrades to untouched on any scorer failure (never
   raises). Context/token budget guard (#2976): the measured lever costs
-  ~6.6× context, so a reranked set over the SAME 8000-token / 32 KiB caps
+  ~6.6× context, so a reranked set over the SAME resolved token / byte caps
   `assemble_context` enforces is refused WHOLE — the pool degrades to the
   unreranked order with a declared `reranked-set-exceeds-context-budget`
   reason (logged), never a silent truncation of the reranked set.
@@ -177,11 +184,11 @@ measurement justifies a change.
 
 ## Cost & budget
 
-- **Per-query cost ≤ $0.01 target is structural:** 8000-token context cap +
-  40-item cap + 500-token output cap (the 60/min/team LLM budget was
+- **Per-query cost ≤ $0.01 target is structural:** 16 000-token context cap +
+  200-item cap + 500-token output cap (the 60/min/team LLM budget was
   retired with the product surface in #3849 — see *Budget* below).
-  Worst case ~$0.0014–0.0023/query at the over-covered rate (5–7× under
-  target).
+  Worst case ~$0.0034/query at the over-covered rate (≈3× under target;
+  the pre-#4105 8000-token cap ran ~$0.0014–0.0023, 5–7× under).
 - **Rates:** `ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m":
   0.42}` — verified deepseek-direct $0.14/$0.28 × a documented ×1.5 safety
   factor (covers the OpenRouter fallback markup). The meter over-covers.
@@ -228,6 +235,17 @@ measurement justifies a change.
   transport-keyed `_selfhost_transport` exemption, never a value-keyed
   "selfhost" check (a hosted team literally named "selfhost" was
   record-and-budget-charged before #3849; no product caller meters today).
+
+  ⚠️ **The window-resolution raise is a SIGNAL, not a refusal** (#3825/#3981).
+  `record_ask_usage` RAISES `QuotaCheckError` when an org's metering window is
+  unresolvable (it will not key the row to a calendar month). That raise does
+  NOT reach the user as a refusal: the answer has already been produced, the
+  caller absorbs the raise, **serves the answer anyway**, and reports the
+  dropped increment to the operator (ERROR, `lane=ask_ledger`). A bookkeeping
+  fault of ours never becomes a user-facing 500. The user-facing refusal —
+  where one exists — is the pre-spend admission gate (the armed cohort cost
+  cap), which runs *before* any spend; a raise downstream of a completed
+  operation cannot refuse it. Do not read "raises" here as "enforced".
 
 ## Error vocabulary
 

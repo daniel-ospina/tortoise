@@ -677,7 +677,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "epistemic Points, and the Session links to subject/project entities. "
                     "#1927: session_recording is default-ON (ToS-covered) with an "
                     "optional off-switch — returns 409 when the team disabled capture; "
-                    "402 at quota; 503 without an LLM provider; "
+                    "402 at quota; a missing LLM provider key is NOT a refusal — the "
+                    "capture is STORED and only extraction is skipped "
+                    '(extraction_mode "no-provider"); '
                     "422 for an invalid harness. session_id is the idempotency key (re-filing "
                     "the same id mints zero new nodes). Only call this when the team has "
                     "session recording enabled (the dashboard 'Memory sources > Agent sessions' "

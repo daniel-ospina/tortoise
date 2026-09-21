@@ -16,6 +16,7 @@ the resolved 402 body, **zero extraction calls**, and **zero Session writes**.
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests.fake_control_plane import _as_dt
 from tortoise import cohort_cost as _cc
 from tortoise import hosted_api as _ha
 from tortoise.alert_store import AlertStore
@@ -31,6 +33,12 @@ from tortoise.hosted_api import app, get_current_org
 from tortoise.hosted_backup import MemoryStorage
 
 CAP_USD = 5.0
+#: #3825: the metering WINDOW the seam-level tests below supply explicitly. The
+#: cohort fixture's orgs carry no ``subscription_id``, so the real resolver
+#: returns the calendar month in UTC (D13) — the behavioural tests further down
+#: use that real path (``metering._current_period``); these stub-plane tests
+#: pass the window in, because what they exercise is the SQL contract.
+WINDOW = ("2026-09-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
 # A ONE-SECOND cohort window. The suite may share a FalkorDB server across
 # runs, so the cohort must be resolvable to exactly the orgs this test
 # provisions: a wide window would pull in every other org that carries a
@@ -326,6 +334,120 @@ def test_replay_of_a_captured_session_is_never_capped(capture_env):
     assert _session_count(COHORT_ORG) == 1
 
 
+def test_unresolvable_window_is_served_and_alerted_never_500(
+        capture_env, incidents, caplog):
+    """#3981 P0: a PAYING org whose metering window is UNRESOLVABLE gets a
+    NORMAL response — 200, extraction runs — plus an OPERATOR alert. Never a
+    500.
+
+    This is the exact shape ``checkout.session.completed`` leaves behind: a
+    ``subscription_id`` with no period, so ``metering._current_period`` raises
+    ``QuotaCheckError``. Pre-fix the admission gate let that escape and
+    ``hosted_api`` turned it into a 500 — a NEW unconditional user-facing
+    refusal on the capture path, BEFORE any spend, which the owner's #3981
+    ruling forbids (the gate was pure calendar arithmetic before #3825 and
+    could not raise). RED on the pre-fix tree (500 instead of 200).
+
+    Mutations caught: removing the ``except QuotaCheckError`` absorb in
+    ``enforce_cohort_cost_cap`` (the 500 returns); absorbing WITHOUT alerting
+    (no ``UNENFORCEABLE COHORT COST CAP`` record — the silent, unenforceable
+    cap); and substituting a calendar month (the cohort sum would read as 0,
+    so a capture that SHOULD be under an armed cap at seed-0 spend would still
+    200 — see ``test_over_cap_cohort_capture_refused_402_no_extraction_no_write``
+    for the paired enforcement path, which stays red if the guard is simply
+    deleted).
+
+    GREEN legitimate form: a subscription org with NULL period columns in an
+    armed cohort with no spend — the unenforceable case, served and alerted.
+    """
+    reg = _ha._make_sdk(namespace="registry")._get_registry()
+    reg.query(
+        "MATCH (t:Team {id: $tid}) SET t.subscription_id = 'sub-3981', "
+        "t.current_period_start = null, t.current_period_end = null",
+        params={"tid": COHORT_ORG},
+    )
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.cohort_cost"):
+        r = capture_env.client.post(
+            "/v1/sessions", json={"conversation": _CONV, "harness": "claude"})
+
+    assert r.status_code == 200, r.text
+    assert capture_env.extraction_calls == ["_extract_session_v2"], (
+        "an unenforceable cap must not block the spend it cannot measure")
+    assert any("UNENFORCEABLE COHORT COST CAP" in rec.getMessage()
+               for rec in caplog.records), [
+        rec.getMessage() for rec in caplog.records]
+    assert not incidents.issues, (
+        "an unenforceable cap is NOT a cap firing — it must not raise a "
+        "cap incident (that would conflate 'over budget' with 'cannot say')")
+
+
+def test_checkout_written_window_makes_the_cap_enforceable(
+        capture_env, incidents, monkeypatch):
+    """#4216 end-to-end: the CHECKOUT path now writes the org's window, so the
+    cohort cap IS enforced for it (402) — instead of being absorbed as
+    unenforceable and served (the pre-#4216 behaviour, and the paired negative
+    directly above).
+
+    REDs on the pre-#4216 tree: ``checkout.session.completed`` wrote
+    ``subscription_id`` and NO period, so ``metering._current_period`` raised,
+    ``enforce_cohort_cost_cap`` absorbed it (#3981) and this over-cap capture
+    returned 200 with the extraction running — the cap silently unenforceable
+    for a paying org. (With the checkout fix reverted, the anchor assertion
+    below fires first; with THAT removed, the capture 200s — the 402 vs 200
+    contrast is the same mutation either way.)
+
+    Mutations caught: reverting the checkout window write (the 402 becomes a
+    200); and the gate substituting a calendar month for a subscription org
+    (the cohort read would target a different window and miss the ledger row).
+    """
+    import json
+    from datetime import datetime
+
+    from tortoise import billing as bl
+
+    org_id = COHORT_ORG
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    start = int(datetime.fromisoformat(
+        "2026-08-01T00:00:00+00:00").timestamp())
+    end = int(datetime.fromisoformat(
+        "2026-09-01T00:00:00+00:00").timestamp())
+    monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
+                        lambda self, payload, sig: {
+                            "id": "evt_4216_e2e",
+                            "type": "checkout.session.completed",
+                            "data": {"object": {
+                                "client_reference_id": org_id,
+                                "customer": "cus_4216_e2e",
+                                "subscription": "sub_4216_e2e"}}})
+    monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                        lambda self, sid: {
+                            "id": "sub_4216_e2e", "status": "active",
+                            "current_period_start": start,
+                            "current_period_end": end,
+                            "items": {"data": []}})
+
+    r = capture_env.client.post(
+        "/webhooks/stripe", content=json.dumps({}),
+        headers={"stripe-signature": "t=1,v1=x"})
+    assert r.status_code == 200, r.text
+
+    anchor = _ha._make_sdk(namespace="registry")._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN t.current_period_start, "
+        "t.current_period_end", params={"id": org_id}).result_set[0]
+    assert anchor[0] is not None and anchor[1] is not None, (
+        f"the checkout webhook must persist a COMPLETE window: {anchor}")
+
+    _spend(org_id, CAP_USD + 1.0)
+
+    r = capture_env.client.post(
+        "/v1/sessions", json={"conversation": _CONV, "harness": "claude"})
+    assert r.status_code == 402, (
+        "a metered paying org's cohort cap must be ENFORCED, not absorbed")
+    assert capture_env.extraction_calls == []
+
+
 # ── 3. the MCP surface reports the same class ───────────────────────────────
 
 
@@ -385,17 +507,21 @@ def test_capture_ledger_write_is_what_the_cohort_spend_reader_reads(
     GREEN legitimate form: a real 200 capture through the cost-reporting
     extractor stub, then the real reader over the real ledger row."""
     from tortoise import sdk as sdk_mod
-    from tortoise.metering import get_cohort_spend_usd
+    from tortoise.metering import _current_period, get_cohort_spend_usd
 
     monkeypatch.setattr(sdk_mod, "_V2SessionMock", _CostModel)
 
-    before = get_cohort_spend_usd([COHORT_ORG])
+    # #3825: the window is the org's own (no subscription → D13 calendar month
+    # in UTC). Resolved once and reused, so the before/after pair reads the
+    # same window the capture lane writes to.
+    window = _current_period(COHORT_ORG)
+    before = get_cohort_spend_usd([COHORT_ORG], window)
     r = capture_env.client.post(
         "/v1/sessions",
         json={"conversation": _CONV, "harness": "claude",
               "session_id": "sess-3665-ledger"})
     assert r.status_code == 200, r.text
-    after = get_cohort_spend_usd([COHORT_ORG])
+    after = get_cohort_spend_usd([COHORT_ORG], window)
 
     assert after > before, (
         f"a real capture must grow the cohort's ledger spend ({before} → {after})")
@@ -453,13 +579,24 @@ class _StubPlane:
         self.rpcs.append((fn, dict(body or {})))
         p = body or {}
         if fn == "metering_cohort_spend":
+            # #3825: the SQL is a HALF-OPEN OVERLAP test over the window, not a
+            # ``period = p_period`` month equality. Mirror it exactly, or a
+            # boundary regression would pass against this double.
             wanted = {str(i) for i in (p.get("p_org_ids") or [])}
-            return sum(
-                float(r.get("ask_cost_usd") or 0.0)
-                + float(r.get("capture_cost_usd") or 0.0)
-                for r in self.ledger
-                if str(r.get("org_id")) in wanted
-                and r.get("period") == p.get("p_period"))
+            start = _as_dt(p.get("p_period_start"))
+            end = _as_dt(p.get("p_period_end"))
+            total = 0.0
+            for r in self.ledger:
+                if str(r.get("org_id")) not in wanted:
+                    continue
+                r_start = _as_dt(r.get("period_start"))
+                r_end = _as_dt(r.get("period_end"))
+                if r_start is None or r_end is None:
+                    continue
+                if r_start < end and r_end > start:
+                    total += float(r.get("ask_cost_usd") or 0.0)
+                    total += float(r.get("capture_cost_usd") or 0.0)
+            return total
         if fn == "cohort_org_ids_since":
             since = str(p.get("p_since") or "")
             limit = int(p.get("p_limit") or 0)
@@ -484,17 +621,20 @@ def test_supabase_cohort_reader_sums_both_lanes_over_the_cohort_via_rpc():
     from tortoise.supabase_control import metering_cohort_spend
 
     plane = _StubPlane(ledger=[
-        {"org_id": "cohort-a", "period": "2026-09", "ask_cost_usd": 0.10,
+        {"org_id": "cohort-a", "period_start": WINDOW[0],
+         "period_end": WINDOW[1], "ask_cost_usd": 0.10,
          "capture_cost_usd": 0.15},
-        {"org_id": "not-in-cohort", "period": "2026-09",
-         "ask_cost_usd": 0.50, "capture_cost_usd": 0.50},
+        {"org_id": "not-in-cohort", "period_start": WINDOW[0],
+         "period_end": WINDOW[1], "ask_cost_usd": 0.50,
+         "capture_cost_usd": 0.50},
     ])
 
-    total = metering_cohort_spend(plane, ["cohort-a"], "2026-09")
+    total = metering_cohort_spend(plane, ["cohort-a"], *WINDOW)
 
     assert total == pytest.approx(0.25), total
     assert plane.rpcs == [("metering_cohort_spend", {
-        "p_org_ids": ["cohort-a"], "p_period": "2026-09"})], plane.rpcs
+        "p_org_ids": ["cohort-a"], "p_period_start": WINDOW[0],
+        "p_period_end": WINDOW[1]})], plane.rpcs
     assert plane.queries == [], (
         "a filtered row read can be silently truncated by db-max-rows and "
         "read as a cheaper cohort — the total must come from the aggregate")
@@ -517,7 +657,7 @@ def test_supabase_cohort_reader_fails_closed_when_the_aggregate_is_unreachable()
             raise RuntimeError("Supabase unreachable (simulated)")
 
     with pytest.raises(RuntimeError, match="unreachable"):
-        metering_cohort_spend(_Broken(), ["cohort-a"], "2026-09")
+        metering_cohort_spend(_Broken(), ["cohort-a"], *WINDOW)
 
 
 def test_supabase_cohort_reader_rejects_a_non_finite_aggregate():
@@ -535,7 +675,7 @@ def test_supabase_cohort_reader_rejects_a_non_finite_aggregate():
             return float("inf")
 
     with pytest.raises(RuntimeError, match="not finite"):
-        metering_cohort_spend(_Poisoned(), ["cohort-a"], "2026-09")
+        metering_cohort_spend(_Poisoned(), ["cohort-a"], *WINDOW)
 
 
 def test_supabase_capture_increment_calls_the_atomic_rpc_with_the_measurement():
@@ -549,11 +689,12 @@ def test_supabase_capture_increment_calls_the_atomic_rpc_with_the_measurement():
     from tortoise.supabase_control import metering_increment_capture_cost
 
     plane = _StubPlane()
-    metering_increment_capture_cost(plane, "cohort-a", "2026-09",
+    metering_increment_capture_cost(plane, "cohort-a", *WINDOW,
                                     calls=1, cost_usd=0.004321)
 
     assert plane.rpcs == [("metering_increment_capture_cost", {
-        "p_org_id": "cohort-a", "p_period": "2026-09", "p_calls": 1,
+        "p_org_id": "cohort-a", "p_period_start": WINDOW[0],
+        "p_period_end": WINDOW[1], "p_calls": 1,
         "p_cost_usd": 0.004321})], plane.rpcs
     assert plane.queries == [], (
         "the ledger write must be the atomic RPC, never a read-modify-write")
@@ -658,6 +799,7 @@ def test_selfhost_transport_exemption_survives_the_to_thread_dispatch(
 
     GREEN legitimate form: the transport ContextVar set in the caller."""
     import asyncio
+    from datetime import datetime
 
     import tortoise.metering as _metering
     from tortoise.cohort_cost import enforce_cohort_cost_cap
@@ -666,6 +808,15 @@ def test_selfhost_transport_exemption_survives_the_to_thread_dispatch(
     monkeypatch.setattr(_cc, "cohort_org_ids", lambda since: ["in-cohort"])
     monkeypatch.setattr(_metering, "get_cohort_spend_usd",
                         lambda ids, period: 999.0)
+    # #3825: the gate resolves the REQUESTING org's metering window before it
+    # reads the ledger (a registry read in the embedded lane). Stub it — this
+    # test is about the ContextVar surviving the ``to_thread`` dispatch, not
+    # about anchor resolution.
+    monkeypatch.setattr(
+        _metering, "_current_period",
+        lambda org_id: _metering.MeteringPeriod(
+            start=datetime.fromisoformat("2026-09-01T00:00:00+00:00"),
+            end=datetime.fromisoformat("2026-10-01T00:00:00+00:00")))
 
     async def _run():
         tok = _selfhost_transport.set(True)
@@ -701,11 +852,15 @@ def test_non_finite_capture_cost_never_poisons_the_cohort_sum(
     (the non-finite charge would be written through to the ledger row).
 
     GREEN legitimate form: a finite charge is recorded verbatim."""
-    from tortoise.metering import get_cohort_spend_usd, record_capture_usage
+    from tortoise.metering import _current_period, get_cohort_spend_usd, record_capture_usage
 
     with patched_tortoise_sdk(str(tmp_path / "nonfinite.db")):
         assert record_capture_usage("org-3665-finite", cost_usd=float("nan"))
         assert record_capture_usage("org-3665-finite", cost_usd=float("inf"))
         assert record_capture_usage("org-3665-finite", cost_usd=2.5)
 
-        assert get_cohort_spend_usd(["org-3665-finite"]) == pytest.approx(2.5)
+        # #3825: the reader takes a WINDOW. The org has no subscription (an
+        # unknown registry org → D13 calendar month in UTC).
+        window = _current_period("org-3665-finite")
+        assert get_cohort_spend_usd(["org-3665-finite"], window) == \
+            pytest.approx(2.5)

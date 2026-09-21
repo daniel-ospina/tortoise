@@ -540,7 +540,16 @@ def test_post_consume_team_read_failure_restores_the_code_and_retry_succeeds(fau
     """matrix row 3 — TODAY: 500, used_at stays set, retry → 400."""
     tc, cp = fault_client
     v = _seed_code(cp, "c5", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="organizations", method="GET", times=1)
+    # Scope the fault to the PRODUCTION call shape. A table-wide
+    # `organizations` GET fault is racy: the app's startup boot sweep
+    # (`tortoise-boot-sweep`) queries organizations with select=["id","name"]
+    # and can consume it before the token exchange's `_assert_org_usable`
+    # (select=["suspended_at","tier"]). Main scoped the `organizations` arm of
+    # test_exactly_one_capture_per_conversion_path for exactly this reason;
+    # this site and the one further down still used the table-wide form, so
+    # their assertions flipped 503 -> 200 on CI (#4464).
+    cp.fail_query(table="organizations", method="GET",
+                  select=["suspended_at", "tier"], times=1)
     r1 = _post_code(tc, cp, "c5", v)
     assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
     assert cp.tables["oauth_codes"][0]["used_at"] is None
@@ -710,7 +719,17 @@ def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, tabl
 
     monkeypatch.setattr("tortoise.sentry.capture_exception", _cap)
     tc, cp = fault_client
-    cp.fail_query(table=table, method="GET", times=1)
+    # Scope the fault to the PRODUCTION call shape. A table-wide
+    # `organizations` GET fault is racy: the app's startup boot sweep
+    # (`tortoise-boot-sweep`) queries organizations with select=["id","name"]
+    # and can consume it before the token exchange's `_assert_org_usable`
+    # (select=["suspended_at","tier"]) — offloading the grant widens that
+    # window. FakeControlPlane recommends a shape predicate for exactly this.
+    if table == "organizations":
+        cp.fail_query(table=table, method="GET",
+                      select=["suspended_at", "tier"], times=1)
+    else:
+        cp.fail_query(table=table, method="GET", times=1)
     if grant == "code":                                        # pre-consume
         v = _seed_code(cp, f"cap-{table}")
         _post_code(tc, cp, f"cap-{table}", v)
@@ -774,7 +793,11 @@ def test_capture_exception_raising_does_not_break_the_typed_error(monkeypatch, f
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sentry down")))
     tc, cp = fault_client
     v = _seed_code(cp, "sentry", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="organizations", method="GET", times=1)
+    # Scoped to the production call shape for the same reason as the other two
+    # shape-predicated sites in this file — a table-wide `organizations` GET
+    # fault races the startup boot sweep's select=["id","name"] query (#4464).
+    cp.fail_query(table="organizations", method="GET",
+                  select=["suspended_at", "tier"], times=1)
     r = _post_code(tc, cp, "sentry", v)
     assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
 

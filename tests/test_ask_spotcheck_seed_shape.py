@@ -254,12 +254,12 @@ def test_identity_resolves_from_the_edge_and_vanishes_without_it(seeded,
 def test_dateless_fixture_session_records_no_recorded_time(tmp_path):
     """#4106: a session the fixture does NOT date must record NO session time.
 
-    ``seed_capture_turn_store`` models a CAPTURE, so its ``now=None`` default
-    is the RUN clock; the ask-path date annotation reads
-    ``:Session.created_at`` and would render that run date as the session's
-    date — a fabricated fact in front of a temporal question. The fixture
-    erases what the default wrote, and the reader's context then carries NO
-    date marker.
+    The fixture tells the shared capture seeder ``now=None``, which since
+    #4156 means "record NO time" rather than "use the run clock". The
+    ask-path date annotation reads ``:Session.created_at``, so a run clock
+    there would render as the session's date — a fabricated fact in front of
+    a temporal question. NO recorded time is written (and nothing has to be
+    erased afterwards), so the reader's context carries NO date marker.
     """
     from tools.ask_spotcheck import _seed_memory
 
