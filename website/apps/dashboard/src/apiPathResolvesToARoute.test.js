@@ -48,7 +48,15 @@
 // `@app.get("/v1/backups")`; rename the `/accept` suffix of the invites route;
 // typo a `url:` poll path; delete `functions/api/profile.ts`; comment out an alias;
 // park an alias in a docstring; add a bogus literal `fetch()`; name the bare
-// `/v1` directory.
+// `/v1` directory; add a `/v1` prefix (or a bare fetch) inside a helper; double a
+// slash under the proxy prefix; register a route via `app.add_route(...)`.
+//
+// The prefix model is READ FROM THE HELPERS, not assumed: test 3 reads `api()`,
+// `authAction()` and `startBoundedPoll`'s bodies, so a one-line change inside one of
+// them fails here instead of keeping every scanned path identical while calls 404. A
+// path literal WRAPPED in an expression (`[...].join(…)`, `encodeURI(…)`,
+// ``String.raw`…` ``) is not a bare runtime variable — it is reported as `unscannable`,
+// so it cannot vanish silently.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync, statSync } from 'node:fs'
@@ -104,6 +112,11 @@ function methodFor(src, index, kind) {
   const shape = kind === 'url:' ? (hasSpreadAt(text, 1) ? 'unreadable' : 'ok') : optionsShape(text)
   if (kind !== 'url:' && shape === 'none') return 'GET'
   if (shape === 'unreadable') return '?'
+  // Scan ONLY the argument `optionsShape` inspected. `api('/v1/x', { a: 1 }, { method:
+  // 'DELETE' })` carries a `method` in a THIRD argument the real helpers never read;
+  // walking the whole argument list graded that GET call as DELETE — the verb was flipped
+  // by a stray argument. `url:` reads the object it already sits in, so its scope is all of it.
+  const scope = kind === 'url:' ? text : firstTopLevelSegment(text.replace(/^\s*,\s*/, ''))
   let depth = 1
   let inString = null
   // The LAST `method` key wins, because that is what javascript does. Returning the
@@ -111,16 +124,16 @@ function methodFor(src, index, kind) {
   // call is a DELETE — a silent false pass of the same class (found by verification
   // of the cycle-7 fix, not by review).
   let result = 'GET'
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i]
+  for (let i = 0; i < scope.length; i += 1) {
+    const ch = scope[i]
     if (inString) {
       if (ch === '\\') i += 1
       else if (ch === inString) inString = null
       continue
     }
     if (depth === want) {
-      const rest = text.slice(i)
-      const prev = text.slice(0, i).replace(/\s+$/, '')
+      const rest = scope.slice(i)
+      const prev = scope.slice(0, i).replace(/\s+$/, '')
       const keyPos = prev === '' || prev.endsWith('{') || prev.endsWith(',')
       if (keyPos) {
         // A getter/setter named `method` is an accessor, not a data property: it
@@ -272,6 +285,69 @@ function callArgs(src, from) {
   return src.slice(from)
 }
 
+// The index of the closer matching the opener at `openIndex` (or -1). String- and
+// comment-aware like `callArgs`, because a `)`/`}` inside a literal would otherwise end
+// the scan early.
+function matchingClose(src, openIndex, open, close) {
+  let depth = 0
+  let inString = null
+  for (let i = openIndex; i < src.length; i += 1) {
+    const ch = src[i]
+    if (inString) {
+      if (ch === '\\') i += 1
+      else if (ch === inString) inString = null
+      continue
+    }
+    if (ch === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i)
+      if (nl === -1) break
+      i = nl
+      continue
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i)
+      if (end === -1) break
+      i = end + 1
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') inString = ch
+    else if (ch === open) depth += 1
+    else if (ch === close) {
+      depth -= 1
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+// The BODY of a named function (the braces and everything between them), found by name
+// and brace-matched. Reading the helpers' REAL bodies is what keeps the prefix model from
+// being a hardcoded table: changing `api()`'s fetch or the poll's consumption must fail
+// here, not silently keep every scanned path identical.
+function functionBody(src, name) {
+  const re = new RegExp(`\\b(?:async\\s+)?function\\s+${escapeRe(name)}\\s*\\(`)
+  const m = re.exec(src)
+  if (!m) return null
+  const parenOpen = m.index + m[0].length - 1
+  const parenClose = matchingClose(src, parenOpen, '(', ')')
+  if (parenClose === -1) return null
+  const braceOpen = src.indexOf('{', parenClose)
+  if (braceOpen === -1) return null
+  const braceClose = matchingClose(src, braceOpen, '{', '}')
+  if (braceClose === -1) return null
+  return { body: src.slice(braceOpen + 1, braceClose), start: braceOpen + 1, end: braceClose }
+}
+
+// The first `fetch(…)` in a body: its raw first argument and the whole argument text.
+function fetchCallFirstArg(body) {
+  const open = body.indexOf('fetch(')
+  if (open === -1) return null
+  const args = callArgs(body, open + 'fetch('.length)
+  return { arg: firstTopLevelSegment(args).trim(), args }
+}
+
+const squash = (s) => s.replace(/\s+/g, '')
+
 // A `fetch()` literal, classified. SCANNED is a path this origin would receive;
 // EXTERNAL is another origin's URL; COMPUTED is a `${API_BASE}` template whose path
 // is a runtime variable (the `api` helper's own call — the call sites it serves are
@@ -354,12 +430,12 @@ function literalCallPaths(rawSrc) {
   const unrooted = []
   const paths = out
     .map(({ call, raw, index, prefix }) => {
-      // A literal `?` starts the query string; a `${…}` before it is a path hole.
-      // A `?` or `#` ends the path: the browser sends neither fragment nor query to the
-      // router, so `api(`/v1/backups#frag`)` requests the same route as `/v1/backups`.
-      // Splitting on `?` alone made a fragment-bearing but otherwise correct call a
-      // FALSE RED (#4345 cycle 7).
-      const pathPart = raw.split(/[?#]/)[0]
+      // A `?` or `#` at TEMPLATE DEPTH 0 ends the path: the browser sends neither
+      // fragment nor query to the router, so `api(`/v1/backups#frag`)` requests the
+      // same route as `/v1/backups`. A `?` INSIDE a `${…}` hole is the JS ternary /
+      // optional-chaining operator, not a query delimiter — splitting blindly at `?`
+      // turned `/v1/team/keys/${row?.id}` into the bogus path `/v1/team/keys/${row`.
+      const pathPart = pathBeforeQuery(raw)
       return {
         call,
         method: methodFor(src, index, call),
@@ -386,12 +462,53 @@ function literalCallPaths(rawSrc) {
   // an expression the regexes above cannot read. Report it instead of missing it.
   const urlObjects = [...src.matchAll(/\b(?:api|fetch)\(\s*new URL\(/g)]
     .map((mm) => src.slice(mm.index, mm.index + 40).split('\n')[0])
+  // A first argument that is an EXPRESSION wrapping a path literal —
+  // `['/v1/x'].join('')`, `encodeURI('/v1/x')`, `String.raw`/v1/x`` — is invisible to
+  // every literal regex above: zero paths AND zero diagnostics. That contradicts this
+  // file's rule that an unknown shape is REPORTED. A bare variable (`api(url, …)` the
+  // poll consumes, and the helper's own `function api(path, …)` signature) is a runtime
+  // value and stays the documented out-of-scope shape; `new URL(…)` has its own bucket.
+  const unscannable = []
+  for (const mm of src.matchAll(/\b(?:api|authAction)\(\s*/g)) {
+    if (/(?:async\s+)?function\s+$/.test(src.slice(0, mm.index))) continue
+    const first = src.slice(mm.index + mm[0].length)
+    if (!/^(?:[[(]|[A-Za-z_$][\w$]*\s*[.(])/.test(first)) continue
+    unscannable.push(src.slice(mm.index, mm.index + 60).split('\n')[0])
+  }
   // A method that could not be read statically is NOT graded GET — it is reported. The
   // resolver must not certify a call whose verb it guessed.
   const unreadable = paths
     .filter(({ method }) => method === '?')
     .map(({ call, raw }) => `${call}('${raw}')`)
-  return { paths, concat, unrooted, urlObjects, unreadable }
+  return { paths, concat, unrooted, urlObjects, unreadable, unscannable }
+}
+
+// The path portion of a template literal: everything before the first `?` or `#` that is
+// NOT inside a `${…}` hole. `raw.split(/[?#]/)[0]` split on the JS ternary and
+// optional-chaining operators too, so `/v1/team/keys/${row?.id}` became the bogus path
+// `/v1/team/keys/${row` — a path that then 404s. A `?`/`#` at depth 0 still ends the path:
+// neither the query nor the fragment reaches the router.
+function pathBeforeQuery(raw) {
+  let depth = 0 // inside a `${…}` hole
+  let inString = null
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]
+    if (inString) {
+      if (ch === '\\') i += 1
+      else if (ch === inString) inString = null
+      continue
+    }
+    if (depth > 0) {
+      if (ch === "'" || ch === '"' || ch === '`') inString = ch
+      else if (ch === '$' && raw[i + 1] === '{') { depth += 1; i += 1 }
+      else if (ch === '{') depth += 1
+      else if (ch === '}') depth -= 1
+      continue
+    }
+    if (ch === '?' || ch === '#') return raw.slice(0, i)
+    if (ch === '$' && raw[i + 1] === '{') { depth += 1; i += 1 }
+  }
+  return raw
 }
 
 // One matcher per segment: a literal segment must equal the route's, a segment
@@ -587,6 +704,16 @@ function matchesServerRoute(pattern, method, routes, wantTrailing = false) {
   })
 }
 
+// Does ANY registered route serve this PATH, whatever the verb? Used only to tell a 405
+// (the path exists, this verb does not) from a 404 (the path does not exist), so a
+// wrong-method call is not reported as "#4144 shape" when FastAPI in fact answers 405.
+function pathServedByAnyMethod(pattern, routes, wantTrailing = false) {
+  return routes.some((route) => {
+    if (route.mount) return matchesServerRoute(pattern, '*', routes, wantTrailing)
+    return matchesServerRoute(pattern, route.method, routes, wantTrailing)
+  })
+}
+
 // The app pathnames `public/_redirects` rewrites to `/` with a 200. Pages serves them,
 // so a same-origin fetch of one is not a 404 — and the repo's own routing surface
 // defines the Stripe-return pathnames that way (`/team / 200`). Read once, cache.
@@ -662,7 +789,7 @@ test('the server-route matcher is not vacuous (it rejects what must not resolve)
   const routes = serverRoutes()
   assert.ok(routes.length > 50, `expected to read many routes from hosted_api.py, got ${routes.length}`)
   // The extraction must be COMPLETE — see the per-verb and unknown-form checks below.
-  for (const form of ['add_api_route(', 'include_router(', 'APIRouter(']) {
+  for (const form of ['add_api_route(', 'add_route(', 'add_websocket_route(', 'include_router(', 'APIRouter(']) {
     assert.equal(
       serverSource().includes(form),
       false,
@@ -783,6 +910,32 @@ test('the server-route matcher is not vacuous (it rejects what must not resolve)
     false,
     'a whole-segment hole was satisfied by a literal route segment',
   )
+  // ── reader edge cases (self-tests) ─────────────────────────────────────────
+  // Only the FIRST argument object is the options object the helpers read. A `method` in
+  // a stray third argument must not flip the graded verb.
+  const stray = literalCallPaths("api('/v1/backups', { a: 1 }, { method: 'DELETE' })")
+  assert.equal(
+    stray.paths[0].method,
+    'GET',
+    'a stray third argument flipped the graded verb — only the first options object is read',
+  )
+  // A path literal reached through an expression (`[...].join(…)`, `encodeURI(…)`,
+  // `String.raw`…``) is reported, not silently invisible.
+  const computed = literalCallPaths(
+    "api(['/v1/bogus'].join(''))\napi(encodeURI('/v1/bogus'))\napi(String.raw`/v1/bogus`)",
+  )
+  assert.equal(
+    computed.unscannable.length,
+    3,
+    `a computed first argument produced no diagnostic: ${JSON.stringify(computed.unscannable)}`,
+  )
+  // A `?` inside a `${…}` hole is part of the hole, not a query delimiter.
+  const optional = literalCallPaths("api(`/v1/team/keys/${row?.id}`, { method: 'DELETE' })")
+  assert.equal(
+    optional.paths[0].path,
+    '/v1/team/keys/${row?.id}',
+    'a `?` inside a `${…}` hole truncated the path at the JS optional-chaining operator',
+  )
 })
 
 test('every literal call path resolves — client route AND upstream server route', () => {
@@ -796,41 +949,67 @@ test('every literal call path resolves — client route AND upstream server rout
   const unrooted = []
   const urlObjects = []
   const unreadable = []
+  const unscannable = []
   for (const file of SOURCES) {
     const scanned = literalCallPaths(readFileSync(join(HERE, file), 'utf8'))
     concats.push(...scanned.concat.map((c) => `${file}: ${c}`))
     unrooted.push(...scanned.unrooted.map((p) => `${file}: ${p}`))
     urlObjects.push(...scanned.urlObjects.map((u) => `${file}: ${u}`))
     unreadable.push(...scanned.unreadable.map((u) => `${file}: ${u}`))
+    unscannable.push(...scanned.unscannable.map((u) => `${file}: ${u}`))
     for (const { call, path, requestPath, method, pattern, trailingSlash } of scanned.paths) {
       total += 1
-      // ONLY the proxy prefix is forwarded. Keying this branch on the STRIPPED path let
-      // a bare `fetch('/v1/...')` be certified by the API route it could never reach:
-      // the browser asks Pages for /v1/..., which does not exist — #4144's own species
-      // (a path the server serves and the browser cannot request).
       if (method === '?') continue // reported below — never certified on a guessed verb
+      // A DOUBLED SLASH is collapsed by neither router. `segments()` filters the empty
+      // segment, so `matchesServerRoute` certified `/v1//backups` against `/v1/backups`
+      // while the browser really requests `/api/v1//backups`, which the proxy route does
+      // not match. The Pages branch already refuses `//`; the proxy branch must too, or the
+      // two branches contradict each other about the same call.
+      if (path.includes('//')) {
+        bad.push(
+          `${file}: ${call}('${path}') → the path contains a doubled slash ('//'); neither the Pages `
+          + 'router nor FastAPI collapses it, so the request 404s. Write a single slash.',
+        )
+        continue
+      }
       if (requestPath.startsWith(`${PROXY_PREFIX}/`)) {
+        // ONLY the proxy prefix is forwarded. Keying this branch on the STRIPPED path let
+        // a bare `fetch('/v1/...')` be certified by the API route it could never reach:
+        // the browser asks Pages for /v1/..., which does not exist — #4144's own species
+        // (a path the server serves and the browser cannot request).
         // Forwarded by the proxy — so the SERVER must serve it, with that METHOD.
         // The proxy route `functions/api/v1/[[path]].ts` strips its own prefix and
         // rebuilds `${API_ORIGIN}/v1/${rest}`, so the upstream path is `path`.
         // The proxy route `functions/api/v1/[[path]].ts` strips its own prefix and
         // rebuilds `${API_ORIGIN}/v1/${rest}`, so the upstream path is `path`.
         if (!matchesServerRoute(pattern, method, routes, trailingSlash)) {
-          // A trailing `${…}` on the last segment is read as a QUERY TAIL, so the route
-          // segment must equal the literal prefix. That is deliberate (the alternative
-          // certified any route merely PREFIX-matching the literal), but for a genuine
-          // path PARAMETER (`/v1/backups-${id}` vs a route `/v1/backups-{id}`) it fails
-          // closed — so say which rule bit, instead of implying the server lost a route.
-          const tailNote = pattern.some((p) => p.queryTail)
-            ? ' — note: a trailing `${…}` is read as a QUERY TAIL here, so the route segment must EQUAL '
-              + 'the literal prefix; if this is a path parameter, this guard cannot tell the two apart '
-              + 'and fails closed'
-            : ''
-          bad.push(
-            `${file}: ${call}('${path}') [${method}] (requests ${requestPath}) → the BFF proxy would forward to `
-            + `${path} on the API, but tortoise/hosted_api.py has no route of that method whose segments match `
-            + `(this is the #4144 shape)${tailNote}`,
-          )
+          // A route may exist at this path for a DIFFERENT verb: FastAPI answers that
+          // with 405 (Method Not Allowed), NOT the 404 this guard exists to catch.
+          // Saying "#4144 shape" — and blaming the query-tail rule, which did not bite —
+          // mislabels a wrong verb as a missing path.
+          if (pathServedByAnyMethod(pattern, routes, trailingSlash)) {
+            bad.push(
+              `${file}: ${call}('${path}') [${method}] (requests ${requestPath}) → the path exists on the `
+              + `API, but no route serves ${method}; FastAPI answers 405 (Method Not Allowed), not a 404. `
+              + `Use a verb the route serves, or add the ${method} route.`,
+            )
+          } else {
+            // A trailing `${…}` on the last segment is read as a QUERY TAIL, so the route
+            // segment must equal the literal prefix. That is deliberate (the alternative
+            // certified any route merely PREFIX-matching the literal), but for a genuine
+            // path PARAMETER (`/v1/backups-${id}` vs a route `/v1/backups-{id}`) it fails
+            // closed — so say which rule bit, instead of implying the server lost a route.
+            const tailNote = pattern.some((p) => p.queryTail)
+              ? ' — note: a trailing `${…}` is read as a QUERY TAIL here, so the route segment must EQUAL '
+                + 'the literal prefix; if this is a path parameter, this guard cannot tell the two apart '
+                + 'and fails closed'
+              : ''
+            bad.push(
+              `${file}: ${call}('${path}') [${method}] (requests ${requestPath}) → the BFF proxy would forward to `
+              + `${path} on the API, but tortoise/hosted_api.py has no route of that method whose segments match `
+              + `(this is the #4144 shape)${tailNote}`,
+            )
+          }
         }
         continue
       }
@@ -882,6 +1061,12 @@ test('every literal call path resolves — client route AND upstream server rout
     `a call path built with \`new URL(…)\` is a literal this origin resolves — write it as a plain `
     + `string so it can be checked:\n  ${urlObjects.join('\n  ')}`,
   )
+  assert.deepEqual(
+    unscannable,
+    [],
+    `these calls pass a computed expression as the path (not a literal, not a bare variable), so `
+    + `the guard cannot read them and must not ignore them:\n  ${unscannable.join('\n  ')}`,
+  )
 })
 
 test('the prefix this guard models matches the client constant and the proxy route', () => {
@@ -897,6 +1082,44 @@ test('the prefix this guard models matches the client constant and the proxy rou
     PROXY_PREFIX,
     `API_BASE is ${m[1]}, so api() requests ${m[1]}…, not ${PROXY_PREFIX}… — the guard's whole `
     + 'model of what the browser asks for is then wrong',
+  )
+  // The prefix model is only as good as the helpers it models. A hardcoded table said
+  // `api()` requests `${API_BASE}${path}` and the poll consumes its `url:` through
+  // `api(url, …)`, but NOTHING read those bodies — so a one-line change inside a helper
+  // (an extra `/v1` prefix, a bare `fetch(url)`, an `/api/auth/…` fetch) left every scanned
+  // path identical and the guard green while every call 404s. Read the REAL bodies.
+  const apiBody = functionBody(client, 'api')
+  assert.ok(apiBody, 'main.jsx must define `function api(…)` — the guard models its prefix')
+  const apiFetch = fetchCallFirstArg(apiBody.body)
+  assert.ok(apiFetch, 'api() must call fetch() — the guard models that call')
+  assert.equal(
+    squash(apiFetch.arg),
+    '`${API_BASE}${path}`',
+    `api() must fetch \`\${API_BASE}\${path}\` and add no other prefix — it fetches `
+    + `\`${apiFetch.arg}\`, so the guard's model of the request path no longer matches the app`,
+  )
+  const authBody = functionBody(client, 'authAction')
+  assert.ok(authBody, 'main.jsx must define `function authAction(…)` — the guard models its path')
+  const authFetch = fetchCallFirstArg(authBody.body)
+  assert.ok(authFetch, 'authAction() must call fetch() — the guard models that call')
+  assert.equal(
+    squash(authFetch.arg),
+    'path',
+    `authAction() must fetch its path verbatim, with no prefix — it fetches \`${authFetch.arg}\`, `
+    + 'so the guard would check a path the app does not request',
+  )
+  assert.match(
+    authFetch.args,
+    /\bmethod\s*:\s*['"]POST['"]/,
+    'authAction() must POST its path verbatim — the guard models this helper as a same-origin POST',
+  )
+  const pollBody = functionBody(client, 'startBoundedPoll')
+  assert.ok(pollBody, 'main.jsx must define `function startBoundedPoll(…)` — the guard models its tick')
+  assert.match(
+    pollBody.body,
+    /\bapi\(\s*url\s*[,)]/,
+    'startBoundedPoll must consume its `url:` through `api(url, …)`; a bare `fetch(url)` would '
+    + 'bypass the prefix/verb model the guard checks every poll path against',
   )
   const proxy = readFileSync(join(FUNCTIONS_DIR, 'api', 'v1', '[[path]].ts'), 'utf8')
   assert.ok(
