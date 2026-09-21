@@ -146,6 +146,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                                   "team-strip-2600": "team-identity",   # :468 — the registry seed, the contextvar and the read-back all key off this team id
                                   "team-sweep-2600": "team-identity"},  # :530/:550 — the sweep fixture's own seeded team id is its graph
     "test_attribution_machine_model.py": {"registry": "prod-coupled"},   # :178 — _make_sdk(namespace="registry") mirrors the hosted_api registry resolve
+    # #3718 (read half): :114 — _make_sdk(namespace="registry") WARMS the same
+    # registry graph the hosted read handlers resolve (the anchor must be warm
+    # for the embedded lane to survive between requests). A test_* rename would
+    # warm a different graph and leave the prod registry anchor cold — same
+    # class as test_attribution_machine_model / test_metering.
+    "test_read_routes_loop_responsiveness.py": {"registry": "prod-coupled"},
     "test_oauth_mcp.py": {"team-free-001": "team-identity"},   # :1342 — the OAuth token's org_id IS the graph namespace the journal assert reads
     # e2e-900 (cycle-4 P2-7 / cycle-5 P1-5): the SHARED non-test team_e2e-900
     # graph of the index suite — routed by REDIRECT DERIVATION, not rename:
