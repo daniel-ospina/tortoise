@@ -937,10 +937,14 @@ def _pn(records: list[dict], key: str) -> dict:
 
 def _assembly_budget(records: list[dict]) -> dict:
     """W7A: the assembly budget the lane actually FILLED — median tokens of
-    the RESOLVED ask-lane ``context_token_cap`` across the live questions
-    (read from ``resolve_ask_retrieval_caps()`` below, never a literal: the
-    cap is 16000 since #4105 and a stated number would be false the moment
-    it moves).
+    the RESOLVED ask-lane ``context_token_cap`` across the live questions.
+
+    The value is resolved at runtime by ``resolve_ask_retrieval_caps()``
+    below and is NEVER restated here: it honours
+    ``TORTOISE_ASK_CONTEXT_TOKEN_CAP``, so any number written into this
+    docstring would be false whenever that env is set — and would go stale
+    the moment the default moves. (#4105 raised the default 8000 -> 16000;
+    the historical attribution is the only form that stays true.)
 
     Reported alongside, never a leg. Read from the lane's own
     ``context_tokens`` (post-assembly), so it measures the real assembled
