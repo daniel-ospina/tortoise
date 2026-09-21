@@ -1028,7 +1028,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("reported 40 in Cursor — so a large part of our surface is not merely unused, it is invisible")
     add("anyway, and we pay context for it on every turn. Every comparable we studied pins a smaller set,")
     add("and the pattern is not novel here: `tortoise_recall` is already one tool with four modes and")
-    add(f"`tortoise_get` already absorbed six getters. Deferring the rest keeps all {len(tools)} callable.")
+    add(f"`tortoise_get_entity` already absorbed the six fetch-by-id getters. Deferring the rest keeps all {len(tools)} callable.")
     add("")
     add("**The case against, which is real and not a formality.** Tortoise is genuinely broader than the")
     add("comparables — a graph memory *and* a reasoning engine with sessions, sources and mining — so some")

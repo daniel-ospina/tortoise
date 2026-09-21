@@ -1,6 +1,6 @@
 manifest_version: 1
 issue: 3863
-cut_at_commit: c01ad93b5
+cut_at_commit: acc6665f8
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -812,7 +812,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_get_entity
-  served_from: tortoise/mcp_server.py:226a2c6087c5beb3
+  served_from: tortoise/mcp_server.py:faaf6508b2146468
   family: graph
   family_rank: 2
   served: http

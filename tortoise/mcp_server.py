@@ -2295,9 +2295,19 @@ def tortoise_set_source_tier(url: str, tier: str) -> dict:
     """
     return _safe(_get_org_sdk().set_source_tier, url, tier)
 
-def tortoise_get_entity(id: str) -> dict:
+def tortoise_get_entity(id: str | None = None, type: str | None = None,
+                        limit: int = 20) -> Any:
     """Get any entity by ID, eventId, or url.
-    Alias → get(id, type='entity') (epic #888 W3)."""
+
+    This is the BROAD fetch tool (owner decision, `docs/product/canonical-mcp-tools.md`,
+    approval_pr 4120): `type` selects the node kind exactly as `tortoise_get` did, so the
+    retirement pointers that name `tortoise_get_entity(id, type=...)` resolve. With no
+    `type`, it keeps its narrow meaning — the entity addressed by an id|eventId|url —
+    and the SDK method `TortoiseSDK.get_entity` is untouched (the decision separates the
+    tool's broad meaning from the SDK's narrow one).
+    """
+    if type is not None or id is None:
+        return tortoise_get(id, type=type, limit=limit)
     return _safe(_get_org_sdk().get_entity, id)
 
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
