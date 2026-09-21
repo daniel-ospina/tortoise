@@ -4632,9 +4632,12 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
-    the OAuth read-only lanes pass a factory raising RFC 6749 §5.2
+    the OAuth resolution lanes pass a factory raising RFC 6749 §5.2
     ``temporarily_unavailable`` instead, because their consumers parse the
-    OAuth error body (#2863) and never the FastAPI ``detail`` shape.
+    OAuth error body (#2863) and never the FastAPI ``detail`` shape. (The
+    authorize/consent lanes are read-mostly: their only write is the idempotent
+    ``oauth_clients`` provisioning insert, so a retry after a bound miss is
+    safe. The MUTATING token grants do not use this bound at all — see below.)
 
     ``timeout`` is the WAIT BOUND on the submission (``None`` = the seam's
     ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``). ``math.inf`` waits WITHOUT a bound —
@@ -4671,7 +4674,7 @@ async def _oauth_offload(fn, *, op: str, no_wait_bound: bool = False):
     ``client_id``, a blocking ``httpcore`` fetch — and it is reached from FOUR
     unauthenticated front doors. Offloading the RESOLUTION (not the fetch) puts
     the whole resolve on a pool dedicated to this lane, so the event loop is
-    never occupied; the fetch's own in-flight cap, absolute deadline and
+    never occupied; the fetch's own in-flight cap, per-fetch deadline and
     per-window wall-clock budget live in ``tortoise.cimd`` and are therefore
     charged identically at all four doors.
 

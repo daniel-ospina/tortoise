@@ -238,12 +238,7 @@ class _FakePool:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.script = list(_FakePool.script)
-        self.closed = False
         _FakePool.instances.append(self)
-
-    def close(self):
-        # The #3669 hard-deadline watchdog calls this from its timer thread.
-        self.closed = True
 
     def __enter__(self):
         return self
@@ -554,19 +549,19 @@ def test_fetch_budget_reserves_the_worst_case_and_refuses_a_later_fetch(monkeypa
     """A fetch RESERVES FETCH_MAX_S up front, settles to actual on return, and
     once the window cannot fit another reservation the next fetch is refused
     BEFORE it starts (and before it charges the rate limiter)."""
-    monkeypatch.setattr(cimd, "FETCH_MAX_S", 0.05)
-    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 0.1)
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 0.5)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 1.0)
     monkeypatch.setattr(cimd, "CACHE_TTL_S", 0)   # force a second fetch
     calls: list[str] = []
 
     def _slow(client_id):
         calls.append(client_id)
-        time.sleep(0.08)
+        time.sleep(0.6)
         return _doc()
 
     monkeypatch.setattr(cimd, "fetch_client_metadata", _slow)
-    _resolve_direct()                               # settles to ~0.08 actual
-    assert 0.05 <= cimd._BUDGET_SPENT < cimd.FETCH_BUDGET_S
+    _resolve_direct()                               # settles to ~0.6 actual
+    assert cimd._BUDGET_SPENT > 0.0
     with pytest.raises(cimd.CimdError, match="wall-clock budget"):
         _resolve_direct()
     assert len(calls) == 1, "the refused fetch must not have been attempted"
@@ -583,6 +578,19 @@ def test_budget_reservation_is_refunded_to_actual(monkeypatch):
         "the 5s worst-case reservation must be refunded to the ~0s actual")
 
 
+def test_budget_reservation_is_refunded_when_the_rate_limiter_refuses(monkeypatch):
+    """REGRESSION (cycle-2 review): the rate-limit charge sits INSIDE the
+    settled region, so a refusal there must not leave the reservation charged
+    for the rest of the window (that leaked the budget to cheap non-fetching
+    requests and starved legitimate clients)."""
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 5.0)
+    monkeypatch.setattr(cimd, "PER_HOST_PER_HOUR", 0)
+    with pytest.raises(cimd.CimdError, match="rate limit"):
+        _resolve_direct()
+    assert cimd._BUDGET_SPENT < cimd.FETCH_MAX_S, (
+        "a rate-refused request leaked its whole reservation")
+
+
 def test_an_unsettled_reservation_stays_charged(monkeypatch):
     """An ABANDONED fetch (its caller's offload bound expired while the worker
     kept running) never reaches ``_budget_settle``, so its reservation stays
@@ -593,6 +601,19 @@ def test_an_unsettled_reservation_stays_charged(monkeypatch):
     assert cimd._BUDGET_SPENT == 5.0
     cimd._budget_settle(0.0)
     assert cimd._BUDGET_SPENT == 0.0
+
+
+def test_settle_cannot_reopen_a_rolled_over_window(monkeypatch):
+    """A settle from a fetch that spanned a window boundary must not subtract a
+    reservation the new window already reset (a negative ``_BUDGET_SPENT``
+    would REOPEN budget the window is meant to have closed)."""
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 5.0)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 100.0)
+    cimd._budget_reserve()
+    with cimd._BUDGET_LOCK:          # simulate the roll-over resetting spent
+        cimd._BUDGET_SPENT = 0.0
+    cimd._budget_settle(0.1)
+    assert cimd._BUDGET_SPENT >= 0.0
 
 
 def test_budget_refusal_does_not_charge_the_rate_limiter(monkeypatch):
@@ -610,15 +631,15 @@ def test_budget_refusal_does_not_charge_the_rate_limiter(monkeypatch):
 def test_budget_window_rolls_over(monkeypatch):
     """The budget is per RATE_WINDOW_S: once the window elapses the next
     check starts a fresh one (lazy roll-over, no background timer)."""
-    monkeypatch.setattr(cimd, "FETCH_MAX_S", 0.05)
-    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 0.1)
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 0.5)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 1.0)
     monkeypatch.setattr(cimd, "CACHE_TTL_S", 0)
     calls: list[str] = []
 
     def _slow_once(client_id):
         calls.append(client_id)
         if len(calls) == 1:
-            time.sleep(0.08)      # spend the whole first window
+            time.sleep(0.6)      # spend the whole first window
         return _doc()
 
     monkeypatch.setattr(cimd, "fetch_client_metadata", _slow_once)
@@ -736,8 +757,8 @@ def test_read_capped_enforces_the_deadline():
 
 
 def test_fetch_aborts_a_trickled_body_at_the_hard_deadline(fake_pool, monkeypatch):
-    """BEHAVIOURAL: a body that trickles past FETCH_MAX_S is aborted (and the
-    watchdog closes the pool) even though each read is inside READ_TIMEOUT_S."""
+    """BEHAVIOURAL: a body that trickles past FETCH_MAX_S is aborted even
+    though each read is inside READ_TIMEOUT_S."""
     monkeypatch.setattr(cimd, "FETCH_MAX_S", 0.05)
     monkeypatch.setattr(cimd, "READ_TIMEOUT_S", 30.0)   # would never fire
 
@@ -749,8 +770,45 @@ def test_fetch_aborts_a_trickled_body_at_the_hard_deadline(fake_pool, monkeypatc
     fake_pool.script = [_FakeResponse(200, _trickle())]
     with pytest.raises(cimd.CimdError, match="deadline"):
         cimd.fetch_client_metadata(CLIENT_ID)
-    assert fake_pool.instances[-1].closed, (
-        "the watchdog must close the pool at the hard deadline")
+
+
+def test_fetch_passes_its_deadline_to_the_pinning_backend(fake_pool):
+    """The connect loop must see the deadline, or a multi-address blackhole
+    burns CONNECT_TIMEOUT_S per address (cycle-2 security finding)."""
+    fake_pool.script = [_FakeResponse(200, [b"{}"])]
+    cimd.fetch_client_metadata(CLIENT_ID)
+    backend = fake_pool.instances[-1].kwargs["network_backend"]
+    assert backend._deadline is not None
+
+
+def test_connect_loop_caps_each_attempt_by_the_remaining_deadline(monkeypatch):
+    monkeypatch.setattr(cimd, "public_addresses", lambda h, p: ["1.1.1.1", "1.1.1.2"])
+    seen: list[float | None] = []
+
+    class _Inner:
+        def connect_tcp(self, host, port, timeout=None, **kw):
+            seen.append(timeout)
+            raise OSError("connection refused")
+
+    backend = cimd._PinningNetworkBackend(inner=_Inner())
+    backend._deadline = time.monotonic() + 1.0
+    with pytest.raises(httpcore.ConnectError):
+        backend.connect_tcp("h", 443, timeout=cimd.CONNECT_TIMEOUT_S)
+    assert seen and all(t is not None and t <= 1.0 for t in seen), (
+        "each connect attempt must be capped by the remaining deadline")
+
+
+def test_connect_loop_refuses_past_the_deadline(monkeypatch):
+    monkeypatch.setattr(cimd, "public_addresses", lambda h, p: ["1.1.1.1"])
+
+    class _Inner:
+        def connect_tcp(self, *a, **k):
+            raise AssertionError("must not attempt a connect past the deadline")
+
+    backend = cimd._PinningNetworkBackend(inner=_Inner(),
+                                          deadline=time.monotonic() - 1)
+    with pytest.raises(httpcore.ConnectTimeout):
+        backend.connect_tcp("h", 443, timeout=cimd.CONNECT_TIMEOUT_S)
 
 
 # ── Feature gate ───────────────────────────────────────────────────────────

@@ -39,10 +39,11 @@ implemented here:
    invalid or malformed").
 6. **Fetch rate limiting** — per-host + aggregate + store cap, mirroring the
    DCR limiter's bucket idiom in ``hosted_api``.
-7. **Total occupancy** (#3669) — a process-wide in-flight cap, an ABSOLUTE
-   per-fetch deadline (the per-op timeouts do not bound a trickled body), and a
-   wall-clock budget per window whose worst case is RESERVED at admission, so
-   the product (fetches x duration) is bounded and not just the fetch count.
+7. **Total occupancy** (#3669) — a process-wide in-flight cap, a per-fetch
+   deadline bounding the connect loop and the body read (the per-op timeouts do
+   not bound a trickled body), and a wall-clock budget per window whose worst
+   case is RESERVED at admission, so the product (fetches x duration) is bounded
+   and not just the fetch count.
 
 Control (2) is closed against **DNS rebinding** by connecting the TCP socket to
 the *validated* address while TLS SNI and the HTTP ``Host`` header stay on the
@@ -118,15 +119,19 @@ STORE_CAP = 256
 # escape the accounting.
 MAX_IN_FLIGHT_FETCHES = 4
 FETCH_BUDGET_S = 120.0
-#: ABSOLUTE wall-clock deadline for ONE fetch, whole exchange. ``READ_TIMEOUT_S``
-#: is a per-socket-read timeout, not a total one: a server that trickles the
-#: body one byte at a time keeps resetting it and can hold a worker — and an
-#: in-flight permit — indefinitely. A watchdog closes the pool at this deadline,
-#: and the budget RESERVES this worst case at admission (see ``_budget_reserve``)
-#: so a fetch that never returns cannot be reset out of the accounting. Sits
-#: BELOW ``monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` so a fetch returns
-#: before its caller's offload bound would abandon it.
-FETCH_MAX_S = 8.0
+#: Wall-clock deadline for the CONNECT loop and the body read of ONE fetch.
+#: ``READ_TIMEOUT_S`` is a per-socket-read timeout, not a total one, so a server
+#: that trickles the body keeps resetting it; the deadline is what actually
+#: bounds the read, and ``_PinningNetworkBackend`` caps EACH connect attempt by
+#: the remaining deadline (a host with several blackholed addresses would
+#: otherwise burn ``CONNECT_TIMEOUT_S`` per address). The budget RESERVES this
+#: at admission (see ``_budget_reserve``), so a fetch that never returns cannot
+#: be reset out of the accounting. One stalled per-socket read may still add up
+#: to ``READ_TIMEOUT_S`` on top; ``FETCH_MAX_S + READ_TIMEOUT_S`` is kept below
+#: ``monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` so a fetch returns before its
+#: caller's offload bound. The OS resolver's own timeout on ``getaddrinfo`` is
+#: the one unbounded tail (pre-existing; see the module docstring).
+FETCH_MAX_S = 6.0
 #: How long a resolution waits for an in-flight slot before refusing. Bounded,
 #: so a saturated cap fails fast instead of parking a caller indefinitely.
 IN_FLIGHT_WAIT_S = 2.0
@@ -310,17 +315,35 @@ class _PinningNetworkBackend(httpcore.NetworkBackend):
     approve, even if DNS changes between the two calls.
     """
 
-    def __init__(self, inner: httpcore.NetworkBackend | None = None) -> None:
+    def __init__(self, inner: httpcore.NetworkBackend | None = None,
+                 deadline: float | None = None) -> None:
         self._inner = inner if inner is not None else httpcore.SyncBackend()
+        # An ABSOLUTE ``time.monotonic()`` deadline for the whole fetch, or None
+        # for the historical unbounded connect (tests and any non-fetch use).
+        self._deadline = deadline
 
     def connect_tcp(self, host, port, timeout=None, local_address=None,
                     socket_options=None):
         addresses = public_addresses(host, int(port))
         last_error: Exception | None = None
         for address in addresses:
+            remaining = (None if self._deadline is None
+                         else self._deadline - time.monotonic())
+            if remaining is not None and remaining <= 0:
+                # #3669 review: httpcore's own ``close()`` cannot interrupt a
+                # blocked connect (the connection object does not exist yet), so
+                # the connect LOOP must honour the deadline itself — otherwise a
+                # host with several blackholed addresses burns
+                # CONNECT_TIMEOUT_S each.
+                raise httpcore.ConnectTimeout(
+                    f"CIMD fetch deadline exceeded before connecting to {host!r}")
+            address_timeout = timeout
+            if remaining is not None:
+                address_timeout = (remaining if timeout is None
+                                   else min(timeout, remaining))
             try:
                 return self._inner.connect_tcp(
-                    address, port, timeout=timeout,
+                    address, port, timeout=address_timeout,
                     local_address=local_address, socket_options=socket_options)
             except Exception as exc:            # try the next vetted address
                 last_error = exc
@@ -400,12 +423,13 @@ def _budget_settle(elapsed: float) -> None:
     """Replace the ``FETCH_MAX_S`` reservation with the ACTUAL elapsed time.
 
     Called in a ``finally``, so a failed fetch still pays for the time it
-    occupied. Adds the difference, so an over-deadline fetch (the watchdog is a
-    best-effort backstop) is still charged for everything it used.
+    occupied. The result is CLAMPED at zero: a concurrent window roll-over can
+    reset the reservation this settle would remove, and a negative
+    ``_BUDGET_SPENT`` would REOPEN budget the window is meant to have closed.
     """
     global _BUDGET_SPENT
     with _BUDGET_LOCK:
-        _BUDGET_SPENT += elapsed - FETCH_MAX_S
+        _BUDGET_SPENT = max(0.0, _BUDGET_SPENT + elapsed - FETCH_MAX_S)
 
 
 def _prune(bucket: list[float], now: float) -> list[float]:
@@ -498,17 +522,10 @@ def fetch_client_metadata(client_id: str) -> dict:
     # pinned socket and hand the destination back to a name, defeating (2).
     timeout = {"connect": CONNECT_TIMEOUT_S, "read": READ_TIMEOUT_S,
                "write": CONNECT_TIMEOUT_S, "pool": CONNECT_TIMEOUT_S}
-    pool = httpcore.ConnectionPool(network_backend=_PinningNetworkBackend(),
-                                   max_connections=2, retries=0)
-    # #3669 control 7: an ABSOLUTE deadline on the whole exchange. The per-op
-    # timeouts below do not bound a server that trickles the headers or body
-    # (each byte resets the read timeout), so a watchdog closes the pool at
-    # FETCH_MAX_S and the blocked read aborts. Cancelled in the `finally` for
-    # every other exit, so a normal fetch never pays the deadline.
-    watchdog = threading.Timer(FETCH_MAX_S, pool.close)
-    watchdog.daemon = True
-    watchdog.start()
     deadline = time.monotonic() + FETCH_MAX_S
+    pool = httpcore.ConnectionPool(
+        network_backend=_PinningNetworkBackend(deadline=deadline),
+        max_connections=2, retries=0)
     try:
         # The validated URL goes to httpcore verbatim: it derives SNI and the
         # Host header from the URL's host, which is exactly the pairing the
@@ -531,8 +548,6 @@ def fetch_client_metadata(client_id: str) -> dict:
         raise
     except Exception as exc:
         raise CimdError(f"could not fetch the client metadata document: {exc}") from exc
-    finally:
-        watchdog.cancel()
     try:
         document = json.loads(body.decode("utf-8"))
     except Exception as exc:
@@ -659,9 +674,12 @@ def resolve_client_metadata(client_id: str, *, supported_scopes: set[str],
         raise CimdError("CIMD fetch concurrency limit reached.")
     try:
         _budget_reserve()
-        _charge_rate_limit(urlparse(client_id).hostname or "")
         started = time.monotonic()
         try:
+            # The rate-limit charge and the fetch share ONE settled region: a
+            # refusal from the limiter must not leave the reservation charged
+            # (that leaked 8 s per refused request and drained the window).
+            _charge_rate_limit(urlparse(client_id).hostname or "")
             document = fetch_client_metadata(client_id)
         finally:
             _budget_settle(time.monotonic() - started)

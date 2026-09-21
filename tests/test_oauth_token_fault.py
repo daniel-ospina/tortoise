@@ -710,7 +710,17 @@ def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, tabl
 
     monkeypatch.setattr("tortoise.sentry.capture_exception", _cap)
     tc, cp = fault_client
-    cp.fail_query(table=table, method="GET", times=1)
+    # Scope the fault to the PRODUCTION call shape. A table-wide
+    # `organizations` GET fault is racy: the app's startup boot sweep
+    # (`tortoise-boot-sweep`) queries organizations with select=["id","name"]
+    # and can consume it before the token exchange's `_assert_org_usable`
+    # (select=["suspended_at","tier"]) — offloading the grant widens that
+    # window. FakeControlPlane recommends a shape predicate for exactly this.
+    if table == "organizations":
+        cp.fail_query(table=table, method="GET",
+                      select=["suspended_at", "tier"], times=1)
+    else:
+        cp.fail_query(table=table, method="GET", times=1)
     if grant == "code":                                        # pre-consume
         v = _seed_code(cp, f"cap-{table}")
         _post_code(tc, cp, f"cap-{table}", v)

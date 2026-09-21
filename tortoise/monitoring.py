@@ -709,8 +709,13 @@ CONTROL_PLANE_TELEMETRY_BACKLOG = 256
 #: ``auth`` pool would let a fetch flood occupy every auth slot — the same
 #: isolation argument that split ``telemetry`` out (#3498 review P1), applied
 #: to a new attacker class. Sized ABOVE ``cimd.MAX_IN_FLIGHT_FETCHES`` so the
-#: CIMD in-flight cap is the binding constraint on fetches (defence in depth)
-#: and the remaining workers still carry the token grants and registry reads.
+#: CIMD in-flight cap is the binding constraint on FETCHES (defence in depth),
+#: with the remaining workers carrying the token grants and registry reads.
+#: NOTE the token grants share this pool and are awaited with no offload wait
+#: bound, so N concurrent grants can occupy N workers; a resolution submitted
+#: while the pool is saturated waits on the shared backlog and fails closed at
+#: its own bound. That read-lane pressure is accepted (bounded by the backlog
+#: and the grant's httpx phase timeouts), not hidden.
 CONTROL_PLANE_OAUTH_WORKER_NAME = "tortoise-oauth"
 CONTROL_PLANE_OAUTH_WORKERS = 8
 CONTROL_PLANE_OAUTH_BACKLOG = 64
