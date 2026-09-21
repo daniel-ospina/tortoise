@@ -3481,7 +3481,20 @@ class FalkorProjection(
                     # regresses the tombstone's stamp below the retract's own
                     # rebuild stamp).
                     max_inline_seq[rid] = seq
-                    self._retract(rid)
+                    # #2884 A7: ``_retract`` carries ``decay_clause`` (a BELIEF
+                    # write) as well as the status tombstone, so this fold is a
+                    # belief writer and needs the SAME hard-delete boundary as
+                    # ``ConfidenceChanged``/``PointRevised``/both decay
+                    # families. Without it, a retract that predates a real
+                    # delete→recreate re-applies onto the fresh incarnation and
+                    # resurrects a belief the live graph never had (pass-1a
+                    # hoists every ``PointAdded``, so the fresh node already
+                    # exists by pass 1b). "retracted" is not lost for a bare
+                    # same-id re-emit: that advances no drop boundary, so the
+                    # tombstone still applies.
+                    _retr_anchor = last_ann_drop_seq.get(("Point", rid))
+                    if _retr_anchor is None or seq > _retr_anchor:
+                        self._retract(rid)
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
@@ -3494,8 +3507,21 @@ class FalkorProjection(
                         max_inline_seq[p["id"]] = seq
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
+                    # #2884 A7: a promote snapshot is ``get_point(...)`` and so
+                    # carries the belief props — this fold is a belief writer
+                    # too. Gate the belief half on the same hard-delete
+                    # boundary: a promote that predates a real
+                    # delete→recreate must not overwrite the fresh
+                    # incarnation's belief with a dead one's. The non-belief
+                    # props (content, status, embedding, …) are unaffected —
+                    # they are the point of the fold (#785 parity).
+                    _prom_props = p
+                    _prom_anchor = last_ann_drop_seq.get(("Point", p["id"]))
+                    if _prom_anchor is not None and seq <= _prom_anchor:
+                        _prom_props = {k: v for k, v in p.items()
+                                       if k not in BELIEF_PROPS}
                     wrote_embedding, wrote_content_hash = (
-                        self._upsert_point_props(p))
+                        self._upsert_point_props(_prom_props))
                     # #4305: id-wide journal-owned derived marks.
                     if wrote_embedding:
                         journal_embed_write.add(p["id"])

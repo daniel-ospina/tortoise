@@ -896,3 +896,70 @@ def test_2884_invalidate_decay_survives_bare_same_id_reemit(journaled):
     assert post["confidence"] == pytest.approx(0.5), (
         f"a bare same-id re-emit suppressed the live invalidate decay: "
         f"live={live} post={post}")
+
+
+def test_2884_retract_decay_drops_across_delete_recreate(journaled):
+    """`_retract` carries `decay_clause` — a BELIEF write — not just the status
+    tombstone, so the `PointRetracted` fold is a belief writer and takes the
+    SAME real-hard-delete boundary (`last_ann_drop_seq`) as `ConfidenceChanged`,
+    `PointRevised` and both decay families. A retract that PREDATES a real
+    delete→recreate must not re-apply onto the fresh incarnation: pass-1a
+    hoists every `PointAdded`, so the fresh node already exists by pass 1b and
+    an ungated `_retract` would resurrect a dead incarnation's belief values."""
+    _db, events, sdk = journaled
+    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    _set_confidence(sdk, pid, 0.9)
+    _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
+                posterior_alpha=9.0)
+    _raw_append(events, sdk, "PointRetracted", id=pid)
+    _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
+                label="Point")
+    _raw_append(events, sdk, "PointAdded",
+                point={"id": pid, "content": "c2", "pointKind": "",
+                       "status": "live"})
+
+    sdk._get_proj().rebuild_all(str(events))
+    post = _state(sdk, [pid])[pid]
+    assert post["posterior_alpha"] is None, (
+        f"the pre-recreation retract decayed the FRESH incarnation: {post}")
+    assert post["confidence"] is None, post
+    st = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status", params={"id": pid},
+    ).result_set[0][0]
+    assert st == "live", (
+        f"the pre-recreation retract tombstoned the fresh incarnation: {st}")
+
+
+def test_2884_promote_belief_props_drop_across_delete_recreate(journaled):
+    """A `PointPromoted` snapshot is `get_point(...)` and therefore CARRIES the
+    belief props — so the promote fold is a belief writer too. Gated on the same
+    real-hard-delete boundary: a promote that predates a delete→recreate must
+    not overwrite the fresh incarnation's belief with a dead one's. Its
+    non-belief props (content, status, embedding) are the point of the fold and
+    are NOT gated (#785 parity)."""
+    _db, events, sdk = journaled
+    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    _set_confidence(sdk, pid, 0.9)
+    _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
+                posterior_alpha=9.0)
+    _raw_append(events, sdk, "PointPromoted",
+                point={"id": pid, "content": "c1", "pointKind": "",
+                       "status": "live", "confidence": 0.9,
+                       "posterior_alpha": 9.0})
+    _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
+                label="Point")
+    _raw_append(events, sdk, "PointAdded",
+                point={"id": pid, "content": "c2", "pointKind": "",
+                       "status": "live"})
+
+    sdk._get_proj().rebuild_all(str(events))
+    post = _state(sdk, [pid])[pid]
+    assert post["posterior_alpha"] is None, (
+        f"the pre-recreation promote wrote a dead belief onto the FRESH "
+        f"incarnation: {post}")
+    assert post["confidence"] is None, post
+    # The fold's real job still happens: the snapshot's content is applied.
+    content = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.content", params={"id": pid},
+    ).result_set[0][0]
+    assert content == "c1", content
