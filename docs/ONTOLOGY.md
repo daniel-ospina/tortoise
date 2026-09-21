@@ -16,8 +16,8 @@ doc_status: live
 >
 > **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
 > - §5: **"claim"** is declared as the sanctioned user-facing **gloss** for a logic-layer
->   Point (the asserted belief — extraction emits `pointKind: statement`; the legacy write
->   kinds remain valid Point kinds). It is **not a distinct kind**: no `claim` type and no
+>   Point (the asserted belief — the logic layer's canonical kind is `pointKind: statement`;
+>   the legacy write kinds remain valid Point kinds). It is **not a distinct kind**: no `claim` type and no
 >   `claim` pointKind, and no canonical node write value — the SDK's kind vocabulary is
 >   deliberately open (an unrecognized kind is accepted with a warning), so this states the
 >   vocabulary rule, not an enforced write rejection; word-carrying identifiers (the EP slot
@@ -712,7 +712,7 @@ decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY 
 > compatibility; extraction emits `statement` only.
 
 > **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
-> **logic-layer Point** — the asserted belief (extraction emits the single kind
+> **logic-layer Point** — the asserted belief (the logic layer's canonical kind is
 > `pointKind: statement`; the legacy write kinds remain valid Point kinds for write-compat,
 > above). "Claim" is the sanctioned plain-English gloss for that node, used where "Point"
 > would read as internal jargon to a customer; per option A a belief-node use of the noun is
