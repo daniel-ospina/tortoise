@@ -480,3 +480,70 @@ def test_the_hook_keeps_the_unraisable_object_repr_line(monkeypatch, capsys):
     # the default hook's line SURVIVES — redacted, not dropped
     assert "Exception ignored in: <redis connection to" in err
     assert "ConnectionError: boom" in err
+
+
+def test_the_hook_emits_the_object_repr_in_BOTH_unraisable_shapes(monkeypatch,
+                                                                  capsys):
+    """CPython's default hook is not ``err_msg`` XOR ``object``: with
+    ``err_msg`` set it prints ``f"{err_msg}: {object!r}"`` (the atexit shape —
+    measured on this interpreter as
+    ``Exception ignored in atexit callback: <function cb at 0x…>``), and with
+    ``err_msg`` unset ``f"Exception ignored in: {object!r}"``. Treating them as
+    mutually exclusive DROPPED the object repr on the atexit shape."""
+    secret = "S3cret-Pa55w0rd"
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+    saved = sys.unraisablehook
+    try:
+        _install_redacting_excepthook()
+
+        class _Probe:
+            def __repr__(self):
+                return f"<function cb bound to {secret}:16379>"
+
+        class _Unraisable:
+            exc_type = ConnectionError
+            exc_value = ConnectionError("boom")
+            exc_traceback = None
+            object = _Probe()
+
+        # (a) the atexit shape: err_msg SET — the repr must SURVIVE
+        _Unraisable.err_msg = "Exception ignored in atexit callback"
+        sys.unraisablehook(_Unraisable())
+        # (b) the __del__ shape: err_msg unset
+        _Unraisable.err_msg = None
+        sys.unraisablehook(_Unraisable())
+    finally:
+        sys.unraisablehook = saved
+    err = capsys.readouterr().err
+    assert secret not in err
+    assert secret.lower() not in err.lower()
+    assert "Exception ignored in atexit callback: <function cb bound to" in err
+    assert "Exception ignored in: <function cb bound to" in err
+
+
+def test_a_short_credential_cannot_rename_the_receipt_schema(monkeypatch,
+                                                             tmp_path):
+    """Redacting dict KEYS was fail-open in the other direction: a credential
+    that is a substring of a schema key renamed it (measured with ``e``:
+    ``receipt_path`` -> ``r***c***ipt_path``), so the receipt parsed, reported
+    success, and had silently lost the fields it exists to carry."""
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI", "docker://:e@host:6379/g")
+    out = tmp_path / "receipt.json"
+    receipt = {
+        "instrument": "tools/ask_shape_rate.py",
+        "substrate": "embedded",
+        "seeding_mode": {"mode": "embedded"},
+        "live": {"per_question": [{"question_id": "q1", "error": "some error"}]},
+    }
+    _write_receipt(SimpleNamespace(receipt=str(out)), receipt)
+    parsed = json.loads(out.read_text())
+    # The SCHEMA survives, so every field is still FINDABLE.
+    assert set(parsed) >= {"instrument", "substrate", "seeding_mode", "live",
+                           "receipt_path"}
+    assert set(parsed["live"]) == {"per_question"}
+    assert isinstance(parsed["receipt_path"], str) and parsed["receipt_path"]
+    # values are still redacted exhaustively — over-redaction is the
+    # documented, acceptable cost for a VALUE (here every "e")
+    assert "e" not in parsed["instrument"]
+    assert parsed["live"]["per_question"][0]["question_id"] == "q1"

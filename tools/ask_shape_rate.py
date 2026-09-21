@@ -510,7 +510,7 @@ def _redact_substrate_text(text: str) -> str:
 
 
 def _redact_receipt(value, _path: set[int] | None = None):
-    """Recursively redact every STRING (and dict KEY) in a receipt tree.
+    """Recursively redact every STRING VALUE in a receipt tree.
 
     ⚠️ Redact the OBJECT TREE, never the serialized JSON. A credential is an
     arbitrary operator-chosen string, so a post-serialization ``re.sub`` over
@@ -540,13 +540,19 @@ def _redact_receipt(value, _path: set[int] | None = None):
         _path.add(id(value))
         try:
             if isinstance(value, dict):
-                # A dict KEY can carry a credential too (a per-question id is
-                # built from fixture data), so keys share the redactor.
-                out: dict = {}
-                for k, v in value.items():
-                    key = _redact_substrate_text(k) if isinstance(k, str) else k
-                    out[key] = _redact_receipt(v, _path)
-                return out
+                # ⚠️ KEYS ARE NOT RENAMED. A receipt's keys are its SCHEMA (code
+                # literals) plus fixture-derived question ids, and the fixture
+                # is pinned by SHA at startup — so no operator value reaches a
+                # key. Redacting keys anyway is FAIL-OPEN IN THE OTHER
+                # DIRECTION: a short credential that is a substring of a schema
+                # key renames it (measured at review with ``e``:
+                # ``instrument`` -> ``instrum***nt``, ``receipt_path`` ->
+                # ``r***c***ipt_path``), so the receipt parses, reports success,
+                # and has silently lost the fields it exists to carry. Values
+                # are redacted exhaustively — over-redacting a VALUE costs
+                # readability; over-redacting a KEY costs the artifact.
+                return {k: _redact_receipt(v, _path)
+                        for k, v in value.items()}
             if isinstance(value, list):
                 return [_redact_receipt(v, _path) for v in value]
             return tuple(_redact_receipt(v, _path) for v in value)
@@ -593,8 +599,10 @@ def _install_redacting_excepthook() -> None:
     one this tool raises is) or redacted at its raise site.
 
     The hooks' METADATA lines are redacted too, not just the traceback: a
-    thread NAME, an unraisable ``err_msg``, and the unraisable object ``repr``
-    the default hook prints when ``err_msg`` is absent (the ``__del__`` path).
+    thread NAME, and an unraisable metadata line reproducing the DEFAULT
+    hook's format for BOTH shapes — ``{err_msg}: {object!r}`` (the atexit
+    shape) and ``Exception ignored in: {object!r}`` (the ``__del__`` shape) —
+    so no field is dropped and no field is emitted unredacted.
 
     ⚠️ NOT redacted, deliberately: the substrate URI's PATH / QUERY / FRAGMENT.
     The path is the documented GRAPH-NAME slot, not a credential slot, and
@@ -629,17 +637,21 @@ def _install_redacting_excepthook() -> None:
         _emit(args.exc_type, args.exc_value, args.exc_traceback)
 
     def _unraisable_hook(unraisable) -> None:
-        # MIRROR THE DEFAULT HOOK's metadata line, which has TWO forms: it
-        # prints ``err_msg`` when that is set, and otherwise
-        # ``Exception ignored in: <object repr>`` (the ``__del__``/GC path —
-        # the teardown class this hook exists for). Emitting only the
-        # ``err_msg`` form silently dropped a whole diagnostic line; and the
-        # repr lives on ``unraisable.object``, NOT in ``err_msg``. The repr is
-        # redacted, because an object repr can name the endpoint.
-        if unraisable.err_msg:
-            meta = unraisable.err_msg
-        elif unraisable.object is not None:
-            meta = f"Exception ignored in: {unraisable.object!r}"
+        # MIRROR THE DEFAULT HOOK's metadata line EXACTLY (measured on this
+        # interpreter): with ``err_msg`` set the default prints
+        # ``f"{err_msg}: {object!r}"`` (the atexit shape,
+        # ``Exception ignored in atexit callback: <function cb at 0x…>``); with
+        # ``err_msg`` unset it prints ``f"Exception ignored in: {object!r}"``
+        # (the ``__del__``/GC shape). The object repr is present in BOTH — an
+        # earlier version treated them as mutually exclusive and silently
+        # dropped it whenever ``err_msg`` was set. The repr is redacted, since
+        # an object repr can name the endpoint.
+        err_msg = unraisable.err_msg
+        obj = getattr(unraisable, "object", None)
+        if err_msg:
+            meta = f"{err_msg}: {obj!r}" if obj is not None else f"{err_msg}:"
+        elif obj is not None:
+            meta = f"Exception ignored in: {obj!r}"
         else:  # pragma: no cover — CPython always supplies ``object``
             meta = ""
         if meta:
