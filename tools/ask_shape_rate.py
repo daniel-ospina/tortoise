@@ -648,7 +648,10 @@ def _install_redacting_excepthook() -> None:
         # an object repr can name the endpoint.
         err_msg = unraisable.err_msg
         obj = getattr(unraisable, "object", None)
-        if err_msg:
+        # ``is not None``, not truthiness: CPython's own predicate is
+        # ``err_msg != NULL``, so an EMPTY string still takes the joined shape
+        # (the default prints ``": <repr>"``).
+        if err_msg is not None:
             meta = f"{err_msg}: {obj!r}" if obj is not None else f"{err_msg}:"
         elif obj is not None:
             meta = f"Exception ignored in: {obj!r}"
@@ -1951,8 +1954,10 @@ def _write_receipt(args, receipt: dict) -> None:
     # text — see ``_redact_receipt``) and with a REDACTING encoder fallback
     # (``_redacted_default``): every receipt (live, movement, VOID) goes through
     # here, so no credential reaches disk — not through a nested error, a
-    # handler envelope, a ``substrate_errors`` entry, a movement exclusion, a
-    # dict key, or a non-JSON-native leaf.
+    # handler envelope, a ``substrate_errors`` entry, a movement exclusion, or a
+    # non-JSON-native leaf. (Dict KEYS are untouched by design — they are the
+    # schema's literals plus SHA-pinned fixture ids, and renaming one silently
+    # destroys the artifact; see ``_redact_receipt``.)
     #
     # Written to a SIBLING TEMP FILE and atomically replaced: measured at
     # review, opening the destination first meant a redaction/serialization
