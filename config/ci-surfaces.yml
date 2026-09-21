@@ -1580,6 +1580,10 @@ durations:
   test_signup_form_safety.py: 0.2
   test_tool_registry.py: 0.2
   test_user_identity_authority.py: 0.2
+  # #4207: the file's junit testcase time from run 35530373858, measured while
+  # the file still carried the workflow-text half. The #4351 split removed that
+  # half, so this now over-states the file — the conservative direction for the
+  # LPT pack. Refresh from the first post-merge main run.
   test_ci_expected_manifests.py: 0.157
   bench/test_bench_core.py: 0.1
   eval/harness/test_harness_corpus.py: 0.1

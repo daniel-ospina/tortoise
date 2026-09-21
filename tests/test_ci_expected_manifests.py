@@ -8,22 +8,34 @@ comparison and CI stays green.
 
 The fix is a FROZEN set: `config/ci-expected-nodeids/*.txt` is checked in, and
 every nodeid in it must still appear as a junitxml `<testcase>` (passed OR
-skipped) in the lane that runs it. This file pins four things:
+skipped) in the lane that runs it. This file pins three things:
 
 1. the manifests are well-formed, their files exist, and they are non-empty;
-2. the workflow actually invokes them, with `--manifest-only` (without that flag
-   a URI-less lane false-reds on its EXPECTED skips — measured: 24 collection
-   violations in the d14 job);
-3. the platform-gated manifest still covers every file `tests/test_markers.py`
+2. the platform-gated manifest still covers every file `tests/test_markers.py`
    registers, so the source scan and the runtime check cannot drift apart;
-4. a frozen test that is collected and then SKIPPED reds, unless its file's
-   declared `# allow-skipped:` budget covers it — the OUTCOME half of #4215,
-   which is the shape a test-level `if …: pytest.skip(…)` produces;
+3. a frozen test that is collected and then SKIPPED reds, unless its file's
+   declared `# allow-skipped:` budget covers it - the OUTCOME half of #4215,
+   which is the shape a test-level `if ...: pytest.skip(...)` produces;
 
 and it BITES: a junit missing one expected nodeid must fail, a junit whose only
 skip exceeds the declared budget must fail and name it, and a junit containing all
 of them must pass. A pin that cannot fail is not a pin.
+
+An earlier revision of this file ALSO asserted that the workflow invokes the guard
+with `--manifest-only`, by reading the step's shell as text. That half was removed
+in PR #4351's scope reduction: thirteen review cycles each produced a spelling in
+which the text reading and shell execution disagreed (the script path inside a
+quoted `echo`, a command substitution in argument position, the manifest as the
+guard's log positional, a duplicate `--manifest` in either spelling, a reassignment
+through `export`/`env`, a flag that is an argument of a redirect) - a text scanner
+cannot be completed by more text rules. That enforcement belongs to execution:
+#4494 (run the step's real shell under `bash -e` with a recording interpreter stub
+on PATH; assert the recorded argv and the step's exit status - the pattern
+`tests/test_pages_bindings.py` already uses) and #4463 (prove the CI job reds when a
+frozen nodeid is mutated). Until those land, nothing here asserts the workflow
+wiring; the runtime check the workflow performs is unaffected.
 """
+
 
 from __future__ import annotations
 
@@ -37,11 +49,9 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
-import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "config" / "ci-expected-nodeids"
-WORKFLOW = ROOT / ".github" / "workflows" / "python-ci.yml"
 SKIP_GUARD = ROOT / "tools" / "skip-guard.py"
 
 EMBEDDED = MANIFEST_DIR / "embedded-only.txt"
@@ -106,39 +116,6 @@ def _strip_comments(text: str) -> str:
     return "\n".join(out)
 
 
-def _shell_commands(workflow: str) -> list[str]:
-    """The shell commands in a run: block, with `\\` continuations JOINED and every
-    comment removed — a full-line comment AND a TRAILING one.
-
-    A pin that matches inside a fixed window of text is wrong in both directions: it
-    reds an honest reformat that moves the flag to an earlier continuation line, and it
-    is satisfied by a comment mentioning the flag. Dropping only comment-ONLY lines
-    left the second half open — `--manifest FILE  # note: deliberately NOT
-    --manifest-only here` stripped to a command that really runs WITHOUT the flag, while
-    the pin matched the comment (cycle-6 finding).
-    """
-    commands: list[str] = []
-    pending: list[str] = []
-    for raw in workflow.splitlines():
-        line = _strip_comments(raw).rstrip()
-        if not line.strip():
-            if pending:
-                continue
-            continue
-        if line.endswith("\\"):
-            pending.append(line[:-1].strip())
-            continue
-        pending.append(line.strip())
-        joined = " ".join(p for p in pending if p)
-        if joined:
-            commands.append(joined)
-        pending = []
-    if pending:
-        commands.append(" ".join(p for p in pending if p))
-    return commands
-
-
-_GUARD_PATH = "tools/skip-guard.py"
 # Words that re-dispatch to another command (so the interesting word comes later) or
 # that introduce a command without being one. A CLOSED vocabulary, deliberately not a
 # denylist of printers: an unknown head word is simply not an invocation, which is the
@@ -146,282 +123,6 @@ _GUARD_PATH = "tools/skip-guard.py"
 _CMD_PREFIXES = frozenset({"env", "sudo", "command", "exec", "nohup", "time", "xargs"})
 _SHELL_KEYWORDS = frozenset({"if", "elif", "else", "then", "do", "while", "until", "!"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-
-
-def _shell_segments(command: str) -> list[str]:
-    """One run-block command split into its simple commands, quote-aware.
-
-    A separator inside quotes is TEXT, not a separator: `echo "a; b"` is one command.
-
-    Parens are NOT separators: `echo $(python3 tools/skip-guard.py …)` runs the guard
-    inside an ARGUMENT, and splitting on `(` would hand the substitution's inner command
-    a command position it does not have — the enclosing `echo` owns the step's status
-    and DISCARDS the captured one, so the frozen set is enforced by nothing while every
-    consumer pin is satisfied (cycle-11 finding; the `|| guard_rc=1` variant is worse —
-    the accumulator is set in the SUBSHELL, so the step's later `exit $guard_rc` still
-    exits 0). Keeping the substitution attached leaves the head word `echo`, which is
-    not an interpreter, so the step is refused as having no consumer at all.
-    """
-    segments: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-    i = 0
-    while i < len(command):
-        ch = command[i]
-        if quote is not None:
-            current.append(ch)
-            quote = None if ch == quote else quote
-            i += 1
-            continue
-        if ch in "\"'":
-            quote = ch
-            current.append(ch)
-            i += 1
-            continue
-        if command.startswith("||", i) or command.startswith("&&", i):
-            segments.append("".join(current))
-            current = []
-            i += 2
-            continue
-        if ch in ";|&\n":
-            segments.append("".join(current))
-            current = []
-            i += 1
-            continue
-        current.append(ch)
-        i += 1
-    segments.append("".join(current))
-    return segments
-
-
-def _shell_words(segment: str) -> list[str]:
-    """The words of one simple command, with their quotes REMOVED.
-
-    Quoting is what makes `echo "python3 tools/skip-guard.py …"` one word whose value
-    is a whole sentence instead of an invocation, so the removal has to happen here,
-    where the word boundaries are decided, rather than in the matcher.
-    """
-    words: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-    for ch in segment:
-        if quote is not None:
-            if ch == quote:
-                quote = None
-            else:
-                current.append(ch)
-            continue
-        if ch in "\"'":
-            quote = ch
-        elif ch.isspace():
-            if current:
-                words.append("".join(current))
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        words.append("".join(current))
-    return words
-
-
-def _is_guard_word(word: str) -> bool:
-    return word == _GUARD_PATH or word.endswith("/" + _GUARD_PATH)
-
-
-def _is_interpreter(word: str) -> bool:
-    base = word.rsplit("/", 1)[-1]
-    return base.startswith("python") or base in {"py", "uv", "uvx", "pypy", "pypy3"}
-
-
-def _invokes_guard(command: str) -> bool:
-    """True iff `command` RUNS the skip-guard — the script in COMMAND POSITION.
-
-    A substring test is satisfied by a command that only PRINTS the invocation:
-    replacing the d14 call with `echo "python3 tools/skip-guard.py … --manifest-only"`
-    left every consumer pin GREEN while the frozen set was enforced by nothing
-    (cycle-10 finding). Quoting alone does not close it either — the unquoted
-    `echo python3 tools/skip-guard.py …` reads identically to a real call — so the
-    HEAD word decides: leading env assignments, shell keywords and re-dispatching
-    prefixes are skipped, and the next word must be an INTERPRETER (`python*`, `py`,
-    `uv`, `uvx`) or the guard itself. An unknown head word (`echo`, `printf`, `cat`, a
-    shell FUNCTION name) is not an invocation, and a `sh -c '<script>'` wrapper is not
-    resolved — it REDS rather than passing (fail closed; see the pin's declared
-    surface).
-    """
-    for segment in _shell_segments(command):
-        words = _shell_words(segment)
-        index = 0
-        while index < len(words) and (
-            re.fullmatch(r"[A-Za-z_]\w*=.*", words[index])
-            or words[index] in _SHELL_KEYWORDS
-            or words[index] in _CMD_PREFIXES
-        ):
-            index += 1
-        if index >= len(words):
-            continue
-        head = words[index]
-        if head in _SHELLS:
-            continue
-        if _is_interpreter(head) or _is_guard_word(head):
-            if any(_is_guard_word(word) for word in words[index:]):
-                return True
-    return False
-
-
-def _workflow_jobs() -> dict[str, dict]:
-    """The workflow's jobs, by name.
-
-    A pin must be able to read the JOB a step lives in: `continue-on-error` is legal
-    at JOB level, where GitHub reports the job's `result` as `success` even when a
-    step inside it failed — so `python-ci-gate`, which greps `needs.*.result`, would
-    never see a guard that never bit (cycle-7 finding).
-    """
-    doc = yaml.safe_load(WORKFLOW.read_text())
-    return {
-        name: job for name, job in (doc.get("jobs") or {}).items() if isinstance(job, dict)
-    }
-
-
-def _workflow_steps() -> list[tuple[str, dict]]:
-    """Every (job name, step) pair, so a pin can read a step's own SCRIPT and its own
-    keys — not every line of the YAML file — and can see the job that owns it.
-
-    Scanning the raw file treated a non-shell mention of the manifest (an artifact
-    `path:`, an `env:` entry) as a consumer and red a correct tree; and reading only
-    the step left the job-level escape invisible (cycle-6 and cycle-7 findings).
-    """
-    pairs: list[tuple[str, dict]] = []
-    for job_name, job in _workflow_jobs().items():
-        for step in job.get("steps") or []:
-            if isinstance(step, dict):
-                pairs.append((job_name, step))
-    return pairs
-
-
-def _after_invocation(command: str) -> tuple[str, str]:
-    """(the shell operator that follows a skip-guard invocation, what comes after it).
-
-    Everything between `tools/skip-guard.py` and the first unquoted shell separator is
-    the invocation's own arguments, in whatever order they are given — so an honest
-    `--manifest-only --manifest <path>` reads as "nothing follows" (looking only at the
-    text after the FLAG flag-order-red that — cycle-9 finding), and a trailing
-    `|| true` / `; echo …` / `| tee` / `&` is visible at all (the same pin could not see
-    it before, so those mutations passed while making the guard unable to fail the
-    step — cycle-9 finding). `2>&1` is a redirection, not a separator.
-
-    `(` and `)` are separators too: `echo $(python3 … --manifest-only)` runs the guard
-    inside an ARGUMENT, so the command in command position is `echo` and the step
-    reports ECHO's status — the guard's own status is discarded. The closing paren has
-    to terminate the invocation for the status check to see that (cycle-11 finding).
-    """
-    marker = "tools/skip-guard.py"
-    rest = command[command.index(marker) + len(marker) :]
-    quote: str | None = None
-    i = 0
-    while i < len(rest):
-        ch = rest[i]
-        if quote is not None:
-            quote = None if ch == quote else quote
-        elif ch in "\"'":
-            quote = ch
-        elif rest.startswith("||", i) or rest.startswith("&&", i):
-            return rest[i : i + 2], rest[i + 2 :].strip()
-        elif ch in ";|()" or (ch == "&" and (i == 0 or rest[i - 1] != ">")):
-            return ch, rest[i + 1 :].strip()
-        i += 1
-    return "", ""
-
-
-def _manifest_values(cmd: str) -> list[str]:
-    """The (quote-stripped) value given to each `--manifest` in one command, in order.
-
-    BOTH spellings count. The guard's `_parse_args` accepts `--manifest <path>` and
-    `--manifest=<path>` (`tools/skip-guard.py:538`) and the LAST assignment wins, so a
-    reader that counts only the space form re-opens the duplicate escape one level over:
-    `--manifest <frozen> --manifest=<other>` read as ONE value while the guard took the
-    other (cycle-13 finding). A duplicate is therefore never collapsed here.
-    """
-    values: list[str] = []
-    for segment in _shell_segments(cmd):
-        words = _shell_words(segment)
-        for position, word in enumerate(words):
-            if word == "--manifest" and position + 1 < len(words):
-                values.append(words[position + 1])
-            elif word.startswith("--manifest="):
-                values.append(word.split("=", 1)[1])
-    return values
-
-
-def _step_assignments(commands: list[str]) -> dict[str, list[str]]:
-    """Every variable a step assigns and EVERY value it assigns it, in order.
-
-    The documented indirection is `M=<manifest path>` and then `--manifest "$M"`.
-    Recording all assignments (not just a set of names) is what a reassignment needs to
-    be visible: `M=<embedded>` followed by `M=<platform-gated>` leaves a command that
-    still MENTIONS the right manifest while the guard enforces the other one (cycle-12
-    finding) — and the reassignment does not have to be a bare line, so the `export` /
-    `env` / `declare` / `typeset` prefixes are read too (cycle-13 finding).
-    """
-    prefixes = {"export", "env", "declare", "typeset"}
-    assignments: dict[str, list[str]] = {}
-    for cmd in commands:
-        words = _shell_words(cmd)
-        # a bare assignment line, or an env prefix on the front of a command
-        candidates = [cmd.strip()] if len(words) <= 1 else [words[0]]
-        if len(words) > 1 and words[0] in prefixes:
-            candidates.append(words[1])
-        for candidate in candidates:
-            if match := re.fullmatch(r"([A-Za-z_]\w*)=(.*)", candidate):
-                assignments.setdefault(match.group(1), []).append(
-                    match.group(2).strip().strip("\"'")
-                )
-    return assignments
-
-
-def _resolves_to(value: str, rel: str, assignments: dict[str, list[str]]) -> bool:
-    """True iff `--manifest <value>` points at `rel` — literally, or through a variable
-    the step assigns that path exactly once and never reassigns."""
-    if value == rel:
-        return True
-    match = re.fullmatch(r"\$\{?([A-Za-z_]\w*)\}?", value)
-    return bool(match) and assignments.get(match.group(1)) == [rel]
-
-
-def _guard_consumers(step_text: str, rel: str) -> list[tuple[int, str]]:
-    """The (index, command) pairs in `step_text` that invoke the guard ON `rel`.
-
-    Three separate escapes had to be closed here, each found by a review cycle:
-
-    * `rel in cmd` with an assignment-prefix exclusion exempted every command that
-      merely STARTS with an assignment, so an env-prefixed invocation
-      (`SG_ENV=1 python3 … --manifest-only || true`) escaped every exit-status check
-      (cycle-9 finding).
-    * the invocation test is `_invokes_guard` — the script in COMMAND POSITION — and
-      not a substring, because a command that merely PRINTS the invocation
-      (`echo "…skip-guard.py … --manifest-only"`) satisfied every consumer pin while
-      the frozen set was enforced by nothing (cycle-10 finding).
-    * the MANIFEST is resolved by ARGUMENT SEMANTICS, not by `rel in cmd`: a path that
-      only appears as the guard's LOG positional, or as the first of TWO `--manifest`
-      flags (the guard's last-wins), or through a variable the step REASSIGNS, left the
-      pin green while the guard enforced the other manifest and exited 0 (cycle-12
-      finding). So: exactly one `--manifest` in the command, and its value must be `rel`
-      literally or a variable assigned `rel` exactly once and never otherwise.
-    """
-    commands = _shell_commands(step_text)
-    assignments = _step_assignments(commands)
-    consumers: list[tuple[int, str]] = []
-    for index, cmd in enumerate(commands):
-        if not _invokes_guard(cmd):
-            continue
-        values = _manifest_values(cmd)
-        # no `--manifest` (nothing to enforce against), or more than one (the guard's
-        # last-wins makes "which manifest" ambiguous) → not a consumer. Both are
-        # refused rather than guessed, so the pin's non-vacuity assertion reds.
-        if len(values) != 1:
-            continue
-        if _resolves_to(values[0], rel, assignments):
-            consumers.append((index, cmd))
-    return consumers
 
 
 def _module_dotted(file: str) -> str:
@@ -741,164 +442,6 @@ def test_platform_gated_manifest_covers_the_registry() -> None:
 
 
 # ── the CI wiring ─────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize(
-    "manifest", [EMBEDDED, PLATFORM_GATED], ids=["embedded", "platform-gated"]
-)
-def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> None:
-    """A frozen set nobody checks is a comment.
-
-    Pins the invocation AND the mode: `--manifest-only` is what keeps a URI-less
-    lane (whose skips are expected) from reding on the skip-anomaly matchers
-    calibrated for the docker lane — measured at 24 collection violations in the
-    d14 job before the flag existed.
-
-    DECLARED THREAT SURFACE (what this pin is for, and all it claims): a step that
-    RUNS the guard on the manifest — the script in COMMAND POSITION, not a mention of
-    it inside a printed string (cycle-10 finding) — with `--manifest-only` as an
-    argument of THAT invocation, in a step and a job that are not `continue-on-error`
-    and whose `if:` can be true on a green run, and whose exit status can reach the
-    step. Those are the ways the frozen set can be enforced by nothing while the
-    artifacts look right, and each is mutation-tested.
-
-    It does NOT model arbitrary shell control flow — a `trap`, `set +e` plus a masking
-    command inside a function, a sourced script, a shell FUNCTION name, a `sh -c
-    '<script>'` wrapper (the last two RED rather than pass: the head word is not an
-    interpreter, which is the fail-closed direction), or a `$VAR` holding the FLAG or
-    the SCRIPT PATH (the #4207 class a text pin cannot see; a variable FLAG is refused
-    loudly instead of passing it). A step whose shell does not PARSE (`bash -n` fails —
-    e.g. `python3 -c print('tools/skip-guard.py')`) is not modelled either: CI reds on
-    the parse error, which is louder than this pin. A command SUBSTITUTION in command
-    position (`X=$(python3 …)`, or a bare subshell `( python3 … )`) is refused rather
-    than read: the capture only reaches the step through an explicit `exit`, and the
-    pin's two blessed forms are the invocation itself as the last command or `||
-    <var>=1` plus a later `exit` (fail closed — a safe capture form reds instead of
-    passing, and the message names the two forms it accepts). An EARLY `exit` placed
-    before the invocation in the same step is the same class: the pin reads the step's
-    commands in order but does not model reachability, so a step that exits on line 2
-    still reads as having a consumer (cycle-12 P3, residual — see #4463). Shell
-    REDIRECTIONS are not modelled either: a flag that is an argument of a redirect
-    (`<<< --manifest-only`, a here-string) reads as an argv token here while the guard
-    never receives it — the lane then reds LOUDLY in CI (the guard exits 2 on an
-    unknown argument), so it is a pin/CI disagreement, not a silent pass (cycle-13 P3).
-    The end-to-end proof — a lane that mutates the manifest and shows the job reds,
-    which is what a construct hiding a command's position from a text scanner cannot
-    survive — is #4463.
-    """
-    jobs = _workflow_jobs()
-    rel = str(manifest.relative_to(ROOT))
-    # Read the step's own SHELL COMMANDS, not its raw text: a mention in a comment is
-    # not a consumer. Cycle 6 stopped the per-command window from reading comments but
-    # left this lookup reading the raw `run:`, so a comment naming the manifest in an
-    # UNRELATED step's shell block red the tree (cycle-7 finding). Cycle 9 replaced the
-    # `rel in cmd` lookup with `_guard_consumers`, which resolves the INVOCATION.
-    consumers = [
-        (job_name, step)
-        for job_name, step in _workflow_steps()
-        if isinstance(step.get("run"), str) and _guard_consumers(step["run"], rel)
-    ]
-    assert consumers, (
-        f"no step RUNS a command consuming {rel} — nothing consumes it (a mention in a "
-        "comment, a `path:`, or an artifact upload is not an invocation)"
-    )
-    for job_name, step in consumers:
-        # Present is not enough: the step must be ABLE TO FAIL ITS JOB, or the frozen
-        # set is enforced by nothing while every pin stays green (cycle-6 finding).
-        # `continue-on-error` is legal at JOB level too, where GitHub reports the job's
-        # `result` as `success` even when a step failed — and `python-ci-gate` reads
-        # `needs.*.result` — so a job-level key made this pin decorative one level up
-        # (cycle-7 finding).
-        name = step.get("name") or step.get("uses") or "<unnamed step>"
-        owner = jobs[job_name]
-        disabled_by = [
-            where
-            for where, obj in (("the step", step), (f"job {job_name!r}", owner))
-            if obj.get("continue-on-error")
-        ]
-        assert not disabled_by, (
-            f"{WORKFLOW.name}: the step consuming {rel} is `continue-on-error` (on "
-            f"{disabled_by[0]}), so its exit status cannot fail the job — the check would "
-            f"be decorative. Step: {name!r}"
-        )
-        # …and it must be able to RUN on a GREEN job — at BOTH levels. The STEP's `if:`
-        # was checked first (cycle 7: a denylist of two literal falses let
-        # `if: failure()` through), and the JOB's `if:` is the same escape one level up:
-        # both consuming jobs already carry one, so a `false`/failure-only/wrong-output
-        # condition there retires the frozen set with every pin green (cycle-9 finding).
-        # A status function or GitHub RESULT that is false on green, or a literal
-        # false/never, is refused — `== 'cancelled'`, `== 'failure'` and `== 'skipped'`
-        # are the same escape written as a comparison (cycle-9 finding: the first
-        # version only matched the function CALLS, so `== 'cancelled'` passed).
-        # `always()`, event/matrix expressions and `== 'success'` output tests are fine.
-        # A NEGATED status function is true on green (`!cancelled()`), so the negations
-        # are removed before the refusal (matching the raw token false-red a correct
-        # condition — cycle-8 finding).
-        for where, obj in (("the step", step), (f"job {job_name!r}", owner)):
-            condition = str(obj.get("if", "")).strip().lower()
-            effective = re.sub(r"!\s*(?:cancelled|failure)\s*\(\s*\)", "", condition)
-            assert not re.search(
-                r"\bfalse\b|\bnever\b|\bfailure\b|\bcancelled\b|\bskipped\b", effective
-            ), (
-                f"{WORKFLOW.name}: {where} consuming {rel} has `if: {condition}` — that "
-                "condition cannot be true on a green run (it names a failure/cancelled/"
-                "skipped status, or a literal false), so the guard never runs and cannot "
-                f"fail anything. Step: {name!r}"
-            )
-        # The flag must be a TOKEN of the command that RUNS the guard, with comments
-        # already removed, so a trailing `# note: NOT --manifest-only` is not read as the
-        # flag (cycle 6) and a flag in an unrelated command of the same step does not
-        # stand in for the invocation that lacks it (cycle-9 finding).
-        # `=` is refused as a boundary too: `--manifest-only=true` is not the flag the
-        # guard receives (argparse-style `--flag=value` is an unknown argument to
-        # `"--manifest-only" in argv`, so the guard exits 2) and a pin that reads it as
-        # the flag asserts something that is not true (cycle-10 finding).
-        flag_re = re.compile(r"(?<![\w=-])--manifest-only(?![\w=-])")
-        commands = _shell_commands(step["run"])
-        for index, cmd in _guard_consumers(step["run"], rel):
-            assert flag_re.search(cmd), (
-                f"{WORKFLOW.name}: step {name!r} runs the guard on {rel} without "
-                "--manifest-only as a token of THAT command — in a URI-less lane this "
-                "false-reds on the EXPECTED skips (the docker-calibrated matchers).\n"
-                f"{cmd}"
-            )
-            # …`!` inverts the exit status, so the guard's failure would report success.
-            assert not re.search(r"(?<![\w])!\s", cmd[: cmd.index("tools/skip-guard.py")]), (
-                f"{WORKFLOW.name}: step {name!r} invokes the guard under `!`, which "
-                f"inverts its exit status.\n{cmd}"
-            )
-            # …and the status must be able to REACH the step: a step's status is its LAST
-            # command's, so a trailing operator that starts another command (`; echo`,
-            # `| tee`, `&& true`) or discards it (`|| true`) makes the guard decorative
-            # while every pin above stays green (cycle-8/9 findings). The two honest forms
-            # are: the invocation IS the step's last command, or it accumulates into a
-            # variable (`|| guard_rc=1`) that the step later `exit`s — which the carve-out
-            # does, and which has to be on a line that really runs (comments are already
-            # stripped, an earlier `exit 0` would make it unreachable, and overwriting the
-            # accumulator after the invocation defeats it).
-            operator, after = _after_invocation(cmd)
-            if not operator and index == len(commands) - 1:
-                continue
-            accumulated = re.match(r"^\{?\s*([A-Za-z_]\w*)=", after) if operator == "||" else None
-            var = accumulated.group(1) if accumulated else None
-            exit_re = re.compile(rf"^exit\s+\"?\$\{{?{re.escape(var or '@')}\}}?\"?\s*$") if var else None
-            later = commands[index + 1 :]
-            assert (
-                exit_re is not None
-                and any(exit_re.match(c.strip()) for c in later)
-                and not any(
-                    re.match(r"^exit\b", c.strip()) and not exit_re.match(c.strip()) for c in later
-                )
-                and not any(re.match(rf"^{re.escape(var)}\s*=", c.strip()) for c in later)
-            ), (
-                f"{WORKFLOW.name}: step {name!r} runs the guard on {rel} with "
-                f"--manifest-only but its exit status cannot reach the step — the step's "
-                f"status is its LAST command's, so `{operator} {after or '<nothing>'}` "
-                "discards it. Allowed: the invocation as the step's last command, or "
-                f"`|| <var>=1` followed by an `exit $<var>` that is not commented, not "
-                "preceded by another `exit`, and not overwritten afterwards.\n"
-                f"{cmd}"
-            )
-    assert len(consumers) >= 1
 
 
 # ── the check bites (non-vacuity) ─────────────────────────────────────────
