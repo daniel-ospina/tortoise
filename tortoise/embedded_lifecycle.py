@@ -1262,7 +1262,15 @@ def _adopt_owner_records_after_fork() -> None:
     two inherited clients would drop the record while the other is still
     live. The load-bearing property — a parent SIGKILL cannot make a forked
     child's live server look orphaned — does hold.
+
+    #4487 review: `_own_start_cache` is inherited too, and a stale entry for
+    a pid the KERNEL later reassigns to this child would make `record_owner`
+    stamp the child's record with a dead ancestor's start — `_owner_records`
+    compares it against the real start, reads the record DEAD, and the reaper
+    kills a live owner's server (the #1642 FIX 5 fail-open class). Drop it so
+    the child resolves its own start fresh, exactly as the counts are redone.
     """
+    _own_start_cache.clear()
     inherited = list(_owner_refcounts)
     _owner_refcounts.clear()
     for sock in inherited:
