@@ -29,6 +29,7 @@ aboutObjects: tortoise
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | CI audit — measured runner-cost/lane analysis, read-only (2026-09-02) | `docs/research/2026-09-02-ci-audit.md` |
+| **Finding provenance gate** — every reported finding names the tree it was measured against; `tools/finding_provenance.py` fails on a stale measurement (ancestry, never SHA equality) (#4290) | `tools/finding_provenance.py` · `CONTRIBUTING.md` (§ A finding must carry the tree it was measured against) · `.github/workflows/finding-provenance.yml` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |
 | Activation scorecard runbook — beta-readiness lane B7: which sessions activate vs merely sign up, the measurable-vs-blocked legs, cohort roll-up, measured production baseline, deploy requirement | `docs/runbook/b7-activation-scorecard.md` |
 | Ontology | `docs/ONTOLOGY.md` |
