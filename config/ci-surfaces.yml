@@ -617,6 +617,10 @@ surfaces:
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
+  # #4366: the consumer-skills licence assertion (validation/check-license-surface.py)
+  # — DB-free marker/surface unit tests; `core` is the fallback for a validation/
+  # -only change, which is the only way that script selects a surface.
+  - test_license_surface_consumer.py
   - test_linear_connector.py
   - test_lint_config.py
   - test_lint_tripwire.py
@@ -1239,6 +1243,12 @@ durations:
   test_shared_state_imports.py: 2.0
   test_shared_state_monitoring.py: 2.0
   test_shared_state_recovery.py: 2.0
+# #4366: the consumer-skills licence assertion's unit file — no CI junit
+# measurement yet, so it enters at the same flat 2.0s default as the #4221 six
+# above (the conservative floor: it keeps coverage at 100% instead of dropping
+# the file back to the default anyway, and cannot mis-balance the LPT pack).
+# Refresh from the first post-merge main run that includes it.
+  test_license_surface_consumer.py: 2.0
   # #4327: no CI junit measurement yet (new file), so enter at the flat 2.0s
   # default per the #3400/#4221 convention — the conservative floor keeps the
   # 90% durations-coverage floor satisfied; refresh from the first post-merge
