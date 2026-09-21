@@ -1139,7 +1139,7 @@ class TestConjunctFalsifiability:
         monkeypatch.setattr(ee, "load1", lambda: 1.0)
         monkeypatch.setattr(ee, "_tool_version", lambda: "blob0")
 
-        digests = list(measured_digests or [("sha256:tree-stable", False)] * len(runs))
+        digests = list(measured_digests or [("sha256:tree-stable", False)] * (len(runs) + 1))
 
         def _porcelain_digest(cwd, exclude=None):
             if Path(cwd) == measured_path:
@@ -1183,9 +1183,10 @@ class TestConjunctFalsifiability:
         files = list(ee.FAMILY_REPRODUCERS)
         runs = [self._run(files, 1, "green"), self._run(files, 2, "green")]
 
+        # The digest is read once BEFORE run 1 and once after each run.
         rec = self._produce(
             monkeypatch, tmp_path, runs=runs,
-            measured_digests=[("sha256:tree-a", False), ("sha256:tree-a", False)],
+            measured_digests=[("sha256:tree-a", False)] * 3,
         )
         assert [r["tree_moved"] for r in rec["runs"]] == [False, False]
         assert "pin-not-airtight" not in ee.closes_issue(rec)[1]
@@ -1193,12 +1194,94 @@ class TestConjunctFalsifiability:
         # MUTATION: an edit between run 1 and run 2 moves the measured tree.
         rec2 = self._produce(
             monkeypatch, tmp_path, runs=runs,
-            measured_digests=[("sha256:tree-a", False), ("sha256:tree-b", False)],
+            measured_digests=[("sha256:tree-a", False), ("sha256:tree-a", False),
+                              ("sha256:tree-b", False)],
         )
         assert [r["tree_moved"] for r in rec2["runs"]] == [False, True]
         ok2, reasons2 = ee.closes_issue(rec2)
         assert ok2 is False
         assert "pin-not-airtight" in reasons2
+
+    def test_tree_move_during_run_one_sets_tree_moved(self, monkeypatch, tmp_path):
+        """D11: a tree that moves only DURING run 1 is caught.
+
+        The baseline digest used to be appended AFTER run 1, so run 1 compared with
+        itself — `tree_moved` was False for run 1 by construction and this move was
+        invisible.
+        """
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            measured_digests=[("sha256:tree-a", False), ("sha256:tree-b", False),
+                              ("sha256:tree-b", False)],
+        )
+        assert [r["tree_moved"] for r in rec["runs"]] == [True, True]
+        ok, reasons = ee.closes_issue(rec)
+        assert ok is False
+        assert "pin-not-airtight" in reasons
+
+    def test_load_bands_must_overlap(self, monkeypatch, tmp_path):
+        """F17/D14 (threat row 10): a red at L-C and greens at L-A must NOT close.
+
+        `bands` was built from the measured runs only, so on a closing shape it held
+        green bands alone and `len(bands) == 1` was trivially satisfied.
+        """
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        for r in green:
+            r["load"]["band"] = ee.load_band(3.0)          # L-A
+        baseline_red = self._run(files, 1, "unexpected-divergence")
+        baseline_red["load"]["band"] = ee.load_band(30.0)  # L-C
+        same = "a" * 40
+
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref", baseline=baseline_red,
+            record_role="closing", ancestor_rc=0,
+            checkout_head=same, measured_commit=same,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        assert rec["load"]["overlap"] is False
+        assert rec["load"]["red_band"] == "L-C"
+        assert rec["load"]["declared_band"] == "L-C"
+        ok, reasons = ee.closes_issue(rec)
+        assert ok is False
+        assert "load-bands-do-not-overlap" in reasons
+        # Threat row 10 / D14: a non-overlap is a red, never a pass.
+        assert ee.exit_code(rec) == 1
+
+        # POSITIVE: both halves in ONE band still closes.
+        baseline_red2 = self._run(files, 1, "unexpected-divergence")
+        baseline_red2["load"]["band"] = ee.load_band(30.0)
+        for r in green:
+            r["load"]["band"] = ee.load_band(30.0)
+        rec2 = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref", baseline=baseline_red2,
+            record_role="closing", ancestor_rc=0,
+            checkout_head=same, measured_commit=same,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        assert rec2["load"]["overlap"] is True
+        assert "load-bands-do-not-overlap" not in ee.closes_issue(rec2)[1]
+
+    def test_red_green_mix_is_derived_from_real_runs(self, monkeypatch, tmp_path):
+        """F17/schema: `red_green_mix` counts the runs that entered the comparison."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        baseline_red = self._run(files, 1, "unexpected-divergence")
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref", baseline=baseline_red,
+            record_role="closing", ancestor_rc=0,
+        )
+        # Two measured greens + the attested baseline red; never the `{"red": 1,
+        # "green": 0}` literal that contradicted `runs == ['green','green']`.
+        assert rec["red"]["red_green_mix"] == {"red": 1, "green": 2}
+        assert sum(rec["red"]["red_green_mix"].values()) == len(rec["runs"]) + 1
 
     def test_certificate_is_bound_to_head_sha(self, monkeypatch, tmp_path):
         """`certificate-not-bound-to-review-head`: the head is read independently."""
@@ -1407,6 +1490,21 @@ class TestConjunctFalsifiability:
             record_role="closing",
         )
         assert with_pair["red"]["ref_role"] == "last-before-first-family-fix"
+
+    def test_record_role_closing_requires_same_invocation_pair(self, monkeypatch, tmp_path):
+        """M52/C1: `closing` with no `--pairing-ref` is a usage error, not a record."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        with pytest.raises(ee.UsageError):
+            self._produce(monkeypatch, tmp_path, runs=green, record_role="closing")
+        # POSITIVE: with a same-invocation pair it is accepted.
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
+        )
+        assert rec["record_role"] == "closing"
 
     def test_closing_role_without_pairing_ref_writes_no_record(self, tmp_path):
         """M52/C1: the documented usage error is exit 2 and NO record."""

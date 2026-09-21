@@ -1175,7 +1175,16 @@ def exit_code(rec: dict) -> int:
     ok, _ = closes_issue(rec)
     if ok:
         return 0
-    if any(r["bucket"] in BUCKETS_RED for r in rec["runs"]):
+    # A RED measured anywhere in this invocation is a red — including the attested
+    # pairing-ref baseline, which is persisted under `red.baseline_run` rather than
+    # in `runs`. D14/threat row 10 requires a non-overlapping load band to be exit 1
+    # ("a red measured at load 80 and a green at load 3"); without the baseline in
+    # this test a closing-shaped record that failed only on load returned a clean 3.
+    red_runs = list(rec["runs"])
+    baseline = rec.get("red", {}).get("baseline_run")
+    if baseline:
+        red_runs.append(baseline)
+    if any(r["bucket"] in BUCKETS_RED for r in red_runs):
         return 1
     if rec["verdict"].get("environment_error"):
         return 2
@@ -1236,19 +1245,22 @@ def _build_record(args: argparse.Namespace) -> dict:
     try:
         if cur_load > ceiling:
             raise RuntimeError(f"load {cur_load} exceeds ceiling {ceiling}")
+        # D11: the baseline digest is captured BEFORE the first run, so a tree that
+        # moves DURING run 1 is caught. Capturing it after run 1 (the old code) made
+        # run 1 compare with itself — `tree_moved` was False for run 1 by
+        # construction — so a tree that moved only during run 1 left
+        # `pin-not-airtight` passing while the tree moved.
+        base_digest, _base_dirty = _porcelain_digest(measured_root, exclude=args.record_out)
         for i in range(1, args.n + 1):
             runs.append(_run_once(files, measured_root, run_root, i, args.marker,
                                   args.run_timeout))
             # The per-run tree state. The cleanliness digest MUST be taken while the
             # measured tree still EXISTS (see below) — and it is taken once per run so
-            # `tree_moved` is MEASURED: a run whose tree digest differs from the first
-            # run's is a moved tree, which `pin-not-airtight` refuses. The previous
-            # producer wrote a literal `False` here, so the per-run half of that
-            # conjunct could never fail.
+            # `tree_moved` is MEASURED: a run whose tree digest differs from the
+            # pre-run baseline is a moved tree, which `pin-not-airtight` refuses.
             tree_states.append(_porcelain_digest(measured_root, exclude=args.record_out))
-        # `tree_moved` is per-run: True iff this run's tree state differs from run
-        # 1's. Run 1 is compared with itself, so it is always False by construction.
-        base_digest = tree_states[0][0] if tree_states else ""
+        # `tree_moved` is per-run: True iff this run's tree state differs from the
+        # digest captured before run 1.
         for r, (digest, _d) in zip(runs, tree_states):
             r["tree_moved"] = digest != base_digest
         # The pin's own cleanliness is the FINAL state, read before the `finally`
@@ -1319,7 +1331,6 @@ def _build_record(args: argparse.Namespace) -> dict:
                     capture_output=True, text=True, cwd=str(REPO_ROOT),
                 )
 
-    bands = {r["load"]["band"] for r in runs}
     measured_red_runs = [r for r in runs if r["bucket"] in BUCKETS_RED]
     measured_green_runs = [r for r in runs if r["bucket"] in BUCKETS_PASSING]
     measured_red_run = next(iter(measured_red_runs), None)
@@ -1334,28 +1345,61 @@ def _build_record(args: argparse.Namespace) -> dict:
         attested_red_run = attested_red_runs[0] if attested_red_runs else None
         red_ref = pair_ref
         red_ref_tree = _git("rev-parse", f"{pair_ref}^{{tree}}")
-        red_green_mix = {"red": len(attested_red_runs),
-                         "green": 0 if attested_red_runs else 1}
     else:
         attested_red_runs = measured_red_runs
         attested_red_run = measured_red_run
         red_ref = requested_ref or commit
         red_ref_tree = tree
-        red_green_mix = {"red": len(measured_red_runs),
-                         "green": len(measured_green_runs)}
+
+    # F17/D14: the OVERLAP set is the band of EVERY run that entered the comparison
+    # — the measured runs AND the attested red (the pairing-ref baseline, which is a
+    # run but is not in `runs`). Built from `runs` alone the set held only green
+    # bands on the one shape that can close, so `len(bands) == 1` was trivially true
+    # and the conjunct could never fire: a red measured at L-C and greens at L-A
+    # recorded `overlap: true` and a CLOSING verdict.
+    bands = {r["load"]["band"] for r in runs}
+    if attested_red_run is not None:
+        bands.add(attested_red_run["load"]["band"])
+
+    # F17/plan schema: the red/green mix counts every run that entered the
+    # comparison — the measured `runs` PLUS the attested baseline red. Derived from
+    # the run objects, never the `{"red": 1, "green": 0}` literal that contradicted
+    # a closing record whose own `runs` were all green and whose
+    # `observed_failure_rate` was 0.0.
+    contributing_runs = list(runs)
+    if attested_red_run is not None and all(attested_red_run is not r for r in runs):
+        contributing_runs.append(attested_red_run)
+    red_green_mix = {
+        "red": sum(1 for r in contributing_runs if r["bucket"] in BUCKETS_RED),
+        "green": sum(1 for r in contributing_runs if r["bucket"] in BUCKETS_PASSING),
+    }
+    assert sum(red_green_mix.values()) == len(contributing_runs), (
+        "red_green_mix must account for every contributing run: "
+        f"mix={red_green_mix} runs={len(contributing_runs)}"
+    )
 
     # F4a: derived from the attested red runs' own recorded file lists, never a
     # literal.
     same_file_list = _red_file_list_matches(attested_red_runs, files)
-    red_band = (measured_red_run or runs[-1])["load"]["band"]
+    # F17/D14: `red_band`/`declared_band` come from the ATTESTED red, not from
+    # `runs[-1]` — on a closing shape the last measured run is GREEN, so writing its
+    # band as the red's band recorded a green L-A run as the red regime while the red
+    # was actually measured at L-C.
+    red_band = (
+        attested_red_run["load"]["band"] if attested_red_run is not None
+        else (measured_red_run or runs[-1])["load"]["band"]
+    )
     green_band = (measured_green_runs[0]["load"]["band"] if measured_green_runs else red_band)
     cause = attested_red_run["redis_log_cause"] if attested_red_run else None
     cause_evidence = attested_red_run["cause_evidence"] if attested_red_run else {}
-    # D9 conjunct 11 (`no-rate-change`): MEASURED — the red was re-attempted at
-    # the fixed commit (`attempted`), it did NOT appear there (`appeared`), and it
-    # DID appear at the pairing ref (`rate_change`). Without a pairing ref there is
-    # no baseline red, so `rate_change` is False and the conjunct cannot pass.
-    attempted = bool(runs)
+    # D9 conjunct 11 (`no-rate-change`): a red was demonstrated (at the pairing ref,
+    # or among the measured runs when no pairing ref is given) and did NOT appear at
+    # the measured, fixed commit. `attempted` records that a red was demonstrated at
+    # ALL — with no red there is no rate to compare — and is NOT a constant:
+    # `bool(runs)` was one (`main()` rejects `--n < 2`, so it was True on every
+    # record that could reach the conjunct). `closes_issue` no longer ANDs it, so it
+    # carries no protection it cannot supply; `rate_change` is the falsifiable claim.
+    attempted = bool(attested_red_run)
     appeared = bool(measured_red_runs)
     rate_change = bool(attested_red_run) and not appeared
     # DERIVED from the label it summarises, never a literal (it was `True`).
@@ -1429,6 +1473,10 @@ def _build_record(args: argparse.Namespace) -> dict:
             "cause": cause,
             "cause_evidence": cause_evidence,
             "red_green_mix": red_green_mix,
+            # D16: the baseline run is PERSISTED, not discarded. It is the only
+            # evidence from which `rate_change` can be re-derived, and `exit_code`
+            # reads its bucket to classify a non-overlap as the red D14 requires.
+            "baseline_run": baseline_run,
             "at_fixed_commit": {
                 "attempted": attempted,
                 "appeared": appeared,
