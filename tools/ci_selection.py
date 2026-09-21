@@ -115,13 +115,14 @@ SHARED_MODULES = (
     # (`tests/conftest.py:1148`) and re-exports the suite-wide autouse
     # `track_tempfile_artifacts` fixture, so it is functionally part of
     # conftest: it patches `tempfile.mkdtemp` and deletes directories for
-    # EVERY surface's tests. It is not a `test_*.py` file, so the manifest
-    # never classifies it and a change to it would otherwise select `core`
-    # only — a break it induces in `api`/`eval`/`onboarding`/`ep`/`battery`
-    # tests would never run on the PR that made it (the same silent
-    # under-selection family as #1349/#3332/#3910). Found by code review on
-    # the #4069 PR itself.
+    # EVERY surface's tests — and, not being a `test_*.py` file, the manifest
+    # never classifies it, so without this entry a change to it selected
+    # `core` only. `tests/_embedded.py` is the same shape, four module-level
+    # conftest imports and 27 importers, and was still under-selecting.
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_import_is_shared`
+    # now DERIVES this list from conftest instead of enumerating it.
     "tests/_tmpdir_hygiene.py",
+    "tests/_embedded.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",

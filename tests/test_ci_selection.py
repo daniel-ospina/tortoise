@@ -230,28 +230,43 @@ def test_shared_module_goes_full():
     assert r2["full"] is True
 
 
-def test_conftest_reexported_suite_wide_module_selects_full():
-    """#4069: the suite-wide teardown helper must run the FULL matrix.
+def test_every_conftest_module_level_import_is_shared():
+    """#4069: a module conftest imports at MODULE level is suite-wide by construction.
 
-    `tests/_tmpdir_hygiene.py` is imported at conftest MODULE level and
-    re-exports the autouse `track_tempfile_artifacts` fixture, so it patches
-    `tempfile.mkdtemp` and deletes directories for EVERY surface's tests — it is
-    functionally part of `tests/conftest.py`.
+    `tests/conftest.py` re-exports suite-wide fixtures (the session-shared embedded
+    projection, the per-test tempfile tracker), so a module it imports at module level
+    runs for EVERY surface's tests. Such a module is not a `test_*.py` file, so the
+    manifest never classifies it: unless it is listed in `SHARED_MODULES`, a change to
+    it selects `core` only, and an api/onboarding/battery break it induces never runs on
+    the PR that made it (the #1349/#3332/#3910 silent-under-selection class).
 
-    `test_every_shared_module_entry_selects_the_full_matrix` (the #4097 ratchet)
-    derives its invariant from the ENTRIES of `SHARED_MODULES`, so it cannot catch
-    an entry that is MISSING — which is exactly the review finding on #4069: the
-    module selected `core` only. This test pins the conftest-import side of the
-    contract, so removing the `SHARED_MODULES` entry (or un-re-exporting the
-    fixture from conftest) fails here instead of silently under-selecting.
+    DERIVED, not enumerated. The cycle-5 review finding pinned one module with a literal
+    assertion; the cycle-6 review then measured that `tests/_embedded.py` — imported at
+    conftest module level four times, imported by 27 test files, 9 of them outside
+    `core` — was still selecting `core` only. There is deliberately no exemption list:
+    "source of a suite-wide fixture" is exactly what `SHARED_MODULES` encodes, so the
+    rule is checkable without naming any module.
     """
     conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text()
-    assert "from tests._tmpdir_hygiene import track_tempfile_artifacts" in conftest_src, (
-        "conftest no longer re-exports the suite-wide tempfile tracker — re-derive "
-        "whether tests/_tmpdir_hygiene.py must still run the full matrix")
-    r = _sel(["tests/_tmpdir_hygiene.py"])
-    assert r["full"] is True, r
-    assert r["test_files"] == "ALL", r
+    imported = sorted({
+        match.group(1)
+        for line in conftest_src.splitlines()
+        for match in (
+            re.match(r"^from (tests\.[\w.]+) import", line),
+            re.match(r"^import (tests\.[\w.]+)", line),
+        )
+        if match
+    })
+    assert imported, "expected tests/conftest.py to import at least one tests.* module"
+    for module in imported:
+        rel = module.replace(".", "/") + ".py"
+        assert rel in SHARED_MODULES, (
+            f"{rel} is imported at conftest MODULE level (so it runs for every "
+            f"surface's tests) but is not in SHARED_MODULES — a change to it would "
+            f"select core only")
+        result = _sel([rel])
+        assert result["full"] is True, result
+        assert result["test_files"] == "ALL", result
 
 
 def test_every_shared_module_entry_selects_the_full_matrix():

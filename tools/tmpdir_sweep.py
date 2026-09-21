@@ -226,8 +226,8 @@ def _live_pid_protects(entry_path: str) -> str | None:
 
     The probe is `os.lstat`, not `os.path.isfile`: `isfile` answers False for
     a path that EXISTS but is not a regular file (FIFO, dangling symlink,
-    device, directory) and for a path whose parent cannot be stat-ed — three
-    states this guard must read as "present but unprovable". Treating any of
+    device, directory) and for a path whose parent cannot be stat-ed — all of
+    which this guard must read as "present but unprovable". Treating any of
     them as "no pid file" is a fail-open (declared threat class 3), and the
     tracker's mirror of this function must decide identically (pinned by
     `tests/test_tmpdir_sweep.py::test_the_two_guards_agree_on_every_shape`).

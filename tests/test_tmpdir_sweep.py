@@ -325,32 +325,45 @@ def test_a_dead_pid_does_not_short_circuit_a_live_second_pid(
     assert result.removed == []
 
 
-def test_the_two_guards_agree_on_every_shape(tmp_path):
+def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
     """`tools/tmpdir_sweep.py::_live_pid_protects` and
     `tests/_tmpdir_hygiene.py::_protected_reason` are deliberate MIRRORS of one
     safety property: only a PROVABLY dead pid permits removal.
 
     They are two copies because the sweep must stay runnable as a bare script —
     `python3 tools/tmpdir_sweep.py` puts `tools/`, not the repo root, on
-    `sys.path`, so the sweep cannot import a shared `tools.*` helper. Two
-    copies drift: both used `os.path.isfile`, which answers False for an
-    EXISTING non-regular pid file, so the same guarded entry read as unguarded
-    in BOTH (review finding on this PR). This test pins the equivalence across
-    the guard's whole decision space, so an unmirrored change to either copy
-    fails here instead of shipping.
+    `sys.path`, so the sweep cannot import a shared `tools.*` helper. Two copies
+    drift: both used `os.path.isfile`, which answers False for an EXISTING
+    non-regular pid file, so the same guarded entry read as unguarded in BOTH.
+
+    This test pins the equivalence across EVERY decision branch of both guards:
+    the four filesystem shapes, the four branches that need an injected I/O
+    failure (unreadable, unstattable, `os.kill` EACCES, `os.kill` generic
+    OSError), and the `_PID_FILENAMES` probe loop plus the tuple itself. A
+    one-sided change to either copy fails here.
     """
+    import builtins
     import tempfile
 
-    from tests._tmpdir_hygiene import _protected_reason
+    import tests._tmpdir_hygiene as hygiene_mod
+    import tools.tmpdir_sweep as sweep_mod
+
+    tracker = hygiene_mod._protected_reason
+
+    # Channel 1 — the probe LIST. Two mirrors that probe different filenames
+    # diverge with no shape below changing at all, so pin the tuple first.
+    assert sweep_mod._PID_FILENAMES == hygiene_mod._PID_FILENAMES, (
+        "the two mirrored guards probe different pid-file names")
 
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait()
     shapes: list[tuple[str, str]] = []
 
-    def _shape(label: str, setup) -> None:
+    def _shape(label: str, setup) -> str:
         path = tempfile.mkdtemp(prefix="ask_parity_", dir=str(tmp_path))
         setup(path)
         shapes.append((label, path))
+        return path
 
     def _pid(text: str):
         def _write(path: str) -> None:
@@ -374,18 +387,81 @@ def test_the_two_guards_agree_on_every_shape(tmp_path):
         _shape("fifo", lambda path: os.mkfifo(
             os.path.join(path, "redis.pid")))
 
+    # Channel 2 — every filesystem shape, agreed and judged.
     assert len(shapes) >= 10
     for label, path in shapes:
-        sweep_verdict = _live_pid_protects(path) is None
-        tracker_verdict = _protected_reason(path) is None
-        assert sweep_verdict == tracker_verdict, (
+        sweep_removable = sweep_mod._live_pid_protects(path) is None
+        tracker_removable = tracker(path) is None
+        assert sweep_removable == tracker_removable, (
             f"the two guards disagree on the {label!r} shape: sweep "
-            f"removable={sweep_verdict}, tracker removable={tracker_verdict}")
+            f"removable={sweep_removable}, tracker removable={tracker_removable}")
     # And the property itself, not only the agreement: ONLY the two
     # no-live-pid shapes may be removable.
     removable = {label for label, path in shapes
-                 if _live_pid_protects(path) is None}
+                 if sweep_mod._live_pid_protects(path) is None}
     assert removable == {"absent", "dead"}, removable
+
+    # Channel 3 — the branches that cannot be reached from filesystem state
+    # alone. Each injects one I/O failure for the pid file only and requires
+    # BOTH guards to agree AND to treat the entry as unprovable (protected).
+    probe = _shape("injected", _pid(str(os.getpid())))
+    pid_file = os.path.join(probe, "redis.pid")
+    real_open, real_lstat, real_kill = builtins.open, os.lstat, os.kill
+
+    def _guarded(target_path: str) -> None:
+        sweep_reason = sweep_mod._live_pid_protects(probe)
+        tracker_reason = tracker(probe)
+        assert (sweep_reason is None) == (tracker_reason is None), (
+            f"guards disagree on injected {target_path}: "
+            f"sweep={sweep_reason!r}, tracker={tracker_reason!r}")
+        assert sweep_reason is not None, (
+            f"injected {target_path} left the entry REMOVABLE (fail-open)")
+
+    def _open_raises(file, *args, **kwargs):
+        if os.path.basename(str(file)) == "redis.pid":
+            raise PermissionError("injected: unreadable pid file")
+        return real_open(file, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(builtins, "open", _open_raises)
+        _guarded("open() OSError -> unreadable")
+
+    def _lstat_raises(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "redis.pid":
+            raise PermissionError("injected: unstattable pid file")
+        return real_lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "lstat", _lstat_raises)
+        _guarded("os.lstat OSError -> unstattable")
+
+    def _kill_raises(exc):
+        def _patched(pid, sig):
+            if pid == os.getpid():
+                raise exc
+            return real_kill(pid, sig)
+        return _patched
+
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "kill", _kill_raises(PermissionError("injected")))
+        _guarded("os.kill PermissionError -> alive, no permission")
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "kill", _kill_raises(OSError("injected")))
+        _guarded("os.kill OSError -> probe failed")
+
+    # Channel 4 — the probe LOOP: a provably dead FIRST pid must not
+    # short-circuit a live SECOND one, in either mirror.
+    pair = _shape("pair", lambda path: None)
+    with open(os.path.join(pair, "redis.pid"), "w") as fh:
+        fh.write(str(proc.pid))                      # provably dead
+    with open(os.path.join(pair, "second.pid"), "w") as fh:
+        fh.write(str(os.getpid()))                   # this process: live
+    with monkeypatch.context() as mp:
+        mp.setattr(sweep_mod, "_PID_FILENAMES", ("redis.pid", "second.pid"))
+        mp.setattr(hygiene_mod, "_PID_FILENAMES", ("redis.pid", "second.pid"))
+        assert sweep_mod._live_pid_protects(pair) is not None
+        assert tracker(pair) is not None
+    assert os.path.exists(pid_file)
 
 
 def test_sweep_refuses_a_non_finite_age_gate(tmp_path):
