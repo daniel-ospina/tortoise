@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """W6C supplementary — the ASSEMBLY BUDGET actually filled (tokens of the
 ~8000-token ask-lane cap) for the five window-miss questions, in the two arms
-(capture-shape / dense-alive) defined in w6c_gold_rank_diagnostic.py.
+(capture-shape / dense-alive) defined in w6c_gold_rank_diagnostic.py (the ``capture`` arm is pinned ``embed=False``, since W7A made the seeder's default ``embed=True``).
 
 The real ask-lane retrieval + dedup + boost + rerank + assembly runs; only the
 READER TRANSPORT is a deterministic stub that returns a fixed non-empty string,
@@ -61,7 +61,7 @@ def measure(q: dict, dense: bool) -> dict:
     ask_lane_mod._default_ask_reader_factory = lambda: StubReader()
     ask_lane_mod._reset_ask_reader_cache_for_tests()
     try:
-        _seed_memory(sdk, q)
+        _seed_memory(sdk, q, embed=False)
         if dense:
             _attach_dense_vectors(sdk)
         res = ask_lane_mod.run_ask_lane(

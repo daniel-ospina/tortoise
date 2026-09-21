@@ -2,6 +2,8 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
+// #4336: TIER_LABELS is the display-name map; its parity against
+// product.html's `labels` map is pinned by tests/test_website_static.py.
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
@@ -4923,7 +4925,25 @@ function claimIntentInFlight() {
         setWizardDurableError('The organization changed while the key was being created — the key was created on the previous organization. Switch back to it in the account menu to use it, or create another key here.')
         return
       }
-      setWizardDurableKey((mk && (mk.key || mk.api_key)) || '')
+      // #4359: the connect-step latch reads the SAME shared predicate as every
+      // other reveal seam. A truthy-but-unrevealable 2xx (`42`, `{}`, `[]`,
+      // `'   '`) used to be stored verbatim: the connect snippet embedded a
+      // non-key, and the row-truth effect / revoke prefix-clear then ran
+      // `wizardDurableKey.startsWith(...)` on it → `TypeError: …startsWith is
+      // not a function`. The secret is unrecoverable, so refuse it and say so,
+      // mirroring `createKey`. A previously-held plaintext is deliberately NOT
+      // cleared (#2735 class: a failed attempt must never destroy a shown-once
+      // key the user still holds).
+      const plaintext = revealableMintPlaintext(mk)
+      if (!plaintext) {
+        // The remedy names the row this mint created: `keyName` is always set
+        // here (unlike the create path's optional name), so pointing at "an
+        // unlabeled key" would be false.
+        setWizardDurableError(`The server did not return the new key\u2019s value, so it cannot be shown. The key may still have been created as \u201c${keyName}\u201d \u2014 open the API Keys tab to revoke it, then create another key here.`)
+        await loadAll('').catch(() => {})
+        return
+      }
+      setWizardDurableKey(plaintext)
       // #2246 (ADR-010): the durable key is NOT installed (no
       // localStorage/teamKeysRef/apiKey write — the browser never holds a
       // key). wizardDurableKey keeps it in-memory so the connect snippet can
@@ -5585,7 +5605,7 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite members.')
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.')
           setBusy(false)
           return
         }
@@ -5878,13 +5898,24 @@ function claimIntentInFlight() {
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
       if (orgIdRef.current !== _teamAtCall) return null
-      // #4330: a 2xx that carries no plaintext is NOT a reveal. The secret is
-      // unrecoverable at this point, so refuse the success path rather than
-      // render an empty box (and never let a falsy value reach the clipboard).
-      const plaintext = (mk && (mk.key || mk.api_key)) || ''
+      // #4330/#4359: a 2xx that carries no REVEALABLE plaintext is NOT a
+      // reveal. The secret is unrecoverable at this point, so refuse the
+      // success path rather than render an empty box (and never let a
+      // non-string/blank value reach the clipboard or claim "Copied ✓"). The
+      // shared predicate — not a bare falsy check — also catches the
+      // truthy-but-unrevealable shapes (`42`, `{}`, `[]`, `'   '`), which are
+      // non-falsy and used to latch a blank/uncopyable reveal with no error.
+      const plaintext = revealableMintPlaintext(mk)
       if (!plaintext) {
-        setError('The server did not return the new key\u2019s value, so it cannot be shown. Refresh the list and revoke any unlabeled key you just created.')
+        // Refresh FIRST, then surface the refusal: `loadAll` owns the same
+        // `error` slot and overwrites it from its own catch, so the message
+        // that a live key exists and must be revoked would otherwise be lost to
+        // a generic network error. The identity guard is re-applied: a switch
+        // during the refresh must not carry this team's message under the new
+        // team's header.
         await loadAll('')
+        if (orgIdRef.current !== _teamAtCall) return null
+        setError('The server did not return the new key\u2019s value, so it cannot be shown. Refresh the list and revoke any unlabeled key you just created.')
         return null
       }
       setNewKey(plaintext)
@@ -5924,7 +5955,11 @@ function claimIntentInFlight() {
   // failed copy used to take the shown-once key with it). It never writes a
   // non-string: `navigator.clipboard.writeText(null)` stringifies to "null".
   async function copyNewKey() {
-    const plaintext = typeof newKey === 'string' ? newKey : ''
+    // #4359: the SAME predicate the reveal gate uses. A whitespace-only
+    // `newKey` must not be written to the clipboard — `writeText('   ')`
+    // resolves and the handler then set `keyCopied = true`, a false
+    // "Copied ✓" over a clipboard that holds only whitespace.
+    const plaintext = revealablePlaintext(newKey)
     if (!plaintext) return
     // Feed the connect snippet even if the clipboard refuses (in-memory only).
     setWizardDurableKey(plaintext)
@@ -5953,16 +5988,37 @@ function claimIntentInFlight() {
   // renders in every other state — so a falsy `newKey` can never produce the
   // empty `.key-value` box (the owner's "square") and is never handed to
   // `navigator.clipboard.writeText` (which stringifies `null` to "null").
-  const newKeyReveal = (keyModalStage === 'done' && typeof newKey === 'string' && newKey) || ''
+  // #4359: the SAME shared predicate as the latch and the copy — a truthy
+  // non-string or a whitespace-only `newKey` no longer renders a blank reveal;
+  // the form is its exact-complement else-branch, so it stays the single gate.
+  const newKeyReveal = (keyModalStage === 'done' && revealablePlaintext(newKey)) || ''
 
-  // #4342: the ONE authority for "is this a revealable plaintext?" — a
-  // non-empty, non-blank STRING. `regenerateKey` must refuse anything else: a
-  // 2xx can carry a number, an object, or padding, and every one of those is
-  // non-falsy, so a bare `!plaintext` check latched a box the user could not
-  // copy. The render gate and the copy control read the same predicate, so no
-  // falsy/blank value can reach either seam.
+  // #4342/#4359: the ONE authority for "is this a revealable plaintext?" — a
+  // non-empty, non-blank STRING. A 2xx can carry a number, an object, or
+  // padding, and every one of those is non-falsy, so a bare `!plaintext` check
+  // latched a box the user could not copy.
+  //
+  // SCOPE: this is NOT a whole-file invariant. Same-class writers outside the
+  // create/connect/rotate reveals are tracked in #4370.
+  //
+  // `trim()` alone is NOT a blankness test — it strips whitespace but not
+  // zero-width / invisible characters, so a string of only those would pass
+  // this single gateway and reproduce the reported symptom exactly: a visually
+  // blank `.key-value` under a "Copied ✓". The class is the Unicode FORMAT set
+  // plus the DEFAULT-IGNORABLE set, plus BRAILLE PATTERN BLANK (U+2800), which
+  // is in NEITHER property. Only the DECISION uses the stripped copy — the
+  // returned value is always the verbatim secret.
   function revealablePlaintext(value) {
-    return (typeof value === 'string' && value.trim()) ? value : ''
+    return (typeof value === 'string' && value.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '').trim()) ? value : ''
+  }
+
+  // #4359: a mint response carries the plaintext on EITHER leg (`key` on the
+  // POST /v1/team/keys response, `api_key` on the provision envelope). The legs
+  // are composed through the predicate INDIVIDUALLY: `mk.key || mk.api_key`
+  // selected a truthy-but-unrevealable primary first, so `{key: {},
+  // api_key: 'tt_ok'}` was refused while a valid value sat in the other leg.
+  function revealableMintPlaintext(response) {
+    return revealablePlaintext(response && response.key) || revealablePlaintext(response && response.api_key)
   }
 
   // #4342: the rotate replacement's key, derived ONCE for the same reason as
@@ -5986,7 +6042,9 @@ function claimIntentInFlight() {
   // (the repo pins exactly this standard — `KEY_VISIBILITY_NOTE` and the
   // wizardConnectTripwire "shown once" ban).
   function dismissKeyModal() {
-    const plaintext = typeof newKey === 'string' ? newKey : ''
+    // #4359: the same predicate — a blank `newKey` is not a secret worth a
+    // confirm, and must not be fed to the connect step's `wizardDurableKey`.
+    const plaintext = revealablePlaintext(newKey)
     if (plaintext && !keyCopied
         && !window.confirm('Close without copying it? This dialog will not show the key again.')) return
     if (plaintext) setWizardDurableKey(plaintext)
@@ -6053,7 +6111,7 @@ function claimIntentInFlight() {
       // and `createKey` already refuse the falsy case). The remedy is
       // rotate-specific: create cannot lose a live credential, rotate already
       // has.
-      const plaintext = revealablePlaintext(mk && (mk.key || mk.api_key))
+      const plaintext = revealableMintPlaintext(mk)
       if (!plaintext) {
         // Refresh FIRST, then surface the reason: `loadAll` owns the same
         // `error` slot and overwrites it from its own catch, so a compound
@@ -8307,7 +8365,7 @@ function claimIntentInFlight() {
                     {(currentOrgName || 'O').charAt(0).toUpperCase()}
                   </span>
                   <span className="account-org-name">{currentOrgName || 'No organization'}</span>
-                  {team?.tier && <span className="tier-badge">{team.tier}</span>}
+                  {team?.tier && <span className="tier-badge">{TIER_LABELS[team.tier] || team.tier}</span>}
                 </div>
                 {teams.length > 1 && (
                   <>
@@ -8478,7 +8536,7 @@ function claimIntentInFlight() {
         )}
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {team.tier || 'free'} tier · Upgrade
+            {(TIER_LABELS[team.tier] || team.tier || 'free')} tier · Upgrade
           </a>
         )}
         {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
@@ -9500,7 +9558,7 @@ function claimIntentInFlight() {
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
+              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>

@@ -40,7 +40,8 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
+def _seed(sdk: TortoiseSDK, seeds: list[dict], *,
+          embed: bool = False) -> None:
     """Seed the fixture's memory in the CAPTURE shape (#3914).
 
     Each seed is ONE TURN of its own session, written through
@@ -69,6 +70,17 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
     takes neither, and a ``kind`` knob would let a seed silently opt out of
     the turn shape — the very defect this seeder existed to stop teaching.
     No committed fixture uses either key (unused dead branches removed).
+
+    ⛔ ``embed`` defaults to **False** here, unlike the shared seeder's own
+    default. These are COMMITTED goldens (``tests/fixtures/ask_llm_transcripts/``)
+    recorded on the PRE-#4194 store, and they are also the frozen
+    instrument's known-GREEN substrate (``ask_shape_rate.known_green``) —
+    seeding a vector changes the assembled context and would rewrite the
+    recorded ``user_message`` byte-for-byte, i.e. it would move the ruler's
+    own control. Re-recording the transcripts on the embedded store is a
+    deliberate NEW-instrument change, not a seeder repair (W7A). The D3
+    instrument's own fixture (``ask_spotcheck._seed_memory``) embeds, so the
+    dense leg IS visible where it is measured.
     """
     proj = sdk._get_proj()
     ids: dict[str, str] = {}
@@ -86,7 +98,8 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
             sdk, sid,
             [{"role": seed.get("role") or "user",
               "content": seed["content"]}],
-            now=f"{sdate}T10:00:00Z" if sdate else None)
+            now=f"{sdate}T10:00:00Z" if sdate else None,
+            embed=embed)
         if not turn_ids:
             # Capture's pre-mutation blank gate — nothing was written.
             continue

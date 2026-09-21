@@ -458,6 +458,36 @@ def test_collision_preflight_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_finding_provenance_tool_change_fails_closed_to_full():
+    # #4290: tools/finding_provenance.py owns tests/test_finding_provenance.py.
+    # Same silent-drop class as the collision-preflight carve-out above — the
+    # flat "tools/" NON_PYTHON_PREFIXES entry swallows a tool-only change, so
+    # without a TOOL_CARVEOUTS entry `changed` is empty and the docs-only
+    # return runs tier-1 smoke only: the gate's own falsification suite would
+    # never run on the PR that changes the gate. No SOURCE_PATTERNS entry
+    # matches, so it lands in the unknown-path fail-closed branch -> FULL.
+    r = _sel(["tools/finding_provenance.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
+def test_embedded_evidence_tool_change_fails_closed_to_full():
+    # #3827: tools/embedded_evidence.py owns tests/test_embedded_evidence.py.
+    # Same silent-drop class as the preflight carve-out above: the flat "tools/"
+    # prefix swallowed the path, `changed` came back empty, and select() took the
+    # docs-only return (surfaces=[], tier-1 smoke only) — so the harness's own
+    # guard test never ran on the PR that changed the harness. That is precisely
+    # the "proxy silent in the case it exists to cover" class the harness is
+    # written to detect, and it applied to the harness itself.
+    # No SOURCE_PATTERNS entry matches the path, so it takes the unknown-path
+    # branch -> full matrix (fail closed), like tools/collision_preflight.py.
+    r = _sel(["tools/embedded_evidence.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_backfill_script_only_change_selects_eval():
     # graph-scripts/backfill_embeddings.py is a SOURCE_PATTERNS["eval"]
     # path — a backfill-only PR selects the eval surface (its test,
