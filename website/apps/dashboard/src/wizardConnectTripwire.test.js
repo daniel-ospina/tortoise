@@ -1554,7 +1554,9 @@ test('#4353: the wizard mint 402 copy offers revoke, never regenerate', () => {
   // renders from wizardPasteRow's own trailing block — i.e. BELOW the input.
   assert.doesNotMatch(cap402, /paste a key below/i,
     'the paste field renders above this message — "below" was the wrong direction')
-  // build-fork arm: byte-identical (the build fork has no paste row — #3218).
+  // build-fork arm: byte-identical. The build fork DOES render a paste row
+  // (main.jsx:7261 → 6943 → 6835), so this pin is about the copy staying
+  // unchanged, not about that row being unreachable.
   assert.match(cap402,
     /\? 'You\\'ve reached your plan\\'s limit of API keys — free a slot in the API Keys tab, then create a key here\.'/,
     'the build-fork arm is unchanged (it names only affordances its branch renders)')
@@ -1576,4 +1578,32 @@ test('#4353: the connect step’s existing-key note is DERIVED, not an inline li
   assert.match(mainJsx,
     /import \{[^}]*existingKeyNoteFrom[^}]*\} from '\.\/keyAllowance\.js'/,
     'the derivation is imported from the pure module')
+})
+
+test('#4353: the paste-validation owner remedies APPEND the at-cap clause', () => {
+  // wizardPasteRow's "Use this key" handler has three owner/admin remedies
+  // (bootstrap / expiring / revoked-disabled). Each names a route — create or
+  // rotate — that mints through the SAME capped POST /v1/team/keys, so each
+  // must append the pure clause rather than promise a mint that 402s. The
+  // slice is marker-guarded on both ends (a renamed/removed handler fails
+  // loudly instead of silently widening).
+  const paste = slice('const wizardPasteRow = (', 'const wizardNoKeyAffordance = (',
+                      'wizardPasteRow handler')
+  // MUTATION: dropping the interpolation from one arm fails its own assert.
+  assert.match(paste,
+    /'Create a new key in the API Keys tab\.' \+ capRevokeFirstClause\(team, keys\)/,
+    'the bootstrap rejection’s owner remedy must append the at-cap clause')
+  assert.match(paste,
+    /'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration\.' \+ capRevokeFirstClause\(team, keys\)/,
+    'the expiring rejection’s owner remedy must append the at-cap clause')
+  assert.match(paste,
+    /'Create or rotate a key in the API Keys tab and paste the new one\.' \+ capRevokeFirstClause\(team, keys\)/,
+    'the revoked/disabled rejection’s owner remedy must append the at-cap clause')
+  // The member arms route to an owner/admin — the only actor who can revoke —
+  // so they must NOT carry the clause: exactly three occurrences, one per arm.
+  assert.equal((paste.match(/capRevokeFirstClause\(team, keys\)/g) || []).length, 3,
+    'exactly the three owner/admin remedies carry the clause (member arms do not)')
+  assert.match(mainJsx,
+    /import \{[^}]*capRevokeFirstClause[^}]*\} from '\.\/keyAllowance\.js'/,
+    'the clause is imported from the pure module')
 })

@@ -42,7 +42,7 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from 
 // #3874: the org's API-key allowance as the SERVER states it — the pre-cap
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
-import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom } from './keyAllowance.js'
+import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -4899,9 +4899,15 @@ function claimIntentInFlight() {
         setWizardDurableCapped(true)  // this session's mint is capped (P2-7)
         setWizardShowPaste(true)
         setWizardDurableError(isBuildFork
-          // #3218: the remedy must name only affordances THIS branch renders —
-          // the build fork has no paste row, so "paste a key below" dead-ended
-          // (review cycle 1, P2).
+          // #3218: the build-fork arm names only the API Keys tab route. It is
+          // NOT the case that this branch has no paste row: the build fork's
+          // step-2 no-key branch renders {wizardKeyAffordance} (main.jsx:7261),
+          // which for an owner/admin in mint mode resolves to
+          // wizardNoKeyAffordance (main.jsx:6943) and renders the paste
+          // disclosure (main.jsx:6835) — opened by this handler
+          // (main.jsx:4900). The copy below is deliberately left byte-identical
+          // either way: whether it should also name the paste escape is a
+          // product call, not this gate's.
           ? 'You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.'
           : 'You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.')
       } else {
@@ -6772,15 +6778,15 @@ function claimIntentInFlight() {
               return
             }
             if (check.source === 'bootstrap') {
-              setWizardDurableError(`That key can\'t be used — it was created for a login session and stops working after 24 hours. ${isOwnerAdmin ? 'Create a new key in the API Keys tab.' : 'Ask an owner or admin to create a new key for you.'}`)
+              setWizardDurableError(`That key can\'t be used — it was created for a login session and stops working after 24 hours. ${isOwnerAdmin ? 'Create a new key in the API Keys tab.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create a new key for you.'}`)
               return
             }
             if (check.source === 'expiring') {
-              setWizardDurableError(`It expires, and a key embedded in an agent must never expire. ${isOwnerAdmin ? 'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              setWizardDurableError(`It expires, and a key embedded in an agent must never expire. ${isOwnerAdmin ? 'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create or rotate a key for you.'}`)
               return
             }
             if (check.source === 'revoked' || check.source === 'disabled') {
-              setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create or rotate a key for you.'}`)
               return
             }
             setWizardDurableKey(pasted)

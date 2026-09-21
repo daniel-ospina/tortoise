@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path'
 import {
   allowanceLine,
   capLimitFrom,
+  capRevokeFirstClause,
   existingKeyNoteFrom,
   keyAllowance,
   rotateCapNoticeFrom,
@@ -262,4 +263,29 @@ test('#3874 (wiring backstop): main.jsx renders the pre-cap allowance on both ke
   const renderCalls = (src.match(/\{keysLoaded && allowanceLine\(team, keys\)/g) || []).length
   assert.ok(renderCalls >= 2,
     `both surfaces must gate on keysLoaded (no fabricated "0 in use"), found ${renderCalls}`)
+})
+
+// ── 9. #4353: the paste-validation at-cap clause ─────────────────────────
+// The clause is ADDED to a rejection's owner/admin remedy, never substituted
+// for it, and must be empty whenever the server has not said the org is at
+// its limit — so no surface can gain an at-cap warning it cannot substantiate.
+
+test('#4353: at the cap the paste-rejection clause names revoke first', () => {
+  const clause = capRevokeFirstClause({ max_api_keys: 2 }, [{ id: 'a' }, { id: 'b' }])
+  assert.match(clause, /revoke a key in the API Keys tab/,
+    `the clause must name the achievable at-cap action: ${clause}`)
+  assert.doesNotMatch(clause, /regenerate/i,
+    'at the cap a rotate/regenerate mints through the same capped route — it must never be offered')
+})
+
+test('#4353: below the cap the paste-rejection clause is empty', () => {
+  assert.equal(capRevokeFirstClause({ max_api_keys: 2 }, [{ id: 'a' }]), '')
+})
+
+test('#4353: an unknown allowance never fabricates an at-cap clause', () => {
+  assert.equal(capRevokeFirstClause({}, []), '')
+  assert.equal(capRevokeFirstClause({ max_api_keys: null }, [{ id: 'a' }]), '')
+  assert.equal(capRevokeFirstClause({ max_api_keys: 'lots' }, []), '')
+  assert.equal(capRevokeFirstClause({ max_api_keys: -3 }, []), '')
+  assert.equal(capRevokeFirstClause(undefined, undefined), '')
 })

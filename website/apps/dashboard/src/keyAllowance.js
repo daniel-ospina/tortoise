@@ -137,3 +137,16 @@ export function existingKeyNoteFrom(team, rows, now = Date.now()) {
   if (a && a.exhausted) return rotateCapNoticeFrom('', team)
   return "Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it without adding a key. Creating a new key here spends another of your plan's key slots."
 }
+
+// #4353: the paste-validation rejections tell an owner/admin how to get a key
+// they can actually use. AT the cap every one of those routes — create and
+// rotate alike — mints through the SAME capped POST /v1/team/keys (rotate
+// mints the replacement before the old row is revoked), so the remedy must
+// name revoke first. Empty below the cap, and empty when the server has not
+// supplied a limit: the clause is added, never substituted, so no surface
+// gains a promise it cannot keep.
+export function capRevokeFirstClause(team, rows, now = Date.now()) {
+  const a = keyAllowance(team, rows, now)
+  if (!a || !a.exhausted) return ''
+  return " You are at your plan's key limit, so revoke a key in the API Keys tab first — a rotate or create mints its replacement before the old key is freed."
+}
