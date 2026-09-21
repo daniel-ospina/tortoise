@@ -156,7 +156,6 @@ def _parse_part_b() -> dict[str, dict]:
         )
         if m:
             _, d_old, redirect, d_new, verdict = m.groups()
-            rows[_ if False else m.group(1)] = {}
             rows[m.group(1)] = {
                 "destination": d_old,
                 "redirect": redirect,
@@ -318,7 +317,10 @@ def test_destination_counts_table_and_prose_are_arithmetic() -> None:
         "the bucket sentence's `absorbed into MCP targets` figure does not match the "
         "other four buckets"
     )
-    assert n_targets and on_mcp + sdk_only + tenancy + removed == n_tools
+    assert n_targets == 26, (
+        f"the bucket sentence says {n_targets} MCP targets; the approved target surface is 26"
+    )
+    assert on_mcp + sdk_only + tenancy + removed == n_tools
 
 
 # ── Part B: the #4031 agreement check ────────────────────────────────────────
@@ -383,6 +385,15 @@ def test_b1_lists_exactly_the_disagreements() -> None:
     b1 = _doc().split("### B1")[1].split("## Reproduce")[0]
     listed = set(re.findall(r"^\| `([a-z_][a-z0-9_]*)` \|", b1, re.M))
     assert listed, "B1 rendered no parseable rows — the finding list is unguarded"
+    # The Part B intro's snapshot size is rendered from the same dict, but nothing
+    # read it: `the same 16 names` could drift to any number with the suite green.
+    assert f"the same {len(RETIRED_LITERAL)} names" in _doc(), (
+        "the Part B intro no longer states the snapshot size the redirects were read from"
+    )
+    # The 16 snapshot redirects are pinned as literals so an in-repo change reds.
+    assert len(RETIRED_LITERAL) == 16, (
+        f"the snapshot is {len(RETIRED_LITERAL)} names, not the pinned 16"
+    )
     assert listed == DISAGREEMENTS_LITERAL, (
         "B1 does not list exactly the disagreements.\n"
         f"  listed but agreeing: {sorted(listed - DISAGREEMENTS_LITERAL)}\n"
@@ -391,6 +402,40 @@ def test_b1_lists_exactly_the_disagreements() -> None:
     m = re.search(r"\*\*(\d+) findings\.\*\*", b1)
     assert m, "B1's findings count is missing or changed shape"
     assert int(m.group(1)) == len(DISAGREEMENTS_LITERAL)
+
+    # B1's three FACTUAL columns are pinned against Part B cell-for-cell. Without
+    # this, only the first cell is read and a row can state a redirect that
+    # contradicts the Part B row it came from — internally contradictory, green.
+    part_b = _parse_part_b()
+    b1_rows = {}
+    for line in b1.splitlines():
+        row = re.match(
+            r"^\| `([a-z_][a-z0-9_]*)` \| `([A-Za-z_:]+)` \| `(.+?)` \| "
+            r"(`[A-Za-z_:]+`|—) \|$",
+            line,
+        )
+        if row:
+            b1_rows[row.group(1)] = (
+                row.group(2), row.group(3), row.group(4),
+            )
+    assert set(b1_rows) == DISAGREEMENTS_LITERAL, (
+        "B1's rows are not parseable as four columns, so its findings are unchecked:\n"
+        f"  parsed {sorted(b1_rows)} vs pinned {sorted(DISAGREEMENTS_LITERAL)}"
+    )
+    for name, (d_old, redirect, d_new) in b1_rows.items():
+        ref = part_b[name]
+        assert d_old == ref["destination"], (
+            f"B1's `0.1 destination` for {name} is {d_old!r}; Part B says "
+            f"{ref['destination']!r} — the finding list contradicts the table"
+        )
+        assert redirect == ref["redirect"], (
+            f"B1's `#4031 redirect` for {name} is {redirect!r}; Part B says "
+            f"{ref['redirect']!r}"
+        )
+        assert d_new == ref["redirect_destination"], (
+            f"B1's `Redirect's 0.1 destination` for {name} is {d_new!r}; Part B says "
+            f"{ref['redirect_destination']!r}"
+        )
     # The finding's tracking reference is a LITERAL here, not imported from the
     # generator, so dropping or renumbering it reds. That the issue itself still
     # exists is NOT verifiable offline — see the residual note in the PR body.
@@ -399,7 +444,26 @@ def test_b1_lists_exactly_the_disagreements() -> None:
     )
 
 
+def test_snapshot_provenance_is_pinned() -> None:
+    """The snapshot's branch+commit are pinned as LITERALS, not read from the generator.
+
+    The 16 redirect VALUES are pinned, but the commit they were claimed to be read
+    from was provenance no test read — a wrong SHA survived every assertion. The
+    branch may move (the redirects are recorded as a snapshot, honestly), so only
+    the SHA is pinned: it names the exact tree the snapshot was taken from.
+    """
+    doc = _doc()
+    sha = "c01ad93b569e514e94d0d813c0216de9cb746d3b"
+    assert sha in doc, (
+        "the document no longer records the commit the #4031 snapshot was read from"
+    )
+    assert "origin/feat/3883-retired-name-warning" in doc, (
+        "the document no longer names the branch the snapshot came from"
+    )
+
+
 # ── The generator's failure paths ────────────────────────────────────────────
+
 
 def test_generator_exits_nonzero_when_the_map_and_registry_disagree(monkeypatch, capsys) -> None:
     """The generator must FAIL, not paper over, a registry/map disagreement.

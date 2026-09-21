@@ -410,9 +410,11 @@ surfaces:
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
   # #4282: dual-registered with `api` for the same reason as test_bridge_table.py
-  # above — `tools/mcp_rename_table.py` is named in SOURCE_PATTERNS["api"], and the
-  # GENERATED `docs/product/mcp-rename-table.md` is not api-owned. `core` is the
-  # docs/default surface.
+  # above — `tools/mcp_rename_table.py` is named in SOURCE_PATTERNS["api"].
+  # NOTE: `core` does NOT catch a hand-edit of the GENERATED
+  # `docs/product/mcp-rename-table.md` — a docs-only change selects no surface
+  # at all (#4454), so the guard against a hand-edited document is the `api`
+  # arm plus the `--check` drift form, not this registration.
   - test_mcp_rename_table.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py

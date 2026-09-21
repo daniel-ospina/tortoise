@@ -326,7 +326,8 @@ def render(rows: list[dict]) -> str:
         "## Part B — agreement with PR #4031's `RETIRED_USE_INSTEAD`",
         "",
         "PR #4031 encodes the *current-surface* redirects. This table encodes the *target-surface*",
-        "destinations. They answer different questions about the same 16 names, and they must not",
+        f"destinations. They answer different questions about the same {len(RETIRED_USE_INSTEAD)} "
+        "names, and they must not",
         "contradict each other: a caller who follows a #4031 redirect to `tortoise_overview` lands",
         "on `graph_overview`, so if the 0.1 map sends the ORIGINAL name somewhere else the two",
         "artifacts disagree about which target absorbs it.",
