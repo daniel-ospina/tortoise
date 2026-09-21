@@ -85,16 +85,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import difflib
 import hashlib
+import itertools
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import traceback
 from datetime import UTC, datetime
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -417,7 +421,465 @@ def assert_reader_pin() -> dict:
 
 # ── seeding + per-question run ──────────────────────────────────────────────
 
-def _fresh_db(tag: str) -> str:
+_DB_SEQ = itertools.count()
+_LAST_DOCKER_GRAPH: str | None = None
+#: The ``TORTOISE_DB_URI`` in force before ``_fresh_db`` started rewriting it
+#: (None = not yet captured). Restored on every non-docker call.
+_PRIOR_DB_URI: str | None = None
+
+#: Every part of a substrate URI that must never be echoed. Populated by
+#: ``_parse_substrate`` on each successful parse; ``_redact_substrate_text``
+#: also reads the two env vars at CALL time, so no registration order matters.
+_SUBSTRATE_SECRETS: set[str] = set()
+
+
+def _redact_substrate_text(text: str) -> str:
+    """Replace every substrate-derived token in ``text`` with ``***``.
+
+    ⚠️ This is the SECOND half of the rounds-2/3/4 redaction. The ``substrate``
+    LABEL (:func:`_substrate_label`) is receipt-safe, but the per-question
+    FAULT channel is not: an SDK connection error NAMES the endpoint it could
+    not reach, and when a malformed ``TORTOISE_ASK_SHAPE_DB_URI`` puts the
+    password in the HOST slot — ``urlparse`` splits userinfo at the LAST
+    ``@``, so ``docker://:@S3cret-Pa55w0rd/invalid/g`` has
+    ``hostname='s3cret-pa55w0rd'`` — that message carries the credential into
+    ``receipt['live']['per_question'][*]['error']``, which is a COMMITTED file
+    (round-5 finding). The label was redacted; the text around it was not.
+
+    Fail-CLOSED by construction, within the rule the code actually implements:
+    the RAW value of each substrate env var is always registered, and its
+    derived components (netloc / hostname / username / password) plus any
+    bracketed host segment are registered whenever the parse yields them — each
+    under its OWN guard, so one raising property cannot drop the rest. A token
+    of ANY LENGTH is redacted, so the worst case is an OVER-redacted diagnostic
+    line and never a leaked credential — a receipt whose error text reads oddly
+    is the correct failure direction, and saying so is why there is no length
+    floor.
+
+    An ABSENT or blank env value leaves the text unchanged. A value that cannot
+    be PARSED still contributes its own RAW string — it is added to the set
+    BEFORE the parse — so only its derived components are unavailable. The
+    parse's own error text is never echoed, so this function makes no claim
+    about WHY a value failed to parse.
+
+    NOT applied inside ``_substrate_error``: its result feeds ``_run_arm``'s
+    ``expected_error_prefix`` comparison, and redacting a token that happens to
+    occur inside that prefix would silently disable a designed-error
+    discriminator. It is applied where the text is EMITTED instead —
+    :func:`_fault_record` (receipt and stdout), :func:`_write_receipt` (the
+    committed file) and the excepthook :func:`main` installs (stderr).
+    """
+    if not text:
+        return text
+    secrets = set(_SUBSTRATE_SECRETS)
+    for var in ("TORTOISE_ASK_SHAPE_DB_URI", "TORTOISE_DB_URI"):
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        # The RAW value is registered FIRST and unconditionally — a value the
+        # parser cannot decompose still redacts itself wherever it is quoted.
+        secrets.add(raw)
+        try:
+            from urllib.parse import urlparse
+            u = urlparse(raw)
+        except Exception:  # noqa: BLE001, RUF100 — a redactor never raises
+            u = None
+        if u is not None:
+            # ⚠️ ONE GUARD PER ATTRIBUTE, never a generator over the tuple:
+
+            # ``.hostname`` and ``.port`` raise EAGERLY on the malformed
+            # forms this function exists for, and a lazy generator would
+            # abort on the first raise and silently drop every LATER
+            # component (measured at review: only the raw value and netloc
+            # were registered for ``docker://:pw@[<secret>]:6379/g``).
+            for attr in ("netloc", "hostname", "username", "password"):
+                try:
+                    component = getattr(u, attr)
+                except Exception:  # noqa: BLE001, RUF100
+                    continue
+                if component:
+                    secrets.add(component)
+        # ``.hostname`` adds the brackets itself but RAISES when the host is
+        # not an IP literal — so the bracketed segment, which is exactly where
+        # a credential sits in that documented malformation, is captured
+        # explicitly instead of being lost with the raise.
+        secrets.update(re.findall(r"\[([^\]]+)\]", raw))
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        text = re.sub(re.escape(secret), "***", text, flags=re.IGNORECASE)
+    return text
+
+
+def _redact_receipt(value, _path: set[int] | None = None):
+    """Recursively redact every STRING VALUE in a receipt tree.
+
+    ⚠️ Redact the OBJECT TREE, never the serialized JSON. A credential is an
+    arbitrary operator-chosen string, so a post-serialization ``re.sub`` over
+    the JSON text is blind to string boundaries: a token that collides with
+    JSON syntax (``null`` / ``false`` / ``true`` / a digit) rewrites literals
+    and emits an UNPARSEABLE receipt, and a non-ASCII credential survives
+    because ``json.dumps`` writes it as ``\\uXXXX`` escapes the pattern cannot
+    match (measured at review: 6/92 secret shapes produced invalid JSON).
+    Walking the tree first makes the guarantee structural: no string is written
+    until it has been through the redactor.
+
+    ``_path`` is the chain of container ``id()``s currently being walked (NOT
+    a global visited-set), so a shared subobject is still redacted on every
+    path while a true CYCLE is named instead of recursing to death — measured
+    at review: a self-referential dict raised ``RecursionError``, and because
+    ``_write_receipt`` opened the destination first, the raised error left a
+    pre-existing receipt TRUNCATED to 0 bytes. ``json.dump`` cannot serialize a
+    cycle either, so naming it loses nothing.
+    """
+    if isinstance(value, str):
+        return _redact_substrate_text(value)
+    if isinstance(value, (dict, list, tuple)):
+        if _path is None:
+            _path = set()
+        if id(value) in _path:
+            return "<circular reference>"
+        _path.add(id(value))
+        try:
+            if isinstance(value, dict):
+                # ⚠️ KEYS ARE NOT RENAMED. A receipt's keys are its SCHEMA (code
+                # literals) plus fixture-derived question ids, and the fixture
+                # is pinned by SHA at startup — so no operator value reaches a
+                # key. Redacting keys anyway is FAIL-OPEN IN THE OTHER
+                # DIRECTION: a short credential that is a substring of a schema
+                # key renames it (measured at review with ``e``:
+                # ``instrument`` -> ``instrum***nt``, ``receipt_path`` ->
+                # ``r***c***ipt_path``), so the receipt parses, reports success,
+                # and has silently lost the fields it exists to carry. Values
+                # are redacted exhaustively — over-redacting a VALUE costs
+                # readability; over-redacting a KEY costs the artifact.
+                return {k: _redact_receipt(v, _path)
+                        for k, v in value.items()}
+            if isinstance(value, list):
+                return [_redact_receipt(v, _path) for v in value]
+            return tuple(_redact_receipt(v, _path) for v in value)
+        finally:
+            _path.discard(id(value))
+    return value
+
+
+def _redacted_default(obj) -> str:
+    """The JSON encoder's ``default`` — REDACTED, so serialization cannot
+    invent an unredacted string.
+
+    ``json.dump(..., default=str)`` runs AFTER the tree walk, for leaves that
+    are not JSON-native; a leaf whose ``str()`` carries the credential would be
+    written verbatim (measured at review). Routing the encoder's fallback
+    through the redactor makes the write-path guarantee total.
+    """
+    return _redact_substrate_text(str(obj))
+
+
+def _install_redacting_excepthook() -> None:
+    """Emit every UNCAUGHT traceback through the redactor.
+
+    ⚠️ Redacting only where text is WRITTEN leaves the EXCEPTION channel open:
+    ``seed_timing()`` has no ``try`` and ``main()`` has only a ``finally``, so
+    an SDK connection failure propagates and the interpreter prints the
+    traceback — whose last line NAMES the endpoint it could not reach, which
+    is the password when the substrate URI put it in the host slot. Measured on
+    the real CLI at review: ``docker://:@<password>/invalid/g`` +
+    ``--mode seed-timing`` printed ``ConnectionError: Error 8 connecting to
+    <password>:16379`` to stderr, i.e. into CI logs.
+
+    ⚠️ ``sys.excepthook`` is NOT the only stderr writer: CPython routes a
+    THREAD's uncaught exception through ``threading.excepthook`` and an
+    exception raised inside an ``atexit`` callback through
+    ``sys.unraisablehook``, and the DEFAULT implementations of both ignore
+    ``sys.excepthook`` and print the traceback themselves (measured at review:
+    the credential reached stderr verbatim from a thread and from an atexit
+    callback with only ``sys.excepthook`` installed). All THREE are replaced
+    here, sharing one redactor — so every uncaught EXCEPTION path is covered
+    (today's ``seed_timing``, any future one, an off-main-thread fault, and a
+    teardown fault), not one call site. ``SystemExit`` is NOT routed here —
+    CPython prints it itself — so a ``SystemExit`` message must be static (every
+    one this tool raises is) or redacted at its raise site.
+
+    The hooks' METADATA lines are redacted too, not just the traceback: a
+    thread NAME, and an unraisable metadata line reproducing the DEFAULT
+    hook's format for BOTH shapes — ``{err_msg}: {object!r}`` (the atexit
+    shape) and ``Exception ignored in: {object!r}`` (the ``__del__`` shape) —
+    so no field is dropped and no field is emitted unredacted.
+
+    ⚠️ NOT redacted, deliberately: the substrate URI's PATH / QUERY / FRAGMENT.
+    The path is the documented GRAPH-NAME slot, not a credential slot, and
+    registering a leaf such as ``g`` would substitute every ``g`` in every
+    receipt string and every diagnostic line. Documented limitation: a value
+    that puts a credential in the graph-name slot is not registered as its own
+    token, so text quoting ONLY that leaf would not be redacted. No carrier in
+    this tool echoes the leaf alone (measured: the SDK's connection and auth
+    errors name the endpoint, not the graph, and the seed/ask path never names
+    the scratch graph).
+
+    Installed by :func:`main`. The traceback SHAPE is preserved — type, frames
+    and message — so the diagnostic survives; only credential tokens are
+    substituted.
+    """
+    def _emit(exc_type, exc, tb) -> None:
+        sys.stderr.write(_redact_substrate_text(
+            "".join(traceback.format_exception(exc_type, exc, tb))))
+
+    def _hook(exc_type, exc, tb) -> None:
+        _emit(exc_type, exc, tb)
+
+    def _thread_hook(args) -> None:
+        name = getattr(getattr(args, "thread", None), "name", None) or "?"
+        # The name reaches the redactor because it can EMBED A REGISTERED
+        # token (the raw URI, the netloc, the host, the userinfo — see
+        # ``_redact_substrate_text``); a raw interpolation would put it on
+        # stderr while the traceback beneath it was redacted. The PATH /
+        # QUERY / FRAGMENT are the documented exception (hook docstring).
+        sys.stderr.write(_redact_substrate_text(
+            f"Exception in thread {name}:\n"))
+        _emit(args.exc_type, args.exc_value, args.exc_traceback)
+
+    def _unraisable_hook(unraisable) -> None:
+        # MIRROR THE DEFAULT HOOK's metadata line EXACTLY (measured on this
+        # interpreter): with ``err_msg`` set the default prints
+        # ``f"{err_msg}: {object!r}"`` (the atexit shape,
+        # ``Exception ignored in atexit callback: <function cb at 0x…>``); with
+        # ``err_msg`` unset it prints ``f"Exception ignored in: {object!r}"``
+        # (the ``__del__``/GC shape). The object repr is present in BOTH — an
+        # earlier version treated them as mutually exclusive and silently
+        # dropped it whenever ``err_msg`` was set. The repr is redacted, since
+        # an object repr can name the endpoint.
+        err_msg = unraisable.err_msg
+        obj = getattr(unraisable, "object", None)
+        # ``is not None``, not truthiness: CPython's own predicate is
+        # ``err_msg != NULL``, so an EMPTY string still takes the joined shape
+        # (the default prints ``": <repr>"``).
+        if err_msg is not None:
+            meta = f"{err_msg}: {obj!r}" if obj is not None else f"{err_msg}:"
+        elif obj is not None:
+            meta = f"Exception ignored in: {obj!r}"
+        else:  # pragma: no cover — CPython always supplies ``object``
+            meta = ""
+        if meta:
+            sys.stderr.write(_redact_substrate_text(f"{meta}\n"))
+        _emit(unraisable.exc_type, unraisable.exc_value,
+              unraisable.exc_traceback)
+
+    sys.excepthook = _hook
+    threading.excepthook = _thread_hook
+    sys.unraisablehook = _unraisable_hook
+
+
+def _parse_substrate(base: str) -> tuple[str, str, int | None, str]:
+    """Parse ``TORTOISE_ASK_SHAPE_DB_URI`` behind ONE guard.
+
+    ⚠️ ``urlparse`` (and its ``.hostname`` / ``.port`` properties) raise
+    EAGERLY on a malformed value, and every one of those messages EMBEDS the
+    netloc — which is where the userinfo password lives. Measured at review:
+    ``docker://:p＠ssword@host:6379/g`` -> ``ValueError: netloc
+    ':p＠ssword@host:6379' contains invalid characters under NFKC
+    normalization`` and ``docker://:pw@[S3cret-Pa55w0rd]:6379/g`` ->
+    ``ValueError: 'S3cret-Pa55w0rd' does not appear to be an IPv4 or IPv6
+    address``. So the parse, the ``hostname`` read and the ``port`` read
+    share a single ``try`` whose refusal quotes NOTHING.
+
+    BOTH consumers call this — ``_substrate_label`` (receipt) and
+    ``_fresh_db`` (connection) — because the guard drifted between the two
+    once: ``--mode seed-timing`` reaches ``_fresh_db`` without ever building
+    a receipt, so a guard applied only to the label left the eager-parse
+    leak open on that path (round-4 P1).
+
+    Returns ``(scheme, netloc, port, leaf)`` with ``scheme`` lower-cased and
+    validated against the product's own ``SUPPORTED_URI_SCHEMES`` (so the
+    tool and ``projection._validate_uri_scheme`` cannot disagree), ``port``
+    an ``int`` or ``None``, and ``leaf`` the path segment stripped of its
+    leading slash.
+    """
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(base)
+        hostname = u.hostname
+        port = u.port
+    except ValueError:
+        raise SystemExit(
+            "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI is not a usable "
+            "connection URI (malformed userinfo/host, or a non-numeric or "
+            "out-of-range port) — expected a form like "
+            "docker://:pw@host:6379/<graph>") from None
+    if not u.netloc or not hostname:
+        # Fail LOUD here: a value this malformed is about to be used as a
+        # connection base too. Name the problem, never the value.
+        raise SystemExit(
+            "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI is not a usable "
+            "connection URI (no host) — expected a form like "
+            "docker://:pw@host:6379/<graph>")
+    # A credential can occupy the SCHEME slot (``<secret>://…``) and would
+    # then be echoed by a blind ``u.scheme``. Validate it against the
+    # product's own scheme set, and emit the canonical (lower-cased) value.
+    from tortoise.config import SUPPORTED_URI_SCHEMES
+    scheme = u.scheme.lower()
+    if scheme not in SUPPORTED_URI_SCHEMES:
+        raise SystemExit(
+            "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI has an unsupported "
+            "scheme (expected one of " +
+            "/".join(SUPPORTED_URI_SCHEMES) + "://)")
+    # Register every part of the value so the FAULT channel can be redacted
+    # too (:func:`_redact_substrate_text`) — the label is not the only string
+    # a credential can reach the receipt through.
+    _SUBSTRATE_SECRETS.update(
+        c for c in (base, u.netloc, u.hostname, u.username, u.password) if c)
+    return scheme, u.netloc, port, u.path.lstrip("/")
+
+
+def _substrate_label() -> str:
+    """A receipt-safe label for the store the run measured against.
+
+    NEVER echoes the raw ``TORTOISE_ASK_SHAPE_DB_URI``, the URI's PATH, its
+    HOST or its USERINFO: the documented form embeds a password in the
+    userinfo, and a receipt is a TRACKED file that gets committed. (It DOES
+    echo the validated scheme and the validated numeric port — the port is
+    part of the URI authority but is not a credential, and it is the one
+    element that makes the recorded substrate identifiable.)
+
+    ⚠️ Masking on ``u.username``/``u.password`` is NOT sufficient —
+    ``urlparse`` splits userinfo at the LAST ``@``, so a password containing
+    ``@``/``?``/``#``/``/`` can land in ``hostname`` while BOTH of those
+    fields parse EMPTY. Measured at review:
+    ``docker://:@S3cret-Pa55w0rd?@host:6379/g`` parsed to
+    ``hostname='s3cret-pa55w0rd', username='', password=''`` and echoed the
+    full password; ``docker://:P@ssw0rd?x@host:6379/g`` echoed the fragment
+    ``ssw0rd`` after a ``***@`` mask. A malformed value (e.g. a single
+    slash, ``docker:/:pw@host:6379/g``) puts the userinfo in
+    ``urlparse(...).path`` instead, so echoing the path leaks too.
+
+    The label therefore echoes the SCHEME (validated against the product's
+    own ``SUPPORTED_URI_SCHEMES``) and the validated numeric PORT only —
+    never the host, never the userinfo, never the path. A URI with no host
+    is refused by name, and so is a host/port the parser cannot validate.
+    """
+    base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
+    if not base:
+        return "embedded"
+    scheme, _netloc, port, _leaf = _parse_substrate(base)
+    # The graph segment is deliberately NOT echoed (it is part of the path,
+    # which is where a malformed userinfo can land). The receipt records
+    # WHERE the rate was measured, not the scratch graph's name — and, per
+    # the docstring, not the host or the userinfo either.
+    return f"{scheme}://<redacted>{f':{port}' if port else ''}/<graph>"
+
+
+def _drop_docker_graph(base: str, name: str) -> None:
+    """Best-effort delete of a scratch docker graph (keep the server's
+    memory bounded — graphs accumulate across a run otherwise).
+
+    The client is derived from the SAME resolver every product connection
+    uses (``tortoise.projection.resolve_db_endpoint``), so the delete can
+    never dial a different endpoint than the SDK that seeded the graph — an
+    independently-parsed port/host would make the delete a silent no-op
+    (it is wrapped in ``except: pass``) and the graphs would accumulate into
+    exactly the memory-ceiling fault this lane exists to avoid.
+    """
+    try:
+        import redis as _redis
+
+        from tortoise.projection import resolve_db_endpoint
+
+        ep = resolve_db_endpoint(base)
+        client = _redis.Redis(host=ep.host, port=ep.port,
+                              username=ep.username or None,
+                              password=ep.password or None,
+                              ssl=bool(ep.ssl))
+        client.execute_command("GRAPH.DELETE", name)
+    except Exception:  # noqa: BLE001, RUF100 — cleanup is best-effort
+        pass
+
+
+def _drop_scratch_graph() -> None:
+    """Drop the CURRENT scratch docker graph and restore ``TORTOISE_DB_URI``.
+
+    ``_fresh_db`` deletes the PREVIOUS graph on the next call, which leaves
+    the LAST graph of every process behind — one leaked graph per instrument
+    run, on a shared server, which is the accumulation the docker lane
+    exists to prevent. Registered with ``atexit`` and called from ``main``'s
+    ``finally`` — which covers every mode (``seed-timing``, full/live/
+    movement, and any raise) — so the final graph goes away without waiting
+    for process exit.
+
+    It also restores ``TORTOISE_DB_URI`` to the value in force before the
+    first docker call, so a caller that constructs another SDK after the run
+    cannot silently attach to a scratch graph that this function just
+    deleted.
+    """
+    global _LAST_DOCKER_GRAPH, _PRIOR_DB_URI
+    base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
+    if base and _LAST_DOCKER_GRAPH:
+        _drop_docker_graph(base, _LAST_DOCKER_GRAPH)
+    _LAST_DOCKER_GRAPH = None
+    if _PRIOR_DB_URI is not None:
+        if _PRIOR_DB_URI:
+            os.environ["TORTOISE_DB_URI"] = _PRIOR_DB_URI
+        else:
+            os.environ.pop("TORTOISE_DB_URI", None)
+        _PRIOR_DB_URI = None
+
+
+# The last scratch graph of a process is otherwise never deleted; drop it on
+# exit so N runs do not leave N graphs on a shared server.
+atexit.register(_drop_scratch_graph)
+
+
+def _fresh_db(tag: str) -> str | None:
+    """A per-call ISOLATED store.
+
+    Default: a fresh embedded redislite FILE (the historical lane). When
+    ``TORTOISE_ASK_SHAPE_DB_URI`` names a ``docker://`` base URI, use the
+    docker server with a UNIQUE per-call graph instead: the embedded lane
+    spawns one redislite server per question and cannot start one reliably
+    under fleet load (measured ~50% startup failure at load > 60,
+    ``No such file or directory`` on the unix socket), which injects
+    substrate faults into the live rate. The docker lane has no
+    per-question process to lose. The env var is a SUBSTRATE selector, not
+    a measurement knob — it changes where the graph lives, never what is
+    seeded or read.
+
+    Docker graphs are named ``<base>_<tag>_<pid>_<seq>`` (unique per process,
+    so two runs never append to each other's seed) and the PREVIOUS graph is
+    deleted on the next call — the sdk for it is always closed first, and a
+    server that accumulates every seeded graph hits its memory ceiling
+    mid-run (observed: 12 questions faulting with ``DB refused writes ...
+    memory ceiling``). The LAST graph of a run is dropped at process exit
+    (``_drop_scratch_graph``, registered with ``atexit``).
+
+    ``TORTOISE_DB_URI`` is written for the duration of each per-call docker
+    graph and RESTORED by ``_drop_scratch_graph`` (run teardown), so a caller
+    that constructs another SDK after the run cannot silently attach to a
+    scratch graph.
+    """
+    global _LAST_DOCKER_GRAPH
+    global _PRIOR_DB_URI
+    prior = _PRIOR_DB_URI
+    if prior is None:
+        prior = os.environ.get("TORTOISE_DB_URI", "")
+        _PRIOR_DB_URI = prior
+    base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
+    if base:
+        # ONE guarded parse for the whole tool (#4105 round-4): this path is
+        # reached by ``--mode seed-timing`` WITHOUT ever building a receipt,
+        # so a guard only on the label left the eager-parse leak open here.
+        scheme, netloc, _port, leaf = _parse_substrate(base)
+        if not leaf:
+            raise SystemExit(
+                "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI must name a base "
+                "GRAPH segment (e.g. docker://:pw@host:6379/askshape) — a "
+                "bare or malformed server URI is rejected")
+        if _LAST_DOCKER_GRAPH:
+            _drop_docker_graph(base, _LAST_DOCKER_GRAPH)
+            _LAST_DOCKER_GRAPH = None
+        name = f"{leaf}_{tag}_{os.getpid()}_{next(_DB_SEQ)}"
+        os.environ["TORTOISE_DB_URI"] = f"{scheme}://{netloc}/{name}"
+        _LAST_DOCKER_GRAPH = name
+        return None
+    if prior:
+        os.environ["TORTOISE_DB_URI"] = prior
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
     return os.path.join(tempfile.mkdtemp(prefix=f"askshape_{tag}_"), "t.db")
 
 
@@ -595,7 +1057,9 @@ def evaluate_question(sdk, question: dict, *, reader_mode: str,
         "gold_answer_span_words": (len(gold_span.split()) if gold_span else 0),
         "ctx_recall": _gold_sessions_covered(result.get("evidence") or "",
                                              question),
-        # W7A: the assembled context size (tokens of the ~8k ask-lane cap) —
+        # W7A: the assembled context size (tokens of the RESOLVED ask-lane
+        # cap — never a literal: #4105 raised it 8000 -> 16000, so a stated
+        # number here would be false the moment the cap moves) —
         # reported alongside, never a leg.
         "context_tokens": result.get("context_tokens"),
         "retrieval_degraded": result.get("retrieval_degraded"),
@@ -719,7 +1183,14 @@ def _pn(records: list[dict], key: str) -> dict:
 
 def _assembly_budget(records: list[dict]) -> dict:
     """W7A: the assembly budget the lane actually FILLED — median tokens of
-    the ask-lane ``context_token_cap`` (~8000) across the live questions.
+    the RESOLVED ask-lane ``context_token_cap`` across the live questions.
+
+    The value is resolved at runtime by ``resolve_ask_retrieval_caps()``
+    below and is NEVER restated here: it honours
+    ``TORTOISE_ASK_CONTEXT_TOKEN_CAP``, so any number written into this
+    docstring would be false whenever that env is set — and would go stale
+    the moment the default moves. (#4105 raised the default 8000 -> 16000;
+    the historical attribution is the only form that stays true.)
 
     Reported alongside, never a leg. Read from the lane's own
     ``context_tokens`` (post-assembly), so it measures the real assembled
@@ -973,7 +1444,12 @@ def _fault_record(question: dict, error: str, attempts: int) -> dict:
     (never a dropped question) and stays visible."""
     return {"question_id": question.get("question_id"),
             "expected_abstain": _abs_question(question),
-            "error": error, "attempts": attempts,
+            # ⚠️ REDACTED: this string is the carrier of the round-5 finding —
+            # an SDK connection error names the endpoint it failed to reach,
+            # and a substrate URI whose password landed in the HOST slot makes
+            # that endpoint the password. The record is what reaches BOTH the
+            # receipt (a committed file) and stdout.
+            "error": _redact_substrate_text(error), "attempts": attempts,
             "abstained": None, "provider": None, "route": None,
             "model": None, "duration_ms": None,
             "l1_abstain": False, "l2_provenance": False,
@@ -1060,6 +1536,14 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                      "(#4194/#4304); un-embedded-backlog = #4197's pre-#4194 "
                      "store, where the dense leg is inert"),
         },
+        # Which store the rate was measured against. The docker selector
+        # (TORTOISE_ASK_SHAPE_DB_URI) is a substrate change the SDK branches
+        # on, so it is recorded rather than implied by the command line —
+        # REDACTED (the URI carries a password; the receipt is committed).
+        # Built ONLY through _substrate_label -> _parse_substrate, the single
+        # guarded parser (#4105 rounds 2-4); an inline mask here is the
+        # credential leak returning.
+        "substrate": _substrate_label(),
         "decision_rule": {
             "shape_rate_min": SHAPE_RATE_ADOPT,
             "provenance_min": f"{FIXTURE_N}/{FIXTURE_N}",
@@ -1458,14 +1942,48 @@ def _write_receipt(args, receipt: dict) -> None:
     path = args.receipt or os.path.join(
         _REPO_ROOT, "docs", "runbook",
         f"ask-shape-rate-{datetime.now(UTC):%Y-%m-%d}.json")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # ``os.makedirs("")`` raises FileNotFoundError, so a bare relative
+    # ``--receipt receipt.json`` could not produce its evidence artifact
+    # (pre-existing on origin/main; fixed here because this is the write
+    # path). ``./receipt.json`` worked, which made the failure misleading.
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     receipt["receipt_path"] = path
-    with open(path, "w") as f:
-        json.dump(receipt, f, indent=2, sort_keys=False, default=str)
+    # ONE write chokepoint, redacted over the OBJECT TREE (never the serialized
+    # text — see ``_redact_receipt``) and with a REDACTING encoder fallback
+    # (``_redacted_default``): every receipt (live, movement, VOID) goes through
+    # here, so no credential reaches disk — not through a nested error, a
+    # handler envelope, a ``substrate_errors`` entry, a movement exclusion, or a
+    # non-JSON-native leaf. (Dict KEYS are untouched by design — they are the
+    # schema's literals plus SHA-pinned fixture ids, and renaming one silently
+    # destroys the artifact; see ``_redact_receipt``.)
+    #
+    # Written to a SIBLING TEMP FILE and atomically replaced: measured at
+    # review, opening the destination first meant a redaction/serialization
+    # failure (a cyclic structure) left a pre-existing receipt TRUNCATED to 0
+    # bytes — losing the previous run's evidence while reporting the fault.
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(_redact_receipt(receipt), f, indent=2, sort_keys=False,
+                      default=_redacted_default)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
     print(f"receipt: {path}")
 
 
 def main(argv: list[str] | None = None) -> int:
+    # FIRST statement: every uncaught EXCEPTION path from here on (seed_timing,
+    # an SDK connection failure, any future one) emits a REDACTED traceback —
+    # the round-5 finding was this channel leaking the substrate credential
+    # into stderr / CI logs. ``SystemExit`` is not routed here (CPython prints
+    # it itself); every ``SystemExit`` this tool raises carries a static,
+    # credential-free message.
+    _install_redacting_excepthook()
     ap = argparse.ArgumentParser(
         description="B6/objective-4 D3 answer-shape instrument (shape_rate). "
                     "REAL pinned reader — there is deliberately NO --mock.")
@@ -1493,13 +2011,20 @@ def main(argv: list[str] | None = None) -> int:
           f"{fixture_shape['n_sessions']} turns={fixture_shape['n_turns']} "
           f"abs={fixture_shape['n_abs']}")
 
-    if args.mode == "seed-timing":
-        assert_embedder()
-        st = seed_timing(questions, n=args.seed_timing_questions)
-        print(json.dumps(st, indent=2))
-        return EXIT_ADOPT
+    try:
+        if args.mode == "seed-timing":
+            assert_embedder()
+            st = seed_timing(questions, n=args.seed_timing_questions)
+            print(json.dumps(st, indent=2))
+            return EXIT_ADOPT
 
-    return run_full(args, questions, fixture_shape)
+        return run_full(args, questions, fixture_shape)
+    finally:
+        # Drop the last scratch docker graph and restore TORTOISE_DB_URI on
+        # EVERY exit path that can have created one (seed-timing, VOID,
+        # not-adopt, raise) — the atexit registration is the backstop, not
+        # the primary teardown.
+        _drop_scratch_graph()
 
 
 if __name__ == "__main__":

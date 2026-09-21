@@ -1126,10 +1126,16 @@ class _AssembledBlock:
     slices: dict
     admission: dict
     post_cap_lines: list
+    #: The `assemble_context` drop census for the fired path (items_selected,
+    #: dropped_by_token_cap/dropped_by_byte_cap, byte_cap, stopped_by) — so
+    #: run_ask_lane() can emit the SAME honest-budget warning on the fired
+    #: path that it emits on the legacy path (#4105). Empty when no assembly
+    #: ran (fired=False) or an older caller did not pass a stats dict.
+    cap_stats: dict = field(default_factory=dict)
     # NOTE: evidence/context_tokens are NOT computed here — run_ask_lane()/the
     # assembled path render post_cap_lines through the SHARED
     # render_context/estimate path so the alignment invariant
-    # (context_tokens == estimate_tokens(evidence)) holds by construction.
+    # (context_tokens == estimate_tokens_ask(evidence)) holds by construction.
 
 
 @dataclass
@@ -1195,7 +1201,13 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
     guard) -> assemble_context(caps). NEVER raises untyped: the
     run_ask_lane() envelope maps any raise to AskRetrievalUnavailable.
     """
-    from tortoise.retrieval import assemble_context
+    from tortoise.retrieval import (
+        assemble_context,
+        resolve_byte_cap_from_caps,
+        resolve_item_cap_from_caps,
+        resolve_limit_from_caps,
+        resolve_token_cap_from_caps,
+    )
     if caps is None:
         from tortoise.retrieval import resolve_ask_retrieval_caps
         caps = resolve_ask_retrieval_caps()
@@ -1215,10 +1227,17 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         return _AssembledBlock(fired=False, shape=None, subjects=(),
                                slices={}, admission={}, post_cap_lines=[])
     candidates = list(resolved.candidates)
+    # ALL FOUR caps resolve through the validated dict-seam resolvers — an
+    # absent/non-numeric/out-of-range entry falls back to the default exactly
+    # as the env seam does, rather than reaching assemble_context and raising
+    # (which would fail the whole ask). Sanitising only token/byte left this
+    # the last unvalidated seam of the same class (#4105 review).
+    limit = resolve_limit_from_caps(caps)
+    item_cap = resolve_item_cap_from_caps(caps)
     slices = collect_slices(
         docker_walker_port(sdk), candidates, shape=shape,
         question_date=question_date,
-        per_subject_cap=caps.get("limit") or 200)
+        per_subject_cap=limit)
     verified = _probe_visible_successors(sdk, slices)
     hits = synthesize_hits(slices, shape=shape, candidates=candidates,
                            halves=terms, successors_verified=verified,
@@ -1254,12 +1273,31 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         from tortoise.why import enrich_items, w4_enrichment_enabled
         if w4_enrichment_enabled():
             hits = enrich_items(sdk._get_proj(), hits)
+    # #4105 review fix: for a LEGACY caps dict (one that predates
+    # ``context_byte_cap``) the token budget and the byte ceiling come from
+    # ONE validated resolution — the byte ceiling is DERIVED from that dict's
+    # token cap when neither the dict nor ``TORTOISE_ASK_CONTEXT_BYTE_CAP``
+    # pins one (never the 32 KiB literal, which would re-open the silent
+    # no-op on exactly this seam), and the token budget is the SAME sanitised
+    # value. Precedence is explicit dict key → byte env → derived, matching
+    # ``resolve_byte_cap_from_caps``' own contract. An absent key resolves the
+    # same env knob the env seam uses, so a caps dict with no token cap
+    # resolves like ``caps=None``.
+    token_cap = resolve_token_cap_from_caps(caps)
+    byte_cap = resolve_byte_cap_from_caps(caps)
+    cap_stats: dict = {}
     selected = assemble_context(
-        hits, top_k=caps.get("context_item_cap", 40),
-        max_context_tokens=caps.get("context_token_cap", 8000),
+        hits, top_k=item_cap,
+        max_context_tokens=token_cap,
         question_date=question_date,
-        context_item_cap=caps.get("context_item_cap", 40),
-        byte_cap=32768)
+        context_item_cap=item_cap,
+        byte_cap=byte_cap,
+        # #4105: opt in to the non-ASCII token surcharge — this is the ask
+        # lane's connected path, so the bound must hold on CJK/emoji pools
+        # too. The shared function's DEFAULT (and thus the eval re-export,
+        # #2070) stays pre-#4105 byte-identical.
+        nonascii_token_surcharge=True,
+        stats=cap_stats)
     if not selected:
         # P1-1: both halves resolved but the assembly has NOTHING to say
         # (content-less subjects) — firing would replace legacy evidence
@@ -1276,4 +1314,5 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         slices={"state_rows": list(slices.state_rows),
                 "timeline_rows": list(slices.timeline_rows),
                 "evidence_rows": list(slices.evidence_rows)},
-        admission=dict(slices.admission), post_cap_lines=selected)
+        admission=dict(slices.admission), post_cap_lines=selected,
+        cap_stats=cap_stats)

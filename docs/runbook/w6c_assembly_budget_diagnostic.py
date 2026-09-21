@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 """W6C supplementary — the ASSEMBLY BUDGET actually filled (tokens of the
-~8000-token ask-lane cap) for the five window-miss questions, in the two arms
-(capture-shape / dense-alive) defined in w6c_gold_rank_diagnostic.py (the ``capture`` arm is pinned ``embed=False``, since W7A made the seeder's default ``embed=True``).
+RESOLVED ask-lane token cap) for the five window-miss questions, in the two
+arms (capture-shape / dense-alive) defined in w6c_gold_rank_diagnostic.py (the
+``capture`` arm is pinned ``embed=False``, since W7A made the seeder's default
+``embed=True``).
+
+The caps are read from ``resolve_ask_retrieval_caps()`` — the SAME resolution
+the lane it drives enforces — so the emitted receipt cannot pair a live token
+cap with a stale byte cap. NOTE: the recorded 2026-09-19 receipt
+(``w6c-assembly-budget-2026-09-19.json``) PREDATES #4105 and was measured
+against the historical 8000-token / 32 KiB caps. The post-#4105 DEFAULTS
+are 16000 tokens / 128000 bytes, but the value is resolved at run time —
+``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` / ``TORTOISE_ASK_CONTEXT_BYTE_CAP``
+override it, so the receipt's own ``context_token_cap`` / ``byte_cap``
+fields are the only authoritative record of what a given run used.
 
 The real ask-lane retrieval + dedup + boost + rerank + assembly runs; only the
 READER TRANSPORT is a deterministic stub that returns a fixed non-empty string,
@@ -77,7 +89,10 @@ def measure(q: dict, dense: bool) -> dict:
                 100.0 * (res.get("context_tokens") or 0)
                 / caps["context_token_cap"], 1),
             "evidence_bytes": len((res.get("evidence") or "").encode("utf-8")),
-            "byte_cap": 32768,
+            # The RESOLVED ceiling, never the historical 32 KiB literal — a
+            # receipt that pairs a live token cap with a stale byte cap is
+            # the lying-cap class #4105 removes.
+            "byte_cap": caps["context_byte_cap"],
             "retrieval_degraded": res.get("retrieval_degraded"),
             "n_retrieved_sessions": len(res.get("retrieved_session_ids") or []),
         }
