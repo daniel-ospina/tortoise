@@ -9,7 +9,8 @@ throwaway sandbox with ``uname``, ``launchctl``, ``plutil`` and ``crontab``
 stubbed on ``PATH``, and assert the script's own decisions (refusal, rendered
 schedule, fixed-string marker replacement) rather than the host's schedule.
 
-Each test names the mutation that turns it RED.
+Each test whose docstring carries a ``Mutation:`` line names the mutation
+that turns it RED.
 """
 from __future__ import annotations
 
