@@ -689,6 +689,24 @@ class TestLaneMarkers:
         assert team["session_user_email"] == "owner@example.com"
         assert team["org_id"] == _SB_TEAM
 
+    def test_supabase_session_dict_omits_blank_session_email(
+            self, sb, monkeypatch, ):
+        """#4504: only a present, non-blank verified email is attached — a
+        None/empty/whitespace claim omits the key so the billing chain falls
+        through instead of binding an empty customer address."""
+        _, fake = sb
+        _sb_membership(fake, _SB_TEAM, _U1, "owner")
+        monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
+        for blank in (None, "", "   "):
+            async def _fake_verify(_request, _e=blank):
+                return {"user_id": _U1, "email": _e}
+
+            monkeypatch.setattr(sa, "verify_session_jwt", _fake_verify)
+            team = asyncio.run(
+                get_current_org_session_ungated(_make_request(_SESSION_HEADERS)))
+            assert "session_user_email" not in team, repr(blank)
+            assert team["session_user_id"] == _U1
+
     def test_override_seam_dicts_pass_through_unchanged(self, sb):
         """The dependency-override seam returns override dicts UNCHANGED —
         no markers fabricated. A test that injects session_user_id keeps the
@@ -705,6 +723,8 @@ class TestLaneMarkers:
             app.dependency_overrides.pop(get_current_org, None)
         assert "session_user_id" not in team  # key-auth shape → pass-through
         assert "auth_lane" not in team
+        # #4504: key-auth shape carries no session email either.
+        assert "session_user_email" not in team
 
     def test_override_seam_session_dict_still_gated(self, sb, as_user):
         """A dependency-override dict WITH session_user_id (emulated session

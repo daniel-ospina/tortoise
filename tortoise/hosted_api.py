@@ -3873,8 +3873,9 @@ _SESSION_USER_ID_KEY = "session_user_id"
 # (billing checkout) can read it without a second token decode. It is sourced
 # ONLY from ``get_current_user`` (the signature-verified Supabase JWT's
 # ``email`` claim, shape-checked in session_auth.verify_session_jwt) — NEVER
-# from a request body/header/query value a caller could forge. Key-auth and
-# dependency-override dicts carry none, exactly like session_user_id.
+# from a request body/header/query value a caller could forge. Key-auth org
+# dicts carry none; dependency-override dicts are returned UNCHANGED (a test
+# seam may inject one) — exactly like session_user_id.
 _SESSION_USER_EMAIL_KEY = "session_user_email"
 
 
@@ -24732,6 +24733,27 @@ def _billing_error_to_http(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail=str(exc))
 
 
+def _billing_email_like(value: object) -> bool:
+    """True when *value* is usable as a billing/customer email.
+
+    #4504 review: ``APIKey.created_by`` is a CREATOR ID, not always an email —
+    the same codebase writes a Supabase user UUID (``_mint_key``:
+    ``session_user_id or "api"``), the literal ``"api"``, and (for
+    /v1/register) an email address. Handing a UUID/``"api"`` to Stripe as the
+    customer email either 502s or binds a garbage address, and — with the
+    session fallback placed last — it shadowed that fallback for a genuinely
+    entitled session user. Require a real address shape (a single ``@``, no
+    whitespace); UUIDs and ``"api"`` fail it and fall through.
+    """
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    if not v or v.count("@") != 1 or any(c.isspace() for c in v):
+        return False
+    local, _, domain = v.partition("@")
+    return bool(local) and bool(domain)
+
+
 def _billing_customer_email(sdk, org: dict) -> str:
     """Resolve the billing email via the fallback chain (review fix 1):
 
@@ -24739,14 +24761,18 @@ def _billing_customer_email(sdk, org: dict) -> str:
     2. ``APIKey.created_by`` — provision-path orgs (created via
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
-       request, fall back to any org key.
+       request, fall back to any org key. Both links are shape-gated
+       (``_billing_email_like``) because ``created_by`` may be a user UUID or
+       ``"api"`` rather than an address (#4504 review) — a non-email creator
+       id must fall through, not be posted to Stripe as the customer email.
     3. The VERIFIED session user's email (#4504) — OAuth/session users whose
-       org carries no ``Team.email`` and whose keys carry no ``created_by``
-       (a dashboard/provisioned org) were refused a checkout they are
-       entitled to. ``org[_SESSION_USER_EMAIL_KEY]`` is attached ONLY on the
-       JWT branch of ``get_current_org_session``, from the signature-verified
-       Supabase JWT's ``email`` claim — never a client-supplied body/header.
-       Last in the chain: the existing resolutions keep precedence.
+       org carries no ``Team.email`` and whose keys carry no usable
+       ``created_by`` (a dashboard/provisioned org) were refused a checkout
+       they are entitled to. ``org[_SESSION_USER_EMAIL_KEY]`` is attached
+       ONLY on the JWT branch of ``get_current_org_session``, from the
+       signature-verified Supabase JWT's ``email`` claim — never a
+       client-supplied body/header. Last in the chain: the existing
+       resolutions keep precedence.
     4. 400 last resort — clear message, no crash.
     """
     org_id = org["org_id"]
@@ -24760,16 +24786,17 @@ def _billing_customer_email(sdk, org: dict) -> str:
         row = sdk._get_registry().query(
             "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
         ).result_set
-        if row and row[0][0]:
+        if row and _billing_email_like(row[0][0]):
             return row[0][0]
     row = sdk._get_registry().query(
         "MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1",
         params={"tid": org_id},
     ).result_set
-    if row and row[0][0]:
+    if row and _billing_email_like(row[0][0]):
         return row[0][0]
     # #4504: verified session email — before the 400, after the existing
-    # resolutions (precedence unchanged).
+    # resolutions (precedence unchanged). Reached whenever no earlier link
+    # produced an address — including a non-email ``created_by``.
     session_email = org.get(_SESSION_USER_EMAIL_KEY)
     if isinstance(session_email, str) and session_email.strip():
         return session_email.strip()
@@ -24796,11 +24823,13 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
 
     # Layer 1 guard: stored mirror already active → reject before any Stripe call.
     row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.subscription_status, t.stripe_customer_id",
+        "MATCH (t:Team {id:$id}) "
+        "RETURN t.subscription_status, t.stripe_customer_id, t.customer_email",
         params={"id": org_id},
     ).result_set
     status = row[0][0] if row else None
     stored_customer_id = row[0][1] if row else None
+    stored_customer_email = row[0][2] if row else None
     if status in _BILLING_ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="team already has an active subscription")
 
@@ -24814,11 +24843,23 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
     except Exception as e:
         raise _billing_error_to_http(e) from e
 
-    # Sync-persist the customer binding BEFORE the session (survives a missed first event).
-    sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_email=$email",
-        params={"id": org_id, "cid": customer_id, "email": email},
-    )
+    # Sync-persist the customer binding BEFORE the session (survives a missed
+    # first event). When the customer is REUSED, keep an already-stored
+    # ``customer_email``: it belongs to that Stripe customer, while the
+    # resolved email may now come from a different member's session (#4504) —
+    # rewriting it would make the mirror disagree with the address invoices go
+    # to. Backfill only when the stored value is empty (webhook/reconcile
+    # created the binding without one).
+    if stored_customer_id and stored_customer_email:
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid",
+            params={"id": org_id, "cid": customer_id},
+        )
+    else:
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid, t.customer_email=$email",
+            params={"id": org_id, "cid": customer_id, "email": email},
+        )
 
     # Layer 2 guard: stale-mirror race — Stripe is the authority for money.
     try:
