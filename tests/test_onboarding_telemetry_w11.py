@@ -43,7 +43,10 @@ from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
 from tortoise.onboarding import state as onboarding_state
 
 ORG = "org-2006-telemetry"
-USER = "user-2006"
+# A UUID, not a placeholder: `_onboarding_distinct_id` passes only UUID-shaped
+# candidates (the same gate the #2600 `actor_user_id` alias uses), so the
+# funnel identity assertions below exercise the real contract.
+USER = "3f1a7c2e-9b84-4d51-a0c6-71e2ab5f8d30"
 TEAM = {
     "org_id": ORG, "tier": "free", "key_id": "k1",
     "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
@@ -364,6 +367,31 @@ class TestSeedWriters:
 
 
 # ── identity + noise guards ───────────────────────────────────────────
+
+def test_non_uuid_identity_never_becomes_distinct_id(monkeypatch):
+    """A registry-lane key's `created_by` can be an EMAIL (or the literal
+    "api"/an st_ recovery id). Those must NEVER reach PostHog as the
+    `distinct_id` — that would push PII and collapse unrelated orgs onto one
+    pseudo-person, breaking the web-funnel join. The helper drops any
+    non-UUID candidate and falls back to the org id."""
+    from tortoise.sdk import _current_actor_user_id
+    token = _current_actor_user_id.set(None)
+    try:
+        assert hosted_api._onboarding_distinct_id(
+            ORG, {"created_by": "alex@example.com"}) == ORG
+        assert hosted_api._onboarding_distinct_id(
+            ORG, {"created_by": "api"}) == ORG
+        assert hosted_api._onboarding_distinct_id(
+            ORG, {"created_by": "st_deadbeef"}) == ORG
+        # …while a real UUID passes through, and the #2600 alias wins first.
+        assert hosted_api._onboarding_distinct_id(
+            ORG, {"created_by": USER}) == USER
+        assert hosted_api._onboarding_distinct_id(
+            ORG, {"actor_user_id": USER,
+                  "created_by": "alex@example.com"}) == USER
+    finally:
+        _current_actor_user_id.reset(token)
+
 
 def test_selfhost_and_stdio_orgs_emit_nothing(edges, emitted, monkeypatch):
     """The MCP auto-complete no-ops for stdio/selfhost (no hosted onboarding

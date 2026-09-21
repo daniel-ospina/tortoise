@@ -32,9 +32,12 @@ of the DOMAIN fact, not of this module:
     W11) — the durable once-only fact ALREADY exists: the ``COMPLETED_STEP``
     edge's new creation, returned as ``created`` by
     ``onboarding.state.write_completed_step``. The CALLER emits only when it
-    observed that ``created=True``, so these are exact-once per org by
-    construction — restart-safe and multi-worker-safe, with no second dedup
-    store, no threshold and no in-process set.
+    observed that ``created=True``, so these are exact-once per edge
+    creation by construction — restart-safe and multi-worker-safe, with no
+    second dedup store, no threshold and no in-process set. (The one W11
+    edge with a sanctioned REMOVAL path is ``decide-completed`` — the #3912
+    false-completion repair — after which a genuine re-completion creates
+    the edge again and re-emits; see ``onboarding_decide_complete``.)
 """
 from __future__ import annotations
 
@@ -149,7 +152,8 @@ def onboarding_seed_complete(
     ``COMPLETED_STEP`` edge being NEWLY created — i.e. gated on
     ``onboarding.state.write_completed_step(...)["created"]``. That
     edge-creation transition IS the once-per-org fact, so this event is
-    exact-once by construction (restart-safe, multi-worker-safe). There is
+    exact-once per edge creation by construction (restart-safe,
+    multi-worker-safe). There is
     deliberately NO in-process dedup set here (unlike ``first_api_call``)
     and no threshold: a replay that reports ``created=False`` must emit
     nothing.
@@ -176,6 +180,14 @@ def onboarding_decide_complete(
     ``decide-completed`` is the self-fork display row; the build fork's
     ``catalog-presented`` carries no W11 event, and ``harness-connected`` is
     deliberately uninstrumented.
+
+    CAVEAT — ``decide-completed`` is the one W11 edge with a sanctioned
+    REMOVAL path (the #3912 false-completion repair, an operator-only
+    ``graph-scripts`` tool). After such a repair the next genuine decide
+    write recreates the edge and reports ``created=True`` again, so the org
+    re-emits. The invariant is exact-once per EDGE CREATION, not per org
+    forever: the funnel read should therefore dedupe this event per org
+    when a repaired cohort is in scope.
     """
     capture(
         "onboarding_decide_complete",

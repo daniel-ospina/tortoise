@@ -41,6 +41,13 @@ surfaces:
   - test_metering_period_window.py
   - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
   - test_onboarding_email_http.py
+  # #2006 (W11): the onboarding funnel-event guard. Load-bearing HERE: four of
+  # the five emission sites live in tortoise/hosted_api.py, which selects the
+  # `api` surface, and an exact-surface match REPLACES the `core` fallback —
+  # so a core-only entry would never run this guard on a hosted_api.py-only
+  # change. Dual-registered with `onboarding` (the step-edge `created`
+  # contract) and `core` (the analytics.py seam).
+  - test_onboarding_telemetry_w11.py
   - test_sentry.py
   - test_telemetry_registration.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
@@ -424,6 +431,12 @@ surfaces:
   - test_canonical.py
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
+  # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
+  # COMPLETED_STEP edge's new creation). Registered under `core` for the
+  # `tortoise/analytics.py` seam, which matches no SOURCE_PATTERNS entry — and
+  # DUAL-registered under `api` + `onboarding`, because an exact-surface match
+  # REPLACES the `core` fallback: a core-only entry would never run this guard
+  # on a hosted_api.py-only (api) or onboarding/state.py-only change.
   - test_onboarding_telemetry_w11.py
   # #4194: captured turn Points must carry the embedding the dense leg
   # searches. Registered here because this file pins the unpatterned engine
@@ -906,6 +919,12 @@ surfaces:
   - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
   - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
+  # #2006 (W11): the funnel-event exact-once guard (emission gated on the
+  # COMPLETED_STEP edge's new creation). Registered here for the
+  # `tortoise/onboarding/state.py` `created` contract this feature depends on;
+  # dual-registered with `api` (tortoise/hosted_api.py's emission sites) and
+  # `core` (tortoise/analytics.py).
+  - test_onboarding_telemetry_w11.py
   - test_onboarding_variants.py
   - test_onboarding_w4_settings.py  # #2000 (W4): docker-lane Settings-surface toggle-persistence tests
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
@@ -1284,6 +1303,13 @@ durations:
   test_onboarding_w6_capture_disclosure.py: 43.2
   test_onboarding_w4_settings.py: 38.8
   test_onboarding_false_completion_repair.py: 42.1  # #3912: 48 docker-lane tests (SDK round-trips per org)
+  # #2006 (W11): no CI junit measurement yet (new file), so enter at the flat
+  # 2.0s default per the #3400/#4221 convention. A fast-pool file with no entry
+  # packs at the default anyway, but leaving it out moved durations coverage to
+  # 90.03% (515/572) against the 90% floor — one file from reddening
+  # `manifest-integrity`, exactly the #3949 repair. Refresh from the first
+  # post-merge main run that includes it.
+  test_onboarding_telemetry_w11.py: 2.0
   test_graph_diagnostics.py: 37.3
   eval/write_path/test_write_path_runner.py: 36.0
   test_write_verb.py: 35.7
