@@ -922,15 +922,20 @@ class TestS3:
                     return []
                 return [
                     {"id": "s1_t3", "content": "[user] the lease makes that "
-                     "impossible no matter how we roll out", "kind": "event"},
+                     "impossible no matter how we roll out",
+                     "point_kind": "event"},
                     {"id": "s1_t4", "content": "[assistant] then we re-plan",
-                     "kind": "event"},
+                     "point_kind": "event"},
+                    # a role OUTSIDE the prefix allowlist — the production turn
+                    # marker still identifies it as an echo
+                    {"id": "s1_t5", "content": "[developer] custom role turn",
+                     "point_kind": "event"},
                     # a caller-minted Point in the session's turn namespace, but
-                    # NOT transcript content — must survive the prior set
+                    # NOT a turn — must survive the prior set
                     {"id": "s1_t9", "content": "the lease forbids it",
-                     "kind": "statement"},
+                     "point_kind": "statement"},
                     {"id": "pt_real", "content": "a real claim",
-                     "kind": "statement"},
+                     "point_kind": "statement"},
                 ]
 
         res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
@@ -974,27 +979,32 @@ class TestS3:
         assert not v2._is_turn_echo_id("", "s1_t8")
         assert not v2._is_turn_echo_id("s1", None)
 
-    def test_turn_echo_filter_requires_the_transcript_content(self):
+    def test_turn_echo_filter_requires_a_turn_marker(self):
         """Both legs must hold: a caller-minted Point carrying the session's
-        turn-namespace id but ordinary claim content is NOT a turn echo."""
+        turn-namespace id but no turn marker is NOT a turn echo."""
         assert v2._is_turn_echo_row("s1", {"id": "s1_t3",
                                            "content": "[user] hello there"})
+        # the production turn marker — covers a role outside the allowlist
+        assert v2._is_turn_echo_row(
+            "s1", {"id": "s1_t5", "content": "[developer] custom role",
+                   "point_kind": "event"})
+        # same id, claim content and kind -> preserved
         assert not v2._is_turn_echo_row(
-            "s1", {"id": "s1_t3", "content": "the lease forbids it"})
+            "s1", {"id": "s1_t3", "content": "the lease forbids it",
+                   "point_kind": "statement"})
+        # transcript content but another session's id -> preserved
         assert not v2._is_turn_echo_row(
             "s1", {"id": "s2_t3", "content": "[user] hello"})
         assert not v2._is_turn_echo_row(
             None, {"id": "s1_t3", "content": "[user] hello"})
 
     def test_turn_echo_content_pattern_matches_retrieval(self):
-        """The content leg mirrors ``retrieval._ROLE_PREFIX_RE`` (the production
-        "is this a transcript turn" test) — pinned so the two cannot drift."""
+        """The content leg IS ``retrieval._ROLE_PREFIX_RE`` — pinned
+        STRUCTURALLY (pattern + flags), so a role added to the production
+        pattern cannot leave this mirror stale."""
         from tortoise.retrieval import _ROLE_PREFIX_RE
-        for text in ("[user] x", "[assistant] y", "[system] z", "[tool] t",
-                     "[unknown] u", "[USER] x", "[user]x", "plain claim",
-                     "  [user] padded", ""):
-            assert bool(v2._TURN_ECHO_CONTENT_RE.match(text.strip())) == \
-                bool(_ROLE_PREFIX_RE.match(text.strip())), text
+        assert v2._TURN_ECHO_CONTENT_RE.pattern == _ROLE_PREFIX_RE.pattern
+        assert v2._TURN_ECHO_CONTENT_RE.flags == _ROLE_PREFIX_RE.flags
 
     def test_turn_echo_id_agrees_with_the_graded_layer_pattern(self):
         """The id leg is the graded layer's ``_turn_id_pattern`` identity —
@@ -1012,11 +1022,16 @@ class TestS3:
 
         class MockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type == "point":
+                    return [{"id": "pt_real", "content": "a real claim",
+                             "point_kind": "statement"}]
                 if entity_type == "event":
                     return [{"id": "s1_t3", "content": "[user] owner paused",
                              "kind": "core:decision"}]
                 if entity_type in ("object", "subject"):
-                    return [{"id": "s1_t4", "content": "a named entity",
+                    # echo-shaped id AND transcript content — still preserved on
+                    # the entity leg, which carries no such drop
+                    return [{"id": "s1_t4", "content": "[user] a named entity",
                              "kind": "core:plan"}]
                 return []
 
@@ -1024,7 +1039,7 @@ class TestS3:
                               session_id="s1")
         assert [e["id"] for e in res["events"]] == ["s1_t3"]
         assert [e["id"] for e in res["entities"]] == ["s1_t4"]
-        assert res["points"] == []
+        assert [p["id"] for p in res["points"]] == ["pt_real"]
 
     def test_turn_echo_drop_refills_the_prior_window(self, monkeypatch):
         """The drop runs AFTER the SDK's own ``[:limit]`` truncation (#898's
@@ -1078,33 +1093,67 @@ class TestS3:
         assert [p["id"] for p in res["points"]] == ["pt_real"]
 
     def test_turn_echo_window_bound_is_documented(self, monkeypatch):
-        """The refill pool is FINITE and its exhaustion is pinned, not implied.
+        """The refill pool is FINITE, its SIZE is pinned, and BOTH sides of its
+        boundary are asserted — not implied.
 
         A capture can hold ``MAX_SESSION_TURNS`` (500) turns; when more echoes
-        than the pool outrank a real prior, the prior is still starved. The
+        than the window outrank a real prior, the prior is still starved. The
         durable fix is a pre-truncation exclusion in the retrieval layer
-        (#4509); until then the boundary behaviour is asserted here so it cannot
-        change silently."""
+        (#4509); until then the pool is a deliberate constant, so growth is a
+        conscious change and its declared bound stays true."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        # the pool size IS part of the documented contract — pinned, so a silent
+        # growth cannot turn the declared bound into a lie
+        assert v2._PRIOR_OVERFETCH == 12
+
+        def _prior_survives(echoes):
+            class MockSDK:
+                def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                    if entity_type != "point":
+                        return []
+                    rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
+                              "point_kind": "event"} for i in range(echoes)]
+                            + [{"id": "pt_real", "content": "a real claim",
+                                "point_kind": "statement"}])
+                    return rows[:limit]
+            return bool(v2.search_graph(MockSDK(), S2_FIXTURE, "STORY",
+                                        session_id="s1")["points"])
+
+        # one echo short of the window -> the refill still surfaces the prior
+        assert _prior_survives(3 + v2._PRIOR_OVERFETCH - 1)
+        # AT the window bound the prior is starved — the documented limitation
+        assert not _prior_survives(3 + v2._PRIOR_OVERFETCH)
+
+    def test_turn_echo_drop_never_exceeds_the_limit(self, monkeypatch):
+        """The refill re-truncates: the prior set is never wider than ``limit``,
+        even though the point leg fetched ``limit + _PRIOR_OVERFETCH`` rows."""
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
             def tortoise_fts_query(self, query, *, entity_type, limit=3):
                 if entity_type != "point":
                     return []
-                rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
-                          "kind": "event"}
-                         for i in range(3 + v2._PRIOR_OVERFETCH)]
-                        + [{"id": "pt_real", "content": "a real claim",
-                            "kind": "statement"}])
-                return rows[:limit]
+                rows = [{"id": f"pt_{i}", "content": f"claim {i}",
+                         "point_kind": "statement"} for i in range(8)]
+                return rows[:limit]  # the real callee truncates to the request
 
         res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", session_id="s1")
-        assert res["points"] == []  # documented starvation at the pool bound
+        assert len(res["points"]) == 3
 
     def test_over_fetch_is_clamped_to_the_sdk_limit_bound(self, monkeypatch):
-        """The over-fetch must not push the callee past its documented bound
-        (``limit`` must be 1-10000), or a large ``limit`` would raise."""
+        """The over-fetch must not push the callee past its documented bound,
+        the mirror constant must match the callee's REAL bound, and an
+        out-of-range ``limit`` must still reach the callee (which raises) rather
+        than being silently capped."""
+        import inspect
+        from tortoise.sdk import TortoiseSDK
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+        # drift guard: the bound is a hardcoded literal in the callee — pin the
+        # mirror against THAT source, not against itself
+        src = inspect.getsource(TortoiseSDK.tortoise_fts_query)
+        assert f"limit > {v2._FTS_LIMIT_MAX}" in src, (
+            f"_FTS_LIMIT_MAX={v2._FTS_LIMIT_MAX} does not match the callee's "
+            "documented bound — the clamp would let the over-fetch raise")
 
         class MockSDK:
             def __init__(self):
@@ -1118,6 +1167,27 @@ class TestS3:
         v2._fts_rows(sdk, "point", "q", limit=v2._FTS_LIMIT_MAX - 1,
                      session_id="s1")
         assert sdk.asked == [("point", v2._FTS_LIMIT_MAX)], sdk.asked
+
+        sdk2 = MockSDK()
+        v2._fts_rows(sdk2, "point", "q", limit=v2._FTS_LIMIT_MAX + 1,
+                     session_id="s1")
+        assert sdk2.asked == [("point", v2._FTS_LIMIT_MAX + 1)], sdk2.asked
+
+    def test_over_fetch_only_when_a_session_can_be_filtered(self):
+        """No session -> nothing to drop -> no wider window (no wasted work)."""
+        class MockSDK:
+            def __init__(self):
+                self.asked = []
+
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                self.asked.append((entity_type, limit))
+                return []
+
+        sdk = MockSDK()
+        v2._fts_rows(sdk, "point", "q", limit=3)  # no session_id
+        v2._fts_rows(sdk, "point", "q", limit=3, session_id="s1")
+        assert sdk.asked == [("point", 3),
+                             ("point", 3 + v2._PRIOR_OVERFETCH)], sdk.asked
 
     def test_extract_session_forwards_the_session_id_to_the_prior_search(
             self, monkeypatch):

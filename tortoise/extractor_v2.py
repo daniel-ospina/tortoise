@@ -1777,20 +1777,21 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 # it from_content_missing / to_content_missing / edge_missing. S3 must never
 # dedup the extraction against the transcript it is extracting.
 #
-# The row test is the graded memory layer's own belt-and-braces pair: an id
+# The row test is the graded memory layer's own belt-and-braces shape: an id
 # ANCHORED on the capture's ``session_id`` (``^{session_id}_t\d+$`` — the
 # identity ``runner._turn_id_pattern`` uses and the reliable turn/claim
-# discriminator) AND the ``[role] …`` transcript shape (``grading.is_turn_echo``
-# / ``retrieval._is_turn_point``'s content leg). Neither leg alone is enough:
-# ``create_point`` accepts explicit caller ids, so a shape-only ``_t\d+$`` would
-# drop a real caller-minted Point, and ``retrieval.py`` records the D3 decision
-# that the ``{session_id}_t{i}`` prefix "is unverifiable — ANY caller id ending
-# in ``_t<digits>`` would be read as a session … the shape of an id is not
-# evidence that a capture happened". Requiring both means a caller-minted Point
-# whose id merely collides with the session's turn namespace (the class
-# ``tests/test_d3_session_identity.py`` documents as reachable) survives the
-# prior set. With no session id the filter is a NO-OP: keeping an echo is a
-# missed dedup, dropping a real prior is memory loss.
+# discriminator) AND a turn marker on the row (the production ``pointKind ==
+# "event"``, or the ``[role] …`` content leg ``retrieval._is_turn_point`` uses).
+# The marker leg is load-bearing: ``create_point`` accepts explicit caller ids, so
+# a shape-only ``_t\d+$`` would drop a real caller-minted Point, and
+# ``retrieval.py`` records the D3 decision that the ``{session_id}_t{i}`` prefix
+# "is unverifiable — ANY caller id ending in ``_t<digits>`` would be read as a
+# session … the shape of an id is not evidence that a capture happened".
+# Requiring a marker means a caller-minted Point whose id merely collides with
+# the session's turn namespace (the class ``tests/test_d3_session_identity.py``
+# documents as reachable) survives the prior set. With no session id the filter
+# is a NO-OP: keeping an echo is a missed dedup, dropping a real prior is memory
+# loss.
 #
 # Scope and its bound — two things this does NOT do, both tracked in #4509:
 #   * other ingest lanes' transcript rows with different id shapes (the longmem
@@ -1808,7 +1809,7 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 _PRIOR_OVERFETCH = 12
 
 #: Mirror of ``tortoise.retrieval._ROLE_PREFIX_RE`` (keep-in-sync — that is the
-#: production "is this a transcript turn" content leg). Pinned by
+#: production "is this a transcript turn" content leg). Pinned structurally by
 #: ``tests/test_extractor_v2.py::test_turn_echo_content_pattern_matches_retrieval``.
 _TURN_ECHO_CONTENT_RE = re.compile(
     r"^\[(user|assistant|system|tool|unknown)\]\s*", re.IGNORECASE)
@@ -1835,26 +1836,39 @@ def _is_turn_echo_id(session_id, point_id) -> bool:
 
 
 def _is_turn_echo_row(session_id, row: dict) -> bool:
-    """This session's turn ID **and** the ``[role] …`` transcript content.
+    """This session's turn ID **and** a turn marker on the row.
 
-    The graded layer's pair: the id is the reliable turn/claim discriminator and
-    the content prefix the defensive one (``grading.is_turn_echo`` /
-    ``retrieval._is_turn_point``), so a caller-minted Point whose id merely
-    collides with the session's turn namespace is NOT dropped from the priors."""
+    The id is the reliable turn/claim discriminator (``runner._turn_id_pattern``'s
+    identity). The marker is EITHER the production turn kind
+    (``pointKind == "event"`` — what ``capture_session`` stamps on every turn
+    Point, ``tortoise/sdk.py``) OR the ``[role] …`` transcript prefix
+    (``retrieval._is_turn_point``'s content leg). The kind leg is what keeps a
+    capture whose role is not in the prefix allowlist from silently retaining
+    its own echoes: ``_normalize_turn_role`` passes ANY role string through, so
+    a ``[developer] …`` / ``[human] …`` turn matches no alternation.
+
+    Requiring a marker at all is what keeps a caller-minted Point — whose id
+    merely sits in the session's turn namespace, the class
+    ``tests/test_d3_session_identity.py`` documents as reachable — in the
+    prior set."""
     if not _is_turn_echo_id(session_id, row.get("id")):
         return False
+    if row.get("point_kind") == "event":
+        return True
     content = row.get("content")
     return bool(_TURN_ECHO_CONTENT_RE.match(str(content or "").strip()))
 
 
 def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
               session_id: str | None = None) -> list[dict]:
-    # Only the point leg over-fetches (it is the only leg with a drop); every
-    # other entity_type keeps the exact ``limit`` window it always had. Clamped
-    # to the callee's documented bound so a large `limit` cannot make the
-    # over-fetch raise.
+    # Only the point leg over-fetches, and only when there is a session to filter
+    # by and a `limit` in the callee's valid range; every other call keeps the
+    # exact ``limit`` window it always had (so an out-of-range `limit` still
+    # raises from the callee, on every leg, as before). The over-fetch is clamped
+    # to the callee's documented bound so it cannot itself raise.
     fetch = (min(limit + _PRIOR_OVERFETCH, _FTS_LIMIT_MAX)
-             if (entity_type == "point" and limit > 0) else limit)
+             if (entity_type == "point" and session_id
+                 and 0 < limit <= _FTS_LIMIT_MAX) else limit)
     rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
     out = []
     for r in rows or []:
