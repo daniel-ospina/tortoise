@@ -261,8 +261,10 @@ def test_oauth_offload_routes_to_the_oauth_pool(monkeypatch):
 
 def test_fetch_deadline_sits_below_the_offload_bound():
     """Constant ordering: a fetch must return before its caller's offload bound
-    would abandon it. ``_DeadlineStream`` bounds every network phase (TLS,
-    status/header reads, body), so the deadline IS the fetch's worst case."""
+    would abandon it. ``_DeadlineStream`` bounds every SOCKET phase (connect,
+    TLS, status/header reads, body); the OS resolver's ``getaddrinfo`` tail is
+    the one exception (see ``cimd.FETCH_MAX_S``), and is bounded in aggregate by
+    the in-flight cap and the budget rather than by this ordering."""
     from tortoise import cimd
     assert cimd.FETCH_MAX_S <= monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S
 

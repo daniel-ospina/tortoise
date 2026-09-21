@@ -40,10 +40,13 @@ implemented here:
 6. **Fetch rate limiting** — per-host + aggregate + store cap, mirroring the
    DCR limiter's bucket idiom in ``hosted_api``.
 7. **Total occupancy** (#3669) — a process-wide in-flight cap, a per-fetch
-   deadline bounding every network phase (connect loop, TLS, status/header and
+   deadline bounding every SOCKET phase (connect loop, TLS, status/header and
    body reads; the per-op timeouts do not bound a trickled response), and a
    wall-clock budget per window whose worst case is RESERVED at admission, so
    the product (fetches x duration) is bounded and not just the fetch count.
+   The one unbounded tail is the OS resolver's own ``getaddrinfo`` timeout
+   (pre-existing, not attacker-settable, and still bounded in aggregate by the
+   in-flight cap and the budget).
 
 Control (2) is closed against **DNS rebinding** by connecting the TCP socket to
 the *validated* address while TLS SNI and the HTTP ``Host`` header stay on the

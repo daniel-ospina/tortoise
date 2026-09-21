@@ -820,6 +820,7 @@ class _StubStream:
         self.reads: list = []
         self.writes: list = []
         self.tls: list = []
+        self.tls_result = None
 
     def read(self, max_bytes, timeout=None):
         self.reads.append(timeout)
@@ -833,7 +834,10 @@ class _StubStream:
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
         self.tls.append(timeout)
-        return self
+        # A DISTINCT object, like the real ``SyncStream.start_tls``: the re-wrap
+        # must target this one, not the pre-TLS stream.
+        self.tls_result = _StubStream()
+        return self.tls_result
 
     def get_extra_info(self, info):
         return None
@@ -875,7 +879,10 @@ def test_deadline_stream_rewraps_after_start_tls():
     stream = cimd._DeadlineStream(stub, time.monotonic() + 5.0)
     wrapped = stream.start_tls(object(), timeout=cimd.CONNECT_TIMEOUT_S)
     assert isinstance(wrapped, cimd._DeadlineStream)
-    assert wrapped._deadline == stream._deadline
+    assert wrapped._inner is stub.tls_result, (
+        "the re-wrap must target the POST-TLS stream, not the pre-TLS one")
+    wrapped.read(10, timeout=cimd.READ_TIMEOUT_S)
+    assert stub.tls_result.reads, "a post-TLS read must reach the new stream"
 
 
 # ── Feature gate ───────────────────────────────────────────────────────────
