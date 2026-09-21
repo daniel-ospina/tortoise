@@ -619,10 +619,11 @@ def _install_redacting_excepthook() -> None:
 
     def _thread_hook(args) -> None:
         name = getattr(getattr(args, "thread", None), "name", None) or "?"
-        # The METADATA line goes through the redactor too: a thread can be
-        # named after a substrate-derived value (a ``thread_name_prefix`` built
-        # from anything the URI carried), and a raw interpolation would put it
-        # on stderr while the traceback beneath it was redacted.
+        # The name reaches the redactor because it can EMBED A REGISTERED
+        # token (the raw URI, the netloc, the host, the userinfo — see
+        # ``_redact_substrate_text``); a raw interpolation would put it on
+        # stderr while the traceback beneath it was redacted. The PATH /
+        # QUERY / FRAGMENT are the documented exception (hook docstring).
         sys.stderr.write(_redact_substrate_text(
             f"Exception in thread {name}:\n"))
         _emit(args.exc_type, args.exc_value, args.exc_traceback)

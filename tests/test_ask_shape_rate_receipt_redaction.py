@@ -412,9 +412,8 @@ def test_a_bare_relative_receipt_path_can_be_written(monkeypatch, tmp_path):
 
 def test_the_hook_redacts_its_metadata_lines_too(monkeypatch, capsys):
     """The traceback was redacted but the METADATA around it was written raw:
-    a worker thread named after the substrate (a ``thread_name_prefix`` built
-    from a graph leaf) or an unraisable ``err_msg`` carrying an object repr
-    reached stderr verbatim."""
+    a thread name embedding a registered substrate token, or an unraisable
+    ``err_msg`` carrying an object repr, reached stderr verbatim."""
     secret = "S3cret-Pa55w0rd"
     monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
                        f"docker://:@{secret}/invalid/g")
