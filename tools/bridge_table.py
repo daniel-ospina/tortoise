@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tortoise.sdk import TortoiseSDK  # noqa: E402
-from tortoise.tool_registry import TOOL_REGISTRY  # noqa: E402
+from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY  # noqa: E402
 
 REGISTRY_SRC = ROOT / "tortoise" / "tool_registry.py"
 MCP_SRC = ROOT / "tortoise" / "mcp_server.py"
@@ -257,7 +257,12 @@ def _registry_rows() -> list[dict]:
             by_name[name] = node.lineno
 
     rows = []
-    for entry in TOOL_REGISTRY:
+    # The SERVED set (#3883): a retired name still answers through the warning
+    # shim, so it is still a name an agent can call — and the bridge table's job is
+    # to say where every caller-visible name leads. Retiring a name re-points its
+    # entry here; it does not remove the row, or the map would stop accounting for
+    # names that still emit calls.
+    for entry in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY):
         declared = getattr(entry, "sdk_method", "") or ""
         rows.append({
             "name": entry.name,
@@ -266,6 +271,7 @@ def _registry_rows() -> list[dict]:
             # The only resolution test that matters: is there a real method?
             "resolves": bool(declared) and hasattr(TortoiseSDK, declared),
             "read_only": bool(getattr(entry.annotations, "readOnlyHint", False)),
+            "retired": bool(getattr(entry, "retired_use_instead", None)),
         })
     return rows
 
