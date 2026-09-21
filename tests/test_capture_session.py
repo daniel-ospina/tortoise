@@ -321,6 +321,50 @@ def test_capture_create_path_omits_unstored_passthrough_props(
     }, res["points"][0]["props"]
 
 
+def test_capture_passthrough_read_clause_covers_whitelist():
+    """#2949 (review F4): the dedup-hit read-back field list is DERIVED from
+    the single ordered declaration, so it cannot silently omit a newly
+    whitelisted E3 field — the pre-fix defect, where the create path stored by
+    whitelist membership while a hand-written inline RETURN omitted the field
+    (the #2813 class on the dedup path).
+
+    MUTATION THAT REDS THIS TEST: hand-write the read-back (drop a field from
+    ``_capture_passthrough_read_fields``) — the coverage assertion fails."""
+    from tortoise.sdk import (
+        _CAPTURE_PASSTHROUGH_ORDER,
+        _CAPTURE_PASSTHROUGH_PROPS,
+        _capture_passthrough_read_fields,
+    )
+    clause = _capture_passthrough_read_fields()
+    missing = sorted(
+        k for k in _CAPTURE_PASSTHROUGH_PROPS if f"n.{k}" not in clause)
+    assert missing == [], (
+        f"read-back {clause!r} omits whitelisted props {missing!r}")
+    assert clause.count("n.") == len(_CAPTURE_PASSTHROUGH_PROPS), clause
+    assert set(_CAPTURE_PASSTHROUGH_ORDER) == set(_CAPTURE_PASSTHROUGH_PROPS)
+    assert len(_CAPTURE_PASSTHROUGH_ORDER) == len(_CAPTURE_PASSTHROUGH_PROPS)
+
+
+def test_capture_passthrough_read_helper_reads_every_whitelisted_prop(sdk):
+    """#2949 (review F4) behavioral arm: the shared read-back helper returns
+    EVERY whitelisted field the node holds, through the SAME generated RETURN
+    clause. A runtime drop (a field missing from the derivation) REDs here.
+    ``search_keys`` is read back in its stored flat-string form."""
+    from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
+    pid = sdk.create_point(
+        "statement", "read helper probe", quote="q-2949",
+        when="2026-01-01", search_keys=["a", "b"],
+        source_turn_id="turn-2949")["id"]
+    stored = sdk._read_capture_passthrough_props(sdk._get_proj(), pid)
+    assert set(stored) == set(_CAPTURE_PASSTHROUGH_PROPS), stored
+    assert stored == {
+        "quote": "q-2949",
+        "when": "2026-01-01",
+        "search_keys": "a b",
+        "source_turn_id": "turn-2949",
+    }, stored
+
+
 def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
     """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP-on-ingest is
     USER-VISIBLE — the pre-ingestion (uncalibrated, has_ep False) state

@@ -395,16 +395,46 @@ class _InMemoryEventLog:
 # WHITELIST (not a blacklist): folded statement dicts carry internal
 # projection state (provenance run_id/source, status, createdAt, operator,
 # speaker) that must never leak into the public capture response. E3 (#1535)
-# landed search_keys/when/quote on the v2 payload — extend here, keep the
-# no-clobber turn-point guard (MERGE SET list excludes these).
-_CAPTURE_PASSTHROUGH_PROPS = frozenset({
-    "source_turn_id", "search_keys", "when", "quote"})
+# landed search_keys/when/quote on the v2 payload — extend _CAPTURE_
+# PASSTHROUGH_ORDER below, keep the no-clobber turn-point guard (MERGE SET
+# list excludes these).
+#
+# #2949 (review F4): ONE ordered declaration is the source of truth. The write
+# path selects by membership in the derived whitelist; the dedup-hit read-back
+# builds its RETURN clause AND its zip order from this SAME tuple. Adding a
+# fifth E3 field is then a one-line change here — the node stores it and the
+# response reads it back — instead of the old split (frozenset whitelist +
+# hand-written inline RETURN) where a newly whitelisted field was stored but
+# silently omitted from the dedup reply, re-minting the #2813 class on the
+# dedup path.
+_CAPTURE_PASSTHROUGH_ORDER = ("quote", "when", "search_keys",
+                              "source_turn_id")
+_CAPTURE_PASSTHROUGH_PROPS = frozenset(_CAPTURE_PASSTHROUGH_ORDER)
 
-# #2949 (review P2): read-back order for the dedup-hit response. Must match the
-# property list in the v2 seam's RETURN clause, and must be a TUPLE — the
-# frozenset above is unordered, so zipping it would scramble keys.
-_CAPTURE_PASSTHROUGH_READ_ORDER = ("quote", "when", "search_keys",
-                                   "source_turn_id")
+
+def _capture_passthrough_read_fields() -> str:
+    """Build the dedup-hit read-back RETURN field list from the ordered
+    declaration above — never hand-written inline (review F4)."""
+    return ", ".join(f"n.{k}" for k in _CAPTURE_PASSTHROUGH_ORDER)
+
+
+# Drift guard (review F4): the DERIVED read-back must cover EVERY whitelisted
+# field, exactly once. A hand-rewritten RETURN (or a whitelist extension that
+# bypasses the derivation) fails at import, before a dedup hit can answer with
+# props the node holds but the response omits.
+_capture_passthrough_read_clause = _capture_passthrough_read_fields()
+assert (
+    _capture_passthrough_read_clause.count("n.")
+    == len(_CAPTURE_PASSTHROUGH_PROPS)
+    and all(
+        f"n.{k}" in _capture_passthrough_read_clause
+        for k in _CAPTURE_PASSTHROUGH_PROPS
+    )
+), (
+    "capture passthrough read-back/whitelist drift: "
+    f"{_capture_passthrough_read_clause!r} does not cover "
+    f"{sorted(_CAPTURE_PASSTHROUGH_PROPS)!r}"
+)
 
 
 def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
@@ -4279,6 +4309,31 @@ class TortoiseSDK:
         }
         return extracted, meta
 
+    @staticmethod
+    def _read_capture_passthrough_props(proj, pid: str) -> dict:
+        """Read back the canonical's STORED capture passthrough props (#2949).
+
+        ONE read-back for every dedup-hit lane (review F3/F4): the points-loop
+        resolution and the consolidation-fold entries both describe what the
+        graph HOLDS. The field list is generated from
+        ``_CAPTURE_PASSTHROUGH_ORDER`` and zipped against the same tuple, so a
+        newly whitelisted E3 field cannot be stored by the create path yet
+        silently omitted here (the #2813 class). Absent (not stored) props are
+        omitted — never fabricated; the read-back does not coerce
+        representation (``_flatten_search_keys_prop`` is WRITE-side). An empty
+        result fails CLOSED: the node vanished between resolution and
+        read-back, so report no stored props rather than echo the payload.
+        """
+        rows = proj.g.query(
+            f"MATCH (n:Point {{id:$pid}}) RETURN "
+            f"{_capture_passthrough_read_fields()}",
+            params={"pid": pid}).result_set
+        if not rows:
+            return {}
+        return {k: v for k, v in
+                zip(_CAPTURE_PASSTHROUGH_ORDER, rows[0], strict=True)
+                if v is not None}
+
     def _extract_session_v2(
         self,
         conversation: list[dict[str, str]],
@@ -4602,19 +4657,11 @@ class TortoiseSDK:
                     # Only the create branch may echo the payload's raw values
                     # — the same values it handed to create_point (a copy, not
                     # the same dict object: create_point's in-place
-                    # normalization does not propagate back here).
-                    _rows = proj.g.query(
-                        "MATCH (n:Point {id:$pid}) RETURN n.quote, n.when, "
-                        "n.search_keys, n.source_turn_id",
-                        params={"pid": pid}).result_set
-                    # Fail CLOSED: an empty result (the resolved node vanished
-                    # between resolution and read-back) reports NO stored
-                    # props — never the payload echo this block exists to
-                    # prevent.
-                    props = ({k: v for k, v in
-                              zip(_CAPTURE_PASSTHROUGH_READ_ORDER, _rows[0],
-                                  strict=True)
-                              if v is not None} if _rows else {})
+                    # normalization does not propagate back here). The
+                    # read-back itself is the shared helper (review F3/F4),
+                    # fail-CLOSED on an empty result — never the payload echo
+                    # this block exists to prevent.
+                    props = self._read_capture_passthrough_props(proj, pid)
                 # P1 #1529 (D8/E3): E3's source_turn_id / search_keys / when /
                 # quote (arriving on the payload point dict) must never be
                 # silently dropped or rebuilt into a reduced {id, kind, text}
@@ -4695,9 +4742,17 @@ class TortoiseSDK:
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": nid})
+                # #2949 (review F3): a consolidation fold is a dedup HIT — the
+                # same lane class as the points-loop resolution above — so it
+                # reports the canonical's STORED passthrough props too, not a
+                # hardcoded {}. Emitting {} here for the SAME canonical that
+                # the points loop describes with its four E3 fields was the
+                # exact asymmetry this PR set out to remove (a consumer saw
+                # the fields on one lane and an empty dict on the other).
                 extracted.append({
                     "id": nid, "kind": "statement",
-                    "text": content_txt[:200], "props": {},
+                    "text": content_txt[:200],
+                    "props": self._read_capture_passthrough_props(proj, nid),
                     "dedup": DEDUP_CONTENT_HASH_HIT})
             if skipped_noops:
                 warnings.append(
@@ -7773,39 +7828,51 @@ class TortoiseSDK:
         restricted to TERMINAL hits — the Phase-1 mechanism behind the
         bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18).
 
-        #2971: the content-hash MATCH alone is not enough. After a
-        ``rebuild_all`` the journal replay leaves every Point with
-        ``content_hash = NULL`` (``_upsert_point_props``'s fixed SET list
-        omits it and ``_emit_event`` strips it), so the hash MATCH misses for
-        EVERY point and this guard silently stops matching — an ingest bundle
-        could then wire a direct edge to a superseded/retracted Point. On a
-        miss, fall back to the SAME hash-less ``content+kind`` scan
-        ``create_point`` / ``_content_exists`` use (the A10 fallback, #2892),
-        keeping the identical terminal-status + ``coalesce(outdated,false)``
-        scoping so the fallback resolves exactly the points the hash path
-        would have resolved were the hash present. Order pin: hash query
-        first, fallback only on the miss — the hash-present path is
+        The candidate predicate is the SAME ``_dedup_match_clauses`` the
+        writer's resolution uses — a single definition, so the guard and
+        ``_find_point_by_content`` can never disagree about which nodes a
+        bundle-local ref dedups onto. (Before #2949's review this helper
+        carried a forked narrow ``n.is_operator = false`` copy: a legacy plain
+        Point — ``is_operator`` ABSENT — was resolved by the writer but missed
+        here, so the guard failed OPEN and a bundle could wire a direct edge
+        onto a superseded/retracted Point — the exact #2062/#2971 hazard.)
+
+        #2971: the content-hash MATCH alone is not enough. On a miss, fall
+        back to the SAME hash-less ``content+kind`` scan ``create_point`` /
+        ``_content_exists`` use (the A10 fallback, #2892), layering only the
+        terminal-status + ``coalesce(outdated,false)`` scoping so the fallback
+        resolves exactly the points the hash path would have resolved were the
+        hash present. A hash-less point arises from a partial ``create_point``
+        write (a crash between the node CREATE and the props SET) or a graph
+        written before #2795 D2 — NOT from a rebuild: #2795 D2 recomputes the
+        hash on replay, so a rebuilt graph keeps its hashes. Order pin: hash
+        query first, fallback only on the miss — the hash-present path is
         unchanged."""
         proj = self._get_proj()
         terminal = sorted(self._INGEST_TERMINAL_STATUSES)
+        base_clauses, base_params = self._dedup_match_clauses(point_kind=kind)
+        status_clauses = ("n.status IN $terminal",
+                          "coalesce(n.outdated, false) = false")
         rows = proj.g.query(
-            "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
-            "AND n.pointKind = $kind AND n.status IN $terminal "
-            "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
-            params={"ch": _content_hash(content), "kind": kind,
+            "MATCH (n:Point {content_hash:$ch}) WHERE "
+            f"{' AND '.join([*base_clauses, *status_clauses])} "
+            "RETURN n.id LIMIT 1",
+            params={**base_params, "ch": _content_hash(content),
                     "terminal": terminal},
         ).result_set
         if not rows:
-            # #2971 A10 CONTENT+KIND FALLBACK SCAN: a JSONL rebuild (or a
-            # create_point crash between the node CREATE and the props SET)
-            # leaves the terminal point hash-less — without this scan the
-            # cycle-17/18 guard cannot see it.
+            # #2971 A10 CONTENT+KIND FALLBACK SCAN: a partial create_point
+            # write (crash between the node CREATE and the props SET) or a
+            # graph written before #2795 D2 leaves the terminal point
+            # hash-less — without this scan the cycle-17/18 guard cannot see
+            # it. (#2795 D2 now recomputes the hash on replay, so a rebuild no
+            # longer produces this state.)
+            fallback_clauses = [*base_clauses, "n.content_hash IS NULL",
+                                "n.content = $content", *status_clauses]
             rows = proj.g.query(
-                "MATCH (n:Point) WHERE n.is_operator = false "
-                "AND n.pointKind = $kind AND n.content_hash IS NULL "
-                "AND n.content = $content AND n.status IN $terminal "
-                "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
-                params={"kind": kind, "content": content,
+                "MATCH (n:Point) WHERE "
+                f"{' AND '.join(fallback_clauses)} RETURN n.id LIMIT 1",
+                params={**base_params, "content": content,
                         "terminal": terminal},
             ).result_set
         return rows[0][0] if rows else None
@@ -11984,6 +12051,45 @@ class TortoiseSDK:
 
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────
 
+    @staticmethod
+    def _dedup_match_clauses(point_kind: str | None = None,
+                             exclude_id: str | None = None,
+                             extra_clauses: tuple[str, ...] = ()
+                             ) -> tuple[list[str], dict]:
+        """Build the shared NON-OPERATOR content-dedup predicate (#2892/#2949).
+
+        Returns ``(clauses, params)``. Defined ONCE so the writer's resolution
+        (``_find_point_by_content``) and the Phase-1 ingest guard
+        (``_find_terminal_dedup_hit``) cannot drift: the guard resolves exactly
+        the nodes the write path would dedup onto. Before this unification the
+        guard still carried the narrow ``n.is_operator = false`` copy, so a
+        legacy plain Point (``is_operator`` property ABSENT, no ``op_type``)
+        was resolved by the writer but MISSED by the guard — the
+        bundle-local-refs-to-terminal-points check failed OPEN and an ingest
+        bundle could wire a direct edge onto a superseded/retracted Point
+        (#2062/#2971).
+
+        The predicate is ``(n.is_operator IS NULL OR n.is_operator = false)
+        AND (n.op_type IS NULL OR n.is_operator = false)``: the
+        absence-or-false form matches the explicit-false modern shape AND the
+        legacy property-absent shape (plain Points written before
+        ``is_operator:false`` was stamped), and the ``op_type`` disjunct
+        excludes LEGACY operators — which carry ``op_type`` WITHOUT the
+        ``is_operator`` property and would otherwise be matched by the
+        absence-or-false form.
+        """
+        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)",
+                   "(n.op_type IS NULL OR n.is_operator = false)"]
+        params: dict = {}
+        if point_kind:
+            clauses.append("n.pointKind = $kind")
+            params["kind"] = point_kind
+        if exclude_id:
+            clauses.append("n.id <> $exclude")
+            params["exclude"] = exclude_id
+        clauses.extend(extra_clauses)
+        return clauses, params
+
     def _find_point_by_content(self, content: str,
                                pointKind: str | None = None,
                                exclude_id: str | None = None) -> str | None:
@@ -11994,10 +12100,17 @@ class TortoiseSDK:
         ``create_point``, the v2 capture seam (``_extract_session_v2``),
         ``ingest_bundle``'s points loop, and ``_content_exists``. #2892: those
         were forked copies of the same query; the fork is exactly what let the
-        hash-less fallback go missing from ``_content_exists``, so after a
-        graph rebuild — where replay leaves every ``content_hash`` NULL —
-        ``checkpoint()``'s Tier-1 gate treated already-present content as new
-        and filed duplicates.
+        hash-less fallback go missing from ``_content_exists``, so a hash-less
+        point was treated as new and ``checkpoint()``'s Tier-1 gate filed a
+        duplicate.
+
+        Why a point can be hash-less: a ``create_point`` crash/failure between
+        the node CREATE and the hash write (a partial write), or a graph
+        written before #2795 D2. It is NOT the rebuild case any more —
+        ``projection/entities.py::_upsert_point_props`` (#2795 D2) now
+        RECOMPUTES ``content_hash`` from the replayed content, so a JSONL
+        rebuild is self-healing and leaves every hash intact. Do not delete
+        this fallback on the belief that a rebuild still produces the state.
 
         ``pointKind`` scopes the match (a duplicate observation must never
         suppress a decision, #784); ``exclude_id`` excludes a specific point
@@ -12029,25 +12142,16 @@ class TortoiseSDK:
         snapshot (the hash-less point's content is intact).
         """
         proj = self._get_proj()
-        # Non-operator predicate (#2949 review): the op_type guard excludes
-        # LEGACY operators (op_type set, is_operator property ABSENT) but NOT
-        # a node that explicitly declares is_operator=false. A bare
-        # `op_type IS NULL` conjunct dropped the latter — a *non-operator*
-        # Point carrying op_type — so create_point's dedup MISSED it and
-        # minted a DUPLICATE (exactly-once violated on idempotent re-write;
-        # main's inline `n.is_operator = false` had matched it). The union
-        # keeps is_operator=false authoritative; op_type only excludes the
-        # property-absent legacy operator shape. See the docstring for why
-        # this deliberately diverges from the #943 counting predicates.
-        clauses = ["(n.is_operator IS NULL OR n.is_operator = false)",
-                   "(n.op_type IS NULL OR n.is_operator = false)"]
-        hash_params: dict = {"ch": _content_hash(content)}
-        if pointKind:
-            clauses.append("n.pointKind = $kind")
-            hash_params["kind"] = pointKind
-        if exclude_id:
-            clauses.append("n.id <> $exclude")
-            hash_params["exclude"] = exclude_id
+        # Non-operator predicate (#2949 review): defined ONCE in
+        # ``_dedup_match_clauses`` and shared with the Phase-1 ingest guard
+        # (``_find_terminal_dedup_hit``) so the writer and the guard can never
+        # disagree. See that helper for the shape rationale (the op_type guard
+        # excludes LEGACY operators but NOT an explicit is_operator=false node
+        # carrying op_type — a bare `op_type IS NULL` conjunct dropped the
+        # latter and minted a DUPLICATE on idempotent re-write).
+        clauses, hash_params = self._dedup_match_clauses(
+            point_kind=pointKind, exclude_id=exclude_id)
+        hash_params["ch"] = _content_hash(content)
         rows = proj.g.query(
             f"MATCH (n:Point {{content_hash:$ch}}) WHERE "
             f"{' AND '.join(clauses)} RETURN n.id",
@@ -12057,18 +12161,17 @@ class TortoiseSDK:
             return rows[0][0]
         # A10 CONTENT+KIND FALLBACK SCAN (cycle-17/18): a mid-function crash
         # inside create_point (between the node CREATE and the content_hash/
-        # props SET loop) or a JSONL rebuild leaves a live Point WITHOUT
-        # content_hash — the content-hash MATCH misses, and a second point
-        # would be a permanent duplicate no later submission can dedup
-        # (exactly-once violated, E2E-6.4). Rebuild-durable: content+kind
-        # survive the #548 snapshot (the hash-less point's content is intact).
-        fallback_clauses = [*clauses,
-                            "n.content_hash IS NULL", "n.content = $content"]
-        fallback_params: dict = {"content": content}
-        if pointKind:
-            fallback_params["kind"] = pointKind
-        if exclude_id:
-            fallback_params["exclude"] = exclude_id
+        # props SET loop) — a partial write — or a graph written before #2795
+        # D2 leaves a live Point WITHOUT content_hash. The content-hash MATCH
+        # misses and a second point would be a permanent duplicate no later
+        # submission can dedup (exactly-once violated, E2E-6.4). NOT the
+        # rebuild case: #2795 D2 recomputes the hash on replay, so a rebuild
+        # is self-healing. Rebuild-durable: content+kind survive the #548
+        # snapshot (the hash-less point's content is intact).
+        fallback_clauses, fallback_params = self._dedup_match_clauses(
+            point_kind=pointKind, exclude_id=exclude_id,
+            extra_clauses=("n.content_hash IS NULL", "n.content = $content"))
+        fallback_params["content"] = content
         frows = proj.g.query(
             f"MATCH (n:Point) WHERE {' AND '.join(fallback_clauses)} "
             "RETURN n.id",
@@ -12082,9 +12185,11 @@ class TortoiseSDK:
         """Return point ID if a point with this content exists, else None.
 
         #2892: delegates to ``_find_point_by_content`` — the content-hash
-        match PLUS the hash-less content+kind fallback. Without the fallback a
-        rebuilt graph (every ``content_hash`` NULL) would make ``checkpoint()``
-        re-file already-present content as new duplicates.
+        match PLUS the hash-less content+kind fallback. Without it a
+        hash-less point (a partial ``create_point`` write, or a graph written
+        before #2795 D2 — NOT a rebuild, which #2795 D2 makes self-healing)
+        would make ``checkpoint()`` re-file already-present content as new
+        duplicates.
         #784: optional pointKind scoping — a duplicate observation must never
         suppress a decision (DE2E-N11); ``exclude_id`` excludes a specific
         point (the dedup candidate itself — self-match guard, #784 review).
