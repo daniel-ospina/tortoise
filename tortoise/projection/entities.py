@@ -330,17 +330,23 @@ class _EntityHandlers:
         ``bool(content)`` guess. Every other caller ignores the return.
 
         #4457: when a NEW embedding is written, the ``REMOVE n.embedding``
-        clause rides in the SAME query ahead of the SET list. A ``VectorF32``
-        overwrite is a SILENT NO-OP on the embedded engine
-        (falkordblite/redislite): leaving the node's already-VectorF32
-        ``embedding`` in place and re-issuing the conditional write kept the
-        OLD vector, so a rebuilt Point's ``embedding`` no longer derived from
-        its ``content`` (the server lane lands the same write, which is why
-        only the embedded lane reddened). ``REMOVE``-first is the workaround
-        this repo already documents (``tests/test_precision_leak_4028.py``);
-        on the server lane the final state is unchanged, and because the
-        clause is emitted ONLY when a new vector is being written, the
-        preserve-on-None semantics above are untouched. See the query below.
+        clause rides in the SAME query ahead of the SET list. On the embedded
+        engine (falkordblite/redislite) a ``vecf32`` overwrite of an existing
+        vector property can be SILENTLY DISCARDED — measured there as landing
+        only once some component moves by ~1.0, which real embedder output
+        never does (the server lane lands the same write, which is why only
+        the embedded lane reddened). So the node kept its OLD vector and a
+        rebuilt Point's ``embedding`` no longer derived from its ``content``.
+        ``REMOVE``-first is the pattern this repo's other vector-write sites
+        already use (e.g. ``tests/test_precision_leak_4028.py``); on the
+        server lane the final state is unchanged, and because the clause is
+        emitted ONLY when a new vector is being written, the preserve-on-None
+        semantics above are untouched. See the query below.
+
+        The parity tests exercise this with REAL embedder output. A probe
+        built from synthetic one-hot vectors has a per-component delta ≫ 1.0
+        and therefore MISSES the discard, and the engine defect itself is
+        tracked separately (#4520).
         """
         op = p.get("operator")
         if not isinstance(op, dict):
@@ -450,7 +456,7 @@ class _EntityHandlers:
         # Phase 2 #49: context removed — never written
         # #4457: clear the property FIRST, in the same atomic query, so the
         # conditional `vecf32` write below actually lands on the embedded
-        # engine (a `VectorF32` overwrite there is a silent no-op — see the
+        # engine (the overwrite there can be silently discarded — see the
         # docstring). Only emitted when a new embedding is being written, so
         # the CASE's preserve-the-existing-value branch is unaffected, and
         # `MERGE`-created nodes simply have nothing to remove.
