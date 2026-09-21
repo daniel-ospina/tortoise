@@ -176,7 +176,7 @@ DEFAULT_BATCH_SIZE = 50
 
 # #1642 FIX 3 (#1427): a live server is only "orphan-confirmed" when its
 # 0-client CLIENT LIST state has persisted across sweeps for at least this
-# long. The cron cadence (10-15 min) makes this natural: sweep 1 records the
+# long. The cron cadence (20 min) makes this natural: sweep 1 records the
 # zero-client observation, a later sweep confirms. The wait distinguishes a
 # genuine orphan from a concurrent suite's between-tests idle server, which
 # also sits at 0 clients (#1557 — redislite servers all daemonize to ppid=1,

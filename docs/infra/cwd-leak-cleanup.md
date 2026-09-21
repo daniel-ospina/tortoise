@@ -60,7 +60,7 @@ do not declare done.
 
 ## Notes
 
-- The reaper (`python -m tortoise.embedded_reaper --no-dry-run`, 5-min
+- The reaper (`python -m tortoise.embedded_reaper --no-dry-run`, 20-min
   cron) handles all FUTURE no-path orphans automatically.
 - Path-based servers with live clients are never killed — they're
   legitimate (Docker-mode, stable singleton, or in-use dev DBs).

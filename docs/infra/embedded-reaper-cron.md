@@ -2,8 +2,7 @@
 
 The reaper is a **safety net**: it cleans orphaned redislite redis-server
 processes that accumulate when parent processes are SIGKILL'd. Run it
-periodically (every 20 minutes, so orphans are cleaned within a few
-spawn cycles).
+periodically (every 20 minutes).
 
 > **#1642 (2026-08-23):** the reaper was designed to be scheduled (Task 3 of
 > #176) but the schedule was never installed — suites that are
@@ -51,13 +50,14 @@ spawn cycles).
 ## Cron (Linux / macOS with cron)
 
 ```cron
-*/20 * * * * /usr/bin/python3 -m tortoise.embedded_reaper --no-dry-run --only-safe --timeout 900 --jobs 16 >> ~/.tortoise/reaper.log 2>&1
+*/20 * * * * cd /path/to/repo && /path/to/venv/bin/python -m tortoise.embedded_reaper --no-dry-run --only-safe --timeout 900 --jobs 16 >> ~/.tortoise/reaper.log 2>&1
 ```
 
 `--only-safe` is REQUIRED for a scheduled sweep — a full sweep could kill a
 concurrent suite's between-tests idle 0-client server (#1005 hazard), and the
 120s default timeout aborts mid-cleanup on a loaded box (#1642). Prefer
-`tools/install-reaper-schedule.sh`, which installs this exact line.
+`tools/install-reaper-schedule.sh`, which renders this line with the repo path
+and interpreter resolved.
 
 **Post-install verification:** `crontab -l | grep embedded_reaper` shows the
 line; `grep -c reaper ~/.tortoise/reaper.log` grows each run.
