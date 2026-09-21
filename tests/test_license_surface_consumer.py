@@ -260,7 +260,6 @@ def test_non_ascii_skill_is_still_scanned(tmp_path: Path) -> None:
     actually ran under, and the test refuses to pass unless that locale is
     genuinely non-UTF-8 — a test that cannot fail is not a test.
     """
-    module = _load()
     surface = _make_surface(tmp_path)
     (surface / "LICENSE").write_text(MIT_TEXT)
     (surface / "some-skill" / "SKILL.md").write_text(

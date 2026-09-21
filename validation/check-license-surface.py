@@ -22,6 +22,7 @@ path gate, so a consumer-surface regression fails every PR.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sys
@@ -304,10 +305,8 @@ def main() -> int:
     # The summary glyphs below cannot be encoded by a C/POSIX stdout, which turns
     # a diagnosis into a traceback; pin the stream the same way the file reads
     # are pinned (found while closing the review's locale finding).
-    try:
+    with contextlib.suppress(AttributeError, ValueError):
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-    except (AttributeError, ValueError):
-        pass
     errors = check()
     if errors:
         print("❌ License surface inconsistent:")
