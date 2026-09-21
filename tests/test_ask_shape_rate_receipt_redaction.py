@@ -25,14 +25,20 @@ source.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.ask_shape_rate import _fresh_db, _substrate_label
+from tools.ask_shape_rate import (
+    _fresh_db,
+    _substrate_label,
+    _write_receipt,
+)
 
 #: Distinctive secrets that do NOT appear in the function's static example
 #: text (``docker://:pw@host:6379/<graph>``), so a match is a real leak.
@@ -154,3 +160,47 @@ def test_a_uri_without_a_host_is_refused_by_name(monkeypatch):
     assert "no host" in str(exc.value)
     # the malformed VALUE itself is not echoed back
     assert bad not in str(exc.value)
+
+
+@pytest.mark.parametrize("secret", LEAKY)
+def test_no_credential_reaches_the_committed_receipt_body(monkeypatch,
+                                                          tmp_path, secret):
+    """Round-5: the LABEL was receipt-safe, but the FAULT channel was not.
+
+    A ``TORTOISE_ASK_SHAPE_DB_URI`` whose password lands in the HOST slot
+    (``docker://:@<password>/graph`` — ``urlparse`` splits userinfo at the
+    LAST ``@``, so ``hostname`` IS the password) passes the parser whenever a
+    graph segment follows. The SDK then dials a host literally named after the
+    password, and its connection error NAMES that host — which is written
+    verbatim into ``receipt[...]["error"]``, a TRACKED file. Redacting only the
+    label left this channel open.
+
+    Pinned over the WHOLE written file (not just the label), so every nested
+    carrier — per-question error, handler envelope, ``substrate_errors``,
+    movement exclusion — is covered by construction.
+    """
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+    # The SDK names the endpoint it could not reach; here that endpoint is
+    # the password, lower-cased by ``urlparse``.
+    fault = (f"ConnectionError: Error 8 connecting to {secret.lower()}:16379. "
+             "nodename nor servname provided, or not known")
+    out = tmp_path / "receipt.json"
+    receipt = {
+        "instrument": "tools/ask_shape_rate.py",
+        "substrate": _substrate_label(),
+        "live": {"per_question": [{"question_id": "q1", "error": fault}],
+                 "substrate_errors": [{"question_id": "q1", "source": "run",
+                                       "error": fault}]},
+        "movement": {"M1": {"per_question": [{"question_id": "q1",
+                                              "error": fault}]}},
+    }
+    _write_receipt(SimpleNamespace(receipt=str(out)), receipt)
+    written = out.read_text()
+    assert secret not in written, f"{secret!r} leaked into the receipt body"
+    assert secret.lower() not in written.lower(), (
+        f"{secret!r} leaked (case-insensitive) into the receipt body")
+    # The receipt stays a real, readable receipt — the redaction must not
+    # have destroyed it.
+    assert json.loads(written)["instrument"] == "tools/ask_shape_rate.py"
+    assert str(out) in written

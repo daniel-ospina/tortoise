@@ -425,6 +425,59 @@ _LAST_DOCKER_GRAPH: str | None = None
 #: (None = not yet captured). Restored on every non-docker call.
 _PRIOR_DB_URI: str | None = None
 
+#: Every part of a substrate URI that must never be echoed. Populated by
+#: ``_parse_substrate`` on each successful parse; ``_redact_substrate_text``
+#: also reads the two env vars at CALL time, so no registration order matters.
+_SUBSTRATE_SECRETS: set[str] = set()
+
+
+def _redact_substrate_text(text: str) -> str:
+    """Replace every substrate-derived token in ``text`` with ``***``.
+
+    ⚠️ This is the SECOND half of the rounds-2/3/4 redaction. The ``substrate``
+    LABEL (:func:`_substrate_label`) is receipt-safe, but the per-question
+    FAULT channel is not: an SDK connection error NAMES the endpoint it could
+    not reach, and when a malformed ``TORTOISE_ASK_SHAPE_DB_URI`` puts the
+    password in the HOST slot — ``urlparse`` splits userinfo at the LAST
+    ``@``, so ``docker://:@S3cret-Pa55w0rd/invalid/g`` has
+    ``hostname='s3cret-pa55w0rd'`` — that message carries the credential into
+    ``receipt['live']['per_question'][*]['error']``, which is a COMMITTED file
+    (round-5 finding). The label was redacted; the text around it was not.
+
+    Fail-CLOSED by construction: the redaction set is built from the values
+    the substrate URI actually carried (raw value, netloc, hostname, username,
+    password — registered by the parse AND re-read from the env at call time),
+    and a token of ANY LENGTH is redacted. The worst case is therefore an
+    OVER-redacted diagnostic line, never a leaked credential — a receipt whose
+    error text reads oddly is the correct failure direction, and saying so is
+    why there is no length floor. A value that cannot be parsed contributes
+    nothing and the text is returned unchanged — and makes no claim about it
+    (the parse is never echoed).
+
+    NOT applied inside ``_substrate_error``: its result feeds ``_run_arm``'s
+    ``expected_error_prefix`` comparison, and redacting a token that happens to
+    occur inside that prefix would silently disable a designed-error
+    discriminator. It is applied where the text is WRITTEN instead.
+    """
+    if not text:
+        return text
+    secrets = set(_SUBSTRATE_SECRETS)
+    for var in ("TORTOISE_ASK_SHAPE_DB_URI", "TORTOISE_DB_URI"):
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        secrets.add(raw)
+        try:
+            from urllib.parse import urlparse
+            u = urlparse(raw)
+            secrets.update(c for c in (u.netloc, u.hostname, u.username,
+                                       u.password) if c)
+        except Exception:  # noqa: BLE001, RUF100 — a redactor never raises
+            continue
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        text = re.sub(re.escape(secret), "***", text, flags=re.IGNORECASE)
+    return text
+
 
 def _parse_substrate(base: str) -> tuple[str, str, int | None, str]:
     """Parse ``TORTOISE_ASK_SHAPE_DB_URI`` behind ONE guard.
@@ -479,6 +532,11 @@ def _parse_substrate(base: str) -> tuple[str, str, int | None, str]:
             "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI has an unsupported "
             "scheme (expected one of " +
             "/".join(SUPPORTED_URI_SCHEMES) + "://)")
+    # Register every part of the value so the FAULT channel can be redacted
+    # too (:func:`_redact_substrate_text`) — the label is not the only string
+    # a credential can reach the receipt through.
+    _SUBSTRATE_SECRETS.update(
+        c for c in (base, u.netloc, u.hostname, u.username, u.password) if c)
     return scheme, u.netloc, port, u.path.lstrip("/")
 
 
@@ -1198,7 +1256,12 @@ def _fault_record(question: dict, error: str, attempts: int) -> dict:
     (never a dropped question) and stays visible."""
     return {"question_id": question.get("question_id"),
             "expected_abstain": _abs_question(question),
-            "error": error, "attempts": attempts,
+            # ⚠️ REDACTED: this string is the carrier of the round-5 finding —
+            # an SDK connection error names the endpoint it failed to reach,
+            # and a substrate URI whose password landed in the HOST slot makes
+            # that endpoint the password. The record is what reaches BOTH the
+            # receipt (a committed file) and stdout.
+            "error": _redact_substrate_text(error), "attempts": attempts,
             "abstained": None, "provider": None, "route": None,
             "model": None, "duration_ms": None,
             "l1_abstain": False, "l2_provenance": False,
@@ -1693,8 +1756,15 @@ def _write_receipt(args, receipt: dict) -> None:
         f"ask-shape-rate-{datetime.now(UTC):%Y-%m-%d}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     receipt["receipt_path"] = path
+    # ONE write chokepoint, redacted as the LAST step: every receipt (live,
+    # movement, VOID) goes through here, so a credential that reached ANY
+    # nested field — a per-question error, a handler envelope, a
+    # ``substrate_errors`` entry, a movement exclusion — cannot land on disk.
+    # The redaction only substitutes substrings for ``***``, so the JSON stays
+    # valid.
     with open(path, "w") as f:
-        json.dump(receipt, f, indent=2, sort_keys=False, default=str)
+        f.write(_redact_substrate_text(json.dumps(
+            receipt, indent=2, sort_keys=False, default=str)))
     print(f"receipt: {path}")
 
 
