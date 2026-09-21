@@ -46,7 +46,7 @@ something derivable from today's code.
 
 **16 merged targets. 2 of them have a method behind them today.** The other **14** are Phase 2 work, not renames.
 
-## Part B — every current tool and its single destination
+## Part B — every served name and its single destination (82 live + 16 retired)
 
 | # | Current tool | Source | SDK binding | Read-only | Destination |
 |---|---|---|---|---|---|
@@ -152,6 +152,8 @@ something derivable from today's code.
 **16** of these are RETIRED names (#3883): off the advertised surface, but they
 still answer through the warning shim, and each one's `Destination` is the destination of
 the replacement that warning names. The other **82** are live.
+
+Listed so a reader can tell them apart from the live rows that share their destination: `tortoise_get`, `tortoise_get_events`, `tortoise_get_governance`, `tortoise_get_operator`, `tortoise_get_point`, `tortoise_health`, `tortoise_index_sessions`, `tortoise_ingest_corpus`, `tortoise_list_pointkinds`, `tortoise_list_sources`, `tortoise_list_tags`, `tortoise_paginated_query`, `tortoise_query_points_by_tag`, `tortoise_stale`, `tortoise_status`, `tortoise_taxonomy`
 
 ### Destination counts
 

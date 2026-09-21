@@ -378,6 +378,14 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
     # Four disjoint buckets, computed -- never a subtraction from a moving number.
     sdk_only = sum(v for k, v in counts.items() if k.startswith("sdk:"))
     on_mcp = total - removed - tenancy - sdk_only
+    # ONE source for the retirement count: it appears in the intro prose, the
+    # Part B heading, the prose under the table and the name list. A hardcoded
+    # number in the prose would silently contradict the derived one below and
+    # `--check` could not see it, because a regenerated contradiction is
+    # identical on both sides of the comparison.
+    retired_names = sorted(r["name"] for r in rows if r.get("use_instead"))
+    n_retired = len(retired_names)
+    n_live = len(rows) - n_retired
 
     out = [
         "# Phase 0.1 — the bridge table",
@@ -387,7 +395,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
         "Every `file:line` in this document is **read from the source at build time**, so it cannot",
         "drift from the code it cites. The destination map is data in the generator; every count",
         "below is arithmetic computed against the **served registry** — the live tools plus the",
-        "16 retired names, which still answer through the #3883 warning shim. The generator **fails the build**",
+        f"{n_retired} retired names, which still answer through the #3883 warning shim. The generator **fails the build**",
         "if the map and the registry disagree — a mismatch is a finding, not something to reconcile.",
         "",
         f"**Registry: {total} tools → {on_mcp} absorbed into the {len(TARGET_MCP)} MCP targets · "
@@ -433,7 +441,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
         f"**{n_merged} merged targets. {n_ok} of them have a method behind them today.** The other"
         f" **{n_merged - n_ok}** are Phase 2 work, not renames.",
         "",
-        "## Part B — every current tool and its single destination",
+        f"## Part B — every served name and its single destination ({n_live} live + {n_retired} retired)",
         "",
         "| # | Current tool | Source | SDK binding | Read-only | Destination |",
         "|---|---|---|---|---|---|",
@@ -449,12 +457,14 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
             f"{'yes' if r['read_only'] else 'no'} | `{DESTINATION[r['name']]}` |"
         )
 
-    n_retired = sum(1 for r in rows if r.get("use_instead"))
     out += [
         "",
         f"**{n_retired}** of these are RETIRED names (#3883): off the advertised surface, but they",
         "still answer through the warning shim, and each one's `Destination` is the destination of",
-        f"the replacement that warning names. The other **{len(rows) - n_retired}** are live.",
+        f"the replacement that warning names. The other **{n_live}** are live.",
+        "",
+        "Listed so a reader can tell them apart from the live rows that share their destination: "
+        + ", ".join(f"`{n}`" for n in retired_names),
         "",
         "### Destination counts",
         "",
