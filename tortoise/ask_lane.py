@@ -317,12 +317,14 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     Local lane pipeline: validation FIRST (``AskValidationError``, zero
     model calls) → ``tortoise_fts_query`` (``include_terminal=True`` —
     the D8 supersession markers reach the reader; cost-bounded by the
-    same 8k/40 caps) → ask-path annotation (session-date join + speaker)
+    resolved caps — ``resolve_ask_retrieval_caps()``, default
+    200/200/16000/derived) → ask-path annotation (session-date join + speaker)
     → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
     → A5 evidence-mark boost (default ON — reorders the deduped pool by
     stored ``has_answer`` marks; zero marks = no-op) → A7 rerank
-    (env-gated OFF by default) → ``assemble_context`` (8000-token
-    estimate cap AND 32 KiB byte cap, whole-hit drop) →
+    (env-gated OFF by default) → ``assemble_context`` (resolved token
+    AND byte caps, whole-hit drop; #4105: the byte cap was a 32 KiB literal
+    and made every cap raise above it a silent no-op) →
     ``detect_question_type`` (or caller override) →
     ONE reader call via ``build_reader_model()`` (never an
     LLM-skip pre-gate — exactly one model call incl. empty context;
@@ -357,19 +359,24 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         ON) + ``TORTOISE_ASK_EVIDENCE_BOOST_ANSWER_STRING/VERBATIM/SOURCE``.
       * A6 caps — ``TORTOISE_ASK_RETRIEVAL_LIMIT`` /
         ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` /
-        ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` (default OFF = 40/40/8000;
-        the retrieval-window limit is threaded IN TANDEM with the
-        assembly caps — raising only the assemble cap changes nothing).
+        ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` /
+        ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` /
+        ``TORTOISE_ASK_POOL_SIZE`` (defaults 200/200/16000/derived(128000 bytes)/200
+        since #4105; the retrieval-window limit is threaded IN TANDEM with the
+        assembly caps and the pool floor, and the byte ceiling is resolved
+        rather than hard-coded — raising only the assemble cap changes
+        nothing, and a byte ceiling that cannot be raised is now impossible:
+        an unset byte cap is DERIVED from the token cap).
       * A7 rerank — ``TORTOISE_ASK_RERANK`` (default OFF, phase 2):
         cross-encoder + MMR port (tortoise/rerank.py), degrade-to-
         current contract + a context/token budget guard (#2976): a
-        reranked set over the 8000-token / 32 KiB caps is refused whole
+        reranked set over the resolved token / byte caps is refused whole
         (unreranked order), never silently truncated.
       * A8 evidence-package assembly (Slice A #2683, epic #2080) —
         ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF, fail-safe):
         collapses a distilled point's own source raw chunks/turns into
         ONE reader entry + dedups cross-item near-duplicate facts, so
-        the 40-item reader window admits distinct facts instead of
+        the resolved-item reader window admits distinct facts instead of
         flooding on duplicates. PURE function (package_evidence_pool)
         — recall surface unchanged, hermetic no-dupe tests prove the
         ON path is byte-identical on duplicate-free pools.
@@ -389,9 +396,10 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     carry, NOT a mirror of the tags: a hit on the eval lane
     (``lme_session_index``) keeps its historical tag whatever id it carries.
     The derived tag is also part of the BYTE accounting, so a pool already at
-    the 32 KiB byte ceiling can admit slightly fewer hits than pre-change
-    (the 8K token cap is unaffected — the tag adds bytes, not whitespace
-    words).
+    the RESOLVED byte ceiling (128 000 bytes by default; #4105) can admit
+    slightly fewer hits than a pool below it (the token cap is unaffected —
+    the tag adds bytes, not whitespace words, and the non-ASCII surcharge is
+    zero for the ASCII tag).
 
     Raises: ``AskValidationError`` (input), ``AskRetrievalUnavailable``
     (retrieval/annotation/assembly raise), ``AskReaderUnavailable``
@@ -401,7 +409,6 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     from datetime import datetime as _dt2
     from tortoise.retrieval import (
         DEFAULT_MAX_CHUNKS_PER_SESSION,
-        DEFAULT_POOL_SIZE,
         _distinct_session_ids,
         apply_evidence_boost,
         ask_env_bool,
@@ -478,6 +485,20 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         assembled = fired_block.post_cap_lines
         hits: list[dict] = []
         leg_trace: list[dict] = []
+        # #4105 review fix: the honest-budget census must cover the FIRED
+        # path too. It assembles under the SAME resolved token/byte caps, and
+        # a byte-bound drop there was previously silent (assembly.py has no
+        # logger), which contradicts the lane's own "never silently accepted
+        # and dropped" contract.
+        _fired_stats = fired_block.cap_stats or {}
+        if _fired_stats.get("dropped_by_byte_cap"):
+            _logger.warning(
+                "ask lane (connected assembly): byte cap %s dropped %d "
+                "hit(s) the token cap admitted (byte budget is the binding "
+                "constraint; raise TORTOISE_ASK_CONTEXT_BYTE_CAP or lower "
+                "TORTOISE_ASK_CONTEXT_TOKEN_CAP to match)",
+                _fired_stats.get("byte_cap"),
+                _fired_stats["dropped_by_byte_cap"])
     else:
         # Legacy lane: retrieval (whole-retrieval raises →
         # AskRetrievalUnavailable). A1/A3/A4/A6 (#2070): the ask-lane
@@ -514,7 +535,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         try:
             hits = sdk.tortoise_fts_query(
                 question, limit=caps["limit"],
-                pool_size=DEFAULT_POOL_SIZE, include_terminal=True,
+                pool_size=caps["pool_size"], include_terminal=True,
                 leg_trace=leg_trace,
                 keep_numeric=keep_numeric,
                 search_keys_prf=search_keys_prf,
@@ -536,7 +557,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
                 f"annotation unavailable: {type(e).__name__}") from e
 
         # 4. Dedup (annotated session key — P2-20) → A5 evidence boost → A7
-        #    rerank → assembly (8k/40/32KiB caps from ``caps``).
+        #    rerank → assembly (resolved / pool / byte caps from ``caps``).
         try:
             def _ask_session_key(h: dict) -> str:
                 return (h.get("session_id")
@@ -564,7 +585,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
             # OFF — phase 2). Degrade-to-current: any failure keeps the
             # deduped pool untouched; the rerank never raises. Budget
             # guard (#2976): the measured lever costs ~6.6x context, so a
-            # reranked set that overruns the SAME 8000-token / 32 KiB caps
+            # reranked set that overruns the SAME resolved token / byte caps
             # ``assemble_context`` enforces is refused WHOLE — degrade to
             # the unreranked order (declared in the stats), never a silent
             # truncation of the reranked set.
@@ -573,7 +594,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
                 question, deduped, proj=sdk._get_proj(),
                 top_k=caps["context_item_cap"],
                 max_context_tokens=caps["context_token_cap"],
-                max_context_bytes=32768,
+                max_context_bytes=caps["context_byte_cap"],
                 question_date=question_date)
             # A8 (Slice A #2683): package the evidence pool BEFORE the
             # reader window fill — a distilled point's own source raw
@@ -587,14 +608,34 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
             # path is byte-identical when the pool has no
             # near-duplicates.
             if evidence_assembly:
-                deduped, _asm_stats = package_evidence_pool(
+                deduped, _pkg_stats = package_evidence_pool(
                     deduped, mark_for=None)
+            _asm_stats: dict = {}
             assembled = assemble_context(
                 deduped, top_k=caps["context_item_cap"],
                 max_context_tokens=caps["context_token_cap"],
                 question_date=question_date,
                 context_item_cap=caps["context_item_cap"],
-                byte_cap=32768)
+                byte_cap=caps["context_byte_cap"],
+                # #4105: the non-ASCII surcharge is OPT-IN — the ask lane is
+                # the one caller that opts in, so the shared function (and
+                # its eval re-export, #2070) keeps pre-#4105 default behaviour.
+                nonascii_token_surcharge=True,
+                stats=_asm_stats)
+            # #4105 honest budget: the byte ceiling was a hard literal, so a
+            # raised item/token cap was SILENTLY a no-op past 32 KiB. The
+            # budget is now resolved IN TANDEM (``resolve_ask_retrieval_caps``)
+            # and the assembly census names the binding constraint — if the
+            # byte cap is the one dropping hits the token cap admitted, say so
+            # LOUDLY rather than accept the budget and drop evidence.
+            if _asm_stats.get("dropped_by_byte_cap"):
+                _logger.warning(
+                    "ask lane: byte cap %s dropped %d hit(s) the token cap "
+                    "admitted (byte budget is the binding constraint; raise "
+                    "TORTOISE_ASK_CONTEXT_BYTE_CAP or lower "
+                    "TORTOISE_ASK_CONTEXT_TOKEN_CAP to match)",
+                    caps["context_byte_cap"],
+                    _asm_stats["dropped_by_byte_cap"])
         except Exception as e:  # noqa: BLE001, RUF100
             raise AskRetrievalUnavailable(
                 f"context assembly unavailable: {type(e).__name__}") from e

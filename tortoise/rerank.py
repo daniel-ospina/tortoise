@@ -418,9 +418,14 @@ def context_budget_overrun(
     set fits. Pure; the caller decides how to degrade (the ask lane degrades
     to the untouched pool — never a silent truncation of the reranked set).
     """
-    from .retrieval import estimate_tokens, render_context
+    from .retrieval import estimate_tokens_ask, render_context
     text = render_context(hits, question_date=question_date)
-    tokens = estimate_tokens(text)
+    # #4105: assembly charges the non-ASCII surcharge (`_ask_token_surcharge`),
+    # so the guard must read the SAME estimator or it is no longer "never less
+    # strict than assembly" on CJK/emoji pools — a set this guard accepts
+    # would then be whole-hit-dropped at assembly, the silent truncation the
+    # guard exists to forbid. Identical to `estimate_tokens` for ASCII text.
+    tokens = estimate_tokens_ask(text)
     nbytes = len(text.encode("utf-8"))
     reasons: list[str] = []
     if max_context_tokens is not None and tokens > max_context_tokens:
@@ -459,10 +464,12 @@ def ask_lane_rerank(
     supplied the reranked set is checked against them and the WHOLE PASS is
     refused (degrade to the unreranked order, ``degrade_reason`` starting
     ``reranked-set-exceeds-context-budget``) rather than silently truncated
-    to fit. The caps are the same ones ``assemble_context`` enforces (the
-    byte check adds the same +2 framing slack, so the guard is never less
-    strict than assembly), so the default path and the guard agree by
-    construction. The check runs BEFORE the A8 evidence package — which can
+    to fit. The caps are the same ones ``assemble_context`` enforces and the
+    token leg reads the SAME estimator assembly charges
+    (``estimate_tokens_ask``, surcharge included — #4105), while the byte
+    check adds the same +2 framing slack, so the guard is never less strict
+    than assembly; the default path and the guard agree by construction. The
+    check runs BEFORE the A8 evidence package — which can
     only shrink the pool — so it is deliberately conservative: it may
     over-refuse, never under-refuse.
     """
