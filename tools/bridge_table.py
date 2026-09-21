@@ -196,6 +196,14 @@ DESTINATION = {
 # (SDK/REST only); `sdk:` = a builder-only SDK method that is NOT on the MCP.
 NAMESPACES = ("tenancy:", "sdk:")
 
+# A target MCP tool whose BACKING method has a different name. Without this the
+# existence check resolves a target by its own name, and `graph_set_recording`
+# would "resolve" to the per-field SDK method that the owner's Decision 3
+# DELETES — reporting the target as implemented when the method is going away.
+# The override folds into `update_memory_graph`, so that is what the tool will
+# call, and that is what must exist for the target to be implementable.
+MCP_BACKING = {"graph_set_recording": "update_memory_graph"}
+
 # ─────────────────────────────────────────────────────────────────────
 # AUTHORED DATA — the one column that is a design fact rather than a
 # derivation. Everything else in Part A (which targets are merged, and
@@ -306,9 +314,13 @@ def _blockers(rows: list[dict], sdk_defs: dict[str, int]) -> tuple[list[dict], l
     sdk_only_targets = sorted(
         {d.split(":", 1)[1] for d in DESTINATION.values() if d.startswith("sdk:")}
     )
+    # Named by the method that must EXIST, which for an MCP target is its backing
+    # method (MCP_BACKING) -- `graph_set_recording`'s tool survives while its
+    # same-named SDK method is discarded, so the method Phase 2 must write is
+    # `update_memory_graph`.
     no_method = [
-        {"what": m, "scope": "MCP", "why": "no `def` on TortoiseSDK"}
-        for m in TARGET_MCP if m not in sdk_defs
+        {"what": MCP_BACKING.get(m, m), "scope": "MCP", "why": "no `def` on TortoiseSDK"}
+        for m in TARGET_MCP if MCP_BACKING.get(m, m) not in sdk_defs
     ] + [
         {"what": m, "scope": "tenancy", "why": "no `def` on TortoiseSDK"}
         for m in tenancy_targets if m not in sdk_defs

@@ -423,7 +423,17 @@ SOURCE_PATTERNS = {
             # test_1162_add_operator_local_svbp.py). Paired with CORE_ALSO:
             # its pinning tests are registered across api, core AND ep, so the
             # named-surface match must not drop `core` (see CORE_ALSO).
-            "tortoise/api.py"),
+            "tortoise/api.py",
+            # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
+            # and `test_bridge_table.py` (registered in `api`) is the drift gate
+            # that keeps them honest. `tools/` is in NON_PYTHON_PREFIXES, so a
+            # generator-only edit selected NO surface (`surfaces: []`, `full:
+            # false`) and the gate never ran on precisely the PR that can break
+            # it. Named here because a SOURCE_PATTERNS match beats the
+            # non-python skip. A docs-only hand-edit of the generated file still
+            # skips the matrix by the repo's deliberate docs-PR policy — see
+            # tortoise #4297.
+            "tools/bridge_table.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).

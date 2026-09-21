@@ -213,6 +213,7 @@ Destination rows: **28**. Registry tools: **98**.
 | `delete_knowledge` | MCP | no `def` on TortoiseSDK |
 | `adjust_relationship` | MCP | no `def` on TortoiseSDK |
 | `refresh_confidence` | MCP | no `def` on TortoiseSDK |
+| `update_memory_graph` | MCP | no `def` on TortoiseSDK |
 | `create_memory_graph` | tenancy | no `def` on TortoiseSDK |
 | `list_memory_graphs` | tenancy | no `def` on TortoiseSDK |
 | `write_knowledge_batch` | sdk-only | no `def` on TortoiseSDK |

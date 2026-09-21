@@ -379,6 +379,12 @@ surfaces:
   # write/read marker split. No DB, no network — default `core` surface is correct.
   - test_4220_blog_residue_cleanup.py
   - test_ask_eval_only.py
+  # #4282: dual-registered with `api` because `api` is keyed on SOURCE PATTERNS, and
+  # the files this guard protects are not api-owned: `tools/bridge_table.py`, the
+  # GENERATED `docs/product/bridge-table.md`, and the three docs that restate its
+  # counts. Editing any of those selected NO surface, so the drift gate never ran
+  # on precisely the PRs that can break it. `core` is the docs/default surface.
+  - test_bridge_table.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
   - test_client_cli_probe.py

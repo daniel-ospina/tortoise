@@ -110,7 +110,7 @@ honest form, and the per-name completeness check is deferred to Phase 0.3b.
 
 **The SDK count is 40 and the MCP count is 26.** Start from the approved canonical MCP list of
 **23**. The owner's 2026-09-21 ruling added `graph_set_recording` — an unplaced tool — bringing the
-approved surface to **24**. The beta target then adds five, drops three and splits one:
+approved surface to **24**. The beta target then adds four, drops three and splits one:
 
 | | |
 |---|---|

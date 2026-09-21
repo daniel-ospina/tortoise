@@ -8,7 +8,12 @@ happen. Nothing ran `--check`, so the promise was unenforced.
 
 This is the enforcement. It is deliberately a test rather than a workflow step:
 the generator imports cleanly with no database, no API key and no network, so it
-runs in the ordinary suite on every PR without a new CI surface.
+runs with the ordinary suite. It is registered in BOTH `api` and `core` in
+`config/ci-surfaces.yml`, and `tools/bridge_table.py` is named in the `api`
+SOURCE_PATTERNS — because `tools/` and `docs/` are in NON_PYTHON_PREFIXES, an
+edit to the generator alone used to select NO surface, so the gate did not run on
+the PR that can break it. Residual: a change touching ONLY the docs skips the
+matrix by the repo's deliberate docs-PR policy (filed as tortoise #4297).
 """
 from __future__ import annotations
 
@@ -22,10 +27,10 @@ GENERATOR = ROOT / "tools" / "bridge_table.py"
 
 
 def test_target_mcp_matches_the_beta_doc() -> None:
-    """The 25-tool target set is declared in TWO places; they must be equal.
+    """The 26-tool target set is declared in TWO places; they must be equal.
 
     This is the round-2 P1 of the PR #4177 review, and it is the *same* defect
-    class round 1 found: two sets that both said "25" while being different
+    class round 1 found: two sets that both said the same number while being different
     sets. The round-1 fix made them agree by hand and added no test, so a
     one-token edit to `TARGET_MCP` re-diverged them behind a green gate.
 
@@ -58,14 +63,29 @@ def test_target_mcp_matches_the_beta_doc() -> None:
         for name in re.findall(r"`([a-z_][a-z0-9_]*)`", cells[twin_col]):
             twins.add(name)
     assert twin_col is not None, (
-        "the beta doc has no `MCP twin` column header - this test cannot bind the two 25-sets"
+        "the beta doc has no `MCP twin` column header - this test cannot bind the two target sets"
     )
 
     assert twins, (
         "parsed no MCP twin names from the beta doc's `MCP twin` column - did its "
-        "header text or table shape change? This test is the only thing binding the two 25-sets."
+        "header text or table shape change? This test is the only thing binding the two target sets."
     )
     declared = set(TARGET_MCP)
+    # `set()` hides a DUPLICATE entry, which inflates `len(TARGET_MCP)` and every
+    # count rendered from it while the set-equality above still passes. Anchored
+    # by a second, independent declaration of the same number: the vision doc's
+    # reconciliation row.
+    assert len(TARGET_MCP) == len(declared), (
+        f"TARGET_MCP has {len(TARGET_MCP)} entries but only {len(declared)} distinct "
+        "names -- a duplicate silently inflates every rendered tool count"
+    )
+    vision = (ROOT / "docs" / "product" / "vision-mcp-sdk-surface.md").read_text(encoding="utf-8")
+    vision_count = re.search(r"^\| MCP target tools \| \*\*(\d+)\*\* \|$", vision, re.M)
+    assert vision_count, "the vision doc has no `MCP target tools` reconciliation row"
+    assert int(vision_count.group(1)) == len(TARGET_MCP), (
+        f"the vision doc says the MCP target has {vision_count.group(1)} tools, "
+        f"TARGET_MCP has {len(TARGET_MCP)}"
+    )
     if twins != declared:
         raise AssertionError(
             "the generator's TARGET_MCP and the beta doc's MCP column disagree.\n"
@@ -251,12 +271,15 @@ def test_c1_blockers_are_exactly_the_targets_without_a_method() -> None:
     gaps" artifact that silently stops finding gaps is worse than none.
     """
     sys.path.insert(0, str(ROOT))
-    from tools.bridge_table import DESTINATION, NAMESPACES, TARGET_MCP
+    from tools.bridge_table import DESTINATION, MCP_BACKING, NAMESPACES, TARGET_MCP
 
     defs = _sdk_defs_independently()
 
-    # Every target the map names, from all three scopes.
-    targets = set(TARGET_MCP)
+    # Every target the map names, from all three scopes. A target's EXISTENCE is
+    # decided by its backing method (MCP_BACKING), matching the generator.
+    targets: set[str] = set()
+    for t in TARGET_MCP:
+        targets.add(MCP_BACKING.get(t, t))
     for dest in DESTINATION.values():
         ns = next((n for n in NAMESPACES if dest.startswith(n)), None)
         targets.add(dest[len(ns):] if ns else dest)
@@ -271,9 +294,6 @@ def test_c1_blockers_are_exactly_the_targets_without_a_method() -> None:
     listed = set(re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| [A-Za-z-]+ \|", c1, re.M))
 
     # `Where` must name the target's real scope, not merely be well-formed.
-    sys.path.insert(0, str(ROOT))
-    from tools.bridge_table import DESTINATION
-
     def scope_of(target: str) -> str:
         for dest in DESTINATION.values():
             ns = next((n for n in NAMESPACES if dest.startswith(n)), None)
@@ -312,7 +332,7 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     generator's own predicate, and pins the three facts the document asserts.
     """
     sys.path.insert(0, str(ROOT))
-    from tools.bridge_table import DESTINATION, TARGET_MCP
+    from tools.bridge_table import DESTINATION, TARGET_MCP, _registry_rows
 
     sources: dict[str, int] = {}
     for dest in DESTINATION.values():
@@ -322,7 +342,7 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
     defs = _sdk_defs_independently()
 
-    assert len(merged) == 17, f"merged set changed size: {len(merged)}"
+    assert merged, "the merged set is empty -- every destination has one source, which cannot be right"
     # Every merged target must appear in Part A, and nothing else may.
     part_a = doc.split("## Part A")[1].split("## Part B")[0]
     listed = set(re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| \d+ \|", part_a, re.M))
@@ -372,8 +392,9 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     assert len(dest_rows) == len(sources), (
         f"the counts table has {len(dest_rows)} rows, the map has {len(sources)} destinations"
     )
-    assert sum(int(v) for v in dest_rows.values()) == 98, (
-        "the destination-counts table does not sum to 98: "
+    n_registry = len(_registry_rows())
+    assert sum(int(v) for v in dest_rows.values()) == n_registry, (
+        f"the destination-counts table does not sum to {n_registry}: "
         f"{sum(int(v) for v in dest_rows.values())}"
     )
     for dest, rendered in dest_rows.items():
@@ -385,15 +406,17 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     # unguarded: mutating only the total line passed every test.
     total_cell = re.search(r"^\| \*\*total\*\* \| \*\*(\d+)\*\* \|$", doc, re.M)
     assert total_cell, "the destination-counts table has no `**total**` row"
-    assert int(total_cell.group(1)) == 98, (
-        f"the counts table's total cell says {total_cell.group(1)}, the registry has 98"
+    assert int(total_cell.group(1)) == n_registry, (
+        f"the counts table's total cell says {total_cell.group(1)}, the registry has {n_registry}"
     )
     prose = re.search(r"Destination rows: \*\*(\d+)\*\*\. Registry tools: \*\*(\d+)\*\*\.", doc)
     assert prose, "the `Destination rows / Registry tools` prose counts are missing"
     assert int(prose.group(1)) == len(dest_rows), (
         f"prose says {prose.group(1)} destination rows, the table has {len(dest_rows)}"
     )
-    assert int(prose.group(2)) == 98, f"prose says {prose.group(2)} registry tools, there are 98"
+    assert int(prose.group(2)) == n_registry, (
+        f"prose says {prose.group(2)} registry tools, there are {n_registry}"
+    )
 
     # The specific regression both prior rounds found.
     assert "record_decision" not in listed, (
@@ -473,3 +496,78 @@ def test_destination_map_matches_registry() -> None:
     errs = _validate(_registry_rows())
     assert not errs, "destination map disagrees with the registry:\n  " + "\n  ".join(errs)
     assert len(DESTINATION) == len(_registry_rows())
+
+
+def test_part_b_columns_are_not_unchecked() -> None:
+    """Part B's `Destination` / `Read-only` columns are claims, so check them.
+
+    Round-5 P1 of the PR #4177 review. `test_part_b_line_numbers_point_at_the_right_tool`
+    parsed only the `name` and the `file:line` from each row, so every OTHER column
+    was free. Overwriting the whole Destination column with `REMOVED` -- a document
+    that flatly contradicts its own headline count and its destination table --
+    left the suite green.
+    """
+    from tools.bridge_table import DESTINATION, _registry_rows
+
+    rows = {r["name"]: r for r in _registry_rows()}
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    part_b = doc.split("## Part B")[1].split("## Part C")[0]
+
+    parsed: dict[str, tuple[str, str]] = {}
+    for line in part_b.splitlines():
+        m = re.match(
+            r"^\| \d+ \| `([a-z_][a-z0-9_]*)` \| `[^`]+` \| (.+?) \| (yes|no) \| (.+?) \|$",
+            line,
+        )
+        if m:
+            parsed[m.group(1)] = (m.group(3), m.group(4).strip())
+
+    assert parsed, "Part B rendered no parseable rows - did its column shape change?"
+    assert set(parsed) == set(rows), (
+        "Part B does not render exactly the registry tools.\n"
+        f"  only in doc: {sorted(set(parsed) - set(rows))}\n"
+        f"  only in registry: {sorted(set(rows) - set(parsed))}"
+    )
+
+    for name, (read_only, dest_cell) in parsed.items():
+        expected_ro = "yes" if rows[name]["read_only"] else "no"
+        assert read_only == expected_ro, (
+            f"Part B says {name} read-only={read_only}, the registry says {expected_ro}"
+        )
+        expected_dest = DESTINATION[name]
+        # The cell carries the destination name, plus a marker when it is a target
+        # the registry cannot resolve today. Both parts must be right.
+        assert f"`{expected_dest}`" in dest_cell, (
+            f"Part B says {name} -> {dest_cell!r}, the map says {expected_dest!r}"
+        )
+        if expected_dest == "REMOVED":
+            assert "does not resolve" not in dest_cell, (
+                f"Part B marks {name} as not resolving, but it is simply REMOVED"
+            )
+
+
+def test_check_exits_nonzero_on_drift() -> None:
+    """`--check` must FAIL on a drifted doc, not merely succeed when clean.
+
+    Round-5 P2 of the PR #4177 review: the only test of `--check` asserted a zero
+    exit, so a mutation making `main()` return 0 unconditionally -- silently
+    disarming the entire drift gate -- would have passed.
+    """
+    import shutil
+    import tempfile
+
+    doc = ROOT / "docs" / "product" / "bridge-table.md"
+    with tempfile.TemporaryDirectory() as td:
+        backup = Path(td) / "bridge-table.md"
+        shutil.copy2(doc, backup)
+        try:
+            doc.write_text(doc.read_text(encoding="utf-8") + "\nDRIFT\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(GENERATOR), "--check"],
+                capture_output=True, text=True, cwd=str(ROOT),
+            )
+            assert proc.returncode != 0, (
+                "--check exited 0 on a deliberately drifted document; the drift gate is disarmed"
+            )
+        finally:
+            shutil.copy2(backup, doc)
