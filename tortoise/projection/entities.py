@@ -1,11 +1,14 @@
 """Entity CRUD handlers for FalkorProjection — Point, Subject, Object, Document, Event, Source.
 
-#2490 rebuild-decay note (rides #2488, APPLIED): #2488's
-``_fold_point_invalidated`` landed in this module and now appends
-``decay_clause('n')`` to ITS terminalizing SET (both the unconditional and
-``skip_updated_at`` branches) — otherwise INVALIDATED claims resurrect their
-frozen posterior post-rebuild while superseded/retracted decay (the exact
-ghost class #2490 eliminates).
+#2490 rebuild-decay note (APPLIED, then MOVED by #2884 A3): the terminalizing
+folds must decay the claim's belief (``decay_clause('n')``) or INVALIDATED /
+SUPERSEDED claims resurrect their frozen posterior post-rebuild (the ghost
+class #2490 eliminates). Both decays now fold INLINE in pass-1b via
+``_decay_point_belief`` — at the event's own journal seq — rather than riding
+``_fold_point_invalidated`` / ``_fold_point_superseded``: those run in the
+trailing sweep AFTER the whole pass-1b loop, so a decay applied there
+clobbered every later inline belief writer (replay != live). The two folds
+below own the status/flag/stamp/CORRECTS half only.
 """
 from __future__ import annotations
 
@@ -1011,6 +1014,17 @@ class _EntityHandlers:
         a chain A→B→C leaves A superseded-by-B and B superseded-by-C (each
         event folds its own target — live semantics, mirror Object).
 
+        #2884 A3: the BELIEF-decay half of the live ``supersede_point`` SET is
+        NOT here — it folds INLINE in pass-1b via ``_decay_point_belief`` (at
+        the surviving event's own journal seq; see that method's docstring and
+        the ``supersede_decay_seq`` pre-pass). This fold owns the status flag,
+        the validity stamps and the CORRECTS edge only. Keeping ``decay_clause``
+        here was the write≠read defect: this fold runs in the TRAILING sweep,
+        after the whole pass-1b loop, so it clobbered every later inline belief
+        writer (replay ended at 0.5 while live ended at the later writer's
+        value). Mirrors ``_fold_point_invalidated``, whose decay also moved
+        inline.
+
         Returns the MATCHED-ROW count (#2164 Task 2 additive fold-miss
         signal): 1 = the target Point was found and folded, 0 = no Point
         matched (missing Point / stale id) or the event lacks id+new_id. The
@@ -1035,8 +1049,7 @@ class _EntityHandlers:
         result = self.g.query(
             "MATCH (n:Point {id:$id}) "
             "SET n.status='superseded', n.outdated=true, "
-            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua, "
-            f"    {decay_clause('n')} "
+            "    n.validTo=$vt, n.expiredAt=$ea, n.updatedAt=$ua "
             "RETURN n.id LIMIT 1",
             params={"id": oid, "vt": valid_to, "ea": expired_at,
                     "ua": updated_at},

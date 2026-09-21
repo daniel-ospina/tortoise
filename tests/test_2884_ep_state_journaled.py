@@ -741,3 +741,130 @@ def test_a7_revise_belief_props_drop_across_delete_recreate(journaled):
     assert pure["confidence"] == pytest.approx(0.3), pure
     assert graph["confidence"] == pytest.approx(pure["confidence"])
     assert graph["posterior_alpha"] == pure.get("posterior_alpha")
+
+
+# ── A3 (supersede): the belief decay folds INLINE, not in the sweep ──
+#
+# The invalidate path already moved its `decay_clause` out of the trailing
+# sweep into pass-1b at the event's own journal seq (`_decay_point_belief`).
+# The supersede path kept its `decay_clause` in `_fold_point_superseded`,
+# which the sweep runs AFTER the whole pass-1b loop — so a journaled belief
+# write AFTER a supersede was clobbered back to the decayed 0.5. These tests
+# pin the moved decay: inline at the supersede event's seq, and absent from
+# the sweep fold.
+
+def _set_confidence(sdk, pid: str, value: float) -> None:
+    """Mirror a LIVE belief write (the EP/dream write-back is a plain SET
+    plus a journaled ConfidenceChanged record)."""
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.confidence=$c",
+        params={"id": pid, "c": value})
+
+
+def _supersede_pair(sdk) -> tuple[str, str]:
+    a = sdk.create_point("statement", "old A", status="live")["id"]
+    b = sdk.create_point("statement", "successor B", status="live")["id"]
+    return a, b
+
+
+def test_2884_supersede_decay_folds_at_its_own_journal_seq(journaled):
+    """PointAdded → ConfidenceChanged(0.9) → PointSuperseded →
+    ConfidenceChanged(0.25): the LAST belief write is the last writer LIVE,
+    so rebuild must end at 0.25 — not the decayed 0.5 the trailing sweep
+    wrote over it."""
+    _db, events, sdk = journaled
+    a, b = _supersede_pair(sdk)
+    _set_confidence(sdk, a, 0.9)
+    _raw_append(events, sdk, "ConfidenceChanged", id=a, confidence=0.9)
+    sdk.supersede_point(a, b)          # live decay → confidence 0.5
+    assert _state(sdk, [a])[a]["confidence"] == pytest.approx(0.5)
+    _set_confidence(sdk, a, 0.25)      # the later writer (live truth)
+    _raw_append(events, sdk, "ConfidenceChanged", id=a, confidence=0.25)
+    live = _state(sdk, [a])[a]
+    assert live["confidence"] == pytest.approx(0.25)
+
+    sdk._get_proj().rebuild_all(str(events))
+    post = _state(sdk, [a])[a]
+    assert post["confidence"] == pytest.approx(0.25), (
+        f"rebuild let the trailing supersede sweep clobber the later belief "
+        f"write: live={live} post={post}")
+
+
+def test_2884_supersede_sweep_does_not_clobber_posterior_clear(journaled):
+    """A real `set_point_baseline` AFTER a supersede clears the posteriors
+    LIVE and journals the clear. The trailing sweep's supersede decay used to
+    resurrect 1.0/1.0 over it."""
+    _db, events, sdk = journaled
+    a, b = _supersede_pair(sdk)
+    sdk.supersede_point(a, b)
+    sdk.set_point_baseline(a, 4.0, 2.0)   # clears posteriors live + journals
+    live = _state(sdk, [a])[a]
+    assert live["posterior_alpha"] is None
+    assert live["posterior_beta"] is None
+
+    sdk._get_proj().rebuild_all(str(events))
+    post = _state(sdk, [a])[a]
+    assert post["posterior_alpha"] is None, (
+        f"trailing supersede decay resurrected the cleared posterior: {post}")
+    assert post["posterior_beta"] is None, post
+
+
+def test_2884_supersede_decay_still_applies_without_later_write(journaled):
+    """NEGATIVE/control: with NO later belief write, live decays to 0.5 — so
+    rebuild must DO THE SAME. Pins that the decay was MOVED, not deleted."""
+    _db, events, sdk = journaled
+    a, b = _supersede_pair(sdk)
+    sdk.supersede_point(a, b)
+    live = _state(sdk, [a])[a]
+    assert live["confidence"] == pytest.approx(0.5)
+    assert live["posterior_alpha"] == pytest.approx(1.0)
+
+    sdk._get_proj().rebuild_all(str(events))
+    post = _state(sdk, [a])[a]
+    assert post["confidence"] == pytest.approx(0.5), (
+        f"supersede decay was dropped instead of moved: live={live} post={post}")
+    assert post["posterior_alpha"] == pytest.approx(1.0), post
+
+
+def test_2884_bare_same_id_reemit_keeps_belief_state(journaled):
+    """A bare same-id PointAdded re-emit (NO hard delete) MERGEs live and
+    keeps the belief value — the replay must not drop the ConfidenceChanged
+    fold on the terminalizing `last_recreate_seq` anchor."""
+    _db, events, sdk = journaled
+    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    _set_confidence(sdk, pid, 0.9)
+    _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9)
+    _raw_append(events, sdk, "PointAdded",
+                point={"id": pid, "content": "c1", "pointKind": "",
+                       "status": "live"})
+    live = _state(sdk, [pid])[pid]
+    assert live["confidence"] == pytest.approx(0.9)
+
+    sdk._get_proj().rebuild_all(str(events))
+    post = _state(sdk, [pid])[pid]
+    assert post["confidence"] == pytest.approx(0.9), (
+        f"a bare same-id re-emit dropped the belief fold: live={live} "
+        f"post={post}")
+
+
+def test_2884_supersede_decay_survives_bare_same_id_reemit(journaled):
+    """The supersede decay is a BELIEF write, so it must be gated on the
+    real-hard-delete boundary (`last_ann_drop_seq`), NOT the terminalizing
+    `last_recreate_seq`: a bare same-id re-emit after the supersede MERGEs
+    live and keeps the DECAYED belief (0.5), so replay must decay too."""
+    _db, events, sdk = journaled
+    a, b = _supersede_pair(sdk)
+    _set_confidence(sdk, a, 0.9)
+    _raw_append(events, sdk, "ConfidenceChanged", id=a, confidence=0.9)
+    sdk.supersede_point(a, b)          # live decay → 0.5
+    _raw_append(events, sdk, "PointAdded",
+                point={"id": a, "content": "old A", "pointKind": "",
+                       "status": "superseded"})
+    live = _state(sdk, [a])[a]
+    assert live["confidence"] == pytest.approx(0.5)
+
+    sdk._get_proj().rebuild_all(str(events))
+    post = _state(sdk, [a])[a]
+    assert post["confidence"] == pytest.approx(0.5), (
+        f"a bare same-id re-emit suppressed the live supersede decay: "
+        f"live={live} post={post}")

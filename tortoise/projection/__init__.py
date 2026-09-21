@@ -3422,6 +3422,36 @@ class FalkorProjection(
         # #2423: DirectEdgeRepoint descriptors (supersede's 2a-DIRECT transfer
         # journal) — replayed in pass-2b AFTER operator edges exist.
         direct_repoint_events: list = []
+        # #2884 A3 (supersede): the supersede family's BELIEF decay folds
+        # INLINE at the event's own journal seq, exactly as the invalidate
+        # family's does (`_decay_point_belief`). The trailing sweep runs AFTER
+        # the whole pass-1b loop, so a `decay_clause` left in
+        # `_fold_point_superseded` overwrote every LATER same-id belief writer
+        # (a journaled ConfidenceChanged, or a PointRevised carrying
+        # confidence): replay ended at the decayed 0.5 while live ended at the
+        # later writer's value (write != read — the same defect the invalidate
+        # fix closed).
+        #
+        # Resolve, PER OLD-ID, the surviving supersede whose decay applies —
+        # the LAST event not obsoleted by a REAL hard-delete boundary. The
+        # anchor is ``last_ann_drop_seq`` (advanced only by a real
+        # ``EntityMutated op=delete`` / ``PointsMerged`` creation), NOT the
+        # terminalizing ``last_recreate_seq``: a bare same-id re-emit MERGEs
+        # live and keeps belief state, so gating the decay on it would drop a
+        # decay live actually applied. Pass 1a has populated both anchors
+        # before this runs, over the SAME ``events`` list the sweep enumerates.
+        supersede_decay_seq: dict[str, int] = {}
+        for seq, ev in enumerate(events):
+            ev = self._norm(ev)
+            if ev.get("type") != "PointSuperseded":
+                continue
+            _sd_rid = ev.get("id")
+            if not isinstance(_sd_rid, str):
+                continue
+            _sd_drop = last_ann_drop_seq.get(("Point", _sd_rid))
+            if _sd_drop is not None and seq <= _sd_drop:
+                continue
+            supersede_decay_seq[_sd_rid] = seq
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
@@ -3745,7 +3775,18 @@ class FalkorProjection(
                 # re-point + DirectEdgeRepoint replay half is pass-2b —
                 # after pass-2 rebuilds edges from operator snapshots that
                 # still name the OLD input.)
+                #
+                # #2884 A3: the BELIEF-decay half (`decay_clause`) folds INLINE
+                # HERE too, at the surviving event's own journal seq (resolved
+                # by the ``supersede_decay_seq`` pre-pass above) — NOT in the
+                # trailing sweep. The sweep fold below no longer writes any
+                # belief prop, so inline and sweep are mutually exclusive by
+                # construction for the same event (only this branch writes the
+                # decay). The anchor is ``last_ann_drop_seq``, NOT
+                # ``last_recreate_seq`` (see the pre-pass).
                 if isinstance(ev.get("id"), str):
+                    if supersede_decay_seq.get(ev["id"]) == seq:
+                        self._decay_point_belief(ev["id"])
                     point_re_stamp_folds.append((seq, ev))
             elif t == "PointInvalidated":
                 # #2488 pass-1b rebuild parity: the POINT-side invalidate
