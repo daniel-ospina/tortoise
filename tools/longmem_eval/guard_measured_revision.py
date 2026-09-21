@@ -256,9 +256,11 @@ def _is_noise(rel: str) -> bool:
     record) ``evil.SWP`` and ``evil.swp`` are the same file, and a
     case-sensitive suffix test is defeatable for exactly the reason the
     ``.GIT`` directory match was (see the nested-git walk). No member of
-    ``NOISE_SUFFIXES`` is executable, so widening the match cannot hide code.
-    Both sides are folded (``NOISE_SUFFIXES_FOLDED``) — folding only the path
-    made the mixed-case ``.DS_Store`` member unreachable.
+    ``NOISE_SUFFIXES`` is an executable *script*; its byte-cache members
+    (``.pyc``/``.pyo``) are handled separately by ``_is_bytecode`` and
+    refused by default (#3712), so widening this excuse list cannot hide
+    code. Both sides are folded (``NOISE_SUFFIXES_FOLDED``) — folding only
+    the path made the mixed-case ``.DS_Store`` member unreachable.
     """
     return rel.casefold().endswith(NOISE_SUFFIXES_FOLDED)
 

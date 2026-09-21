@@ -760,20 +760,31 @@ def test_non_bytecode_file_inside_pycache_is_refused(repo: Repo) -> None:
 def test_ds_store_dropping_is_excused(repo: Repo) -> None:
     """The canonical macOS Finder dropping is excused noise, not a refusal.
 
-    ``_is_noise`` casefolds the path, so the suffix side must be folded too —
-    an unfolded ``.DS_Store`` member never matched ``.../.ds_store``, making
-    that exemption unreachable.
+    RED before the fix: the unfolded ``.DS_Store`` member never matched the
+    casefolded path, so this was refused as an untracked surface file.
     """
     (repo.path("tortoise/.DS_Store")).write_text("finder droppings\n")
     assert _scan(repo).checked == SURFACE_FILES
 
 
+def test_lowercase_ds_store_is_excused(repo: Repo) -> None:
+    """RED before the fix (a second discriminator): the unfolded member never
+    matched ``.ds_store`` either."""
+    (repo.path("tortoise/.ds_store")).write_text("finder droppings\n")
+    assert _scan(repo).checked == SURFACE_FILES
+
+
 def test_uppercase_noise_suffix_is_excused(repo: Repo) -> None:
+    """Guard, NOT a fix-discriminator: ``.SWP`` already matched — the path
+    was folded pre-fix, only the mixed-case suffix literal was broken."""
     (repo.path("tortoise/evil.SWP")).write_text("swap\n")
     assert _scan(repo).checked == SURFACE_FILES
 
 
 def test_noise_suffix_is_a_suffix_not_a_substring(repo: Repo) -> None:
+    """Guard against over-broad matching (it passed pre-fix too): the excuse
+    is a suffix, so a ``.py`` that merely *contains* a noise suffix is not
+    excused."""
     (repo.path("tortoise/.DS_Store.py")).write_text("x = 1\n")
     with pytest.raises(GuardRefused, match="untracked file"):
         _scan(repo)
