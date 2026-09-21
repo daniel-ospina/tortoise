@@ -246,6 +246,7 @@ def test_part_a_exists_column_is_derived_from_the_ast() -> None:
     """
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
     part_a = doc.split("## Part A")[1].split("## Part B")[0]
+    from tools.bridge_table import C1_REF
     defs = _sdk_defs_independently()
 
     rows = re.findall(
@@ -318,6 +319,19 @@ def test_c1_blockers_are_exactly_the_targets_without_a_method() -> None:
         f"  missing from C1 ({len(expected - listed)}): {sorted(expected - listed)}"
     )
 
+    # The Finding column is prose, but it is the section's whole claim: rewriting
+    # it to "method exists but is not exported" -- the OPPOSITE of the heading --
+    # left every row misstated with the suite green.
+    from tools.bridge_table import C1_FINDING
+    findings = re.findall(r"^\| `[a-z_][a-z0-9_]*` \| [A-Za-z-]+ \| (.+?) \|$", c1, re.M)
+    assert findings, "Part C1's Finding column did not parse - the surface is unguarded"
+    assert len(findings) == len(listed), (
+        f"C1 has {len(listed)} rows but {len(findings)} Findings"
+    )
+    assert set(findings) == {C1_FINDING}, (
+        f"C1's Finding says {sorted(set(findings))!r}, expected {C1_FINDING!r} on every row"
+    )
+
 
 def test_part_a_merged_set_is_recomputed_independently() -> None:
     """Part A's merged set is derived, so derive it a second way and compare.
@@ -345,6 +359,7 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     assert merged, "the merged set is empty -- every destination has one source, which cannot be right"
     # Every merged target must appear in Part A, and nothing else may.
     part_a = doc.split("## Part A")[1].split("## Part B")[0]
+    from tools.bridge_table import C1_REF
     listed = set(re.findall(r"^\| `([a-z_][a-z0-9_]*)` \| \d+ \|", part_a, re.M))
     assert listed, "Part A rendered no rows - did its table shape change?"
     assert listed == merged, (
@@ -394,6 +409,18 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     assert set(discs_in_doc) == set(counts_in_doc), (
         "Part A's Discriminator column and its counts column cover different rows"
     )
+    # The `Exists` cell's cross-reference is a claim about WHERE the finding is
+    # listed: pointing at C2 (unresolvable bindings) instead of C1 (missing
+    # methods) was green, because the old check only tested `startswith("yes")`.
+    exists_in_doc = dict(re.findall(
+        r"^\| `([a-z_][a-z0-9_]*)` \| \d+ \| .+? \| (yes|.+?) \|$", part_a, re.M
+    ))
+    assert exists_in_doc, "Part A's `Exists` column did not parse - the surface is unguarded"
+    for target, rendered in exists_in_doc.items():
+        assert rendered in ("yes", C1_REF), (
+            f"Part A says {target} exists={rendered!r}; expected 'yes' or {C1_REF!r}"
+        )
+
     for target, rendered in discs_in_doc.items():
         want = DISCRIMINATORS.get(target, "*(none — dispatch is by argument)*")
         assert rendered.strip() == want, (
@@ -469,18 +496,45 @@ def test_vision_doc_buckets_match_generated_doc() -> None:
     """
     import re
 
+    from tools.bridge_table import TARGET_MCP
+
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
     vision = (ROOT / "docs" / "product" / "vision-mcp-sdk-surface.md").read_text(encoding="utf-8")
 
     m = re.search(
-        r"Registry: (\d+) tools → (\d+) absorbed into the \d+ MCP targets · "
+        r"Registry: (\d+) tools → (\d+) absorbed into the (\d+) MCP targets · "
         r"(\d+) absorbed into a builder-only SDK method \(not on the MCP\) · "
         r"(\d+) tenancy \(SDK/REST only\) · (\d+) retired\.",
         doc,
     )
     assert m, "could not parse the generated headline; did its wording change?"
-    total, mcp, sdk_only, tenancy, retired = (int(g) for g in m.groups())
+    total, mcp, mcp_targets, sdk_only, tenancy, retired = (int(g) for g in m.groups())
     assert mcp + sdk_only + tenancy + retired == total, "generated buckets do not sum"
+    # The target count in the headline was a `\d+` wildcard, so it was free: the
+    # headline could say "99 MCP targets" while the next sentence said 26.
+    assert mcp_targets == len(TARGET_MCP), (
+        f"the headline says {mcp_targets} MCP targets, TARGET_MCP has {len(TARGET_MCP)}"
+    )
+
+    # The SECOND headline sentence restates the same four numbers in prose, and
+    # nothing read it: bumping one of them there left line 10 and line 12 (and the
+    # vision doc) disagreeing, green.
+    m2 = re.search(
+        r"The MCP has \*\*(\d+)\*\* tools; "
+        r"\*\*(\d+)\*\* current tools retire, \*\*(\d+)\*\* are tenancy-only, "
+        r"\*\*(\d+)\*\* is absorbed into a builder-only SDK method that is not on the MCP, "
+        r"and \*\*(\d+)\*\* are absorbed into those",
+        doc,
+    )
+    assert m2, "could not parse the headline's second sentence; did its wording change?"
+    mcp2, retired2, tenancy2, sdk_only2, on_mcp2 = (int(g) for g in m2.groups())
+    assert (mcp2, retired2, tenancy2, sdk_only2, on_mcp2) == (
+        mcp_targets, retired, tenancy, sdk_only, mcp
+    ), (
+        "the headline's second sentence disagrees with its first: "
+        f"got {(mcp2, retired2, tenancy2, sdk_only2, on_mcp2)}, "
+        f"expected {(mcp_targets, retired, tenancy, sdk_only, mcp)}"
+    )
 
     # Labels carry a number that the owner's rulings can change. Match the shape,
     # then assert the number -- so the doc cannot silently keep a stale count.
@@ -539,6 +593,11 @@ def test_part_b_columns_are_not_unchecked() -> None:
             parsed[m.group(1)] = (m.group(2), m.group(3), m.group(4).strip())
 
     assert parsed, "Part B rendered no parseable rows - did its column shape change?"
+    # The `#` index is a cell too: renumbering every row from 101 was green.
+    idx = [int(x) for x in re.findall(r"^\| (\d+) \| `", part_b, re.M)]
+    assert idx == list(range(1, len(rows) + 1)), (
+        f"Part B's row numbers are not 1..{len(rows)}: got {idx[:5]}...{idx[-3:]}"
+    )
     assert set(parsed) == set(rows), (
         "Part B does not render exactly the registry tools.\n"
         f"  only in doc: {sorted(set(parsed) - set(rows))}\n"
@@ -561,10 +620,10 @@ def test_part_b_columns_are_not_unchecked() -> None:
             f"Part B says {name} binds {binding.strip()!r}, the registry says {want_bind!r}"
         )
         expected_dest = DESTINATION[name]
-        # The cell carries the destination name, plus a marker when it is a target
-        # the registry cannot resolve today. Both parts must be right.
-        assert f"`{expected_dest}`" in dest_cell, (
-            f"Part B says {name} -> {dest_cell!r}, the map says {expected_dest!r}"
+        # EXACT, not a substring: the generator emits no marker, so appending one
+        # to every cell was green while the doc claimed things the map does not.
+        assert dest_cell == f"`{expected_dest}`", (
+            f"Part B says {name} -> {dest_cell!r}, the map says `{expected_dest}` exactly"
         )
         if expected_dest == "REMOVED":
             assert "does not resolve" not in dest_cell, (

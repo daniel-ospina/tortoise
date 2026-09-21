@@ -204,6 +204,16 @@ NAMESPACES = ("tenancy:", "sdk:")
 # call, and that is what must exist for the target to be implementable.
 MCP_BACKING = {"graph_set_recording": "update_memory_graph"}
 
+# C1's one Finding column. A single constant so a test can pin the whole
+# section by equality: the section is headed "target tools with NO method",
+# and a rewrite of this string stated the opposite on every row, green.
+C1_FINDING = "no `def` on TortoiseSDK"
+
+# Part A's `Exists` cell when the method is missing. The cross-reference is a
+# claim about WHERE the finding is listed, and it was free: pointing at C2 --
+# the unresolvable-BINDINGS section -- sent readers to the wrong table.
+C1_REF = "**no — Part C1**"
+
 # ─────────────────────────────────────────────────────────────────────
 # AUTHORED DATA — the one column that is a design fact rather than a
 # derivation. Everything else in Part A (which targets are merged, and
@@ -319,13 +329,13 @@ def _blockers(rows: list[dict], sdk_defs: dict[str, int]) -> tuple[list[dict], l
     # same-named SDK method is discarded, so the method Phase 2 must write is
     # `update_memory_graph`.
     no_method = [
-        {"what": MCP_BACKING.get(m, m), "scope": "MCP", "why": "no `def` on TortoiseSDK"}
+        {"what": MCP_BACKING.get(m, m), "scope": "MCP", "why": C1_FINDING}
         for m in TARGET_MCP if MCP_BACKING.get(m, m) not in sdk_defs
     ] + [
-        {"what": m, "scope": "tenancy", "why": "no `def` on TortoiseSDK"}
+        {"what": m, "scope": "tenancy", "why": C1_FINDING}
         for m in tenancy_targets if m not in sdk_defs
     ] + [
-        {"what": m, "scope": "sdk-only", "why": "no `def` on TortoiseSDK"}
+        {"what": m, "scope": "sdk-only", "why": C1_FINDING}
         for m in sdk_only_targets if m not in sdk_defs
     ]
 
@@ -393,7 +403,7 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
         disc = DISCRIMINATORS.get(dest, "*(none — dispatch is by argument)*")
         # Check the method, and for a namespaced target the method it names.
         method = dest.split(":", 1)[1] if dest.startswith(NAMESPACES) else dest
-        ok = "yes" if method in sdk_defs else "**no — Part C1**"
+        ok = "yes" if method in sdk_defs else C1_REF
         out.append(f"| `{dest}` | {len(merged[dest])} | {disc} | {ok} |")
     n_merged = len(merged)
     n_ok = sum(
