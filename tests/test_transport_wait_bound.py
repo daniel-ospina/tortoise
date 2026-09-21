@@ -600,8 +600,7 @@ async def test_breach_path_is_sanitized_before_the_log_and_the_sink(
     (code-review round 2): VT/FF/ESC/NUL, DEL, the C1 range (U+0085 NEL and
     U+009B CSI — line-break and escape introducers to Unicode-aware readers)
     and U+2028/U+2029 forge lines or inject terminal escapes too, so the full
-    C0/C1 + DEL range is escaped (`tortoise/schemas.py` is the repo's
-    control-char convention)."""
+    C0/C1 + DEL range is escaped."""
     seen = []
     monkeypatch.setattr(ha, "_track_analytics_event",
                         lambda org, ev, props: seen.append(props))
