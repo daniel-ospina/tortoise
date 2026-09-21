@@ -299,3 +299,45 @@ def test_the_excepthook_redacts_an_uncaught_traceback(monkeypatch, capsys):
     assert "ConnectionError" in err
     assert "Error 8 connecting to" in err
     assert "Traceback (most recent call last)" in err
+
+
+def test_a_non_json_native_leaf_is_redacted_too(monkeypatch, tmp_path):
+    """The encoder's ``default`` fallback runs AFTER the tree walk, so a leaf
+    whose ``str()`` carries the credential used to be written verbatim."""
+    secret = "hunter2"
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+
+    class Opaque:
+        def __str__(self):
+            return f"connection to {secret} failed"
+
+    out = tmp_path / "receipt.json"
+    receipt = {"instrument": "x", "nested": {"leaf": Opaque()}}
+    _write_receipt(SimpleNamespace(receipt=str(out)), receipt)
+    written = out.read_text()
+    assert secret not in written
+    assert "***" in written            # redacted, not dropped
+    assert json.loads(written)["nested"]["leaf"].startswith("connection to")
+
+
+def test_a_cyclic_receipt_neither_hangs_nor_truncates(monkeypatch, tmp_path):
+    """A self-referential receipt used to raise RecursionError — and because
+    the destination was opened first, that left a pre-existing receipt
+    TRUNCATED to 0 bytes (evidence lost while reporting the fault)."""
+    secret = "hunter2"
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+    out = tmp_path / "receipt.json"
+    out.write_text('{"previous": "run evidence"}')
+
+    receipt: dict = {"instrument": "x", "note": secret}
+    receipt["self"] = receipt          # a true cycle
+    _write_receipt(SimpleNamespace(receipt=str(out)), receipt)
+
+    written = out.read_text()
+    assert written, "the pre-existing receipt was truncated"
+    parsed = json.loads(written)       # still valid JSON
+    assert parsed["self"] == "<circular reference>"
+    assert secret not in written
+    assert not list(tmp_path.glob("*.tmp.*")), "temp file was left behind"

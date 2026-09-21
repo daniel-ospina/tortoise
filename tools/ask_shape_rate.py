@@ -487,7 +487,7 @@ def _redact_substrate_text(text: str) -> str:
     return text
 
 
-def _redact_receipt(value):
+def _redact_receipt(value, _path: set[int] | None = None):
     """Recursively redact every STRING (and dict KEY) in a receipt tree.
 
     ⚠️ Redact the OBJECT TREE, never the serialized JSON. A credential is an
@@ -497,23 +497,52 @@ def _redact_receipt(value):
     and emits an UNPARSEABLE receipt, and a non-ASCII credential survives
     because ``json.dumps`` writes it as ``\\uXXXX`` escapes the pattern cannot
     match (measured at review: 6/92 secret shapes produced invalid JSON).
-    Walking the tree first makes the guarantee structural: nothing is written
-    until every string has been through the redactor, and the serialized
-    document is byte-identical to what the unredacted tree would have produced
-    apart from the substituted values.
+    Walking the tree first makes the guarantee structural: no string is written
+    until it has been through the redactor.
+
+    ``_path`` is the chain of container ``id()``s currently being walked (NOT
+    a global visited-set), so a shared subobject is still redacted on every
+    path while a true CYCLE is named instead of recursing to death — measured
+    at review: a self-referential dict raised ``RecursionError``, and because
+    ``_write_receipt`` opened the destination first, the raised error left a
+    pre-existing receipt TRUNCATED to 0 bytes. ``json.dump`` cannot serialize a
+    cycle either, so naming it loses nothing.
     """
     if isinstance(value, str):
         return _redact_substrate_text(value)
-    if isinstance(value, dict):
-        # A dict KEY can carry a credential too (a per-question id is built
-        # from fixture data), so keys go through the same redactor.
-        return {(_redact_substrate_text(k) if isinstance(k, str) else k):
-                _redact_receipt(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_receipt(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_receipt(v) for v in value)
+    if isinstance(value, (dict, list, tuple)):
+        if _path is None:
+            _path = set()
+        if id(value) in _path:
+            return "<circular reference>"
+        _path.add(id(value))
+        try:
+            if isinstance(value, dict):
+                # A dict KEY can carry a credential too (a per-question id is
+                # built from fixture data), so keys share the redactor.
+                out: dict = {}
+                for k, v in value.items():
+                    key = _redact_substrate_text(k) if isinstance(k, str) else k
+                    out[key] = _redact_receipt(v, _path)
+                return out
+            if isinstance(value, list):
+                return [_redact_receipt(v, _path) for v in value]
+            return tuple(_redact_receipt(v, _path) for v in value)
+        finally:
+            _path.discard(id(value))
     return value
+
+
+def _redacted_default(obj) -> str:
+    """The JSON encoder's ``default`` — REDACTED, so serialization cannot
+    invent an unredacted string.
+
+    ``json.dump(..., default=str)`` runs AFTER the tree walk, for leaves that
+    are not JSON-native; a leaf whose ``str()`` carries the credential would be
+    written verbatim (measured at review). Routing the encoder's fallback
+    through the redactor makes the write-path guarantee total.
+    """
+    return _redact_substrate_text(str(obj))
 
 
 def _install_redacting_excepthook() -> None:
@@ -1818,14 +1847,26 @@ def _write_receipt(args, receipt: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     receipt["receipt_path"] = path
     # ONE write chokepoint, redacted over the OBJECT TREE (never the serialized
-    # text — see ``_redact_receipt``): every receipt (live, movement, VOID) goes
-    # through here, so a credential that reached ANY nested field — a
-    # per-question error, a handler envelope, a ``substrate_errors`` entry, a
-    # movement exclusion — cannot land on disk, and the output is always valid
-    # JSON.
-    with open(path, "w") as f:
-        json.dump(_redact_receipt(receipt), f, indent=2, sort_keys=False,
-                  default=str)
+    # text — see ``_redact_receipt``) and with a REDACTING encoder fallback
+    # (``_redacted_default``): every receipt (live, movement, VOID) goes through
+    # here, so no credential reaches disk — not through a nested error, a
+    # handler envelope, a ``substrate_errors`` entry, a movement exclusion, a
+    # dict key, or a non-JSON-native leaf.
+    #
+    # Written to a SIBLING TEMP FILE and atomically replaced: measured at
+    # review, opening the destination first meant a redaction/serialization
+    # failure (a cyclic structure) left a pre-existing receipt TRUNCATED to 0
+    # bytes — losing the previous run's evidence while reporting the fault.
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(_redact_receipt(receipt), f, indent=2, sort_keys=False,
+                      default=_redacted_default)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
     print(f"receipt: {path}")
 
 
