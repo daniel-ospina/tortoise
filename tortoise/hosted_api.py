@@ -24742,8 +24742,11 @@ def _billing_email_like(value: object) -> bool:
     /v1/register) an email address. Handing a UUID/``"api"`` to Stripe as the
     customer email either 502s or binds a garbage address, and — with the
     session fallback placed last — it shadowed that fallback for a genuinely
-    entitled session user. Require a real address shape (a single ``@``, no
-    whitespace); UUIDs and ``"api"`` fail it and fall through.
+    entitled session user. The gate requires a real address shape — a single
+    ``@``, a non-empty local part and domain, and no interior whitespace;
+    surrounding whitespace is trimmed, so a caller that returns a passing
+    value must return its ``.strip()``. UUIDs and ``"api"`` fail the gate and
+    fall through.
     """
     if not isinstance(value, str):
         return False
@@ -24787,13 +24790,13 @@ def _billing_customer_email(sdk, org: dict) -> str:
             "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
         ).result_set
         if row and _billing_email_like(row[0][0]):
-            return row[0][0]
+            return row[0][0].strip()
     row = sdk._get_registry().query(
         "MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1",
         params={"tid": org_id},
     ).result_set
     if row and _billing_email_like(row[0][0]):
-        return row[0][0]
+        return row[0][0].strip()
     # #4504: verified session email — before the 400, after the existing
     # resolutions (precedence unchanged). Reached whenever no earlier link
     # produced an address — including a non-email ``created_by``.
@@ -24848,8 +24851,8 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
     # ``customer_email``: it belongs to that Stripe customer, while the
     # resolved email may now come from a different member's session (#4504) —
     # rewriting it would make the mirror disagree with the address invoices go
-    # to. Backfill only when the stored value is empty (webhook/reconcile
-    # created the binding without one).
+    # to. Backfill only when the stored value is empty (the checkout webhook
+    # persisted the binding without a customer_email).
     if stored_customer_id and stored_customer_email:
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid",

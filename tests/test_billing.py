@@ -694,6 +694,38 @@ class TestCheckoutPortal:
         assert r.status_code == 200, r.text
         assert captured == ["session-user@example.com"]
 
+    def test_checkout_padded_created_by_is_returned_stripped(
+            self, monkeypatch, billing_client):
+        """#4504 review: the shape gate trims before validating, so a padded
+        email-shaped ``created_by`` must be handed to Stripe trimmed — never
+        the raw DB string."""
+        from tortoise.hosted_api import app, get_current_org
+
+        sdk = billing_client["sdk"]
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) REMOVE t.email",
+            params={"id": billing_client["org_id"]},
+        )
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) SET k.created_by=' provision@example.com '",
+            params={"tid": billing_client["org_id"]},
+        )
+        captured: list[str] = []
+        self._stub_checkout(monkeypatch, captured, "pad1")
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": billing_client["org_id"], "key_id": None, "tier": "free",
+            "session_user_email": "session-user@example.com",
+        }
+        try:
+            r = billing_client["client"].post(
+                "/v1/billing/checkout", json={"price_id": "price_200proMM"})
+        finally:
+            app.dependency_overrides.pop(get_current_org, None)
+        assert r.status_code == 200, r.text
+        assert captured == ["provision@example.com"]  # trimmed, not padded
+        t = sdk.org_get(billing_client["org_id"])
+        assert t["customer_email"] == "provision@example.com"
+
     def test_checkout_reuse_keeps_stored_customer_email(self, monkeypatch, billing_client):
         """#4504 review: when the Stripe customer is reused, a second member's
         session must not rewrite the org's stored billing contact — the mirror
