@@ -149,9 +149,9 @@ class FindingProvenanceTestBase(unittest.TestCase):
 
     def test_malformed_line_is_not_a_pass(self) -> None:
         for body in (
-            "Measured at: main@abc123 on 2026-09-20\n",       # short SHA
-            "Measured at: main@%s\n" % self.tip,              # no date
-            "measured at: main@%s on 2026-09-20\n" % self.tip,  # wrong case
+            "Measured at: main@abc123 on 2026-09-20\n",  # short SHA
+            f"Measured at: main@{self.tip}\n",  # no date
+            f"measured at: main@{self.tip} on 2026-09-20\n",  # wrong case
         ):
             with self.subTest(body=body):
                 r = self.invoke("--validate", "-", stdin=body)

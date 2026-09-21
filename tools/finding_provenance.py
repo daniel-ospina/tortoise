@@ -165,7 +165,7 @@ def _emit(root: Path, base_ref: str) -> int:
         return 2
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     label = branch if branch and branch != "HEAD" else "HEAD"
-    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    today = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d")
     # A dirty worktree means HEAD does NOT describe the tree that was read. The
     # marker rides IN the emitted line so it travels with the finding to the
     # reader — a stderr warning only ever reaches the reporter's terminal.
