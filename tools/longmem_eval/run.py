@@ -1312,8 +1312,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
                        # ALWAYS present (results-relevant by construction: a
                        # question that dies at 0 write retries survives at 2 —
-                       # the same class as max_retries). A pre-feature
-                       # checkpoint therefore refuses via CheckpointStaleError
+                       # the same class as max_retries). A fingerprint-bearing
+                       # pre-feature checkpoint therefore refuses via
+                       # CheckpointStaleError
                        # (the SAFE direction — Task 8 requires a fresh
                        # checkpoint anyway).
                        ingest_write_retries: int = INGEST_WRITE_RETRIES,
@@ -1480,12 +1481,15 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("aggregative_flag", aggregative_flag),
             ("max_chunks_per_session", max_chunks_per_session),
             # #1786 (R5): the eval's hybrid retrieval budget — conditional
-            # presence (the eval always passes 1500, so a pre-feature /
-            # 500-ms-budget checkpoint refuses via CheckpointStaleError).
+            # presence (the eval always passes 1500, so a fingerprint-bearing
+            # pre-feature / 500-ms-budget checkpoint refuses via
+            # CheckpointStaleError).
             ("retrieval_budget_ms", retrieval_budget_ms),
             # #2578 (Task 1): the TR item-cap knob — conditional presence
-            # (absent at the 12 default → pre-feature checkpoints resume
-            # byte-identically; a 16-checkpoint resumed at 12 refuses).
+            # (absent at the 12 default, so the key itself perturbs nothing;
+            # a post-C4 checkpoint resumes byte-identically, a pre-C4 one is
+            # refused by the always-present arm/guard bools; a 16-checkpoint
+            # resumed at 12 refuses).
             ("tr_top_k", tr_top_k),
             # #2976: the temporal retrieval-leg arm — conditional presence
             # ONLY when the env resolves ON, so the default fingerprint
@@ -3814,23 +3818,26 @@ def run_evaluation(
         max_chunks_per_session=max_chunks_per_session,
         # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
         # results-relevant) + the hybrid retrieval budget (conditional
-        # presence — the eval always passes the non-default 1500). All four
-        # stale pre-feature checkpoints via CheckpointStaleError.
+        # presence — the eval always passes the non-default 1500). Each
+        # stales a fingerprint-bearing pre-feature checkpoint via
+        # CheckpointStaleError.
         ingest_write_retries=ingest_write_retries,
         ingest_question_retries=ingest_question_retries,
         resume_attempts_cap=resume_attempts_cap,
         # #1744 (review P1): the graph-content-affecting session-parallel
-        # toggle — ALWAYS present, so a pre-#1744 checkpoint (no key)
-        # refuses on resume rather than silently crossing the mode. Recorded
+        # toggle — ALWAYS present, so a fingerprint-bearing pre-#1744
+        # checkpoint (no key) refuses on resume rather than silently crossing
+        # the mode. Recorded
         # as the EFFECTIVE ingest value: the per-session census lane forces
         # ingest to sequential, so recording the outer value would fingerprint
         # a regime that did not actually run.
         session_workers=(1 if per_session_census else session_workers),
         retrieval_budget_ms=retrieval_budget_ms,
         # #2578 (Task 1): conditional presence — the DEFAULT tr_top_k (12)
-        # fingerprints as absent so pre-feature checkpoints resume
-        # byte-identically; a non-default value fingerprints (mismatched
-        # resumes refused by the existing fingerprint gate).
+        # fingerprints as absent, so the key itself perturbs nothing; a
+        # post-C4 checkpoint resumes byte-identically (a pre-C4 one is refused
+        # by the always-present arm/guard bools); a non-default value
+        # fingerprints (mismatched resumes refused by the existing gate).
         tr_top_k=(tr_top_k if tr_top_k != DEFAULT_TR_TOP_K else None),
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
@@ -6492,9 +6499,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # --retry-failed resume mode (default off) + the eval's
                 # elevated HYBRID-arm retrieval deadline (1500 ms via the
                 # _elevated_timeout_ms seam — the vector arm keeps
-                # VECTOR_TIMEOUT_MS=5000). All four fingerprint keys stale
-                # pre-feature checkpoints (CheckpointStaleError — the SAFE
-                # direction; Task 8 requires a fresh checkpoint anyway).
+                # VECTOR_TIMEOUT_MS=5000). All four fingerprint keys stale a
+                # fingerprint-bearing pre-feature checkpoint
+                # (CheckpointStaleError — the SAFE direction; Task 8 requires
+                # a fresh checkpoint anyway).
                 retry_failed=args.retry_failed,
                 ingest_write_retries=INGEST_WRITE_RETRIES,
                 ingest_question_retries=INGEST_QUESTION_RETRIES,
