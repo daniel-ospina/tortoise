@@ -330,7 +330,11 @@ def session_key_of(hit: dict) -> str:
     ``lme_session_index`` maps to the single bucket ``idx:-1``. Two
     identity-less hits therefore cap together under the C5 per-session
     cap, and :func:`seeded_sessions` drops them all as phantom ``idx:``
-    buckets (never a real graph ``p.session_id``). Hits that DO carry an
+    buckets (never a real graph ``p.session_id``). This is a PRE-EXISTING
+    product collapse, not a C4 decision: the key expression is the
+    historical one (unchanged here), and the product-side fix is tracked in
+    #3591 (with the sibling camel-``sessionId`` gap in #4155) — C4 documents
+    and pins it; it introduces and fixes nothing. Hits that DO carry an
     ``lme_session_index`` are distinct per index even when ``session_id``
     is absent/empty (``""`` is falsy but not identity-less)."""
     return (hit.get("session_id")

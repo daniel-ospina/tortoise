@@ -455,8 +455,12 @@ def _resolve_reinjection_total_cap(arm_on: bool,
 
     Off-path hygiene (the evidence_boost multiplier precedent): an arm-OFF
     run resolves ``None`` — it never reads the env, never records a stray
-    env value, and never stamps an inert knob on the fingerprint (an OFF
-    run stays byte-identical to a pre-knob OFF checkpoint). Arm-ON
+    env value, and never stamps an inert knob on the fingerprint. It is NOT
+    resumable from a pre-C4 checkpoint: the always-present
+    ``session_reinjection`` / ``session_reinjection_guard`` bools already
+    refuse any pre-C4 resume (``CheckpointStaleError``, the safe direction) —
+    the cap key's conditional presence only avoids recording an inert value.
+    Arm-ON
     resolution is explicit > env > product constant, and BOTH sides go
     through the SAME ``rerank._clamp_int`` (garbage / non-integer / <1
     falls back to ``DEFAULT_REINJECTION_TOTAL_ITEMS``) — so the run path
@@ -1452,8 +1456,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("coverage_loop", coverage_loop),
             # C4 (#2513): the resolved injection total budget — conditional
             # presence like the sibling knobs (absent for an arm-OFF run:
-            # the knob is inert there, and a pre-knob arm-OFF checkpoint
-            # resumes byte-identically). When the arm is ON the cap is
+            # the knob is inert there, so no inert value is recorded). This
+            # key is NOT what makes a pre-C4 checkpoint resumable — the
+            # always-present arm/guard bools above already refuse it. When
+            # the arm is ON the cap is
             # always stamped, so a cap change (10 vs 15 vs the product
             # default) refuses the resume in either direction via the
             # key-union in ``_fingerprint_diffs``.
@@ -3791,8 +3797,9 @@ def run_evaluation(
         session_reinjection_guard=bool(session_reinjection_guard),
         # C4 (#2513): the resolved injection total budget rides the
         # fingerprint as a CONDITIONAL member (absent while the arm is OFF
-        # — the knob is inert there and a pre-knob arm-OFF checkpoint must
-        # keep resuming). Arm-ON: always stamped, so the cap the
+        # — the knob is inert there, so no inert value is recorded; a pre-C4
+        # checkpoint is refused by the always-present arm/guard bools, not
+        # by this key). Arm-ON: always stamped, so the cap the
         # checkpoint was produced under can never differ silently from the
         # cap a resume serves (10 vs 15 vs the product default all refuse).
         reinjection_total_cap=reinjection_total_cap,

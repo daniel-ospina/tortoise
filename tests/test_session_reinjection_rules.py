@@ -413,8 +413,10 @@ def test_reinjection_total_cap_resolves_once_before_the_loop(monkeypatch):
     outside the per-question path.
 
     Arm-ON: explicit > env > the product constant. Arm-OFF: ``None`` — the
-    knob is inert, so a stray env value is never read and never stamped
-    (an OFF run stays byte-identical to a pre-knob OFF run). The pre-fix
+    knob is inert, so a stray env value is never read and never stamped.
+    (It does not make a pre-C4 checkpoint resumable: the always-present
+    ``session_reinjection`` / ``session_reinjection_guard`` bools already
+    refuse that resume.) The pre-fix
     shape read the env lazily inside ``retrieve_for_question``, where no
     fingerprint or methodology record can see it.
     """

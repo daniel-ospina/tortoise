@@ -757,6 +757,28 @@ def test_non_bytecode_file_inside_pycache_is_refused(repo: Repo) -> None:
         _scan(repo)
 
 
+def test_ds_store_dropping_is_excused(repo: Repo) -> None:
+    """The canonical macOS Finder dropping is excused noise, not a refusal.
+
+    ``_is_noise`` casefolds the path, so the suffix side must be folded too —
+    an unfolded ``.DS_Store`` member never matched ``.../.ds_store``, making
+    that exemption unreachable.
+    """
+    (repo.path("tortoise/.DS_Store")).write_text("finder droppings\n")
+    assert _scan(repo).checked == SURFACE_FILES
+
+
+def test_uppercase_noise_suffix_is_excused(repo: Repo) -> None:
+    (repo.path("tortoise/evil.SWP")).write_text("swap\n")
+    assert _scan(repo).checked == SURFACE_FILES
+
+
+def test_noise_suffix_is_a_suffix_not_a_substring(repo: Repo) -> None:
+    (repo.path("tortoise/.DS_Store.py")).write_text("x = 1\n")
+    with pytest.raises(GuardRefused, match="untracked file"):
+        _scan(repo)
+
+
 def test_unparseable_surface_file_refuses_with_a_reason(repo: Repo) -> None:
     repo.path("tortoise/a.py").write_text("def f(:\n")
     with pytest.raises(GuardRefused, match="does not parse"):

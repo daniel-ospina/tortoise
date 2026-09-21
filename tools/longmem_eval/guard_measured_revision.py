@@ -159,6 +159,14 @@ NOISE_SUFFIXES = (
     ".DS_Store",
 )
 
+#: ``NOISE_SUFFIXES`` casefolded. The match casefolds the PATH (macOS/APFS —
+#: the platform of record), so the SUFFIX side must be folded too: a
+#: mixed-case member like ``.DS_Store`` can never match a folded
+#: ``.../.ds_store``, which made that exemption unreachable and refused the
+#: canonical Finder dropping. Built from ``NOISE_SUFFIXES`` so the two cannot
+#: drift.
+NOISE_SUFFIXES_FOLDED = tuple(s.casefold() for s in NOISE_SUFFIXES)
+
 
 class GuardRefused(SystemExit):
     """The measured surface drifted, or the check could not be trusted."""
@@ -249,8 +257,10 @@ def _is_noise(rel: str) -> bool:
     case-sensitive suffix test is defeatable for exactly the reason the
     ``.GIT`` directory match was (see the nested-git walk). No member of
     ``NOISE_SUFFIXES`` is executable, so widening the match cannot hide code.
+    Both sides are folded (``NOISE_SUFFIXES_FOLDED``) — folding only the path
+    made the mixed-case ``.DS_Store`` member unreachable.
     """
-    return rel.casefold().endswith(NOISE_SUFFIXES)
+    return rel.casefold().endswith(NOISE_SUFFIXES_FOLDED)
 
 
 def _is_bytecode(rel: str) -> bool:
