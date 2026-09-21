@@ -164,15 +164,19 @@ def test_retry_signal_is_never_shorter_than_the_bound():
     Every breach is caused by work that EXCEEDED the bound, so an advertised
     delay shorter than the bound tells a compliant caller to re-enter the SAME
     slow operation while the abandoned attempt is still running. The SHIPPED
-    pair is 10/10, which holds one copy of one logical operation (every retry
-    waits out the bound). This record is for the PRE-FIX pair: at the pre-fix
-    bound/retry = 10/2 the steady-state concurrent copies of ONE logical
-    operation were 5 (measured at 1/50 scale: refusals=5,
-    dispatches_started=5, peak_concurrent=5), and for a non-idempotent tool the
-    abandoned original can still commit AFTER the caller was told to retry —
-    duplicate side effects. A prose caveat cannot discharge this: retry
-    middleware acts on status/code/header, not on the body. Pinned so a future
-    edit cannot quietly re-open the window — do NOT restore retry = 2.
+    pair is 10/10, which buys a FLOOR, not an elimination: a compliant caller
+    cannot re-enter before the bound elapses, so overlap now requires work that
+    outlives ``bound + retry_after`` (≈20 s) — and the measured tail still
+    exceeds that (p99 22,476 ms, max 157,116 ms in the population recorded in
+    ``mcp_auth.py``), so a retry can still land while the abandoned original
+    runs. This record is for the PRE-FIX pair: at the pre-fix bound/retry = 10/2
+    the steady-state concurrent copies of ONE logical operation were 5 (measured
+    at 1/50 scale: refusals=5, dispatches_started=5, peak_concurrent=5), and for
+    a non-idempotent tool the abandoned original can still commit AFTER the
+    caller was told to retry — duplicate side effects. A prose caveat cannot
+    discharge this: retry middleware acts on status/code/header, not on the
+    body. Pinned so a future edit cannot quietly re-open the window — do NOT
+    restore retry = 2.
     """
     assert ma._TRANSPORT_WAIT_RETRY_AFTER_S >= ma._TRANSPORT_WAIT_BOUND_S, (
         f"advertised back-off {ma._TRANSPORT_WAIT_RETRY_AFTER_S!r}s is shorter "
@@ -796,11 +800,22 @@ async def test_mcp_breach_emit_imports_hosted_api_off_the_event_loop(
     builds the whole hosted FastAPI app. DONE ON THE LOOP (as it was), it froze
     the loop and delivered the refusal seconds after the bound: in a fresh
     process against a 0.05 s bound the refusal returned after ~2–4 s with an
-    event-loop heartbeat gap of the same span. The import now runs inside the
-    callable submitted to the telemetry pool, so this swaps ``sys.modules`` for
-    a fake module whose writer records the thread that ran it, and asserts that
-    thread is not the event loop's.
+    event-loop heartbeat gap of the same span.
+
+    This pin fails on the PROPERTY, not on a proxy. ``hosted_api`` is removed
+    from ``sys.modules`` AND from the ``tortoise`` package attribute, so
+    ``from tortoise import hosted_api`` CANNOT resolve as a dict lookup, and a
+    ``sys.meta_path`` finder records the thread whenever the name is ACTUALLY
+    imported (``exec_module``), supplying a stub module that carries only the
+    writer. A regression that re-imports on the loop executes the finder on the
+    MAIN thread first and this assertion goes red. An earlier version inserted
+    the fake into ``sys.modules``, which turned the on-loop import into a dict
+    lookup and made the pin unable to fail on the property it names (#3834
+    re-review H1).
     """
+    import contextlib
+    import importlib.abc
+    import importlib.util
     import sys
     import threading
     import types
@@ -809,17 +824,33 @@ async def test_mcp_breach_emit_imports_hosted_api_off_the_event_loop(
     from tortoise import mcp_server as ms
 
     recorded: list = []
-    fake = types.ModuleType("tortoise.hosted_api")
 
     def _record(org_id, route_path, method, latency_ms, *, tool_name=None):
-        recorded.append(threading.current_thread())
+        pass
 
-    fake._emit_wait_bound_breach = _record
-    saved = sys.modules.get("tortoise.hosted_api")
+    class _StubLoader(importlib.abc.Loader):
+        def create_module(self, spec):
+            return types.ModuleType(spec.name)
+
+        def exec_module(self, module):
+            # Recorded at the moment the REAL import would have run, so the
+            # thread here is the thread that pays the import cost.
+            recorded.append(threading.current_thread())
+            module._emit_wait_bound_breach = _record
+
+    class _Finder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname != "tortoise.hosted_api":
+                return None
+            return importlib.util.spec_from_loader(fullname, _StubLoader())
+
+    saved_mod = sys.modules.pop("tortoise.hosted_api", None)
     had_attr = hasattr(tortoise, "hosted_api")
     saved_attr = getattr(tortoise, "hosted_api", None)
-    sys.modules["tortoise.hosted_api"] = fake
-    tortoise.hosted_api = fake
+    if had_attr:
+        delattr(tortoise, "hosted_api")
+    finder = _Finder()
+    sys.meta_path.insert(0, finder)
     try:
         result = await ms.mcp.call_tool("_bound_slow")
         assert result.is_error is True
@@ -828,19 +859,22 @@ async def test_mcp_breach_emit_imports_hosted_api_off_the_event_loop(
                 break
             await asyncio.sleep(0.02)
     finally:
-        if saved is None:
-            sys.modules.pop("tortoise.hosted_api", None)
-        else:
-            sys.modules["tortoise.hosted_api"] = saved
+        with contextlib.suppress(ValueError):
+            sys.meta_path.remove(finder)
+        sys.modules.pop("tortoise.hosted_api", None)
+        if saved_mod is not None:
+            sys.modules["tortoise.hosted_api"] = saved_mod
         if had_attr:
             tortoise.hosted_api = saved_attr
-        else:
+        elif hasattr(tortoise, "hosted_api"):
             delattr(tortoise, "hosted_api")
     assert recorded, (
-        "the breach emit never ran — the shared writer was not reached")
+        "hosted_api was never actually imported — the shared writer was not "
+        "reached, so this pin measured nothing")
     assert recorded[0] is not threading.main_thread(), (
-        "the breach telemetry (and its hosted_api import) ran ON the event "
-        "loop — that is the G1 freeze, which delivers the refusal seconds late")
+        "hosted_api's import ran ON the event loop (thread "
+        f"{recorded[0]!r}) — that is the G1 freeze, which delivers the "
+        "refusal seconds late")
 
 
 @pytest.mark.asyncio

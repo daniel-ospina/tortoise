@@ -315,8 +315,13 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
 
     def _done(f) -> None:
         _pending_mcp_wait_bound_telemetry.discard(f)
-        if not f.cancelled():
-            f.exception()  # retrieve, so it is never un-retrieved
+        # ``submit`` returns a PRE-FAILED future when the telemetry worker's
+        # bounded backlog is full (``_WorkerBacklogFull``) — the saturation
+        # that also causes breaches. Mirror ``hosted_api._telemetry_done`` so
+        # the outer hop's drop is traceable rather than silent (#3834 H3).
+        if not f.cancelled() and f.exception() is not None:
+            _log.debug(
+                "mcp wait-bound telemetry schedule dropped: %r", f.exception())
 
     fut.add_done_callback(_done)
 

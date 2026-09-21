@@ -171,13 +171,16 @@ _TRANSPORT_WAIT_BOUND_S = 10.0
 #: ⚠️ It MUST NOT be shorter than ``_TRANSPORT_WAIT_BOUND_S``. Every breach was
 #: caused by work that exceeded the bound, so a shorter advertised delay tells a
 #: compliant caller to re-enter the SAME slow operation while the abandoned
-#: attempt is still running. The SHIPPED pair is 10/10, which holds one copy of
-#: one logical operation (every retry waits out the bound). The record below is
-#: for the PRE-FIX pair: at the pre-fix bound/retry = 10/2 the steady-state
-#: concurrent copies of one logical operation WERE 5 (measured at 1/50 scale:
-#: refusals=5, dispatches_started=5, peak_concurrent=5 for ONE logical
-#: operation), and for a non-idempotent tool the abandoned original can still
-#: commit AFTER the caller was told to retry — duplicate side effects. A prose
+#: attempt is still running. What the SHIPPED pair 10/10 BUYS is only a FLOOR:
+#: a compliant caller cannot re-enter before the bound elapses, so overlap now
+#: requires work that outlives ``bound + retry_after`` (≈20 s). That is NOT an
+#: elimination — the measured tail above exceeds it (p99 22,476 ms, max
+#: 157,116 ms), so a retry can still land while the abandoned original runs,
+#: and for a non-idempotent tool the original can still commit AFTER the caller
+#: was told to retry — duplicate side effects. The record below is for the
+#: PRE-FIX pair: at the pre-fix bound/retry = 10/2 the steady-state concurrent
+#: copies of one logical operation WERE 5 (measured at 1/50 scale: refusals=5,
+#: dispatches_started=5, peak_concurrent=5 for ONE logical operation). A prose
 #: caveat does not discharge this: retry middleware acts on status/code/header,
 #: not on the body. Do NOT "simplify" the retry constant back to 2. Pinned by
 #: ``tests/test_transport_wait_bound.py::
