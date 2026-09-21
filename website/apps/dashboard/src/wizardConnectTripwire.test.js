@@ -1555,8 +1555,9 @@ test('#4353: the wizard mint 402 copy offers revoke, never regenerate', () => {
   assert.doesNotMatch(cap402, /paste a key below/i,
     'the paste field renders above this message — "below" was the wrong direction')
   // build-fork arm: byte-identical. The build fork DOES render a paste row
-  // (main.jsx:7261 → 6943 → 6835), so this pin is about the copy staying
-  // unchanged, not about that row being unreachable.
+  // (wizardKeyAffordance → wizardNoKeyAffordance → the paste disclosure), so
+  // this pin is about the copy staying unchanged, not about that row being
+  // unreachable. Named by symbol: a line citation here stales on the next edit.
   assert.match(cap402,
     /\? 'You\\'ve reached your plan\\'s limit of API keys — free a slot in the API Keys tab, then create a key here\.'/,
     'the build-fork arm is unchanged (it names only affordances its branch renders)')

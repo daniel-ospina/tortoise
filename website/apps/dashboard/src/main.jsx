@@ -4901,13 +4901,14 @@ function claimIntentInFlight() {
         setWizardDurableError(isBuildFork
           // #3218: the build-fork arm names only the API Keys tab route. It is
           // NOT the case that this branch has no paste row: the build fork's
-          // step-2 no-key branch renders {wizardKeyAffordance} (main.jsx:7261),
-          // which for an owner/admin in mint mode resolves to
-          // wizardNoKeyAffordance (main.jsx:6943) and renders the paste
-          // disclosure (main.jsx:6835) — opened by this handler
-          // (main.jsx:4900). The copy below is deliberately left byte-identical
-          // either way: whether it should also name the paste escape is a
-          // product call, not this gate's.
+          // step-2 no-key branch renders {wizardKeyAffordance}, which for an
+          // owner/admin in mint mode resolves to wizardNoKeyAffordance and
+          // renders the paste disclosure — opened by this handler. The copy
+          // below is deliberately left byte-identical either way: whether it
+          // should also name the paste escape is a product call, not this
+          // gate's.
+          // (Named by symbol, never by line number: a citation into this file
+          // is a claim that re-stales on the next edit above it.)
           ? 'You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.'
           : 'You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.')
       } else {
