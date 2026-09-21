@@ -1734,6 +1734,48 @@ def _provenance_gate_step() -> dict:
     raise AssertionError("the provenance gate step is not wired into the real deploy workflow")
 
 
+def _payload_step() -> dict:
+    """The workflow step that builds the Fly secrets payload."""
+    import yaml
+
+    doc = yaml.safe_load(REAL_WORKFLOW.read_text())
+    found = [
+        step
+        for job in (doc.get("jobs") or {}).values()
+        for step in (job.get("steps") or [])
+        if isinstance(step, dict) and "secrets set" in str(step.get("run") or "")
+    ]
+    assert found, "no `fly secrets set` payload step in the real deploy workflow"
+    return found[0]
+
+
+def test_gh_secret_declarations_are_bound_from_their_own_github_secret():
+    """A name bound to the WRONG secret reads as present while the deploy skips it.
+
+    The probe/env-name lockstep is not enough. A binding of
+    `SENTRY_DSN: ${{ secrets.POSTHOG_API_KEY }}` still names the key, so the probe
+    reports `SENTRY_DSN` PRESENT from POSTHOG's value while `secrets.SENTRY_DSN`
+    may not exist in the repo — the gate certifies the declaration, the real
+    deploy's guard is a no-op, and the hand-managed Fly value survives. Same for
+    the propagation step: a mis-bound `$NAME` guard silently skips the assignment.
+    Both steps must bind each declared GitHub secret name to ITSELF (#4523 review,
+    T5).
+    """
+    gate_env = {
+        str(k): str(v).strip() for k, v in (_provenance_gate_step().get("env") or {}).items()
+    }
+    payload_env = {str(k): str(v).strip() for k, v in (_payload_step().get("env") or {}).items()}
+    for name in sorted(_declared_gh_names(REAL_MANIFEST)):
+        assert gate_env.get(name) == f"${{{{ secrets.{name} }}}}", (
+            f"the gate step binds {name} to {gate_env.get(name)!r} — the presence "
+            "probe would report that name from another secret's value"
+        )
+        assert payload_env.get(name) == f"${{{{ secrets.{name} }}}}", (
+            f"the payload step binds {name} to {payload_env.get(name)!r} — the "
+            "propagation guard would read the wrong secret and skip the assignment"
+        )
+
+
 def test_probe_block_and_manifest_gh_secret_names_are_in_lockstep():
     """Every probe line tests the name it appends, is `env:`-bound, and is declared."""
     step = _provenance_gate_step()
@@ -1753,6 +1795,18 @@ def test_probe_block_and_manifest_gh_secret_names_are_in_lockstep():
         "probed names with no `env:` binding on the gate step are unset shell "
         f"variables, so they read as ABSENT: {sorted(probed - env_keys)}"
     )
+    # The KEY is not enough — the VALUE must come from the name's own GitHub
+    # secret. `SENTRY_DSN: ${{ secrets.POSTHOG_API_KEY }}` still binds the key, so
+    # the probe reports SENTRY_DSN present from POSTHOG's value while the real run
+    # may not carry SENTRY_DSN at all: the gate certifies a declaration whose
+    # assignment the deploy skips — the #4126 shape, green (#4523 review, T5).
+    for name in sorted(probed):
+        binding = str((step.get("env") or {})[name]).strip()
+        assert binding == f"${{{{ secrets.{name} }}}}", (
+            f"the gate step binds {name} to {binding!r} instead of its own GitHub "
+            "secret, so the presence probe reports that name from another secret's "
+            "value"
+        )
     declared_gh = _declared_gh_names(REAL_MANIFEST)
     assert probed == declared_gh, (
         "the probe block and the manifest's `gh-secret:` declarations disagree — "
@@ -1839,6 +1893,11 @@ def test_fly_only_without_a_well_formed_issue_ref_is_exit_2():
         r = _run(_secrets_file(_FLY_ONLY_SECRETS, f"fly-only-bad-{index}.json"), manifest=manifest)
         assert r.returncode == 2, f"ref={ref!r} -> {r.returncode}\n{r.stdout}{r.stderr}"
         assert "cannot determine secret provenance" in r.stderr, r.stderr
+        # The `__main__` backstop also exits 2, so a regression that turned the
+        # ref validation into an UNCAUGHT exception would satisfy the two
+        # assertions above while the manifest path was never actually validated.
+        # The sibling gh-secret test guards the same distinction.
+        assert "unexpected" not in r.stderr, r.stderr
 
 
 def test_fly_only_on_a_fly_toml_env_key_is_stale():
