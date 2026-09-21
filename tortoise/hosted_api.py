@@ -15,6 +15,7 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import hmac
@@ -2221,9 +2222,11 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
 #: "which routes breach" answerable.
 _TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
 
-#: Bounded dispatch tasks, tracked from CREATION until completion so no escape
-#: path (timeout or cancellation) can orphan one or drop its late exception.
-#: Entries remove themselves on completion — the set self-drains.
+#: Handlers abandoned past the bound, held only so their late exception is
+#: retrieved (never "exception was never retrieved"). Entries remove themselves
+#: on completion — the set self-drains. (This is the BREACH path only; a
+#: cancelled request is drained in the ``except BaseException`` branch, not
+#: tracked here. No test awaits this set.)
 _pending_wait_bound_requests: set = set()
 _pending_wait_bound_telemetry: set = set()
 
@@ -2397,26 +2400,20 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
 
 
 def _track_wait_bound_request(task) -> None:
-    """Track a bounded dispatch so no escape path can orphan it.
+    """Register an abandoned dispatch so its late exception is retrieved.
 
-    Registered at task CREATION, not only on breach, because there are two ways
-    the middleware can stop awaiting a running handler: the timeout (the
-    breach), and an outer cancellation (server shutdown, transport teardown).
-    The second is easy to miss and the worst of the two: the handler keeps
-    running while its task drops out of every bookkeeping structure, so its
-    late exception is never retrieved and its late ``send`` is not dropped.
+    Called on the BREACH path only. Deliberately NOT ``task.cancel()`` there:
+    this module's own doctrine (#2988, #3718) is that cancelling the await stops
+    the AWAITABLE, not the worker thread, while running every ``finally`` the
+    handler owns — and 14 handlers here close their SDK in a ``finally``, so a
+    cancel would tear the projection down under work that is still using it
+    (exactly the #3718 P1). Unwinding normally keeps the handler's own
+    bookkeeping (and the ``InFlightMiddleware`` gauge the #2850 self-kill
+    predicate reads) consistent.
 
-    Deliberately NOT ``task.cancel()`` on the breach path. This module's own
-    doctrine (#2988, #3718) is that cancelling the await stops the AWAITABLE,
-    not the worker thread, while running every ``finally`` the handler owns —
-    and 14 handlers here close their SDK in a ``finally``, so a cancel would
-    tear the projection down under work that is still using it (exactly the
-    #3718 P1). Unwinding normally keeps the handler's own bookkeeping (and the
-    ``InFlightMiddleware`` gauge the #2850 self-kill predicate reads)
-    consistent. Idempotent, so a task is never double-registered.
+    NOT used on the CANCELLATION path, where the opposite is required: see the
+    ``except BaseException`` branch in ``WaitBoundMiddleware.__call__``.
     """
-    if task in _pending_wait_bound_requests:
-        return
     _pending_wait_bound_requests.add(task)
 
     def _done(t) -> None:
@@ -2502,12 +2499,23 @@ class WaitBoundMiddleware:
 
         t0 = time.monotonic()
         task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
-        # Track from CREATION, so the timeout path AND an outer cancellation
-        # both drain the task and retrieve its late exception (the send-guard
-        # above drops its late response). See ``_track_wait_bound_request``.
-        _track_wait_bound_request(task)
-        done, _ = await asyncio.wait({task},
-                                     timeout=_TRANSPORT_WAIT_BOUND_S)
+        try:
+            done, _ = await asyncio.wait({task},
+                                         timeout=_TRANSPORT_WAIT_BOUND_S)
+        except BaseException:
+            # The caller was cancelled (client disconnect, server shutdown).
+            # Propagate the cancellation INTO the handler and await it: the
+            # app's own cancellation path is where its cleanup and abandonment
+            # markers live (#3129 — a capture cancelled after its extraction
+            # must still record the failed attempt), and the direct
+            # ``await self.app(...)`` this middleware replaced ran exactly that
+            # path. ABANDONING here instead would silently keep a disconnected
+            # capture running and leave its marker unset. Cancelling is correct
+            # ONLY on this path; the breach path below abandons on purpose.
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            raise
         if task in done:
             task.result()  # re-raises exactly as a plain await would
             return
@@ -2535,9 +2543,12 @@ class WaitBoundMiddleware:
         _logger.warning(
             "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
             _TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
-        # The task is already tracked (registration happens at creation, so a
-        # client that has gone by the time the refusal is written cannot skip
-        # it). The send is best-effort: the handler is drained regardless.
+        # The task has already outlived the refusal decision, so register it
+        # BEFORE the send: the send happens 10 s in, where a client that has
+        # already gone makes uvicorn raise (ConnectionResetError /
+        # ClientDisconnected); if that raise skipped this call the still-running
+        # handler would never be drained. The send is then best-effort.
+        _track_wait_bound_request(task)
         try:
             await _send_wait_bound_refusal(send, scope, route_path)
         except Exception:

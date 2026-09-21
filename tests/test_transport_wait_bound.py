@@ -301,6 +301,42 @@ async def test_breached_handler_runs_to_completion_and_its_late_reply_is_dropped
 
 
 @pytest.mark.asyncio
+async def test_cancellation_propagates_into_the_handler(monkeypatch):
+    """A caller that goes away must reach the handler's OWN cancellation path.
+
+    The middleware runs the handler in a CHILD task (it must, to substitute a
+    refusal on breach). Naively awaiting that child under ``asyncio.wait`` sends
+    the cancellation no further than the middleware, so a disconnected request
+    keeps running unseen — on the app side that is #3129: a capture cancelled
+    after its extraction never records the failed attempt, and the next
+    same-session request replays it as a silent 0-turn success. The transport
+    half of that contract is here: the handler must see ``CancelledError``.
+    Cancelling (and awaiting) is correct on THIS path only; the breach path
+    above still abandons on purpose.
+    """
+    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
+    entered = asyncio.Event()
+    saw_cancel: list = []
+
+    async def app(scope, receive, send):
+        entered.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            saw_cancel.append(True)
+            raise
+
+    job = asyncio.ensure_future(_drive(ha.WaitBoundMiddleware(app), _scope()))
+    await entered.wait()
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await job
+    assert saw_cancel == [True], (
+        "the handler never saw the cancellation — the middleware consumed it, "
+        "so app-side abandonment markers (#3129) would never run")
+
+
+@pytest.mark.asyncio
 async def test_an_already_started_response_is_never_replaced(monkeypatch):
     """A response that has already begun streaming cannot be substituted — we
     let it finish rather than emit a second, contradictory status."""

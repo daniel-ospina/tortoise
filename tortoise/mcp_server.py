@@ -251,12 +251,11 @@ def _hold_mcp_dispatch_after_request(task) -> None:
     as soon as the SSE refusal is written. So this seam holds the gauge itself
     for the life of the abandoned dispatch.
 
-    Called on BOTH escape paths — the timeout and an outer cancellation — and is
-    idempotent, so a task is never double-counted. The gauge exits in a
-    ``finally`` so a raising abandoned dispatch cannot leak a slot permanently.
+    Called on the TIMEOUT path only. The cancellation path is the opposite case
+    (the cancellation is propagated into the dispatch); see the ``except
+    BaseException`` branch in ``_await_under_mcp_wait_bound``. The gauge exits
+    in a ``finally`` so a raising abandoned dispatch cannot leak a slot.
     """
-    if task in _pending_mcp_wait_bound:
-        return
     monitoring.workload_enter()
     _pending_mcp_wait_bound.add(task)
 
@@ -295,9 +294,12 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     the same message plus ``error.data.retry_after`` inside the result keeps the
     retry signal shipped WITH the bound instead of dropping it.
 
-    The dispatch is ABANDONED, never cancelled: cancelling an ``asyncio`` await
-    runs every ``finally`` the handler owns, and this module's handlers close
-    their SDK in one (#2988 / #3718).
+    On the TIMEOUT path the dispatch is ABANDONED, never cancelled: cancelling
+    an ``asyncio`` await runs every ``finally`` the handler owns, and this
+    module's handlers close their SDK in one (#2988 / #3718). On the
+    CANCELLATION path the opposite holds — the cancellation is propagated INTO
+    the dispatch, as the direct await this wrapper replaced did, so the tool's
+    own cancellation cleanup runs.
     """
     from tortoise import hosted_api as _ha  # late: keeps import order acyclic
 
@@ -308,11 +310,13 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     try:
         done, _ = await asyncio.wait({task}, timeout=_ha._TRANSPORT_WAIT_BOUND_S)
     except BaseException:
-        # Outer cancellation (server shutdown, transport teardown) must not
-        # orphan the dispatch: it would escape the request's structured
-        # concurrency, drop out of the gauge, and never have its exception
-        # retrieved. Track it, then propagate the cancellation unchanged.
-        _hold_mcp_dispatch_after_request(task)
+        # Outer cancellation (client disconnect, server shutdown, transport
+        # teardown). Propagate it INTO the dispatch and await it, so the tool's
+        # own cancellation path runs — abandoning here would silently keep a
+        # cancelled dispatch alive.
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
         raise
     if task in done:
         return task.result()  # re-raises exactly as a plain await would
