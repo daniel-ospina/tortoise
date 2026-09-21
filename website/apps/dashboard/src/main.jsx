@@ -5607,17 +5607,31 @@ function claimIntentInFlight() {
 
   async function loadBackups(key) {
     const _teamAtCall = orgIdRef.current // Round-10: staleness guard
-    // #2167 (rule 2): session-mode /backups pins ?org_id=<selected> and
+    // #2167 (rule 2): session-mode /v1/backups pins ?org_id=<selected> and
     // sends NO key header — the old shape team-scoped by the KEY header
     // (a zero-key session whose selected team ≠ first membership rendered
-    // the first membership's backups: /backups is ungated server-side, so
+    // the first membership's backups: /v1/backups is ungated server-side, so
     // _session_user_org resolves memberships[0] without the param).
-    // Key-mode (authMode 'apikey' — no session JWT exists there) keeps the
-    // key header as its authenticator.
-    // #1842 P1-2: /backups is session-dual-auth (get_current_org_session_ungated).
+    // #1842 P1-2: /v1/backups is session-dual-auth (get_current_org_session_ungated).
+    // Only the SESSION lane reaches this route: the BFF proxy requires the
+    // `__Host-session` cookie, strips any client-built `authorization` header and
+    // attaches its own Bearer, so key-mode (authMode 'apikey') cannot authenticate
+    // here at all — it does not render the backups surface.
+    // #4144: the `/v1/` prefix is REQUIRED, not cosmetic. `api()` targets the
+    // same-origin BFF proxy, whose TypeScript route is `functions/api/v1/[[path]].ts`
+    // and which rebuilds the upstream URL as `${API_ORIGIN}/v1/${rest}`. This call
+    // predates the #3501/#4054 migration to the proxy and was the one call site left
+    // without the prefix, so it asked `/api/backups` — a path with no Pages Function
+    // — and the Backups card silently read as empty (404 in the console). Every other
+    // call site in this file that reaches the HOSTED API goes through `/v1/…` (paths
+    // like `/session` and `/profile` are Pages Functions and are served directly).
+    // The route-side regression pin for this fix is tests/test_backups_v1_alias.py:
+    // it reads the LIVE route table and requires every public backup route to have a
+    // `/v1` alias. A file-wide guard over the dashboard's literal call paths is
+    // proposed in #4446 (a runtime-derived check, not a static text scan).
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
-      const b = await api(`/backups${q}`, { useSession: true })
+      const b = await api(`/v1/backups${q}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       // #2784: retain the whole array — the Graphs tab derives a per-graph

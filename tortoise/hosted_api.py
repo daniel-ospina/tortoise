@@ -23247,7 +23247,16 @@ def _incident_subject(inc: dict) -> str:
     return tid
 
 
+# #4144: the public backups family is ALSO served under `/v1/`. The dashboard
+# reaches the API only through the same-origin BFF proxy
+# (`website/apps/dashboard/functions/api/v1/[[path]].ts`), which rebuilds the
+# upstream URL as `${API_ORIGIN}/v1/${rest}` — it cannot produce a bare path.
+# Served only at `/backups`, the dashboard's `loadBackups` got a 404 from Pages
+# (no `api/backups.ts` exists either) and the Backups card silently read as
+# empty. The alias is the SAME function object, so it cannot drift into a
+# second implementation.
 @app.get("/backups")
+@app.get("/v1/backups")
 async def backups_list(org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """List this org's backups (newest first) with timestamps + node counts.
 
@@ -23390,6 +23399,7 @@ async def _org_restore_lock(org_id: str) -> asyncio.Lock:
 
 
 @app.post("/backups", status_code=201)
+@app.post("/v1/backups", status_code=201)  # #4144 BFF-reachable alias
 async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     """Trigger an on-demand backup of the org graph (Builder plan, tier `pro`)."""
     org_id = org.get("org_id")
@@ -23529,6 +23539,7 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
 
 
 @app.post("/backups/restore")
+@app.post("/v1/backups/restore")  # #4144 BFF-reachable alias
 async def backups_restore(body: BackupRestoreRequest, request: Request, org: dict = Depends(get_current_org_session)):  # noqa: B008
     """Restore the org graph from a backup (Builder plan, tier `pro`; confirm=true required).
 
