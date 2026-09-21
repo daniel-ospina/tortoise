@@ -75,11 +75,15 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """98 tools = the merged census (99 − the eval-only ask tool removed in
-        #3849). The census is bumped per add."""
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 98, f"Expected 98, got {len(TOOL_REGISTRY)}"
+        """82 live tools = 98 − the 16 owner-approved retirements (#3863).
+        The census is bumped per add."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        assert len(TOOL_REGISTRY) == 82, f"Expected 82, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
+        # The 16 retired names are NOT live, and each one is declared retired.
+        retired = {t.name for t in RETIRED_TOOL_REGISTRY}
+        assert len(retired) == 16, f"Expected 16 retired, got {len(retired)}"
+        assert not (retired & names), f"Retired names still live: {retired & names}"
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
         assert "tortoise_graph_set_recording" in names, "Missing #2302 graph_set_recording tool"
@@ -97,15 +101,17 @@ class TestRegistryEquivalence:
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
         assert "tortoise_audit" in names, "Missing #348 tortoise_audit tool"
         # W1–W4 consolidated tools (#888): recall (W1), update/delete/
-        # operator_action/create_edge (W2), overview/get (W3), ingest (W4)
+        # operator_action/create_edge (W2), overview/get_entity (W3), ingest (W4).
+        # W3's fetch tool is `tortoise_get_entity` — `tortoise_get` retires into it
+        # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
         w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
                             "tortoise_operator_action", "tortoise_create_edge",
-                            "tortoise_overview", "tortoise_get", "tortoise_ingest"}
+                            "tortoise_overview", "tortoise_get_entity", "tortoise_ingest"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
         # #454-era surface tools covered by this PR's tests
-        for name in ("tortoise_list_tags", "tortoise_suggest_entry_points",
-                     "tortoise_get_events"):
+        for name in ("tortoise_query", "tortoise_suggest_entry_points",
+                     "tortoise_overview"):
             assert name in names, f"Missing tool: {name}"
         # Phase-4 mining/promotion/dedup/timeline surface (#787)
         phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
@@ -225,11 +231,17 @@ class TestDescriptionImprovements:
         assert "BFS" in ep and "tortoise_list_topics" in ep, ep
         assert "neighbor" in lt.lower() and "tortoise_entity_profile" in lt, lt
 
-    def test_query_aliases_marked_deprecated(self):
-        pq = self._desc("tortoise_paginated_query")
-        qt = self._desc("tortoise_query_points_by_tag")
-        assert "DEPRECATED" in pq and "tortoise_query" in pq, pq
-        assert "DEPRECATED" in qt and "tortoise_query" in qt, qt
+    def test_query_aliases_retired(self):
+        """The two query aliases are RETIRED (#3883), keeping their DEPRECATED
+        description and naming tortoise_query as the replacement."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+        pq = by_name["tortoise_paginated_query"]
+        qt = by_name["tortoise_query_points_by_tag"]
+        assert "DEPRECATED" in pq.description and "tortoise_query" in pq.description, pq.description
+        assert "DEPRECATED" in qt.description and "tortoise_query" in qt.description, qt.description
+        assert pq.retired_use_instead.startswith("tortoise_query")
+        assert qt.retired_use_instead.startswith("tortoise_query")
 
 
 class TestFastMCPAdapter:
@@ -312,6 +324,10 @@ class TestFastMCPAdapter:
             operator_only = (sdk_filesystem_methods() | sdk_operator_only_mutators()
                              | set(HTTP_EXCLUDED_SDK_METHODS))
             excluded = {e.name for m in operator_only for e in by_method.get(m, [])}
+            # `by_method` covers the SERVED set (#3883), but the adapter registers the
+            # LIVE registry — a retired name is served through the warning shim instead,
+            # which the two assertions below pin. So compare against the live half.
+            excluded &= {e.name for e in TOOL_REGISTRY}
             assert "tortoise_org_create" in excluded  # non-vacuity sentinel
 
             mcp = FastMCP("test_excluded")
@@ -331,6 +347,9 @@ class TestFastMCPAdapter:
             # Excluded tools should still be registered (HTTP filter handles hiding them)
             missing = excluded - registered
             assert not missing, f"excluded tools not registered: {missing}"
+            # The two legacy bulk writers are RETIRED (#3883): off the advertised
+            assert "tortoise_ingest_corpus" not in registered
+            assert "tortoise_index_sessions" not in registered
 
         asyncio.run(_check())
 
@@ -497,6 +516,25 @@ class TortoiseSDK:
         return _mod_mut_2()
 '''
 
+# A synthetic ledgered entry.  The ledger tests monkeypatch
+# DECLARED_BINDING_DIVERGENCES with this tool instead of using the REAL ledger
+# keys, because the real ledger is emptied as its two entries are repaired — and a
+# test bound to a live ledger would red the build on exactly the action the guard
+# itself instructs ("delete the ledger entry").
+_LEDGER_TOOL = "tortoise_probe_ledgered"
+_LEDGER_DECLARED = "query"
+_LEDGER_OTHER = "recall_state"
+
+
+def _ledger_src(reaches: str) -> str:
+    """Source whose handler for `_LEDGER_TOOL` reaches `reaches`."""
+    return (
+        "def _get_org_sdk():\n"
+        "    ...\n\n"
+        f"def {_LEDGER_TOOL}(id):\n"
+        f"    return _get_org_sdk().{reaches}(id)\n"
+    )
+
 
 def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool, writes: bool = False):
     from tortoise.tool_registry import ToolDefinition
@@ -535,30 +573,61 @@ class TestCapabilityModel:
         assert "compute_confidence" in handler_operations("tortoise_compute_confidence").operations
 
     def test_operator_only_and_filesystem_capabilities_are_http_excluded(self):
-        from tool_surface_capabilities import privileged_exposure_violations
+        from tool_surface_capabilities import (
+            privileged_exposure_violations,
+            served_registry,
+        )
 
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert privileged_exposure_violations(TOOL_REGISTRY) == []
+        assert privileged_exposure_violations(served_registry()) == []
 
     def test_write_capability_is_classified(self):
-        from tool_surface_capabilities import write_classification_violations
+        from tool_surface_capabilities import (
+            served_registry,
+            write_classification_violations,
+        )
 
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert write_classification_violations(TOOL_REGISTRY) == []
+        assert write_classification_violations(served_registry()) == []
 
     def test_bindings_resolve(self):
-        from tool_surface_capabilities import binding_resolution_violations
+        from tool_surface_capabilities import (
+            binding_resolution_violations,
+            served_registry,
+        )
 
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert binding_resolution_violations(TOOL_REGISTRY) == []
+        assert binding_resolution_violations(served_registry()) == []
 
     def test_declared_sets_are_live(self):
         """Every declared set entry resolves — a rename fails loudly, it does
         not silently drop out of its check."""
-        from tool_surface_capabilities import declared_set_violations
+        from tool_surface_capabilities import declared_set_violations, served_registry
 
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert declared_set_violations(TOOL_REGISTRY) == []
+        assert declared_set_violations(served_registry()) == []
+
+    def test_guards_cover_the_served_set_not_only_the_live_one(self):
+        """#3883: a retired name is still resolvable and callable by name, so the
+        capability guards must see it. A live-only default left a retired entry's
+        handler and binding outside every guard — the exact hole that let a
+        retired writer's `writes` flag go unchecked."""
+        from tool_surface_capabilities import (
+            all_handler_operations,
+            registry_entries_by_method,
+            served_registry,
+        )
+
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        retired = {e.name for e in RETIRED_TOOL_REGISTRY}
+        live = {e.name for e in TOOL_REGISTRY}
+        assert retired, "the retirement set is empty — this test would be vacuous"
+        served = {e.name for e in served_registry()}
+        assert served == live | retired
+
+        # The guard defaults must cover the retired half, not just the live half.
+        assert retired <= set(all_handler_operations())
+        by_method = registry_entries_by_method()
+        bound = {e.name for entries in by_method.values() for e in entries}
+        assert retired & bound, (
+            "no retired entry is reachable through the binding index — the guards "
+            "would not see a retired entry's declared binding")
 
     # ── falsifiability — each declared threat class must be able to fail ──
 
@@ -659,6 +728,115 @@ class TestCapabilityModel:
             violations = binding_resolution_violations([entry], _PROBE_SRC)
             assert any("dispatch" in v for v in violations), (probe, violations)
 
+    def test_T3_divergence_ledger_checked_when_declaration_does_not_resolve(self, monkeypatch):
+        """A ledgered entry whose declaration drifts to an already-exempt dangling
+        name (a `DANGLING_SDK_DECLARATIONS` member, which does not resolve) must
+        still be reported.  Skipping non-resolving declarations — correct for
+        unledgered entries — would leave a stale ledger entry green forever."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset({_LEDGER_OTHER}), "synthetic"),
+        })
+        drifted = _probe(_LEDGER_TOOL, "upsert_tenant_manifest",
+                         annotations=_ro(), http_policy=True)
+        violations = tsc.binding_resolution_violations(
+            [drifted], _ledger_src(_LEDGER_OTHER))
+        assert any("update the entry" in v for v in violations), violations
+
+    def test_T3_handlerless_entry_is_not_a_binding_divergence(self):
+        """An entry with no module-level handler is already reported by the
+        handler-existence arm.  Asserting it *also* \"never reaches\" its
+        declaration is noise — it names a handler that does not exist."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        handlerless = _probe("tortoise_no_handler_at_all", "query",
+                             annotations=_ro(), http_policy=True)
+        violations = binding_resolution_violations([handlerless])
+        assert any("no module-level handler" in v for v in violations), violations
+        assert not any("never" in v for v in violations), violations
+
+    def test_T3_declared_binding_must_be_reached_not_merely_resolvable(self):
+        """#4337: a declared `sdk_method` that RESOLVES but is never called must
+        fail. `query` is a real method on TortoiseSDK, so the resolution arm
+        passes it; only reading the handler body can see that this handler calls
+        `create_point` instead."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        diverged = _probe("tortoise_probe_reader", "query",
+                          annotations=_ro(), http_policy=True)
+        violations = binding_resolution_violations([diverged], _PROBE_SRC)
+        assert any("never" in v and "query" in v for v in violations), violations
+
+    def test_T3_divergence_ledger_cannot_outlive_its_defect(self, monkeypatch):
+        """The ledger is exact in BOTH directions: a repaired divergence must red
+        the build until its entry is deleted.  Run on a SYNTHETIC ledger so the
+        test survives the repair of the real entries."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset({_LEDGER_OTHER}), "synthetic"),
+        })
+        repaired = _probe(_LEDGER_TOOL, _LEDGER_DECLARED,
+                          annotations=_ro(), http_policy=True)
+        violations = tsc.binding_resolution_violations(
+            [repaired], _ledger_src(_LEDGER_DECLARED))
+        assert any("delete the ledger entry" in v for v in violations), violations
+
+    def test_T3_divergence_ledger_records_the_declared_method(self, monkeypatch):
+        """A ledger keyed on the tool name alone is a blanket exemption: the entry
+        could re-diverge to a DIFFERENT declared method and stay green.  This
+        covers the declared half of the recorded divergence."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset({_LEDGER_OTHER}), "synthetic"),
+        })
+        drifted = _probe(_LEDGER_TOOL, "get_point",
+                         annotations=_ro(), http_policy=True)
+        violations = tsc.binding_resolution_violations(
+            [drifted], _ledger_src(_LEDGER_OTHER))
+        assert any("update the entry" in v for v in violations), violations
+
+    def test_T3_declared_private_method_counts_as_reached(self, monkeypatch):
+        """Presence of the declared method is asked of the RAW reach set.  A
+        declared PRIVATE SDK method is a real binding: filtering it out first would
+        report it unreached, and a ledgered one could never clear its entry."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        private = _probe(_LEDGER_TOOL, "_get_proj",
+                         annotations=_ro(), http_policy=True)
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {})
+        assert not any("never" in v for v in tsc.binding_resolution_violations(
+            [private], _ledger_src("_get_proj")))
+
+    def test_T3_divergence_ledger_records_the_reached_set(self, monkeypatch):
+        """The REACHED half of the recorded divergence, on its own.  Without this
+        the reached comparison is dead weight — the declared-drift test exercises
+        only the other conjunct, so deleting the reached check leaves the suite
+        green."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset(), "synthetic"),
+        })
+        same_declared = _probe(_LEDGER_TOOL, _LEDGER_DECLARED,
+                               annotations=_ro(), http_policy=True)
+        violations = tsc.binding_resolution_violations(
+            [same_declared], _ledger_src(_LEDGER_OTHER))
+        assert any("update the entry" in v for v in violations), violations
+
     def test_T1_partial_or_dead_self_guard_fails(self):
         """T1: presence of `_http_excluded_error` is not enough — a conditional
         or dead guard does not dominate the write, so it must fail."""
@@ -677,11 +855,13 @@ class TestCapabilityModel:
         assert handler_self_guards("tortoise_probe_helper_guard", _PROBE_SRC)
 
     def test_exemption_set_is_exact(self):
-        """2b: the non-HTTP writer exemption set is exactly NON_HTTP_WRITER_TOOLS."""
-        from tool_surface_capabilities import exemption_set_violations
+        """2b: the non-HTTP writer exemption set is exactly NON_HTTP_WRITER_TOOLS —
+        measured over the SERVED set, retired names included (#3883): a retired
+        writer is still callable by name, so it is not exempt from the guard."""
+        from tool_surface_capabilities import exemption_set_violations, served_registry
 
-        from tortoise.tool_registry import TOOL_REGISTRY, _rw
-        assert exemption_set_violations(TOOL_REGISTRY) == []
+        from tortoise.tool_registry import _rw
+        assert exemption_set_violations(served_registry()) == []
         rogue = _probe("tortoise_rogue_writer", "query", annotations=_rw(),
                        http_policy=False)
         assert exemption_set_violations([rogue])
@@ -775,6 +955,20 @@ class TestCapabilityModel:
         assert any("does not resolve" in v
                    for v in declared_set_violations(TOOL_REGISTRY,
                                                    sdk_src="class TortoiseSDK:\n    pass\n"))
+
+    def test_declared_binding_divergence_ledger_is_live(self, monkeypatch):
+        """#4337: a ledger key whose registry entry is gone must fail, not persist
+        unexamined — the name-goes-stale vacuity #4113 exists to remove. The
+        divergence arm iterates ENTRIES, so it cannot see a key with no entry."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            "tortoise_probe_absent_ledger_key": tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset(), "synthetic"),
+        })
+        assert any("no registry entry" in v
+                   for v in tsc.declared_set_violations(TOOL_REGISTRY))
 
     def test_guard1_declared_and_unguarded_branches_fail(self):
         """Guard 1 must fire on the declared-binding leg and on an HTTP-excluded
@@ -914,10 +1108,18 @@ class TestToolIdentity:
         assert renamed.writes is True and renamed.id == writer.id
 
     def test_write_names_are_derived_from_the_entries(self):
-        """WRITE_TOOL_NAMES is the derivation, not a parallel list."""
+        """WRITE_TOOL_NAMES is the derivation, not a parallel list.
+
+        Derived over the SERVED set (#3883), exactly like `get_write_tool_names`:
+        a retired name still answers, so a write under a retired name must still
+        count as a write. No retired entry is a writer today, so stating it over
+        the served set changes no number — it stops the census from silently
+        shrinking when one is retired."""
         from tortoise.mcp_server import WRITE_TOOL_NAMES
-        from tortoise.tool_registry import TOOL_REGISTRY
-        derived = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        derived = frozenset(
+            t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
+        )
         assert derived == WRITE_TOOL_NAMES
         # 42 is today's declared write census (#4170) — a change here is a
         # permission change and needs the owner's eye, not a test edit.

@@ -67,6 +67,7 @@ from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
     RestoreVerificationError,
+    _r2_config_from_env,
     _restore_into_temp_verify_swap,
     create_backup,
     decrypt_backup,
@@ -1235,7 +1236,13 @@ async def _lifespan(app):
         # driver-disabled case is covered by construction. Spawned only when
         # the sweep config validates (fail-closed default keeps TestClient and
         # misconfigured deploys quiet) and not explicitly disabled for tests.
-        global _WATCHER
+        global _WATCHER, _WATCHER_START_ERROR
+        # #2877: recompute watcher liveness per app instance. Without the
+        # reset, a prior lifespan's start failure (or a stale thread) would
+        # leak into /health on TestClient/app reuse — reporting a dead watcher
+        # as running, or a running one as failed.
+        _WATCHER = None
+        _WATCHER_START_ERROR = None
         try:
             cfg = _backup_config_safe()
             # #2922: EVERY reason the watcher does not start must be stated on
@@ -1396,6 +1403,11 @@ async def _lifespan(app):
             # have surfaced #2790 (no sweep for 33 days, no drill ever recorded).
             # Loud, with a traceback, so a dead watcher can never be invisible again.
             _logger.error("backup watcher could not start: %s", exc, exc_info=True)
+            # #2877: and not invisible to /health either. This marker is set
+            # ONLY here, so _backup_watcher_health() can distinguish "wanted
+            # but failed to start" (degraded) from the legitimate disabled
+            # states (ok).
+            _WATCHER_START_ERROR = str(exc)[:200]
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-org graphs get purged by the SDK lazy hook too (embedded/stdio);
@@ -3231,6 +3243,46 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _backup_watcher_health() -> dict:
+    """#2877: backup-watcher liveness for /health.
+
+    The watcher is the hosted durability monitor for #305/R2 backups, and
+    #2851/#2922 showed it can be completely dead while the process serves
+    normally. ``_WATCHER is None`` is ambiguous — it is the state after a
+    FAILED start *and* the fail-closed default when the sweep is off
+    (TestClient/embedded) or the test-only kill switch is set. The
+    ``_WATCHER_START_ERROR`` marker, set only from the start-failure handler,
+    is the one signal that separates those.
+
+    States:
+      * ``running``  — thread alive (the healthy case).
+      * ``failed``   — wanted but ``_WATCHER_START_ERROR`` was recorded.
+      * ``stopped``  — started, but its watchdog-backed thread is no longer
+        alive (a dead monitor that must not read as healthy).
+      * ``disabled`` — no config / kill switch: legitimate, stays ``ok``.
+
+    Mirrors the ``db`` block: a sub-dict carrying ``ok``, folded into
+    ``status`` by the caller. Never raises and never 5xxes — a dead monitor
+    must not kill a live process's liveness probe (#338).
+    """
+    try:
+        watcher = _WATCHER
+        if watcher is not None:
+            thread = getattr(watcher, "_thread", None)
+            if thread is not None and thread.is_alive():
+                return {"state": "running", "ok": True, "error": None}
+            return {
+                "state": "stopped",
+                "ok": False,
+                "error": "watcher thread is not alive",
+            }
+        if _WATCHER_START_ERROR is not None:
+            return {"state": "failed", "ok": False, "error": _WATCHER_START_ERROR}
+        return {"state": "disabled", "ok": True, "error": None}
+    except Exception as exc:  # liveness must answer, always
+        return {"state": "unknown", "ok": False, "error": str(exc)[:200]}
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -3271,6 +3323,12 @@ async def health():
     # The response shape is unchanged for deploy/dashboard consumers:
     # ``{"status", "db"}`` — ``probe`` and ``loop_stale_ms`` are additive.
     # It never 5xxes: a dead DB is "degraded", never a killed process.
+
+    Watcher check (#2877): a dead/never-started backup watcher is the SAME
+    shape of silent durability failure, so it rides along in ``backup_watcher``
+    and flips ``status`` to "degraded" under the identical rule. A disabled
+    sweep (no config / kill switch) stays ``ok`` — only "wanted but failed"
+    degrades.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -3284,8 +3342,10 @@ async def health():
         loop_age_ms = loop_heartbeat_info().get("loop_age_ms")
     except Exception:
         loop_age_ms = None
-    return {"status": "ok" if db.get("ok") else "degraded", "db": db,
-            "probe": probe_meta, "loop_stale_ms": loop_age_ms}
+    watcher = _backup_watcher_health()
+    return {"status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
+            "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
+            "backup_watcher": watcher}
 
 
 @app.get("/health/ready")
@@ -21257,11 +21317,12 @@ _ANALYTICS_RESOLVE_NOT_BEFORE = None
 # only when the window did not move under the resolve. The single exception is
 # the process-start UNKNOWN state, where a failed read arms nothing (the window
 # doubles as the alert gate): there a delivered write retries until the store
-# answers, and each retry pays a fresh store CONSTRUCTION plus one read
-# (`_analytics_alert_store()` rebuilds the channel and `_backup_storage()`
-# builds a new object-store client per attempt) — not the R2 PUT + GitHub
-# search + Telegram a dispatch costs. An honest bound, chosen over a window
-# that would silence a real episode.
+# answers, and each retry rebuilds the alert channel and pays one read —
+# `_analytics_alert_store()` rebuilds the channel per attempt, while the
+# object store and its boto3 client are process-wide (keyed on the resolved
+# R2 config, #3968) — not the R2 PUT + GitHub search + Telegram a dispatch
+# costs. An honest bound, chosen over a window that would silence a real
+# episode.
 _ANALYTICS_RESOLVE_BACKOFF_S = 300
 # #3820 (cycle-8 P1): the resolve is serialized by its OWN lock — separate from
 # `_ANALYTICS_ALERT_LOCK` so the claim cannot be blocked by the counters or the
@@ -23501,14 +23562,32 @@ if os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower() == "memory":
         "process memory only and are LOST on restart (test seam, #303)"
     )
 _MEMORY_BACKUP_STORE: MemoryStorage | None = None
+# #3968: the DEFAULT (R2) path needs the same process-wide reuse the memory seam
+# already has. Without it every `_backup_storage()` call built a fresh
+# `R2Storage`, and `R2Storage._s3()` builds a fresh boto3 client per instance —
+# so the #3820 process-start-UNKNOWN resolve (which retries one read per
+# delivered write until the store answers) paid a client construction per
+# write. Keyed on the RESOLVED R2 config (`_r2_config_from_env`), never a bare
+# "have we built one yet" flag: a changed `R2_*` env (a credential rotation, or
+# a test's monkeypatch) rebuilds the store instead of pinning a stale
+# credential into a long-lived client. No health/refresh path is needed because
+# the env IS the credential source in this process model — the key covers it.
+_R2_BACKUP_STORE: R2Storage | None = None
+_R2_BACKUP_STORE_CONFIG: tuple[str, str, str, str] | None = None
 
 
 def _backup_storage() -> R2Storage | MemoryStorage:
     """Backup object store. R2 from env (R2_ACCOUNT_ID / ...) by default.
 
     TORTOISE_BACKUP_STORAGE=memory → process-wide MemoryStorage singleton
-    (E2E seam, #303). Unknown value → RuntimeError (fail-closed)."""
-    global _MEMORY_BACKUP_STORE
+    (E2E seam, #303). Unknown value → RuntimeError (fail-closed).
+
+    The R2 path is ALSO process-wide, keyed on the resolved R2 config (#3968):
+    N calls build one ``R2Storage`` (and therefore one lazily-built boto3
+    client), not N. An incomplete config still raises here, fail-closed — the
+    key is compared BEFORE any return, so a removed ``R2_*`` cannot be served
+    out of a previously-populated cache."""
+    global _MEMORY_BACKUP_STORE, _R2_BACKUP_STORE, _R2_BACKUP_STORE_CONFIG
     mode = os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower()
     if mode == "memory":
         if _MEMORY_BACKUP_STORE is None:
@@ -23522,7 +23601,15 @@ def _backup_storage() -> R2Storage | MemoryStorage:
         raise RuntimeError(
             f"TORTOISE_BACKUP_STORAGE={mode!r} unknown — use 'memory' or unset for R2"
         )
-    return R2Storage()
+    config = _r2_config_from_env()
+    if _R2_BACKUP_STORE is None or config != _R2_BACKUP_STORE_CONFIG:
+        # `R2Storage()` re-resolves the SAME env into the SAME tuple, so the
+        # cached store always describes `config`. Assign only AFTER a
+        # successful construction: a raise (missing R2_*) leaves the cache
+        # untouched rather than half-updated.
+        _R2_BACKUP_STORE = R2Storage()
+        _R2_BACKUP_STORE_CONFIG = config
+    return _R2_BACKUP_STORE
 
 
 def _backup_mirror_storage(cfg) -> R2Storage | None:
@@ -24098,6 +24185,13 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
 # not true).
 
 _WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # noqa: F821
+# #2877: why the watcher is not running. `_WATCHER is None` ALONE cannot tell a
+# dead monitor from a deliberately-disabled one — it is also the fail-closed
+# default (no/invalid backup config) and the `BACKUP_WATCHER_DISABLED=1` kill
+# switch. Set only from the watcher-start `except` in `_lifespan`; cleared when
+# the watcher starts cleanly, so the one signal it carries is "wanted but
+# failed". Read by `_backup_watcher_health()` for /health.
+_WATCHER_START_ERROR: str | None = None
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600

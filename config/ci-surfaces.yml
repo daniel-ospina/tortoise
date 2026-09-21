@@ -28,6 +28,9 @@ surfaces:
   # registration as the boot guards above, for the same reason: the file it
   # guards is tortoise/hosted_api.py, which selects the `api` surface.
   - test_health_ready_nonblocking.py
+  # #2877: a dead/never-started backup watcher must surface in /health, not just
+  # a boot log. Dual-registered with `core` (same rationale as the boot guards).
+  - test_backup_watcher_health.py
   # #3718: the REST graph-write handlers must not run synchronous FalkorDB I/O
   # on the event loop. Same dual registration as the two guards above and for
   # the same reason: the file it guards is tortoise/hosted_api.py, which
@@ -401,6 +404,7 @@ surfaces:
   - test_bridge_table.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
+  - test_ci_expected_manifests.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -447,6 +451,10 @@ surfaces:
   - test_finding_provenance.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
   - test_transport_wait_bound.py  # #3834: transport wait bound + cold-half gate wiring (dual: api)
+  # #2877: DB-free guards that a dead backup watcher degrades /health (the file
+  # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
+  # dual-registered `api`+`core` for the same reason as the boot guards).
+  - test_backup_watcher_health.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_build_window_transcript.py
@@ -738,6 +746,7 @@ surfaces:
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
+  - test_retired_tools.py  # #3883: a retired MCP name resolves and WARNS (16 names retired, #3863)
   - test_coverage_loop.py  # #2567: evidence-completeness loop E2E (C3-1, docker-lane)
   - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
@@ -1303,6 +1312,12 @@ durations:
   # 90% durations-coverage floor satisfied; refresh from the first post-merge
   # main run that includes it.
   test_installer_preserves_foreign_skill_content.py: 2.0
+  # #4470: same convention — the file is new, so no CI junit measurement yet;
+  # enter at the flat 2.0s default (the conservative floor keeps the 90%
+  # durations-coverage floor satisfied) and refresh from the first post-merge
+  # main run that includes it. Measured locally 2026-09-21: 13.7s for the file
+  # (7 tests, DB-free, app-boot-free) on a loaded machine.
+  test_backup_watcher_health.py: 2.0
   eval/retrieval/test_integration.py: 855.2
   test_onboarding_state_split.py: 182.5
   eval/write_path/test_write_path_benchmark.py: 112.3
@@ -1704,6 +1719,14 @@ durations:
   test_signup_form_safety.py: 0.2
   test_tool_registry.py: 0.2
   test_user_identity_authority.py: 0.2
+  # #4207: the file's junit testcase time from run 35530373858, whose head
+  # (8a1a59d33) is an EARLIER revision of this file: 7 test functions and 3
+  # `_run_guard` subprocess call sites there, against 11 and 8 at HEAD (five
+  # outcome/budget tests were added after that measurement, and the #4351 split
+  # removed the workflow-text half). So this is a first-cut weight, NOT a
+  # measurement of the current file, and its direction is not asserted either
+  # way. Refresh from the first post-merge main run that includes it.
+  test_ci_expected_manifests.py: 0.157
   bench/test_bench_core.py: 0.1
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1

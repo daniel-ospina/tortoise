@@ -690,6 +690,7 @@ jobs:
         # fail fast ONLY on app-unreachable (curl error); keep polling
         # db.ok=false for >=3 min (cold-start DB connection exceeds 60s per
         # #338; DNS propagation after a restart runs ~2 min per #1381);
+        # the db.ok read is a JSON parse, not a body text-match (#4470);
         # assert /health/ready 200 LAST (it ANDs both planes). Bypassable
         # for incident-fix deploys: the workflow_dispatch input OR the repo
         # variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
@@ -710,8 +711,17 @@ jobs:
           echo "app reachable — polling DB data plane"
           # Poll db.ok=true for up to 3 min (180s / 10s).
           DB_OK=0
+          # Parse the JSON and read ``db.ok`` — do NOT text-match the body.
+          # The body gained a SECOND `"ok": true` when /health's additive
+          # ``backup_watcher`` block landed (#4470/#2877), and a
+          # `grep -q '"ok": *true'` then matched the WATCHER's ok while db.ok
+          # was still false: the poll short-circuited on the FIRST probe, the
+          # 3-minute cold-start tolerance above was silently neutralized, and
+          # /health/ready was asserted while the DB was still cold — a spurious
+          # deploy failure on a legitimate cold start. A field's VALUE must be
+          # read, not its spelling.
           for i in $(seq 1 18); do
-            if curl -fsS "$BASE/health" 2>/dev/null | grep -q '"ok": *true'; then DB_OK=1; break; fi
+            if curl -fsS "$BASE/health" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("db") or {}).get("ok") else 1)' 2>/dev/null; then DB_OK=1; break; fi
             sleep 10
           done
           [ "$DB_OK" = "1" ] || { echo "::error::db.ok stayed false for 3 min — FalkorDB unreachable"; exit 1; }

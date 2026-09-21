@@ -687,3 +687,28 @@ def test_check_exits_nonzero_on_drift() -> None:
             )
         finally:
             shutil.copy2(backup, doc)
+
+
+def test_retired_rows_lead_to_their_replacement_destination() -> None:
+    """A retired name's destination is its REPLACEMENT's destination.
+
+    The retirement warning sends the caller to the replacement, so the bridge
+    table must not claim the same name lands somewhere else: two maps disagreeing
+    about one journey is a silent contradiction in an owner-facing document, and
+    nothing else in this file compares them.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools.bridge_table import DESTINATION, _registry_rows
+
+    retired = [r for r in _registry_rows() if r["use_instead"]]
+    assert len(retired) == 16, f"expected 16 retired rows, got {len(retired)}"
+    for r in retired:
+        assert r["use_instead"] in DESTINATION, (
+            f"{r['name']} names a replacement the destination map does not know: "
+            f"{r['use_instead']}"
+        )
+        assert DESTINATION[r["name"]] == DESTINATION[r["use_instead"]], (
+            f"{r['name']} leads to {DESTINATION[r['name']]!r} but its replacement "
+            f"{r['use_instead']} leads to {DESTINATION[r['use_instead']]!r} — the "
+            f"retirement warning and the bridge table disagree about one journey"
+        )
