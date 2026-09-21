@@ -2212,17 +2212,18 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
 )
 
 #: Analytics event name for a breach. Recorded through the EXISTING writer (no
-#: new table, no new metric endpoint). The REST arm writes an empty `org_id`:
-#: this middleware is OUTSIDE the auth middleware, so no org has resolved yet.
+#: new table, no new metric endpoint). The `org_id` comes from
+#: ``scope["state"]["org_id"]`` — populated by the auth dependency, which has
+#: normally resolved long before a 10 s deadline, so the REST arm usually
+#: carries the real org and is empty only when the breach precedes resolution.
 #: The MCP arm (`mcp_server._await_under_mcp_wait_bound`) passes the resolved
-#: `_current_org_id` — MCP auth runs inside the mounted app, before dispatch.
-#: The `path` (and the MCP `tool_name`) prop is what makes "which routes
-#: breach" answerable.
+#: `_current_org_id`. The `path` (and the MCP `tool_name`) prop is what makes
+#: "which routes breach" answerable.
 _TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
 
-#: Handlers abandoned past the bound, held only so their late exception is
-#: retrieved (never "exception was never retrieved") and so a test can await
-#: them. Entries remove themselves on completion — the set self-drains.
+#: Bounded dispatch tasks, tracked from CREATION until completion so no escape
+#: path (timeout or cancellation) can orphan one or drop its late exception.
+#: Entries remove themselves on completion — the set self-drains.
 _pending_wait_bound_requests: set = set()
 _pending_wait_bound_telemetry: set = set()
 
@@ -2258,9 +2259,11 @@ def _sanitize_for_log(value: str) -> str:
     with embedded CR/LF; escaped verbatim it forges log lines. CR/LF alone is
     not the whole class (code-review round 2): VT/FF/ESC/NUL, DEL, the C1 range
     (U+0085 NEL and U+009B CSI are line-break / escape introducers to Unicode-
-    aware readers) and U+2028/U+2029 all do the same. The C0/C1 + DEL ranges are
-    the repo's own control-char convention (``tortoise/schemas.py``); CR/LF/TAB
-    keep their readable backslash escapes so existing log greps still match.
+    aware readers) and U+2028/U+2029 all do the same. CR/LF/TAB keep their
+    readable backslash escapes so existing log greps still match. This is
+    deliberately BROADER than ``tortoise/schemas.py``'s C0-only control-char
+    validation: that rejects a user field; this escapes a value bound for a log
+    line and a telemetry sink.
     """
     out = []
     for ch in value:
