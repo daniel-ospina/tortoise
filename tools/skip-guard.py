@@ -83,19 +83,27 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
   --junitxml <path>                  junitxml from the same pytest run, written
                                      with -o junit_family=xunit1 so every
                                      <testcase> carries file/line attributes.
-  --manifest-only                    compare the expected nodeids and NOTHING
-                                     else (#4207). The skip-anomaly matchers
-                                     are calibrated for the docker lane, where a
-                                     live-FalkorDB/embedder skip is an anomaly;
-                                     in a URI-less lane those skips are the
-                                     EXPECTED state and would false-red every
+  --manifest-only                    disable the three skip-ANOMALY reason
+                                     matchers and compare the expected nodeids
+                                     (#4207) — plus, since #4215, enforce the
+                                     manifest's `# allow-skipped:` OUTCOME budget
+                                     (a frozen nodeid that is collected and then
+                                     SKIPPED reds beyond its file's budget). The
+                                     reason matchers are calibrated for the docker
+                                     lane, where a live-FalkorDB/embedder skip is
+                                     an anomaly; in a URI-less lane those skips are
+                                     the EXPECTED state and would false-red every
                                      e2e module. Use this where the property is
-                                     "the frozen nodeid set is still COLLECTED".
+                                     "the frozen nodeid set is still COLLECTED
+                                     (and the tests that must run, run)".
 
   Every expected nodeid must appear as a junitxml <testcase> — passed OR
   skipped-with-reason; a missing nodeid (deselected, file dropped from $FILES,
   vacuous early-return) -> print + exit 1. This kills the vacuous-pass class
-  (#942): on migrated halves a vanished nodeid can no longer green.
+  (#942): on migrated halves a vanished nodeid can no longer green. And in the
+  --manifest-only mode, a nodeid that is present but SKIPPED beyond its file's
+  `# allow-skipped: <file>=<n>` budget -> print + exit 1 (#4215: the outcome half
+  a test-level `pytest.skip(…)` would otherwise hide in).
 
   The junitxml is the AUTHORITATIVE observed set (lossless per-testcase nodeid
   via file+classname+name reconstruction; lossless skip reason in <skipped
@@ -570,13 +578,25 @@ def _parse_skip_allowances(text: str) -> tuple[dict[str, int], list[str]]:
         if not stripped.startswith("#"):
             continue
         body = stripped.lstrip("#").strip()
-        if not body.lower().startswith("allow-skipped:"):
+        # The colon is OPTIONAL in the match, so a typo'd directive
+        # (`allow-skipped file=2`) is REPORTED rather than silently skipped: the
+        # promise above was false for that spelling, and a silently ignored
+        # directive leaves the strict default in force while the reader believes a
+        # budget was declared (cycle-8 finding).
+        if not body.lower().startswith("allow-skipped"):
             continue
-        rest = body.split(":", 1)[1].strip()
+        rest = body.split(":", 1)[1].strip() if ":" in body else ""
         spec = rest.split()[0] if rest else ""
         file, _, count = spec.rpartition("=")
         if not file or not count.isdigit():
             invalid.append(stripped)
+            continue
+        if file in allowances:
+            # A second directive for one file is NEVER legitimate: last-wins
+            # silently overrode the declared budget, so a copy-pasted `=3` under a
+            # documented `=2` let the OUTCOME half allow the very skip the header
+            # calls a gate evasion, with every pin green (cycle-8 finding).
+            invalid.append(f"{stripped} (duplicate: {file} is already declared)")
             continue
         allowances[file] = int(count)
     return allowances, invalid
@@ -767,13 +787,14 @@ def _main_emit_manifest(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     if "--emit-manifest" in argv:
         return _main_emit_manifest(argv)
-    # #4207: `--manifest-only` compares the expected nodeids and NOTHING ELSE.
-    # The three skip-anomaly matchers are calibrated for the docker lane, where
-    # a live-FalkorDB or embedder skip is an anomaly; in a URI-less lane (the
-    # embedded_only selection) those skips are the EXPECTED state, so applying
-    # them there false-reds on every e2e module (24 of them, measured). The
-    # coverage property — "every frozen nodeid is still collected" — is
-    # lane-independent, and that is the one to assert in such a lane.
+    # #4207: `--manifest-only` disables the three skip-ANOMALY reason matchers.
+    # They are calibrated for the docker lane, where a live-FalkorDB or embedder
+    # skip is an anomaly; in a URI-less lane (the embedded_only selection) those
+    # skips are the EXPECTED state, so applying them there false-reds on every e2e
+    # module (24 of them, measured). It does NOT assert "nothing else": the
+    # coverage comparison, and since #4215 the `# allow-skipped:` OUTCOME budget,
+    # both still run — a lane whose skips are expected owes a written budget for
+    # them (cycle-8 finding: the old wording claimed literally "NOTHING else").
     manifest_only = "--manifest-only" in argv
     if manifest_only:
         argv = [a for a in argv if a != "--manifest-only"]

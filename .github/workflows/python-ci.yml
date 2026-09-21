@@ -1710,9 +1710,10 @@ jobs:
           # that baseline and below the measured total, so losing the rescued
           # class reds the job while a few legitimate removals do not.
           # Measured 2026-09-20 on this tree (run 35518962357, head fd23a4033): 35
-          # passed / 34 skipped (each skip exogenous — the module-level gates, an
-          # absent optional dep, the two darwin-gated #3845 fork tests). The
-          # contract is that the marks RUN; the exact count is free to grow.
+          # passed / 34 skipped (each skip exogenous — the 32 module-level gate
+          # markers, and the two darwin-gated #3845 fork tests; no real test skips
+          # for any other reason). The contract is that the marks RUN; the exact
+          # count is free to grow.
           passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
           echo "embedded_only-marked tests passed: $passed"
           [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }

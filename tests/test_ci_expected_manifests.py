@@ -8,7 +8,7 @@ comparison and CI stays green.
 
 The fix is a FROZEN set: `config/ci-expected-nodeids/*.txt` is checked in, and
 every nodeid in it must still appear as a junitxml `<testcase>` (passed OR
-skipped) in the lane that runs it. This file pins three things:
+skipped) in the lane that runs it. This file pins four things:
 
 1. the manifests are well-formed, their files exist, and they are non-empty;
 2. the workflow actually invokes them, with `--manifest-only` (without that flag
@@ -508,10 +508,13 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
         # so its exit status is not what reds anything — cycle-7 finding). A status
         # function that is false on a green job, or a literal false/never, is refused;
         # `always()` (the carve-out guard's condition) and event/matrix expressions are
-        # fine.
+        # fine. A NEGATED status function is true on green (`!cancelled()`), so the
+        # negations are removed before the refusal — matching the raw token false-red a
+        # correct condition (cycle-8 finding).
         condition = str(step.get("if", "")).strip().lower()
+        effective = re.sub(r"!\s*(?:cancelled|failure)\s*\(\s*\)", "", condition)
         assert not re.search(
-            r"\bfalse\b|\bnever\b|\bfailure\s*\(|\bcancelled\s*\(", condition
+            r"\bfalse\b|\bnever\b|\bfailure\s*\(|\bcancelled\s*\(", effective
         ), (
             f"{WORKFLOW.name}: the step consuming {rel} has `if: {condition}` — that "
             "condition is false on a green job, so the guard never runs and cannot fail "
@@ -524,12 +527,36 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
         # case the flag only has to be present in the step.
         flag_re = re.compile(r"(?<![\w-])--manifest-only(?![\w-])")
         commands = _shell_commands(step["run"])
-        literal_consumers = [c for c in commands if rel in c and not re.match(r"^[A-Za-z_]\w*=", c)]
-        for cmd in literal_consumers:
+        literal_consumers = [
+            (i, c)
+            for i, c in enumerate(commands)
+            if rel in c and not re.match(r"^[A-Za-z_]\w*=", c)
+        ]
+        for index, cmd in literal_consumers:
             assert flag_re.search(cmd), (
                 f"{WORKFLOW.name}: step {name!r} consumes {rel} without --manifest-only as a "
                 "token of that same command — in a URI-less lane that false-reds on the "
                 f"EXPECTED skips (the docker-calibrated matchers).\n{cmd}"
+            )
+            # …and the guard's EXIT STATUS must be able to reach the step: a step's
+            # status is its LAST command's, so a trailing `|| true`, `|| echo …`, `; …`
+            # or a pipe discards a real finding while every pin above stays green — the
+            # mutations `… --manifest-only || true` and `… --manifest-only; echo done`
+            # both passed the cycle-7 pins (cycle-8 finding). The carve-out accumulates
+            # (`|| guard_rc=1`) and exits it, which is allowed — but only when the step
+            # really does `exit $guard_rc`, or the accumulation is discarded too.
+            after = cmd.split("--manifest-only", 1)[1].strip().lstrip(";").strip()
+            if index == len(commands) - 1 and not after:
+                continue  # the guard IS the step's last command: its status propagates
+            accumulated = re.match(r"^\|\|\s*\{?\s*([A-Za-z_]\w*)=", after)
+            assert accumulated and re.search(
+                rf"\bexit\s+\$\{{?{re.escape(accumulated.group(1))}\b", step["run"]
+            ), (
+                f"{WORKFLOW.name}: step {name!r} consumes {rel} with --manifest-only but its "
+                "exit status cannot reach the step — the step's status is its LAST command's, "
+                f"so `{after or '<nothing>'} ` discards it (and an accumulated code has to be "
+                "exited). Refused: `|| true`, `|| echo …`, `; …`, a pipe, or an accumulation "
+                f"with no `exit $var`.\n{cmd}"
             )
         assert literal_consumers or any(flag_re.search(c) for c in commands), (
             f"{WORKFLOW.name}: step {name!r} reads {rel} but no command in it passes "
@@ -647,6 +674,17 @@ def test_the_declared_skip_budget_is_honoured() -> None:
                 "of its nodeids are pinned — the allowance would be absorbed by tests "
                 "this manifest does not expect"
             )
+            # …and a budget covering EVERY frozen nodeid of a file makes the OUTCOME
+            # half unable to fail for it: the guard would allow the whole file to skip
+            # while the check still reported success (cycle-8 finding — `=4` of 4 was
+            # accepted). No file needs that today; a file whose every test really is
+            # platform-gated must change this pin deliberately, and say why in the
+            # header, rather than neutralise the check silently.
+            assert count < len(pinned), (
+                f"{manifest.name}: the budget for {file} covers all {count} of its pinned "
+                "nodeids — a full-file budget makes the OUTCOME half vacuous for that "
+                "file (every frozen test may skip and the guard still passes)"
+            )
             skipped.update(pinned[:count])
         with tempfile.TemporaryDirectory() as tmp:
             junit = Path(tmp) / "junit.xml"
@@ -664,18 +702,50 @@ def test_a_malformed_skip_budget_fails_closed() -> None:
 
     The fail-closed direction of the same rule: an unreadable allowance would leave
     the strict reading in force while the reader believes a budget was declared, so
-    the two disagreeing artifacts would both look fine.
+    the two disagreeing artifacts would both look fine. The colon is optional in the
+    MATCH so a typo'd directive is REPORTED rather than skipped (cycle-8 finding).
+    """
+    nodeids = _nodeids(EMBEDDED)
+    for directive in (
+        "# allow-skipped: tests/test_fork_safety_3845.py = two",  # count is not a number
+        "# allow-skipped tests/test_fork_safety_3845.py=2",  # no colon
+        "# allow-skipped: tests/test_fork_safety_3845.py",  # no count
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest.txt"
+            manifest.write_text(directive + "\n" + "\n".join(nodeids) + "\n")
+            junit = Path(tmp) / "junit.xml"
+            _junit_for(nodeids, junit)
+            result = _run_guard(manifest, junit)
+        assert result.returncode != 0 and "allow-skipped" in result.stderr, (
+            f"the unreadable directive {directive!r} was ignored — an unknowable budget "
+            f"must not default to 'allow' (fail-closed).\nrc={result.returncode}\n"
+            f"{result.stderr}"
+        )
+
+
+def test_a_duplicate_skip_budget_fails_closed() -> None:
+    """Two directives for one file must not silently last-win.
+
+    Last-wins let a copy-pasted `=3` under a documented `=2` make the OUTCOME half
+    allow the very skip the header calls a gate evasion — while the header, and every
+    pin, still said 2 (cycle-8 finding). A second declaration for one file is never
+    legitimate, so it is refused.
     """
     nodeids = _nodeids(EMBEDDED)
     with tempfile.TemporaryDirectory() as tmp:
         manifest = Path(tmp) / "manifest.txt"
         manifest.write_text(
-            "# allow-skipped: tests/test_fork_safety_3845.py = two\n" + "\n".join(nodeids) + "\n"
+            "# allow-skipped: tests/test_fork_safety_3845.py=2\n"
+            "# allow-skipped: tests/test_fork_safety_3845.py=3\n"
+            + "\n".join(nodeids)
+            + "\n"
         )
         junit = Path(tmp) / "junit.xml"
         _junit_for(nodeids, junit)
         result = _run_guard(manifest, junit)
-    assert result.returncode != 0 and "allow-skipped" in result.stderr, (
-        "an unreadable `# allow-skipped:` directive was ignored — an unknowable budget "
-        f"must not default to 'allow' (fail-closed).\nrc={result.returncode}\n{result.stderr}"
+    assert result.returncode != 0 and "duplicate" in result.stderr, (
+        "a duplicate `# allow-skipped:` directive was accepted (last wins) — the written "
+        f"budget and the guard's behaviour would diverge with nothing red.\n"
+        f"rc={result.returncode}\n{result.stderr}"
     )
