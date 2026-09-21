@@ -123,6 +123,10 @@ CITES_LITERAL: dict[str, str] = {
     'r7': '| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | 3 | → `review_link_candidates`. |',
     'r8': '| `events_poll` | → row 11 `poll_events`. |',
     'r9': "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`.",
+    't_n2': '| N2 | `graph` | `graph_list`, `graph_count`, `graph_delete`, `graph_restore`, `trash_graphs`, `graph_set_name`, `graph_set_recording`, `graph_key_ids`, `graph_active_key_count` |',
+    't_r3': '| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `restore_point_at` |',
+    't_r5': '| R5 | `explore_connections` | #5 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` |',
+    't_r6': '| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` |',
     'unchanged4': 'current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`)',
     'w1': '| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` | 5 | Collapsed into `create_entity(type=)`.',
     'w10': '| `file_human_approval` | 1 | → `record_decision`. |',
@@ -156,6 +160,165 @@ CITES_LITERAL: dict[str, str] = {
     'w9_canon': '| W9 | `link_entities` | #15 | `create_edge`,',
 }
 
+# The COMPLETE row → (target, citation text) binding, for all 150 rows. Pinning the
+# quotes by citation KEY was not enough: nothing pinned WHICH key a row selected, and
+# where two keys share a `named` member (`w3`/`w3_cut`, `w4`/`w4_index_sessions`) a
+# key swap kept the target, the basis AND the pinned quote set intact — so row 23
+# could cite the `register_source` grouping as evidence for a DISCARDED disposition.
+# Binding the rendered citation text per row closes the evidence-swap in both
+# directions.
+ROW_CITE_LITERAL: dict[str, tuple[str, str]] = {
+    "annotate_ask_hits": ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
+    "annotate_operator": ('adjust_relationship', '`beta-sdk-surface.md` — “\\| `mitigate_operator`, `operator_action`, `annotate_operator` \\| 3 \\| → `adjust_relationship`”'),
+    "apikey_create": ('create_key', '`beta-sdk-surface.md` — “\\| 34 \\| `create_key` \\| Mint a credential scoped to one memory graph.”'),
+    "apikey_list": ('list_keys', '`beta-sdk-surface.md` — “\\| 34 \\| `create_key` \\| Mint a credential scoped to one memory graph.”'),
+    "apikey_revoke": ('revoke_key', '`beta-sdk-surface.md` — “\\| 34 \\| `create_key` \\| Mint a credential scoped to one memory graph.”'),
+    "apikey_verify": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing.”'),
+    "approve_merge": ('UNCHANGED', '`beta-sdk-surface.md` — “current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`)”'),
+    "assess_source": ('manage_source_trust', '`beta-sdk-surface.md` — “\\| `assess_source`, `set_source_tier`, `get_source_reliability` \\| 3 \\| → `manage_source_trust`”'),
+    "audit": ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview`”'),
+    "backfill_about_entities": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` \\| 4 \\| One-shot migrations.”'),
+    "backfill_sources": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` \\| 4 \\| One-shot migrations.”'),
+    "backfill_v25": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` \\| 4 \\| One-shot migrations.”'),
+    "batch_create_points": ('write_knowledge_batch', '`beta-sdk-surface.md` — “\\| `batch_create_points` \\| 1 \\| → `write_knowledge_batch`. \\|”'),
+    "belief_timeline": ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence`”'),
+    "calibrate_summary": ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence`”'),
+    "calibration_passed": ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence`”'),
+    "capture_session": ('mine_knowledge_from_session', '`beta-sdk-surface.md` — “\\| `capture_session` / `commit_session` \\| → row 16 `mine_knowledge_from_session`, one method.”'),
+    "check_structure": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "checkpoint": ('DISCARDED', '`beta-sdk-surface.md` — “**The journal capability** — `checkpoint`, `diary_write`, `diary_read`.”'),
+    "cleanup_expired_invitations": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` \\| 4 \\| **Our maintenance.**”'),
+    "close": ('UNCHANGED', '`beta-sdk-surface.md` — “current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`)”'),
+    "commit_session": ('mine_knowledge_from_session', '`beta-sdk-surface.md` — “\\| `capture_session` / `commit_session` \\| → row 16 `mine_knowledge_from_session`, one method.”'),
+    "complete_source": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `complete_source` \\| 1 \\| **Cut.**”'),
+    "compute_confidence": ('refresh_confidence', '`canonical-sdk-methods.md` — “\\| W13 \\| `stabilize_beliefs` \\| #19 \\| `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` \\|”'),
+    "compute_reputation": ('UNBACKED', '**no doc states a destination**'),
+    "create_derivation": ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`”'),
+    "create_direct_edge": ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`”'),
+    "create_document": ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`.”'),
+    "create_edge": ('link_entities', '`canonical-sdk-methods.md` — “\\| W9 \\| `link_entities` \\| #15 \\| `create_edge`,”'),
+    "create_entity": ('UNCHANGED', '`beta-sdk-surface.md` — “current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`)”'),
+    "create_event": ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`.”'),
+    "create_object": ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`.”'),
+    "create_operator": ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`”'),
+    "create_or_update_point": ('create_entity', '`canonical-sdk-methods.md` — “\\| `create_or_update_point` → `create_point` \\|”'),
+    "create_point": ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`.”'),
+    "create_source": ('register_source', '`canonical-sdk-methods.md` — “\\| W3 \\| `register_source` \\| #11 \\| `create_source`, `complete_source` \\|”'),
+    "create_subject": ('create_entity', '`beta-sdk-surface.md` — “\\| `create_subject`, `create_object`, `create_event`, `create_document`, `create_point` \\| 5 \\| Collapsed into `create_entity(type=)`.”'),
+    "delete": ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`,”'),
+    "delete_entity": ('delete_knowledge', '`canonical-sdk-methods.md` — “\\| W12 \\| `delete_knowledge` \\| #18 \\| `delete`,”'),
+    "delete_point": ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
+    "delete_point_wrapped": ('delete_knowledge', '`beta-sdk-surface.md` — “\\| `delete_point`, `delete_point_wrapped` \\| 2 \\| → `delete_knowledge`. \\|”'),
+    "diary_read": ('DISCARDED', '`beta-sdk-surface.md` — “**The journal capability** — `checkpoint`, `diary_write`, `diary_read`.”'),
+    "diary_write": ('DISCARDED', '`beta-sdk-surface.md` — “**The journal capability** — `checkpoint`, `diary_write`, `diary_read`.”'),
+    "dream": ('refresh_confidence', '`canonical-sdk-methods.md` — “\\| W13 \\| `stabilize_beliefs` \\| #19 \\| `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` \\|”'),
+    "dream_health_check": ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview`”'),
+    "dream_health_state": ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview`”'),
+    "events_poll": ('poll_events', '`beta-sdk-surface.md` — “\\| `events_poll` \\| → row 11 `poll_events`. \\|”'),
+    "expand_relationships": ('explore_connections', '`beta-sdk-surface.md` — “\\| `traverse`, `expand_relationships`, `get_org_structure` \\| 3 \\| → `explore_connections`. \\|”'),
+    "file_decision": ('write_question', '`beta-sdk-surface.md` — “\\| `file_decision` \\| → rows 20/21 **`write_question`** + **`record_decision`**.”'),
+    "file_human_approval": ('record_decision', '`beta-sdk-surface.md` — “\\| `file_human_approval` \\| 1 \\| → `record_decision`. \\|”'),
+    "get_confidence": ('check_confidence', '`canonical-sdk-methods.md` — “\\| R3 \\| `recall_beliefs` \\| #3 \\| `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`”'),
+    "get_cross_lens_candidates": ('review_link_candidates', '`beta-sdk-surface.md` — “\\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \\| 3 \\| → `review_link_candidates`. \\|”'),
+    "get_entity": ('UNCHANGED', '`beta-sdk-surface.md` — “current SDK (`create_entity`, `get_entity`, `approve_merge`, `close`)”'),
+    "get_events": ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`”'),
+    "get_org_structure": ('explore_connections', '`beta-sdk-surface.md` — “\\| `traverse`, `expand_relationships`, `get_org_structure` \\| 3 \\| → `explore_connections`. \\|”'),
+    "get_owned_entities": ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`”'),
+    "get_point": ('get_entity', '`canonical-sdk-methods.md` — “\\| R4 \\| `get_entity` \\| #4 \\| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \\|”'),
+    "get_provenance_chain": ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`”'),
+    "get_session": ('get_entity', '`beta-sdk-surface.md` — “\\| narrow readers (`get_session`, `get_events`, `get_owned_entities`, `get_provenance_chain`, …) \\| ~8 \\| → `get_entity`”'),
+    "get_source_reliability": ('manage_source_trust', '`beta-sdk-surface.md` — “\\| `assess_source`, `set_source_tier`, `get_source_reliability` \\| 3 \\| → `manage_source_trust`”'),
+    "graph_active_key_count": ('list_keys', '`beta-sdk-surface.md` — “\\| `graph_key_ids`, `graph_active_key_count` \\| 2 \\| Console diagnostics. Both fold into `list_keys`. \\|”'),
+    "graph_count": ('list_memory_graphs', '`beta-sdk-surface.md` — “`list_memory_graphs` answers "how many" for any real N.”'),
+    "graph_delete": ('delete_memory_graph', '`beta-sdk-surface.md` — “\\| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` \\| → rows 30–33 `*_memory_graph*`. \\|”'),
+    "graph_key_ids": ('list_keys', '`beta-sdk-surface.md` — “\\| `graph_key_ids`, `graph_active_key_count` \\| 2 \\| Console diagnostics. Both fold into `list_keys`. \\|”'),
+    "graph_list": ('list_memory_graphs', '`beta-sdk-surface.md` — “\\| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` \\| → rows 30–33 `*_memory_graph*`. \\|”'),
+    "graph_restore": ('restore_memory_graph', '`beta-sdk-surface.md` — “\\| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` \\| → rows 30–33 `*_memory_graph*`. \\|”'),
+    "graph_set_name": ('update_memory_graph', '`beta-sdk-surface.md` — “\\| `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` \\| → rows 30–33 `*_memory_graph*`. \\|”'),
+    "graph_set_recording": ('update_memory_graph', '`beta-sdk-surface.md` — “The override therefore folds into **`update_memory_graph`**”'),
+    "index_directory": ('index_sources_from_directory', '`canonical-sdk-methods.md` — “\\| W4 \\| `index_files` \\| #12 \\| `index_file`, `index_directory`”'),
+    "index_file": ('index_sources_from_directory', '`beta-sdk-surface.md` — “\\| `ingest_corpus`, `index_file`, `session_index_health` \\| 3 \\| → `index_sources_from_directory`. \\|”'),
+    "index_sessions": ('index_sources_from_directory', '`canonical-sdk-methods.md` — “\\| `index_sessions` / `ingest_corpus` → `index_directory` \\|”'),
+    "ingest": ('write_knowledge_batch', '`canonical-sdk-methods.md` — “\\| W2 \\| `write_knowledge` \\| — \\| `ingest` \\|”'),
+    "ingest_corpus": ('index_sources_from_directory', '`beta-sdk-surface.md` — “\\| `ingest_corpus`, `index_file`, `session_index_health` \\| 3 \\| → `index_sources_from_directory`. \\|”'),
+    "invalidate_point": ('update_knowledge', '`beta-sdk-surface.md` — “\\| `retract_point`, `invalidate_point` \\| 2 \\| → fields on `update_knowledge`.”'),
+    "invitation_accept": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `invitation_*` (6) \\| 6 \\| The invite **UX** belongs to the console, where a human clicks it. \\|”'),
+    "invitation_create": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `invitation_*` (6) \\| 6 \\| The invite **UX** belongs to the console, where a human clicks it. \\|”'),
+    "invitation_get_by_id": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `invitation_*` (6) \\| 6 \\| The invite **UX** belongs to the console, where a human clicks it. \\|”'),
+    "invitation_get_by_token": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `invitation_*` (6) \\| 6 \\| The invite **UX** belongs to the console, where a human clicks it. \\|”'),
+    "invitation_list": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `invitation_*` (6) \\| 6 \\| The invite **UX** belongs to the console, where a human clicks it. \\|”'),
+    "invitation_revoke": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `invitation_*` (6) \\| 6 \\| The invite **UX** belongs to the console, where a human clicks it. \\|”'),
+    "issue_insight": ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
+    "link_source_to_entity": ('link_entities', '`beta-sdk-surface.md` — “\\| `create_operator`, `create_direct_edge`, `create_derivation`, `link_source_to_entity` \\| 4 \\| → `link_entities`”'),
+    "list_batch": ('list_knowledge', "`beta-sdk-surface.md` — “\\| `list_batch`, `list_batches` \\| 2 \\| → `list_knowledge(kind='batch')`.”"),
+    "list_batches": ('list_knowledge', "`beta-sdk-surface.md` — “\\| `list_batch`, `list_batches` \\| 2 \\| → `list_knowledge(kind='batch')`.”"),
+    "list_dedup_candidates": ('review_link_candidates', '`beta-sdk-surface.md` — “\\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \\| 3 \\| → `review_link_candidates`. \\|”'),
+    "list_drafts": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| 4 \\| Lifecycle and confidence wrangling”'),
+    "list_graphs": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "list_namespaces": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "list_pointkinds": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "list_relations": ('graph_overview', '`canonical-sdk-methods.md` — “\\| R6 \\| `graph_overview` \\| #6 \\| `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`”'),
+    "list_sources": ('list_knowledge', "`beta-sdk-surface.md` — “It folds into **row 4 `list_knowledge(kind='source')`**”"),
+    "list_tags": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "list_topics": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "membership_create": ('add_member', '`beta-sdk-surface.md` — “\\| 37 \\| `add_member` \\| Grant a person access to the account \\|”'),
+    "membership_delete": ('remove_member', '`beta-sdk-surface.md` — “\\| 37 \\| `add_member` \\| Grant a person access to the account \\|”'),
+    "membership_get": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing.”'),
+    "membership_list": ('list_members', '`beta-sdk-surface.md` — “\\| 37 \\| `add_member` \\| Grant a person access to the account \\|”'),
+    "membership_update_role": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing.”'),
+    "migrate_orgs_to_registry": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` \\| 4 \\| **Our maintenance.**”'),
+    "mine_corpus": ('mine_knowledge_from_directory', '`beta-sdk-surface.md` — “\\| `mine_corpus` \\| 1 \\| → `mine_knowledge_from_directory`.”'),
+    "mitigate_operator": ('adjust_relationship', '`beta-sdk-surface.md` — “\\| `mitigate_operator`, `operator_action`, `annotate_operator` \\| 3 \\| → `adjust_relationship`”'),
+    "operator_action": ('adjust_relationship', '`beta-sdk-surface.md` — “\\| `mitigate_operator`, `operator_action`, `annotate_operator` \\| 3 \\| → `adjust_relationship`”'),
+    "org_create": ('UNBACKED', '**no doc states a destination**'),
+    "org_delete": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing.”'),
+    "org_get": ('get_organisation_account', '`beta-sdk-surface.md` — “\\| 28 \\| `get_organisation_account` \\| Read the account and the plan it is on \\|”'),
+    "org_list": ('get_organisation_account', '`beta-sdk-surface.md` — “\\| 28 \\| `get_organisation_account` \\| Read the account and the plan it is on \\|”'),
+    "org_update": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `org_update`, `org_delete`, `membership_get`, `membership_update_role`, `apikey_verify` \\| 5 \\| Console plumbing.”'),
+    "paginated_query": ('list_knowledge', '`beta-sdk-surface.md` — “\\| `query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`. \\|”'),
+    "promote_point": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| 4 \\| Lifecycle and confidence wrangling”'),
+    "provenance": ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence`”'),
+    "quarantine_batch": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| 4 \\| Lifecycle and confidence wrangling”'),
+    "query": ('list_knowledge', '`beta-sdk-surface.md` — “\\| `query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`. \\|”'),
+    "query_points_by_tag": ('list_knowledge', '`beta-sdk-surface.md` — “\\| `query`, `paginated_query`, `query_points_by_tag` \\| 3 \\| → `list_knowledge`. \\|”'),
+    "recall_gaps": ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence`”'),
+    "recall_state": ('check_confidence', '`beta-sdk-surface.md` — “\\| `recall_gaps`, `recall_subgraph`, `recall_state`, `recall_legs`, `calibrate_summary`, `calibration_passed` \\| ~6 \\| → `check_confidence`”'),
+    "recall_subgraph": ('DISCARDED', '`beta-sdk-surface.md` — “**`recall_subgraph` is dropped, not folded**”'),
+    "reconcile_sessions": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `backfill_v25`, `backfill_sources`, `backfill_about_entities`, `reconcile_sessions` \\| 4 \\| One-shot migrations.”'),
+    "record_calibration": ('UNBACKED', '**no doc states a destination**'),
+    "resolve_id": ('get_entity', '`canonical-sdk-methods.md` — “\\| R4 \\| `get_entity` \\| #4 \\| `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` \\|”'),
+    "restore_point_at": ('get_historical_knowledge', '`beta-sdk-surface.md` — “\\| `restore_point_at` \\| → row 7 **`get_historical_knowledge`**.”'),
+    "retract_point": ('update_knowledge', '`beta-sdk-surface.md` — “\\| `retract_point`, `invalidate_point` \\| 2 \\| → fields on `update_knowledge`.”'),
+    "retrieval_legs": ('check_confidence', '`canonical-sdk-methods.md` — “\\| R3 \\| `recall_beliefs` \\| #3 \\| `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`”'),
+    "review_connections": ('review_link_candidates', '`beta-sdk-surface.md` — “\\| `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` \\| 3 \\| → `review_link_candidates`. \\|”'),
+    "search_sessions": ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
+    "session_context": ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence`”'),
+    "session_index_health": ('index_sources_from_directory', '`beta-sdk-surface.md` — “\\| `ingest_corpus`, `index_file`, `session_index_health` \\| 3 \\| → `index_sources_from_directory`. \\|”'),
+    "set_point_baseline": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` \\| 4 \\| Lifecycle and confidence wrangling”'),
+    "set_source_tier": ('manage_source_trust', '`beta-sdk-surface.md` — “\\| `assess_source`, `set_source_tier`, `get_source_reliability` \\| 3 \\| → `manage_source_trust`”'),
+    "signup_token_lookup": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `signup_token_*` (3) \\| 3 \\| Operator-side agent self-signup”'),
+    "signup_token_recover": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `signup_token_*` (3) \\| 3 \\| Operator-side agent self-signup”'),
+    "signup_token_revoke": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `signup_token_*` (3) \\| 3 \\| Operator-side agent self-signup”'),
+    "stale_points": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "status": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "suggest_entry_points": ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
+    "summarize_structure": ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview`”'),
+    "supersede": ('supersede_knowledge', '`beta-sdk-surface.md` — “\\| `supersede`, `supersede_point` \\| 2 \\| → `supersede_knowledge`.”'),
+    "supersede_point": ('supersede_knowledge', '`beta-sdk-surface.md` — “\\| `supersede`, `supersede_point` \\| 2 \\| → `supersede_knowledge`.”'),
+    "sweep_invite_ghost_memberships": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` \\| 4 \\| **Our maintenance.**”'),
+    "taxonomy": ('graph_overview', '`beta-sdk-surface.md` — “narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` \\| **Deleted, not folded.**”'),
+    "test_guard": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `test_guard` \\| **Kept and relocated.**”'),
+    "topic_summarize": ('search_knowledge', '`beta-sdk-surface.md` — “\\| `search_sessions`, `suggest_entry_points`, `topic_summarize`, `issue_insight`, `annotate_ask_hits` \\| 5 \\| → `search_knowledge`. \\|”'),
+    "tortoise_fts_query": ('search_knowledge', '`canonical-sdk-methods.md` — “\\| R1 \\| `search_knowledge` \\| #1 \\| `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` \\|”'),
+    "trash_graphs": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `trash_graphs`, `migrate_orgs_to_registry`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` \\| 4 \\| **Our maintenance.**”'),
+    "traverse": ('explore_connections', '`beta-sdk-surface.md` — “\\| `traverse`, `expand_relationships`, `get_org_structure` \\| 3 \\| → `explore_connections`. \\|”'),
+    "ulid": ('DISCARDED', '`beta-sdk-surface.md` — “\\| `ulid` \\| 1 \\| A ULID generator. Not a memory operation. \\|”'),
+    "update": ('update_knowledge', '`canonical-sdk-methods.md` — “\\| W11 \\| `revise_knowledge` \\| #17 \\| `update`,”'),
+    "update_entity": ('update_knowledge', '`beta-sdk-surface.md` — “\\| `update_point`, `update_entity` \\| 2 \\| → `update_knowledge`. \\|”'),
+    "update_point": ('update_knowledge', '`beta-sdk-surface.md` — “\\| `update_point`, `update_entity` \\| 2 \\| → `update_knowledge`. \\|”'),
+    "validate_domain": ('graph_overview', '`beta-sdk-surface.md` — “\\| `audit`, `validate_domain`, `summarize_structure`, `dream_health_check`, `dream_health_state` \\| ~5 \\| → `graph_overview`”'),
+    "volunteer_context": ('check_confidence', '`beta-sdk-surface.md` — “\\| `provenance`, `belief_timeline`, `session_context`, `volunteer_context` \\| 4 \\| → `check_confidence`”'),
+}
 
 def _doc() -> str:
     """The generated document, read fresh — never cached across tests."""
@@ -441,6 +604,24 @@ def test_part_c3_tensions_are_read() -> None:
         "C3's cross-doc tensions changed, or the section emptied itself.\n"
         f"  parsed: {parsed}\n  pinned: {C3_TENSIONS_LITERAL}"
     )
+    # The 4th column is C3's EVIDENCE, and it was read by nothing: it could be swapped
+    # for another real sentence from the same doc while the tension stayed as claimed.
+    for name, marker in (
+        ("get_owned_entities", r"\| R5 \| `explore_connections`"),
+        ("get_provenance_chain", r"\| R3 \| `recall_beliefs`"),
+        ("restore_point_at", r"\| R3 \| `recall_beliefs`"),
+        ("list_sources", r"\| R6 \| `graph_overview`"),
+        ("test_guard", r"\| R6 \| `graph_overview`"),
+        ("graph_set_recording", r"\| N2 \| `graph`"),
+    ):
+        row = next(
+            (ln for ln in c3.splitlines() if ln.startswith(f"| `{name}` |")), None
+        )
+        assert row, f"C3 has no row for {name}"
+        assert marker in row, (
+            f"C3's evidence for {name} is no longer the {marker!r} grouping — "
+            f"the tension is now backed by a different doc's table:\n  {row}"
+        )
 
 
 def test_structural_counts_and_the_summary_sentence_are_read() -> None:
@@ -503,11 +684,30 @@ def test_every_citation_quote_is_pinned() -> None:
 
     actual = {k: v[1] for k, v in gen.CITES.items()}
     actual.update({k: v[1] for k, v in (gen.PHANTOM_CITES or {}).items()})
+    # C3's tensions carry their own quotes; omitting them left the C3 evidence free.
+    actual.update({k: v[1] for k, v in (gen.TENSION_CITES or {}).items()})
     assert actual == CITES_LITERAL, (
         "a citation quote changed, or cites were re-keyed.\n"
         f"  changed: {sorted(k for k in actual if CITES_LITERAL.get(k) != actual[k])}\n"
         f"  added:   {sorted(set(actual) - set(CITES_LITERAL))}\n"
         f"  dropped: {sorted(set(CITES_LITERAL) - set(actual))}"
+    )
+
+
+def test_every_row_is_bound_to_its_own_evidence() -> None:
+    """Each row's Target AND its rendered citation text equal the pinned pair.
+
+    This subsumes the per-key quote pin for Part A: swapping which citation key a row
+    uses changes the text it renders, so the swap reds. Without it, a row could cite
+    another method's grouping as the evidence for its own disposition.
+    """
+    rows = part_a_rows()
+    actual = {r["name"]: (r["target"], r["cite"]) for r in rows}
+    assert actual == ROW_CITE_LITERAL, (
+        "a row's target or its citation text moved.\n"
+        f"  changed: {sorted(k for k in actual if ROW_CITE_LITERAL.get(k) != actual[k])[:10]}\n"
+        f"  added:   {sorted(set(actual) - set(ROW_CITE_LITERAL))}\n"
+        f"  dropped: {sorted(set(ROW_CITE_LITERAL) - set(actual))}"
     )
 
 
@@ -630,17 +830,53 @@ def test_the_resolved_partition_never_emits_the_wildcard_group() -> None:
 # ─────────────────────────────────────────────────────────────────────
 def test_prose_counts_are_the_literals_the_doc_claims() -> None:
     text = DOC.read_text(encoding="utf-8")
-    for literal in (
-        "150 public methods",
-        "40 target methods",
-        "110 of the 150 are renames",
-        "**4** are already targets (unchanged)",
-        "**33** are discarded with a rationale",
-        "**3** have no destination",
-        "only **4** of them exist on `TortoiseSDK` today",
-        "**36** are Phase 2 work",
+    # Digit-BOUNDED, not substring: `"150 public methods" in text` also passes when the
+    # render produces `1150 public methods`, so the pin did not hold the number.
+    for pattern in (
+        r"(?<![\d])150 public methods",
+        r"(?<![\d])40 target methods",
+        r"(?<![\d])110 of the 150 are renames",
+        r"\*\*4\*\* are already targets \(unchanged\)",
+        r"\*\*33\*\* are discarded with a rationale",
+        r"\*\*3\*\* have no destination",
+        r"only \*\*4\*\* of them exist on `TortoiseSDK` today",
+        r"\*\*36\*\* are Phase 2 work",
     ):
-        assert literal in text, f"the headline no longer says {literal!r}"
+        assert re.search(pattern, text), f"the headline no longer says {pattern!r}"
+
+
+def test_the_unread_cells_and_the_row_ordinals_are_pinned() -> None:
+    """Cells that render facts but were read by no test, plus Part A's numbering.
+
+    Each of these was mutable with the whole suite green: the ordinals could become
+    `100, 101, …`, C1's status cell could state the opposite of its own heading, C2's
+    reason could contradict its finding, and C4's referent could name a method that
+    does not exist. A cell that states a fact is a claim; unread, it is a claim that
+    can be false.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    part_a = text.split("## Part A")[1].split("## Part B")[0]
+    ordinals = [int(m) for m in re.findall(r"^\| (\d+) \|", part_a, re.M)]
+    assert ordinals == list(range(1, 151)), (
+        f"Part A's row ordinals are {ordinals[:5]}…{ordinals[-2:]}, expected 1..150"
+    )
+    c1 = text.split("### C1")[1].split("### C2")[0]
+    assert c1.count("| no `def` on `TortoiseSDK` today |") == 36, (
+        "C1's status column no longer repeats its one true statement on all 36 rows"
+    )
+    c4 = text.split("### C4")[1].split("### C5")[0]
+    for name, referent in (
+        ("recall_legs", "`retrieval_legs`"),
+        ("stale", "`stale_points`"),
+        ("count_memory_graphs", "`graph_count`"),
+        ("set_memory_graph_name", "`graph_set_name`"),
+        ("set_memory_graph_backend", "**none**"),
+        ("index_sources", "`index_directory`"),
+        ("withdraw_knowledge", "**none**"),
+    ):
+        assert re.search(rf"^\| `{name}` \| {re.escape(referent)} \|", c4, re.M), (
+            f"C4's referent for {name} is no longer {referent}"
+        )
 
     rows = part_a_rows()
     assert sum(1 for r in rows if r["target"] == "UNCHANGED") == 4

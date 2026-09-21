@@ -437,9 +437,10 @@ surfaces:
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
   # `docs/product/beta-sdk-surface.md`,
   # `docs/product/canonical-sdk-methods.md`, or the GENERATED
-  # `docs/product/sdk-rename-table.md` selects NO surface at all (#4454) and this
-  # registration does not run. The guard against a hand-edited generated document
-  # is the `api` arm plus the `--check` drift form, not this registration.
+  # `docs/product/sdk-rename-table.md` selects NO surface at all (#4454), so this
+  # registration does not run for a docs-only change. A hand-edit of the GENERATED
+  # document is therefore UNGUARDED BY DESIGN (#4454); the drift gate exists only
+  # for the generator path.
   - test_sdk_rename_table.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
@@ -1623,7 +1624,7 @@ durations:
   # earlier reading is superseded and must not be restated as fact. Refresh from
   # the first CI junit run that includes it.
   test_mcp_rename_table.py: 240.0
-  test_sdk_rename_table.py: 45.0  # 26 tests; one subprocess `--check` (fresh ~16s tortoise.sdk import) + 25 in-process; measured 47s-553s wall depending on box load
+  test_sdk_rename_table.py: 45.0  # 29 tests; one subprocess `--check` (fresh ~16s tortoise.sdk import) + 28 in-process; measured 46s-553s wall depending on box load
   test_connector_sources.py: 1.5
   test_e2e9_point_in_time.py: 1.5
   test_file_human_approval.py: 1.5
