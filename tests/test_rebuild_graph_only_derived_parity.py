@@ -73,6 +73,12 @@ except Exception:
 _EMBED_PATCH = "tortoise.embeddings.compute_embedding"
 
 
+def _seed_hash(text: str) -> str:
+    """The content_hash the writer derives for `text` (import-local)."""
+    from tortoise.ids import content_hash
+    return content_hash(text)
+
+
 @pytest.fixture
 def sup(tmp_path):
     """(events_dir, sdk) with the JSONL journal wired (redirect-aware)."""
@@ -470,6 +476,69 @@ def test_sidecar_recovery_prefers_the_live_capture_over_stale_leftover(
     expected = _oracle(tmp_path, [_point_added(pid, "")], pid, "NEW")
     sdk._get_proj().rebuild_all(str(events))
     assert _read_derived(sdk, pid) == expected
+
+
+def test_failed_restore_still_retires_the_sidecar(sup, tmp_path):
+    """#4305 code-review round 5 — the sidecar must retire even when a derived
+    restore FAILED.
+
+    The pre-wipe sidecar is ONE graph-wide blob. Retaining it because one id's
+    restore failed re-merges pre-wipe truth for EVERY id it carries, so a raw
+    delete of an unrelated id is resurrected on the next rebuild (the
+    code-review round-4 P2). This pins the retirement AND its consequence:
+    `bad`'s restore write is rejected (an injected engine error — the
+    degrade-and-log class the tail's `except` exists for), `good` restores;
+    after rebuild #1 the sidecar must be gone, so a raw delete of `good`
+    survives rebuild #2. RED on the round-3 head (ff7b06b63, which retained the
+    sidecar).
+    """
+    from tortoise.projection import (
+        _load_prewipe_snapshot, _write_prewipe_snapshot, prewipe_snapshot_path)
+
+    events, sdk = sup
+    good, bad = "pt-good", "pt-bad"
+    _seed(sdk, good, "SEED")
+    _seed(sdk, bad, "SEED")
+    _write_journal(events, [])
+    entries = [
+        {"type": "PointAdded", "projection_version": 2,
+         "point": {"id": pid, "content": "SEED", "pointKind": "statement",
+                   "content_hash": _seed_hash("SEED")}}
+        for pid in (good, bad)
+    ]
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(events)), {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": entries,
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+    # Inject one engine rejection on `bad`'s restore write (the degrade-and-log
+    # class the tail's `except` exists for). Patching the INNER graph's `query`
+    # (`_GuardedGraph` is `__slots__`) keeps the guard in the call chain.
+    from unittest import mock
+    proj = sdk._get_proj()
+    inner = proj.g._g
+    real_query = inner.query
+
+    def _inject(cypher, params=None, timeout=None):
+        if "vecf32($emb)" in cypher and (params or {}).get("pid") == bad:
+            raise RuntimeError("injected engine rejection")
+        return real_query(cypher, params=params, timeout=timeout)
+
+    with mock.patch.object(inner, "query", _inject):
+        proj.rebuild_all(str(events))
+    # Retirement is unconditional — a failed restore must not retain the blob.
+    assert _load_prewipe_snapshot(prewipe_snapshot_path(str(events))) is None
+    # The unrelated, successfully-restored id must NOT come back on rebuild #2.
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": good})
+    proj.rebuild_all(str(events))
+    assert proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN count(n)",
+        params={"id": good}).result_set[0][0] == 0
 
 
 def test_revise_before_recreate_is_unchanged(sup, tmp_path):
