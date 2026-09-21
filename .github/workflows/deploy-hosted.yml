@@ -207,16 +207,41 @@ jobs:
           diff -u /tmp/committed-reqs.txt /tmp/expected-reqs.txt
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Verify secrets exist
+        # #4334: every secret is bound in `env:` and referenced as a QUOTED
+        # shell variable. `${{ secrets.X }}` must never appear in a `run:`
+        # body — GitHub substitutes it into the shell SOURCE before bash
+        # parses it, so a value containing `"` loses its quotes (the
+        # STRIPE_PRICE_IDS outage) and one containing `$(…)`/backticks would
+        # EXECUTE. An expanded variable's contents are data, never re-parsed.
+        env:
+          FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+          TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
+          FALKORDB_CLOUD_URI: ${{ secrets.FALKORDB_CLOUD_URI }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           # Core secrets are mandatory — the API cannot boot without them.
-          if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_CLOUD_URI }}" ]; then
+          if [ -z "$FASTAPI_INTERNAL_KEY" ] || [ -z "$TORTOISE_SECRET_PEPPER" ] || [ -z "$FALKORDB_CLOUD_URI" ]; then
             echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
             exit 1
           fi
           # Supabase migration drift gate (#1095): SUPABASE_ACCESS_TOKEN is
           # hard-required — the gate is fail-closed, a missing token must fail
           # the deploy, never silently skip the schema check.
-          if [ -z "${{ secrets.SUPABASE_ACCESS_TOKEN }}" ]; then
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
             echo "::error::SUPABASE_ACCESS_TOKEN must be set in GitHub secrets (migration drift gate, #1095)"
             exit 1
           fi
@@ -224,7 +249,7 @@ jobs:
           # guard stays ARMED even when skipped by skip-fly-machines-guard —
           # a missing token must fail the deploy, never silently disarm the
           # fleet check.
-          if [ -z "${{ secrets.FLY_API_TOKEN }}" ]; then
+          if [ -z "$FLY_API_TOKEN" ]; then
             echo "::error::FLY_API_TOKEN must be set in GitHub secrets (Fly machine guard, #1896)"
             exit 1
           fi
@@ -232,7 +257,7 @@ jobs:
           # never ships with billing silently dead. STRIPE_PRICE_IDS / Resend /
           # BILLING_* are warn-only — they degrade lazily at runtime (billing
           # endpoints 503, notifications skipped) until configured.
-          if [ -z "${{ secrets.STRIPE_SECRET_KEY }}" ] || [ -z "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ]; then
+          if [ -z "$STRIPE_SECRET_KEY" ] || [ -z "$STRIPE_WEBHOOK_SECRET" ]; then
             echo "::error::STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be set in GitHub secrets"
             exit 1
           fi
@@ -248,28 +273,28 @@ jobs:
           # backup (#545) optional-secret pattern — when a key is added to GH
           # secrets the secrets-set step below propagates it to Fly on the
           # next deploy.
-          if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ] && \
-             [ -z "${{ secrets.DEEPSEEK_API_KEY }}" ] && \
-             [ -z "${{ secrets.OPENAI_API_KEY }}" ] && \
-             [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
+          if [ -z "$OPENROUTER_API_KEY" ] && \
+             [ -z "$DEEPSEEK_API_KEY" ] && \
+             [ -z "$OPENAI_API_KEY" ] && \
+             [ -z "$GEMINI_API_KEY" ]; then
             echo "::warning::No LLM provider key set — POST /v1/sessions stores captures but skips LLM extraction into memory until configured. Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
           fi
-          if [ -z "${{ secrets.STRIPE_PRICE_IDS }}" ]; then
+          if [ -z "$STRIPE_PRICE_IDS" ]; then
             echo "::warning::STRIPE_PRICE_IDS not set — checkout/webhook tier resolution disabled until configured"
           fi
-          if [ -z "${{ secrets.RESEND_API_KEY }}" ] || [ -z "${{ secrets.BILLING_NOTIFY_TO }}" ]; then
+          if [ -z "$RESEND_API_KEY" ] || [ -z "$BILLING_NOTIFY_TO" ]; then
             echo "::warning::RESEND_API_KEY/BILLING_NOTIFY_TO not set — billing email notifications disabled until configured"
           fi
-          if [ -z "${{ secrets.RESEND_FROM_EMAIL }}" ]; then
+          if [ -z "$RESEND_FROM_EMAIL" ]; then
             echo "::warning::RESEND_FROM_EMAIL not set — transactional/billing sender falls back to noreply@premiselabs.co (#1136)"
           fi
           # Backup (TORTOISE_BACKUP_KEY + R2_*) is env-gated at runtime and
           # Pro-tier-only — missing secrets degrade gracefully (backup
           # endpoints 402/503), so warn instead of blocking the deploy (#545).
-          if [ -z "${{ secrets.TORTOISE_BACKUP_KEY }}" ]; then
+          if [ -z "$TORTOISE_BACKUP_KEY" ]; then
             echo "::warning::TORTOISE_BACKUP_KEY not set — backups disabled until configured"
           fi
-          if [ -z "${{ secrets.R2_ACCOUNT_ID }}" ] || [ -z "${{ secrets.R2_BUCKET }}" ]; then
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_BUCKET" ]; then
             echo "::warning::R2_* secrets not fully set — backup storage disabled until configured"
           fi
           # Session-capture LLM test seam (#1197): TORTOISE_SESSION_LLM_MOCK=1
@@ -310,44 +335,48 @@ jobs:
           # FAILS the deploy for that name instead of silently reopening the hole.
           # Keep it in step with .github/scripts/fly-managed-secrets.txt: every
           # `gh-secret:<NAME>` there needs its line here.
+          #
+          # #4334: each probe reads a variable bound in this step's `env:` —
+          # never an Actions secret template in the run text, where a value's
+          # `"` would be parsed as shell syntax (and `$(…)` executed).
           GH_PRESENT=""
-          [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ] && GH_PRESENT="$GH_PRESENT BACKUP_ALERT_ASSIGNEE"
-          [ -n "${{ secrets.BACKUP_SIMULATE_ENABLED }}" ] && GH_PRESENT="$GH_PRESENT BACKUP_SIMULATE_ENABLED"
-          [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && GH_PRESENT="$GH_PRESENT BILLING_CANCEL_URL"
-          [ -n "${{ secrets.BILLING_FROM_EMAIL }}" ] && GH_PRESENT="$GH_PRESENT BILLING_FROM_EMAIL"
-          [ -n "${{ secrets.BILLING_NOTIFY_TO }}" ] && GH_PRESENT="$GH_PRESENT BILLING_NOTIFY_TO"
-          [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && GH_PRESENT="$GH_PRESENT BILLING_SUCCESS_URL"
-          [ -n "${{ secrets.DEEPSEEK_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT DEEPSEEK_API_KEY"
-          [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && GH_PRESENT="$GH_PRESENT DR_ISSUES_PAT"
-          [ -n "${{ secrets.FALKORDB_CLOUD_URI }}" ] && GH_PRESENT="$GH_PRESENT FALKORDB_CLOUD_URI"
-          [ -n "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] && GH_PRESENT="$GH_PRESENT FASTAPI_INTERNAL_KEY"
-          [ -n "${{ secrets.GEMINI_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT GEMINI_API_KEY"
-          [ -n "${{ secrets.GH_CALLBACK_URL }}" ] && GH_PRESENT="$GH_PRESENT GH_CALLBACK_URL"
-          [ -n "${{ secrets.GH_CLIENT_ID }}" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_ID"
-          [ -n "${{ secrets.GH_CLIENT_SECRET }}" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_SECRET"
-          [ -n "${{ secrets.OPENAI_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT OPENAI_API_KEY"
-          [ -n "${{ secrets.OPENROUTER_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT OPENROUTER_API_KEY"
-          [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT POSTHOG_API_KEY"
-          [ -n "${{ secrets.POSTHOG_HOST }}" ] && GH_PRESENT="$GH_PRESENT POSTHOG_HOST"
-          [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && GH_PRESENT="$GH_PRESENT R2_ACCESS_KEY_ID"
-          [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && GH_PRESENT="$GH_PRESENT R2_ACCOUNT_ID"
-          [ -n "${{ secrets.R2_BUCKET }}" ] && GH_PRESENT="$GH_PRESENT R2_BUCKET"
-          [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && GH_PRESENT="$GH_PRESENT R2_SECRET_ACCESS_KEY"
-          [ -n "${{ secrets.RESEND_API_KEY }}" ] && GH_PRESENT="$GH_PRESENT RESEND_API_KEY"
-          [ -n "${{ secrets.RESEND_FROM_EMAIL }}" ] && GH_PRESENT="$GH_PRESENT RESEND_FROM_EMAIL"
-          [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && GH_PRESENT="$GH_PRESENT STRIPE_PRICE_IDS"
-          [ -n "${{ secrets.STRIPE_SECRET_KEY }}" ] && GH_PRESENT="$GH_PRESENT STRIPE_SECRET_KEY"
-          [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ] && GH_PRESENT="$GH_PRESENT STRIPE_WEBHOOK_SECRET"
-          [ -n "${{ secrets.SUPABASE_ANON_KEY }}" ] && GH_PRESENT="$GH_PRESENT SUPABASE_ANON_KEY"
-          [ -n "${{ secrets.SUPABASE_SERVICE_KEY }}" ] && GH_PRESENT="$GH_PRESENT SUPABASE_SERVICE_KEY"
-          [ -n "${{ secrets.SUPABASE_URL }}" ] && GH_PRESENT="$GH_PRESENT SUPABASE_URL"
-          [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_BOT_TOKEN"
-          [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_CHAT_ID"
-          [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY"
-          [ -n "${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY_PREVIOUS"
-          [ -n "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_ENCRYPTION_KEY"
-          [ -n "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
-          [ -n "${{ secrets.TURNSTILE_SECRET_KEY }}" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
+          [ -n "$BACKUP_ALERT_ASSIGNEE" ] && GH_PRESENT="$GH_PRESENT BACKUP_ALERT_ASSIGNEE"
+          [ -n "$BACKUP_SIMULATE_ENABLED" ] && GH_PRESENT="$GH_PRESENT BACKUP_SIMULATE_ENABLED"
+          [ -n "$BILLING_CANCEL_URL" ] && GH_PRESENT="$GH_PRESENT BILLING_CANCEL_URL"
+          [ -n "$BILLING_FROM_EMAIL" ] && GH_PRESENT="$GH_PRESENT BILLING_FROM_EMAIL"
+          [ -n "$BILLING_NOTIFY_TO" ] && GH_PRESENT="$GH_PRESENT BILLING_NOTIFY_TO"
+          [ -n "$BILLING_SUCCESS_URL" ] && GH_PRESENT="$GH_PRESENT BILLING_SUCCESS_URL"
+          [ -n "$DEEPSEEK_API_KEY" ] && GH_PRESENT="$GH_PRESENT DEEPSEEK_API_KEY"
+          [ -n "$DR_ISSUES_PAT" ] && GH_PRESENT="$GH_PRESENT DR_ISSUES_PAT"
+          [ -n "$FALKORDB_CLOUD_URI" ] && GH_PRESENT="$GH_PRESENT FALKORDB_CLOUD_URI"
+          [ -n "$FASTAPI_INTERNAL_KEY" ] && GH_PRESENT="$GH_PRESENT FASTAPI_INTERNAL_KEY"
+          [ -n "$GEMINI_API_KEY" ] && GH_PRESENT="$GH_PRESENT GEMINI_API_KEY"
+          [ -n "$GH_CALLBACK_URL" ] && GH_PRESENT="$GH_PRESENT GH_CALLBACK_URL"
+          [ -n "$GH_CLIENT_ID" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_ID"
+          [ -n "$GH_CLIENT_SECRET" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_SECRET"
+          [ -n "$OPENAI_API_KEY" ] && GH_PRESENT="$GH_PRESENT OPENAI_API_KEY"
+          [ -n "$OPENROUTER_API_KEY" ] && GH_PRESENT="$GH_PRESENT OPENROUTER_API_KEY"
+          [ -n "$POSTHOG_API_KEY" ] && GH_PRESENT="$GH_PRESENT POSTHOG_API_KEY"
+          [ -n "$POSTHOG_HOST" ] && GH_PRESENT="$GH_PRESENT POSTHOG_HOST"
+          [ -n "$R2_ACCESS_KEY_ID" ] && GH_PRESENT="$GH_PRESENT R2_ACCESS_KEY_ID"
+          [ -n "$R2_ACCOUNT_ID" ] && GH_PRESENT="$GH_PRESENT R2_ACCOUNT_ID"
+          [ -n "$R2_BUCKET" ] && GH_PRESENT="$GH_PRESENT R2_BUCKET"
+          [ -n "$R2_SECRET_ACCESS_KEY" ] && GH_PRESENT="$GH_PRESENT R2_SECRET_ACCESS_KEY"
+          [ -n "$RESEND_API_KEY" ] && GH_PRESENT="$GH_PRESENT RESEND_API_KEY"
+          [ -n "$RESEND_FROM_EMAIL" ] && GH_PRESENT="$GH_PRESENT RESEND_FROM_EMAIL"
+          [ -n "$STRIPE_PRICE_IDS" ] && GH_PRESENT="$GH_PRESENT STRIPE_PRICE_IDS"
+          [ -n "$STRIPE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT STRIPE_SECRET_KEY"
+          [ -n "$STRIPE_WEBHOOK_SECRET" ] && GH_PRESENT="$GH_PRESENT STRIPE_WEBHOOK_SECRET"
+          [ -n "$SUPABASE_ANON_KEY" ] && GH_PRESENT="$GH_PRESENT SUPABASE_ANON_KEY"
+          [ -n "$SUPABASE_SERVICE_KEY" ] && GH_PRESENT="$GH_PRESENT SUPABASE_SERVICE_KEY"
+          [ -n "$SUPABASE_URL" ] && GH_PRESENT="$GH_PRESENT SUPABASE_URL"
+          [ -n "$TELEGRAM_BOT_TOKEN" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_BOT_TOKEN"
+          [ -n "$TELEGRAM_CHAT_ID" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_CHAT_ID"
+          [ -n "$TORTOISE_BACKUP_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY"
+          [ -n "$TORTOISE_BACKUP_KEY_PREVIOUS" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY_PREVIOUS"
+          [ -n "$TORTOISE_ENCRYPTION_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_ENCRYPTION_KEY"
+          [ -n "$TORTOISE_SECRET_PEPPER" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
+          [ -n "$TURNSTILE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
           export GH_SECRETS_PRESENT="$GH_PRESENT"
           # The gate parses the workflow YAML (a step/job `if:` or an `env:` value is
           # not part of the `run:` shell, so execution cannot see it and line
@@ -378,6 +407,44 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: tortoise-y4mjjq
+          # #4334: the GH_SECRETS_PRESENT probe reads these as shell variables.
+          BACKUP_ALERT_ASSIGNEE: ${{ secrets.BACKUP_ALERT_ASSIGNEE }}
+          BACKUP_SIMULATE_ENABLED: ${{ secrets.BACKUP_SIMULATE_ENABLED }}
+          BILLING_CANCEL_URL: ${{ secrets.BILLING_CANCEL_URL }}
+          BILLING_FROM_EMAIL: ${{ secrets.BILLING_FROM_EMAIL }}
+          BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
+          BILLING_SUCCESS_URL: ${{ secrets.BILLING_SUCCESS_URL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DR_ISSUES_PAT: ${{ secrets.DR_ISSUES_PAT }}
+          FALKORDB_CLOUD_URI: ${{ secrets.FALKORDB_CLOUD_URI }}
+          FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
+          GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
+          TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
+          TORTOISE_ENCRYPTION_KEY: ${{ secrets.TORTOISE_ENCRYPTION_KEY }}
+          TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
+          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
       # Migration drift gate (#1095): fail-closed check that repo migrations
       # are not ahead of prod before shipping app code. The #1001 P0 (code
       # reading teams.suspended_at/flagged_at whose migration never reached
@@ -423,17 +490,69 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: tortoise-y4mjjq
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
+        # #4334: every secret is bound in `env:` and referenced as a QUOTED
+        # shell variable; the flyctl argv is a bash ARRAY (`"${ARGS[@]}"`).
+        # Never interpolate `${{ secrets.X }}` into the run text: GitHub
+        # substitutes it into the shell SOURCE before bash parses it, so a
+        # JSON value's `"` characters were read as quote toggles and REMOVED
+        # (the valid 573-char STRIPE_PRICE_IDS catalog reached Fly as a 501-char,
+        # zero-quote string → PriceCatalog() raised BillingConfigError →
+        # checkout_price_ids {} → checkout dead in prod), and a value
+        # containing `$(…)`/backticks would have EXECUTED. An expanded
+        # variable's contents are data, never re-parsed. The same anti-pattern
+        # remains in other workflows (blog-write-e2e, deploy-pages,
+        # attach-tortoise-domain, e2e-live-reconcile) — tracked in #4361.
+        env:
+          FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
+          TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
+          FALKORDB_CLOUD_URI: ${{ secrets.FALKORDB_CLOUD_URI }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          BILLING_FROM_EMAIL: ${{ secrets.BILLING_FROM_EMAIL }}
+          BILLING_SUCCESS_URL: ${{ secrets.BILLING_SUCCESS_URL }}
+          BILLING_CANCEL_URL: ${{ secrets.BILLING_CANCEL_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TORTOISE_SESSION_LLM_MODEL: ${{ secrets.TORTOISE_SESSION_LLM_MODEL }}
+          TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
+          TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DR_ISSUES_PAT: ${{ secrets.DR_ISSUES_PAT }}
+          BACKUP_ALERT_ASSIGNEE: ${{ secrets.BACKUP_ALERT_ASSIGNEE }}
+          BACKUP_SIMULATE_ENABLED: ${{ secrets.BACKUP_SIMULATE_ENABLED }}
+          GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
+          TORTOISE_ENCRYPTION_KEY: ${{ secrets.TORTOISE_ENCRYPTION_KEY }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"
+          ARGS=(FASTAPI_INTERNAL_KEY="$FASTAPI_INTERNAL_KEY" TORTOISE_SECRET_PEPPER="$TORTOISE_SECRET_PEPPER" FALKORDB_CLOUD_URI="$FALKORDB_CLOUD_URI")
           # #2208: TORTOISE_GIT_SHA — the exact deploy commit, exposed by GET
           # /v1/version so clients/skills can detect an outdated server.
           # GITHUB_SHA is the checked-out commit on push AND workflow_dispatch
           # (the ref head), so it always matches what this run deploys.
-          ARGS="$ARGS TORTOISE_GIT_SHA=${GITHUB_SHA}"
+          ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")
           # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
           # embeds (supabase-js createClient). Was never synced to Fly, so the
           # page rendered with an empty key ('supabaseKey is required').
-          [ -n "${{ secrets.SUPABASE_ANON_KEY }}" ] && ARGS="$ARGS SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+          [ -n "$SUPABASE_ANON_KEY" ] && ARGS+=(SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY")
           # #4126: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY were hand-set on Fly
           # with no managing source (both showed `Deployed`, i.e. never touched by
           # a staged deploy). Both already exist as GitHub Actions secrets, so
@@ -443,28 +562,28 @@ jobs:
           # SUPABASE_SERVICE_KEY; the FLY variable keeps the name the app reads
           # (`SUPABASE_SERVICE_ROLE_KEY` — tools/capture_cost_report.py accepts
           # either, tortoise/ reads the *_ROLE_* one).
-          [ -n "${{ secrets.SUPABASE_URL }}" ] && ARGS="$ARGS SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
-          [ -n "${{ secrets.SUPABASE_SERVICE_KEY }}" ] && ARGS="$ARGS SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+          [ -n "$SUPABASE_URL" ] && ARGS+=(SUPABASE_URL="$SUPABASE_URL")
+          [ -n "$SUPABASE_SERVICE_KEY" ] && ARGS+=(SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_KEY")
           # Stripe billing (#310): pass all billing secrets when present.
-          ARGS="$ARGS STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }} STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
-          [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
-          [ -n "${{ secrets.RESEND_API_KEY }}" ] && ARGS="$ARGS RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}"
-          [ -n "${{ secrets.BILLING_NOTIFY_TO }}" ] && ARGS="$ARGS BILLING_NOTIFY_TO=${{ secrets.BILLING_NOTIFY_TO }}"
+          ARGS+=(STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY" STRIPE_WEBHOOK_SECRET="$STRIPE_WEBHOOK_SECRET")
+          [ -n "$STRIPE_PRICE_IDS" ] && ARGS+=(STRIPE_PRICE_IDS="$STRIPE_PRICE_IDS")
+          [ -n "$RESEND_API_KEY" ] && ARGS+=(RESEND_API_KEY="$RESEND_API_KEY")
+          [ -n "$BILLING_NOTIFY_TO" ] && ARGS+=(BILLING_NOTIFY_TO="$BILLING_NOTIFY_TO")
           # #1136: single managed sender identity — RESEND_FROM_EMAIL (billing
           # override optional when a distinct billing sender is desired).
-          [ -n "${{ secrets.RESEND_FROM_EMAIL }}" ] && ARGS="$ARGS RESEND_FROM_EMAIL=${{ secrets.RESEND_FROM_EMAIL }}"
-          [ -n "${{ secrets.BILLING_FROM_EMAIL }}" ] && ARGS="$ARGS BILLING_FROM_EMAIL=${{ secrets.BILLING_FROM_EMAIL }}"
-          [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && ARGS="$ARGS BILLING_SUCCESS_URL=${{ secrets.BILLING_SUCCESS_URL }}"
-          [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && ARGS="$ARGS BILLING_CANCEL_URL=${{ secrets.BILLING_CANCEL_URL }}"
+          [ -n "$RESEND_FROM_EMAIL" ] && ARGS+=(RESEND_FROM_EMAIL="$RESEND_FROM_EMAIL")
+          [ -n "$BILLING_FROM_EMAIL" ] && ARGS+=(BILLING_FROM_EMAIL="$BILLING_FROM_EMAIL")
+          [ -n "$BILLING_SUCCESS_URL" ] && ARGS+=(BILLING_SUCCESS_URL="$BILLING_SUCCESS_URL")
+          [ -n "$BILLING_CANCEL_URL" ] && ARGS+=(BILLING_CANCEL_URL="$BILLING_CANCEL_URL")
           # Session-capture LLM provider (#1197): propagate the four provider
           # keys so the verify-secrets gate above and the shipped app AGREE —
           # a key present in GH secrets never reaches Fly otherwise (and every
           # capture would store turns but never extract them, even though the
           # gate passed).
-          [ -n "${{ secrets.OPENROUTER_API_KEY }}" ] && ARGS="$ARGS OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}"
-          [ -n "${{ secrets.DEEPSEEK_API_KEY }}" ] && ARGS="$ARGS DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
-          [ -n "${{ secrets.OPENAI_API_KEY }}" ] && ARGS="$ARGS OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
-          [ -n "${{ secrets.GEMINI_API_KEY }}" ] && ARGS="$ARGS GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
+          [ -n "$OPENROUTER_API_KEY" ] && ARGS+=(OPENROUTER_API_KEY="$OPENROUTER_API_KEY")
+          [ -n "$DEEPSEEK_API_KEY" ] && ARGS+=(DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY")
+          [ -n "$OPENAI_API_KEY" ] && ARGS+=(OPENAI_API_KEY="$OPENAI_API_KEY")
+          [ -n "$GEMINI_API_KEY" ] && ARGS+=(GEMINI_API_KEY="$GEMINI_API_KEY")
           # Session-capture extraction model (#1197/#1358, #4126): the model id
           # is NOT a credential, so the default lives HERE — in version control,
           # where a reviewer can see it — and is assigned UNCONDITIONALLY. Before
@@ -480,39 +599,39 @@ jobs:
           # provider key is set would leave the override pointing at a provider
           # the app is no longer configured for (sdk raises on the mismatch), so
           # warn here rather than let the deploy ship that state silently.
-          if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ] && [ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ]; then
+          if [ -z "$OPENROUTER_API_KEY" ] && [ -n "$TORTOISE_SESSION_LLM_MODEL" ]; then
             echo "::notice::TORTOISE_SESSION_LLM_MODEL comes from a GitHub secret — the key it names must be configured"
-          elif [ -z "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ] && [ -z "${{ secrets.OPENROUTER_API_KEY }}" ]; then
+          elif [ -z "$TORTOISE_SESSION_LLM_MODEL" ] && [ -z "$OPENROUTER_API_KEY" ]; then
             echo "::warning::TORTOISE_SESSION_LLM_MODEL is the versioned openrouter default but OPENROUTER_API_KEY is not set on GitHub — session-capture extraction will fail until that key is configured or the model override is changed (docs/infra-runbook.md §4)"
           fi
-          if [ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ]; then
-            ARGS="$ARGS TORTOISE_SESSION_LLM_MODEL=${{ secrets.TORTOISE_SESSION_LLM_MODEL }}"
+          if [ -n "$TORTOISE_SESSION_LLM_MODEL" ]; then
+            ARGS+=(TORTOISE_SESSION_LLM_MODEL="$TORTOISE_SESSION_LLM_MODEL")
           else
-            ARGS="$ARGS TORTOISE_SESSION_LLM_MODEL=openrouter:google/gemini-2.5-flash"
+            ARGS+=(TORTOISE_SESSION_LLM_MODEL=openrouter:google/gemini-2.5-flash)
           fi
           # Optional (env-gated at runtime): only pass when set, so unconfigured
           # backups / GitHub OAuth never fail the deploy.
-          [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"
+          [ -n "$TORTOISE_BACKUP_KEY" ] && ARGS+=(TORTOISE_BACKUP_KEY="$TORTOISE_BACKUP_KEY")
           # #2318: the RETAINED previous backup key is synced ONLY while the
           # GitHub secret exists (a rotation overlap window — old user-backup
           # archives stay decryptable in-app). Absent → the app reads no
           # *_PREVIOUS candidate. Clear it from GitHub + Fly after the window.
-          [ -n "${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY_PREVIOUS=${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}"
-          [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && ARGS="$ARGS R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}"
-          [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && ARGS="$ARGS R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}"
-          [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && ARGS="$ARGS R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}"
-          [ -n "${{ secrets.R2_BUCKET }}" ] && ARGS="$ARGS R2_BUCKET=${{ secrets.R2_BUCKET }}"
+          [ -n "$TORTOISE_BACKUP_KEY_PREVIOUS" ] && ARGS+=(TORTOISE_BACKUP_KEY_PREVIOUS="$TORTOISE_BACKUP_KEY_PREVIOUS")
+          [ -n "$R2_ACCOUNT_ID" ] && ARGS+=(R2_ACCOUNT_ID="$R2_ACCOUNT_ID")
+          [ -n "$R2_ACCESS_KEY_ID" ] && ARGS+=(R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID")
+          [ -n "$R2_SECRET_ACCESS_KEY" ] && ARGS+=(R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY")
+          [ -n "$R2_BUCKET" ] && ARGS+=(R2_BUCKET="$R2_BUCKET")
           # Backup sweep (#596): dual-channel alerting needs the Telegram pair +
           # the GitHub PAT; BACKUP_SWEEP_ENABLED=true only when ALL required
           # syncable secrets are present (fail-closed default — a missing
           # secret keeps the sweep off, never crashes the boot, #545).
-          [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && ARGS="$ARGS TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && ARGS="$ARGS TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}"
-          [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && ARGS="$ARGS DR_ISSUES_PAT=${{ secrets.DR_ISSUES_PAT }}"
-          [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ] && ARGS="$ARGS BACKUP_ALERT_ASSIGNEE=${{ secrets.BACKUP_ALERT_ASSIGNEE }}"
-          [ -n "${{ secrets.BACKUP_SIMULATE_ENABLED }}" ] && ARGS="$ARGS BACKUP_SIMULATE_ENABLED=${{ secrets.BACKUP_SIMULATE_ENABLED }}"
-          if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
-            ARGS="$ARGS BACKUP_SWEEP_ENABLED=true"
+          [ -n "$TELEGRAM_BOT_TOKEN" ] && ARGS+=(TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN")
+          [ -n "$TELEGRAM_CHAT_ID" ] && ARGS+=(TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID")
+          [ -n "$DR_ISSUES_PAT" ] && ARGS+=(DR_ISSUES_PAT="$DR_ISSUES_PAT")
+          [ -n "$BACKUP_ALERT_ASSIGNEE" ] && ARGS+=(BACKUP_ALERT_ASSIGNEE="$BACKUP_ALERT_ASSIGNEE")
+          [ -n "$BACKUP_SIMULATE_ENABLED" ] && ARGS+=(BACKUP_SIMULATE_ENABLED="$BACKUP_SIMULATE_ENABLED")
+          if [ -n "$TORTOISE_BACKUP_KEY" ] && [ -n "$R2_ACCOUNT_ID" ] && [ -n "$R2_ACCESS_KEY_ID" ] && [ -n "$R2_SECRET_ACCESS_KEY" ] && [ -n "$R2_BUCKET" ] && [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && [ -n "$DR_ISSUES_PAT" ] && [ -n "$BACKUP_ALERT_ASSIGNEE" ]; then
+            ARGS+=(BACKUP_SWEEP_ENABLED=true)
             echo "::notice::BACKUP_SWEEP_ENABLED=true — all backup-sweep secrets present"
             # REGISTRY_STREAM_KEY is deliberately NOT synced from GH (#661);
             # REGISTRY_STREAM_KEY_PREVIOUS (the #2318 rotation-overlap
@@ -529,26 +648,24 @@ jobs:
           fi
           # GitHub OAuth (#542): GH_CLIENT_ID/GH_CLIENT_SECRET (GitHub reserves GITHUB_* prefix) + encryption key —
           # warn-only until the OAuth app is registered and secrets set.
-          if [ -z "${{ secrets.GH_CLIENT_ID }}" ] || [ -z "${{ secrets.GH_CLIENT_SECRET }}" ]; then
+          if [ -z "$GH_CLIENT_ID" ] || [ -z "$GH_CLIENT_SECRET" ]; then
             echo "::warning::GH_CLIENT_ID/GH_CLIENT_SECRET not set — GitHub OAuth disabled until configured (#542)"
           fi
-          if [ -z "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ]; then
+          if [ -z "$TORTOISE_ENCRYPTION_KEY" ]; then
             echo "::warning::TORTOISE_ENCRYPTION_KEY not set — token encryption unavailable until configured (#542)"
           fi
-          [ -n "${{ secrets.GH_CLIENT_ID }}" ] && ARGS="$ARGS GITHUB_CLIENT_ID=${{ secrets.GH_CLIENT_ID }}"
-          [ -n "${{ secrets.GH_CLIENT_SECRET }}" ] && ARGS="$ARGS GITHUB_CLIENT_SECRET=${{ secrets.GH_CLIENT_SECRET }}"
-          [ -n "${{ secrets.GH_CALLBACK_URL }}" ] && ARGS="$ARGS GITHUB_CALLBACK_URL=${{ secrets.GH_CALLBACK_URL }}"
-          [ -n "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ] && ARGS="$ARGS TORTOISE_ENCRYPTION_KEY=${{ secrets.TORTOISE_ENCRYPTION_KEY }}"
+          [ -n "$GH_CLIENT_ID" ] && ARGS+=(GITHUB_CLIENT_ID="$GH_CLIENT_ID")
+          [ -n "$GH_CLIENT_SECRET" ] && ARGS+=(GITHUB_CLIENT_SECRET="$GH_CLIENT_SECRET")
+          [ -n "$GH_CALLBACK_URL" ] && ARGS+=(GITHUB_CALLBACK_URL="$GH_CALLBACK_URL")
+          [ -n "$TORTOISE_ENCRYPTION_KEY" ] && ARGS+=(TORTOISE_ENCRYPTION_KEY="$TORTOISE_ENCRYPTION_KEY")
           # #528 server analytics (PostHog) — absent key → analytics module no-ops.
-          [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && ARGS="$ARGS POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}"
-          [ -n "${{ secrets.POSTHOG_HOST }}" ] && ARGS="$ARGS POSTHOG_HOST=${{ secrets.POSTHOG_HOST }}"
+          [ -n "$POSTHOG_API_KEY" ] && ARGS+=(POSTHOG_API_KEY="$POSTHOG_API_KEY")
+          [ -n "$POSTHOG_HOST" ] && ARGS+=(POSTHOG_HOST="$POSTHOG_HOST")
           # #308 signup CAPTCHA (Cloudflare Turnstile) — absent secret → API
           # fails open (signup works, warning logged), matching the optional
           # env-gated feature pattern.
-          [ -n "${{ secrets.TURNSTILE_SECRET_KEY }}" ] && ARGS="$ARGS TURNSTILE_SECRET_KEY=${{ secrets.TURNSTILE_SECRET_KEY }}"
-          flyctl secrets set --stage $ARGS --app tortoise-y4mjjq
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          [ -n "$TURNSTILE_SECRET_KEY" ] && ARGS+=(TURNSTILE_SECRET_KEY="$TURNSTILE_SECRET_KEY")
+          flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq
       - name: Deploy (retry through Fly lease/API races)
         # Uses app-scoped deploy token (#660). NOTE (verified 2026-08-09):
         # app-scoped deploy tokens CAN still manage this app's secrets —
