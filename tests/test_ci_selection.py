@@ -230,6 +230,30 @@ def test_shared_module_goes_full():
     assert r2["full"] is True
 
 
+def test_conftest_reexported_suite_wide_module_selects_full():
+    """#4069: the suite-wide teardown helper must run the FULL matrix.
+
+    `tests/_tmpdir_hygiene.py` is imported at conftest MODULE level and
+    re-exports the autouse `track_tempfile_artifacts` fixture, so it patches
+    `tempfile.mkdtemp` and deletes directories for EVERY surface's tests — it is
+    functionally part of `tests/conftest.py`.
+
+    `test_every_shared_module_entry_selects_the_full_matrix` (the #4097 ratchet)
+    derives its invariant from the ENTRIES of `SHARED_MODULES`, so it cannot catch
+    an entry that is MISSING — which is exactly the review finding on #4069: the
+    module selected `core` only. This test pins the conftest-import side of the
+    contract, so removing the `SHARED_MODULES` entry (or un-re-exporting the
+    fixture from conftest) fails here instead of silently under-selecting.
+    """
+    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text()
+    assert "from tests._tmpdir_hygiene import track_tempfile_artifacts" in conftest_src, (
+        "conftest no longer re-exports the suite-wide tempfile tracker — re-derive "
+        "whether tests/_tmpdir_hygiene.py must still run the full matrix")
+    r = _sel(["tests/_tmpdir_hygiene.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+
+
 def test_every_shared_module_entry_selects_the_full_matrix():
     """#4097: `SHARED_MODULES` is a hand-maintained list, so derive its invariant here.
 

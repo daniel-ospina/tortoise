@@ -141,6 +141,61 @@ def test_tracker_fails_closed_on_an_unreadable_pid():
         os.rmdir(path)
 
 
+def test_tracker_fails_closed_on_a_non_regular_pid_file():
+    """A `redis.pid` that exists but is not a regular file must not expose the
+    directory: `os.path.isfile` returns False for a FIFO, which read as "no
+    pid file" (review finding on this PR; declared threat class 3)."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("mkfifo is POSIX-only")
+    with TrackedTempfileArtifacts() as tracker:
+        path = tempfile.mkdtemp(prefix="ask_hygiene_fifo_")
+        os.mkfifo(os.path.join(path, "redis.pid"))
+    try:
+        assert os.path.isdir(path)  # left for the reaper, never removed
+        assert [p for p, _ in tracker.skipped_live] == [path]
+    finally:
+        os.remove(os.path.join(path, "redis.pid"))
+        os.rmdir(path)
+
+
+def test_tracker_fails_closed_on_a_dangling_symlink_pid_file():
+    with TrackedTempfileArtifacts() as tracker:
+        path = tempfile.mkdtemp(prefix="ask_hygiene_dangling_")
+        os.symlink(os.path.join(path, "gone"),
+                   os.path.join(path, "redis.pid"))
+    try:
+        assert os.path.isdir(path)
+        assert [p for p, _ in tracker.skipped_live] == [path]
+    finally:
+        os.remove(os.path.join(path, "redis.pid"))
+        os.rmdir(path)
+
+
+def test_tracker_dead_pid_does_not_short_circuit_a_live_second_pid(
+        monkeypatch):
+    """The dead-pid branch must `continue` to the remaining pid files, not
+    `return None` — otherwise a dead first pid disables a live server's
+    protection once `_PID_FILENAMES` grows past one entry."""
+    import subprocess
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    monkeypatch.setattr(
+        "tests._tmpdir_hygiene._PID_FILENAMES", ("redis.pid", "falkor.pid"))
+    with TrackedTempfileArtifacts() as tracker:
+        path = tempfile.mkdtemp(prefix="ask_hygiene_twopids_")
+        with open(os.path.join(path, "redis.pid"), "w") as fh:
+            fh.write(str(proc.pid))                  # provably dead
+        with open(os.path.join(path, "falkor.pid"), "w") as fh:
+            fh.write(str(os.getpid()))               # this process: live
+    try:
+        assert os.path.isdir(path)  # the LIVE second pid must still protect it
+        assert [p for p, _ in tracker.skipped_live] == [path]
+    finally:
+        os.remove(os.path.join(path, "redis.pid"))
+        os.remove(os.path.join(path, "falkor.pid"))
+        os.rmdir(path)
+
+
 def test_protected_reason_is_none_for_a_provably_dead_pid():
     import subprocess
     proc = subprocess.Popen([sys.executable, "-c", "pass"])

@@ -29,8 +29,10 @@ This tool is deliberately narrow and safe BY CONSTRUCTION:
   its session-long dirs carry a live `redis.pid` — see the guard below.
   Raise to 24h for a conservative pass on a busy box.
 * **Live-server guard.** A candidate whose `redis.pid` names a live
-  process (or is unparseable — fail closed) is protected. Socket-bearing
-  tree cleanup beyond that is the reaper's domain, not this tool's.
+  process — or whose pid file is unreadable, unparseable, non-positive,
+  out-of-range, or present but not a regular file — is protected: fail
+  closed on anything not PROVABLY dead. Socket-bearing tree cleanup beyond
+  that is the reaper's domain, not this tool's.
 * **Dry-run by default.** `--apply` is required to delete anything.
 * **Idempotent.** A second `--apply` run discovers zero candidates; the
   removal path itself tolerates an already-removed entry.
@@ -60,6 +62,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -215,14 +218,34 @@ def _dir_size(path: str) -> int:
 def _live_pid_protects(entry_path: str) -> str | None:
     """Return a reason string when a live embedded server owns the entry.
 
-    Fail-closed: an unreadable/unparseable pid file protects the entry
-    rather than exposing it to removal. A dead pid does NOT protect — that
-    is exactly the orphaned-dir case the sweep exists to reclaim.
+    Fail-closed: a pid file that is present but CANNOT BE PROVEN DEAD
+    protects the entry rather than exposing it to removal — unreadable,
+    unparseable, non-positive, out-of-range, or present-but-not-a-regular-
+    file. A DEAD pid does not protect: that is exactly the orphaned-dir case
+    the sweep exists to reclaim.
+
+    The probe is `os.lstat`, not `os.path.isfile`: `isfile` answers False for
+    a path that EXISTS but is not a regular file (FIFO, dangling symlink,
+    device, directory) and for a path whose parent cannot be stat-ed — three
+    states this guard must read as "present but unprovable". Treating any of
+    them as "no pid file" is a fail-open (declared threat class 3), and the
+    tracker's mirror of this function must decide identically (pinned by
+    `tests/test_tmpdir_sweep.py::test_the_two_guards_agree_on_every_shape`).
+
+    `tests/_tmpdir_hygiene.py::_protected_reason` is the deliberate mirror of
+    this function; a change here must be made there too, or the parity test
+    fails.
     """
     for name in _PID_FILENAMES:
         pid_file = os.path.join(entry_path, name)
-        if not os.path.isfile(pid_file):
+        try:
+            st = os.lstat(pid_file)
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            return f"unstattable {name} ({exc}) (treated as live)"
+        if not stat.S_ISREG(st.st_mode):
+            return f"non-regular {name} (treated as live)"
         try:
             with open(pid_file, encoding="utf-8", errors="replace") as fh:
                 raw = fh.read().strip()
@@ -237,7 +260,12 @@ def _live_pid_protects(entry_path: str) -> str | None:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            return None  # dead pid -> orphaned dir, safe to reclaim
+            # PROVABLY dead: this pid file does not protect the entry. Keep
+            # checking the REMAINING pid files — returning here would let a
+            # dead first pid short-circuit a live second one, which is a
+            # fail-open the moment a second pid file is ever added to
+            # `_PID_FILENAMES`.
+            continue
         except PermissionError:
             return f"pid {pid} alive (no permission to signal)"
         except OverflowError:

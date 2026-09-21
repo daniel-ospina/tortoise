@@ -111,6 +111,17 @@ SHARED_MODULES = (
     "tortoise/projection/",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
+    # #4069: `tests/_tmpdir_hygiene.py` is imported at conftest MODULE level
+    # (`tests/conftest.py:1148`) and re-exports the suite-wide autouse
+    # `track_tempfile_artifacts` fixture, so it is functionally part of
+    # conftest: it patches `tempfile.mkdtemp` and deletes directories for
+    # EVERY surface's tests. It is not a `test_*.py` file, so the manifest
+    # never classifies it and a change to it would otherwise select `core`
+    # only — a break it induces in `api`/`eval`/`onboarding`/`ep`/`battery`
+    # tests would never run on the PR that made it (the same silent
+    # under-selection family as #1349/#3332/#3910). Found by code review on
+    # the #4069 PR itself.
+    "tests/_tmpdir_hygiene.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",

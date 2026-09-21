@@ -266,6 +266,128 @@ def test_unreadable_pid_protects_a_stale_dir(tmp_path):
         os.chmod(pid_file, 0o600)
 
 
+def test_non_regular_pid_file_fails_closed(tmp_path):
+    """A `redis.pid` that EXISTS but is not a regular file must protect the
+    entry. `os.path.isfile` answers False for a FIFO — which read as "no pid
+    file" and exposed the entry to removal (declared threat class 3:
+    live-server clobber; found by review on this PR)."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("mkfifo is POSIX-only")
+    weird = tmp_path / "ask_fifo_55555555"
+    weird.mkdir()
+    os.mkfifo(weird / "redis.pid")
+    ts = time.time() - _OLD_H * 3600.0
+    os.utime(weird, (ts, ts))
+
+    assert _live_pid_protects(str(weird)) is not None
+    result = sweep(str(tmp_path), apply=True, older_than_hours=24.0)
+    assert weird.exists()
+    assert result.removed == []
+    assert any("non-regular" in d.reason for d in result.kept)
+
+
+def test_dangling_symlink_pid_file_fails_closed(tmp_path):
+    weird = tmp_path / "ask_dangling_44444444"
+    weird.mkdir()
+    os.symlink(str(weird / "does-not-exist"), weird / "redis.pid")
+    ts = time.time() - _OLD_H * 3600.0
+    os.utime(weird, (ts, ts))
+
+    assert _live_pid_protects(str(weird)) is not None
+    result = sweep(str(tmp_path), apply=True, older_than_hours=24.0)
+    assert weird.exists()
+    assert result.removed == []
+
+
+def test_a_dead_pid_does_not_short_circuit_a_live_second_pid(
+        tmp_path, monkeypatch):
+    """The dead-pid branch must `continue` to the REMAINING pid files rather
+    than `return None`: with a second entry in `_PID_FILENAMES`, a dead
+    `redis.pid` would otherwise silently disable a live server's protection.
+
+    `_PID_FILENAMES` is a one-tuple today, so this is the latent fail-open the
+    loop shape exists to prevent — monkeypatched to two entries to make it
+    reachable."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    monkeypatch.setattr(
+        "tools.tmpdir_sweep._PID_FILENAMES", ("redis.pid", "falkor.pid"))
+    live = tmp_path / "ask_two_pids_22222222"
+    live.mkdir()
+    (live / "redis.pid").write_text(str(proc.pid))      # provably dead
+    (live / "falkor.pid").write_text(str(os.getpid()))  # this process: live
+    ts = time.time() - _OLD_H * 3600.0
+    os.utime(live, (ts, ts))
+
+    assert _live_pid_protects(str(live)) is not None
+    result = sweep(str(tmp_path), apply=True, older_than_hours=24.0)
+    assert live.exists()
+    assert result.removed == []
+
+
+def test_the_two_guards_agree_on_every_shape(tmp_path):
+    """`tools/tmpdir_sweep.py::_live_pid_protects` and
+    `tests/_tmpdir_hygiene.py::_protected_reason` are deliberate MIRRORS of one
+    safety property: only a PROVABLY dead pid permits removal.
+
+    They are two copies because the sweep must stay runnable as a bare script —
+    `python3 tools/tmpdir_sweep.py` puts `tools/`, not the repo root, on
+    `sys.path`, so the sweep cannot import a shared `tools.*` helper. Two
+    copies drift: both used `os.path.isfile`, which answers False for an
+    EXISTING non-regular pid file, so the same guarded entry read as unguarded
+    in BOTH (review finding on this PR). This test pins the equivalence across
+    the guard's whole decision space, so an unmirrored change to either copy
+    fails here instead of shipping.
+    """
+    import tempfile
+
+    from tests._tmpdir_hygiene import _protected_reason
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    shapes: list[tuple[str, str]] = []
+
+    def _shape(label: str, setup) -> None:
+        path = tempfile.mkdtemp(prefix="ask_parity_", dir=str(tmp_path))
+        setup(path)
+        shapes.append((label, path))
+
+    def _pid(text: str):
+        def _write(path: str) -> None:
+            with open(os.path.join(path, "redis.pid"), "w") as fh:
+                fh.write(text)
+        return _write
+
+    _shape("absent", lambda path: None)
+    _shape("live", _pid(str(os.getpid())))
+    _shape("dead", _pid(str(proc.pid)))
+    _shape("unparseable", _pid("not-a-pid"))
+    _shape("empty", _pid(""))
+    _shape("zero", _pid("0"))
+    _shape("negative", _pid("-3"))
+    _shape("out-of-range", _pid("1" + "0" * 30))
+    _shape("directory", lambda path: os.mkdir(
+        os.path.join(path, "redis.pid")))
+    _shape("dangling-symlink", lambda path: os.symlink(
+        os.path.join(path, "gone"), os.path.join(path, "redis.pid")))
+    if hasattr(os, "mkfifo"):
+        _shape("fifo", lambda path: os.mkfifo(
+            os.path.join(path, "redis.pid")))
+
+    assert len(shapes) >= 10
+    for label, path in shapes:
+        sweep_verdict = _live_pid_protects(path) is None
+        tracker_verdict = _protected_reason(path) is None
+        assert sweep_verdict == tracker_verdict, (
+            f"the two guards disagree on the {label!r} shape: sweep "
+            f"removable={sweep_verdict}, tracker removable={tracker_verdict}")
+    # And the property itself, not only the agreement: ONLY the two
+    # no-live-pid shapes may be removable.
+    removable = {label for label, path in shapes
+                 if _live_pid_protects(path) is None}
+    assert removable == {"absent", "dead"}, removable
+
+
 def test_sweep_refuses_a_non_finite_age_gate(tmp_path):
     # `age_h < nan` is always False -> every entry becomes a candidate.
     _make(tmp_path, "ask_nan_33333333", age_hours=0.0)

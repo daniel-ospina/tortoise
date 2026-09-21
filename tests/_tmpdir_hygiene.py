@@ -23,10 +23,13 @@ Why patch the call sites rather than edit 435 of them:
 Safety properties:
 
 * Directories only (`tempfile.mkdtemp`); `mkstemp` files are not touched.
-* A directory whose `redis.pid` is live — or unreadable/unparseable — is
-  left for the reaper rather than removed out from under a running embedded
+* A directory whose `redis.pid` is live — or unreadable, unparseable,
+  non-positive, out-of-range, or present but not a regular file — is left
+  for the reaper rather than removed out from under a running embedded
   server (fail closed, mirroring the sweep: a pid that cannot be proven dead
-  is treated as live). The skip is logged.
+  is treated as live; the two guards are pinned equal by
+  `tests/test_tmpdir_sweep.py::test_the_two_guards_agree_on_every_shape`).
+  The skip is logged.
 * `shutil.rmtree` never follows symlinks; removal is `ignore_errors` so an
   already-cleaned directory (or a concurrent reaper) is a no-op — the fixture
   is idempotent.
@@ -40,6 +43,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator
 
@@ -54,16 +58,32 @@ def _protected_reason(path: str) -> str | None:
     """Why `path` must NOT be removed, or None when teardown is safe.
 
     Fail-CLOSED, mirroring `tools/tmpdir_sweep.py::_live_pid_protects`: a
-    `redis.pid` that is live, unreadable, unparseable, non-positive, or whose
-    probe fails for any reason is treated as a running server and the
-    directory is left for the reaper. Only a provably dead pid (or no pid
-    file at all) permits removal — the reaper cannot reclassify a directory
-    this fixture has already deleted.
+    `redis.pid` that is live, unreadable, unparseable, non-positive, present
+    but not a regular file, or whose probe fails for any reason is treated as
+    a running server and the directory is left for the reaper. Only a
+    provably dead pid (or no pid file at all) permits removal — the reaper
+    cannot reclassify a directory this fixture has already deleted.
+
+    This function is the deliberate MIRROR of the sweep's guard; the two must
+    decide identically on every pid-file shape, which
+    `tests/test_tmpdir_sweep.py::test_the_two_guards_agree_on_every_shape`
+    pins. A change here must be made there too.
     """
     for name in _PID_FILENAMES:
         pid_file = os.path.join(path, name)
-        if not os.path.isfile(pid_file):
+        # `os.lstat`, NOT `os.path.isfile`: `isfile` answers False for a path
+        # that EXISTS but is not a regular file (FIFO, dangling symlink,
+        # device, directory) and for a path whose parent cannot be stat-ed —
+        # all of which must read as "present but unprovable", never as "no
+        # pid file" (which would expose the directory to removal).
+        try:
+            st = os.lstat(pid_file)
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            return f"unstattable {name} ({exc}) — treated as live"
+        if not stat.S_ISREG(st.st_mode):
+            return f"non-regular {name} — treated as live"
         try:
             with open(pid_file, encoding="utf-8", errors="replace") as fh:
                 raw = fh.read().strip()
@@ -78,7 +98,10 @@ def _protected_reason(path: str) -> str | None:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            return None  # provably dead -> safe to remove
+            # Provably dead: this pid file does not protect the directory.
+            # Keep checking the REMAINING pid files — returning here would
+            # let a dead first pid short-circuit a live second one.
+            continue
         except PermissionError:
             return f"pid {pid} alive (no permission to signal)"
         except OverflowError:
