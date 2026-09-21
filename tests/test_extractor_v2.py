@@ -1077,9 +1077,9 @@ class TestS3:
         # the point leg asked for exactly `limit + _PRIOR_OVERFETCH`; every other
         # leg kept the exact window it always had
         assert sdk.asked, "no queries ran"
-        assert {l for t, l in sdk.asked if t == "point"} == \
+        assert {win for t, win in sdk.asked if t == "point"} == \
             {3 + v2._PRIOR_OVERFETCH}, sdk.asked
-        assert {l for t, l in sdk.asked if t != "point"} == {3}, sdk.asked
+        assert {win for t, win in sdk.asked if t != "point"} == {3}, sdk.asked
 
     def test_turn_echo_drop_refills_a_single_slot(self, monkeypatch):
         """``limit=1`` — the minimal refill: one echo dropped, the real prior
@@ -1154,6 +1154,7 @@ class TestS3:
         out-of-range ``limit`` must still reach the callee (which raises) rather
         than being silently capped."""
         import inspect
+
         from tortoise.sdk import TortoiseSDK
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
         # drift guard: the bound is a hardcoded literal in the callee — pin the

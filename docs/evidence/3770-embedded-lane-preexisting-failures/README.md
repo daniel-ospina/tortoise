@@ -72,7 +72,8 @@ docker lane. **No rebase clears them** (the failure is not time/shape drift).
 ## 4. Mechanism — a real, deterministic projection bug (not a flake)
 
 The failing assertion compares the rebuilt node's `embedding` with the live
-`apply()` oracle's. A probe (`probe.py`, cosine similarity of each side's vector
+`apply()` oracle's. A probe (`probe.py.txt` — a verbatim recorded script, kept
+with a `.txt` suffix so it is not linted as repo code; cosine similarity of each side's vector
 against the candidate contents) shows the rebuilt node keeps the **original**
 content's embedding while its `content` is the final one:
 
