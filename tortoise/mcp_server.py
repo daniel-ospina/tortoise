@@ -2955,12 +2955,14 @@ def _maybe_onboarding_auto_complete(*,
       is a DELIBERATE false negative — claiming a decision at the refinement
       step would be the same unobserved fact, inverted. See #3916.)
     - ``catalog-presented`` (label: "Review the catalog"): NEVER inferred
-      from a write. Its presentation is observed only by the agent catalog
-      checkpoint (``hosted_api._CHECKPOINT_STEPS``) — the dashboard used to
-      render-mark it on a build-fork pick, but that writer is deleted. #3913
-      (owner ruling 2026-09-20): it is NO LONGER a build-gate requirement —
-      the build fork completes on the two observed acts above — so this id
-      remains an accepted, OPTIONAL record, never a completion input.
+      from a write. Its presentation is observed by the agent catalog
+      checkpoint (``hosted_api._CHECKPOINT_STEPS``), or asserted by an
+      external caller through ``PATCH /v1/onboarding/state``
+      (``catalog_presented``). The dashboard used to render-mark it on a
+      build-fork pick, but that writer is deleted; the id stays an accepted,
+      OPTIONAL record either way. #3913 (owner ruling 2026-09-20): it is NO
+      LONGER a build-gate requirement — the build fork completes on the two
+      observed acts above — so it is never a completion input.
 
     Status is SERVER-OWNED and fork-aware: completion is delegated to
     ``hosted_api._maybe_apply_completion`` (the canonical

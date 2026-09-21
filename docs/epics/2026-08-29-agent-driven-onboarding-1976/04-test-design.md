@@ -13,6 +13,8 @@ aboutObjects: tortoise
 
 > Produced by the Test-Design Gate (epic-workflow, between Scope approval and Plan). Input: scope `03-scope.md` Customer Value Map (17 capabilities). This doc is the canonical surface map; the filed test-design issue **#1992** carries it so every child issue can reference it.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork pick writes `{fork}` only, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ## Integration Surface Map
 
 | # | Surface | Type | Data Flow | Test Layer | Contract | Key Failure Modes |
@@ -81,8 +83,6 @@ aboutObjects: tortoise
 | 11 capture disclosure | integration + hosted-e2e | delete cleans session+receipt; no consent re-gate (#1927 preserved) |
 | 12 invite fusion | integration + contract + hosted-e2e | 3-path choice; OTP BOTH mismatch paths; atomic new-user accept; legacy-403 byte-unchanged w/o v2 opt-in; member_progress never fakes org completion; inline skippable invitee setup; pending-invites + admin resend/expire |
 | 13 builder catalog | unit + integration + contract | registry pullable + accurate; module notes present; catalog-presented once (step-edge) |
-
-> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** one or more rows in this doc still state the old build gate (`catalog-presented` as a required step edge) and/or the old dashboard writer (a render-time `POST {step:'catalog-presented'}`). The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input and no dashboard path writes it. The rows are kept verbatim as the historical record.
 | 14 telemetry | integration + regression | events once per org at write paths via edge new-creation; deduped |
 | 15 self-hosted | integration (self-host) + manual | 2 Subjects + decide without Supabase; node inits fork='self' at selfhost SDK/API init (ONE owned write point) |
 | 16 wizard shrink | hosted-e2e + manual | 5 human steps; Organization copy; chooser archived; legacy wizard archived-not-deleted |

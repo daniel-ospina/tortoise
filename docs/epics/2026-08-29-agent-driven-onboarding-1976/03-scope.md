@@ -14,6 +14,8 @@ aboutObjects: tortoise
 > **Inputs:** align decision (`01-align.md`, PROCEED + Rails 1/2) + research brief (`02-research-brief.md`).
 > **This doc is the pressure-tested formalization of the issue's embedded workstream list** — the W1-W12 decomposition is retained, but boundaries, customer value, complexity, and E2E tests are now explicit and reviewable before planning.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork pick writes `{fork}` only, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ---
 
 ## 0. Axis Research Notes
@@ -167,8 +169,6 @@ The cut is **user-visible journey first, infrastructure second** (align Rail 1):
 **When:** they complete the full journey (signup → org → fork → connect → seed → decide)
 **Then:** every step of E2E-1 through E2E-6 passes in one sitting, W11 fires seed_complete + decide_complete once per org (deduped), and onboarding_complete is set only on the fork-aware completion gate
 **And:** completion semantics are FORK-AWARE (self: two Subjects + one decide + connected; build: org-anchor Subject + connected + catalog-presented-once; compact: org-anchor Subject + harness-connected) — dismissal alone never completes
-
-> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
 
 > **Superseded-semantics note (verify P2 fix):** the original single-gate wording ("set only on the aha + checklist done") was SUPERSEDED by plan §7 DE2E-12's fork-aware gates (P1 fix, consistency resolution round 2/plan review). This scope row is amended to match; the capstone #2008 walks the fork-aware version.
 

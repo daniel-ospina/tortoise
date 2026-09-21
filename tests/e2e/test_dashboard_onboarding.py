@@ -1128,12 +1128,16 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
 
 
 def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:
-    """#3913: a build-fork projection carrying the two OBSERVED acts
-    (harness-connected + first-points-filed) and NOT `catalog-presented` is the
-    state the dashboard reflects — the wizard reaches the connected done screen
-    with no catalog row and no catalog-presented carried anywhere. This is the
-    client-side half of the gate change; the server-side completion assertions
-    live in test_capabilities_endpoint.py / test_onboarding_auto_complete.py."""
+    """#3913: the wizard's build path reaches the connected done screen on a
+    projection carrying the two OBSERVED acts (harness-connected +
+    first-points-filed) and NOT `catalog-presented`, with no catalog row on the
+    way. This pins the UI path only — the wizard cursor advances client-side, so
+    it would walk the same way before the gate change. The assertions that
+    actually pin #3913 live elsewhere: the exact checkpoint capture in
+    `test_first_timer_wizard_build_fork_records_no_catalog_presented` above
+    (the fork is the ONLY thing written), the per-fork counted rows in the
+    dashboard JS unit tests, and the server-side gate in
+    test_capabilities_endpoint.py / test_onboarding_auto_complete.py."""
     _seed_cookie(page, "u-bld-2acts")
     proj = {"org_id": "team_o", "fork": "build", "status": "active",
             "onboarding_complete": False,
@@ -1150,8 +1154,8 @@ def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)
-    assert "catalog" not in done.inner_text().lower(), \
-        "#3913: the build gate carries no catalog requirement into the done step"
+    # No "catalog" text assert here: the done body contains none on any branch,
+    # so it would pass unchanged on origin/main and pin nothing (cycle-3 finding).
 
 
 # ── #3428/#2937 (lane B3, review cycle 2 P2-2): runtime coverage for the ──

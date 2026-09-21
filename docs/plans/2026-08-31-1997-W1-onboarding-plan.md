@@ -5,6 +5,8 @@
 > **Issue:** #1997 (W1 of epic #1976, agent-driven onboarding) · **Branch:** feat/1997-W1-onboarding
 > **Complexity:** standard (UX standard / Architecture low) — no plan reviewers dispatched per issue-scoping (standard tier).
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork pick writes `{fork}` only, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 **Goal:** Shrink the 5-step #1643 wizard to EXACTLY 5 human steps (orientation → org-create/join → fork → connect-consent → done), archive (not delete) the legacy wizard render, sweep user-facing team→Organization copy on wizard + org-create + connected surfaces, and activate the W5 T7 accept-and-drop pin (removing wizardComplete = the cross-PR ordering pin).
 
 **Team:** epistemic-team
@@ -33,8 +35,6 @@ team→Organization on: wizard (all new copy via wizardFlow.js), org-create dial
 
 ### D5 — Fork placeholder catalog-presented mechanism
 The build-branch placeholder catalog render fires `POST /v1/onboarding/state/checkpoint {step:'catalog-presented'}` (fire-and-forget, .catch → noop). FWW keyed-MERGE → replay no-op; W8 later replaces the placeholder SOURCE, not the mechanism (MECE fix). Launch-slice build-fork gate (org-anchor + connected + catalog-once) becomes evaluable.
-
-> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
 
 ## Tasks
 
@@ -78,8 +78,6 @@ All 7 tasks implemented + verified locally:
 - main.jsx: 5 human steps render (orientation → org-create/join → fork → connect → done); legacy #1643 wizard gated behind `LEGACY_WIZARD_ARCHIVED` (byte-identical JSX retained, A0 rollback) + `wizardArchived.test.js` source-scan assertions (DE2E-1 archived-not-deleted, DE2E-2 Organization copy).
 - Org-create: name REQUIRED + editable prefill (orgNameError mirror), POST /v1/onboarding/team, 409 advance, 402 upgrade surface; join leg = pending invites inline.
 - Fork card: set-once checkpoint; build → BUILD_CATALOG_PLACEHOLDER render marks catalog-presented (render-time effect, re-entry covered).
-
-> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
 - Server: `_ACCEPT_AND_DROP = True` — PATCH onboarding_complete dropped on node-present orgs (node-governed echo), node-absent keeps jsonb writer. Tests updated + TestAcceptAndDrop node-absent branch added.
 - wizardComplete: PATCH write removed (done step hands off to the graph).
 - Copy sweep: wizard (wizardFlow.js), org-create dialog, welcome provisioning, re-entry + first-data cards, claim strings, suspended fallback, harnesses.js connect copy.

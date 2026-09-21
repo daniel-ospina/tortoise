@@ -5,6 +5,8 @@
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 > **Issue:** #1999 (W3 of epic #1976, agent-driven onboarding) · **Branch:** feat/1999-W3-onboarding
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork pick writes `{fork}` only, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 **Goal:** Ship the interactive ontology-precise seed — exactly two Subjects (Organization/organization + User/naturalPerson linked `memberOf`) with collision detection (never silent merge of distinct identities), person→naturalPerson normalization, no invented identity, an observable decide-completed/last_decide_attempt write path, and fork-aware completion (self = two Subjects + decide + connected; build defers decide to catalog-presented; compact = seed-lite org anchor + connected).
 
 **Team:** epistemic-team
@@ -61,8 +63,6 @@
 
 ### Journey: Build + compact forks
 1. **Step:** fork=build → seed both + catalog-presented checkpoint → **Acceptance:** complete WITHOUT decide → **Test:** TestSeedEndpoint::test_build_fork_defers_decide_to_catalog
-
-> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
 2. **Step:** compact org → seed (org anchor) → **Acceptance:** seed-lite completes on first-points-filed + connected; person not required → **Test:** TestSeedEndpoint::test_compact_seed_lite
 
 ### Failure Modes
@@ -160,7 +160,5 @@
 - Legacy subjectKind 'person' → normalized to 'naturalPerson' on MATCH (never validate-block; DM-3).
 - Seed/decide completion observable: first-points-filed + decide-completed step edges (FWW created-signal = W11's hook), org_subject_id + onboards edge (DM-1), last_decide_attempt LWW.
 - Gate eval is monotonic + fork-aware (self/build/compact) via the existing `_maybe_apply_completion`; decide is NOT required for build (catalog-presented) or compact (seed-lite + connected).
-
-> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
 - Self-hosted two-prompt UI + prompts are W12's (#2007); the shared seed core is the reusable half (surface 15 seed half).
 - MCP tools: onboarding group + retire-on-completion (existing mechanism); thin in-process delegates.

@@ -18942,9 +18942,11 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
 
-    NOTE: step-edge writes via this router (PATCH catalog-presented) trigger
-    the post-write gate eval; the checkpoint calls state.py writers directly
-    and evals via _maybe_apply_completion."""
+    NOTE: this router's step-edge branch is NOT on the PATCH catalog path —
+    `patch_onboarding_state` pops `catalog_presented` and writes the edge +
+    evals itself, and the checkpoint path calls the state.py writers directly.
+    Any other caller that hands a step id to this router does get the
+    post-write gate eval."""
     jsonb_fields: dict[str, object] = {}
     wrote_step = False
     for k, v in fields.items():

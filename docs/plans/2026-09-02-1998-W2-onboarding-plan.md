@@ -7,6 +7,8 @@
 > **Team:** epistemic-team · **Epic:** #1976 · **Depends on (merged):** W5 (#2001 state.py + checkpoint), W1 (#1997 wizard shell)
 > **Rev 2:** integrated findings from 2 parallel plan verifiers (2026-09-02). Where a verifier claim contradicted direct code reads, the code read is authoritative and the plan notes it.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork pick writes `{fork}` only, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ## Scope (surfaces 4/5/6 of test-design #1992; DE2E-1/5/8/12 targets)
 
 1. **SKILL.md successor to AGENT_ONBOARDING.md** (surface 6) — the ONE live onboarding script; owns the generic MCP-tool decide protocol (I-4; DE2E-5: works on all 6 harnesses WITHOUT the local `tortoise-decide` skill file) and the capture-announcement COPY CONTRACT (W6 owns trigger + Settings — epic §8 timing pin).
@@ -68,8 +70,6 @@ New `tests/test_onboarding_w2_fork_card.py` (docker-lane; module-level skip when
 - negative: absent-node org first FLOW write (create-on-write seam) → node materializes with `compact:false` (never fabricated compact — guards a hook regression).
 - fork write never touches jsonb operational keys (`session_recording` unchanged after fork checkpoint).
 - build-fork gate via checkpoint surface: harness-connected + catalog-presented + first-points-filed (fork build) → status complete; capture-disclosed alone never completes.
-
-> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** the build gate is `{harness-connected, first-points-filed}`. `catalog-presented` is no longer a gate input, and **no dashboard path writes it** (the fork pick writes `{fork}` only; the id stays accepted for agent/external callers and for existing orgs' `completed_steps`). The superseded wording above is kept verbatim as the historical record.
 
 New JS: `harnesses.test.js` (node --test, pure module — harnesses.js has no imports): HARNESS_SELF_INSTALL ∪ HARNESS_TEACH_HUMAN == HARNESS_ORDER (6, disjoint); UNIVERSAL_COMMAND per harness: config-write path token present (claude: `claude mcp add --transport http`, codex: `codex mcp add tortoise --url` + `--bearer-token-env-var`, cursor: `.cursor/mcp.json`, pi: `.mcp.json`, desktop: `claude_desktop_config.json`, web: connector + prompt); `tortoise_health` token; no `tt_` literal in project-scoped configs; legacy exports (A0 rollback data) still exported. `wizardFlow.js` gains pure `forkStepState(fork)` ('ask' | 'set') + tests; wizardFlow.test.js additions (universal-command mention in connect copy; fork copy unchanged).
 

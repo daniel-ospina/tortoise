@@ -15,6 +15,8 @@ aboutObjects: tortoise
 > **Capstone hook:** #2008 (capstone: clickthrough verification) — fired after Decompose, before Verify.
 > **Source:** plan `06-plan.md` §8 decomposition plan + test-design #1992 surface map.
 
+> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** where this document states the build-fork completion gate as including `catalog-presented`, or states that the dashboard / a catalog render / the fork pick writes the `catalog-presented` step edge, that is the superseded design. The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input, and **no dashboard path writes it** — the fork pick writes `{fork}` only, and the id stays accepted for agent/external callers and for existing orgs' `completed_steps`. The superseded wording is kept verbatim as the historical record.
+
 ## Issue inventory (11 created + 1 deferred)
 
 | Issue | Workstream | Complexity | Depends on | Surfaces (#1992) | DE2E targets |
@@ -52,8 +54,6 @@ Last: **W10** (explicitly deferred — RBAC first).
 ## Key ownership pins (MECE single-owner discipline)
 
 - **Fork card:** W1 = shell + static build-branch placeholder (+ marks catalog-presented at render via W5 checkpoint); W2 = semantics + persistence; W9 = door-level skip verification only.
-
-> ⚠️ **Superseded for the build fork — #3913 (owner ruling 2026-09-20):** one or more rows in this doc still state the old build gate (`catalog-presented` as a required step edge) and/or the old dashboard writer (a render-time `POST {step:'catalog-presented'}`). The build gate is `{harness-connected, first-points-filed}`; `catalog-presented` is no longer a gate input and no dashboard path writes it. The rows are kept verbatim as the historical record.
 - **Catalog placeholder:** W1 renders at launch; W8 replaces the SOURCE (mechanism stays W5's checkpoint).
 - **Capture announcement:** W2 owns copy contract; W6 implements trigger + Settings surface (consumes W4 tab).
 - **Telemetry emission:** W11 owns emission + dedup (hooks W5 checkpoint edge-creation); W3 creates the step edges.
