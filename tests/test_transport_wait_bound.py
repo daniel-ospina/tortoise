@@ -645,6 +645,10 @@ async def test_mcp_cancellation_propagates_into_the_tool(monkeypatch):
     monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
     monkeypatch.setattr(ha, "_track_analytics_event",
                         lambda *a, **k: None)
+    events: list = []
+    monkeypatch.setattr(
+        ms, "_emit_mcp_tool_call_telemetry",
+        lambda org, name, status, latency, kind: events.append((status, kind)))
     try:
         job = asyncio.ensure_future(ms.mcp.call_tool("_bound_cancel"))
         await asyncio.wait_for(started.wait(), timeout=5)
@@ -655,6 +659,11 @@ async def test_mcp_cancellation_propagates_into_the_tool(monkeypatch):
             "the tool never saw the cancellation — the MCP seam consumed it")
         assert not ms._pending_mcp_wait_bound, (
             "a cancelled dispatch was booked as an abandoned timeout task")
+        # A cancellation must not inflate the "ok" count of the mcp_tool_call
+        # series this bound is measured from (CancelledError bypasses
+        # `except Exception`, so without the dedicated branch it read "ok").
+        assert ("cancelled", "caller_cancelled") in events, (
+            f"a cancelled call was not classified: {events!r}")
     finally:
         try:  # noqa: SIM105
             ms.mcp.local_provider.remove_tool("_bound_cancel")
