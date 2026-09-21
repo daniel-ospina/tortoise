@@ -103,6 +103,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import os
@@ -446,10 +447,8 @@ def _write_text_safe(path: str, text: str) -> None:
             fh.write(text)
         os.replace(tmp, p)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 
@@ -516,10 +515,8 @@ def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
         # Cleanup must never raise (a timeout here must not replace the real
         # error) — a stranded temp ref only makes the worktree engine PRESERVE.
         for ref in refs:
-            try:
+            with contextlib.suppress(Exception):
                 _run(["git", "-C", repo_root, "update-ref", "-d", ref], timeout=60)
-            except Exception:
-                pass
 
 
 # ── reporting ───────────────────────────────────────────────────────────────
@@ -527,7 +524,7 @@ def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
 def _fmt_ts(ts: int) -> str:
     import datetime
 
-    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%d")
+    return datetime.datetime.fromtimestamp(ts, datetime.UTC).strftime("%Y-%m-%d")
 
 
 def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
