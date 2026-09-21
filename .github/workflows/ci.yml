@@ -44,7 +44,7 @@ jobs:
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE" ] || BASE="origin/main"
-          CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || true)
+          CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"
           echo "$CHANGED"
           cat > /tmp/ci-gates.py <<'PY'
@@ -452,7 +452,7 @@ jobs:
       - name: Get changed markdown files
         id: changed
         run: |
-          FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
+          FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
         if: steps.changed.outputs.files != ''

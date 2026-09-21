@@ -185,7 +185,7 @@ jobs:
           else
             BASE="${{ github.event.pull_request.base.sha }}"
             [ -n "$BASE" ] || BASE="origin/main"
-            CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || git diff --name-only "$BASE" HEAD)
+            CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || git diff --no-renames --name-only "$BASE" HEAD)
             echo "changed files:"
             echo "$CHANGED"
             SEL=$(printf '%s\n' "$CHANGED" | python3 tools/ci_selection.py --changed-files - --event pull_request)

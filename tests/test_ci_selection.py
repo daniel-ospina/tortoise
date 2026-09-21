@@ -2463,3 +2463,52 @@ def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path,
         monkeypatch.setattr(cs, "MANIFEST", ok)
         monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
         assert cs.main() == 0, f"an empty durations map ({empty!r}) was treated as a failure"
+
+
+def test_every_changed_set_diff_disables_rename_detection():
+    """#4378: `git diff --name-only` drops the SOURCE path of a rename.
+
+    Rename detection is on by default (`diff.renames` is unset -> true), so for a
+    rename git emits only the DESTINATION. The selector is therefore handed a path
+    set that never mentions the file that was moved away, and a guard registered
+    against the old path silently does not run — the same "silent in exactly the
+    case it exists to cover" class this lane exists to close.
+
+    Demonstrated on a real rename in this repo's history (371eec29f, which moved
+    tests out of tortoise/shared_state/tests/ precisely so they would be collected):
+
+        git diff --name-only 371eec29f^ 371eec29f | grep shared_state
+          -> the 6 destinations under tests/ only
+        git diff --no-renames --name-only 371eec29f^ 371eec29f | grep shared_state
+          -> those 6 AND the 6 sources under tortoise/shared_state/tests/
+
+    Measured cost of the flag: over main's last 200 commits, 2 commits contain any
+    rename and 0 are pure moves, so the "a no-op move now selects both surfaces"
+    objection does not occur in practice. Adopted on #4378.
+
+    This scans EVERY workflow rather than the three known sites, so a fourth
+    changed-set computation added later cannot reintroduce the hole unnoticed.
+    Scope note: it reads line by line, so a `git diff` split across lines would be
+    missed — none exists today, and the failure would be a silent skip, so if a
+    multi-line invocation is ever added it needs a shell-continuation-aware scan.
+    """
+    root = Path(__file__).resolve().parents[1]
+    workflows = sorted((root / ".github" / "workflows").glob("*.yml"))
+    assert workflows, "no workflow files found — the scan would pass vacuously"
+
+    offenders: list[str] = []
+    checked = 0
+    for wf in workflows:
+        for i, line in enumerate(wf.read_text().splitlines(), start=1):
+            if "git diff" not in line or "--name-only" not in line:
+                continue
+            checked += 1
+            if "--no-renames" not in line:
+                offenders.append(f"{wf.name}:{i}: {line.strip()}")
+
+    assert checked >= 3, f"expected at least the 3 known sites, found {checked}"
+    assert not offenders, (
+        "a changed-set `git diff --name-only` without --no-renames drops the source "
+        "path of a rename, so the moved file's guard never runs (#4378):\n  "
+        + "\n  ".join(offenders)
+    )
