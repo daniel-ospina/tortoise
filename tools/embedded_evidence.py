@@ -1142,18 +1142,28 @@ def closes_issue(rec: dict) -> tuple[bool, list[str]]:
     ok &= conj("reproducer-absent",
                any(MANDATORY_REPRODUCER.endswith(f) or MANDATORY_REPRODUCER in f
                    for f in rec["selection"]["files"]))
+    # D11: the attested baseline is a RUN too, so its own tree state is part of the
+    # pin — `runs` alone left the pairing worktree's move unexamined.
     ok &= conj("pin-not-airtight",
-               rec["pin"]["worktree_clean"] and all(not r["tree_moved"] for r in rec["runs"]))
+               rec["pin"]["worktree_clean"]
+               and all(not r["tree_moved"]
+                       for r in [*rec["runs"], *(
+                           [rec["red"]["baseline_run"]]
+                           if rec["red"].get("baseline_run") else [])]))
     ok &= conj("cause-unattributed",
                rec["red"]["cause"] in CAUSE_CLASSES and rec["red"]["cause"] != "unattributed")
     ok &= conj("cause-not-expected",
                rec["red"]["cause"] in rec["selection"]["expected_causes"])
     ok &= conj("red-file-list-differs", rec["red"]["same_file_list"])
     ok &= conj("load-bands-do-not-overlap", rec["load"]["overlap"])
+    # `attempted` is deliberately NOT an AND-term here: `main()` rejects `--n < 2`,
+    # so the producer could only ever set it True and it supplied no protection. The
+    # falsifiable claim is `rate_change` (a red was demonstrated and did not appear
+    # at the measured commit); `attempted` still records that a red was demonstrated
+    # at all, so it can be False in a produced record.
     ok &= conj("no-rate-change",
-               (rec["red"]["at_fixed_commit"]["attempted"]
-                and not rec["red"]["at_fixed_commit"]["appeared"]
-                and rec["red"]["at_fixed_commit"]["rate_change"])
+               (rec["red"]["at_fixed_commit"]["rate_change"]
+                and not rec["red"]["at_fixed_commit"]["appeared"])
                or (bool(rec["red"]["at_fixed_commit"]["mutation"])
                    and str(rec["red"]["at_fixed_commit"]["mutation_operator"]).startswith("statement-deletion:")
                    and rec["red"]["at_fixed_commit"]["mutation_target_is_fix_branch"]
@@ -1408,6 +1418,17 @@ def _build_record(args: argparse.Namespace) -> dict:
     # have.
     attributable_ = attributable(cause)
 
+    # The verdict summarises the red the record actually ATTESTED TO. Derived from
+    # the measured runs it printed ALL-GREEN with `green_only: true` while
+    # `red.cause` was non-null (the pairing-ref red) — the exact pair `main()` prints
+    # as the human summary.
+    if attested_red_run is None:
+        red_status = "ALL-GREEN"
+    elif baseline_run is not None:
+        red_status = "RED-AT-PAIRING-REF"
+    else:
+        red_status = "RED-AT-PINNED-REF"
+
     rec = {
         "schema": "embedded-evidence/1",
         "attestation": "self-declared",
@@ -1495,8 +1516,8 @@ def _build_record(args: argparse.Namespace) -> dict:
             "same_file_list": same_file_list,
         },
         "verdict": {
-            "status": "RED-AT-PINNED-REF" if measured_red_runs else "ALL-GREEN",
-            "green_only": not measured_red_runs,
+            "status": red_status,
+            "green_only": attested_red_run is None,
             "attributable": attributable_,
             "environment_error": False,
             "closes_issue": False,
@@ -1512,8 +1533,7 @@ def _build_record(args: argparse.Namespace) -> dict:
     rec["verdict"]["closes_issue"] = ok
     rec["verdict"]["violations"] = reasons
     rec["verdict"]["status"] = (
-        "PAIRED-RED-DEMONSTRATED" if ok else
-        ("RED-AT-PINNED-REF" if measured_red_runs else "ALL-GREEN")
+        "PAIRED-RED-DEMONSTRATED" if ok else red_status
     )
     rec["exit_code"] = exit_code(rec)
     return rec

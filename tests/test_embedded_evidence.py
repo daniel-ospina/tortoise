@@ -1037,6 +1037,40 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         assert "red-file-list-differs" in reasons
 
 
+def test_record_out_receipt_does_not_dirty_the_pin(monkeypatch, tmp_path):
+    """M5/D6: the tool's OWN receipt is excluded from `post_review_dirty`.
+
+    `_porcelain_digest` filtered the record-out line from the DIGEST blob but
+    computed `dirty` from the UNFILTERED `git status`, so the previously written
+    `--record-out` receipt (untracked) made every documented re-run report
+    `post_review_dirty: true` and fail `certificate-not-bound-to-review-head`.
+    This drives the REAL `_porcelain_digest` — the producer-level tests monkeypatch
+    it, which is exactly why they could not catch this.
+    """
+    rec_out = tmp_path / "docs" / "evidence" / "3827-green.json"
+    receipt = "? docs/evidence/3827-green.json"
+    edit = "1 .M N... 100644 100644 100644 abc abc tortoise/sdk.py"
+
+    def _git(*a, cwd=None):
+        if a[0] == "status":
+            return receipt
+        return ""
+
+    monkeypatch.setattr(ee, "_git", _git)
+    receipt_digest, dirty = ee._porcelain_digest(tmp_path, exclude=rec_out)
+    assert dirty is False
+
+    def _git_dirty(*a, cwd=None):
+        if a[0] == "status":
+            return receipt + "\n" + edit
+        return ""
+
+    monkeypatch.setattr(ee, "_git", _git_dirty)
+    edited_digest, dirty2 = ee._porcelain_digest(tmp_path, exclude=rec_out)
+    assert dirty2 is True
+    assert receipt_digest != edited_digest
+
+
 # ── #4203: every conjunct flips in BOTH directions on a PRODUCED record ──────
 
 class TestConjunctFalsifiability:
@@ -1282,6 +1316,74 @@ class TestConjunctFalsifiability:
         # "green": 0}` literal that contradicted `runs == ['green','green']`.
         assert rec["red"]["red_green_mix"] == {"red": 1, "green": 2}
         assert sum(rec["red"]["red_green_mix"].values()) == len(rec["runs"]) + 1
+
+    def test_attempted_is_not_a_constant(self, monkeypatch, tmp_path):
+        """The dropped AND-term: `bool(runs)` was True on every reachable record."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        no_red = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            record_role="historical-attestation",
+        )
+        assert no_red["red"]["at_fixed_commit"]["attempted"] is False
+        # ... and the conjunct does not depend on it: the rate-change claim is
+        # decided by `rate_change` / `appeared`.
+        probe = _nonclosing_record()
+        probe["red"]["at_fixed_commit"]["attempted"] = False
+        probe["red"]["at_fixed_commit"]["rate_change"] = True
+        probe["red"]["at_fixed_commit"]["appeared"] = False
+        assert "no-rate-change" not in ee.closes_issue(probe)[1]
+
+    def test_verdict_status_follows_the_attested_red(self, monkeypatch, tmp_path):
+        """`status`/`green_only` must follow `red.cause`, not the measured runs."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        # A pairing-ref red that does NOT close (internal seam surface): the old code
+        # printed ALL-GREEN / green_only: true while `red.cause` was non-null.
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
+            surface="TortoiseSDK.search",
+            surface_assertion="tests/test_x.py::test_internal",
+        )
+        assert rec["red"]["cause"] is not None
+        assert rec["verdict"]["green_only"] is False
+        assert rec["verdict"]["status"] == "RED-AT-PAIRING-REF"
+        assert rec["verdict"]["status"] != "ALL-GREEN"
+
+    def test_baseline_run_is_persisted(self, monkeypatch, tmp_path):
+        """A verifier must be able to re-derive `rate_change` from the record."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        baseline_red = self._run(files, 1, "unexpected-divergence")
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref", baseline=baseline_red,
+            record_role="closing",
+        )
+        base = rec["red"]["baseline_run"]
+        assert base is not None
+        appeared = any(r["bucket"] in ee.BUCKETS_RED for r in rec["runs"])
+        assert (base["bucket"] in ee.BUCKETS_RED) and not appeared
+        # It must survive the JSON round-trip the record file performs.
+        round_tripped = json.loads(json.dumps(ee._jsonable(rec)))
+        assert round_tripped["red"]["baseline_run"]["bucket"] in ee.BUCKETS_RED
+
+    def test_baseline_tree_move_fails_the_pin(self, monkeypatch, tmp_path):
+        """D11: the attested baseline's own tree state is part of the pin."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
+        )
+        assert "pin-not-airtight" not in ee.closes_issue(rec)[1]
+        rec["red"]["baseline_run"]["tree_moved"] = True
+        assert "pin-not-airtight" in ee.closes_issue(rec)[1]
 
     def test_certificate_is_bound_to_head_sha(self, monkeypatch, tmp_path):
         """`certificate-not-bound-to-review-head`: the head is read independently."""
