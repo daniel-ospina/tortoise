@@ -94,7 +94,8 @@ surfaces:
   - test_resume_gate_parity.py
   # #4179: constants agree (7-day restore) — docs/retention-and-deletion.md;
   # user account, graph, team account; frontend window bound; anti-scatter scan.
-  # Dual-registered in `core` (docs scan) and `onboarding` (website/privacy.html).
+  # Also registered in `core` (docs scan), `onboarding` (website/privacy.html)
+  # and `tier1` (docs-only PRs — no Python path selects a surface there, #4309).
   - test_retention_promise.py
   - test_per_session_census.py
   - test_graph_integrity_gate.py
