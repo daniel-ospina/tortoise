@@ -157,8 +157,8 @@ class ReaperTestCase(unittest.TestCase):
         out = _git_out(self.repo, "for-each-ref", "--format=%(refname:short)", "refs/heads")
         return {ln for ln in out.splitlines() if ln}
 
-    def rows(self, args=None):
-        rc, out, err = self.run_tool(["--json", *(args or [])])
+    def rows(self, args=None, repo=None):
+        rc, out, err = self.run_tool(["--json", *(args or [])], repo=repo)
         self.assertEqual(rc, 0, err)
         return {r["branch"]: r for r in json.loads(out)["rows"]}
 
@@ -233,6 +233,12 @@ class ReaperTestCase(unittest.TestCase):
         row = self.rows()["main"]
         self.assertEqual(row["verdict"], "PRESERVE")
         self.assertEqual(row["reason"], "trunk")
+        # The CURRENT branch of the checkout being classified is protected even
+        # when it is not trunk: the driver worktree is on `driver/base`, which is
+        # an ancestor of main and would otherwise classify SAFE.
+        cur = self.rows(repo=self.driver)["driver/base"]
+        self.assertEqual(cur["verdict"], "PRESERVE")
+        self.assertEqual(cur["reason"], "trunk")
 
     def test_judgement_has_no_pr_and_is_not_ancestor(self):
         self.commit_on("nopr/branch", "unlanded")
@@ -246,12 +252,15 @@ class ReaperTestCase(unittest.TestCase):
     def test_truncated_pr_list_is_incomplete_and_deletes_nothing(self):
         sha = self.commit_on("merged/branch", "merged work")
         self.add_pr("merged", "merged/branch", sha)
-        # One page, and a cap of one page -> TRUNCATED.
-        self.write_fixtures(closed_pages=[[{"number": 1, "head": {"ref": "x", "sha": "y"},
-                                            "merged_at": None}]])
-        rc, out, err = self.run_tool(["--apply", "--max-pr-pages", "1"], repo=self.driver)
+        # The OPEN list is one page (< cap); the CLOSED list reaches the cap, so
+        # the truncation must be detected on the CLOSED surface (a test that trips
+        # on the open list first would pass even if the closed check were gone).
+        filler = {"number": 1, "head": {"ref": "x", "sha": "y"}, "merged_at": None}
+        self.write_fixtures(closed_pages=[[filler], [filler]])
+        rc, out, err = self.run_tool(["--apply", "--max-pr-pages", "2"], repo=self.driver)
         self.assertEqual(rc, 2, err + out)
         self.assertIn("INCOMPLETE", err)
+        self.assertIn("closed", err)
         self.assertIn("merged/branch", self.branches())
 
     def test_unqueryable_gh_is_incomplete(self):
@@ -271,6 +280,12 @@ class ReaperTestCase(unittest.TestCase):
         wt = self.tmp / "wt-held"
         _git(self.repo, "worktree", "add", str(wt), "held/branch")
         (wt / "untracked.txt").write_text("uncommitted work the lane left behind\n")
+
+        # The dirt is REPORTED (the issue requires it) and the branch is preserved.
+        row = self.rows()["held/branch"]
+        self.assertEqual(row["verdict"], "SAFE")
+        self.assertTrue(row["worktree"])
+        self.assertTrue(row["dirty"], "dirty worktree must be reported as dirty")
 
         rc, out, err = self.run_tool(["--apply"], repo=self.driver)
         self.assertEqual(rc, 0, err + out)
@@ -315,22 +330,37 @@ class ReaperTestCase(unittest.TestCase):
 
     # ── TOCTOU + recovery ───────────────────────────────────────────────────
 
-    def test_ref_moved_between_classify_and_delete_is_skipped(self):
+    def test_ref_moved_between_classify_and_delete_is_refused(self):
         # Import the module and call the delete phase directly with a stale OID,
-        # simulating a lane committing after classification.
+        # simulating a lane committing after classification. The atomic
+        # compare-and-delete must refuse rather than delete the moved ref.
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("branch_reaper", TOOL)
         br = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(br)
         sha = self.commit_on("merged/branch", "merged work")
+        rows = [{"branch": "merged/branch", "oid": self.main_sha, "ts": 0,
+                 "verdict": "SAFE", "reason": "pr-merged-tip"}]
+        results = br.delete_branches(str(self.repo), rows, set(), backup_bundle=None)
+        self.assertEqual(results[0]["result"], "refused")
+        self.assertIn("merged/branch", self.branches())
+        self.assertTrue(sha)  # branch still exists at its real tip
+
+    def test_all_zero_expected_oid_is_refused_not_deleted(self):
+        # git treats an all-zero old-oid as "no old value" and would delete
+        # unconditionally — the compare-and-delete sentinel must never be zeros.
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("branch_reaper", TOOL)
+        br = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(br)
+        self.commit_on("merged/branch", "merged work")
         rows = [{"branch": "merged/branch", "oid": "0" * 40, "ts": 0,
                  "verdict": "SAFE", "reason": "pr-merged-tip"}]
         results = br.delete_branches(str(self.repo), rows, set(), backup_bundle=None)
-        self.assertEqual(results[0]["result"], "skipped")
-        self.assertIn("moved", results[0]["detail"])
+        self.assertEqual(results[0]["result"], "refused")
         self.assertIn("merged/branch", self.branches())
-        self.assertTrue(sha)  # branch still exists at its real tip
 
     def test_report_written_before_deletion_contains_recovery_record(self):
         sha = self.commit_on("merged/branch", "merged work")
@@ -341,8 +371,38 @@ class ReaperTestCase(unittest.TestCase):
         self.assertEqual(rc, 0, err + out)
         body = report.read_text()
         self.assertIn("Recovery record", body)
-        self.assertIn(sha, body)
+        self.assertIn(sha, body)  # FULL 40-char tip, not the abbreviated table form
         self.assertIn("Post-apply results", body)
+        # A durable, machine-readable recovery record is written unconditionally
+        # before the delete phase.
+        rec = report.parent / (report.name + ".recovery.json")
+        self.assertTrue(rec.exists())
+        payload = json.loads(rec.read_text())
+        self.assertIn(sha, [b["oid"] for b in payload["branches"]])
+
+    def test_apply_without_report_still_writes_recovery_json(self):
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        rc, out, err = self.run_tool(["--apply"], repo=self.driver)
+        self.assertEqual(rc, 0, err + out)
+        rec = self.driver / "branch-reaper-recovery.json"
+        self.assertTrue(rec.exists())
+        self.assertIn(sha, [b["oid"] for b in json.loads(rec.read_text())["branches"]])
+
+    def test_backup_bundle_written_before_deletion(self):
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        bundle = self.tmp / "backup.bundle"
+        rc, out, err = self.run_tool(
+            ["--apply", "--backup-bundle", str(bundle)], repo=self.driver)
+        self.assertEqual(rc, 0, err + out)
+        self.assertTrue(bundle.exists() and bundle.stat().st_size > 0)
+        self.assertNotIn("merged/branch", self.branches())
+        # The bundle really carries the deleted tip.
+        verify = _run(["git", "bundle", "verify", str(bundle)], cwd=self.repo, check=False)
+        self.assertEqual(verify.returncode, 0, verify.stderr)
 
 
 if __name__ == "__main__":

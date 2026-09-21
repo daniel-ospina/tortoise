@@ -58,16 +58,27 @@ Safety
 * **Truncated != clean.** The PR lists are fetched to completeness; a truncated
   or unqueryable surface makes the whole run INCOMPLETE and deletes NOTHING — so
   the ancestor rule can never fire on a branch whose open PR fell off a page.
-* **TOCTOU.** The ref OID is re-verified immediately before each delete; a branch
-  moved between classification and deletion is skipped, not destroyed.
-* **Recovery.** Every deleted branch, its tip SHA and its verdict is written to
-  the report BEFORE the delete phase; ``--backup-bundle`` optionally writes one
-  ``git bundle`` of the deleted tips (no ``refs/reaped/*`` refs — those would
-  collide with the worktree engine's ``refs/heads/*``-only survival doctrine).
+* **TOCTOU.** Deletion uses the ATOMIC compare-and-delete primitive
+  ``git update-ref -d refs/heads/<b> <classified-oid>``: it fails without
+  deleting if the ref no longer equals the classified tip. Because ``update-ref``
+  does not itself refuse a branch checked out in a worktree, the worktree-held
+  snapshot — recomputed immediately before the delete phase, after any delegated
+  teardown — is the checked-out guard.
+* **Recovery.** A durable machine-readable recovery record (full tip SHAs) is
+  written BEFORE the delete phase, independent of ``--report``; the report also
+  carries a Recovery record section. ``--backup-bundle`` optionally writes one
+  ``git bundle`` of the deleted tips (via temporary refs — no persistent
+  ``refs/reaped/*`` refs, which would collide with the worktree engine's
+  ``refs/heads/*``-only survival doctrine); a bundle that cannot be produced
+  aborts the whole delete phase rather than deleting unbacked-up.
+* **Dirty worktrees are reported, never force-removed.** A branch held by ANY
+  worktree is preserved; the report marks whether that checkout is dirty.
 * **Guard.** ``--apply`` refuses to run from the MAIN checkout: this tool invokes
-  ``git branch -D`` from an interpreter file payload, which the
+  ref deletion from an interpreter file payload, which the
   ``main-worktree-guard`` extension does not content-gate, so the tool declares
   and enforces the run-from-a-worktree contract itself.
+* Report and bundle writes refuse a symlinked target and replace atomically
+  (``os.replace``), so a planted link cannot clobber another file.
 * Remote branches are NEVER touched.
 
 Exit codes (a delegate code is never passed through unmodified)
@@ -95,9 +106,9 @@ import argparse
 import fnmatch
 import json
 import os
-import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 EXIT_OK = 0
@@ -128,9 +139,13 @@ class Incomplete(Exception):
 # ── subprocess helpers ──────────────────────────────────────────────────────
 
 def _run(cmd: list[str], *, cwd: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
-    )
+    try:
+        return subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise Incomplete(
+            f"command timed out after {timeout}s: {' '.join(cmd[:2])}") from exc
 
 
 def _gh_bin() -> str:
@@ -154,12 +169,12 @@ def resolve_repo(target: str | None) -> tuple[str, str | None]:
     if os.path.isdir(target):
         root = _run(["git", "-C", target, "rev-parse", "--show-toplevel"])
         if root.returncode != 0:
-            raise SystemExit(f"branch_reaper: {target!r} is not inside a git repository")
+            raise ValueError(f"{target!r} is not inside a git repository")
         return os.path.realpath(root.stdout.strip()), _slug_from_remote(target)
     # Not a directory: treat as owner/name.
     if "/" in target:
         return os.getcwd(), target
-    raise SystemExit(f"branch_reaper: --repo {target!r} is not a directory or owner/name")
+    raise ValueError(f"--repo {target!r} is not a directory or owner/name")
 
 
 def _slug_from_remote(repo_root: str) -> str | None:
@@ -401,6 +416,78 @@ def detached_worktrees(worktrees: list[dict]) -> list[dict]:
     return [wt for wt in worktrees if wt.get("detached") and not wt.get("bare")]
 
 
+def _detached_head_ts(repo_root: str, worktrees: list[dict]) -> dict[str, int]:
+    """HEAD commit time for each detached worktree (so the report ranks by age)."""
+    out: dict[str, int] = {}
+    for wt in detached_worktrees(worktrees):
+        head = wt.get("head")
+        if not head:
+            continue
+        res = _run(["git", "-C", repo_root, "show", "-s", "--format=%ct", head], timeout=30)
+        if res.returncode == 0 and res.stdout.strip().isdigit():
+            out[head] = int(res.stdout.strip())
+    return out
+
+
+def _write_text_safe(path: str, text: str) -> None:
+    """Write atomically, refusing to follow a symlink at ``path`` (#4098 class).
+
+    ``Path.write_text`` follows a symlink; a planted link at a documented report
+    path would clobber its target. A same-directory temp file plus ``os.replace``
+    replaces the link itself, never its target.
+    """
+    p = Path(path)
+    if p.is_symlink():
+        raise Incomplete(f"refusing to write through a symlink: {path}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=p.name + ".tmp.", dir=str(p.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _write_json_safe(path: str, payload: dict) -> None:
+    _write_text_safe(path, json.dumps(payload, indent=2) + "\n")
+
+
+def _make_backup_bundle(repo_root: str, path: str, targets: list[dict]) -> None:
+    """Write ONE bundle of the given tips, or raise Incomplete (fail closed).
+
+    ``git bundle create <file> <sha>`` is rejected ("Refusing to create empty
+    bundle") because a bundle records REF names, not bare commits — so temporary
+    refs under ``refs/branch-reaper-backup/`` are created for the tips, the
+    bundle is written from them, and the temp refs are removed immediately.
+    They are deliberately NOT the persistent ``refs/reaped/*`` shape, which
+    would collide with ``pi-reap-worktrees.sh``'s ``refs/heads/*``-only survival
+    doctrine.
+    """
+    if Path(path).is_symlink():
+        raise Incomplete(f"refusing to write a symlinked bundle path: {path}")
+    refs: list[str] = []
+    try:
+        for i, r in enumerate(targets):
+            ref = f"refs/branch-reaper-backup/{i:06d}"
+            upd = _run(["git", "-C", repo_root, "update-ref", ref, r["oid"]])
+            if upd.returncode != 0:
+                raise Incomplete(f"could not stage backup ref {ref}: {upd.stderr.strip()}")
+            refs.append(ref)
+        if not refs:
+            return
+        res = _run(["git", "-C", repo_root, "bundle", "create", path, *refs], timeout=900)
+        if res.returncode != 0:
+            raise Incomplete(f"git bundle create failed: {res.stderr.strip()}")
+    finally:
+        for ref in refs:
+            _run(["git", "-C", repo_root, "update-ref", "-d", ref])
+
+
 # ── reporting ───────────────────────────────────────────────────────────────
 
 def _fmt_ts(ts: int) -> str:
@@ -413,7 +500,8 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
                  *, repo_root: str, slug: str | None, main_ref_used: str,
                  include_closed_unmerged: bool, engine_output: str | None = None,
                  apply_results: list[dict] | None = None, now: int | None = None,
-                 disk: dict | None = None) -> str:
+                 disk: dict | None = None, recovery: list[dict] | None = None,
+                 detached_ts: dict[str, int] | None = None) -> str:
     safe = [r for r in rows if r["verdict"] == VERDICT_SAFE]
     held_safe = [r for r in safe if r["worktree"]]
     deletable = [r for r in safe if not r["worktree"]]
@@ -476,10 +564,12 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
         out.append("## Safe by history — held by a worktree (branch preserved)\n")
         out.append("The delegate preserves these checkouts (dirty / ignored-artifact / too-recent), "
                    "or they were not torn down; the branch is kept. Reported, not deleted.\n")
-        out.append("| branch | worktree | verdict | PR |")
-        out.append("|---|---|---|---|")
+        out.append("| branch | worktree | dirty | verdict | PR |")
+        out.append("|---|---|---|---|---|")
         for r in sorted(held_safe, key=lambda r: r["ts"]):
-            out.append(f"| `{r['branch']}` | `{r['worktree']}` | {r['reason']} | {r['pr_number'] or '—'} |")
+            dirty = "yes" if r.get("dirty") else "no"
+            out.append(f"| `{r['branch']}` | `{r['worktree']}` | {dirty} | {r['reason']} | "
+                       f"{r['pr_number'] or '—'} |")
         out.append("")
 
     out.append("## Judgement — no PR, not an ancestor (never auto-deleted)\n")
@@ -493,10 +583,25 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
 
     if detached:
         out.append("## Detached-HEAD worktrees (never auto-deleted)\n")
+        out.append("Oldest HEAD first. A human decides.\n")
         out.append("| path | HEAD | age (days) |")
         out.append("|---|---|---|")
-        for wt in sorted(detached, key=lambda w: w.get("head") or ""):
-            out.append(f"| `{wt['path']}` | `{(wt.get('head') or '?')[:12]}` | — |")
+        ts_map = detached_ts or {}
+        for wt in sorted(detached, key=lambda w: ts_map.get(w.get("head") or "", 1 << 62)):
+            ts = ts_map.get(wt.get("head") or "")
+            age = "—" if ts is None else str((now - ts) // 86400)
+            out.append(f"| `{wt['path']}` | `{(wt.get('head') or '?')[:12]}` | {age} |")
+        out.append("")
+
+    if recovery is not None:
+        out.append("## Recovery record (written before deletion)\n")
+        out.append("Full tip SHAs; `git branch <name> <sha>` restores a branch. Recovery window is "
+                   "the reflog (~30 days) until gc, or the `--backup-bundle` file indefinitely.\n")
+        out.append("| branch | tip | verdict | PR |")
+        out.append("|---|---|---|---|")
+        for r in recovery:
+            out.append(f"| `{r['branch']}` | `{r['oid']}` | {r.get('verdict', '')} | "
+                       f"{r.get('pr_number') or '—'} |")
         out.append("")
 
     if engine_output is not None:
@@ -521,11 +626,11 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
             out.append(f"| filesystem free after | {disk.get('after_kb')} KiB |")
             out.append(f"| free-space delta | {disk.get('delta_kb')} KiB |")
         out.append("")
-        out.append("### Recovery record (written before deletion)\n")
-        out.append("| branch | tip | how |")
-        out.append("|---|---|---|")
+        out.append("### Deleted\n")
+        out.append("| branch | tip |")
+        out.append("|---|---|")
         for r in deleted:
-            out.append(f"| `{r['branch']}` | `{r['oid']}` | reflog ~30d / `--backup-bundle` |")
+            out.append(f"| `{r['branch']}` | `{r['oid']}` |")
         out.append("")
         if refused:
             out.append("### Refused\n")
@@ -548,29 +653,39 @@ def run_worktree_engine(engine: str, repo_root: str, timeout: int) -> tuple[int,
 
 def delete_branches(repo_root: str, rows: list[dict], held: set[str],
                     *, backup_bundle: str | None) -> list[dict]:
+    """Delete the SAFE rows. ``held`` must be a worktree snapshot taken
+    immediately before this call (after any delegated teardown).
+
+    Deletion uses the ATOMIC compare-and-delete primitive
+    ``git update-ref -d refs/heads/<b> <expected>``: it fails without deleting
+    if the ref no longer equals the classified tip, closing the
+    check-then-act window. Because ``update-ref`` does NOT itself refuse a
+    branch checked out in some worktree (``git branch -D`` does), the ``held``
+    snapshot IS the checked-out guard — it is recomputed right before this loop,
+    and a worktree created in the microseconds during the loop is the documented
+    residual. A requested ``--backup-bundle`` that cannot be produced aborts the
+    whole phase (``Incomplete``) rather than deleting unbacked-up.
+    """
     results: list[dict] = []
     targets = [r for r in rows if r["verdict"] == VERDICT_SAFE]
     if backup_bundle:
-        shas = [r["oid"] for r in targets if r["branch"] not in held]
-        if shas:
-            bundle = _run(["git", "-C", repo_root, "bundle", "create", backup_bundle, *shas],
-                          timeout=600)
-            if bundle.returncode != 0:
-                results.append({"branch": "(bundle)", "oid": "", "result": "skipped",
-                                "detail": f"bundle failed: {bundle.stderr.strip()}"})
+        _make_backup_bundle(repo_root, backup_bundle,
+                            [r for r in targets if r["branch"] not in held])
     for r in targets:
         b, expected = r["branch"], r["oid"]
         if b in held:
             results.append({"branch": b, "oid": expected, "result": "skipped",
                             "detail": "worktree-held"})
             continue
-        current = _run(["git", "-C", repo_root, "rev-parse", "--verify", f"refs/heads/{b}"])
-        if current.returncode != 0 or current.stdout.strip() != expected:
-            results.append({"branch": b, "oid": expected, "result": "skipped",
-                            "detail": "ref moved between classify and delete"})
+        # Defensive: an empty/all-zero expected OID is NOT a valid compare-and-
+        # delete sentinel — git treats all-zeros as "no old value" and deletes
+        # unconditionally, so guard before it can reach update-ref.
+        if not expected or set(expected) == {"0"}:
+            results.append({"branch": b, "oid": expected, "result": "refused",
+                            "detail": "missing classified OID"})
             continue
-        # `git branch -D` itself refuses a branch checked out in ANY worktree.
-        res = _run(["git", "-C", repo_root, "branch", "-D", b])
+        res = _run(["git", "-C", repo_root, "update-ref", "-d",
+                    f"refs/heads/{b}", expected])
         if res.returncode == 0:
             results.append({"branch": b, "oid": expected, "result": "deleted", "detail": ""})
         else:
@@ -623,8 +738,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         repo_root, slug = resolve_repo(args.repo)
-    except SystemExit as exc:
-        return int(str(exc.code)) if str(exc.code).isdigit() else EXIT_USAGE
+    except ValueError as exc:
+        print(f"branch_reaper: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     if args.slug:
         slug = args.slug
 
@@ -658,60 +774,81 @@ def main(argv: list[str] | None = None) -> int:
     rows = classify(branches, worktrees, prs, ancestors,
                     protected=protected,
                     include_closed_unmerged=args.include_closed_unmerged)
+    # Annotate worktree-held rows with dirt (the issue requires dirty worktrees
+    # reported, not silently treated as clean), and detached checkouts with age.
+    for r in rows:
+        if r["worktree"]:
+            r["dirty"] = worktree_dirty(r["worktree"])
+    detached_ts = _detached_head_ts(repo_root, worktrees)
 
     result = EXIT_OK
     engine_output: str | None = None
     apply_results: list[dict] | None = None
     disk: dict | None = None
+    recovery: list[dict] | None = None
 
     if args.apply:
-        if args.reap_worktrees:
-            engine = args.worktree_engine or os.path.join(repo_root, "scripts", "pi-reap-worktrees.sh")
-            try:
+        try:
+            if args.reap_worktrees:
+                engine = args.worktree_engine or os.path.join(repo_root, "scripts", "pi-reap-worktrees.sh")
                 rc, engine_output = run_worktree_engine(engine, repo_root, args.engine_timeout)
-            except Incomplete as exc:
-                print(f"branch_reaper: INCOMPLETE — {exc}. Nothing was deleted.", file=sys.stderr)
-                return EXIT_INCOMPLETE
-            if rc == _ENGINE_EXIT_FAILCLOSED:
-                print("branch_reaper: INCOMPLETE — the worktree engine fail-closed "
-                      "(nothing trusted). Nothing was deleted.", file=sys.stderr)
-                return EXIT_INCOMPLETE
-            if rc == _ENGINE_EXIT_USAGE:
-                print("branch_reaper: internal error — the worktree engine rejected its argv.",
-                      file=sys.stderr)
-                return EXIT_INTERNAL
-            if rc == _ENGINE_EXIT_PARTIAL:
-                result = EXIT_PARTIAL
-            elif rc != _ENGINE_EXIT_OK:
-                print(f"branch_reaper: internal error — unexpected worktree-engine exit {rc}.",
-                      file=sys.stderr)
-                return EXIT_INTERNAL
-            worktrees = enum_worktrees(repo_root)
+                if rc == _ENGINE_EXIT_FAILCLOSED:
+                    print("branch_reaper: INCOMPLETE — the worktree engine fail-closed "
+                          "(nothing trusted). Nothing was deleted.", file=sys.stderr)
+                    return EXIT_INCOMPLETE
+                if rc == _ENGINE_EXIT_USAGE:
+                    print("branch_reaper: internal error — the worktree engine rejected its argv.",
+                          file=sys.stderr)
+                    return EXIT_INTERNAL
+                if rc == _ENGINE_EXIT_PARTIAL:
+                    result = EXIT_PARTIAL
+                elif rc != _ENGINE_EXIT_OK:
+                    print(f"branch_reaper: internal error — unexpected worktree-engine exit {rc}.",
+                          file=sys.stderr)
+                    return EXIT_INTERNAL
+                worktrees = enum_worktrees(repo_root)
 
-        held = {wt["branch"] for wt in worktrees if wt.get("branch")}
-        # Pre-delete recovery record: write the report BEFORE anything is removed.
-        if args.report:
-            Path(args.report).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.report).write_text(build_report(
-                rows, worktrees, ancestors, repo_root=repo_root, slug=slug,
-                main_ref_used=ref, include_closed_unmerged=args.include_closed_unmerged,
-                engine_output=engine_output))
-        free_before = _disk_free_kb(repo_root)
-        apply_results = delete_branches(repo_root, rows, held, backup_bundle=args.backup_bundle)
-        free_after = _disk_free_kb(repo_root)
-        if free_before is not None and free_after is not None:
-            disk = {"before_kb": free_before, "after_kb": free_after,
-                    "delta_kb": free_after - free_before}
-        if any(r["result"] == "refused" for r in apply_results):
-            result = EXIT_PARTIAL
+            # Recompute the worktree-held set AFTER any delegated teardown — this
+            # is the checked-out guard for the CAS delete phase.
+            held = {wt["branch"] for wt in worktrees if wt.get("branch")}
+            recovery = [{"branch": r["branch"], "oid": r["oid"], "verdict": r["reason"],
+                         "pr_number": r["pr_number"]}
+                        for r in rows if r["verdict"] == VERDICT_SAFE and not r["worktree"]]
+            # Durable recovery record BEFORE any deletion (so a crash mid-delete
+            # still leaves the tips recoverable), independent of --report.
+            recovery_path = (args.report + ".recovery.json") if args.report else \
+                os.path.join(repo_root, "branch-reaper-recovery.json")
+            _write_json_safe(recovery_path, {"generated": _now(), "repo": repo_root,
+                                             "include_closed_unmerged": args.include_closed_unmerged,
+                                             "branches": recovery})
+            if args.report:
+                _write_text_safe(args.report, build_report(
+                    rows, worktrees, ancestors, repo_root=repo_root, slug=slug,
+                    main_ref_used=ref, include_closed_unmerged=args.include_closed_unmerged,
+                    engine_output=engine_output, recovery=recovery, detached_ts=detached_ts))
+            free_before = _disk_free_kb(repo_root)
+            apply_results = delete_branches(repo_root, rows, held, backup_bundle=args.backup_bundle)
+            free_after = _disk_free_kb(repo_root)
+            if free_before is not None and free_after is not None:
+                disk = {"before_kb": free_before, "after_kb": free_after,
+                        "delta_kb": free_after - free_before}
+            if any(r["result"] == "refused" for r in apply_results):
+                result = EXIT_PARTIAL
+        except Incomplete as exc:
+            print(f"branch_reaper: INCOMPLETE — {exc}. Nothing was deleted.", file=sys.stderr)
+            return EXIT_INCOMPLETE
 
     report = build_report(rows, worktrees, ancestors, repo_root=repo_root, slug=slug,
                           main_ref_used=ref,
                           include_closed_unmerged=args.include_closed_unmerged,
-                          engine_output=engine_output, apply_results=apply_results, disk=disk)
-    if args.report:
-        Path(args.report).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.report).write_text(report)
+                          engine_output=engine_output, apply_results=apply_results, disk=disk,
+                          recovery=recovery, detached_ts=detached_ts)
+    try:
+        if args.report:
+            _write_text_safe(args.report, report)
+    except Incomplete as exc:
+        print(f"branch_reaper: {exc}", file=sys.stderr)
+        return EXIT_INCOMPLETE
     if args.json:
         print(json.dumps({"repo": repo_root, "slug": slug, "main_ref": ref,
                           "rows": rows,
@@ -731,6 +868,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"skipped={sum(1 for r in apply_results if r['result'] == 'skipped')}")
         if args.report:
             print(f"  report: {args.report}")
+        elif args.apply:
+            print(f"  recovery: {os.path.join(repo_root, 'branch-reaper-recovery.json')}")
     return result
 
 
