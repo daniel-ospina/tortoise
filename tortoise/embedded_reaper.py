@@ -2465,19 +2465,36 @@ class _ReaperLock:
 
 
 def _parse_timeout(cli_value: str | None) -> int:
-    """Timeout resolution: CLI --timeout > TORTOISE_REAPER_TIMEOUT env > 120."""
+    """Timeout resolution: CLI --timeout > TORTOISE_REAPER_TIMEOUT env > 120.
+
+    A resolved value < 1 is refused and falls back to the default:
+    `signal.alarm(0)` CANCELS the alarm, so `--timeout 0` would run the sweep
+    unbounded while holding `_ReaperLock` — every later fire then exits
+    `already running`. (The installer guards its own `REAPER_TIMEOUT`, but the
+    documented CLI/env flag must be safe on its own.)
+    """
     if cli_value is not None:
         try:
-            return int(float(cli_value))
+            value = int(float(cli_value))
         except ValueError:
             logger.warning("invalid --timeout %r — using default", cli_value)
+        else:
+            if value >= 1:
+                return value
+            logger.warning("--timeout %r must be >= 1 — using default",
+                           cli_value)
     env = os.environ.get("TORTOISE_REAPER_TIMEOUT", "")
     if env:
         try:
-            return int(float(env))
+            value = int(float(env))
         except ValueError:
             logger.warning(
                 "TORTOISE_REAPER_TIMEOUT=%r invalid — using default", env)
+        else:
+            if value >= 1:
+                return value
+            logger.warning(
+                "TORTOISE_REAPER_TIMEOUT=%r must be >= 1 — using default", env)
     return TIMEOUT_DEFAULT
 
 

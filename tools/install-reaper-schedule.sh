@@ -101,7 +101,7 @@ fi
 # #4438 review: derive the interval from the budget so the
 # "interval > budget" invariant holds by construction, and warn (never
 # silently) when a hand-set value violates it.
-REAPER_INTERVAL="${REAPER_INTERVAL:-$((REAPER_TIMEOUT + 300))}"
+REAPER_INTERVAL="${REAPER_INTERVAL:-$((10#$REAPER_TIMEOUT + 300))}"
 case "$REAPER_INTERVAL" in
     ''|*[!0-9]*)
         echo "ERROR: REAPER_INTERVAL must be a whole number of seconds, got '$REAPER_INTERVAL'" >&2
@@ -113,8 +113,8 @@ fi
 case "$REAPER_INTERVAL" in
     *[!0-9]*|'') : ;;
     *)
-        if [ "$REAPER_INTERVAL" -lt 60 ] || [ $((REAPER_INTERVAL % 60)) -ne 0 ]; then
-            echo "WARNING: cron takes REAPER_INTERVAL in whole minutes; $REAPER_INTERVAL s floors to $(( REAPER_INTERVAL / 60 < 1 ? 1 : REAPER_INTERVAL / 60 )) min" >&2
+        if [ "$REAPER_INTERVAL" -lt 60 ] || [ $((10#$REAPER_INTERVAL % 60)) -ne 0 ]; then
+            echo "WARNING: cron takes REAPER_INTERVAL in whole minutes; $REAPER_INTERVAL s floors to $(( 10#$REAPER_INTERVAL / 60 < 1 ? 1 : 10#$REAPER_INTERVAL / 60 )) min" >&2
         fi ;;
 esac
 REAPER_CMD="$PYTHON_BIN -m tortoise.embedded_reaper --no-dry-run --only-safe --timeout $REAPER_TIMEOUT --jobs $REAPER_JOBS"
@@ -159,7 +159,7 @@ cron_line() {
     # interval/60 minutes, so a non-multiple-of-60 floors to the minute
     # (a warning is emitted at install time — see REAPER_INTERVAL).
     local interval="${REAPER_INTERVAL:-1200}"
-    local minutes=$(( interval / 60 ))
+    local minutes=$(( 10#$interval / 60 ))
     [ "$minutes" -lt 1 ] && minutes=1
     echo "$CRON_LINE_RAW"
     echo "*/$minutes * * * * cd $REPO && $REAPER_CMD >> \$HOME/.tortoise/reaper.log 2>&1"
