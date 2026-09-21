@@ -332,32 +332,86 @@ def _after_invocation(command: str) -> tuple[str, str]:
     return "", ""
 
 
+def _manifest_values(cmd: str) -> list[str]:
+    """The (quote-stripped) value given to each `--manifest` in one command, in order.
+
+    A duplicate is deliberately NOT collapsed here: the guard's `_parse_args` assigns
+    each `--manifest` it sees, so the LAST one wins, and a pin that reads the first (or
+    any mention) asserts something the guard does not do (cycle-12 finding).
+    """
+    values: list[str] = []
+    for segment in _shell_segments(cmd):
+        words = _shell_words(segment)
+        for position, word in enumerate(words[:-1]):
+            if word == "--manifest":
+                values.append(words[position + 1])
+    return values
+
+
+def _step_assignments(commands: list[str]) -> dict[str, list[str]]:
+    """Every variable a step assigns and EVERY value it assigns it, in order.
+
+    The documented indirection is `M=<manifest path>` on its own line and then
+    `--manifest "$M"`. Recording all assignments (not just a set of names) is what a
+    reassignment needs to be visible: `M=<embedded>` followed by `M=<platform-gated>`
+    leaves a command that still MENTIONS the right manifest while the guard enforces
+    the other one (cycle-12 finding).
+    """
+    assignments: dict[str, list[str]] = {}
+    for cmd in commands:
+        words = _shell_words(cmd)
+        # a bare assignment line, or an env prefix on the front of a command
+        candidates = [cmd.strip()] if len(words) <= 1 else [words[0]]
+        for candidate in candidates:
+            if match := re.fullmatch(r"([A-Za-z_]\w*)=(.*)", candidate):
+                assignments.setdefault(match.group(1), []).append(
+                    match.group(2).strip().strip("\"'")
+                )
+    return assignments
+
+
+def _resolves_to(value: str, rel: str, assignments: dict[str, list[str]]) -> bool:
+    """True iff `--manifest <value>` points at `rel` — literally, or through a variable
+    the step assigns that path exactly once and never reassigns."""
+    if value == rel:
+        return True
+    match = re.fullmatch(r"\$\{?([A-Za-z_]\w*)\}?", value)
+    return bool(match) and assignments.get(match.group(1)) == [rel]
+
+
 def _guard_consumers(step_text: str, rel: str) -> list[tuple[int, str]]:
-    """The (index, command) pairs in `step_text` that invoke the guard FOR `rel`.
+    """The (index, command) pairs in `step_text` that invoke the guard ON `rel`.
 
-    The consumer is resolved by the INVOCATION — `tools/skip-guard.py` plus the manifest
-    path, directly or through a variable this same step assigned it to — rather than by
-    `rel in cmd` with an assignment-prefix exclusion. That exclusion (meant to bless the
-    documented `M=<path>` refactor) exempted every command that merely STARTS with an
-    assignment, so an env-prefixed invocation (`SG_ENV=1 python3 … --manifest-only ||
-    true`) escaped every exit-status check (cycle-9 finding).
+    Three separate escapes had to be closed here, each found by a review cycle:
 
-    The invocation test is `_invokes_guard` — the script in COMMAND POSITION — and not
-    a substring: a command that merely PRINTS the invocation (`echo "…skip-guard.py …
-    --manifest-only"`, or the same text unquoted) satisfied every consumer pin while the
-    frozen set was enforced by nothing (cycle-10 finding).
+    * `rel in cmd` with an assignment-prefix exclusion exempted every command that
+      merely STARTS with an assignment, so an env-prefixed invocation
+      (`SG_ENV=1 python3 … --manifest-only || true`) escaped every exit-status check
+      (cycle-9 finding).
+    * the invocation test is `_invokes_guard` — the script in COMMAND POSITION — and
+      not a substring, because a command that merely PRINTS the invocation
+      (`echo "…skip-guard.py … --manifest-only"`) satisfied every consumer pin while
+      the frozen set was enforced by nothing (cycle-10 finding).
+    * the MANIFEST is resolved by ARGUMENT SEMANTICS, not by `rel in cmd`: a path that
+      only appears as the guard's LOG positional, or as the first of TWO `--manifest`
+      flags (the guard's last-wins), or through a variable the step REASSIGNS, left the
+      pin green while the guard enforced the other manifest and exited 0 (cycle-12
+      finding). So: exactly one `--manifest` in the command, and its value must be `rel`
+      literally or a variable assigned `rel` exactly once and never otherwise.
     """
     commands = _shell_commands(step_text)
-    assigned = {
-        match.group(1)
-        for cmd in commands
-        if (match := re.match(rf"^([A-Za-z_]\w*)=\"?{re.escape(rel)}\"?\s*$", cmd.strip()))
-    }
+    assignments = _step_assignments(commands)
     consumers: list[tuple[int, str]] = []
     for index, cmd in enumerate(commands):
         if not _invokes_guard(cmd):
             continue
-        if rel in cmd or any(re.search(rf"\$\{{?{re.escape(var)}\b", cmd) for var in assigned):
+        values = _manifest_values(cmd)
+        # no `--manifest` (nothing to enforce against), or more than one (the guard's
+        # last-wins makes "which manifest" ambiguous) → not a consumer. Both are
+        # refused rather than guessed, so the pin's non-vacuity assertion reds.
+        if len(values) != 1:
+            continue
+        if _resolves_to(values[0], rel, assignments):
             consumers.append((index, cmd))
     return consumers
 
@@ -711,9 +765,13 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     than read: the capture only reaches the step through an explicit `exit`, and the
     pin's two blessed forms are the invocation itself as the last command or `||
     <var>=1` plus a later `exit` (fail closed — a safe capture form reds instead of
-    passing, and the message names the two forms it accepts). The end-to-end proof — a
-    lane that mutates the manifest and shows the job reds, which is what a construct
-    hiding a command's position from a text scanner cannot survive — is #4463.
+    passing, and the message names the two forms it accepts). An EARLY `exit` placed
+    before the invocation in the same step is the same class: the pin reads the step's
+    commands in order but does not model reachability, so a step that exits on line 2
+    still reads as having a consumer (cycle-12 P3, residual — see #4463). The
+    end-to-end proof — a lane that mutates the manifest and shows the job reds, which
+    is what a construct hiding a command's position from a text scanner cannot survive
+    — is #4463.
     """
     jobs = _workflow_jobs()
     rel = str(manifest.relative_to(ROOT))
