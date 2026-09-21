@@ -31,9 +31,17 @@ Coverage (the mutations from the issue):
   * --apply cannot be armed by an abbreviated flag (--ap)
   * an OPEN PR's base branch -> PRESERVE (base-ref veto)
   * an Incomplete AFTER a deletion -> distinct exit 6, not exit 2
+  * an aborted-FIRST delete (a killed update-ref) -> distinct exit 6, not exit 2
+  * a worktree created DURING `git bundle create` -> branch kept, worktree intact
+  * a worktree created between the guard read and its own delete -> ref RESTORED
+  * the POST-delete report write failing after a real deletion -> exit 6
+  * a late worktree's dirt is refreshed from the re-read, not the stale snapshot
 """
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import shlex
@@ -170,6 +178,27 @@ class ReaperTestCase(unittest.TestCase):
         rc, out, err = self.run_tool(["--json", *(args or [])], repo=repo)
         self.assertEqual(rc, 0, err)
         return {r["branch"]: r for r in json.loads(out)["rows"]}
+
+    def _load_tool(self):
+        """Import tools/branch_reaper.py in-process (the monkeypatchable path)."""
+        spec = importlib.util.spec_from_file_location("branch_reaper", TOOL)
+        br = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(br)
+        return br
+
+    @contextlib.contextmanager
+    def _stub_env(self):
+        saved = {k: os.environ.get(k) for k in ("BRANCH_REAPER_GH", "GH_STUB_DIR")}
+        os.environ["BRANCH_REAPER_GH"] = str(self.gh)
+        os.environ["GH_STUB_DIR"] = str(self.gh_dir)
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     # ── classification mutations ────────────────────────────────────────────
 
@@ -424,7 +453,7 @@ cat "$d/${{state}}_pages.json"
         sha = self.commit_on("merged/branch", "merged work")
         rows = [{"branch": "merged/branch", "oid": self.main_sha, "ts": 0,
                  "verdict": "SAFE", "reason": "pr-merged-tip"}]
-        results = br.delete_branches(str(self.repo), rows, set(), backup_bundle=None)
+        results = br.delete_branches(str(self.repo), rows, backup_bundle=None)
         self.assertEqual(results[0]["result"], "refused")
         self.assertIn("merged/branch", self.branches())
         self.assertTrue(sha)  # branch still exists at its real tip
@@ -440,7 +469,7 @@ cat "$d/${{state}}_pages.json"
         self.commit_on("merged/branch", "merged work")
         rows = [{"branch": "merged/branch", "oid": "0" * 40, "ts": 0,
                  "verdict": "SAFE", "reason": "pr-merged-tip"}]
-        results = br.delete_branches(str(self.repo), rows, set(), backup_bundle=None)
+        results = br.delete_branches(str(self.repo), rows, backup_bundle=None)
         self.assertEqual(results[0]["result"], "refused")
         self.assertIn("merged/branch", self.branches())
 
@@ -538,8 +567,8 @@ cat "$d/${{state}}_pages.json"
         target = {"branch": "merged/branch", "oid": sha, "ts": 0,
                   "verdict": "SAFE", "reason": "pr-merged-tip"}
 
-        def partial_delete(repo_root, rows, held, *, backup_bundle, results=None):
-            real_delete(repo_root, [target], held, backup_bundle=None, results=results)
+        def partial_delete(repo_root, rows, *, backup_bundle, results=None, **kwargs):
+            real_delete(repo_root, [target], backup_bundle=None, results=results)
             raise br.Incomplete("simulated timeout on a later ref")
 
         br.delete_branches = partial_delete
@@ -557,6 +586,196 @@ cat "$d/${{state}}_pages.json"
                     os.environ[k] = v
         self.assertEqual(rc, br.EXIT_INCOMPLETE_AFTER_DELETE, rc)
         self.assertNotIn("merged/branch", self.branches())
+
+    def test_worktree_created_during_bundle_create_is_not_deleted(self):
+        # P1 — the demonstrated case. `held` used to be read by the caller BEFORE
+        # `_make_backup_bundle`, whose `git bundle create` has a 900 s timeout, so
+        # a worktree created during that write was invisible to the delete; and
+        # `git update-ref -d` does NOT refuse a checked-out branch, so the branch
+        # was deleted out from under a live checkout, reported clean at exit 0.
+        # The guard is now read INSIDE delete_branches, after the bundle.
+        br = self._load_tool()
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        late_wt = self.tmp / "wt-during-bundle"
+        bundle = self.tmp / "backup.bundle"
+        real_run = br._run
+
+        def run_with_late_worktree(cmd, **kwargs):
+            if "bundle" in cmd and "create" in cmd and not late_wt.exists():
+                _git(self.repo, "worktree", "add", str(late_wt), "merged/branch")
+            return real_run(cmd, **kwargs)
+
+        br._run = run_with_late_worktree
+        try:
+            with self._stub_env():
+                rc = br.main(["--repo", str(self.driver), "--slug", "owner/repo",
+                              "--apply", "--backup-bundle", str(bundle)])
+        finally:
+            br._run = real_run
+        self.assertEqual(rc, 0, rc)
+        self.assertTrue(bundle.exists() and bundle.stat().st_size > 0)
+        self.assertIn("merged/branch", self.branches())
+        self.assertTrue(late_wt.exists())
+
+    def test_worktree_created_in_the_delete_window_is_restored(self):
+        # The residual the batch re-read cannot cover: a worktree created between
+        # the guard read and its branch's `update-ref -d`. The post-delete
+        # reconcile must restore the ref — a worktree created AFTER the delete
+        # cannot name a deleted branch, so one re-read after the loop is complete.
+        br = self._load_tool()
+        sha = self.commit_on("merged/branch", "merged work")
+        self.write_fixtures()
+        late_wt = self.tmp / "wt-during-delete"
+        real_run = br._run
+
+        def run_creating_worktree(cmd, **kwargs):
+            if ("update-ref" in cmd and "-d" in cmd and cmd[-1] == sha
+                    and not late_wt.exists()):
+                _git(self.repo, "worktree", "add", str(late_wt), "merged/branch")
+            return real_run(cmd, **kwargs)
+
+        rows = [{"branch": "merged/branch", "oid": sha, "ts": 0,
+                 "verdict": "SAFE", "reason": "pr-merged-tip"}]
+        br._run = run_creating_worktree
+        try:
+            results = br.delete_branches(str(self.repo), rows, backup_bundle=None)
+        finally:
+            br._run = real_run
+        self.assertEqual(results[0]["result"], "restored", results)
+        self.assertIn("merged/branch", self.branches())
+        self.assertEqual(_git_out(self.repo, "rev-parse", "refs/heads/merged/branch"), sha)
+        self.assertTrue(late_wt.exists())
+
+    def test_aborted_first_delete_returns_exit_6_not_2(self):
+        # P2 — a timed-out `update-ref -d` is recorded `aborted` and re-raised.
+        # When that is the FIRST target, deciding on `deleted` alone returned exit
+        # 2 ("Nothing was deleted") even though the killed update-ref may already
+        # have landed. `aborted` is deletion-or-unknown and must return exit 6.
+        br = self._load_tool()
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        real_run = br._run
+
+        def timeout_on_delete(cmd, **kwargs):
+            if "update-ref" in cmd and "-d" in cmd:
+                raise br.Incomplete("simulated 120 s timeout on update-ref -d")
+            return real_run(cmd, **kwargs)
+
+        br._run = timeout_on_delete
+        try:
+            with self._stub_env(), contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = br.main(["--repo", str(self.driver), "--slug", "owner/repo",
+                              "--apply"])
+        finally:
+            br._run = real_run
+        self.assertEqual(rc, br.EXIT_INCOMPLETE_AFTER_DELETE, err.getvalue())
+        self.assertIn("AFTER DELETION", err.getvalue())
+        self.assertIn("merged/branch", self.branches())
+
+    def test_post_delete_report_write_failure_returns_exit_6(self):
+        # The POST-delete report-write handler, distinct from the mid-loop one:
+        # the pre-delete write succeeded, a real deletion landed, and only THEN
+        # does the report path become a symlink. Without the exit-6 decision here
+        # the run would report the false "nothing was deleted" exit 2.
+        br = self._load_tool()
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        report = self.tmp / "r.md"
+        victim = self.tmp / "victim.md"
+        victim.write_text("do not clobber\n")
+        real_delete = br.delete_branches
+
+        def delete_then_symlink(repo_root, rows, *, backup_bundle, results=None, **kwargs):
+            out = real_delete(repo_root, rows, backup_bundle=backup_bundle, results=results)
+            if report.exists() and not report.is_symlink():
+                os.unlink(report)
+                os.symlink(victim, report)
+            return out
+
+        br.delete_branches = delete_then_symlink
+        try:
+            with self._stub_env(), contextlib.redirect_stderr(io.StringIO()):
+                rc = br.main(["--repo", str(self.driver), "--slug", "owner/repo",
+                              "--apply", "--report", str(report)])
+        finally:
+            br.delete_branches = real_delete
+        self.assertEqual(rc, br.EXIT_INCOMPLETE_AFTER_DELETE, rc)
+        self.assertEqual(victim.read_text(), "do not clobber\n")
+        self.assertNotIn("merged/branch", self.branches())
+
+    def test_aborted_delete_that_landed_while_held_is_restored_on_the_abort_path(self):
+        # The kill-after-landing case: the update-ref deleted the ref and THEN the
+        # process was killed; the post-kill probe was unavailable, so the row stayed
+        # `aborted` (deletion-or-unknown) while a worktree held the branch. The
+        # abort-path reconcile must probe and restore it, never leave the checkout
+        # on a missing ref.
+        br = self._load_tool()
+        sha = self.commit_on("merged/branch", "merged work")
+        self.write_fixtures()
+        wt = self.tmp / "wt-held-aborted"
+        real_run = br._run
+        state = {"probes": 0}
+
+        def land_then_timeout(cmd, **kwargs):
+            if "update-ref" in cmd and "-d" in cmd and cmd[-1] == sha:
+                _git(self.repo, "worktree", "add", str(wt), "merged/branch")
+                real_run(cmd, **kwargs)  # the ref transaction COMMITS first
+                raise br.Incomplete("killed after the ref transaction committed")
+            if "rev-parse" in cmd and "--verify" in cmd:
+                state["probes"] += 1
+                if state["probes"] == 1:
+                    raise br.Incomplete("probe unavailable")
+            return real_run(cmd, **kwargs)
+
+        rows = [{"branch": "merged/branch", "oid": sha, "ts": 0,
+                 "verdict": "SAFE", "reason": "pr-merged-tip"}]
+        br._run = land_then_timeout
+        try:
+            with self.assertRaises(br.Incomplete):
+                br.delete_branches(str(self.repo), rows, backup_bundle=None)
+        finally:
+            br._run = real_run
+        self.assertIn("merged/branch", self.branches())
+        self.assertEqual(_git_out(self.repo, "rev-parse", "refs/heads/merged/branch"), sha)
+
+    def test_late_worktree_dirty_is_refreshed_for_the_report(self):
+        # P3 — the re-read refreshed `worktree` but left `dirty` (and the detached
+        # age map) from the stale first snapshot, so a genuinely dirty late
+        # worktree could be reported dirty=no.
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        late_wt = self.tmp / "wt-late-dirty"
+        late_stub = _write_exec(self.gh_dir / "gh-late-dirty", f"""#!/usr/bin/env bash
+set -u
+d="${{GH_STUB_DIR:?GH_STUB_DIR unset}}"
+state=""
+for a in "$@"; do
+  case "$a" in
+    *state=open*) state=open ;;
+    *state=closed*) state=closed ;;
+  esac
+done
+[ -n "$state" ] || exit 1
+if [ "$state" = "closed" ]; then
+  git -C {shlex.quote(str(self.repo))} worktree add {shlex.quote(str(late_wt))} merged/branch >/dev/null 2>&1 || true
+  echo dirty > {shlex.quote(str(late_wt))}/untracked.txt
+fi
+cat "$d/${{state}}_pages.json"
+""")
+        rc, out, err = self.run_tool(["--json", "--apply"], repo=self.driver,
+                                     env_extra={"BRANCH_REAPER_GH": str(late_stub)})
+        self.assertEqual(rc, 0, err + out)
+        row = next(r for r in json.loads(out)["rows"] if r["branch"] == "merged/branch")
+        self.assertTrue(row["worktree"], "the late worktree must be reported")
+        self.assertEqual(os.path.realpath(row["worktree"]), os.path.realpath(str(late_wt)))
+        self.assertTrue(row["dirty"],
+                        "dirty must come from the re-read, not the stale snapshot")
+        self.assertIn("merged/branch", self.branches())
 
     def test_backup_bundle_symlink_path_is_refused(self):
         sha = self.commit_on("merged/branch", "merged work")

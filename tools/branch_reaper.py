@@ -61,10 +61,18 @@ Safety
   the ancestor rule can never fire on a branch whose open PR fell off a page.
 * **TOCTOU.** Deletion uses the ATOMIC compare-and-delete primitive
   ``git update-ref -d refs/heads/<b> <classified-oid>``: it fails without
-  deleting if the ref no longer equals the classified tip. Because ``update-ref``
-  does not itself refuse a branch checked out in a worktree, the worktree-held
-  snapshot — recomputed immediately before the delete phase, after any delegated
-  teardown — is the checked-out guard.
+  deleting if the ref no longer equals the classified tip. ``update-ref`` does
+  NOT itself refuse a branch checked out in a worktree, so the checked-out guard
+  is a ``git worktree list`` snapshot taken INSIDE :func:`delete_branches` —
+  after the backup bundle has been written and immediately before the delete
+  loop, then refreshed every :data:`HELD_RECHECK_BATCH` deletes. It is NOT taken
+  by the caller: the caller's snapshot precedes the recovery write, the report
+  write, the disk probe and ``git bundle create`` (timeout 900 s), which is the
+  window that let a worktree created during the bundle write be deleted out from
+  under. A branch a worktree created inside the remaining one-batch window still
+  holds is RESTORED by :func:`_reconcile_held_deletions` once the loop ends, so
+  the net residual is zero (a branch cannot be checked out by a *new* worktree
+  after its ref is gone).
 * **Recovery.** A durable machine-readable recovery record (full tip SHAs) is
   written BEFORE the delete phase, independent of ``--report``; the report also
   carries a Recovery record section. ``--backup-bundle`` optionally writes one
@@ -98,12 +106,14 @@ Exit codes (a delegate code is never passed through unmodified)
   4  partial failure — at least one deletion was refused, or the worktree
      engine reported >=1 FAILED removal
   5  internal error (unexpected engine exit, malformed output)
-  6  INCOMPLETE AFTER DELETION — the run aborted after at least one branch had
-     already been deleted (a mid-loop timeout, or a report path that became a
-     symlink between the pre-delete and post-delete writes). Exit 2's "Nothing
-     was deleted" contract does NOT hold here; the pre-delete recovery record
-     holds every classified tip, so ``git branch <name> <sha>`` restores any of
-     them.
+  6  INCOMPLETE AFTER DELETION — the run aborted after at least one branch may
+     have been deleted: a mid-loop timeout, a FIRST target whose killed
+     ``update-ref -d`` may already have landed (a deleted-or-unknown
+     ``aborted``), a worktree-held branch that could not be restored, or a report
+     path that became a symlink between the pre-delete and post-delete writes.
+     Exit 2's "Nothing was deleted" contract does NOT hold here; the pre-delete
+     recovery record holds every classified tip, so ``git branch <name> <sha>``
+     restores any of them.
 
 Usage
 -----
@@ -138,6 +148,14 @@ EXIT_INCOMPLETE_AFTER_DELETE = 6
 #: Page caps. A list that reaches its cap is TRUNCATED, never "complete but short".
 DEFAULT_MAX_PR_PAGES = 50
 DEFAULT_PER_PAGE = 100
+
+#: How often ``delete_branches`` re-reads the checked-out set. A full
+#: ``git worktree list --porcelain`` over this repo's ~450 worktrees costs ~0.8 s
+#: (measured), so a re-read *per delete* would add ~12 min to a 923-branch run;
+#: one per batch keeps the checked-out guard at most ``batch`` ``update-ref``
+#: calls old for ~30 s of that same run. The post-delete reconcile is what makes
+#: the residual non-destructive, so this is a cost/latency choice, not the guard.
+HELD_RECHECK_BATCH = 25
 
 #: Worktree-engine (``pi-reap-worktrees.sh``) exit codes, remapped below.
 _ENGINE_EXIT_OK = 0
@@ -677,12 +695,17 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
         deleted = [r for r in apply_results if r["result"] == "deleted"]
         refused = [r for r in apply_results if r["result"] == "refused"]
         skipped = [r for r in apply_results if r["result"] == "skipped"]
+        restored = [r for r in apply_results if r["result"] == "restored"]
+        unknown = [r for r in apply_results if r["result"] in ("aborted", "unrestored")]
         out.append("## Post-apply results\n")
         out.append("| metric | value |")
         out.append("|---|---|")
         out.append(f"| deleted | {len(deleted)} |")
+        out.append(f"| restored (a worktree created in the delete window held it) | {len(restored)} |")
         out.append(f"| refused | {len(refused)} |")
         out.append(f"| skipped (held / moved) | {len(skipped)} |")
+        if unknown:
+            out.append(f"| **aborted / unrestored — deleted-or-unknown** | **{len(unknown)}** |")
         if disk:
             out.append(f"| filesystem free before | {disk.get('before_kb')} KiB |")
             out.append(f"| filesystem free after | {disk.get('after_kb')} KiB |")
@@ -694,10 +717,22 @@ def build_report(rows: list[dict], worktrees: list[dict], ancestors: set[str],
         for r in deleted:
             out.append(f"| `{r['branch']}` | `{r['oid']}` |")
         out.append("")
+        if restored:
+            out.append("### Restored — deleted while a worktree created in the window held it\n")
+            out.append("The ref was deleted and then restored by the post-delete reconcile; "
+                       "the branch is intact.\n")
+            for r in restored:
+                out.append(f"- `{r['branch']}` — {r.get('detail', 'restored')}")
+            out.append("")
         if refused:
             out.append("### Refused\n")
             for r in refused:
                 out.append(f"- `{r['branch']}` — {r.get('detail', 'refused')}")
+            out.append("")
+        if unknown:
+            out.append("### Aborted / unrestored — deleted-or-unknown\n")
+            for r in unknown:
+                out.append(f"- `{r['branch']}` — {r.get('detail', r['result'])}")
             out.append("")
     return "\n".join(out) + "\n"
 
@@ -713,23 +748,95 @@ def run_worktree_engine(engine: str, repo_root: str, timeout: int) -> tuple[int,
     return res.returncode, output
 
 
-def delete_branches(repo_root: str, rows: list[dict], held: set[str],
+def _held_branches(repo_root: str) -> set[str]:
+    """Local branch names checked out in ANY worktree (the main one included).
+
+    A worktree whose branch ref has already been deleted still reports ``branch
+    refs/heads/<name>`` — git reads the worktree HEAD symref and reports an
+    all-zero HEAD — so this sees a held-but-deleted branch. That is what makes
+    the post-delete reconcile possible.
+    """
+    return {wt["branch"] for wt in enum_worktrees(repo_root) if wt.get("branch")}
+
+
+def _reconcile_held_deletions(repo_root: str, results: list[dict]) -> None:
+    """Restore any branch this run deleted while a worktree still held it.
+
+    ``git update-ref -d`` does NOT refuse a branch checked out in a worktree, so
+    a worktree created between the ``held`` re-read and the delete of its branch
+    can be left on a deleted ref. That window is CLOSED here: ``git worktree add
+    <path> <branch>`` needs the branch ref to exist, so a worktree created AFTER
+    our delete cannot name the deleted branch — a single re-read once the loop is
+    over therefore sees every branch held by a worktree created while we ran.
+    Each one is restored from the classified tip with the all-zero old-oid
+    precondition (create-only), so a ref a concurrent lane has already re-created
+    is never clobbered. A restore that fails is raised as ``Incomplete`` so the
+    caller reports exit 6 and names the branch.
+    """
+    candidates = {r["branch"]: r for r in results if r["result"] in ("deleted", "aborted")}
+    if not candidates:
+        return
+    for branch in sorted(_held_branches(repo_root) & set(candidates)):
+        row = candidates[branch]
+        if row["result"] == "aborted":
+            # The killed update-ref may OR may not have landed; only a branch whose
+            # ref is actually gone needs restoring (an existing ref is not broken).
+            probe = _run(["git", "-C", repo_root, "rev-parse", "--verify", "--quiet",
+                          f"refs/heads/{branch}"])
+            if probe.returncode == 0 and probe.stdout.strip():
+                continue
+        res = _run(["git", "-C", repo_root, "update-ref",
+                    f"refs/heads/{branch}", row["oid"], "0" * 40])
+        if res.returncode == 0:
+            row["result"] = "restored"
+            row["detail"] = ("deleted while a worktree created during the delete "
+                             "window held it — branch restored from the classified tip")
+        else:
+            row["result"] = "unrestored"
+            row["detail"] = ("REF DELETED WHILE HELD and the automatic restore failed: "
+                             + (res.stderr or res.stdout).strip())
+    stuck = sorted(r["branch"] for r in results if r["result"] == "unrestored")
+    if stuck:
+        raise Incomplete(
+            "a worktree holds a branch this run deleted and it could not be restored: "
+            + ", ".join(stuck))
+
+
+#: Delete-phase outcomes where the ref may no longer exist. ``aborted`` is a
+#: killed ``update-ref -d`` whose result the post-kill probe could not determine.
+_LANDED_RESULTS = ("deleted", "aborted", "unrestored")
+
+
+def _landed_results(results: list[dict] | None) -> list[dict]:
+    """Rows whose ref may be gone — the input to the exit-6 decision.
+
+    Keyed on more than ``deleted``: a killed ``update-ref -d`` is ``aborted``
+    (deletion-or-unknown), so an aborted FIRST target must not read as "nothing
+    was deleted".
+    """
+    return [r for r in (results or []) if r["result"] in _LANDED_RESULTS]
+
+
+def delete_branches(repo_root: str, rows: list[dict],
                     *, backup_bundle: str | None,
-                    results: list[dict] | None = None) -> list[dict]:
-    """Delete the SAFE rows. ``held`` must be a worktree snapshot taken by the
-    caller immediately before this call (after any delegated teardown).
+                    results: list[dict] | None = None,
+                    batch: int = HELD_RECHECK_BATCH) -> list[dict]:
+    """Delete the SAFE rows, guarding the checked-out set HERE — not in the caller.
 
     Deletion uses the ATOMIC compare-and-delete primitive
     ``git update-ref -d refs/heads/<b> <expected>``: it fails without deleting
     if the ref no longer equals the classified tip, closing the
-    check-then-act window. Because ``update-ref`` does NOT itself refuse a
-    branch checked out in some worktree, the ``held`` snapshot IS the
-    checked-out guard. The residual is NOT microseconds: a ``--backup-bundle``
-    run stages temporary refs and writes the bundle after ``held`` was read (up
-    to the 900 s bundle timeout), so a worktree created during that stretch is
-    still absent from ``held``. A requested ``--backup-bundle`` that cannot be
-    produced aborts the whole phase (``Incomplete``) rather than deleting
-    unbacked-up.
+    check-then-act window. Because ``update-ref`` does NOT itself refuse a branch
+    checked out in some worktree, a fresh ``git worktree list`` snapshot IS the
+    checked-out guard, and it is taken INSIDE this function: once after
+    ``_make_backup_bundle`` (whose ``git bundle create`` has a 900 s timeout —
+    taking the snapshot before it was the P1 defect: a worktree created during
+    the bundle write was invisible to the delete) and then every ``batch``
+    deletes. The guard is therefore at most ``batch`` ``update-ref`` calls old,
+    never as old as the slowest preceding operation. The residual — a worktree
+    created between a re-read and its branch's delete — is closed by
+    :func:`_reconcile_held_deletions`, which restores any deleted branch a
+    worktree is found holding once the loop ends.
 
     ``results`` may be a caller-owned sink: when supplied, progress is appended
     to it as it happens, so an ``Incomplete`` raised mid-loop still leaves the
@@ -738,37 +845,60 @@ def delete_branches(repo_root: str, rows: list[dict], held: set[str],
     """
     if results is None:
         results = []
+    batch = max(1, batch)
     targets = [r for r in rows if r["verdict"] == VERDICT_SAFE]
     if backup_bundle:
         _make_backup_bundle(repo_root, backup_bundle,
-                            [r for r in targets if r["branch"] not in held])
-    for r in targets:
-        b, expected = r["branch"], r["oid"]
-        if b in held:
-            results.append({"branch": b, "oid": expected, "result": "skipped",
-                            "detail": "worktree-held"})
-            continue
-        # Defensive: an empty/all-zero expected OID is NOT a valid compare-and-
-        # delete sentinel — git treats all-zeros as "no old value" and deletes
-        # unconditionally, so guard before it can reach update-ref.
-        if not expected or set(expected) == {"0"}:
-            results.append({"branch": b, "oid": expected, "result": "refused",
-                            "detail": "missing classified OID"})
-            continue
-        try:
-            res = _run(["git", "-C", repo_root, "update-ref", "-d",
-                        f"refs/heads/{b}", expected])
-        except Incomplete as exc:
-            # A timeout here aborts the phase; record the branch we were on so
-            # the caller can see how far it got, then fail closed.
-            results.append({"branch": b, "oid": expected, "result": "aborted",
-                            "detail": str(exc)})
-            raise
-        if res.returncode == 0:
-            results.append({"branch": b, "oid": expected, "result": "deleted", "detail": ""})
-        else:
-            results.append({"branch": b, "oid": expected, "result": "refused",
-                            "detail": (res.stderr or res.stdout).strip()})
+                            [r for r in targets if r["branch"] not in _held_branches(repo_root)])
+    held: set[str] = set()
+    try:
+        for i, r in enumerate(targets):
+            b, expected = r["branch"], r["oid"]
+            # The checked-out guard: re-read immediately before the FIRST delete
+            # (after the bundle) and every `batch` deletes after that.
+            if i % batch == 0:
+                held = _held_branches(repo_root)
+            if b in held:
+                results.append({"branch": b, "oid": expected, "result": "skipped",
+                                "detail": "worktree-held"})
+                continue
+            # Defensive: an empty/all-zero expected OID is NOT a valid compare-and-
+            # delete sentinel — git treats all-zeros as "no old value" and deletes
+            # unconditionally, so guard before it can reach update-ref.
+            if not expected or set(expected) == {"0"}:
+                results.append({"branch": b, "oid": expected, "result": "refused",
+                                "detail": "missing classified OID"})
+                continue
+            try:
+                res = _run(["git", "-C", repo_root, "update-ref", "-d",
+                            f"refs/heads/{b}", expected])
+            except Incomplete as exc:
+                # A killed update-ref may already have landed: probe the ref so the
+                # caller can tell "may have deleted" from "deleted nothing" (an
+                # aborted-FIRST run must NOT read as the "nothing was deleted"
+                # exit 2). If the probe is itself unavailable the row stays
+                # `aborted` — deletion-or-unknown — which the caller also counts.
+                row = {"branch": b, "oid": expected, "result": "aborted", "detail": str(exc)}
+                with contextlib.suppress(Incomplete):
+                    probe = _run(["git", "-C", repo_root, "rev-parse", "--verify", "--quiet",
+                                  f"refs/heads/{b}"])
+                    if probe.returncode != 0 or not probe.stdout.strip():
+                        row["result"] = "deleted"
+                        row["detail"] = str(exc) + " (ref is gone — the delete landed)"
+                results.append(row)
+                raise
+            if res.returncode == 0:
+                results.append({"branch": b, "oid": expected, "result": "deleted", "detail": ""})
+            else:
+                results.append({"branch": b, "oid": expected, "result": "refused",
+                                "detail": (res.stderr or res.stdout).strip()})
+    except Incomplete:
+        # Best-effort repair before surfacing the abort; the reconcile must never
+        # mask the original error.
+        with contextlib.suppress(Exception):
+            _reconcile_held_deletions(repo_root, results)
+        raise
+    _reconcile_held_deletions(repo_root, results)
     return results
 
 
@@ -898,20 +1028,27 @@ def _run_main(args) -> int:
                           file=sys.stderr)
                     return EXIT_INTERNAL
 
-            # Re-read the worktree list IMMEDIATELY before the delete phase, on
-            # EVERY --apply path (not only --reap-worktrees). `git update-ref -d`
-            # does NOT refuse a branch checked out in a worktree, so this snapshot
-            # IS the checked-out guard; the initial enumeration happened before two
-            # paginated `gh api` calls and the per-worktree dirty probes, which is
-            # far too old to guard the delete. Re-reading here also refreshes each
-            # row's worktree so the recovery record and the report derive from the
-            # SAME snapshot deletion uses (a stale `r["worktree"]` silently omitted
-            # a freed-then-deleted branch from the recovery record).
+            # Refresh the worktree list after any delegated teardown and on EVERY
+            # --apply path (not only --reap-worktrees), so the recovery record and
+            # the report derive from a snapshot taken after the initial
+            # enumeration (which preceded two paginated `gh api` calls and the
+            # per-worktree dirty probes). This snapshot is for the REPORT and the
+            # RECOVERY RECORD only: `delete_branches` re-reads its own, later
+            # snapshot for the checked-out guard, because this one still precedes
+            # the recovery write, the report write and `git bundle create` (up to
+            # 900 s) — the window that was the P1.
             worktrees = enum_worktrees(repo_root)
-            held = {wt["branch"] for wt in worktrees if wt.get("branch")}
             held_map = {wt["branch"]: wt["path"] for wt in worktrees if wt.get("branch")}
             for r in rows:
                 r["worktree"] = held_map.get(r["branch"])
+                # Refresh dirt and detached-HEAD age from the SAME snapshot the
+                # report and the recovery record are built from: a stale
+                # first-snapshot dirty=no would be printed for a genuinely dirty
+                # late worktree. (`delete_branches` takes its OWN, later snapshot
+                # for the actual checked-out guard — see its docstring.)
+                if r["worktree"]:
+                    r["dirty"] = worktree_dirty(r["worktree"])
+            detached_ts = _detached_head_ts(repo_root, worktrees)
             recovery = [{"branch": r["branch"], "oid": r["oid"], "verdict": r["reason"],
                          "pr_number": r["pr_number"]}
                         for r in rows if r["verdict"] == VERDICT_SAFE and not r["worktree"]]
@@ -929,7 +1066,10 @@ def _run_main(args) -> int:
                     engine_output=engine_output, recovery=recovery, detached_ts=detached_ts))
             free_before = _disk_free_kb(repo_root)
             apply_results = []
-            delete_branches(repo_root, rows, held, backup_bundle=args.backup_bundle,
+            # delete_branches re-reads the checked-out set itself, after the
+            # bundle write and again every HELD_RECHECK_BATCH deletes: the caller
+            # snapshot above is for the report and the recovery record only.
+            delete_branches(repo_root, rows, backup_bundle=args.backup_bundle,
                             results=apply_results)
             free_after = _disk_free_kb(repo_root)
             if free_before is not None and free_after is not None:
@@ -938,12 +1078,12 @@ def _run_main(args) -> int:
             if any(r["result"] == "refused" for r in apply_results):
                 result = EXIT_PARTIAL
         except Incomplete as exc:
-            deleted = [r for r in (apply_results or []) if r["result"] == "deleted"]
-            if deleted:
+            landed = _landed_results(apply_results)
+            if landed:
                 print(f"branch_reaper: INCOMPLETE AFTER DELETION — {exc}. "
-                      f"{len(deleted)} branch(es) had already been deleted; the remaining "
-                      f"targets were NOT deleted. The pre-delete recovery record holds every "
-                      f"classified tip.", file=sys.stderr)
+                      f"{len(landed)} branch(es) were deleted, or left in an unknown state "
+                      f"(a killed `git update-ref -d` may already have landed). The pre-delete "
+                      f"recovery record holds every classified tip.", file=sys.stderr)
                 return EXIT_INCOMPLETE_AFTER_DELETE
             print(f"branch_reaper: INCOMPLETE — {exc}. Delete phase aborted; the "
                   f"pre-delete recovery record is on disk.", file=sys.stderr)
@@ -959,7 +1099,7 @@ def _run_main(args) -> int:
             _write_text_safe(args.report, report)
     except Incomplete as exc:
         print(f"branch_reaper: {exc}", file=sys.stderr)
-        if apply_results and any(r["result"] == "deleted" for r in apply_results):
+        if _landed_results(apply_results):
             return EXIT_INCOMPLETE_AFTER_DELETE
         return EXIT_INCOMPLETE
     if args.json:
@@ -977,6 +1117,7 @@ def _run_main(args) -> int:
               f"judgement={sum(1 for r in rows if r['verdict'] == VERDICT_JUDGEMENT)}")
         if apply_results is not None:
             print(f"  deleted={sum(1 for r in apply_results if r['result'] == 'deleted')} "
+                  f"restored={sum(1 for r in apply_results if r['result'] == 'restored')} "
                   f"refused={sum(1 for r in apply_results if r['result'] == 'refused')} "
                   f"skipped={sum(1 for r in apply_results if r['result'] == 'skipped')}")
         if args.report:
