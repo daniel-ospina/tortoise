@@ -7,9 +7,9 @@ drift from the code it cites. The destination map is data in the generator; ever
 below is arithmetic computed against the live registry. The generator **fails the build**
 if the map and the registry disagree — a mismatch is a finding, not something to reconcile.
 
-**Registry: 98 tools → 80 absorbed into the 25 MCP targets · 1 absorbed into a builder-only SDK method (not on the MCP) · 2 tenancy (SDK/REST only) · 15 retired.**
+**Registry: 98 tools → 81 absorbed into the 26 MCP targets · 1 absorbed into a builder-only SDK method (not on the MCP) · 2 tenancy (SDK/REST only) · 14 retired.**
 
-**These are not the same number.** The MCP has **25** tools; **15** current tools retire, **2** are tenancy-only, **1** is absorbed into a builder-only SDK method that is not on the MCP, and **80** are absorbed into those 25 — many-to-one. Writing "98 minus 25 equals 73 retired" conflates the two, and is wrong.
+**These are not the same number.** The MCP has **26** tools; **14** current tools retire, **2** are tenancy-only, **1** is absorbed into a builder-only SDK method that is not on the MCP, and **81** are absorbed into those 26 — many-to-one. Writing "98 minus 26 equals 72 retired" conflates the two, and is wrong.
 
 ---
 
@@ -92,7 +92,7 @@ something derivable from today's code.
 | 40 | `tortoise_get_point` | `tool_registry.py:233` | `get_point` | yes | `get_entity` |
 | 41 | `tortoise_get_session` | `tool_registry.py:795` | `get_session` | yes | `get_entity` |
 | 42 | `tortoise_get_source_reliability` | `tool_registry.py:850` | `get_source_reliability` | no | `list_knowledge` |
-| 43 | `tortoise_graph_set_recording` | `tool_registry.py:612` | **none declared** | no | `REMOVED` |
+| 43 | `tortoise_graph_set_recording` | `tool_registry.py:612` | **none declared** | no | `graph_set_recording` |
 | 44 | `tortoise_health` | `tool_registry.py:574` | `health` ⚠️ **does not resolve** | yes | `graph_overview` |
 | 45 | `tortoise_index_files` | `tool_registry.py:811` | `index_directory` | no | `index_sources_from_directory` |
 | 46 | `tortoise_index_sessions` | `tool_registry.py:802` | `index_sessions` | no | `index_sources_from_directory` |
@@ -153,7 +153,7 @@ something derivable from today's code.
 
 | Destination | Count |
 |---|---|
-| `REMOVED` | 15 |
+| `REMOVED` | 14 |
 | `graph_overview` | 10 |
 | `list_knowledge` | 10 |
 | `check_confidence` | 7 |
@@ -172,6 +172,7 @@ something derivable from today's code.
 | `poll_events` | 2 |
 | `supersede_knowledge` | 2 |
 | `approve_merge` | 1 |
+| `graph_set_recording` | 1 |
 | `mine_knowledge_from_directory` | 1 |
 | `mine_knowledge_from_session` | 1 |
 | `record_decision` | 1 |
@@ -182,7 +183,7 @@ something derivable from today's code.
 | `write_question` | 1 |
 | **total** | **98** |
 
-Destination rows: **27**. Registry tools: **98**.
+Destination rows: **28**. Registry tools: **98**.
 
 ## Part C — blockers
 

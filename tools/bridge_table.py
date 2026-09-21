@@ -55,6 +55,19 @@ TARGET_MCP = [
     "manage_source_trust", "link_entities", "write_question", "record_decision",
     "update_knowledge", "supersede_knowledge", "delete_knowledge",
     "adjust_relationship", "refresh_confidence", "approve_merge",
+    # Owner decision 2026-09-21: KEPT. Dropping it would leave an agent that hits
+    # the capture 409 ("Session recording is disabled for this graph") with no
+    # recovery path inside MCP, since REST is unreachable from an MCP client.
+    #
+    # Note which SDK method backs it. A public `graph_set_recording` DOES exist on
+    # TortoiseSDK, but it is a per-field setter, and the owner's Decision 3
+    # deleted `set_memory_graph_name`/`set_memory_graph_backend` for exactly that
+    # shape ("fields go on create, plus one partial update"). Folding the
+    # override into `update_memory_graph` is the consistent reading, so the SDK
+    # method stays discarded while the MCP tool survives. That makes
+    # `graph_set_recording` this surface's one deliberate exception to "tenancy is
+    # not on the MCP" - and the reason it needs a `team:manage`-scoped key.
+    "graph_set_recording",
 ]
 
 # ─────────────────────────────────────────────────────────────────────
@@ -174,7 +187,7 @@ DESTINATION = {
     "tortoise_packs_list": "REMOVED",
     # ── Tenancy / admin ─────────────────────────────────────────────
     "tortoise_org_create": "tenancy:create_memory_graph",
-    "tortoise_graph_set_recording": "REMOVED",
+    "tortoise_graph_set_recording": "graph_set_recording",
     # ── Analytics ───────────────────────────────────────────────────
     "tortoise_analyze": "REMOVED",
 }

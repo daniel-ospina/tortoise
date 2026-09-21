@@ -54,7 +54,7 @@ The freeze is on **tools and endpoints** — nothing is added, removed, renamed 
 either surface without explicit human approval. A **response field** that is off by default and
 leaves the response unchanged is **not** a gate failure, but must be recorded.
 
-## The reconciliation — MCP 98 → 25
+## The reconciliation — MCP 98 → 26
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.
@@ -70,26 +70,26 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 | | |
 |---|---|
 | Registry tools | **98** |
-| Absorbed into the 25 MCP targets | **80** |
+| Absorbed into the 26 MCP targets | **81** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
-| Retired | **15** |
-| MCP target tools | **25** |
+| Retired | **14** |
+| MCP target tools | **26** |
 
 **The four bucket rows sum to 98.** (The last row is the target *surface*, not a bucket —
-25 targets received those 80 absorbed tools many-to-one, so it is not part of the sum.)
+26 targets received those 81 absorbed tools many-to-one, so it is not part of the sum.)
 
 † **`run_onboarding` is in the approved 23-tool list — it is tool #23, absorbing the seven
-`onboarding_*` tools — and the beta 25 drops it in favour of `check_connection`.** That is not a
-contradiction with the bridge table, which describes the **25-tool target**: `run_onboarding` was
-a proposed merge of seven registry tools, the 25 drops it, so those seven have no destination and
+`onboarding_*` tools — and the beta 26 drops it in favour of `check_connection`.** That is not a
+contradiction with the bridge table, which describes the **26-tool target**: `run_onboarding` was
+a proposed merge of seven registry tools, the 26 drops it, so those seven have no destination and
 are correctly `REMOVED`. **They are one of the genuine retirements** — `check_connection` replaces
 the proposed entry point and absorbs none of them. (An earlier draft of this footnote claimed
 `run_onboarding` was never in the approved list; that was false and is corrected here.)
 
-**`98 − 25 = 73 retired` is wrong** and circulated in earlier drafts: 15 retire, 2 are tenancy-only,
-1 is absorbed into a builder-only SDK method that is not on the MCP, and 80 are
-absorbed into the 25 targets. Many current tools map onto one target, so the two numbers are
+**`98 − 26 = 72 retired` is wrong** and circulated in earlier drafts: 14 retire, 2 are tenancy-only,
+1 is absorbed into a builder-only SDK method that is not on the MCP, and 81 are
+absorbed into the 26 targets. Many current tools map onto one target, so the two numbers are
 not complements.
 
 ## The reconciliation — SDK 150 → 40
@@ -108,8 +108,9 @@ honest form, and the per-name completeness check is deferred to Phase 0.3b.
 **40 rows**, of which the table's rows 1–2 are the `Tortoise(...)` constructor and
 `close()`.
 
-**The SDK count is 40 and the MCP count is 25.** The approved canonical MCP list is **23**; the
-beta surface adds four, drops three and splits one:
+**The SDK count is 40 and the MCP count is 26.** Start from the approved canonical MCP list of
+**23**. The owner's 2026-09-21 ruling added `graph_set_recording` — an unplaced tool — bringing the
+approved surface to **24**. The beta target then adds five, drops three and splits one:
 
 | | |
 |---|---|
@@ -118,20 +119,26 @@ beta surface adds four, drops three and splits one:
 | **±1** | `revise_knowledge` splits into `update_knowledge` + `supersede_knowledge` |
 | **renames** | `recall_beliefs`→`check_confidence` · `stabilize_beliefs`→`refresh_confidence` · `capture_knowledge`→`mine_knowledge_from_session` · `index_files`→`index_sources_from_directory` · `manage_source_trust` unchanged |
 
-23 + 4 − 3 + 1 = **25**. ✓
+`23 + 1 (owner ruling) + 4 − 3 + 1 = 26`. ✓
+
+**The one ruling this rests on** (owner, 2026-09-21 — `graph_set_recording` was an unplaced tool, so it is
+not one of the 23's rejects but a separate decision): **KEPT.** It is an agent's only in-MCP recovery
+from the capture 409, because REST is unreachable from an MCP client. It is the target's one deliberate
+exception to "tenancy is not on the MCP" — its SDK method is the builder-only `update_memory_graph`,
+and it needs a `team:manage`-scoped key, so it is **not** a universal self-heal path.
 
 ## ⛔ Cross-artifact tensions — do not let the target silently close an owner-open item
 
-`docs/product/canonical-mcp-tools.md` is **owner-approved and merged**, and it carries **five** items left **open**: three marked literally **"OPEN — owner decision"**
-(`packs_list`, `pack_install`, `graph_set_recording`), `run_onboarding` marked **"OPEN — decision"**,
-and `manage_deployment` marked **"placement OPEN"**. The beta target has already made a call on all five. **A draft
+`docs/product/canonical-mcp-tools.md` is **owner-approved and merged**, and it carried five items left **open**; **one of them — `graph_set_recording` — was ruled on 2026-09-21 and is now resolved**, leaving **four** open: `packs_list` and `pack_install` marked literally **"OPEN — owner decision"**,
+`run_onboarding` marked **"OPEN — decision"**, and `manage_deployment` marked **"placement OPEN"**.
+The beta target has already made a call on all four. **A draft
 making a call does not resolve an owner-open item**, and no lane may treat it as resolved merely
 because the bridge table renders a destination. Each needs the owner, or an explicit statement that
 the beta supersedes it.
 
 | Owner-open item (in the approved doc) | What the beta target does | Status |
 |---|---|---|
-| `graph_set_recording` — *keep it as a 24th tool, or accept the loss?* Dropping it leaves an agent that hits a 409 with **no recovery path inside MCP** (REST is unreachable from an MCP client). | Maps it to `REMOVED`; the count stays 25. | **Unresolved — and this one has a session-count consequence.** |
+| `graph_set_recording` — *keep it as a 24th tool, or accept the loss?* Dropping it leaves an agent that hits a 409 with **no recovery path inside MCP** (REST is unreachable from an MCP client). | **RESOLVED by owner ruling 2026-09-21: KEPT.** Now a 26th MCP tool; the SDK's own per-field `graph_set_recording` stays discarded and the override folds into `update_memory_graph`, consistent with the ruling that deleted `set_memory_graph_name`/`set_memory_graph_backend`. | **✅ resolved — the count is 26** |
 | `packs_list` — *does a tenant need to list its own packs?* Folding it into an operator-only tool **removes a tenant-visible read**. | Absorbed under the tenancy block, which is not on the MCP. | **Unresolved.** |
 | `pack_install` — same question for a **write** (`hosted_only`, `http_policy=True`). | Absorbed under the tenancy block. | **Unresolved.** |
 | `run_onboarding` — it absorbs two read-only tenant-served tools, so it is both read and write on a customer-grantable surface, which the read/write principle forbids. | Dropped for `check_connection`. | **Unresolved.** |
@@ -140,7 +147,7 @@ Also on the approved doc's plate: **`manage_deployment` was marked "placement OP
 resolves it by moving the whole block to a tenancy surface that is not on the MCP.
 
 **None of this blocks the docs.** It blocks Phase 1.2 (cutting the surface manifest) and Phase 3.2
-(removing anything): until these five are answered, the target is a **proposal**, and the frozen
+(removing anything): until these four are answered, the target is a **proposal**, and the frozen
 registry is what exists. File them as questions to the owner — with the consequence of each already
 stated above, which is the form they are already in.
 
@@ -154,9 +161,9 @@ handler twice.
 
 | | Deliverable | Why |
 |---|---|---|
-| **0.1** | **The bridge table.** Every MCP `type=` / `mode=` / `section=` discriminator → the exact SDK method and argument it resolves to. | The merged tools dispatch internally. Until that mapping is written down, nobody knows whether the 25 names can be implemented on the frozen SDK — or whether a `type=` value has no SDK method to call. **This is the check that prevents a rewrite.** |
+| **0.1** | **The bridge table.** Every MCP `type=` / `mode=` / `section=` discriminator → the exact SDK method and argument it resolves to. | The merged tools dispatch internally. Until that mapping is written down, nobody knows whether the 26 names can be implemented on the frozen SDK — or whether a `type=` value has no SDK method to call. **This is the check that prevents a rewrite.** |
 | **0.2** | **Name the target.** A short note in both canonical docs stating that **every name is a target, not a description of today.** | The review found the MCP column reads as present tense. A developer following it today calls tools that do not exist. |
-| **0.3** | **The MCP rename table.** old name → new name, per tool. | **None of the 25 is live verbatim** — every registered MCP tool carries a `tortoise_` prefix, and only 3 (create_entity, get_entity, approve_merge) have a prefixed equivalent. Without this, implementation silently renames the whole MCP surface with no migration note. |
+| **0.3** | **The MCP rename table.** old name → new name, per tool. | **Only 4 of the 26 is live verbatim** — every registered MCP tool carries a `tortoise_` prefix, and exactly 4 (create_entity, get_entity, approve_merge, graph_set_recording) have a prefixed equivalent. Without this, implementation silently renames the whole MCP surface with no migration note. |
 | **0.3b** | **The SDK rename table.** old name → new name, per method — the SDK pair to 0.3. This exists because 0.3 is the *MCP* table; the SDK half would otherwise have had no owner. `beta-sdk-surface.md` and the SDK reconciliation above both delegate their per-name check here. | 0.1 |
 | **0.4** | **`__all__` in `tortoise/__init__.py`.** | The root cause of 150. The public surface is declared by *convention*; every design test presupposes a declaration. Without this the surface drifts back. |
 
@@ -187,8 +194,8 @@ that names its replacement.
 
 | | Deliverable | Depends on |
 |---|---|---|
-| **3.1** | The 25 tools implemented **on the frozen SDK** | Phase 2 |
-| **3.2** | The **15 retired** tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so **80 are absorbed** into the 25 targets — many-to-one. Writing "98 − 25 = 73 retired" conflates the two and is wrong. | 3.1 |
+| **3.1** | The 26 tools implemented **on the frozen SDK** | Phase 2 |
+| **3.2** | The **14 retired** tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so **81 are absorbed** into the 26 targets — many-to-one. Writing "98 − 26 = 72 retired" conflates the two and is wrong. | 3.1 |
 | **3.3** | The `co_firstlineno` guard defect fixed — see *Coordination* | — |
 
 ### Phase 4 — verification

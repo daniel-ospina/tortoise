@@ -1,15 +1,29 @@
 ---
 title: Beta SDK Surface — the recommended set
-status: draft
-products: [tortoise]
+type: synthesis
+domain: capability
+doc_status: live
+created: 2026-09-18
+ownedBy: epistemic-team
+aboutSubjects: tortoise-memory
 aboutObjects: [tortoise-sdk, mcp-server]
-approval_status: proposed
+approval_status: approved
+approved: 2026-09-21
+approvedBy: daniel-ospina
 ---
 
 # Beta SDK surface
 
 **The recommended set a beta developer sees.** Designed from who the SDK is for and what
 they do — not pruned from the existing 150.
+
+> **Scope of this approval.** The owner settled the **target surface** on 2026-09-21, including the
+> ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26**. That
+> settlement does **not** reach every item in the surface: **four** placement questions are still
+> open in `canonical-mcp-tools.md` (`packs_list`, `pack_install`, `run_onboarding`,
+> `manage_deployment`). None of the four changes the count — they are unplaced, not undecided — but
+> approval here is approval **of the target**, not of any of them. See
+> `vision-mcp-sdk-surface.md` §"Cross-artifact tensions".
 
 **Canonical terms:** an **organisation account** (the customer's account — the billing and
 plan boundary) owns many **memory graphs** (the unit of memory).
@@ -72,7 +86,7 @@ person managing their own account).
 | | **TENANCY — SDK and REST only. NOT on the MCP** | | | |
 | 28 | `get_organisation_account` | Read the account and the plan it is on | — | admin |
 | 29 | `create_memory_graph` | **Provision a memory graph — one per end-customer, or per agent.** Takes `name` and `backend` at creation | — | builder |
-| 30 | `update_memory_graph` | **Rename a memory graph.** The one partial update the tenancy resource has — a graph is created with its fields and renamed here | — | builder |
+| 30 | `update_memory_graph` | **The one partial update a memory graph has** — rename it, or set/clear its session-recording override. A graph is created with its fields; this is the single place they change | `graph_set_recording` (recording only) | builder |
 | 31 | `list_memory_graphs` | List the account's memory graphs | — | admin, builder |
 | 32 | `delete_memory_graph` | Destroy a memory graph. **`purge=True` for irreversible erasure; the default is a recoverable delete** | — | builder |
 | 33 | `restore_memory_graph` | Undo a recoverable delete. **Refuses on a purged graph** | — | builder |
@@ -85,7 +99,7 @@ person managing their own account).
 | | **PLATFORM** | | | |
 | 40 | `check_connection` | **What does this credential reach?** Omit `key_id` to check your own connection; pass one to inspect a specific credential. Makes the isolation promise verifiable. **Programmatic, returns a result — not a wizard** | `check_connection` | builder |
 
-**40 methods** against **150** today. **MCP: 25 tools** — every row except the tenancy block
+**40 methods** against **150** today. **MCP: 26 tools** — every row except the tenancy block
 (28–39), `write_knowledge_batch` (builder-only, 13) and the constructor/`close` (1–2).
 
 > **Every name here is a target, not a description of today.** Only **four** of the 40 exist in the
@@ -242,7 +256,8 @@ Recorded so they are not silently dropped. None is required for beta:
 | `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → `manage_source_trust` for the setter; reads via `list_sources`. |
 | `complete_source` | 1 | **Cut.** Its entire body populates `contentHash`, `version`, `externalId` — fields `register_source` already writes — and it has **zero callers in the repo**. |
 | `ulid` | 1 | A ULID generator. Not a memory operation. |
-| `graph_set_recording`, `graph_key_ids`, `graph_active_key_count` | 3 | Console diagnostics. `key_ids`/`active_key_count` fold into `list_keys`. |
+| `graph_key_ids`, `graph_active_key_count` | 2 | Console diagnostics. Both fold into `list_keys`. |
+| ~~`graph_set_recording`~~ (SDK method) | 1 | **Discarded as an SDK method, KEPT as an MCP tool.** It is a per-field setter, the same shape as `set_memory_graph_name`/`set_memory_graph_backend`, which were deleted so that fields go on create plus one partial update. The override therefore folds into **`update_memory_graph`** (row 30) — while the **MCP tool** `graph_set_recording` survives, because it is an agent's only in-MCP recovery from the capture 409. |
 | `set_memory_graph_name`, `set_memory_graph_backend`, `count_memory_graphs` | 3 | See "Provisioning" above. |
 | `invitation_*` (6) | 6 | The invite **UX** belongs to the console, where a human clicks it. |
 | `signup_token_*` (3) | 3 | Operator-side agent self-signup — our provisioning, not product surface. |

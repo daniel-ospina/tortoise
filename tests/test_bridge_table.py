@@ -72,7 +72,10 @@ def test_target_mcp_matches_the_beta_doc() -> None:
             f"  only in generator ({len(declared - twins)}): {sorted(declared - twins)}\n"
             f"  only in beta doc ({len(twins - declared)}): {sorted(twins - declared)}"
         )
-    assert len(declared) == 25, f"TARGET_MCP has {len(declared)} entries, expected 25"
+    # Guard against an empty parse only. The size is NOT asserted here: a literal
+    # here is the same hand-maintained constant this test exists to eliminate, and
+    # it is what broke when the owner's ruling took the target from 25 to 26.
+    assert declared, "parsed TARGET_MCP is empty -- the parse broke, not the set"
 
 
 def _sdk_defs_independently() -> set[str]:
@@ -440,17 +443,19 @@ def test_vision_doc_buckets_match_generated_doc() -> None:
     total, mcp, sdk_only, tenancy, retired = (int(g) for g in m.groups())
     assert mcp + sdk_only + tenancy + retired == total, "generated buckets do not sum"
 
-    for label, value in [
-        ("Registry tools", total),
-        ("Absorbed into the 25 MCP targets", mcp),
-        ("Absorbed into a builder-only SDK method (not on the MCP)", sdk_only),
-        ("Tenancy (SDK/REST only)", tenancy),
-        ("Retired", retired),
+    # Labels carry a number that the owner's rulings can change. Match the shape,
+    # then assert the number -- so the doc cannot silently keep a stale count.
+    for label_pat, value in [
+        (r"Registry tools", total),
+        (r"Absorbed into the \d+ MCP targets", mcp),
+        (r"Absorbed into a builder-only SDK method \(not on the MCP\)", sdk_only),
+        (r"Tenancy \(SDK/REST only\)", tenancy),
+        (r"Retired", retired),
     ]:
-        row = re.search(rf"^\| {re.escape(label)} \| \*\*(\d+)\*\* \|$", vision, re.M)
-        assert row, f"vision doc has no reconciliation row for {label!r}"
+        row = re.search(rf"^\| {label_pat} \| \*\*(\d+)\*\* \|$", vision, re.M)
+        assert row, f"vision doc has no reconciliation row matching {label_pat!r}"
         assert int(row.group(1)) == value, (
-            f"vision doc says {label} = {row.group(1)}, generated doc says {value}. "
+            f"vision doc row {label_pat!r} = {row.group(1)}, generated doc says {value}. "
             "The vision doc restates computed numbers; update it with the generator's output."
         )
 
