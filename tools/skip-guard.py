@@ -442,9 +442,10 @@ def _read_junitxml(
     carries a <skipped> child. The nodeid comparison cannot see these — a test
     that is collected and then skips is present in the junit — so a platform gate
     spelled as a test-level `pytest.skip(…)` is invisible to both the source scan
-    and the coverage check. Module-level collection-abort markers are excluded:
-    their skip IS the expected state (pytest writes them with an empty
-    classname).
+    and the coverage check. Two shapes are excluded: module-level collection-abort
+    markers (pytest writes them with an empty classname, and their skip IS the
+    expected state) and `type="pytest.xfail"`, which is a test that RAN and failed
+    as expected, not one that was hidden.
 
     The collection-skip class is STRUCTURAL (pytest's constant "collection
     skipped" message on a whole-module <testcase>) — see
@@ -511,7 +512,12 @@ def _read_junitxml(
         # `classname == ""` is pytest's module-level collection-abort marker (its
         # <testcase> IS the module). Such a skip is a marker's expected state, so
         # it is never an outcome violation — only a real test's skip is.
-        if skipped is not None and classname:
+        # And an XFAIL is not a skip that hid the test: pytest writes it as
+        # <skipped type="pytest.xfail">, and the test DID run (it failed as
+        # expected), so counting it would red a correct tree while the message
+        # ("the test did not RUN") and the only remedy (a skip allowance for a test
+        # that executes) would both be wrong (cycle-9 finding).
+        if skipped is not None and classname and (skipped.get("type") or "") != "pytest.xfail":
             skipped_tests.add(nodeid)
     return (observed, falkor_violations, embedder_violations,
             collection_violations, contract_error, skipped_tests)

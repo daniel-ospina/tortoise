@@ -168,13 +168,69 @@ def _workflow_steps() -> list[tuple[str, dict]]:
     return pairs
 
 
+def _after_invocation(command: str) -> tuple[str, str]:
+    """(the shell operator that follows a skip-guard invocation, what comes after it).
+
+    Everything between `tools/skip-guard.py` and the first unquoted shell separator is
+    the invocation's own arguments, in whatever order they are given — so an honest
+    `--manifest-only --manifest <path>` reads as "nothing follows" (looking only at the
+    text after the FLAG flag-order-red that — cycle-9 finding), and a trailing
+    `|| true` / `; echo …` / `| tee` / `&` is visible at all (the same pin could not see
+    it before, so those mutations passed while making the guard unable to fail the
+    step — cycle-9 finding). `2>&1` is a redirection, not a separator.
+    """
+    marker = "tools/skip-guard.py"
+    rest = command[command.index(marker) + len(marker) :]
+    quote: str | None = None
+    i = 0
+    while i < len(rest):
+        ch = rest[i]
+        if quote is not None:
+            quote = None if ch == quote else quote
+        elif ch in "\"'":
+            quote = ch
+        elif rest.startswith("||", i) or rest.startswith("&&", i):
+            return rest[i : i + 2], rest[i + 2 :].strip()
+        elif ch in ";|" or (ch == "&" and (i == 0 or rest[i - 1] != ">")):
+            return ch, rest[i + 1 :].strip()
+        i += 1
+    return "", ""
+
+
+def _guard_consumers(step_text: str, rel: str) -> list[tuple[int, str]]:
+    """The (index, command) pairs in `step_text` that invoke the guard FOR `rel`.
+
+    The consumer is resolved by the INVOCATION — `tools/skip-guard.py` plus the manifest
+    path, directly or through a variable this same step assigned it to — rather than by
+    `rel in cmd` with an assignment-prefix exclusion. That exclusion (meant to bless the
+    documented `M=<path>` refactor) exempted every command that merely STARTS with an
+    assignment, so an env-prefixed invocation (`SG_ENV=1 python3 … --manifest-only ||
+    true`) escaped every exit-status check (cycle-9 finding).
+    """
+    commands = _shell_commands(step_text)
+    assigned = {
+        match.group(1)
+        for cmd in commands
+        if (match := re.match(rf"^([A-Za-z_]\w*)=\"?{re.escape(rel)}\"?\s*$", cmd.strip()))
+    }
+    consumers: list[tuple[int, str]] = []
+    for index, cmd in enumerate(commands):
+        if "tools/skip-guard.py" not in cmd:
+            continue
+        if rel in cmd or any(re.search(rf"\$\{{?{re.escape(var)}\b", cmd) for var in assigned):
+            consumers.append((index, cmd))
+    return consumers
+
+
 def _module_dotted(file: str) -> str:
     """`tests/test_x.py` -> `tests.test_x` (the junit `classname` prefix)."""
     assert file.endswith(".py"), file
     return file[: -len(".py")].replace("/", ".")
 
 
-def _junit_for(nodeids: list[str], path: Path, skipped: Iterable[str] = ()) -> None:
+def _junit_for(
+    nodeids: list[str], path: Path, skipped: Iterable[str] = (), xfailed: Iterable[str] = ()
+) -> None:
     """Write a junit (xunit1 shape) that contains exactly `nodeids`.
 
     pytest's own junit is the only writer in CI, so the attributes that
@@ -188,9 +244,11 @@ def _junit_for(nodeids: list[str], path: Path, skipped: Iterable[str] = ()) -> N
 
     `skipped` emits a `<skipped>` child on those testcases — the OUTCOME half of
     #4215: pytest writes the reason in `message` (and the repr in the element text),
-    but the check reads only whether the child is there.
+    but the check reads whether the child is there and its `type` (an XFAIL is
+    `type="pytest.xfail"`, and it must NOT count as a hidden test).
     """
     skipped = set(skipped)
+    xfailed = set(xfailed)
     suite = ET.Element("testsuite", {"name": "pytest", "tests": str(len(nodeids))})
     for nodeid in nodeids:
         file, *parts = nodeid.split("::")
@@ -207,8 +265,15 @@ def _junit_for(nodeids: list[str], path: Path, skipped: Iterable[str] = ()) -> N
             "testcase",
             {"file": file, "classname": classname, "name": name, "time": "1.0"},
         )
-        if nodeid in skipped:
-            ET.SubElement(case, "skipped", {"message": "guarded by the platform gate"})
+        if nodeid in skipped or nodeid in xfailed:
+            ET.SubElement(
+                case,
+                "skipped",
+                {
+                    "message": "guarded by the platform gate",
+                    "type": "pytest.xfail" if nodeid in xfailed else "pytest.skip",
+                },
+            )
     ET.ElementTree(suite).write(path)
 
 
@@ -326,8 +391,9 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     # Anchor the number to its CLAUSE: `(\d+)[^\n]*\bmarkers?\b` spanned the whole
     # line, so an honest rewrite ("Of the 69 entries, 32 are module-level … markers")
     # captured 69 and red a correct header (cycle-4 finding — the over-constrained
-    # regex class cycle 2 fixed for provenance, one line over).
-    recorded = [int(n) for n in re.findall(r"(\d+)\s+are\s+module-level", header)]
+    # regex class cycle 2 fixed for provenance, one line over). Case-insensitive since
+    # cycle 9: `32 Are module-level` is the same claim.
+    recorded = [int(n) for n in re.findall(r"(\d+)\s+are\s+module-level", header, re.I)]
     assert recorded and all(n == len(markers) for n in recorded), (
         f"the header records {recorded} markers but the manifest has {len(markers)}"
     )
@@ -342,8 +408,12 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     # NARROWING: `--manifest-only` compares expected-minus-observed, so a manifest
     # whose real-test entries were deleted is still satisfied by its own junit. The
     # header's real-test count is the only written record of how many there were,
-    # so it is pinned against the manifest (cycle-3 finding).
-    recorded_tests = [int(n) for n in re.findall(r"(\d+)\s+are\s+(?:\w+\s+)?test nodeids", header)]
+    # so it is pinned against the manifest (cycle-3 finding). `ID` is accepted as a
+    # synonym for `nodeid`, and the match is case-insensitive: `37 are real test IDs`
+    # is the same claim as `37 are real test nodeids` (cycle-9 finding).
+    recorded_tests = [
+        int(n) for n in re.findall(r"(\d+)\s+are\s+(?:\w+\s+)?test\s+(?:node\s*ids?|ids?)", header, re.I)
+    ]
     assert recorded_tests and all(n == len(tests) for n in recorded_tests), (
         f"the header records {recorded_tests} real test nodeids but the manifest has {len(tests)}"
     )
@@ -367,8 +437,10 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
         # Each family's count is read from ITS OWN clause. Resolving the family to the
         # first line containing its token and taking that line's first integer meant an
         # honest rewrite that merged the three bullets into one line red the tree with a
-        # bogus split (all three tokens resolve to that line) — cycle-7 finding.
-        counts = [int(n) for n in re.findall(pattern, header)]
+        # bogus split (all three tokens resolve to that line) — cycle-7 finding. The
+        # match is case-insensitive, so `14 hosted e2e` / `8 Docker-lane modules` are the
+        # same claim (cycle-9 finding).
+        counts = [int(n) for n in re.findall(pattern, header, re.I)]
         assert counts, f"the header names {label} but records no marker count for it"
         assert all(n == counts[0] for n in counts), (
             f"the header states the {label} marker count more than once, with conflicting "
@@ -437,16 +509,26 @@ def test_platform_gated_manifest_covers_the_registry() -> None:
         # `class TestZ: def test_x` where `test_x` is already pinned adds no name to
         # `defs` and no nodeid to `pinned`, so the new (collected) test could be
         # hidden by the gate with the pin still green (cycle-4 finding). Count DEFS
-        # and NODEIDS, not distinct names — one def may pin several nodeids
-        # (parametrization), so the manifest must list at least one per def.
+        # against the distinct pinned PATHS — full `Class::test_name` with any
+        # parameter suffix removed — not against the raw nodeid count: a parametrized
+        # test (one def, several nodeids) buffered the count, so a colliding def was
+        # invisible again (`5 >= 5` passed while a fifth def existed — cycle-9
+        # finding). Two classes that legitimately share a method name are distinct
+        # paths, so they still count twice.
         n_defs = len(
             re.findall(r"^\s*(?:async )?def (test_\w+)", _strip_docstrings(path.read_text()), re.M)
         )
-        n_pinned = len([nid for nid in _nodeids(PLATFORM_GATED) if nid.startswith(f"{rel}::")])
+        n_pinned = len(
+            {
+                re.sub(r"\[[^\]]*\]$", "", nid.split("::", 1)[1])
+                for nid in _nodeids(PLATFORM_GATED)
+                if nid.startswith(f"{rel}::")
+            }
+        )
         assert n_pinned >= n_defs, (
-            f"{rel} defines {n_defs} test functions but platform-gated.txt has only "
-            f"{n_pinned} nodeids for it — a def whose bare name collides with a pinned "
-            "one would otherwise be invisible (#4215)"
+            f"{rel} defines {n_defs} test functions but platform-gated.txt pins only "
+            f"{n_pinned} distinct test paths for it — a def whose bare name collides with "
+            "a pinned one would otherwise be invisible (#4215)"
         )
     missing = sorted(set(PLATFORM_GATED_TESTS) - listed)
     assert not missing, (
@@ -468,18 +550,29 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     lane (whose skips are expected) from reding on the skip-anomaly matchers
     calibrated for the docker lane — measured at 24 collection violations in the
     d14 job before the flag existed.
+
+    DECLARED THREAT SURFACE (what this pin is for, and all it claims): a step that
+    RUNS the guard on the manifest, with `--manifest-only` as an argument of THAT
+    invocation, in a step and a job that are not `continue-on-error` and whose `if:`
+    can be true on a green run, and whose exit status can reach the step. Those are
+    the four ways the frozen set can be enforced by nothing while the artifacts look
+    right, and each is mutation-tested. It does NOT model arbitrary shell control
+    flow — a `trap`, `set +e` plus a masking command inside a function, a sourced
+    script, or a `$VAR` holding the FLAG (a variable FLAG is the #4207 class a text
+    pin cannot see; this pin refuses it loudly instead of passing it). The end-to-end
+    proof — a lane that mutates the manifest and shows the job reds — is #4463.
     """
     jobs = _workflow_jobs()
     rel = str(manifest.relative_to(ROOT))
     # Read the step's own SHELL COMMANDS, not its raw text: a mention in a comment is
     # not a consumer. Cycle 6 stopped the per-command window from reading comments but
     # left this lookup reading the raw `run:`, so a comment naming the manifest in an
-    # UNRELATED step's shell block red the tree (cycle-7 finding).
+    # UNRELATED step's shell block red the tree (cycle-7 finding). Cycle 9 replaced the
+    # `rel in cmd` lookup with `_guard_consumers`, which resolves the INVOCATION.
     consumers = [
         (job_name, step)
         for job_name, step in _workflow_steps()
-        if isinstance(step.get("run"), str)
-        and any(rel in cmd for cmd in _shell_commands(step["run"]))
+        if isinstance(step.get("run"), str) and _guard_consumers(step["run"], rel)
     ]
     assert consumers, (
         f"no step RUNS a command consuming {rel} — nothing consumes it (a mention in a "
@@ -493,9 +586,10 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
         # `needs.*.result` — so a job-level key made this pin decorative one level up
         # (cycle-7 finding).
         name = step.get("name") or step.get("uses") or "<unnamed step>"
+        owner = jobs[job_name]
         disabled_by = [
             where
-            for where, obj in (("the step", step), (f"job {job_name!r}", jobs[job_name]))
+            for where, obj in (("the step", step), (f"job {job_name!r}", owner))
             if obj.get("continue-on-error")
         ]
         assert not disabled_by, (
@@ -503,65 +597,80 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
             f"{disabled_by[0]}), so its exit status cannot fail the job — the check would "
             f"be decorative. Step: {name!r}"
         )
-        # …and it must be able to RUN on a GREEN job. A denylist of two literal falses
-        # let every failure-only condition through (`if: failure()` never runs the guard,
-        # so its exit status is not what reds anything — cycle-7 finding). A status
-        # function that is false on a green job, or a literal false/never, is refused;
-        # `always()` (the carve-out guard's condition) and event/matrix expressions are
-        # fine. A NEGATED status function is true on green (`!cancelled()`), so the
-        # negations are removed before the refusal — matching the raw token false-red a
-        # correct condition (cycle-8 finding).
-        condition = str(step.get("if", "")).strip().lower()
-        effective = re.sub(r"!\s*(?:cancelled|failure)\s*\(\s*\)", "", condition)
-        assert not re.search(
-            r"\bfalse\b|\bnever\b|\bfailure\s*\(|\bcancelled\s*\(", effective
-        ), (
-            f"{WORKFLOW.name}: the step consuming {rel} has `if: {condition}` — that "
-            "condition is false on a green job, so the guard never runs and cannot fail "
-            f"it. Step: {name!r}"
-        )
-        # …and the flag must be a TOKEN of the command that consumes the manifest, with
-        # comments already removed, so a trailing `# note: NOT --manifest-only` is not read
-        # as the flag. A pure ASSIGNMENT (`M=config/…`) is excluded, so an honest
-        # `M=<path>` plus `--manifest "$M" --manifest-only` refactor does not red; in that
-        # case the flag only has to be present in the step.
+        # …and it must be able to RUN on a GREEN job — at BOTH levels. The STEP's `if:`
+        # was checked first (cycle 7: a denylist of two literal falses let
+        # `if: failure()` through), and the JOB's `if:` is the same escape one level up:
+        # both consuming jobs already carry one, so a `false`/failure-only/wrong-output
+        # condition there retires the frozen set with every pin green (cycle-9 finding).
+        # A status function or GitHub RESULT that is false on green, or a literal
+        # false/never, is refused — `== 'cancelled'`, `== 'failure'` and `== 'skipped'`
+        # are the same escape written as a comparison (cycle-9 finding: the first
+        # version only matched the function CALLS, so `== 'cancelled'` passed).
+        # `always()`, event/matrix expressions and `== 'success'` output tests are fine.
+        # A NEGATED status function is true on green (`!cancelled()`), so the negations
+        # are removed before the refusal (matching the raw token false-red a correct
+        # condition — cycle-8 finding).
+        for where, obj in (("the step", step), (f"job {job_name!r}", owner)):
+            condition = str(obj.get("if", "")).strip().lower()
+            effective = re.sub(r"!\s*(?:cancelled|failure)\s*\(\s*\)", "", condition)
+            assert not re.search(
+                r"\bfalse\b|\bnever\b|\bfailure\b|\bcancelled\b|\bskipped\b", effective
+            ), (
+                f"{WORKFLOW.name}: {where} consuming {rel} has `if: {condition}` — that "
+                "condition cannot be true on a green run (it names a failure/cancelled/"
+                "skipped status, or a literal false), so the guard never runs and cannot "
+                f"fail anything. Step: {name!r}"
+            )
+        # The flag must be a TOKEN of the command that RUNS the guard, with comments
+        # already removed, so a trailing `# note: NOT --manifest-only` is not read as the
+        # flag (cycle 6) and a flag in an unrelated command of the same step does not
+        # stand in for the invocation that lacks it (cycle-9 finding).
         flag_re = re.compile(r"(?<![\w-])--manifest-only(?![\w-])")
         commands = _shell_commands(step["run"])
-        literal_consumers = [
-            (i, c)
-            for i, c in enumerate(commands)
-            if rel in c and not re.match(r"^[A-Za-z_]\w*=", c)
-        ]
-        for index, cmd in literal_consumers:
+        for index, cmd in _guard_consumers(step["run"], rel):
             assert flag_re.search(cmd), (
-                f"{WORKFLOW.name}: step {name!r} consumes {rel} without --manifest-only as a "
-                "token of that same command — in a URI-less lane that false-reds on the "
-                f"EXPECTED skips (the docker-calibrated matchers).\n{cmd}"
+                f"{WORKFLOW.name}: step {name!r} runs the guard on {rel} without "
+                "--manifest-only as a token of THAT command — in a URI-less lane this "
+                "false-reds on the EXPECTED skips (the docker-calibrated matchers).\n"
+                f"{cmd}"
             )
-            # …and the guard's EXIT STATUS must be able to reach the step: a step's
-            # status is its LAST command's, so a trailing `|| true`, `|| echo …`, `; …`
-            # or a pipe discards a real finding while every pin above stays green — the
-            # mutations `… --manifest-only || true` and `… --manifest-only; echo done`
-            # both passed the cycle-7 pins (cycle-8 finding). The carve-out accumulates
-            # (`|| guard_rc=1`) and exits it, which is allowed — but only when the step
-            # really does `exit $guard_rc`, or the accumulation is discarded too.
-            after = cmd.split("--manifest-only", 1)[1].strip().lstrip(";").strip()
-            if index == len(commands) - 1 and not after:
-                continue  # the guard IS the step's last command: its status propagates
-            accumulated = re.match(r"^\|\|\s*\{?\s*([A-Za-z_]\w*)=", after)
-            assert accumulated and re.search(
-                rf"\bexit\s+\$\{{?{re.escape(accumulated.group(1))}\b", step["run"]
+            # …`!` inverts the exit status, so the guard's failure would report success.
+            assert not re.search(r"(?<![\w])!\s", cmd[: cmd.index("tools/skip-guard.py")]), (
+                f"{WORKFLOW.name}: step {name!r} invokes the guard under `!`, which "
+                f"inverts its exit status.\n{cmd}"
+            )
+            # …and the status must be able to REACH the step: a step's status is its LAST
+            # command's, so a trailing operator that starts another command (`; echo`,
+            # `| tee`, `&& true`) or discards it (`|| true`) makes the guard decorative
+            # while every pin above stays green (cycle-8/9 findings). The two honest forms
+            # are: the invocation IS the step's last command, or it accumulates into a
+            # variable (`|| guard_rc=1`) that the step later `exit`s — which the carve-out
+            # does, and which has to be on a line that really runs (comments are already
+            # stripped, an earlier `exit 0` would make it unreachable, and overwriting the
+            # accumulator after the invocation defeats it).
+            operator, after = _after_invocation(cmd)
+            if not operator and index == len(commands) - 1:
+                continue
+            accumulated = re.match(r"^\{?\s*([A-Za-z_]\w*)=", after) if operator == "||" else None
+            var = accumulated.group(1) if accumulated else None
+            exit_re = re.compile(rf"^exit\s+\"?\$\{{?{re.escape(var or '@')}\}}?\"?\s*$") if var else None
+            later = commands[index + 1 :]
+            assert (
+                exit_re is not None
+                and any(exit_re.match(c.strip()) for c in later)
+                and not any(
+                    re.match(r"^exit\b", c.strip()) and not exit_re.match(c.strip()) for c in later
+                )
+                and not any(re.match(rf"^{re.escape(var)}\s*=", c.strip()) for c in later)
             ), (
-                f"{WORKFLOW.name}: step {name!r} consumes {rel} with --manifest-only but its "
-                "exit status cannot reach the step — the step's status is its LAST command's, "
-                f"so `{after or '<nothing>'} ` discards it (and an accumulated code has to be "
-                "exited). Refused: `|| true`, `|| echo …`, `; …`, a pipe, or an accumulation "
-                f"with no `exit $var`.\n{cmd}"
+                f"{WORKFLOW.name}: step {name!r} runs the guard on {rel} with "
+                f"--manifest-only but its exit status cannot reach the step — the step's "
+                f"status is its LAST command's, so `{operator} {after or '<nothing>'}` "
+                "discards it. Allowed: the invocation as the step's last command, or "
+                f"`|| <var>=1` followed by an `exit $<var>` that is not commented, not "
+                "preceded by another `exit`, and not overwritten afterwards.\n"
+                f"{cmd}"
             )
-        assert literal_consumers or any(flag_re.search(c) for c in commands), (
-            f"{WORKFLOW.name}: step {name!r} reads {rel} but no command in it passes "
-            "--manifest-only (any mention in a comment does not count)"
-        )
     assert len(consumers) >= 1
 
 
@@ -647,6 +756,31 @@ def test_a_frozen_test_that_only_skips_fails_and_is_named() -> None:
     )
     assert victim in result.stdout, (
         f"the check must NAME the skipped nodeid {victim!r}; it said:\n{result.stdout}"
+    )
+
+
+def test_an_xfail_is_not_an_outcome_violation() -> None:
+    """An XFAIL ran and failed as expected — it is not a hidden test.
+
+    pytest writes `@pytest.mark.xfail` as `<skipped type="pytest.xfail">`, so a check
+    that reads only the child's presence reds a correct tree with a message ("the test
+    did not RUN") that is false, and its documented remedy — raise the file's skip
+    budget — would write an allowance for a test that executes (cycle-9 finding).
+    """
+    nodeids = _nodeids(EMBEDDED)
+    markers = {n for n in nodeids if n.partition("::")[2] == _module_dotted(n.split("::")[0])}
+    budget = _skip_budget(EMBEDDED)
+    victims = [
+        n for n in sorted(nodeids) if n not in markers and budget.get(n.split("::", 1)[0], 0) == 0
+    ]
+    assert victims, "this test needs a budget-less real nodeid"
+    with tempfile.TemporaryDirectory() as tmp:
+        junit = Path(tmp) / "junit.xml"
+        _junit_for(nodeids, junit, xfailed={victims[0]})
+        result = _run_guard(EMBEDDED, junit)
+    assert result.returncode == 0, (
+        f"an xfailed nodeid ({victims[0]}) was reported as a skipped test that never ran — "
+        f"an XFAIL ran, and the skip budget is not its remedy.\n{result.stdout}"
     )
 
 
