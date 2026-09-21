@@ -1515,7 +1515,7 @@ durations:
   test_subjectadded_journal.py: 1.4
   test_turnstile_signup.py: 1.4
   test_validity_windows.py: 1.4
-  bench/test_degradation_chain.py: 1.3
+  bench/test_degradation_chain.py: 1.2  # CI junit sum 1.207 (half a, 2 tests)
   longmem_eval/test_measure_temporal.py: 1.3
   test_assembly_fixtures.py: 1.3
   test_epic903_hosted.py: 1.3
@@ -1838,20 +1838,22 @@ durations:
   # unmeasured files added here take it to 61/579 (89.5%, FAIL).
   #
   # Values are per-file junit `testcase/@time` sums (the same aggregation the
-  # rest of this map uses — cf. test_coverage_loop_rules.py: 0.0):
-  #   * four hermetic files — from THIS branch's own CI run 35208465736
-  #     (head 33059ae7a) junit artifacts, pytest-log-test-a (half a) and
-  #     pytest-log-test-b (half b) of the Python CI workflow;
-  #   * test_session_reinjection.py is docker-lane and SKIPS in the embedded
-  #     lane, so that run carries no duration for it (its testcases are
-  #     `skipped`, time 0). No docker-lane CI run exists for this branch yet
-  #     (tier-2 PR runs are embedded), so its value is a LOCAL docker-lane
-  #     measurement taken 2026-09-21 against the canonical falkordb on
-  #     127.0.0.1:6379 (junit sum 42.120s over 20 tests, testsuite 42.879s).
-  #     It is a loaded-box local sample, not a CI figure — re-measure from a
-  #     full-matrix run rather than trusting it.
-  test_build_cohorts_2517.py: 0.0         # CI junit sum 0.031 (half a, 11 tests)
-  test_eval_reinjection_cap_resume.py: 0.7  # CI junit sum 0.662 (half b, 1 test)
-  test_guard_measured_revision.py: 3.0    # CI junit sum 3.001 (half b, 58 tests)
-  test_session_reinjection.py: 42.1       # LOCAL docker-lane junit sum 42.120 (20 tests)
-  test_session_reinjection_rules.py: 0.4  # CI junit sum 0.433 (half b, 38 tests)
+  # rest of this map uses — cf. test_coverage_loop_rules.py: 0.0), regenerated
+  # from THIS branch's own FULL-MATRIX CI run 35571363631 (head 070a503ce),
+  # whose pytest-log-test-a / pytest-log-test-b junit artifacts carry a real
+  # docker-lane measurement for all five. Earlier revisions took
+  # test_session_reinjection.py from a loaded local box (42.1s); the CI figure
+  # over the same 20 tests is 2.864s. That 42.1 weight — 14.7x the measured
+  # value — tipped split_fast_gate's LPT pack so every bench/ file fell into
+  # half_a, failing test_push_legs_partitions_every_classified_file. The values
+  # below are the CI sums rounded to this map's one-decimal convention. The
+  # correction is cross-pool: it must hold on the branch's own pool AND on the
+  # merged pool (main advances between the branch and the CI run), and the
+  # split_fast_gate LPT pack is a knife-edge over ~580 files, so the bench
+  # file's own stale 1.3 (an older run; the same run measures 1.207) is
+  # refreshed too.
+  test_build_cohorts_2517.py: 0.1         # CI junit sum 0.061 (half a, 11 tests)
+  test_eval_reinjection_cap_resume.py: 0.5  # CI junit sum 0.534 (half b, 1 test)
+  test_guard_measured_revision.py: 3.4    # CI junit sum 3.405 (half b, 58 tests)
+  test_session_reinjection.py: 2.9        # CI junit sum 2.864 (half a, 20 tests)
+  test_session_reinjection_rules.py: 0.8  # CI junit sum 0.802 (half b, 38 tests)
