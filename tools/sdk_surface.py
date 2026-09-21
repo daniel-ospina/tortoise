@@ -81,6 +81,7 @@ sys.path.insert(0, str(ROOT))
 
 # The ONE AST walk of the `TortoiseSDK` class body. Imported, not re-implemented: a second
 # copy would be a second answer to "what is the SDK surface", and the two would drift.
+from tools import bridge_table  # noqa: E402
 from tools.bridge_table import _sdk_targets  # noqa: E402
 
 DECLARATION_FILE = ROOT / "config" / "sdk-surface.json"
@@ -98,6 +99,36 @@ class SurfaceEvidenceUnreadable(Exception):
     """A gate that cannot read its evidence must refuse, never skip (#1382 class)."""
 
 
+def _read_text_or_refuse(path: Path, what: str) -> str:
+    """Read an evidence text file, or refuse in the same contract as the other surfaces.
+
+    The doc staleness read is an evidence read exactly like `load_declaration` /
+    `approved_from_manifest`: a path that exists but cannot be read (a directory, a permission
+    error, bad encoding) must produce the documented `SURFACE CHECK REFUSED`, not a raw
+    traceback (#4516 review). The declaration's own text is captured by `load_declaration`'s
+    single read, so it needs no second read here.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise SurfaceEvidenceUnreadable(f"{what} {path} does not exist") from None
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"{what} {path} could not be read: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _refuse(exc: SurfaceEvidenceUnreadable) -> int:
+    """The one documented refusal: message + remedial command, exit 1."""
+    print(f"SURFACE CHECK REFUSED — {exc}", file=sys.stderr)
+    print(
+        "A gate that cannot read its evidence must fail, not skip. "
+        "Run: uv run python tools/sdk_surface.py",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def is_public(name: str) -> bool:
     """The public-surface predicate, applied identically to every view.
 
@@ -110,8 +141,21 @@ def is_public(name: str) -> bool:
 
 
 def declared_from_ast() -> set[str]:
-    """The declaration's SOURCE: public methods defined in the `TortoiseSDK` class body."""
-    return {name for name in _sdk_targets() if is_public(name)}
+    """The declaration's SOURCE: public methods defined in the `TortoiseSDK` class body.
+
+    Fail closed (#1382 class): a source file that cannot be read, decoded, or parsed is
+    unreadable EVIDENCE, not an empty surface. It is re-raised as the same
+    `SurfaceEvidenceUnreadable` the other two surfaces raise, so all four refuse identically
+    rather than one of them escaping as a raw `FileNotFoundError`/`SyntaxError` traceback.
+    """
+    try:
+        targets = _sdk_targets()
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"the AST view could not be read from {bridge_table.SDK_SRC}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    return {name for name in targets if is_public(name)}
 
 
 def reflected_from_runtime() -> set[str]:
@@ -120,14 +164,24 @@ def reflected_from_runtime() -> set[str]:
     This is the view `tests/test_surface_resolution.py` consumes and the view the approved
     baseline was cut from. It sees attributes attached outside the class body; the AST walk
     does not.
-    """
-    from tortoise.sdk import TortoiseSDK
 
-    return {
-        name
-        for name in dir(TortoiseSDK)
-        if is_public(name) and callable(getattr(TortoiseSDK, name))
-    }
+    Fail closed (#1382 class): an import that fails, a class that is missing, or a `dir()`/
+    `getattr` that raises is unreadable EVIDENCE, not an empty surface — re-raised as
+    `SurfaceEvidenceUnreadable` like the other three.
+    """
+    try:
+        from tortoise.sdk import TortoiseSDK
+
+        return {
+            name
+            for name in dir(TortoiseSDK)
+            if is_public(name) and callable(getattr(TortoiseSDK, name))
+        }
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"the reflection view could not be read from `tortoise.sdk`: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def approved_from_manifest(path: Path = MANIFEST_FILE) -> set[str]:
@@ -155,10 +209,17 @@ def approved_from_manifest(path: Path = MANIFEST_FILE) -> set[str]:
     }
 
 
-def load_declaration(path: Path = DECLARATION_FILE) -> set[str]:
-    """The frozen declaration as written — one of the four views under check."""
+def load_declaration(path: Path = DECLARATION_FILE) -> tuple[set[str], str]:
+    """The frozen declaration as written — the declared view, plus its RAW text.
+
+    The raw text is returned alongside the name set so `--check` can compare the file's
+    bytes against a freshly rendered declaration from the SAME read. A second read would be
+    a second, unguarded evidence read (and a TOCTOU window), which is exactly the class
+    #4516 closed.
+    """
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        doc = json.loads(text)
     except FileNotFoundError:
         raise SurfaceEvidenceUnreadable(f"the declaration {path} does not exist") from None
     except Exception as exc:  # any read failure is a fail-closed failure
@@ -169,7 +230,7 @@ def load_declaration(path: Path = DECLARATION_FILE) -> set[str]:
         raise SurfaceEvidenceUnreadable(
             f"the declaration {path} is malformed: expected a mapping with a `methods` list"
         )
-    return {str(name) for name in doc["methods"]}
+    return {str(name) for name in doc["methods"]}, text
 
 
 def render_json(declared: set[str]) -> str:
@@ -344,43 +405,49 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--manifest", type=Path, default=MANIFEST_FILE)
     args = ap.parse_args(argv)
 
-    is_default_paths = (
-        args.declaration == DECLARATION_FILE
-        and args.doc == DOC_FILE
-        and args.manifest == MANIFEST_FILE
-    )
-
     try:
         live_ast = declared_from_ast()
         reflected = reflected_from_runtime()
         approved = approved_from_manifest(args.manifest)
         # `--render` CREATES the declaration, so reading it is only a precondition of
         # `--check`. Requiring it to pre-exist would make the first render impossible.
-        frozen = load_declaration(args.declaration) if args.check else set()
-    except SurfaceEvidenceUnreadable as exc:
-        print(f"SURFACE CHECK REFUSED — {exc}", file=sys.stderr)
-        print(
-            "A gate that cannot read its evidence must fail, not skip. "
-            "Run: uv run python tools/sdk_surface.py",
-            file=sys.stderr,
+        frozen, declaration_text = (
+            load_declaration(args.declaration) if args.check else (set(), "")
         )
-        return 1
+    except SurfaceEvidenceUnreadable as exc:
+        return _refuse(exc)
 
     json_text = render_json(live_ast)
     doc_text = render_doc(live_ast, reflected, approved)
 
     if args.check:
-        problems = reconcile_declaration(frozen, live_ast, reflected, approved)
-        if is_default_paths:
-            # Text staleness is a separate check from the name sets: it catches a
-            # hand-edited metadata field, which the name-set comparison cannot see.
-            if args.declaration.read_text(encoding="utf-8") != json_text:
+        try:
+            problems = reconcile_declaration(frozen, live_ast, reflected, approved)
+            # Text staleness is a separate check from the name sets: it catches a hand-edited
+            # metadata field, which the name-set comparison cannot see. It is performed on
+            # WHATEVER path was actually read — never gated on Path equality with ANY default.
+            # Gating on equality failed OPEN: a relative path (or a symlink, or a `./`-prefixed
+            # spelling) that resolves to the SAME file compared unequal, so a corrupted `count`
+            # was silently accepted (#4516 review). Compare the file that was read (`frozen`
+            # and `declaration_text` come from ONE read), or resolve both paths; never compare
+            # spellings. The doc read is an EVIDENCE read and refuses in the same contract as
+            # the other four surfaces — a directory or unreadable file is a refusal, not a
+            # traceback.
+            if declaration_text != json_text:
                 problems.append(
                     f"{args.declaration} is stale — it does not match the code. "
                     "Run: uv run python tools/sdk_surface.py"
                 )
-            if not args.doc.exists() or args.doc.read_text(encoding="utf-8") != doc_text:
-                problems.append(f"{args.doc} is stale. Run: uv run python tools/sdk_surface.py")
+            if not args.doc.exists():
+                problems.append(
+                    f"{args.doc} is stale. Run: uv run python tools/sdk_surface.py"
+                )
+            elif _read_text_or_refuse(args.doc, "the doc") != doc_text:
+                problems.append(
+                    f"{args.doc} is stale. Run: uv run python tools/sdk_surface.py"
+                )
+        except SurfaceEvidenceUnreadable as exc:
+            return _refuse(exc)
 
         if problems:
             print("::error::the SDK declaration and the code disagree.")

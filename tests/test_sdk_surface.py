@@ -23,6 +23,7 @@ a name list, so these tests cannot drift from the artifact they guard.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 GENERATOR = ROOT / "tools" / "sdk_surface.py"
 DECLARATION = ROOT / "config" / "sdk-surface.json"
+MANIFEST = ROOT / "config" / "surface-manifest.yml"
 DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 
 # The frozen count for THIS phase. A literal on purpose (see the module docstring): asserting
@@ -343,8 +345,13 @@ def test_check_reds_on_a_hand_edited_metadata_field():
     intact — so all three name-set comparisons stay clean and a machine consumer reads a
     wrong number. The text comparison is the only thing that catches it.
 
-    The mutation is applied to the checked-in file (the text check is deliberately scoped to
-    the default path) and restored from a /tmp copy in `finally` — never `git checkout`.
+    This test uses the DEFAULT spelling. The same defect reached through a non-identical
+    spelling used to fail OPEN (see
+    `test_check_reds_on_a_hand_edited_metadata_field_at_a_non_identical_path`), because the
+    text comparison was gated on `Path` equality rather than on the file that was read.
+
+    The mutation is applied to the checked-in file and restored from a /tmp copy in
+    `finally` — never `git checkout`.
     """
     original = DECLARATION.read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as td:
@@ -364,6 +371,102 @@ def test_check_reds_on_a_hand_edited_metadata_field():
     assert DECLARATION.read_text(encoding="utf-8") == original, (
         "the declaration was not restored; the worktree now holds a mutation"
     )
+
+
+@pytest.mark.parametrize("spelling", ["relative", "dot-prefixed", "symlink"])
+def test_check_reds_on_a_hand_edited_metadata_field_at_a_non_identical_path(
+    tmp_path, spelling
+):
+    """The text comparison must run on the path that was READ, not on a specific spelling.
+
+    Found by review of PR #4516: both text comparisons were gated on `Path` equality with
+    the absolute default. A relative path, a `./`-prefixed path, or a symlink that resolves
+    to the SAME file compared unequal, so a corrupted `count` was silently accepted:
+
+        python tools/sdk_surface.py --check                             # exit 1
+        python tools/sdk_surface.py --check --declaration config/sdk-surface.json  # exit 0
+
+    The `methods` list is left intact, so the three name-set comparisons stay clean and only
+    the text comparison can catch the corruption. HERMETIC: the corrupted declaration is a
+    temp copy (never the checked-in artifact), so a killed test cannot leak a mutation.
+    """
+    candidate = _corrupted_declaration(tmp_path)
+    spelling_arg = _path_spelling(candidate, spelling, tmp_path, "linked-declaration.json")
+
+    result = _run("--check", "--declaration", spelling_arg)
+
+    assert result.returncode == 1, (
+        f"a hand-edited `count` was accepted through the {spelling!r} spelling of the "
+        "declaration path — the text comparison is gated on path equality and fails open. "
+        f"stdout={result.stdout!r}"
+    )
+    assert "stale" in result.stdout
+
+
+@pytest.mark.parametrize("spelling", ["relative", "dot-prefixed", "symlink"])
+def test_check_reds_on_a_drifted_document_at_a_non_identical_path(tmp_path, spelling):
+    """The DOC text comparison must also run on the path that was READ.
+
+    The same fail-open as the declaration side (#4516 review), and the same hermetic shape:
+    a drifted temp copy of the doc, reached via a relative, `./`-prefixed, or symlinked
+    spelling. The declaration and the name sets stay clean, so only the doc-text comparison
+    can catch the drift.
+    """
+    drifted = tmp_path / "drifted-declaration.md"
+    drifted.write_text(DOC.read_text(encoding="utf-8") + "\nDRIFT\n", encoding="utf-8")
+    spelling_arg = _path_spelling(drifted, spelling, tmp_path, "linked-declaration.md")
+
+    result = _run("--check", "--doc", spelling_arg)
+
+    assert result.returncode == 1, (
+        f"a drifted doc was accepted through the {spelling!r} spelling of the doc path — "
+        f"the doc-text comparison is gated on path equality and fails open. "
+        f"stdout={result.stdout!r}"
+    )
+    assert "stale" in result.stdout
+
+
+def test_check_reds_on_a_hand_edited_metadata_field_with_a_custom_manifest(tmp_path):
+    """The text comparison must not be gated on the MANIFEST path either.
+
+    The original fail-open was a THREE-part AND (`is_default_paths` required the declaration,
+    the doc AND the manifest to be the default). The declaration and doc legs are pinned by
+    the tests above; this pins the manifest leg, so a mutation re-gating the text comparison
+    on `args.manifest == MANIFEST_FILE` cannot survive the suite.
+    """
+    candidate = _corrupted_declaration(tmp_path)
+    manifest_copy = tmp_path / "surface-manifest.yml"
+    shutil.copy2(MANIFEST, manifest_copy)
+
+    result = _run(
+        "--check", "--declaration", str(candidate), "--manifest", str(manifest_copy)
+    )
+
+    assert result.returncode == 1, (
+        "a corrupted declaration `count` was accepted with a custom manifest path — the "
+        f"text comparison is gated on path equality and fails open. stdout={result.stdout!r}"
+    )
+    assert "stale" in result.stdout
+
+
+def _corrupted_declaration(tmp_path: Path) -> Path:
+    """A temp declaration copy with a wrong `count` and an INTACT `methods` list."""
+    doc = _declaration()
+    doc["count"] = len(doc["methods"]) + 1  # wrong number, SAME name set
+    path = tmp_path / "corrupted-declaration.json"
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _path_spelling(path: Path, spelling: str, tmp_path: Path, link_name: str) -> str:
+    """A non-identical but equivalent spelling of `path`, relative to the repo root."""
+    if spelling == "relative":
+        return os.path.relpath(path, ROOT)
+    if spelling == "dot-prefixed":
+        return "./" + os.path.relpath(path, ROOT)
+    link = tmp_path / link_name
+    link.symlink_to(path)
+    return str(link)
 
 
 def test_the_rendered_doc_does_not_claim_agreement_when_the_views_disagree():
@@ -456,6 +559,101 @@ def test_check_refuses_on_a_malformed_baseline(tmp_path):
     result = _run("--check", "--manifest", str(bad))
     assert result.returncode == 1
     assert "malformed" in result.stdout + result.stderr
+
+
+# --- 4. ALL FOUR evidence surfaces fail closed (#4516 review) ------------------------------
+#
+# The module claims "a gate that cannot read its evidence must refuse, never skip (#1382
+# class)". Before the fix that held for only two of the four surfaces: the AST and reflection
+# readers raised raw `FileNotFoundError` / `SyntaxError` / `ImportError` / `RuntimeError` past
+# `main()`'s `except SurfaceEvidenceUnreadable` as an uncaught traceback. Each test drives the
+# real `main()` so it proves the documented REFUSED message and exit code, not merely that a
+# helper raises. Each test FAILS on the pre-fix code (the exception escapes `main()`).
+
+
+def _refused(rc: int, output: str, view: str) -> None:
+    assert rc == 1, f"unreadable {view} evidence did not refuse"
+    assert "REFUSED" in output, (
+        f"unreadable {view} evidence did not produce the documented REFUSED message; "
+        f"output={output!r}"
+    )
+
+
+def test_check_refuses_when_the_ast_source_is_missing(monkeypatch, capsys):
+    """Surface 1/4 — `sdk.py` missing: unreadable AST evidence must REFUSE, not traceback."""
+    import tools.bridge_table as bridge_table
+    import tools.sdk_surface as sdk_surface
+
+    monkeypatch.setattr(bridge_table, "SDK_SRC", Path("/nonexistent/sdk.py"))
+    rc = sdk_surface.main(["--check"])
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    _refused(rc, output, "AST")
+    assert "AST view" in output
+
+
+def test_check_refuses_when_the_ast_source_does_not_parse(monkeypatch, capsys, tmp_path):
+    """Surface 2/4 — `sdk.py` unparseable: unreadable AST evidence must REFUSE."""
+    import tools.bridge_table as bridge_table
+    import tools.sdk_surface as sdk_surface
+
+    bad = tmp_path / "sdk.py"
+    bad.write_text("def (:\n", encoding="utf-8")
+    monkeypatch.setattr(bridge_table, "SDK_SRC", bad)
+    rc = sdk_surface.main(["--check"])
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    _refused(rc, output, "AST")
+    assert "AST view" in output
+
+
+def test_check_refuses_when_the_sdk_class_is_absent(monkeypatch, capsys):
+    """Surface 3/4 — `tortoise.sdk` imports but has no `TortoiseSDK`: must REFUSE."""
+    import sys
+    import types
+
+    import tools.sdk_surface as sdk_surface
+
+    monkeypatch.setitem(sys.modules, "tortoise.sdk", types.ModuleType("tortoise.sdk"))
+    rc = sdk_surface.main(["--check"])
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    _refused(rc, output, "reflection")
+    assert "reflection view" in output
+
+
+def test_check_refuses_when_the_sdk_import_raises(monkeypatch, capsys):
+    """Surface 4/4 — the reflection import raises: must REFUSE, not leak the exception."""
+    import sys
+    import types
+
+    import tools.sdk_surface as sdk_surface
+
+    class _ExplodingSdk(types.ModuleType):
+        def __getattr__(self, name):
+            raise RuntimeError("boom importing sdk")
+
+    monkeypatch.setitem(sys.modules, "tortoise.sdk", _ExplodingSdk("tortoise.sdk"))
+    rc = sdk_surface.main(["--check"])
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    _refused(rc, output, "reflection")
+    assert "reflection view" in output
+
+
+def test_check_refuses_when_the_doc_is_unreadable(tmp_path):
+    """The doc staleness read is EVIDENCE too: unreadable must REFUSE, not traceback.
+
+    Found by independent review of the #4516 fix (P2, medium): the doc read sat outside the
+    `SurfaceEvidenceUnreadable` contract, so `--check --doc <a directory>` raised
+    `IsADirectoryError`. Exit was 1, but the documented refusal message was absent — the
+    contract is only uniform if EVERY evidence read honours it.
+    """
+    result = _run("--check", "--doc", str(tmp_path))  # a directory, not a file
+    assert result.returncode == 1, "an unreadable doc did not refuse"
+    assert "REFUSED" in result.stdout + result.stderr, (
+        "an unreadable doc produced a raw traceback rather than the documented refusal"
+    )
 
 
 @pytest.mark.parametrize("label", ["AST", "reflection", "approved"])
