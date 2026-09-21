@@ -16,7 +16,7 @@
 #
 # Installs `python -m tortoise.embedded_reaper --no-dry-run --only-safe`
 # every 10 minutes:
-#   - macOS  -> a launchd LaunchAgent (StartInterval 600)
+#   - macOS  -> a launchd LaunchAgent (StartInterval 1200)
 #   - Linux  -> a cron entry (*/10 * * * *)
 # The reaper's singleton lock (<tempdir>/.tortoise-reaper-<uid>/.reaper.lock, fcntl;
 # tempdir-scoped since #1658 — NOT ~/.tortoise) makes concurrent runs safe,
@@ -39,7 +39,9 @@
 #   TORTOISE_REPO   repo root (default: this script's repo)
 #   PYTHON_BIN      interpreter for the sweep (default: <repo>/.venv/bin/python
 #                   if present, else `command -v python3`)
-#   REAPER_INTERVAL interval seconds (launchd) / minutes (cron); default 600/10
+#   REAPER_INTERVAL interval seconds (launchd) / minutes (cron); default 1200/20
+#   REAPER_TIMEOUT  sweep budget in seconds; default 900
+#   REAPER_JOBS     parallel CLIENT LIST probe workers; default 16
 #   AGENTS_DIR      launchd install dir (default $HOME/Library/LaunchAgents)
 #   CRONTAB_CMD     crontab binary (default: crontab)
 #
@@ -65,7 +67,19 @@ if [ -z "$PYTHON_BIN" ]; then
     echo "ERROR: no python3 found (set PYTHON_BIN)" >&2
     exit 1
 fi
-REAPER_CMD="$PYTHON_BIN -m tortoise.embedded_reaper --no-dry-run --only-safe --timeout 300"
+# #4299: `--timeout 300` aborted every sweep before it could act on a real
+# backlog — the sweep's own log carried `reaper timeout (300s) exceeded —
+# aborting sweep` against 298 live servers, so the backlog never drained and
+# the box stayed at load ~140. The budget must exceed the realistic sweep time
+# on a host running many concurrent suites. The interval is kept ABOVE the
+# budget so a sweep always finishes before the next fire, instead of being
+# refused on the singleton lock mid-sweep (those refusals were the issue's
+# 212 "already running" lines — legitimate, not a stale lock).
+# `--jobs` parallelizes the per-candidate CLIENT LIST probes — the dominant
+# cost at hundreds of leaked servers (see _run_sweep's docstring).
+REAPER_TIMEOUT="${REAPER_TIMEOUT:-900}"
+REAPER_JOBS="${REAPER_JOBS:-16}"
+REAPER_CMD="$PYTHON_BIN -m tortoise.embedded_reaper --no-dry-run --only-safe --timeout $REAPER_TIMEOUT --jobs $REAPER_JOBS"
 
 usage() {
     sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
@@ -87,10 +101,12 @@ render_plist() {
     <string>--no-dry-run</string>
     <string>--only-safe</string>
     <string>--timeout</string>
-    <string>300</string>
+    <string>$REAPER_TIMEOUT</string>
+    <string>--jobs</string>
+    <string>$REAPER_JOBS</string>
   </array>
   <key>WorkingDirectory</key><string>$REPO</string>
-  <key>StartInterval</key><integer>${REAPER_INTERVAL:-600}</integer>
+  <key>StartInterval</key><integer>${REAPER_INTERVAL:-1200}</integer>
   <key>StandardOutPath</key><string>$HOME/.tortoise/reaper.log</string>
   <key>StandardErrorPath</key><string>$HOME/.tortoise/reaper.log</string>
 </dict>
@@ -100,7 +116,7 @@ PLIST
 
 cron_line() {
     # run every REAPER_INTERVAL minutes (default 10)
-    local interval="${REAPER_INTERVAL:-600}"
+    local interval="${REAPER_INTERVAL:-1200}"
     local minutes=$(( interval / 60 ))
     [ "$minutes" -lt 1 ] && minutes=1
     echo "$CRON_LINE_RAW"
@@ -155,7 +171,7 @@ install_darwin() {
             echo "ERROR: launchctl bootstrap failed — see 'launchctl print gui/$(id -u)/$LABEL'" >&2
             return 1
         fi
-        echo "installed + loaded: $PLIST_PATH (interval ${REAPER_INTERVAL:-600}s)"
+        echo "installed + loaded: $PLIST_PATH (interval ${REAPER_INTERVAL:-1200}s)"
     fi
     plutil -lint "$PLIST_PATH" || { echo "ERROR: rendered plist invalid" >&2; return 1; }
     return 0
