@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -122,6 +123,8 @@ test('#2426: the show-once key card states the expiry (server echo / never)', ()
   // must ride it, or a rotated key silently reads 'never expires'.
   // #4342: the plaintext is derived ONCE and a plaintext-less mint is REFUSED
   // before the latch (the pre-fix `|| ''` expression latched an empty reveal).
+  // #4356: the SAME refusal now fires BEFORE the destructive leg, so a
+  // plaintext-less mint leaves the old key working; the message says so.
   // Scoped to regenerateKey's body — createKey derives the same local name.
   // Both pins are kept so neither the refusal NOR the expiry echo can be
   // dropped silently.
@@ -133,7 +136,14 @@ test('#2426: the show-once key card states the expiry (server echo / never)', ()
   assert.match(rotBody, /if \(!plaintext\) \{/, 'rotate must refuse a plaintext-less mint')
   assert.ok(rotBody.indexOf('if (!plaintext) {') < rotBody.indexOf('setRotatedKey({ plaintext: plaintext'),
     'the refusal must come BEFORE the reveal latch — no empty reveal can be set (#4342)')
-  assert.match(rotBody, /has already been revoked/, 'the refusal must state the OLD key is already revoked')
+  assert.ok(rotBody.indexOf('if (!plaintext) {') < rotBody.indexOf('await revokeKey(keyId, { skipConfirm: true })'),
+    '#4356: and BEFORE the destructive leg — a plaintext-less mint must not revoke the old key')
+  assert.match(rotBody, /Nothing was revoked/, '#4356: the refusal must state the OLD key was NOT revoked')
+  assert.match(rotBody, /is still active/, '#4356: and that it is still working')
+  // Comment-sensitive negatives must run on the STRIPPED body: a later
+  // rationale comment quoting #4342\u2019s phrase must not fail a behavioural pin.
+  assert.doesNotMatch(stripComments(rotBody), /has already been revoked/,
+    '#4356: the pre-fix already-revoked claim is false once the check precedes the revoke')
   assert.match(rotBody, /setRotatedKey\(\{ plaintext: plaintext, expiresAt: \(mk && mk\.expires_at\) \|\| null \}\)/,
     'rotate captures the server expiry echo into rotatedKey')
   assert.match(mainJsx, /expires \{fmtExpiryDate\(newKeyExpiresAt\)\}/, 'modal card shows the create expiry date')

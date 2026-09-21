@@ -620,21 +620,23 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
 
 
 def test_rotate_plaintext_less_mint_latches_no_reveal(page: Page) -> None:
-    """#4342: a 2xx rotate mint that carries NO plaintext must not latch an
-    empty reveal. `regenerateKey` mints the replacement, revokes the OLD key,
-    then used to `setRotatedKey({plaintext: … || ''})` — unconditionally
-    truthy, so the reveal `{rotatedKey && (…)}` rendered an empty
-    `<code class="key-value">` box and its copy ran `writeText('')` (a silent
-    no-op) before clearing the only view. The old key is already revoked by
-    then, so the failure must be surfaced — never a blank box whose copy
-    writes the empty string.
+    """#4342/#4356: a 2xx rotate mint that carries NO plaintext must not latch an
+    empty reveal — and (since #4356) must not revoke the OLD key either.
+    `regenerateKey` used to revoke first, then `setRotatedKey({plaintext: … || ''})`
+    — unconditionally truthy, so the reveal `{rotatedKey && (…)}` rendered an
+    empty `<code class="key-value">` box and its copy ran `writeText('')` (a
+    silent no-op) before clearing the only view; by then the old key was already
+    revoked. #4356 moves the plaintext check BEFORE the destructive leg, so this
+    path fires NO DELETE, leaves the old row active, and surfaces a truthful
+    "Nothing was revoked" banner — never a blank box.
 
     Stateful harness (mirrors test_rotate_durable_key_replaces_in_place_without
     _holding): the mint appends the replacement row and answers 2xx WITHOUT a
-    key/api_key; the DELETE stamps the old row revoked. A clipboard-write spy
-    pins the "no clipboard write" claim at the API seam as a guard against an
-    auto-write regression — the primary teeth are the ABSENT reveal/copy
-    controls (there is no control left to click) and the truthful banner."""
+    key/api_key; the DELETE route is registered but must NEVER fire (#4356).
+    A clipboard-write spy pins the "no clipboard write" claim at the API seam
+    as a guard against an auto-write regression — the primary teeth are the
+    ABSENT reveal/copy controls (there is no control left to click) and the
+    truthful banner."""
     keys = _mixed_keys_fixture()
     session_mints: list = []
     key_authed: list = []
@@ -726,19 +728,25 @@ def test_rotate_plaintext_less_mint_latches_no_reveal(page: Page) -> None:
     page.on("dialog", lambda d: d.accept())
     row3.locator(".key-rotate").click()
 
-    # The rotate ran to completion (mint, then revoke) — but no reveal latched.
-    expect(row3.locator("span.revoked")).to_contain_text("revoked", timeout=15_000)
-    assert order == ["mint", "delete"], f"mint-before-revoke ordering: {order}"
+    # The refusal banner is the deterministic end-of-flow signal on this path.
+    # Wait on it BEFORE sampling `order` or the absence-of-reveal invariants —
+    # those are all true at t=0 and would otherwise read a pre-flow snapshot
+    # (review cycle 1, P2: an unsampled `order` can still be `[]`).
+    banner = page.locator(".error.banner")
+    expect(banner).to_contain_text("Nothing was revoked", timeout=15_000)
+    expect(banner).to_contain_text("cannot be shown")
+    expect(banner).to_contain_text("still active")
+    # #4356: the mint ran, but the destructive leg did NOT — no DELETE fired and
+    # the old row is still live and fully actionable.
+    assert order == ["mint"], f"#4356: no DELETE on a plaintext-less mint: {order}"
+    expect(row3.locator("span.revoked")).to_have_count(0)
+    expect(row3.locator("span.live")).to_contain_text("active")
+    expect(row3.locator(".key-rotate")).to_be_visible()
     # NO reveal, NO empty `.key-value` square, NO clipboard write.
     expect(page.locator(".new-key")).to_have_count(0)
     expect(page.locator("code.key-value")).to_have_count(0)
     writes = page.evaluate("window.__clipWrites")
     assert writes == [], f"#4342: the empty reveal must never write to the clipboard: {writes}"
-    # The failure is surfaced truthfully — naming the already-revoked old key
-    # (the rotate-specific remedy, distinct from the create path's).
-    banner = page.locator(".error.banner")
-    expect(banner).to_contain_text("has already been revoked", timeout=10_000)
-    expect(banner).to_contain_text("cannot be shown")
     # The replacement row exists (the failure path still refreshes the table).
     expect(page.locator("tbody tr", has_text=ROT_NEW_PREFIX)).to_have_count(1, timeout=10_000)
     # Unchanged invariants: session-only, no key-authed request.

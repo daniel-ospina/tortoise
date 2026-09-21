@@ -5967,12 +5967,13 @@ function claimIntentInFlight() {
     return revealablePlaintext(response && response.key) || revealablePlaintext(response && response.api_key)
   }
 
-  // #4342: the rotate replacement's key, derived ONCE for the same reason as
-  // `newKeyReveal` above — the reveal renders iff this is a non-empty string,
-  // so a falsy `rotatedKey.plaintext` can never produce the empty `.key-value`
-  // box and is never handed to `navigator.clipboard.writeText`. `regenerateKey`
-  // already refuses to latch a plaintext-less mint (the old key is revoked by
-  // then); this is the render-side half of that same guard.
+  // #4342/#4356: the rotate replacement's key, derived ONCE for the same
+  // reason as `newKeyReveal` above — the reveal renders iff this is a
+  // non-empty string, so a falsy `rotatedKey.plaintext` can never produce the
+  // empty `.key-value` box and is never handed to
+  // `navigator.clipboard.writeText`. `regenerateKey` refuses to latch a
+  // plaintext-less mint (#4356: it refuses BEFORE the revoke, so the old key
+  // survives); this is the render-side half of that same guard.
   const rotatedKeyReveal = (rotatedKey && revealablePlaintext(rotatedKey.plaintext)) || ''
 
   // #4330: Done dismisses the reveal — the key is already live and listed; this
@@ -6046,36 +6047,53 @@ function claimIntentInFlight() {
       // replacement stays as a visible team-A durable (same accepted orphan
       // semantics as createKey's identity guard).
       if (orgIdRef.current !== _teamAtCall) return
-      await revokeKey(keyId, { skipConfirm: true })
-      if (orgIdRef.current !== _teamAtCall) return
-      // #4342: a 2xx mint that carries no revealable plaintext is NOT a
-      // reveal. The secret is unrecoverable at this point AND the OLD key was
-      // revoked on the line above, so the only honest outcome is to say so —
-      // never to latch `rotatedKey` with a falsy (or non-string, or blank)
-      // plaintext, which rendered an empty `.key-value` box whose copy wrote
-      // the empty string (the #4330 class on the rotate surface; `mintGraphKey`
-      // and `createKey` already refuse the falsy case). The remedy is
-      // rotate-specific: create cannot lose a live credential, rotate already
-      // has.
+      // #4356: the revealable-plaintext check is a PRECONDITION of the
+      // destructive leg, not a post-condition of it. It sits here — after the
+      // Round-29 identity guard (the refusal names a row, so it is team-scoped)
+      // and BEFORE `revokeKey` — so a 2xx mint whose secret cannot be shown is
+      // treated as a FAILED replacement and never destroys the working
+      // credential. Pre-#4356 the check ran after the revoke: the old key was
+      // already dead and the replacement unrecoverable, so the user lost a
+      // working key and got nothing (#4342's already-revoked message was
+      // truthful about that outcome, not a remedy for it). The predicate is the
+      // base's shared `revealableMintPlaintext` (#4359) — never a third one.
       const plaintext = revealableMintPlaintext(mk)
       if (!plaintext) {
         // Refresh FIRST, then surface the reason: `loadAll` owns the same
         // `error` slot and overwrites it from its own catch, so a compound
-        // failure (the rotate legs succeeded, the refresh did not) would
-        // otherwise replace the one message that tells the user their old key
-        // is gone and which row to clean up. The identity guard mirrors the
-        // stale-response rule — a switch during the refresh must not carry this
-        // team's error under the new team's header.
+        // failure (the mint succeeded, the follow-up read did not) would
+        // otherwise replace the one message that tells the user which row to
+        // clean up. The identity guard mirrors the stale-response rule — a
+        // switch during the refresh must not carry this team's error under the
+        // new team's header.
         await loadAll('')
         if (orgIdRef.current !== _teamAtCall) return
-        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. ${rowName} has already been revoked, so applications using the old key have stopped working. Refresh the list, revoke the unused replacement row, and create a new key.`)
+        // #4356: name the replacement's prefix when the mint echoed one. The
+        // mint carries the old row's label over (`mintKey('', oldRow.name…)`),
+        // so two ACTIVE rows share `rowName` after this failure — a remedy that
+        // said only "revoke the unused replacement row" could send the user to
+        // revoke the WORKING row and re-create the very defect.
+        const replacementPrefix = (mk && mk.key_prefix) || ''
+        // #4356 (review): the copy must not claim a state the row does not
+        // have. Rotate renders on EVERY unrevoked row (`!k.revoked_at`), which
+        // includes DISABLED rows — "still active" would be false there. Scope
+        // the claim to what this rotation did (no DELETE) plus the row's own
+        // captured state.
+        const rowState = (!row0 || row0.revoked_at) ? 'was not touched'
+          : (row0.enabled === false) ? 'is still disabled'
+          : 'is still active'
+        setError(`The server did not return the replacement key\u2019s value, so it cannot be shown. Nothing was revoked \u2014 ${rowName} ${rowState}. Refresh the list, revoke the unused replacement row${replacementPrefix ? ` (prefix ${replacementPrefix})` : ''}, and try again.`)
         return
       }
+      // The mint yielded a revealable secret, so the destructive leg may run.
+      // `mint → revoke` (the #2229 success-path ordering) is unchanged.
+      await revokeKey(keyId, { skipConfirm: true })
+      if (orgIdRef.current !== _teamAtCall) return
       // #2246: no held install — the replacement is shown once and managed
       // from the table like any other durable. #2735: its OWN reveal state
       // (rotatedKey), never the create modal's newKey — the create modal's
       // dismiss paths clear newKey, which would destroy this unread
-      // replacement (the old key is already revoked by this point).
+      // replacement.
       setRotatedKey({ plaintext: plaintext, expiresAt: (mk && mk.expires_at) || null })
       await loadAll('')
     } catch (e) {

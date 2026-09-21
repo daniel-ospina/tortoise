@@ -1,5 +1,5 @@
 // keyRotateEmptyRevealExec.test.js — #4342 (the #4330 defect class on the
-// ROTATE surface).
+// ROTATE surface), extended by #4356 (the destructive-leg ordering).
 //
 // WHY THIS FILE EXISTS. `regenerateKey` mints the replacement, revokes the OLD
 // key, and then latches the reveal with
@@ -13,14 +13,20 @@
 // (`mintGraphKey` throws; #4330 hardened `createKey`); this is the one mint
 // site with no guard.
 //
+// #4356 MOVED THE GUARD. #4342 placed it after the revoke (so its message said
+// "the old key is already revoked"); #4356 places the SAME check between the
+// mint and the destructive leg, so a plaintext-less 2xx never fires the DELETE
+// at all and the old key keeps working. The success path is unchanged.
+//
 // WHY EXECUTION, NOT A TEXT SCAN. The exit claim is a BEHAVIOUR — "a
-// plaintext-less rotate never latches the reveal, and no falsy value reaches
-// the clipboard". Source shapes are unbounded (`mk && setRotatedKey(…)`,
-// `Boolean(mk) && …`, a helper that decides), and each would satisfy a regex
-// while keeping the bug. So this file takes the REAL `regenerateKey` and
-// `copyRotatedKey` out of `main.jsx`, builds them with `new Function(...)` over
-// stub deps, and runs the actual paths. The text pins at the bottom stay only
-// as cheap backstops for the DOM gate (a behaviour test cannot see JSX).
+// plaintext-less rotate never revokes the old key, never latches the reveal,
+// and no falsy value reaches the clipboard". Source shapes are unbounded
+// (`mk && setRotatedKey(…)`, `Boolean(mk) && …`, a helper that decides), and
+// each would satisfy a regex while keeping the bug. So this file takes the REAL
+// `regenerateKey` and `copyRotatedKey` out of `main.jsx`, builds them with
+// `new Function(...)` over stub deps, and runs the actual paths. The text pins
+// at the bottom stay only as cheap backstops for the DOM gate (a behaviour
+// test cannot see JSX).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -106,9 +112,9 @@ function build(deps, decls) {
 }
 
 // ── regenerateKey ───────────────────────────────────────────────────────────
-function rotateEnv({ mintKey, loadAll, orgIdRef } = {}) {
+function rotateEnv({ mintKey, loadAll, orgIdRef, keys: keysOverride } = {}) {
   const calls = { rotatedKey: [], error: [], capNotice: [], loadAll: 0, revoke: [], order: [] }
-  const rows = [
+  const rows = keysOverride || [
     { id: 'k-old', key_id: 'k-old', name: 'residue row', key_prefix: 'tt_live_re',
       created_at: '2026-08-01T00:00:00.000Z' },
   ]
@@ -144,36 +150,46 @@ function rotateEnv({ mintKey, loadAll, orgIdRef } = {}) {
   return { deps, calls, regenerateKey: build(deps, ['function revealablePlaintext', 'function revealableMintPlaintext', 'async function regenerateKey']).regenerateKey }
 }
 
-test('#4342: a plaintext-less rotate 2xx latches NO reveal and states the old key is revoked', async () => {
+test('#4356: a plaintext-less rotate 2xx NEVER fires the DELETE — the old key survives', async () => {
   // The reported mechanism: a 2xx mint carrying only a row id — the secret is
-  // unrecoverable. Pre-fix this reached `setRotatedKey({ plaintext: '', … })`.
+  // unrecoverable. #4342 refused the latch but STILL revoked the old key;
+  // #4356 moves the check before the destructive leg, so the working
+  // credential survives and the message says so.
   const { calls, regenerateKey } = rotateEnv({
     mintKey: async () => ({ id: 'k-new', key_prefix: 'tt_rot_new' }),
   })
   await regenerateKey('k-old')
   assert.deepEqual(calls.rotatedKey, [],
     'a plaintext-less mint must never latch `rotatedKey` (the empty `.key-value` box)')
-  assert.deepEqual(calls.order, ['mint', 'delete'],
-    'the old key IS revoked on this path — the message must say so')
+  assert.deepEqual(calls.order, ['mint'],
+    '#4356: the mint ran, but the destructive leg must NOT fire — the old key keeps working')
+  assert.deepEqual(calls.revoke, [],
+    '#4356: `revokeKey` must never be called when the replacement cannot be shown')
   assert.equal(calls.loadAll, 1,
     'the replacement row exists server-side — the table must be refreshed')
   const msg = calls.error.filter(Boolean).at(-1) || ''
   assert.match(msg, /cannot be shown/, 'the failure must say the replacement cannot be shown')
-  assert.match(msg, /already been revoked/,
-    'and that the OLD key is already revoked (the rotate-specific remedy)')
-  assert.match(msg, /create a new key/, 'and name the remedy')
+  assert.match(msg, /Nothing was revoked/,
+    '#4356: and that the old key was NOT revoked (distinct from #4342\u2019s already-revoked message)')
+  assert.match(msg, /still active/, '#4356: naming the live state of the old key')
+  assert.match(msg, /tt_rot_new/,
+    '#4356: the replacement is named by prefix so the user does not revoke the wrong (same-named) row')
+  assert.doesNotMatch(msg, /already been revoked/,
+    '#4356: the pre-fix already-revoked claim must be gone — it is now false')
   // Never an empty string latched, and never a non-string in the error slot.
   assert.ok(!calls.rotatedKey.some((v) => !v || !v.plaintext))
 })
 
-test('#4342: a mint returning nothing at all is refused the same way', async () => {
+test('#4342/#4356: a mint returning nothing at all is refused the same way', async () => {
   const { calls, regenerateKey } = rotateEnv({ mintKey: async () => undefined })
   await regenerateKey('k-old')
   assert.deepEqual(calls.rotatedKey, [], 'a missing response must not latch a reveal')
+  assert.deepEqual(calls.order, ['mint'], '#4356: still no DELETE when there is no replacement')
   assert.match(calls.error.filter(Boolean).at(-1) || '', /cannot be shown/)
+  assert.match(calls.error.filter(Boolean).at(-1) || '', /Nothing was revoked/)
 })
 
-test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused too', async () => {
+test('#4342/#4356: a truthy-but-unrevealable mint (number / object / blank) is refused too', async () => {
   // A bare `!plaintext` check let these through: `mk.key = 42` and
   // `mk.key = '   '` are both NON-falsy, so the reveal rendered a value the
   // user could not use (a blank box, or a copied blank) with no error surfaced.
@@ -182,33 +198,37 @@ test('#4342: a truthy-but-unrevealable mint (number / object / blank) is refused
     await regenerateKey('k-old')
     assert.deepEqual(calls.rotatedKey, [],
       `a mint carrying ${JSON.stringify(value)} must not latch the reveal`)
+    assert.deepEqual(calls.revoke, [],
+      `#4356: and must not revoke the old key for ${JSON.stringify(value)}`)
     const msg = calls.error.filter(Boolean).at(-1) || ''
     assert.match(msg, /cannot be shown/,
       `the failure must be surfaced for ${JSON.stringify(value)}`)
   }
 })
 
-test('#4342: a failing refresh cannot overwrite the already-revoked message', async () => {
+test('#4342/#4356: a failing refresh cannot overwrite the not-revoked message', async () => {
   // `loadAll` owns the same `error` slot and overwrites it from its own catch
   // (main.jsx). If the refusal message were set FIRST, a compound failure (the
-  // rotate legs succeeded, the follow-up read did not) would replace the one
-  // message that tells the user their old key is gone. The refusal must be
-  // surfaced AFTER the refresh — pinned here behaviourally.
+  // mint succeeded, the follow-up read did not) would replace the one message
+  // that tells the user their old key survives. The refusal must be surfaced
+  // AFTER the refresh — pinned here behaviourally.
   const { calls, regenerateKey } = rotateEnv({
     mintKey: async () => ({ id: 'k-new', key_prefix: 'tt_rot_new' }),
     loadAll: (c) => { c.error.push('Failed to fetch') },
   })
   await regenerateKey('k-old')
   assert.deepEqual(calls.rotatedKey, [], 'still no reveal')
+  assert.deepEqual(calls.revoke, [], '#4356: and still no revoke')
   const msg = calls.error.filter(Boolean).at(-1) || ''
-  assert.match(msg, /has already been revoked/,
+  assert.match(msg, /Nothing was revoked/,
     'the rotate truth must survive a refresh failure, not be replaced by the network error')
   assert.doesNotMatch(msg, /Failed to fetch/)
 })
 
-test('#4342: a successful rotate still latches the plaintext and its expiry echo', async () => {
+test('#4342/#4356: a successful rotate still latches the plaintext and its expiry echo', async () => {
   // Positive control: the guard must not swallow the working path (#2426 must
-  // keep riding `rotatedKey`).
+  // keep riding `rotatedKey`), and the destructive leg must still run AFTER
+  // the mint.
   const { calls, regenerateKey } = rotateEnv({
     mintKey: async () => ({ key: 'tt_ok', expires_at: '2026-10-20T00:00:00+00:00' }),
   })
@@ -217,12 +237,14 @@ test('#4342: a successful rotate still latches the plaintext and its expiry echo
     [{ plaintext: 'tt_ok', expiresAt: '2026-10-20T00:00:00+00:00' }])
   assert.deepEqual(calls.error, [''], 'the open-time clear is the only error write')
   assert.equal(calls.loadAll, 1)
+  assert.deepEqual(calls.order, ['mint', 'delete'],
+    '#2229: the SUCCESS path still mints before it revokes')
 })
 
 test('#4342/#4359: a team switch during the rotate refusal refresh suppresses the refusal', async () => {
-  // Mirrors the create-path guard (`createKey`): the refusal names the row and
-  // the already-revoked old key, so a switch mid-refresh must not carry it
-  // under the new team's header.
+  // Mirrors the create-path guard (`createKey`): the refusal names the row,
+  // so a switch mid-refresh must not carry it under the new team's header.
+  // #4356: the switch also precedes the (never-reached) destructive leg.
   const orgIdRef = { current: 'org-A' }
   const { calls, regenerateKey } = rotateEnv({
     orgIdRef,
@@ -231,8 +253,61 @@ test('#4342/#4359: a team switch during the rotate refusal refresh suppresses th
   })
   await regenerateKey('k-old')
   assert.deepEqual(calls.rotatedKey, [], 'still no reveal')
+  assert.deepEqual(calls.revoke, [], '#4356: the switch suppressed the refusal before the revoke')
   assert.deepEqual(calls.error.filter(Boolean), [],
     'a refusal whose team changed mid-refresh must not be surfaced under the new team')
+})
+
+test('#4356: the refusal tells the truth for a DISABLED old row (never claims active)', async () => {
+  // The Rotate control renders on EVERY unrevoked row (`!k.revoked_at`),
+  // including DISABLED ones — so "is still active" would be a false claim
+  // there (review cycle 1, P2). The message must scope its state claim.
+  const { calls, regenerateKey } = rotateEnv({
+    keys: [{ id: 'k-old', key_id: 'k-old', name: 'residue row', key_prefix: 'tt_live_re',
+             created_at: '2026-08-01T00:00:00.000Z', enabled: false }],
+    mintKey: async () => ({ id: 'k-new', key_prefix: 'tt_rot_new' }),
+  })
+  await regenerateKey('k-old')
+  const msg = calls.error.filter(Boolean).at(-1) || ''
+  assert.match(msg, /is still disabled/,
+    'a disabled row must not be reported as active')
+  assert.doesNotMatch(msg, /is still active/,
+    'the false active claim must be gone')
+  assert.deepEqual(calls.revoke, [], '#4356: still no revoke')
+})
+
+test('#4356: the identity guard precedes the plaintext check — a switch during the MINT returns before both', async () => {
+  // Rejected alternative (scoping `## Rejected Alternatives` #7): hoist the
+  // plaintext check above the Round-29 guard. The guard must fire first — a
+  // stale team must not revoke, and must not surface a team-scoped refusal
+  // under the new team's header.
+  const orgIdRef = { current: 'org-A' }
+  const { calls, regenerateKey } = rotateEnv({
+    orgIdRef,
+    mintKey: async () => { orgIdRef.current = 'org-B'; return { id: 'k-new' } },
+  })
+  await regenerateKey('k-old')
+  assert.deepEqual(calls.order, ['mint'],
+    'the switch during the mint aborts before the destructive leg')
+  assert.deepEqual(calls.revoke, [], 'no revoke on the stale-team path')
+  assert.deepEqual(calls.error.filter(Boolean), [], 'and no refusal under the new team')
+  assert.deepEqual(calls.rotatedKey, [])
+})
+
+test('#4356: in regenerateKey the identity guard precedes the plaintext check, which precedes the revoke', () => {
+  // A static pin for the statement order the executable cases exercise. If a
+  // future edit hoists the plaintext check above the identity guard, or drops
+  // it below the revoke, this fails even if the chosen stubs happen to pass.
+  const body = extractDeclaration(mainJsx, 'async function regenerateKey')
+  const iIdentity = body.indexOf('if (orgIdRef.current !== _teamAtCall) return')
+  const iPlaintext = body.indexOf('const plaintext = revealableMintPlaintext(mk)')
+  const iRevoke = body.indexOf('await revokeKey(keyId, { skipConfirm: true })')
+  assert.ok(iIdentity > -1 && iPlaintext > -1 && iRevoke > -1,
+    'all three statements must exist in regenerateKey')
+  assert.ok(iIdentity < iPlaintext,
+    'the Round-29 identity guard must precede the plaintext check')
+  assert.ok(iPlaintext < iRevoke,
+    'the plaintext check must precede the destructive revoke')
 })
 
 // ── copyRotatedKey ──────────────────────────────────────────────────────────
