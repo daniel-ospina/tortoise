@@ -2052,6 +2052,12 @@ def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
     (The comparison is what makes the check sound; nothing here relies on the
     engine's install ordering.)
 
+    Assumes a QUIESCED destination: a concurrent writer to a real (non-drill)
+    live graph can add nodes between the copy and this probe, which then reads
+    as a mismatch — the copy is reported as a timeout. That is fail-closed (a
+    false NEGATIVE, never a false accept), as is refusing to settle when
+    ``_graph_present`` cannot read the listing.
+
     Deliberately never QUERIES a graph ``GRAPH.LIST`` does not name: a Cypher
     read on a missing graph CREATES an empty one (verified on FalkorDB
     4.20.4), and on the swap's freshly-deleted ``live_name`` that would leave

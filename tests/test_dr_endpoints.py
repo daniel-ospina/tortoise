@@ -968,7 +968,7 @@ class TestDrRebaseline:
             from tortoise.config import is_loopback_uri
             if not is_loopback_uri(os.environ["TORTOISE_DB_URI"]):
                 pytest.skip("RESULTSET_SIZE is server-global — never lower it "
-                            "on a non-loopback/shared server")
+                            "on a remote server")
 
         db = _held_proj_db()
         conn = db.connection
@@ -987,13 +987,14 @@ class TestDrRebaseline:
             # ... but the aggregate is not: full data-node count survives.
             assert hb.count_data_nodes(db, "org_settle_source") == 6
         finally:
-            # Never leave the shared server's cap lowered, even if the body or
-            # the restore raised — a stuck cap poisons every later
-            # non-aggregate read in the session.
-            import contextlib
-            with contextlib.suppress(Exception):
-                conn.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE",
-                                     int(prev[1]))
+            # Restore the server-global cap and VERIFY it. Deliberately NOT
+            # suppressed: a failed restore must fail this test loudly rather
+            # than leave the cap lowered (which would truncate every later
+            # non-aggregate read in the session/other lanes on this server).
+            conn.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE",
+                                 int(prev[1]))
+            assert conn.execute_command(
+                "GRAPH.CONFIG", "GET", "RESULTSET_SIZE")[1] == int(prev[1])
 
 
 class TestDrDrill:
