@@ -1221,6 +1221,26 @@ def owner_record_dir(socket_file: str) -> str:
 #: record is only dropped when the last of them closes).
 _owner_refcounts: dict[str, int] = {}
 
+#: Cache of THIS process's start time, keyed by pid (#4487).
+#: `record_owner` runs on EVERY construction now, and `_process_start_time`
+#: shells out to `ps` — a fork+exec per client, which on a loaded runner is
+#: real load and was implicated in the carve-out lane's time-bounded waits.
+#: A process's own start time never changes, so resolve it once; the pid key
+#: keeps this correct across `fork()` (a child sees its own pid).
+_own_start_cache: dict[int, float | None] = {}
+
+
+def _own_start_time() -> float | None:
+    """This process's start time, resolved at most ONCE per pid (#4487)."""
+    pid = os.getpid()
+    if pid not in _own_start_cache:
+        from tortoise.embedded_reaper import _process_start_time
+        try:
+            _own_start_cache[pid] = _process_start_time(pid)
+        except Exception:
+            _own_start_cache[pid] = None
+    return _own_start_cache[pid]
+
 
 def _adopt_owner_records_after_fork() -> None:
     """Re-establish owner records for inherited clients in a forked child.
@@ -1304,14 +1324,9 @@ def record_owner(socket_file: str | None) -> bool:
         os.makedirs(owner_record_dir(socket_file), exist_ok=True)
     except OSError:
         return False
-    # Import at call time: `_process_start_time` shells out to `ps`, and the
-    # reaper module is already a module-level import here — this keeps the
-    # acquisition localized and skippable.
-    from tortoise.embedded_reaper import _process_start_time
-    try:
-        start = _process_start_time(os.getpid())
-    except Exception:
-        start = None
+    # #4487: this process's own start time is invariant — resolve it once
+    # (see `_own_start_time`), not a `ps` fork on every construction.
+    start = _own_start_time()
     # An undeterminable start time is stamped 'unknown'; _owner_records
     # treats that as LIVE (fail closed) — never as a dead owner.
     stamp = f"{os.getpid()}-{'unknown' if start is None else int(start)}"
