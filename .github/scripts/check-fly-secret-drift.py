@@ -407,13 +407,13 @@ def _capture_payload(
         )
     if proc.returncode != 0:
         raise ValueError(
-            "the propagation shell failed under the stub (rc=%d): the payload "
+            f"the propagation shell failed under the stub (rc={proc.returncode}): the payload "
             "reads a variable this harness does not model (workflow/job/step "
             "`env:`, GITHUB_SHA) — a value written by an earlier step to "
             "$GITHUB_ENV, or a runner-provided variable — so whether it assigns "
             "the Fly secret cannot be determined. Put the value in an `env:` key, "
-            "or assign the secret unconditionally. stderr: %s"
-            % (proc.returncode, proc.stderr.strip()[:300])
+            "or assign the secret unconditionally. stderr: "
+            f"{proc.stderr.strip()[:300]}"
         )
     return _payload_assignments(records)
 
