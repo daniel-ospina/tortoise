@@ -18941,8 +18941,8 @@ def _maybe_apply_completion(org_id: str) -> bool:
 # one event per edge creation falls out of it by construction: restart-safe
 # and multi-worker-safe, with NO second dedup store, NO threshold and NO
 # in-process set. Every writer of a W11 step maps its own edge result
-# through ``_emit_onboarding_step_events``; a non-creating replay passes an
-# empty list and emits nothing. (``decide-completed`` is the one W11 edge
+# through ``_emit_onboarding_step_events``; a non-creating replay never
+# reaches the emitter. (``decide-completed`` is the one W11 edge
 # with a sanctioned removal path — the #3912 repair — after which a genuine
 # re-completion re-emits; see ``analytics.onboarding_decide_complete``.)
 #

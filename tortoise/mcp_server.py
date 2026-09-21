@@ -3009,12 +3009,10 @@ def _maybe_onboarding_auto_complete(*,
             observed.append("decide-completed")
         legacy_mirror = bool(
             _get_onboarding_state(org_id).get("onboarding_complete"))
-        # #2006 (W11): emit IMMEDIATELY after each creating write — a later
-        # step's failure must not discard an already-observed edge creation,
-        # because no later call can ever observe that transition again (a
-        # replay reports created=False). The emit is fail-safe (capture never
-        # raises, and the helper guards each emit), so it can never block the
-        # agent's write.
+        # #2006 (W11): emit IMMEDIATELY after each creating write, so a later
+        # step's failure cannot discard an edge creation this call already
+        # observed. Fail-safe (capture never raises, and the helper guards each
+        # emit), so this can never block the agent's write.
         for step in observed:
             res = _os_write_step(proj, org_id, step,
                                  status_from_mirror=legacy_mirror)

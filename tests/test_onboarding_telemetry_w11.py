@@ -13,7 +13,7 @@ repair — after which a genuine re-completion creates the edge again and
 re-emits. See ``analytics.onboarding_decide_complete``. The residual
 funnel-accuracy question is filed as #4458.)
 
-The load-bearing tests (each would go RED if emission were ungated):
+The two exact-once tests (each would go RED if emission were ungated):
 
 * ``test_repeat_write_emits_exactly_once`` — the core: the second write of the
   same step reports ``created=False`` and emits NOTHING.
@@ -21,8 +21,9 @@ The load-bearing tests (each would go RED if emission were ungated):
   property the issue asks for ("not the multi-worker-racy in-process set"):
   the agent checkpoint and the MCP auto-complete both write the SAME edge and
   exactly one event is emitted in total, in either order.
-* ``test_capture_failure_never_breaks_the_write_path`` — the seam's
-  "never raises" promise (R19).
+
+``test_capture_failure_never_breaks_the_write_path`` is the separate R19
+guard: a raising PostHog client must not turn a committed write into an error.
 
 DB-free: the edge store is a miniature ``COMPLETED_STEP`` store with the real
 once-only MERGE semantics, and the graph/projection/gate legs are stubbed, so

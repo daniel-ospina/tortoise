@@ -27,7 +27,8 @@ distinct_id = user UUID) to server events.
 Once-only events have TWO shapes here, and which one applies is a property
 of the DOMAIN fact, not of this module:
   * ``first_api_call`` — no durable once-only fact exists in the graph, so
-    it keeps an in-process set (the single-worker caveat above).
+    it keeps an in-process set (see the single-worker caveat documented on
+    ``_first_api_call_seen`` below).
   * ``onboarding_seed_complete`` / ``onboarding_decide_complete`` (#2006
     W11) — the durable once-only fact ALREADY exists: the ``COMPLETED_STEP``
     edge's new creation, returned as ``created`` by
@@ -151,12 +152,11 @@ def onboarding_seed_complete(
     EMIT ONLY when the caller observed the ``first-points-filed``
     ``COMPLETED_STEP`` edge being NEWLY created — i.e. gated on
     ``onboarding.state.write_completed_step(...)["created"]``. That
-    edge-creation transition IS the once-per-org fact, so this event is
+    edge-creation transition IS the once-only fact, so this event is
     exact-once per edge creation by construction (restart-safe,
-    multi-worker-safe). There is
-    deliberately NO in-process dedup set here (unlike ``first_api_call``)
-    and no threshold: a replay that reports ``created=False`` must emit
-    nothing.
+    multi-worker-safe). There is deliberately NO in-process dedup set here
+    (unlike ``first_api_call``) and no threshold: a replay that reports
+    ``created=False`` must emit nothing.
 
     ``source`` names the write path that observed the creation
     ('seed' | 'starter_seed' | 'checkpoint' | 'mcp_auto' | 'state_router')
