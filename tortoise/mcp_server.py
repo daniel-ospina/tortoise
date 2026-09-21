@@ -309,13 +309,14 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
                             run_middleware=True, task_meta=task_meta))
     try:
         done, _ = await asyncio.wait({task}, timeout=_ha._TRANSPORT_WAIT_BOUND_S)
-    except BaseException:
+    except asyncio.CancelledError:
         # Outer cancellation (client disconnect, server shutdown, transport
         # teardown). Propagate it INTO the dispatch and await it, so the tool's
         # own cancellation path runs — abandoning here would silently keep a
-        # cancelled dispatch alive.
+        # cancelled dispatch alive. Suppress only the child's CANCELLATION; a
+        # genuine error from its cleanup must surface.
         task.cancel()
-        with contextlib.suppress(BaseException):
+        with contextlib.suppress(asyncio.CancelledError):
             await task
         raise
     if task in done:

@@ -2502,7 +2502,7 @@ class WaitBoundMiddleware:
         try:
             done, _ = await asyncio.wait({task},
                                          timeout=_TRANSPORT_WAIT_BOUND_S)
-        except BaseException:
+        except asyncio.CancelledError:
             # The caller was cancelled (client disconnect, server shutdown).
             # Propagate the cancellation INTO the handler and await it: the
             # app's own cancellation path is where its cleanup and abandonment
@@ -2512,8 +2512,13 @@ class WaitBoundMiddleware:
             # path. ABANDONING here instead would silently keep a disconnected
             # capture running and leave its marker unset. Cancelling is correct
             # ONLY on this path; the breach path below abandons on purpose.
+            #
+            # Suppress only the child's CANCELLATION. A genuine error raised by
+            # its cleanup (a raising ``finally``, a send on a dead socket) must
+            # surface, exactly as it did through the old direct await —
+            # ``suppress(BaseException)`` would retrieve and discard it.
             task.cancel()
-            with contextlib.suppress(BaseException):
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
             raise
         if task in done:

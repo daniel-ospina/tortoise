@@ -588,6 +588,55 @@ async def test_mcp_abandonment_holds_the_2850_workload_gauge(
         "the gauge leaked after the abandoned dispatch finished")
 
 
+@pytest.mark.asyncio
+async def test_mcp_cancellation_propagates_into_the_tool(monkeypatch):
+    """The MCP seam's CANCELLATION path cancels the dispatch and awaits it.
+
+    Same contract as the REST half (``test_cancellation_propagates_into_the_
+    handler``) but for the seam that has its own bookkeeping: a regression that
+    reverted the MCP branch to abandon-on-cancel would leave a cancelled
+    dispatch running and untracked, and no other test would see it.
+    """
+    from fastmcp.tools import FunctionTool
+
+    from tortoise import mcp_server as ms
+
+    started = asyncio.Event()
+    saw_cancel: list = []
+
+    async def _bound_cancel_probe() -> dict:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            saw_cancel.append(True)
+            raise
+        return {"ok": True}
+
+    ms.mcp.add_tool(FunctionTool.from_function(
+        _bound_cancel_probe, name="_bound_cancel",
+        description="wait-bound test: cancellation probe"))
+    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda *a, **k: None)
+    try:
+        job = asyncio.ensure_future(ms.mcp.call_tool("_bound_cancel"))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+        assert saw_cancel == [True], (
+            "the tool never saw the cancellation — the MCP seam consumed it")
+        assert not ms._pending_mcp_wait_bound, (
+            "a cancelled dispatch was booked as an abandoned timeout task")
+    finally:
+        try:  # noqa: SIM105
+            ms.mcp.local_provider.remove_tool("_bound_cancel")
+        except Exception:
+            pass
+        ms._pending_mcp_wait_bound.clear()
+
+
 # ── the cold half: a VERIFICATION, not a build ────────────────────────────
 
 def test_cold_half_readiness_gate_holds_or_is_reported():
