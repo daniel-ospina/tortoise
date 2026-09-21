@@ -11675,13 +11675,25 @@ class TortoiseSDK:
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
-        proj.g.query(
+        written = proj.g.query(
             "MATCH (n:Point {id: $id}) "
             "SET n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
             "    n.baseline_source = $src, "
-            "    n.posterior_alpha = null, n.posterior_beta = null",
+            "    n.posterior_alpha = null, n.posterior_beta = null "
+            "RETURN n.id",
             params={"id": claim_id, "a": alpha, "b": beta, "src": source},
-        )
+        ).result_set
+        # #2884 D3/FIX-3: a baseline clears the posteriors LIVE (`null`), so a
+        # rebuild must replay the CLEAR or it resurrects the stale posteriors
+        # the live graph no longer holds. `RETURN n.id` binds the journal to
+        # the rows the statement actually committed; a missing Point wrote
+        # nothing and journals nothing. Only the two keys this statement
+        # wrote are carried — `confidence` is untouched here.
+        if self._event_log_path:
+            for row in written:
+                self._emit_event(
+                    "ConfidenceChanged", id=row[0],
+                    posterior_alpha=None, posterior_beta=None)
         # Dreaming (#85, P1): a baseline change alters the prior — neighbors
         # whose confidence derived from this claim are now stale.
         self._mark_dirty([claim_id])
@@ -11866,12 +11878,22 @@ class TortoiseSDK:
                     age = recompute_interval + 1
                 if age < recompute_interval:
                     continue  # within interval and not dirty-marked → keep
-            proj.g.query(
+            reverted = proj.g.query(
                 "MATCH (n:Point {id:$id}) REMOVE n.ep_alpha, n.ep_beta, "
                 "n.baseline_set, n.baseline_source, n.inherited_at, "
-                "n.posterior_alpha, n.posterior_beta",
+                "n.posterior_alpha, n.posterior_beta "
+                "RETURN count(n)",
                 params={"id": pid},
-            )
+            ).result_set
+            # #2884 D3/FIX-3: the revert REMOVEs the posteriors LIVE, so a
+            # rebuild must replay the CLEAR (journal the two belief keys the
+            # statement wrote; `confidence` is untouched). `RETURN count(n)`
+            # binds the journal to the committed rows — a missing Point
+            # removed nothing and journals nothing.
+            if self._event_log_path and reverted and reverted[0][0]:
+                self._emit_event(
+                    "ConfidenceChanged", id=pid,
+                    posterior_alpha=None, posterior_beta=None)
             # Clear the stale prior from in-memory evidence cache (#652).
             # set_point_baseline writes (alpha, beta) into self._evidence
             # unconditionally, and _hydrate_evidence is additive-only — so
@@ -20124,6 +20146,18 @@ class TortoiseSDK:
         ).result_set
         old_ids = [r[0] for r in old_rows]
         if old_ids:
+            # #2884 D3/FIX-3: the sweep writes the DECAYED belief state LIVE
+            # (`confidence=0.5, posterior_alpha=1.0, posterior_beta=1.0`), so a
+            # rebuild must replay it or it resurrects the pre-sweep values.
+            # `RETURN p.id` already binds the journal set to the committed
+            # set; the `if old_ids` gate means a sweep that matched nothing
+            # journals nothing. Carry EXACTLY the three keys decay_clause
+            # wrote.
+            if self._event_log_path:
+                for _oid in old_ids:
+                    self._emit_event(
+                        "ConfidenceChanged", id=_oid, confidence=0.5,
+                        posterior_alpha=1.0, posterior_beta=1.0)
             # #2422: the superseded assessments' influence rides their
             # operators' sibling edges (same ghost class as invalidate) —
             # drop their messages so the next warm-start recomputes instead

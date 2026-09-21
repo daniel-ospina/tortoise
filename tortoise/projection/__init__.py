@@ -1145,6 +1145,8 @@ def _journal_append_product(graph_name: str) -> None:
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import (  # noqa: E402, I001
+    BELIEF_PROPS,
+    _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
 )
@@ -1449,6 +1451,18 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # conditional — never clobber a sibling dim the revision did not
             # carry.
             p.update(_annotator_dims(ev))
+            # #2884 FIX-4: fold the four belief props when the revision
+            # carries them. `update_point(confidence=...)` writes them LIVE
+            # (`SET n += $props`) and emits them in the PointRevised payload,
+            # but the replay fold built its SET clauses only from the
+            # content/annotator fields and silently discarded them — so a
+            # rebuild dropped a caller-set confidence. Same presence-
+            # conditional shape and the SAME value gate as
+            # `_fold_confidence_changed` / the ConfidenceChanged branch
+            # (#330 parity).
+            for _bk in BELIEF_PROPS:
+                if _bk in ev and _belief_prop_value_ok(_bk, ev[_bk]):
+                    p[_bk] = ev[_bk]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's
@@ -1492,17 +1506,17 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
         # graph folds (`FalkorProjection.apply` / `rebuild_all`).
         # Presence-conditional, exactly like `_fold_confidence_changed`: only
         # keys the record carries are written; a key present with null writes
-        # null. Same value-shape gate so the pure fold and the graph fold
-        # cannot disagree on a corrupt line (#330 parity).
+        # null. `_belief_prop_value_ok` is the ONE value gate the graph fold
+        # also uses, so the pure fold and the graph fold cannot disagree on a
+        # corrupt line (#330 parity).
         rid = ev.get("id")
         p = points.get(rid) if _writable_id(rid) else None
         if p:
-            for key in ("confidence", "posterior_alpha", "posterior_beta",
-                        "lastDreamedAt"):
+            for key in BELIEF_PROPS:
                 if key not in ev:
                     continue
                 value = ev[key]
-                if value is not None and not _is_persistable_prop_value(value):
+                if not _belief_prop_value_ok(key, value):
                     continue
                 p[key] = value
     elif t in _NO_POINT_FOLD:
@@ -5380,6 +5394,21 @@ class FalkorProjection(
             for key, val in _annotator_dims(ev).items():
                 set_clauses.append(f"n.{key} = ${key}")
                 params[key] = val
+        # #2884 FIX-4: fold the four belief props when the revision carries
+        # them (`update_point(confidence=…)` / `posterior_*` / `lastDreamedAt`).
+        # The live write is `SET n += $props`, and the PointRevised payload
+        # carries the value — but this fold built clauses only from
+        # content/context/embedding/hash/annotator dims, so a rebuild silently
+        # dropped the caller's belief state (write ≠ read). Presence-
+        # conditional and gated by the SAME `_belief_prop_value_ok` the
+        # `_fold_confidence_changed` / ConfidenceChanged folds use (#330
+        # parity). Not gated by `skip_annotator_dims`: the belief props have no
+        # annotator hard-delete boundary of their own; the broader revision
+        # fold-totality problem is #2795 D1, not this slice.
+        for key in BELIEF_PROPS:
+            if key in ev and _belief_prop_value_ok(key, ev[key]):
+                set_clauses.append(f"n.{key} = ${key}")
+                params[key] = ev[key]
 
         # #4042: every clause can now be suppressed at once (a superseded
         # props-only revision carrying no dims). FalkorDB rejects a `SET` with

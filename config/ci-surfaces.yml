@@ -831,7 +831,20 @@ surfaces:
   # surface, so `core` is the arm that runs on the very change it guards (same
   # #2498 rationale as test_lifecycle_guards.py above).
   - test_terminal_status_vocabulary.py
+  # #2884 D3: `tortoise/projection/entities.py` (where `_fold_confidence_changed`
+  # lives) is a SHARED_MODULE today, so a projection-only change already runs the
+  # full matrix. Registered here as the fallback arm for the `tortoise/`
+  # fallback: if `projection/` ever left SHARED_MODULES, an entities.py-only
+  # change would select `core` — and the fold guard for that very file would
+  # then never run (the #1349/#3332 silent-drop class). Dual-registered with
+  # `ep`, which owns `tortoise/dream.py`. See the note in the `ep` block.
+  - test_2884_ep_state_journaled.py
   ep:
+  # #2884 D3: the EP/dream belief-state journal+replay guard. `tortoise/dream.py`
+  # selects `ep`, so this registration is what runs the guard on a dream.py
+  # change. Dual-registered under `core` (above) for its
+  # `tortoise/projection/entities.py` subject.
+  - test_2884_ep_state_journaled.py
   # #4097: the env-truthiness non-divergence guard scans ALL of `tortoise/**` —
   # including this surface's mapped modules (`dream.py`, `analyze.py`, `ranking.py`).
   # A `SOURCE_PATTERNS` match REPLACES the `core` fallback, so without this

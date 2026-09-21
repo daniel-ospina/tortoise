@@ -10,6 +10,7 @@ ghost class #2490 eliminates).
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 
 # #2795: cycle-free helper (tortoise/ids.py is stdlib-only). sdk.py imports
@@ -55,6 +56,54 @@ def _is_persistable_prop_value(value, _depth: int = 0) -> bool:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
+
+
+# ── #2884 D3: the belief-state value gate ─────────────────────────────────
+# The four properties the EP/dream write-backs carry. ONE gate, shared by
+# BOTH replay folds (`_fold_confidence_changed` here and `_apply_one` in
+# `tortoise/projection/__init__.py`), so a corrupt journal line cannot be
+# admitted by one dispatcher and rejected by the other — the #330 parity
+# contract, and the reason this is a single helper rather than two copies.
+BELIEF_PROPS: tuple = ("confidence", "posterior_alpha", "posterior_beta",
+                       "lastDreamedAt")
+# The numeric keys must be a REAL FINITE number. ``bool`` is rejected
+# EXPLICITLY: ``True`` is an ``int`` to Python, but it is not a belief, and
+# persisting it verbatim poisons the next EP run's ``float(...)`` read.
+_BELIEF_NUMERIC_PROPS: tuple = ("confidence", "posterior_alpha",
+                                "posterior_beta")
+
+
+def _belief_prop_value_ok(key: str, value) -> bool:
+    """True when ``value`` may be folded as the belief property ``key``.
+
+    ``None`` is VALID for every key — it is the journaled CLEAR (the EP
+    run-evidence pre-write and ``set_point_baseline`` both write JSON null),
+    and dropping it would leave a stale prior in place across a rebuild.
+
+    The three numeric keys accept ``int``/``float`` but NOT ``bool`` and NOT
+    a non-finite float (NaN/±Inf). FalkorDB's parameter parse does NOT reject
+    a string/list/bool for a numeric prop — it persists it verbatim — and the
+    next EP run then raises ``ValueError`` from ``float(rows[0][0])``,
+    bricking the EP lane until a hand repair. ``lastDreamedAt`` is an ISO
+    TIMESTAMP string and takes its own string gate, rejecting a NUL or
+    lone-surrogate value the driver cannot encode as a parameter. A corrupt
+    line degrades to a DROPPED value, never an aborted recovery AFTER the
+    wipe — the guard's own documented purpose (#2884).
+    """
+    if value is None:
+        return True
+    if key in _BELIEF_NUMERIC_PROPS:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        return math.isfinite(value)
+    # lastDreamedAt (and any future non-numeric belief key): an encodable str.
+    if not isinstance(value, str) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False  # lone surrogate (driver rejects at encode)
+    return True
 
 
 # #388: connector sourceKinds eligible for choke-point Source materialization in
@@ -1073,20 +1122,28 @@ class _EntityHandlers:
         same SET.
         """
         oid = ev.get("id")
-        if not isinstance(oid, str) or not oid:
+        # #2884 review P1: the SAME id gate the sibling folds use. A bare
+        # ``isinstance(oid, str)`` admits a NUL / lone-surrogate id that
+        # ``_writable_id`` rejects; such an id reaches ``params={"id": oid}``
+        # and the driver raises at encode — during pass-1b recovery, AFTER
+        # the graph was wiped. Lazy import mirrors the sibling folds
+        # (``_fold_entity_linked_reason`` / ``_apply_annotator``) and avoids
+        # the module cycle (``tortoise.projection`` imports this module).
+        from tortoise.projection import _writable_id
+        if not _writable_id(oid):
             return 0
         set_parts: list[str] = []
         params: dict = {"id": oid}
-        for key in ("confidence", "posterior_alpha", "posterior_beta",
-                    "lastDreamedAt"):
+        for key in BELIEF_PROPS:
             if key not in ev:
                 continue
             value = ev[key]
-            # Reject value shapes FalkorDB cannot take as a parameter (a
-            # corrupt journal line must not abort rebuild_all AFTER the wipe
-            # — the #331/_writable_id precedent). ``None`` is valid: it is
-            # the journaled clear.
-            if value is not None and not _is_persistable_prop_value(value):
+            # ONE value gate shared with the pure fold (``_apply_one``) so
+            # the two dispatchers cannot disagree on a corrupt line (#330
+            # parity). A non-finite / bool / string "posterior" persists
+            # verbatim through the param parse and brick the next EP run's
+            # ``float(...)`` read — drop it. ``None`` is valid: the clear.
+            if not _belief_prop_value_ok(key, value):
                 continue
             set_parts.append(f"n.{key} = ${key}")
             params[key] = value
