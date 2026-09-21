@@ -2360,8 +2360,8 @@ class TestRestoreSwapReadBound:
         assert "timed out" in detail.lower(), detail
         assert "not restored" in detail.lower(), detail
 
-    def test_restore_copy_settled_requires_content_parity(self, client):
-        """#4233 — the settle predicate is CONTENT parity, not existence.
+    def test_restore_copy_settled_requires_count_parity(self, client):
+        """#4233 — the settle predicate is node/edge COUNT parity, not existence.
 
         A destination that merely EXISTS (a stale graph, a torn install) must
         never be accepted as the copy's outcome. Node AND edge counts are

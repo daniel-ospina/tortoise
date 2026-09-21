@@ -2046,9 +2046,13 @@ def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
 
     For the restore's two copies — whose destination is either freshly deleted
     (the swap) or brand new (the pre-restore safety copy) — a destination the
-    copy itself created, holding the source's counts, IS the operation's
-    success condition (#4233). Both halves are re-read LIVE, so a partial or
-    torn install can never be accepted: node AND edge counts are compared.
+    copy itself created, holding the source's node AND edge COUNTS, is the
+    operation's success condition (#4233). Both counts are re-read LIVE, so a
+    torn install (fewer nodes or edges) cannot be accepted. That is COUNT
+    parity, not byte/content equality: a destination whose counts match but
+    whose content differs would pass — acceptable because it cannot be a
+    pre-existing graph (``dst_preexisting`` refuses those) and a torn
+    ``GRAPH.COPY`` loses counts.
     (The comparison is what makes the check sound; nothing here relies on the
     engine's install ordering.)
 
