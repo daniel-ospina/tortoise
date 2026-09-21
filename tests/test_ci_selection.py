@@ -8,6 +8,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 """
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 import subprocess
@@ -2465,14 +2466,812 @@ def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path,
         assert cs.main() == 0, f"an empty durations map ({empty!r}) was treated as a failure"
 
 
+# ── #4378: changed-set diffs must disable rename detection ──────────────
+#
+# The predicate below is per COMMAND, not per line: `python-ci.yml`'s "Tiered
+# selection" step carries TWO `git diff` invocations on ONE line joined by `||`,
+# so a whole-line substring check is satisfied by the flag on either side —
+# removing it from the second command reintroduces #4378 while the check still
+# passes. These helpers are module-level so the parser can be exercised directly
+# on synthetic shell text.
+
+# The shell joiners that separate one command from another. The DOUBLED forms
+# are listed before the single characters so a regex alternation matches `||` as
+# one separator rather than two adjacent `|`s, and `&&` likewise. The single
+# `|`/`&` are included because a pipeline and a backgrounded command split two
+# invocations exactly as `;` does: without them `git diff --name-only A |\
+# git diff --name-status B` was ONE parsed command whose ownership accounted for
+# the second diff's flag, so a flagless `--name-status` read clean (#4378).
+_SHELL_SEPARATORS = re.compile(r"\|\||&&|;|\||&")
+
+# The spellings that make a `git diff` a changed-set computation. `--name-only` is
+# the one `changed_set_git_diff_commands` parses; the other two are listed so the
+# raw-line cross-check (`unparsed_changed_set_diff_lines`) reports a future site
+# that uses them as UNPARSED — a loud failure — instead of letting it pass.
+_CHANGED_SET_DIFF_FLAGS = ("--name-only", "--name-status", "--diff-filter")
+
+
+def _strip_shell_comments_and_quotes(line: str) -> str:
+    """Remove shell comments and the CONTENT of ordinary quoted strings.
+
+    `#` starts a comment only OUTSIDE quotes (and, per shell, only at the start
+    of a word). The content of an ordinary quoted string is removed so a
+    separator, `#`, or flag written inside quotes can neither split a command nor
+    satisfy/defeat the pin; a space is left in its place so adjacent tokens do
+    not merge. Single-quoted text is a literal in every context and is always
+    removed.
+
+    A command substitution is the one exception: `$( … )` runs a real command, so
+    its contents are EXTRACTED and returned as commands of their own — including
+    when the substitution sits inside double quotes. The substitution becomes a
+    space in the surrounding text, so it can neither hide nor lend a flag to the
+    command around it. Without this, `CHANGED="$(git diff --name-only … )"` — the
+    quoted `="$( … )"` house style this repo writes throughout its workflows —
+    was invisible to the pin in BOTH directions (not counted, not flagged), while
+    only the unquoted `CHANGED=$( … )` form was seen.
+
+    Only `$( … )` is unwrapped: a backtick substitution's body is left in place
+    (though `_shell_tokens` still tokenises it, so a backtick diff IS parsed),
+    and this function does not resolve a diff reached through a variable,
+    function or `eval`.
+    """
+    out: list[list[str]] = [[]]
+    # Quote context to restore at each `$( … )`'s `)`; `None` = opened unquoted.
+    saved_quotes: list[str | None] = []
+    extracted: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+                out[-1].append(" ")
+            i += 1
+            continue
+        if quote == '"':
+            if ch == "\\" and i + 1 < n:
+                i += 2  # an escaped character inside a string is string content
+                continue
+            if ch == '"':
+                quote = None
+                out[-1].append(" ")
+                i += 1
+                continue
+            if ch == "$" and line.startswith("$(", i):
+                out[-1].append(" ")
+                saved_quotes.append(quote)
+                quote = None
+                out.append([])
+                i += 2
+                continue
+            i += 1
+            continue
+        # Unquoted, or inside a `$( … )` substitution — both are shell code.
+        if ch == "\\" and i + 1 < n:
+            out[-1].append(ch)
+            out[-1].append(line[i + 1])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            out[-1].append(" ")
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or line[i - 1].isspace()):
+            break
+        if ch == "$" and line.startswith("$(", i):
+            out[-1].append(" ")
+            saved_quotes.append(None)
+            quote = None
+            out.append([])
+            i += 2
+            continue
+        if ch == ")" and len(out) > 1:
+            extracted.append("".join(out.pop()))
+            quote = saved_quotes.pop()
+            i += 1
+            continue
+        out[-1].append(ch)
+        i += 1
+    while len(out) > 1:  # an unterminated substitution still contributes code
+        extracted.append("".join(out.pop()))
+    stripped = "".join(out[0])
+    if extracted:
+        stripped += " ; " + " ; ".join(extracted)
+    return stripped
+
+
+def _strip_shell_comments(line: str) -> str:
+    """Drop a trailing shell comment, KEEPING quoted text and substitutions.
+
+    `#` starts a comment only OUTSIDE quotes and at the start of a word. Unlike
+    `_strip_shell_comments_and_quotes`, everything else survives: the raw-line
+    cross-check (`unparsed_changed_set_diff_lines`) must be able to see a
+    changed-set spelling the parser's quote stripping would hide (an `eval` or
+    `sh -c` whose argument names a `git diff`), so it over-reports rather than
+    misses.
+    """
+    quote: str | None = None
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+        i += 1
+    return line
+
+
+def _logical_shell_line_spans(text: str) -> list[tuple[int, int, str]]:
+    """(start, end, joined) for every backslash-joined logical line.
+
+    Comments/quotes are stripped per physical line first. `start`/`end` are
+    1-based physical line numbers (equal for a one-line invocation); the parser
+    attributes a command to `start`, so the span is what the raw-line cross-check
+    uses to decide whether a physical line was already accounted for.
+    """
+    spans: list[tuple[int, int, str]] = []
+    parts: list[str] = []
+    start: int | None = None
+    end = 0
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = _strip_shell_comments_and_quotes(raw)
+        if start is None:
+            start = lineno
+        end = lineno
+        stripped = line.rstrip()
+        if stripped.endswith("\\") and not stripped.endswith("\\\\"):
+            parts.append(stripped[:-1])
+            continue
+        parts.append(line)
+        spans.append((start, end, " ".join(parts)))
+        parts = []
+        start = None
+    if start is not None:
+        spans.append((start, end, " ".join(parts)))
+    return spans
+
+
+def _logical_shell_lines(text: str) -> list[tuple[int, str]]:
+    """Join backslash continuations into one logical line.
+
+    Comments/quotes are stripped per physical line first; the 1-based number of
+    the line the logical line STARTED on is preserved for file:line reporting.
+    """
+    return [(start, joined) for start, _end, joined in _logical_shell_line_spans(text)]
+
+
+def iter_shell_commands(text: str) -> list[tuple[int, str]]:
+    """Split shell text into individual commands on every shell joiner.
+
+    The joiners are `||`, `&&`, `;`, `|` and `&` (`_SHELL_SEPARATORS`), the
+    doubled forms matched first so each is one separator; a newline is a joiner
+    by construction, since a logical line ends there unless backslash-continued.
+    Comments/quotes are stripped and backslash continuations joined first, so a
+    multi-line invocation is read as ONE command. Returns (line, command).
+    """
+    commands: list[tuple[int, str]] = []
+    for lineno, logical in _logical_shell_lines(text):
+        for part in _SHELL_SEPARATORS.split(logical):
+            part = part.strip()
+            if part:
+                commands.append((lineno, part))
+    return commands
+
+
+def _shell_tokens(command: str) -> list[str]:
+    # Shell grouping characters bind adjacent words to each other: `$(git` is one
+    # shlex token, and `HEAD)` is another. Treat them as whitespace so `git`,
+    # `diff` and the flags are recognised as standalone tokens either way.
+    detached = re.sub(r"[()$`]", " ", command)
+    try:
+        return shlex.split(detached, comments=False, posix=True)
+    except ValueError:  # unbalanced quote the stripper did not catch
+        return detached.split()
+
+
+def changed_set_git_diff_commands(text: str) -> list[tuple[int, str]]:
+    """The changed-set diff invocations in `text`.
+
+    A command qualifies when its tokens contain `git` AND `diff` AND
+    `--name-only`. Token-based, not `"git diff" in command`, so
+    `git -c <cfg> diff ...` is recognised, as is a diff living in a command
+    substitution — both the unquoted `CHANGED=$(git diff ...)` form and the
+    quoted `CHANGED="$(git diff ...)"` house style.
+    """
+    found: list[tuple[int, str]] = []
+    for lineno, command in iter_shell_commands(text):
+        tokens = _shell_tokens(command)
+        if "git" in tokens and "diff" in tokens and "--name-only" in tokens:
+            found.append((lineno, command))
+    return found
+
+
+def _no_renames_is_honoured(tokens: list[str]) -> bool:
+    """True iff every `--no-renames` token precedes the FIRST `--` separator.
+
+    `git diff` treats every token after `--` as a PATHSPEC, so a `--no-renames`
+    written there is swallowed: the command runs, rc=0, no warning, and rename
+    detection stays ON. Token membership alone therefore accepts an argument git
+    ignores — position is the whole rule. With no `--` there is no pathspec region
+    to fall behind, so the flag is honoured wherever it sits.
+    """
+    if "--no-renames" not in tokens:
+        return False
+    if "--" not in tokens:
+        return True
+    first_separator = tokens.index("--")
+    return all(
+        index < first_separator
+        for index, token in enumerate(tokens)
+        if token == "--no-renames"
+    )
+
+
+def changed_set_git_diff_offenders(text: str) -> list[tuple[int, str]]:
+    """Changed-set diff commands that do NOT actually disable rename detection.
+
+    An offender is a parsed command where `--no-renames` is ABSENT, or present
+    only after the first `--` (where git ignores it).
+    """
+    return [
+        (lineno, command)
+        for lineno, command in changed_set_git_diff_commands(text)
+        if not _no_renames_is_honoured(_shell_tokens(command))
+    ]
+
+
+def _parsed_changed_set_flag_ownership(text: str) -> dict[int, dict[str, int]]:
+    """Per logical-span START line, how many parsed commands own each flag.
+
+    A parsed command is attributed to the START line of the logical span it was
+    read from (the same attribution `iter_shell_commands` uses when reporting),
+    and OWNS every `_CHANGED_SET_DIFF_FLAGS` spelling its tokens carry. Counting
+    occurrences rather than recording a set is what makes the cross-check fail
+    closed on co-location: if a span's raw text carries a flag N times while its
+    parsed commands account for fewer than N, the surplus is unaccounted for.
+    """
+    ownership: dict[int, dict[str, int]] = {}
+    for lineno, command in changed_set_git_diff_commands(text):
+        tokens = _shell_tokens(command)
+        owned = ownership.setdefault(
+            lineno, {flag: 0 for flag in _CHANGED_SET_DIFF_FLAGS}
+        )
+        for flag in _CHANGED_SET_DIFF_FLAGS:
+            if flag in tokens:
+                owned[flag] += 1
+    return ownership
+
+
+def unparsed_changed_set_diff_lines(text: str) -> list[tuple[int, str]]:
+    """Comment-stripped raw lines that carry a changed-set spelling the parser MISSED.
+
+    This is the pin's fail-closed net. `changed_set_git_diff_commands` recognises
+    exactly one spelling (`git diff … --name-only`); any other way of writing a
+    changed-set diff (`--name-status`, `--diff-filter`, an `eval`/`sh -c` whose
+    quoted argument names the command, a spelling added after this file was
+    written) yields no parsed command, so before this check it passed silently —
+    the failure mode every review cycle of #4378 kept re-closing one spelling at a
+    time. Here a logical (backslash-joined) line that contains `git` AND `diff`
+    AND a `_CHANGED_SET_DIFF_FLAGS` spelling the parsed commands do not account
+    for is returned for the caller to fail on.
+
+    FAIL-CLOSED ON CO-LOCATION, not merely on absence. The net used to mark a
+    whole line "covered" as soon as ANY parsed command started on it, so a second,
+    unparsed changed-set diff sharing that line (`… || git diff --name-status …`
+    beside a parsed `--name-only`, or an unparsed `eval "git diff --name-only …"`
+    beside one) was suppressed by its neighbour's parse. It now COUNTS
+    OCCURRENCES per flag spelling: a span whose raw text carries a flag N times
+    while its parsed commands account for fewer than N is reported. The splitter's
+    joiners (`||`, `&&`, `;`, `|`, `&`, plus the newline that ends a logical span)
+    each make the two invocations separate parsed candidates, so the second's flag
+    cannot be absorbed by the first's parse. A same-line
+    `--name-only` beside a parsed `--name-only` is still accounted for only when
+    both invocations are parsed; a spelling the parser cannot tokenise on any
+    logical line is never accounted for and is always reported.
+
+    `git`/`diff`/flag are matched as SUBSTRINGS of the comment-stripped raw line,
+    not through the parser's tokeniser, and the presence check spans a backslash
+    continuation: it is deliberately coarser than the parser, so a spelling the
+    parser mis-splits — or one whose `git`/`diff` and flag land on different
+    physical lines of ONE continued command — is still reported. It can only
+    SUPPRESS a report for a spelling the parser genuinely accounted for; it can
+    never rescue an offender. Stated limits — do not read more into it: a spelling
+    whose raw text never carries all three substrings on one logical line (a diff
+    reached through a bare variable or alias, a flag assembled from string
+    fragments on SEPARATE statements, a command name bound at runtime) is still
+    invisible, as is any file outside the caller's scan. No changed-set `git diff`
+    in `.github/workflows/` reaches the pin through any such route today.
+    """
+    ownership = _parsed_changed_set_flag_ownership(text)
+    physical = text.splitlines()
+    unparsed: list[tuple[int, str]] = []
+    for start, end, _joined in _logical_shell_line_spans(text):
+        raw_span = " ".join(
+            _strip_shell_comments(physical[i - 1]) for i in range(start, end + 1)
+        )
+        if "git" not in raw_span or "diff" not in raw_span:
+            continue
+        owned = ownership.get(start, {})
+        if any(
+            raw_span.count(flag) > owned.get(flag, 0)
+            for flag in _CHANGED_SET_DIFF_FLAGS
+        ):
+            unparsed.append((start, physical[start - 1].strip()))
+    return unparsed
+
+
+def _workflow_files(wf_dir: Path) -> list[Path]:
+    """Every workflow file in `wf_dir` — BOTH `.yml` and `.yaml`.
+
+    `.yaml` is a valid GitHub Actions workflow extension, so the scan's claim to
+    read EVERY workflow in `.github/workflows/` is only true while this glob
+    keeps both. The repo has no `.yaml` workflow today, which is exactly why the
+    `.yaml` half needs its own test: without one, deleting the glob left the
+    changed-set tests green. Handing every caller (the pin and the synthetic
+    test) through this single function is what makes the mutation visible.
+    """
+    return sorted({*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")})
+
+
+def _scan_changed_set_diffs(workflows: list[Path]) -> tuple[int, list[str], list[str]]:
+    """Scan `workflows` for changed-set diffs; return (checked, offenders, unparsed).
+
+    `checked` counts PARSED changed-set commands (the non-vacuity floor's input);
+    the two lists hold `file:line: raw` reports ready to embed in an assertion
+    message. Kept separate from the pin so `test_every_changed_set_diff_scan_covers_yaml_workflows`
+    can run the SAME scan over a tmp dir and freeze the `.yaml` glob.
+    """
+    offenders: list[str] = []
+    unparsed: list[str] = []
+    checked = 0
+    for wf in workflows:
+        text = wf.read_text()
+        checked += len(changed_set_git_diff_commands(text))
+        raw_lines = text.splitlines()
+        for lineno, command in changed_set_git_diff_offenders(text):
+            raw = raw_lines[lineno - 1].strip() if lineno <= len(raw_lines) else command
+            offenders.append(f"{wf.name}:{lineno}: {raw}")
+        for lineno, raw in unparsed_changed_set_diff_lines(text):
+            unparsed.append(f"{wf.name}:{lineno}: {raw}")
+    return checked, offenders, unparsed
+
+
+def test_every_changed_set_diff_scan_covers_yaml_workflows(tmp_path):
+    """#4378 FIX 2: the pin scans `*.yaml` workflows too, not only `*.yml`.
+
+    The pin reads `.github/workflows/` for BOTH extensions, but this repo has no
+    `.yaml` workflow, so removing the `.yaml` glob left every changed-set test
+    green — the `.yaml` claim was unfrozen. This writes a synthetic `.yaml`
+    workflow (a flagless changed-set diff, and a flagged `.yml` sibling) into a
+    tmp dir and runs the SAME scan the pin runs: the `.yaml` offender must be
+    reported. No repo fixture is added; nothing here touches `.github/`.
+    """
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "synthetic.yaml").write_text(
+        "steps:\n"
+        "  - run: |\n"
+        '      git diff --name-only "$BASE" HEAD\n'
+    )
+    (wf_dir / "synthetic.yml").write_text(
+        'steps:\n  - run: git diff --no-renames --name-only "$BASE" HEAD\n'
+    )
+    workflows = _workflow_files(wf_dir)
+    assert {p.name for p in workflows} == {"synthetic.yml", "synthetic.yaml"}, workflows
+    checked, offenders, unparsed = _scan_changed_set_diffs(workflows)
+    assert checked == 2, (checked, offenders, unparsed)
+    assert len(offenders) == 1, (offenders, unparsed)
+    assert "synthetic.yaml" in offenders[0], offenders
+    assert "--no-renames" not in offenders[0], offenders
+    assert unparsed == [], unparsed
+
+
+def test_changed_set_parser_reads_commands_not_lines():
+    """#4378 FIX 1: two `git diff`s on one `||` line are TWO commands.
+
+    `python-ci.yml`'s "Tiered selection" step carries
+    `... || git diff --no-renames --name-only ...`.
+    A whole-line substring predicate is satisfied by the flag on EITHER side, so
+    removing it from the second command reintroduced #4378 undetected. The
+    synthetic inputs below freeze that regression.
+    """
+    one_flagged = (
+        'CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" '
+        '|| git diff --name-only "$BASE" HEAD)\n'
+    )
+    commands = changed_set_git_diff_commands(one_flagged)
+    assert len(commands) == 2, commands
+    offenders = changed_set_git_diff_offenders(one_flagged)
+    assert len(offenders) == 1, offenders
+    assert offenders[0][0] == 1
+    assert "--name-only" in offenders[0][1]
+    # both flagged -> no offender
+    both_flagged = (
+        'CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" '
+        '|| git diff --no-renames --name-only "$BASE" HEAD)\n'
+    )
+    assert changed_set_git_diff_offenders(both_flagged) == []
+
+
+def test_changed_set_parser_splits_on_every_documented_separator():
+    """#4378: `&&`, `;`, `|` and `&` split commands exactly like `||`.
+
+    The parser's contract is that a line is split on every shell joiner — `||`,
+    `&&`, `;`, `|` and `&` (`_SHELL_SEPARATORS`, doubled forms first). Each is
+    exercised independently here, so dropping one from that set fails this test:
+    narrowing it to `||` alone left every parser test green (proven by runtime
+    monkeypatch), and a flagless second command behind any other joiner was
+    silently accepted (`commands=1, offenders=0`).
+    """
+    flagged = 'git diff --no-renames --name-only "$BASE" HEAD'
+    flagless = 'git diff --name-only "$BASE" HEAD'
+    for sep in ("&&", ";", "|", "&"):
+        text = f"{flagged} {sep} {flagless}\n"
+        commands = changed_set_git_diff_commands(text)
+        assert len(commands) == 2, (sep, commands)
+        offenders = changed_set_git_diff_offenders(text)
+        assert len(offenders) == 1, (sep, offenders)
+        assert offenders[0][0] == 1, (sep, offenders)
+        assert "--name-only" in offenders[0][1], (sep, offenders)
+        assert "--no-renames" not in offenders[0][1], (sep, offenders)
+
+
+def test_changed_set_parser_separates_bare_pipe_and_amp_merge():
+    """#4378 FIX 1: a bare `|`/`&` keeps two invocations SEPARATE, not merged.
+
+    A pipeline (`|`) and a backgrounded command (`&`) each split two commands
+    just as `;` does, but the separator set used to carry only the doubled forms
+    (`||`, `&&`) — so this shape was read as ONE command:
+
+        git diff --no-renames --name-only A | git diff --name-status B
+
+    The merged command carried `--no-renames`, its token list contained BOTH
+    spellings, and the ownership count therefore matched the raw span exactly:
+    `offenders=[]` (the one parsed command is flagged) AND `unparsed=[]` (the
+    second diff's `--name-status` was accounted for by the merge) — a flagless
+    changed-set diff that read CLEAN. With the bare joiners in the set the two
+    halves are separate commands, the second is unparsed, and its flag is a
+    surplus occurrence the cross-check reports. Both halves of the fix are
+    frozen here: the split itself, and the cross-check catching the merged case.
+    """
+    for sep in ("|", "&"):
+        # The literal bypass: the first half is flagged, the second is not, and
+        # the second's spelling is one only the cross-check can see.
+        merged = (
+            'git diff --no-renames --name-only "$BASE" HEAD '
+            f'{sep} git diff --name-status "$BASE" HEAD\n'
+        )
+        assert len(changed_set_git_diff_commands(merged)) == 1, (sep, merged)
+        assert changed_set_git_diff_offenders(merged) == [], (sep, merged)
+        unparsed = unparsed_changed_set_diff_lines(merged)
+        assert [lineno for lineno, _ in unparsed] == [1], (sep, unparsed)
+        assert "--name-status" in unparsed[0][1], (sep, unparsed)
+
+        # A flagless `--name-only` second half becomes its own OFFENDER.
+        two_name_only = (
+            'git diff --no-renames --name-only "$BASE" HEAD '
+            f'{sep} git diff --name-only "$BASE" HEAD\n'
+        )
+        assert len(changed_set_git_diff_commands(two_name_only)) == 2, (
+            sep,
+            changed_set_git_diff_commands(two_name_only),
+        )
+        offenders = changed_set_git_diff_offenders(two_name_only)
+        assert len(offenders) == 1, (sep, offenders)
+        assert "--no-renames" not in offenders[0][1], (sep, offenders)
+
+
+def test_changed_set_parser_ignores_comments():
+    """A comment can neither satisfy the floor nor rescue an offender."""
+    # A comment mentioning the flag is NOT a parsed command.
+    assert changed_set_git_diff_commands(
+        "# git diff --no-renames --name-only x\n") == []
+    # A trailing comment carrying the flag must not rescue the real command.
+    rescued = 'git diff --name-only "$BASE" HEAD  # --no-renames is written here\n'
+    assert len(changed_set_git_diff_commands(rescued)) == 1
+    assert len(changed_set_git_diff_offenders(rescued)) == 1
+    # A comment mentioning a bare diff is likewise inert.
+    assert changed_set_git_diff_commands("# git diff --name-only x\n") == []
+
+
+def test_changed_set_parser_joins_backslash_continuations():
+    """A multi-line invocation is ONE command, not a silent skip."""
+    missing = 'git diff --name-only \\\n  "$BASE" HEAD\n'
+    commands = changed_set_git_diff_commands(missing)
+    assert len(commands) == 1, commands
+    assert commands[0][0] == 1
+    assert len(changed_set_git_diff_offenders(missing)) == 1
+    ok = 'git diff --no-renames \\\n  --name-only "$BASE" HEAD\n'
+    assert len(changed_set_git_diff_commands(ok)) == 1
+    assert changed_set_git_diff_offenders(ok) == []
+
+
+def test_changed_set_parser_accepts_git_config_and_substitution():
+    """`git -c <cfg> diff` and a `$( )` prefix still invoke git diff."""
+    text = 'git -c diff.renames=true diff --name-only "$BASE" HEAD\n'
+    assert len(changed_set_git_diff_commands(text)) == 1
+    assert len(changed_set_git_diff_offenders(text)) == 1
+    subst = 'CHANGED=$(git diff --name-only "$BASE" HEAD)\n'
+    assert len(changed_set_git_diff_commands(subst)) == 1
+    assert len(changed_set_git_diff_offenders(subst)) == 1
+
+
+def test_changed_set_parser_sees_quoted_command_substitution():
+    """#4378 FIX 1: `CHANGED="$(git diff … )"` IS a parsed changed-set diff.
+
+    The stripper used to discard a double-quoted span wholesale, so a changed-set
+    diff written in the repo's own `="$( … )"` house style (29 uses today:
+    `="$(printf …)"`, `="$(gh api …)"`, `="$(unzip …)"` …) was invisible to the
+    pin in BOTH directions — never counted, never flagged. These inputs freeze
+    both directions, for the one-command and the two-command (`||`) shapes.
+    """
+    # WITHOUT the flag: one command, and it MUST be an offender.
+    flagless = (
+        'CHANGED="$(git diff --name-only "$BASE...HEAD" 2>/dev/null || true)"\n'
+    )
+    commands = changed_set_git_diff_commands(flagless)
+    assert len(commands) == 1, commands
+    offenders = changed_set_git_diff_offenders(flagless)
+    assert len(offenders) == 1, offenders
+    assert offenders[0][0] == 1, offenders
+
+    # WITH the flag: still counted, and NOT an offender.
+    flagged = (
+        'CHANGED="$(git diff --no-renames --name-only "$BASE...HEAD" '
+        '2>/dev/null || true)"\n'
+    )
+    assert len(changed_set_git_diff_commands(flagged)) == 1
+    assert changed_set_git_diff_offenders(flagged) == [], changed_set_git_diff_offenders(
+        flagged
+    )
+
+    # The two-command `||` shape inside the quoted substitution: the flag on the
+    # FIRST command must not rescue the flagless SECOND one.
+    one_flagged = (
+        'CHANGED="$(git diff --no-renames --name-only "$BASE...HEAD" '
+        '|| git diff --name-only "$BASE" HEAD)"\n'
+    )
+    assert len(changed_set_git_diff_commands(one_flagged)) == 2
+    offenders = changed_set_git_diff_offenders(one_flagged)
+    assert len(offenders) == 1, offenders
+    assert "--no-renames" not in offenders[0][1]
+
+    both_flagged = (
+        'CHANGED="$(git diff --no-renames --name-only "$BASE...HEAD" '
+        '|| git diff --no-renames --name-only "$BASE" HEAD)"\n'
+    )
+    assert changed_set_git_diff_offenders(both_flagged) == []
+
+    # A `$( … )` inside SINGLE quotes is a literal, not code.
+    literal = "CMD='$(git diff --name-only \"$BASE\" HEAD)'\n"
+    assert changed_set_git_diff_commands(literal) == []
+
+
+def test_changed_set_parser_quoted_flag_cannot_rescue_a_site():
+    """Unwrapping a quoted `$( … )` must not leak into ordinary quoted text.
+
+    Only the CONTENT of `$( … )` is code; the content of a plain double-quoted
+    string is not. A `--no-renames` that a command merely *mentions* — in a
+    trailing comment, in a quoted string, or as a single-quoted literal — cannot
+    turn a flagless changed-set diff green. Discarding the quoted token is the
+    conservative direction: the pin fails closed, never open.
+    """
+    decoys = (
+        'git diff --name-only "$BASE" HEAD  # add --no-renames\n',
+        'git diff --name-only "$BASE" HEAD "--no-renames not passed"\n',
+        "git diff --name-only \"$BASE\" HEAD '--no-renames'\n",
+        # A substitution's inner flag belongs to the substitution, not to the
+        # diff command it is an argument of — it must not rescue that diff.
+        'git diff --name-only "$BASE" HEAD "$(true --no-renames)"\n',
+    )
+    for text in decoys:
+        commands = changed_set_git_diff_commands(text)
+        assert len(commands) == 1, (text, commands)
+        offenders = changed_set_git_diff_offenders(text)
+        assert len(offenders) == 1, (text, offenders)
+
+
+def test_changed_set_parser_requires_flag_before_pathspec_separator():
+    """#4378 FIX 1: `--no-renames` after the first `--` is ignored by git.
+
+    `git diff` treats everything after `--` as a pathspec, so a flag written
+    there is swallowed (rc=0, no warning, renames still detected). The old
+    predicate was token membership only, so it accepted the flag wherever it sat.
+    These inputs freeze the positional rule: before `--` clean, after `--` an
+    offender, and one on each side still an offender (the trailing one governs
+    nothing, so git's effective flag is not what the pin claims).
+    """
+    after = 'git diff --name-only "$BASE" HEAD -- \'*.md\' --no-renames\n'
+    commands = changed_set_git_diff_commands(after)
+    assert len(commands) == 1, commands
+    offenders = changed_set_git_diff_offenders(after)
+    assert len(offenders) == 1, offenders
+    assert "--no-renames" in offenders[0][1]
+
+    before = 'git diff --no-renames --name-only "$BASE" HEAD -- \'*.md\'\n'
+    assert len(changed_set_git_diff_commands(before)) == 1
+    assert changed_set_git_diff_offenders(before) == []
+
+    both = 'git diff --no-renames --name-only "$BASE" HEAD -- \'*.md\' --no-renames\n'
+    assert len(changed_set_git_diff_offenders(both)) == 1, (
+        changed_set_git_diff_offenders(both)
+    )
+
+
+def test_changed_set_parser_cross_check_fails_closed_on_unparsed_spelling():
+    """#4378 FIX 2: a changed-set diff the parser does not recognise FAILS.
+
+    Each review cycle closed one spelling at a time; this closes the CLASS. A
+    synthetic workflow body carries an unrecognised `--name-status`, an
+    unrecognised `--diff-filter`, a comment (inert), and a recognised
+    `--name-only` site (covered) — only the first two are reported.
+    """
+    synthetic = (
+        "steps:\n"
+        "  - run: |\n"
+        "      # a comment mentioning git diff --name-only is inert\n"
+        '      git diff --name-status "$BASE" HEAD\n'
+        '      CHANGED=$(git diff --diff-filter=ACMR "$BASE" HEAD)\n'
+        '      FILES=$(git diff --name-only "$BASE" HEAD)\n'
+    )
+    unparsed = unparsed_changed_set_diff_lines(synthetic)
+    assert [lineno for lineno, _ in unparsed] == [4, 5], unparsed
+    # The recognised site is still parsed, so the net suppresses it (no false
+    # positive) rather than reporting a line the pin already checked.
+    assert changed_set_git_diff_commands(synthetic), (
+        "the recognised --name-only site must still parse"
+    )
+    assert not any(lineno == 6 for lineno, _ in unparsed), unparsed
+
+    # A quoted or `eval`-wrapped spelling the parser cannot unwrap is caught too.
+    quoted = 'eval "git diff --name-only \\"$BASE\\" HEAD"\n'
+    assert unparsed_changed_set_diff_lines(quoted), quoted
+    # `--no-index --quiet` content comparisons carry no changed-set flag: their
+    # existence must not trip the net (ci-timing.yml has no --name-only at all).
+    no_index = (
+        "if git diff --no-index --quiet docs/a generated/a \\\n"
+        "   && git diff --no-index --quiet docs/b generated/b; then\n"
+    )
+    assert unparsed_changed_set_diff_lines(no_index) == []
+
+
+def test_changed_set_parser_cross_check_fails_closed_on_colocation():
+    """#4378 FIX 1: an unparsed changed-set diff cannot hide beside a parsed one.
+
+    `unparsed_changed_set_diff_lines` used to mark a whole line "covered" as soon
+    as ONE parsed command started on it, so this shape — `python-ci.yml:188`'s two
+    changed-set diffs on one line, with the second written in a spelling the
+    parser does not recognise (`--name-status`, no flag) — passed the pin clean
+    (`offenders=[]`, `unparsed=[]`) while the second command computed a changed set
+    with rename detection ON. The cross-check must count the flag spellings, not
+    the lines, so the surplus is reported.
+    """
+    colocated = (
+        'CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null '
+        '|| git diff --name-status "$BASE" HEAD)\n'
+    )
+    # The FIRST command is parsed and correctly flagged, so the offender rule is
+    # silent — the cross-check is the ONLY thing that can catch the second one.
+    assert len(changed_set_git_diff_commands(colocated)) == 1, colocated
+    assert changed_set_git_diff_offenders(colocated) == [], colocated
+    unparsed = unparsed_changed_set_diff_lines(colocated)
+    assert [lineno for lineno, _ in unparsed] == [1], unparsed
+    assert "--name-status" in unparsed[0][1], unparsed
+
+    # The SAME spelling hidden by the parser's quote stripping (`eval "…"`) beside
+    # a parsed `--name-only` is caught too: the raw span counts two `--name-only`,
+    # the parser accounts for one. A set-based rule would suppress this; counting
+    # occurrences is what makes it fail closed.
+    eval_colocated = (
+        'git diff --no-renames --name-only "$BASE" HEAD; '
+        'eval "git diff --name-only \\"$BASE\\" HEAD"\n'
+    )
+    assert len(changed_set_git_diff_commands(eval_colocated)) == 1, eval_colocated
+    unparsed = unparsed_changed_set_diff_lines(eval_colocated)
+    assert [lineno for lineno, _ in unparsed] == [1], unparsed
+
+    # Neither half recognised: still reported.
+    both_unrecognised = (
+        'CHANGED=$(git diff --name-status "$BASE...HEAD" '
+        '|| git diff --name-status "$BASE" HEAD)\n'
+    )
+    assert unparsed_changed_set_diff_lines(both_unrecognised), both_unrecognised
+
+    # Control: BOTH halves parsed and flagged is clean — no false positive.
+    both_parsed = (
+        'CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null '
+        '|| git diff --no-renames --name-only "$BASE" HEAD)\n'
+    )
+    assert unparsed_changed_set_diff_lines(both_parsed) == [], (
+        unparsed_changed_set_diff_lines(both_parsed)
+    )
+
+
+def test_changed_set_parser_cross_check_sees_continuation_split_spelling():
+    """#4378 FIX 2: `git`/`diff` and the flag on different physical lines of
+    ONE backslash-continued command still fail.
+
+    A `--name-status` continuation is invisible to a purely per-physical-line
+    check (the first line carries no flag; the flag line carries no `git`), so the
+    net joins a backslash continuation before looking for the flag — the same join
+    the parser already performs. Freeze it so the join cannot be dropped.
+    """
+    continued = 'git diff \\\n  --name-status "$BASE" HEAD\n'
+    unparsed = unparsed_changed_set_diff_lines(continued)
+    assert [lineno for lineno, _ in unparsed] == [1], unparsed
+    # The report is attributed to the line the logical span STARTED on, and the
+    # flag lives on the continuation line — proving the join happened.
+    assert "--name-status" in continued.splitlines()[1], continued
+    # The recognised, correctly-flagged continuation is still clean.
+    ok = 'git diff --no-renames \\\n  --name-only "$BASE" HEAD\n'
+    assert unparsed_changed_set_diff_lines(ok) == [], (
+        unparsed_changed_set_diff_lines(ok)
+    )
+
+
+def test_changed_set_parser_cross_check_reports_unrecognised_spelling_in_every_shape():
+    """#4378 FIX 3: every declared in-scope spelling of an UNRECOGNISED changed-set
+    diff is reported by the cross-check.
+
+    The parser recognises only `--name-only`; `--name-status`/`--diff-filter` are
+    caught as unrecognised whatever shell shape they are written in — bare, inside
+    `$( … )`, inside a double-quoted `"$( … )"`, joined by `||`/`&&`/`;`/`|`/`&`,
+    split across a backslash continuation, or prefixed by `git -c <cfg>`. Each
+    entry is a shape whose mutation (e.g. dropping the `$(` unwrap, a per-line
+    check, dropping a bare joiner) would let it pass silently, so this is the
+    coverage table's executable form.
+    """
+    shapes = {
+        "bare": 'git diff --name-status "$BASE" HEAD',
+        "substitution": 'CHANGED=$(git diff --diff-filter=ACMR "$BASE" HEAD)',
+        "quoted substitution": (
+            'CHANGED="$(git diff --name-status "$BASE" HEAD)"'
+        ),
+        "or": 'true || git diff --name-status "$BASE" HEAD',
+        "and": 'true && git diff --diff-filter=ACMR "$BASE" HEAD',
+        "semicolon": 'true ; git diff --name-status "$BASE" HEAD',
+        "pipe": 'true | git diff --name-status "$BASE" HEAD',
+        "background": 'true & git diff --diff-filter=ACMR "$BASE" HEAD',
+        "git -c": 'git -c diff.renames=true diff --name-status "$BASE" HEAD',
+        "backslash continuation": 'git diff \\\n  --name-status "$BASE" HEAD',
+    }
+    for label, text in shapes.items():
+        unparsed = unparsed_changed_set_diff_lines(text + "\n")
+        assert unparsed, (label, text)
+        assert changed_set_git_diff_commands(text) == [], (
+            label,
+            "an unrecognised spelling must not be a parsed command",
+        )
+
+
 def test_every_changed_set_diff_disables_rename_detection():
-    """#4378: `git diff --name-only` drops the SOURCE path of a rename.
+    """#4378: every changed-set selection diff must pass `--no-renames`.
 
     Rename detection is on by default (`diff.renames` is unset -> true), so for a
-    rename git emits only the DESTINATION. The selector is therefore handed a path
-    set that never mentions the file that was moved away, and a guard registered
-    against the old path silently does not run — the same "silent in exactly the
-    case it exists to cover" class this lane exists to close.
+    rename git emits only the DESTINATION. The selector is handed a path set that
+    never mentions the file moved away, and a guard registered against the old
+    path silently does not run — the "silent in exactly the case it exists to
+    cover" class this lane exists to close.
 
     Demonstrated on a real rename in this repo's history (371eec29f, which moved
     tests out of tortoise/shared_state/tests/ precisely so they would be collected):
@@ -2486,29 +3285,173 @@ def test_every_changed_set_diff_disables_rename_detection():
     rename and 0 are pure moves, so the "a no-op move now selects both surfaces"
     objection does not occur in practice. Adopted on #4378.
 
-    This scans EVERY workflow rather than the three known sites, so a fourth
-    changed-set computation added later cannot reintroduce the hole unnoticed.
-    Scope note: it reads line by line, so a `git diff` split across lines would be
-    missed — none exists today, and the failure would be a silent skip, so if a
-    multi-line invocation is ever added it needs a shell-continuation-aware scan.
+    Scope and coverage (read before editing this test):
+
+    * The scan reads EVERY workflow file in `.github/workflows/` — both `.yml` and
+      `.yaml` — not a list of the known sites, so a new changed-set computation
+      added later cannot reintroduce the hole unnoticed. The `.yaml` half is
+      frozen by `test_every_changed_set_diff_scan_covers_yaml_workflows` (the repo has no
+      `.yaml` workflow, so without that test the glob was unfrozen). It claims
+      NOTHING about files outside `.github/workflows/`.
+    * It is per COMMAND, not per line (`iter_shell_commands`): `||`/`&&`/`;`/`|`/`&`
+      split a line into commands, a backslash-continued invocation is joined first,
+      and comments and ordinary quoted text are dropped. `python-ci.yml`'s "Tiered
+      selection" step carries TWO diffs on one line, so a line-level check would
+      let the second lose the flag undetected — the regression the parser tests
+      above freeze. The bare `|`/`&` joiners are load-bearing, not decorative: with
+      only the doubled forms in the separator set,
+      `git diff --no-renames --name-only A | git diff --name-status B` was ONE
+      merged command whose token list carried both spellings, so the ownership
+      count balanced and the flagless `--name-status` read clean
+      (test_changed_set_parser_separates_bare_pipe_and_amp_merge).
+    * A `$( … )` command substitution is NOT ordinary quoted text: its contents
+      are unwrapped and parsed even inside double quotes, so the repo's own
+      `CHANGED="$(git diff … )"` house style is counted and checked exactly like
+      the unquoted `CHANGED=$( … )` form. A backtick substitution is parsed too
+      (`_shell_tokens` treats the backtick as shell whitespace), so both
+      substitution spellings are checked — not merely the `$( … )` one.
+    * It FAILS CLOSED on an unrecognised spelling (`unparsed_changed_set_diff_lines`):
+      a spelling the parser does not understand must not pass silently. Any
+      comment-stripped logical line (backslash continuations joined) that contains
+      `git` AND `diff` AND a `--name-only`/`--name-status`/`--diff-filter`
+      spelling the parsed commands do not ACCOUNT FOR fails the pin with a message
+      to add `--no-renames` or teach the parser the spelling. The net COUNTS flag
+      occurrences instead of marking a line "covered", so an unparsed spelling
+      CO-LOCATED with a parsed one is still reported — a line carrying two diffs
+      is no longer rescued by the parse of its neighbour. The net is deliberately
+      COARSER than the parser — it matches substrings on the comment-stripped raw
+      line, not the parser's separator/quote output, and it spans a backslash
+      continuation — so a spelling the parser mis-splits is still caught. It can
+      only SUPPRESS a report for a spelling the parser genuinely accounted for; it
+      never rescues an offender. Because it matches raw substrings, a line that
+      merely QUOTES a changed-set diff (`echo "git diff --name-only"`) would
+      over-report rather than slip through; that is the intended fail-closed
+      direction, and no such line exists today.
+    * THREAT SURFACE — the declared edge of this guard. This test is a STATIC
+      SCANNER over workflow text, NOT a shell interpreter: it reads each command
+      as WRITTEN and applies the rules below. The in-scope list IS the declared
+      surface. A fresh reviewer that reproduces no in-scope bypass and confirms
+      every in-scope class has a test terminates the review — do not chase an
+      ever-more-contrived spelling outside the declared surface.
+
+      IN SCOPE — the pin must FAIL for each of these (test named in brackets):
+
+      - `git diff … --name-only` — the parser-recognised changed-set spelling —
+        written in ANY of these shapes, when `--no-renames` is MISSING or sits
+        after the first `--` (git swallows it as a pathspec; rc=0, no warning):
+          · bare (test_changed_set_parser_splits_on_every_documented_separator);
+          · inside `$( … )`
+            (test_changed_set_parser_accepts_git_config_and_substitution);
+          · inside a double-quoted `"$( … )"`
+            (test_changed_set_parser_sees_quoted_command_substitution);
+          · joined by `||`, `&&`, `;`, `|` or `&`
+            (test_changed_set_parser_reads_commands_not_lines,
+            test_changed_set_parser_splits_on_every_documented_separator,
+            test_changed_set_parser_separates_bare_pipe_and_amp_merge);
+          · split across a backslash continuation
+            (test_changed_set_parser_joins_backslash_continuations);
+          · prefixed by `git -c <cfg>`
+            (test_changed_set_parser_accepts_git_config_and_substitution).
+      - `--no-renames` after the first `--`
+        (test_changed_set_parser_requires_flag_before_pathspec_separator).
+      - `--name-status` / `--diff-filter`, and any other spelling the parser
+        cannot tokenise, whenever `git` + `diff` + the flag appear on ONE
+        comment-stripped logical line — bare, in a substitution, in a quoted
+        substitution, `||`/`&&`/`;`/`|`/`&`-joined, `git -c`-prefixed, or split
+        across a backslash continuation
+        (test_changed_set_parser_cross_check_fails_closed_on_unparsed_spelling,
+        test_changed_set_parser_cross_check_reports_unrecognised_spelling_in_every_shape,
+        test_changed_set_parser_cross_check_sees_continuation_split_spelling).
+      - CO-LOCATION: a logical line whose raw text carries a changed-set flag
+        spelling MORE times than its parsed commands account for is reported, not
+        covered. This states the mechanism exactly — the net counts flag
+        OCCURRENCES per logical span (`raw_span.count(flag) > owned[flag]`, a
+        count, not a covered/not-covered set) — so an unparsed changed-set
+        spelling sharing a logical line with a parsed one is reported whenever the
+        splitter keeps them as separate commands. Every shell joiner does: `||`,
+        `&&`, `;`, `|` and `&` split, and a newline ends a logical line by
+        construction, so a second diff on the next line is a span of its own (a
+        `for`-loop body, a subshell, a `case` arm and a backtick substitution are
+        each reported by the count; a newline inside a quoted string is scanned as
+        two physical lines and consequently OVER-reports rather than missing).
+        (test_changed_set_parser_cross_check_fails_closed_on_colocation,
+        test_changed_set_parser_separates_bare_pipe_and_amp_merge).
+
+      OUT OF SCOPE — declared, with the reason; a bypass here is a known,
+      accepted gap, not a defect:
+
+      - the command name reached DYNAMICALLY: `$GIT diff`, a shell alias, or any
+        other wrapper whose raw text carries no literal `git` substring — a text
+        scanner does not follow a name bound at runtime. (`/usr/bin/git diff` IS
+        caught, because `/usr/bin/git` carries the `git` substring; that is the
+        fail-closed direction, not a gap.)
+      - fragments of one invocation split across SEPARATE statements or lines (the
+        flag on one line, the command on another), or a flag assembled from
+        string pieces — no single logical line then carries all three substrings
+        (`git`, `diff`, the flag);
+      - two changed-set spellings inside ONE parsed command with NO shell joiner
+        between them (e.g. two diffs separated only by whitespace): the command's
+        own token list carries both, so the raw occurrence count has no surplus
+        and the net reports nothing. That shape is not two invocations — there is
+        no joiner — and no site writes it. It is the ONLY same-logical-line
+        co-location the count does not catch; every real joiner is handled as
+        described in the CO-LOCATION entry above;
+      - files outside `.github/workflows/`: the pin scans that directory only. The
+        two known changed-set sites elsewhere — the `.husky/pre-commit` hook and
+        the eval-drift gate — are filed as follow-ups, not covered here.
+    * The non-vacuity floor (`checked >= 3`) is a FLOOR, not a pin of exactly
+      three. It is counted from the PARSED commands above — measured today as
+      FOUR: two on `python-ci.yml`'s "Tiered selection" step, one on `ci.yml`'s
+      "Compute per-surface path gates (#2149)" step, and one on the dead step
+      below. So a comment cannot satisfy it (and a comment mentioning the flag
+      cannot inflate it). Because the other THREE commands satisfy the floor by
+      themselves, deleting the dead step alone leaves `checked == 3` and needs NO
+      floor change; the floor has to come down to 2 only if a SECOND command is
+      removed, once just two remain.
+    * The dead FOURTH command — from the "Get changed markdown files" step in
+      `ci.yml` (cited by step name, not line number, because line numbers drift)
+      — is INERT today. That step builds a lint-target list, and the `docs` job
+      checks out at depth 1, so `github.event.pull_request.base.sha` is absent,
+      the diff fails, `|| true` leaves `FILES` empty and the consuming
+      markdownlint/lychee steps are skipped. The `docs` job's own "Conflict-marker
+      check (#2802)" step comment records this. Do not let the floor drift above
+      the number of live commands.
+    * The same step's `--no-renames` is still deliberate and the rule applies to
+      it uniformly: it IS a changed-set computation, and feeding markdownlint/lychee
+      the DELETED source path of a `.md`->`.md` rename is tolerated —
+      `npx markdownlint-cli <nonexistent.md>` exits 0, and plain `.md` deletions
+      already put nonexistent paths into this list.
+    * Do NOT generalise this rule to `.github/scripts/check-migration-append-only`.
+      That script deliberately runs
+      `git diff --find-renames=20% ... --name-status` because its #1235
+      pure-prefix-rename repair exception is keyed on the `R*` status (recorded
+      at `docs/plans/2026-08-13-1095-migration-drift-gate.md:148`); `--no-renames`
+      there would emit `D`+`A` and break the gate. The rule in this pin is scoped
+      to changed-set *selection* diffs; that file is a deliberate exception.
     """
     root = Path(__file__).resolve().parents[1]
-    workflows = sorted((root / ".github" / "workflows").glob("*.yml"))
+    wf_dir = root / ".github" / "workflows"
+    workflows = _workflow_files(wf_dir)
     assert workflows, "no workflow files found — the scan would pass vacuously"
 
-    offenders: list[str] = []
-    checked = 0
-    for wf in workflows:
-        for i, line in enumerate(wf.read_text().splitlines(), start=1):
-            if "git diff" not in line or "--name-only" not in line:
-                continue
-            checked += 1
-            if "--no-renames" not in line:
-                offenders.append(f"{wf.name}:{i}: {line.strip()}")
+    checked, offenders, unparsed = _scan_changed_set_diffs(workflows)
 
-    assert checked >= 3, f"expected at least the 3 known sites, found {checked}"
+    assert checked >= 3, (
+        f"expected the non-vacuity floor of 3 changed-set diff commands across "
+        f".github/workflows/ (a floor, not a pin), found {checked} — either the "
+        f"parser stopped recognising the sites, or a site was removed without "
+        f"lowering the floor"
+    )
     assert not offenders, (
         "a changed-set `git diff --name-only` without --no-renames drops the source "
         "path of a rename, so the moved file's guard never runs (#4378):\n  "
         + "\n  ".join(offenders)
+    )
+    assert not unparsed, (
+        "a changed-set `git diff` in .github/workflows/ was not recognised by the "
+        "parser, or its flag could not be accounted for beside another diff on "
+        "the same line, so the --no-renames rule could not be enforced on it. "
+        "Add --no-renames if it is a changed-set selection diff, or teach "
+        "changed_set_git_diff_commands the new spelling (#4378):\n  "
+        + "\n  ".join(unparsed)
     )

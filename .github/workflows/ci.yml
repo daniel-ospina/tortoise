@@ -452,6 +452,12 @@ jobs:
       - name: Get changed markdown files
         id: changed
         run: |
+          # `--no-renames` is deliberate here, though this is a lint-target list
+          # rather than a changed-set SELECTION set (so the pin that enforces the
+          # flag workflow-wide still applies to it): a rename's deleted .md source
+          # path is tolerated because markdownlint-cli exits 0 on a nonexistent
+          # path, and plain .md deletions already produce exactly such paths.
+          # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
           FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
