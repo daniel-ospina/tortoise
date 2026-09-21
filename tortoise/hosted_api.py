@@ -66,6 +66,7 @@ from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
     RestoreVerificationError,
+    _r2_config_from_env,
     _restore_into_temp_verify_swap,
     create_backup,
     decrypt_backup,
@@ -20876,11 +20877,12 @@ _ANALYTICS_RESOLVE_NOT_BEFORE = None
 # only when the window did not move under the resolve. The single exception is
 # the process-start UNKNOWN state, where a failed read arms nothing (the window
 # doubles as the alert gate): there a delivered write retries until the store
-# answers, and each retry pays a fresh store CONSTRUCTION plus one read
-# (`_analytics_alert_store()` rebuilds the channel and `_backup_storage()`
-# builds a new object-store client per attempt) — not the R2 PUT + GitHub
-# search + Telegram a dispatch costs. An honest bound, chosen over a window
-# that would silence a real episode.
+# answers, and each retry rebuilds the alert channel and pays one read —
+# `_analytics_alert_store()` rebuilds the channel per attempt, while the
+# object store and its boto3 client are process-wide (keyed on the resolved
+# R2 config, #3968) — not the R2 PUT + GitHub search + Telegram a dispatch
+# costs. An honest bound, chosen over a window that would silence a real
+# episode.
 _ANALYTICS_RESOLVE_BACKOFF_S = 300
 # #3820 (cycle-8 P1): the resolve is serialized by its OWN lock — separate from
 # `_ANALYTICS_ALERT_LOCK` so the claim cannot be blocked by the counters or the
@@ -23120,14 +23122,32 @@ if os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower() == "memory":
         "process memory only and are LOST on restart (test seam, #303)"
     )
 _MEMORY_BACKUP_STORE: MemoryStorage | None = None
+# #3968: the DEFAULT (R2) path needs the same process-wide reuse the memory seam
+# already has. Without it every `_backup_storage()` call built a fresh
+# `R2Storage`, and `R2Storage._s3()` builds a fresh boto3 client per instance —
+# so the #3820 process-start-UNKNOWN resolve (which retries one read per
+# delivered write until the store answers) paid a client construction per
+# write. Keyed on the RESOLVED R2 config (`_r2_config_from_env`), never a bare
+# "have we built one yet" flag: a changed `R2_*` env (a credential rotation, or
+# a test's monkeypatch) rebuilds the store instead of pinning a stale
+# credential into a long-lived client. No health/refresh path is needed because
+# the env IS the credential source in this process model — the key covers it.
+_R2_BACKUP_STORE: R2Storage | None = None
+_R2_BACKUP_STORE_CONFIG: tuple[str, str, str, str] | None = None
 
 
 def _backup_storage() -> R2Storage | MemoryStorage:
     """Backup object store. R2 from env (R2_ACCOUNT_ID / ...) by default.
 
     TORTOISE_BACKUP_STORAGE=memory → process-wide MemoryStorage singleton
-    (E2E seam, #303). Unknown value → RuntimeError (fail-closed)."""
-    global _MEMORY_BACKUP_STORE
+    (E2E seam, #303). Unknown value → RuntimeError (fail-closed).
+
+    The R2 path is ALSO process-wide, keyed on the resolved R2 config (#3968):
+    N calls build one ``R2Storage`` (and therefore one lazily-built boto3
+    client), not N. An incomplete config still raises here, fail-closed — the
+    key is compared BEFORE any return, so a removed ``R2_*`` cannot be served
+    out of a previously-populated cache."""
+    global _MEMORY_BACKUP_STORE, _R2_BACKUP_STORE, _R2_BACKUP_STORE_CONFIG
     mode = os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower()
     if mode == "memory":
         if _MEMORY_BACKUP_STORE is None:
@@ -23141,7 +23161,15 @@ def _backup_storage() -> R2Storage | MemoryStorage:
         raise RuntimeError(
             f"TORTOISE_BACKUP_STORAGE={mode!r} unknown — use 'memory' or unset for R2"
         )
-    return R2Storage()
+    config = _r2_config_from_env()
+    if _R2_BACKUP_STORE is None or config != _R2_BACKUP_STORE_CONFIG:
+        # `R2Storage()` re-resolves the SAME env into the SAME tuple, so the
+        # cached store always describes `config`. Assign only AFTER a
+        # successful construction: a raise (missing R2_*) leaves the cache
+        # untouched rather than half-updated.
+        _R2_BACKUP_STORE = R2Storage()
+        _R2_BACKUP_STORE_CONFIG = config
+    return _R2_BACKUP_STORE
 
 
 def _backup_mirror_storage(cfg) -> R2Storage | None:
