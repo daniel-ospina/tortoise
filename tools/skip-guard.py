@@ -713,6 +713,18 @@ def main(argv: list[str]) -> int:
     manifest_only = "--manifest-only" in argv
     if manifest_only:
         argv = [a for a in argv if a != "--manifest-only"]
+        # Fail CLOSED without a manifest: the flag's whole meaning is "assert the
+        # frozen expected set", so `--manifest-only` with nothing to expect would
+        # silently skip every matcher instead of erroring (cycle-5 finding — a
+        # no-op that looks like a passing check).
+        if not any(a == "--manifest" or a.startswith("--manifest=") for a in argv):
+            print(
+                f"❌ {argv[0]}: --manifest-only requires --manifest <expected-nodeids.txt> "
+                "— with no manifest there is nothing to compare, and silently asserting "
+                "nothing is worse than failing.",
+                file=sys.stderr,
+            )
+            return 2
     log_path, manifest_path, junit_path = _parse_args(argv)
     if log_path is None:
         print(

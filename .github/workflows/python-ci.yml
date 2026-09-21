@@ -1717,7 +1717,7 @@ jobs:
           echo "embedded_only-marked tests passed: $passed"
           [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
           # #4207: the floor above is a COUNT of PASSED lines, so a single
-          # subtracted test leaves ~35 and the step stays green — and the pin in
+          # subtracted test leaves 34 and the step stays green — and the pin in
           # tests/test_markers.py reads this step's TEXT, so a deselecting flag
           # passed through a shell variable is invisible to it as well. Neither
           # can see a subtraction. The checked-in manifest is the FROZEN

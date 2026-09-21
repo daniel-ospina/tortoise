@@ -69,6 +69,64 @@ def _strip_docstrings(text: str) -> str:
     return re.sub(r'"""[\s\S]*?"""', "", re.sub(r"'''[\s\S]*?'''", "", text))
 
 
+def _strip_comments(text: str) -> str:
+    """Drop `#` comments, quote-aware, one line at a time.
+
+    Classification by token presence has to read CODE, not prose: a comment saying
+    "RUN_FOO_E2E is unrelated" reclassified a docker-lane marker module as opt-in
+    e2e, which red a correct tree and pushed the header toward a FALSE split
+    (cycle-5 finding — the same "classification by string" hazard cycle 3 fixed for
+    docstrings, one text class over).
+    """
+    out = []
+    for line in text.splitlines():
+        quote: str | None = None
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if quote:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                break
+            i += 1
+        out.append(line[:i])
+    return "\n".join(out)
+
+
+def _shell_commands(workflow: str) -> list[str]:
+    """The shell commands in a workflow, with `\\` continuations JOINED and
+    comment-only lines dropped.
+
+    A pin that matches inside a fixed 3-line window is wrong in both directions: it
+    reds an honest reformat that moves the flag to an earlier continuation line, and
+    it is satisfied by a *comment* on the following line mentioning the flag
+    (cycle-5 finding). Both directions need the command, not a window of text.
+    """
+    commands: list[str] = []
+    pending: list[str] = []
+    for raw in workflow.splitlines():
+        line = raw.rstrip()
+        if line.lstrip().startswith("#"):
+            continue
+        if line.endswith("\\"):
+            pending.append(line[:-1].strip())
+            continue
+        pending.append(line.strip())
+        joined = " ".join(p for p in pending if p)
+        if joined:
+            commands.append(joined)
+        pending = []
+    if pending:
+        commands.append(" ".join(p for p in pending if p))
+    return commands
+
+
 def _module_dotted(file: str) -> str:
     """`tests/test_x.py` -> `tests.test_x` (the junit `classname` prefix)."""
     assert file.endswith(".py"), file
@@ -235,7 +293,9 @@ def test_embedded_manifest_markers_are_documented_and_real() -> None:
     # Classify every marker module by the gate it really has.
     actual: dict[str, int] = {}
     for marker in markers:
-        src = _strip_docstrings((ROOT / marker.split("::")[0]).read_text())
+        # Comments are stripped too: a comment naming another gate's token must not
+        # reclassify a module (cycle-5 finding).
+        src = _strip_comments(_strip_docstrings((ROOT / marker.split("::")[0]).read_text()))
         if "skip_unless_hosted_e2e" in src:
             fam = "hosted E2E"
         elif re.search(r"RUN_[A-Z_]*E2E", src):
@@ -323,19 +383,19 @@ def test_workflow_invokes_the_manifest_with_manifest_only(manifest: Path) -> Non
     """
     text = WORKFLOW.read_text()
     rel = str(manifest.relative_to(ROOT))
-    assert rel in text, f"{rel} is not referenced by {WORKFLOW.name} — nothing consumes it"
-    invocations = 0
-    for lineno, line in enumerate(text.splitlines(), 1):
-        if rel not in line or line.lstrip().startswith("#"):
-            continue  # a comment mentioning the path is not a consumer
-        # The command may continue on the next line(s) (YAML line continuations).
-        window = "\n".join(text.splitlines()[lineno - 1: lineno + 2])
-        assert "--manifest-only" in window, (
-            f"{WORKFLOW.name}:{lineno} consumes {rel} without --manifest-only — in a URI-less "
-            "lane that false-reds on the EXPECTED skips (the docker-calibrated matchers)"
+    assert any(rel in cmd for cmd in _shell_commands(text)), (
+        f"{rel} is not referenced by any command in {WORKFLOW.name} — nothing consumes it"
+    )
+    consumers = [cmd for cmd in _shell_commands(text) if rel in cmd]
+    assert consumers, f"{rel} appears only in comments in {WORKFLOW.name}"
+    for cmd in consumers:
+        # A TOKEN, of that command — not a substring anywhere in a window of text.
+        assert re.search(r"(?<![\w-])--manifest-only(?![\w-])", cmd), (
+            f"{WORKFLOW.name} consumes {rel} without --manifest-only as a token of that same "
+            "command — in a URI-less lane that false-reds on the EXPECTED skips (the "
+            f"docker-calibrated matchers).\n{cmd}"
         )
-        invocations += 1
-    assert invocations >= 1
+    assert len(consumers) >= 1
 
 
 # ── the check bites (non-vacuity) ─────────────────────────────────────────
