@@ -430,9 +430,11 @@ def test_overview_reports_unavailable_when_the_state_read_fails(page: Page) -> N
 # ── 5. the client never asserts the connection, observed on the wire ────────
 def test_client_never_asserts_harness_connected_on_the_wire(page: Page) -> None:
     """The whole wizard walk with every state-writing request recorded. The
-    client may POST fork/catalog checkpoints but must NEVER write the
-    `harness-connected` step — that edge is the server's observation, not the
-    user's click (#3428/#2937). Observed on the wire, not scanned from text."""
+    client may POST only the fork checkpoint (or its `fork_unsure_at` marker) and
+    must NEVER write the `harness-connected` step — that edge is the server's
+    observation, not the user's click (#3428/#2937). #3913: nor may it write the
+    `catalog-presented` step, which it used to render-mark. Observed on the
+    wire, not scanned from text."""
     _seed_ship_session(page, "u-ship-wire")
     cap = _wire(page, role="owner", key_rows=[DURABLE_ROW],
                 onboarding_projection=UNOBSERVED_PROJECTION)

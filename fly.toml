@@ -192,6 +192,25 @@ primary_region = "iad"
   R2_ACCESS_KEY_ID = ""
   R2_SECRET_ACCESS_KEY = ""
   R2_BUCKET = ""
+  # ── #4126 secret-provenance: non-secret CONFIG, version-controlled here ────
+  # These three were Fly SECRETS with no managing source — the recorded debt in
+  # `.github/scripts/fly-managed-secrets.txt`. A non-secret config value belongs
+  # in version control, so it lives here and is declared `fly-toml-env` there.
+  # The deploy then no longer needs a secret for any of them, and the provenance
+  # gate fails a `fly-toml-env` declaration whose name is still a Fly secret
+  # (a Fly secret SHADOWS `[env]`) — so the two states cannot come apart.
+  #
+  # ⛔ THE VALUES ARE CARRIED OVER FROM THE LIVE FLY SECRETS, NOT FROM
+  # `.env.example`. TORTOISE_MANUAL_LINKING_ENABLED is `1` in production while
+  # `.env.example` documents the `0` dev default — moving it is
+  # behaviour-preserving, so the live value is what the app reads today and is
+  # what is recorded here. The flag's VALUE is the owner's call (the 2026-08-26
+  # ops runbook gates a flip on a Supabase `double_confirm_changes` check); this
+  # entry only carries the current value across. Do NOT "fix" it to match
+  # `.env.example`.
+  TORTOISE_CONTROL_PLANE = "supabase"
+  TORTOISE_REAUTH_WINDOW_SECONDS = "900"
+  TORTOISE_MANUAL_LINKING_ENABLED = "1"
 
 [deploy]
   wait_timeout = "5m"

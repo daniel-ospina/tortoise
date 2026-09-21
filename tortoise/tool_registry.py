@@ -38,6 +38,8 @@ class ToolDefinition:
                                  # (deployment-gated — e.g. tortoise_pack_install;
                                  # self-host uses filesystem packs dir + CLI)
     writes: bool = False         # declared write permission — a caller needs graphs:write
+    retired_use_instead: Optional[str] = None  # noqa: UP045  # #3883: non-None ONLY
+                                 # on a retired entry — the call that replaces this name.
 
 
 # ── Shorthand constructors ────────────────────────────────────────
@@ -73,7 +75,12 @@ def _idem() -> ToolAnnotations:
 #    by design — that red IS the gate. Do not "fix" it by editing the baseline
 #    to match; see docs/product/mcp-sdk-surface.md for the curated list.
 
-TOOL_REGISTRY: list[ToolDefinition] = [
+# The FULL declaration, live and retired together. `TOOL_REGISTRY` (the live,
+# advertised surface) and `RETIRED_TOOL_REGISTRY` (the #3883 warning shims) are
+# both derived from this at the module bottom — which entries land where is
+# decided by `RETIRED_USE_INSTEAD` there, so an entry's retirement is legible in
+# one place rather than implied by which list literal it sits in.
+_ENTRY_DECLARATIONS: list[ToolDefinition] = [
     # ── Core CRUD ─────────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_create_point",
@@ -990,7 +997,10 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_get_entity",
         id="surface.get_entity",
-        description="Get any entity by ID, eventId, or url.",
+        description="Get any entity by ID, eventId, or url. `type` selects the node kind "
+                    "(point | entity | operator | events | governance), dispatching exactly as "
+                    "the retired per-type getters did; omit it to look the entity up by id. "
+                    "The canonical fetch-by-id tool.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="get_entity",
@@ -1199,8 +1209,16 @@ def get_write_tool_names() -> frozenset[str]:
     """Derive the write-tool name set from each entry's declared `writes`.
 
     Replaces the hand-maintained parallel list: the permission lives on the
-    tool entry, so a rename or a merge cannot leave it behind (#4170)."""
-    return frozenset(t.name for t in TOOL_REGISTRY if t.writes)
+    tool entry, so a rename or a merge cannot leave it behind (#4170).
+
+    Covers the SERVED set (#3883): a retired name still answers through the
+    warning shim, so a write served under a retired name must not be recorded as
+    a read. No retired entry is a writer today, so the census is unchanged — the
+    derivation is stated over the served set so it cannot silently shrink when
+    one is."""
+    return frozenset(
+        t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
+    )
 
 
 _TOOL_BY_NAME: dict[str, ToolDefinition] | None = None
@@ -1209,11 +1227,16 @@ _TOOL_BY_NAME: dict[str, ToolDefinition] | None = None
 def get_tool_by_name() -> dict[str, ToolDefinition]:
     """Registry indexed by tool name — the scope gate's single lookup.
 
+    Retired entries are INCLUDED (#3883): a retired name still resolves and is
+    still served (through the warning shim), so it must carry a permission the
+    gate can read. Omitting them made the gate answer a scoped caller with
+    "Unknown tool — denied" instead of the retirement warning.
+
     Cached: the registry is immutable after import, and this is on the
     per-tool-call hot path."""
     global _TOOL_BY_NAME
     if _TOOL_BY_NAME is None:
-        _TOOL_BY_NAME = {t.name: t for t in TOOL_REGISTRY}
+        _TOOL_BY_NAME = {t.name: t for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)}
     return _TOOL_BY_NAME
 
 
@@ -1449,15 +1472,73 @@ GROUP_BY_NAME: dict[str, str] = {
 }
 
 
-def _apply_groups() -> list[ToolDefinition]:
-    """Return the registry with curation groups assigned (frozen dataclass)."""
-    out = []
-    for t in TOOL_REGISTRY:
-        out.append(replace(t, group=GROUP_BY_NAME.get(t.name, "memory")))
-    return out
+# ── Retired names (#3883 / #3863) ─────────────────────────────────────────
+# A name in this mapping is RETIRED: it is not in TOOL_REGISTRY, so it is not
+# registered as an MCP tool and never appears in `tools/list`. It is NOT gone —
+# `_RetiredToolTransform` in mcp_server.py resolves it on `get_tool` and serves
+# a shim that answers exactly as the live tool did AND warns the caller, naming
+# the replacement. That is the #3836 (b) decision: a retired name keeps working
+# and tells us who still calls it.
+#
+# The handler FUNCTION (mcp_server.py) and the SDK METHOD (sdk.py) both stay: the
+# consolidating tool calls the function internally, so retiring the NAME loses no
+# capability.
+#
+# Retiring a name SHRINKS the agent-facing surface, so it is a surface change:
+# `tools/surface-guard.py` requires every name here to be recorded in the
+# approved baseline's `retired:` block, and re-cut by a human, exactly as an
+# addition requires approval.
+RETIRED_USE_INSTEAD: dict[str, str] = {
+    # Tier 1 — `tortoise_get_entity` is the canonical fetch-by-id tool; the
+    # per-type getters and `tortoise_get` are redundant names for it.
+    #
+    # ⚠ This direction is an OWNER DECISION, not an implementation preference:
+    # `docs/product/canonical-mcp-tools.md` (approved, approval_pr 4120) rules
+    # that `tortoise_get_entity` must NOT be retired and that the map must
+    # retire `tortoise_get` in its place. Retiring the pair the other way sends
+    # every caller of `get_entity` to a name that is itself retired — a churn
+    # loop — which is why the pointers below name `tortoise_get_entity`.
+    "tortoise_get_point": 'tortoise_get_entity(id, type="point")',
+    "tortoise_get": 'tortoise_get_entity(id, type=...)',
+    "tortoise_get_events": 'tortoise_get_entity(None, type="events")',
+    "tortoise_get_operator": 'tortoise_get_entity(id, type="operator")',
+    "tortoise_get_governance": 'tortoise_get_entity(id, type="governance")',
+    # Tier 1 — tortoise_overview() already calls the handler; the name is redundant.
+    "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',
+    "tortoise_list_tags": 'tortoise_overview(section="tags")',
+    "tortoise_list_sources": 'tortoise_overview(section="sources")',
+    "tortoise_taxonomy": 'tortoise_overview(section="taxonomy")',
+    "tortoise_health": 'tortoise_overview(section="health")',
+    "tortoise_status": 'tortoise_overview(section="status")',
+    "tortoise_stale": 'tortoise_overview(section="stale")',
+    # Tier 2 — the entry's own description already named its replacement.
+    "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
+    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
+    "tortoise_index_sessions": "tortoise_index_files(directory)",
+    "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+}
 
 
-TOOL_REGISTRY = _apply_groups()
+def _apply_groups(entries: list[ToolDefinition]) -> list[ToolDefinition]:
+    """Assign curation groups + the retirement pointer to a list of entries."""
+    return [
+        replace(
+            t,
+            group=GROUP_BY_NAME.get(t.name, "memory"),
+            retired_use_instead=RETIRED_USE_INSTEAD.get(t.name),
+        )
+        for t in entries
+    ]
+
+
+# The LIVE, advertised surface. Every entry here is registered on both surfaces.
+TOOL_REGISTRY = _apply_groups(
+    [t for t in _ENTRY_DECLARATIONS if t.name not in RETIRED_USE_INSTEAD]
+)
+# The RETIRED names: served ONLY through the warning shim, never advertised.
+RETIRED_TOOL_REGISTRY = _apply_groups(
+    [t for t in _ENTRY_DECLARATIONS if t.name in RETIRED_USE_INSTEAD]
+)
 
 
 def tools_by_group(group: str) -> list[ToolDefinition]:

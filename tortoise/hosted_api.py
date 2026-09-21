@@ -45,6 +45,8 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
     api_key_created,
     first_api_call,
     first_api_call_pending,
+    onboarding_decide_complete,
+    onboarding_seed_complete,
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
@@ -64,6 +66,7 @@ from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
     RestoreVerificationError,
+    _r2_config_from_env,
     _restore_into_temp_verify_swap,
     create_backup,
     decrypt_backup,
@@ -109,12 +112,11 @@ from tortoise.sdk import (
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
-    _content_hash,
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
-    _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
+    _write_capture_turns,  # #3086: the ONE batched turn-stream writer (shared with sdk.capture_session)
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
@@ -1233,7 +1235,13 @@ async def _lifespan(app):
         # driver-disabled case is covered by construction. Spawned only when
         # the sweep config validates (fail-closed default keeps TestClient and
         # misconfigured deploys quiet) and not explicitly disabled for tests.
-        global _WATCHER
+        global _WATCHER, _WATCHER_START_ERROR
+        # #2877: recompute watcher liveness per app instance. Without the
+        # reset, a prior lifespan's start failure (or a stale thread) would
+        # leak into /health on TestClient/app reuse — reporting a dead watcher
+        # as running, or a running one as failed.
+        _WATCHER = None
+        _WATCHER_START_ERROR = None
         try:
             cfg = _backup_config_safe()
             # #2922: EVERY reason the watcher does not start must be stated on
@@ -1394,6 +1402,11 @@ async def _lifespan(app):
             # have surfaced #2790 (no sweep for 33 days, no drill ever recorded).
             # Loud, with a traceback, so a dead watcher can never be invisible again.
             _logger.error("backup watcher could not start: %s", exc, exc_info=True)
+            # #2877: and not invisible to /health either. This marker is set
+            # ONLY here, so _backup_watcher_health() can distinguish "wanted
+            # but failed to start" (degraded) from the legitimate disabled
+            # states (ok).
+            _WATCHER_START_ERROR = str(exc)[:200]
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-org graphs get purged by the SDK lazy hook too (embedded/stdio);
@@ -1654,13 +1667,29 @@ def _dream_key(org_id: str, graph_namespace: str | None) -> str:
 # `Dreamer._lock` cannot serve here: it is per-SDK-instance and every request
 # builds its own SDK.
 #
-# NOT covered by this lock, recorded so it is not read as process-wide: the
-# capture path's `_apply_capture_ingest_ep` (sdk.py:1232) still runs
-# `sdk.dream(mode="local", ...)` on the EVENT LOOP, from
-# `_capture_session_impl` (hosted_api.py:9166). It is on the loop, so taking a
-# `threading.Lock` there would freeze the loop for a whole pass — the very
-# thing #3718 removes; moving that pass to the pool is the capture-path
-# residual tracked by #3086, not this change.
+# Threads are expected to wait; the WAIT happens off the loop.
+#
+# ⚠️ One coupling this lock introduces that the pooled sites did not have:
+# since #3086 the capture path's `_apply_capture_ingest_ep` also takes this
+# lock, and it runs on `_CAPTURE_EXECUTOR` (4 workers by default, process-wide).
+# A same-graph long `/v1/dream` full pass can therefore park capture workers
+# while it holds the lock — and because that pool is GLOBAL, it delays captures
+# of ANY org, not only the org whose dream holds the lock. The admission cap
+# does NOT bound this stage: `_CaptureSlot` is released when the EXTRACTION
+# future completes, after which the ep pass still occupies a worker. It is
+# strictly better than the pre-#3086 shape (which froze the event loop for the
+# whole pass) and there is no deadlock (a dream pass never needs the capture
+# pool); recorded here so the coupling is visible rather than discovered.
+#
+# Covered since #3086: the capture path's `_apply_capture_ingest_ep` — which
+# runs `sdk.dream(mode="local", ...)` — is now off the event loop on
+# `_CAPTURE_EXECUTOR` and takes this lock, so a hosted capture and `/v1/dream`
+# can no longer interleave on one graph's `ep_dirty` roots. NOT covered, and
+# recorded so it is not read as process-wide: the SDK lane's own
+# `capture_session` still calls `_apply_capture_ingest_ep` inline on its caller's
+# thread without this lock — it is synchronous and cannot import this module,
+# and every capture on that lane uses its OWN `TortoiseSDK`, so the pool-crossing
+# hazard this lock exists for does not arise there.
 #
 # A `threading.Lock`, NOT an `asyncio.Lock`, is deliberate: it is acquired and
 # released INSIDE the worker thread, and asyncio primitives bind to the first
@@ -2804,6 +2833,46 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _backup_watcher_health() -> dict:
+    """#2877: backup-watcher liveness for /health.
+
+    The watcher is the hosted durability monitor for #305/R2 backups, and
+    #2851/#2922 showed it can be completely dead while the process serves
+    normally. ``_WATCHER is None`` is ambiguous — it is the state after a
+    FAILED start *and* the fail-closed default when the sweep is off
+    (TestClient/embedded) or the test-only kill switch is set. The
+    ``_WATCHER_START_ERROR`` marker, set only from the start-failure handler,
+    is the one signal that separates those.
+
+    States:
+      * ``running``  — thread alive (the healthy case).
+      * ``failed``   — wanted but ``_WATCHER_START_ERROR`` was recorded.
+      * ``stopped``  — started, but its watchdog-backed thread is no longer
+        alive (a dead monitor that must not read as healthy).
+      * ``disabled`` — no config / kill switch: legitimate, stays ``ok``.
+
+    Mirrors the ``db`` block: a sub-dict carrying ``ok``, folded into
+    ``status`` by the caller. Never raises and never 5xxes — a dead monitor
+    must not kill a live process's liveness probe (#338).
+    """
+    try:
+        watcher = _WATCHER
+        if watcher is not None:
+            thread = getattr(watcher, "_thread", None)
+            if thread is not None and thread.is_alive():
+                return {"state": "running", "ok": True, "error": None}
+            return {
+                "state": "stopped",
+                "ok": False,
+                "error": "watcher thread is not alive",
+            }
+        if _WATCHER_START_ERROR is not None:
+            return {"state": "failed", "ok": False, "error": _WATCHER_START_ERROR}
+        return {"state": "disabled", "ok": True, "error": None}
+    except Exception as exc:  # liveness must answer, always
+        return {"state": "unknown", "ok": False, "error": str(exc)[:200]}
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -2844,6 +2913,12 @@ async def health():
     # The response shape is unchanged for deploy/dashboard consumers:
     # ``{"status", "db"}`` — ``probe`` and ``loop_stale_ms`` are additive.
     # It never 5xxes: a dead DB is "degraded", never a killed process.
+
+    Watcher check (#2877): a dead/never-started backup watcher is the SAME
+    shape of silent durability failure, so it rides along in ``backup_watcher``
+    and flips ``status`` to "degraded" under the identical rule. A disabled
+    sweep (no config / kill switch) stays ``ok`` — only "wanted but failed"
+    degrades.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -2857,8 +2932,10 @@ async def health():
         loop_age_ms = loop_heartbeat_info().get("loop_age_ms")
     except Exception:
         loop_age_ms = None
-    return {"status": "ok" if db.get("ok") else "degraded", "db": db,
-            "probe": probe_meta, "loop_stale_ms": loop_age_ms}
+    watcher = _backup_watcher_health()
+    return {"status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
+            "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
+            "backup_watcher": watcher}
 
 
 @app.get("/health/ready")
@@ -8863,25 +8940,21 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     minted_event = False
     event_id = None
 
-    # NOTE: this per-turn loop (episodic turn Points) is duplicated from
-    # tortoise/sdk.py capture_session — the shared primitives #1532 D1/D2
-    # (_capture_turn_window / _normalize_turn_role) keep the two loops
-    # byte-identical for identical input: same stored-window truncation, same
-    # role normalization (None -> "unknown", truthy non-strings -> str()), and
-    # the same `speaker` property write (delta 5 — hosted previously wrote no
-    # speaker tag). Hosted additionally adds quota/auth bounds + a pre-write
-    # estimate. Keep the two in sync — and note the THIRD copy:
-    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
-    # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
-    # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
-    # since #3914. It omits Source/extraction, but since W7A it EMBEDS every
-    # turn BY DEFAULT through the shared store seam (#4194/#4304) and retains
-    # `embed=False` for #4197's un-backfilled backlog.
-    # #3551 tracks collapsing all three onto one shared
-    # primitive. The LLM extraction that follows the
-    # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    # #3086: the episodic turn stream is written by the ONE shared writer
+    # (`sdk._write_capture_turns`), also called by `sdk.capture_session` — so
+    # this lane and the SDK lane can no longer drift (the #1532 duplicated-loop
+    # class). Hosted additionally adds quota/auth bounds + a pre-write
+    # estimate. NOTE the THIRD, still-separate copy:
+    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors the same store
+    # shape to seed the ask fixtures (#3910) — the ONE copy every ask seeder
+    # writes through since #3914. It omits Source/extraction, but since W7A it
+    # EMBEDS every turn BY DEFAULT through the shared store seam (#4194/#4304)
+    # and retains `embed=False` for #4197's un-backfilled backlog.
+    # #3551 tracks collapsing it onto the shared primitive too. The LLM
+    # extraction that follows the write is shared via
+    # sdk._extract_session_llm/_extract_session_v2 (#822).
     #
-    # #3892: metering truth. The turn loop below runs for EVERY request, so a
+    # #3892: metering truth. The turn write below runs for EVERY request, so a
     # re-capture of a GROWN transcript writes NEW turn Points even when the
     # branch taken extracts nothing (a keyless re-capture, or a keyless retry
     # on the M2 lane). The write-op/abuse meter keys on the ACTUAL write — the
@@ -8918,109 +8991,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # impaired. The write's own MERGE reads the node's pre-write content_hash
     # to decide preserve-vs-clear, so no external probe can fail.
     #
-    # #4194/#3086: the encode runs OFF the event loop on the capture pool. The
-    # turn loop itself is a tracked on-loop residual (#3086); the local-model
-    # encode over a capture window must not add to it. SDK `capture_session`
-    # is synchronous (there is no loop to free) and calls the same helper
-    # inline — the two share the helper, not the scheduling.
+    # #4194/#3086: the encode runs OFF the event loop on the capture pool. SDK
+    # `capture_session` is synchronous (there is no loop to free) and calls
+    # the same helper inline — the two share the helper, not the scheduling.
     _turn_texts = _capture_turn_texts(windowed)
     _turn_embs = await _run_off_loop(
         _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts,
         proj.required_embedding_dim)
-    for i, turn in enumerate(windowed):
-        role = _normalize_turn_role(turn.get("role"))
-        # P1 #1529 (D10, #721 parity): the stored text (and its isinstance-first
-        # coercion — a non-string content can NEVER crash the loop into a raw
-        # 500 after the Session MERGE) comes from the shared
-        # `_capture_turn_texts`, one definition shared with the embedding batch
-        # above (#4194), so the vector is always computed over the string
-        # actually stored.
-
-        # #490: turn Points are the episodic turn stream OF THIS SESSION —
-        # keyed deterministically by {session_id}_t{i} so re-capturing the
-        # same session is idempotent, but turns from different sessions never
-        # conflate (content-hash dedup would share an empty "[user] " or
-        # repeated "ok" turn org-wide, destroying per-session turn identity
-        # — #490 review P2-2). Node MERGEs run BEFORE the edge MERGE: a full-
-        # path MERGE (s)-[:CONTAINS]->(t) with a missing edge makes FalkorDB
-        # create the whole path from scratch, duplicating the Point node.
-        turn_id = f"{session_id}_t{i}"
-        turn_text = _turn_texts[i]
-        turn_embedding = _turn_embs[i]
-        _turn_rows = proj.g.query(
-            "MERGE (t:Point {id:$id}) "
-            # #4194: capture the node's PRE-write content_hash before the SET
-            # reassigns it (capture-time read, no external probe that can
-            # fail). prior_ch NULL => a new turn, nothing to preserve.
-            "WITH t, t.content_hash AS prior_ch "
-            "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
-            "    t.speaker=$speaker, "
-            "    t.is_episodic=true, "
-            "    t.status=coalesce(t.status, $s), "
-            "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch, "
-            # #4194: three-way guard. New vector if we encoded one; else
-            # PRESERVE the stored vector only when the content is UNCHANGED;
-            # else CLEAR it, because a preserved vector for changed text
-            # would rank the turn by text no longer on the node (the
-            # dense-leg lie).
-            "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
-            "        WHEN prior_ch = $ch THEN t.embedding ELSE NULL END "
-            "RETURN t.createdAt AS createdAt, t.status AS status",
-            params={"id": turn_id, "c": turn_text, "k": "event",
-                    "speaker": role, "s": "draft", "now": now,
-                    "ch": _content_hash(turn_text),
-                    "emb": turn_embedding},
-        ).result_set
-        # #3947 review (F4 + parity): the write's COALESCE owns the stored
-        # timestamp and status — a RE-capture keeps the original createdAt and
-        # any promoted status, so journal what the graph holds. Emitting the
-        # literal `now`/`draft` regresses a promoted turn to draft and drifts
-        # createdAt on every replay (parity with sdk.py's loop, #1532).
-        turn_created_at = (
-            _turn_rows[0][0]
-            if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
-            else now)
-        turn_status = (
-            _turn_rows[0][1]
-            if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
-            else "draft")
-        proj.g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-            "MERGE (s)-[:CONTAINS]->(t)",
-            params={"sid": session_id, "tid": turn_id},
-        )
-        # #3947: journal the turn write so a rebuild can recreate it (parity
-        # with sdk.capture_session's loop — the two are kept identical by
-        # design, #1532). The raw Cypher writes above are unchanged; this is
-        # the missing RECORD. `contains_session` rides the event envelope so
-        # the projection's edge fold restores the CONTAINS link without a
-        # node property the live write never sets.
-        #
-        # #3947 review (cycle 2, #3086): gated on a configured journal, exactly
-        # as in sdk.py — on this lane `_make_sdk`/`_data_sdk` pass no
-        # `event_log_path`, so the JSONL half is a no-op and the `:GraphEvent`
-        # half is not a rebuild source (the wipe takes it with the graph). The
-        # per-turn `ensure_event_schema` + `next_seq` + `append_event` cost was
-        # pure overhead on the lane #3086 measures as already blocking the
-        # event loop. The residual — hosted captures have no rebuild-durable
-        # turn record until a journal is wired here — is unchanged by this PR.
-        if sdk._get_event_log() is not None:
-            sdk._emit_event(
-                "PointAdded",
-                {"id": turn_id, "kind": "event",
-                 "content_hash": _content_hash(turn_text)},
-                point={
-                    "id": turn_id,
-                    "content": turn_text,
-                    "pointKind": "event",
-                    "speaker": role,
-                    "is_episodic": True,
-                    "status": turn_status,
-                    "createdAt": turn_created_at,
-                },
-                contains_session=session_id,
-            )
+    # #3086: the turn WRITE runs OFF the event loop on the capture pool, in ONE
+    # batched `UNWIND $turns` transaction, through the SAME shared writer the
+    # SDK lane calls (`_write_capture_turns`). The per-turn loop this replaced
+    # issued two FalkorDB round-trips per turn straight on the loop (~1000 for
+    # a 500-turn capture — the ~4.75 s single-loop freeze #3086 measures).
+    # Node shape, per-row idempotency (`{session_id}_t{i}`), the stale-vector
+    # guard and the rebuild journal all live in that one definition, so this
+    # lane and `sdk.capture_session` can no longer drift (#1532's drift class).
+    await _run_off_loop(
+        _CAPTURE_EXECUTOR, _write_capture_turns, proj, sdk, session_id,
+        windowed, now=now, turn_embs=_turn_embs)
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -9121,7 +9109,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             tenant_master = None
             try:
                 from tortoise.extractor_v2 import build_master_list
-                tenant_master = build_master_list(sdk=sdk)
+                # #3086: the tenant vocab compile walks the pack manifests and
+                # is a documented cold-start cost (`extractor_v2` — ~12.2 s
+                # cold on the manifest path). It ran INLINE on the event loop,
+                # stalling every concurrent request; it belongs on the capture
+                # pool with the rest of the capture residual.
+                tenant_master = await _run_off_loop(
+                    _CAPTURE_EXECUTOR, build_master_list, sdk=sdk)
             except Exception as e:  # noqa: BLE001, RUF100
                 _logger.warning(
                     "tenant vocabulary compile failed for %s — capture "
@@ -9704,10 +9698,36 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # FIRST calibration here.
     ep_ids = _capture_ep_target_ids(extracted, proj)
     if ep_ids:
-        _apply_capture_ingest_ep(
-            sdk, ep_ids,
-            warn=extraction_warnings.append,
-        )
+        # #3086: this pass runs `sdk.dream(mode="local", ...)`, which is
+        # KNOWN loop-unsafe — the whole reason `/v1/dream` is async and pooled
+        # (#3718). It ran INLINE here, ON the event loop, freezing every
+        # concurrent request for the whole pass. Two things are required to
+        # move it:
+        #
+        #   1. Off the loop, onto the dedicated capture pool.
+        #   2. UNDER the same per-graph dream lock the two pooled pass sites
+        #      take. Before the off-load the single event loop made both
+        #      bodies atomic (no await before `sdk.dream`); now the pass runs
+        #      in a pool, so two same-graph passes (this one and `/v1/dream`,
+        #      or two HOSTED captures) could otherwise read and clear the SAME
+        #      `ep_dirty` roots and interleave `warm_start` writes — the exact
+        #      exclusion #3718's review made explicit for the pooled sites.
+        #      (The SDK lane's own inline `capture_session` call is unchanged
+        #      and takes no lock — it is synchronous on its caller's thread and
+        #      cannot import this module; that is pre-existing, not widened.)
+        #      The lock is a `threading.Lock` taken INSIDE the worker, never on
+        #      the loop (an `asyncio.Lock` binds to the first loop, which breaks
+        #      across the per-test loops — the `_CAPTURE_IN_FLIGHT` rationale).
+        _dk = _dream_key(org["org_id"],
+                         (org.get("graph_namespace")
+                          if org.get("graph_id") else None))
+
+        def _capture_ep_pass() -> None:
+            with _dream_lock(_dk):
+                _apply_capture_ingest_ep(
+                    sdk, ep_ids, warn=extraction_warnings.append)
+
+        await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
     # verb (memory_write_v1) — protocol_version REQUIRED, provenance
     # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
@@ -19126,6 +19146,75 @@ def _maybe_apply_completion(org_id: str) -> bool:
         return False
 
 
+# ── #2006 (W11): onboarding funnel telemetry ──────────────────────────
+# The emission gate is the COMPLETED_STEP edge's NEW CREATION — the
+# ``created`` flag ``onboarding.state.write_completed_step`` already returns
+# for exactly this purpose. That transition is the domain fact itself, so
+# one event per edge creation falls out of it by construction: restart-safe
+# and multi-worker-safe, with NO second dedup store, NO threshold and NO
+# in-process set. Every writer of a W11 step maps its own edge result
+# through ``_emit_onboarding_step_events``; a non-creating replay never
+# reaches the emitter. (``decide-completed`` is the one W11 edge
+# with a sanctioned removal path — the #3912 repair — after which a genuine
+# re-completion re-emits; see ``analytics.onboarding_decide_complete``.)
+#
+# Deliberately NOT instrumented: ``harness-connected`` (the funnel keys off
+# seed/decide) and ``catalog-presented`` (the build fork's display row has
+# no W11 event).
+_ONBOARDING_STEP_EVENTS = {
+    "first-points-filed": onboarding_seed_complete,
+    "decide-completed": onboarding_decide_complete,
+}
+
+
+def _onboarding_distinct_id(org_id: str, org: dict | None = None,
+                            *, user_id: str | None = None) -> str:
+    """Funnel identity for the W11 onboarding events (#2006).
+
+    The Supabase user UUID wherever one is RESOLVABLE, falling back to the
+    org id — matching ``analytics.py``'s identity contract so these server
+    events join the web funnel's ``user_signed_up`` (distinct_id = user
+    UUID, never an email).
+
+    Every candidate passes the SAME predicate the #2600 ``actor_user_id``
+    alias uses (``_is_uuid_shape``): the repo documents that a raw
+    ``created_by`` is NOT always a human id — production mints store the
+    literal ``"api"``, ``st_``-prefixed recovery ids, and registry-lane
+    EMAIL self-signup creators (``tortoise/sdk.py``). Emitting one of those
+    as ``distinct_id`` would push PII into PostHog and collapse unrelated
+    orgs onto one pseudo-person, so a non-UUID candidate is DROPPED."""
+    from tortoise.sdk import _current_actor_user_id, _is_uuid_shape
+    candidates = [user_id]
+    if org is not None:
+        candidates += [org.get("actor_user_id"),
+                       org.get(_SESSION_USER_ID_KEY),
+                       org.get("created_by")]
+    candidates.append(_current_actor_user_id.get())
+    for uid in candidates:
+        if _is_uuid_shape(uid):
+            return uid
+    return org_id
+
+
+def _emit_onboarding_step_events(created_steps, *, distinct_id: str,
+                                 org_id: str, source: str) -> None:
+    """Emit the W11 funnel event for each step edge a write NEWLY created.
+
+    ``created_steps`` must carry ONLY the steps whose ``created`` was True —
+    that filtering is the caller's gate, so a replay is silent and the
+    event is exact-once per edge creation. Fail-safe: ``capture()`` never
+    raises, and each emit is guarded here too, so telemetry can never turn a
+    committed write into an error."""
+    for step in created_steps:
+        emit = _ONBOARDING_STEP_EVENTS.get(step)
+        if emit is None:
+            continue
+        try:  # noqa: SIM105
+            emit(distinct_id, org_id, source)
+        except Exception:
+            pass  # telemetry must never break the write path (R19)
+
+
 def _update_onboarding_state(org_id: str, **fields) -> dict:
     """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
     legacy whole-dict merge — its non-atomicity caveat is pre-existing
@@ -19136,14 +19225,21 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
 
-    NOTE: step-edge writes via this router (PATCH catalog-presented) trigger
-    the post-write gate eval; the checkpoint calls state.py writers directly
-    and evals via _maybe_apply_completion."""
+    NOTE: this router's step-edge branch is NOT on the PATCH catalog path —
+    `patch_onboarding_state` pops `catalog_presented` and writes the edge +
+    evals itself, and the checkpoint path calls the state.py writers directly.
+    Any other caller that hands a step id to this router does get the
+    post-write gate eval."""
     jsonb_fields: dict[str, object] = {}
     wrote_step = False
+    # #2006 (W11): the steps whose COMPLETED_STEP edge THIS call created —
+    # the only steps a funnel event may be emitted for.
+    created_steps: list[str] = []
     for k, v in fields.items():
         if k in _os.STEP_IDS:
-            _os.write_completed_step(_org_proj(org_id), org_id, k)
+            if _os.write_completed_step(
+                    _org_proj(org_id), org_id, k).get("created"):
+                created_steps.append(k)
             wrote_step = True
         elif k in _os.FLOW_KEYS:
             # only step-edge keys are routable here; scalar FLOW keys are
@@ -19166,6 +19262,15 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
         _write_onboarding_state(org_id, state)
     if wrote_step:
         _maybe_apply_completion(org_id)
+        # #2006 (W11): emit for the edges this call NEWLY created (empty on a
+        # replay). No production caller routes a W11 step here today — the
+        # PATCH boundary 422s first-points-filed/decide-completed — but this
+        # generic router accepts any STEP_IDS key, so it is instrumented so a
+        # future routing change cannot silently lose the funnel event.
+        if created_steps:
+            _emit_onboarding_step_events(
+                created_steps, distinct_id=_onboarding_distinct_id(org_id),
+                org_id=org_id, source="state_router")
     # Echo = the MERGED PROJECTION (writer-return-composed — GET/PATCH can
     # never diverge), overlaid with the just-written jsonb fields: the
     # pre-#2001 echo returned the in-memory merged state, and a missing
@@ -19432,8 +19537,11 @@ class OnboardingStatePatchRequest(BaseModel):
     github_docs_scope: list[dict] | None = None
     # #2001 (W5): FLOW keys DECLARED on the PATCH surface so a stray client
     # send is REJECTED loudly (403/422) instead of silently dropped — and
-    # catalog-presented, the ONE step key the dashboard writes (W1/W8 first
-    # catalog render, step-edge MERGE). All other FLOW keys are
+    # catalog-presented, the ONE step key a client may still PATCH (step-edge
+    # MERGE — an optional record, never a completion requirement). Since #3913
+    # (owner ruling 2026-09-20) NO dashboard path sends it: the fork card writes
+    # only the fork (or its unsure marker), never a step, and the id stays
+    # accepted for agent/external callers and for existing orgs' completed_steps. All other FLOW keys are
     # server-owned / checkpoint-owned on this surface.
     catalog_presented: bool | None = None
     harness_connected: bool | None = None
@@ -19493,10 +19601,12 @@ async def get_capabilities(org: dict = Depends(get_current_org_session_ungated))
     The indexers+extractors registry rows from tool_registry.py
     ``CAPABILITY_CATALOG`` (R2-9 — no new infra): one canonical list for the
     registry endpoint AND the dashboard's build-path catalog read (W8
-    replaced W1's static placeholder source with this endpoint; the
-    dashboard's first build-fork render marks the catalog-presented
-    checkpoint via the existing W1/W5 mechanism — presentation only, never
-    a billing gate). Org-independent static registry data (no graph
+    replaced W1's static placeholder source with this endpoint; the BUILD
+    fork pick records the FORK ONLY — since #3913 (owner ruling 2026-09-20)
+    no dashboard path writes catalog-presented, and the id stays accepted for
+    agent/external callers. Presentation only, never a billing gate, never a
+    build-completion requirement). Org-independent static
+    registry data (no graph
     touch — never 'unavailable'); dual-auth like the onboarding state reads.
 
     Contract: ``200 {modules: [{name, kind: indexer|extractor, description,
@@ -19612,7 +19722,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     updates = _validate_scope_payload(updates)
     # #2001 (W5): per-key-type write-surface ownership at the PATCH
     # boundary — server-owned FLOW keys 403, agent-step keys 422, the one
-    # dashboard step (catalog-presented) MERGEs the step edge.
+    # client-writable step (catalog-presented) MERGEs the step edge. Since
+    # #3913 the dashboard no longer sends it; the surface stays open for
+    # agent/external callers.
     _sent_owned = [k for k in _PATCH_SERVER_OWNED_KEYS if k in updates]
     if _sent_owned:
         raise HTTPException(
@@ -19671,8 +19783,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 # #2001 (W5): agent/internal checkpoint — the ONLY surface for the agent
 # steps + fork/compact set-once + last_decide_attempt LWW + member_progress.
-# Per-step write-surface ownership (scope pin 8): the dashboard PATCHes only
-# operational keys + catalog-presented; agents checkpoint everything else.
+# Per-step write-surface ownership (scope pin 8): the PATCH surface accepts
+# operational keys + catalog-presented (no dashboard path has sent the latter
+# since #3913); agents checkpoint everything else.
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
@@ -19853,6 +19966,25 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     except Exception:
         raise HTTPException(status_code=500,
                             detail="Checkpoint failed — retry-safe") from None
+    # #2006 (W11): funnel events for the step edges THIS call newly created.
+    # ``created_steps`` already carries the structural gate — a replay
+    # (created=False) is silent, and the edge-creation transition is
+    # exact-once per edge creation, so this survives restarts and multiple
+    # workers with no in-process set. Emission sits OUTSIDE the write-path
+    # try/except above: telemetry can never turn a committed checkpoint into
+    # a 500.
+    if created_steps:
+        # Off the loop (the analytics.py contract for async handlers) and
+        # guarded HERE too: the write above has already committed, so even a
+        # bug in the emitter itself must not turn a committed checkpoint into
+        # a 500 (R19 — telemetry never degrades the API).
+        try:  # noqa: SIM105
+            await asyncio.to_thread(
+                _emit_onboarding_step_events, created_steps,
+                distinct_id=_onboarding_distinct_id(org_id, org),
+                org_id=org_id, source="checkpoint")
+        except Exception:
+            pass
     return {
         "created_steps": created_steps,
         "noop_steps": noop_steps,
@@ -19913,16 +20045,18 @@ class _OrgSeedSurface:
 
 def _next_onboarding_step(org_id: str, proj) -> str | None:
     """First incomplete fork-aware step after the seed (the decide nudge
-    target): self fork → decide; build → catalog-presented; compact →
-    harness-connected. 'done' when the gate already satisfied the status."""
+    target): self fork → decide; build/compact → harness-connected (the
+    #3913 build gate is the two observed acts; first-points-filed is written
+    by the seed itself, so after a successful seed only harness-connected can
+    still be open). 'done' when the gate already satisfied the status."""
     node = _os.read_onboarding_node(proj, org_id)
     if node is None or node.get("status") == _os.STATUS_COMPLETE:
         return "done"
     steps = set(_os.completed_steps(proj, org_id))
-    if bool(node.get("compact")):
+    # #3913: build no longer trails catalog-presented — build and compact share
+    # the reduced post-seed checklist (the seed files first-points-filed).
+    if bool(node.get("compact")) or node.get("fork") == _os.FORK_BUILD:
         order = ("harness-connected",)
-    elif node.get("fork") == _os.FORK_BUILD:
-        order = ("harness-connected", "catalog-presented")
     else:
         order = ("harness-connected", "decide-completed")
     for step in order:
@@ -20021,6 +20155,14 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
         step = _os.write_completed_step(
             proj, org_id, "first-points-filed",
             status_from_mirror=legacy_mirror)
+        if step.get("created"):
+            # #2006 (W11): the edge's new creation is the once-per-org fact
+            # (a replay reports created=False and emits nothing).
+            _emit_onboarding_step_events(
+                ["first-points-filed"],
+                distinct_id=_onboarding_distinct_id(
+                    org_id, user_id=person_user_id),
+                org_id=org_id, source="seed")
         _maybe_apply_completion(org_id)
     finally:
         sdk.close()
@@ -20184,6 +20326,15 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
             step = _os.write_completed_step(
                 proj, org_id, "first-points-filed",
                 status_from_mirror=legacy_mirror)
+            if step.get("created"):
+                # #2006 (W11): provisioning-time seed step — same structural
+                # gate as the interactive seed (only ONE of the two writers
+                # can ever see created=True for a given org).
+                _emit_onboarding_step_events(
+                    ["first-points-filed"],
+                    distinct_id=_onboarding_distinct_id(
+                        org_id, user_id=person_user_id),
+                    org_id=org_id, source="starter_seed")
         _maybe_apply_completion(org_id)
     finally:
         sdk.close()
@@ -20814,11 +20965,12 @@ _ANALYTICS_RESOLVE_NOT_BEFORE = None
 # only when the window did not move under the resolve. The single exception is
 # the process-start UNKNOWN state, where a failed read arms nothing (the window
 # doubles as the alert gate): there a delivered write retries until the store
-# answers, and each retry pays a fresh store CONSTRUCTION plus one read
-# (`_analytics_alert_store()` rebuilds the channel and `_backup_storage()`
-# builds a new object-store client per attempt) — not the R2 PUT + GitHub
-# search + Telegram a dispatch costs. An honest bound, chosen over a window
-# that would silence a real episode.
+# answers, and each retry rebuilds the alert channel and pays one read —
+# `_analytics_alert_store()` rebuilds the channel per attempt, while the
+# object store and its boto3 client are process-wide (keyed on the resolved
+# R2 config, #3968) — not the R2 PUT + GitHub search + Telegram a dispatch
+# costs. An honest bound, chosen over a window that would silence a real
+# episode.
 _ANALYTICS_RESOLVE_BACKOFF_S = 300
 # #3820 (cycle-8 P1): the resolve is serialized by its OWN lock — separate from
 # `_ANALYTICS_ALERT_LOCK` so the claim cannot be blocked by the counters or the
@@ -23058,14 +23210,32 @@ if os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower() == "memory":
         "process memory only and are LOST on restart (test seam, #303)"
     )
 _MEMORY_BACKUP_STORE: MemoryStorage | None = None
+# #3968: the DEFAULT (R2) path needs the same process-wide reuse the memory seam
+# already has. Without it every `_backup_storage()` call built a fresh
+# `R2Storage`, and `R2Storage._s3()` builds a fresh boto3 client per instance —
+# so the #3820 process-start-UNKNOWN resolve (which retries one read per
+# delivered write until the store answers) paid a client construction per
+# write. Keyed on the RESOLVED R2 config (`_r2_config_from_env`), never a bare
+# "have we built one yet" flag: a changed `R2_*` env (a credential rotation, or
+# a test's monkeypatch) rebuilds the store instead of pinning a stale
+# credential into a long-lived client. No health/refresh path is needed because
+# the env IS the credential source in this process model — the key covers it.
+_R2_BACKUP_STORE: R2Storage | None = None
+_R2_BACKUP_STORE_CONFIG: tuple[str, str, str, str] | None = None
 
 
 def _backup_storage() -> R2Storage | MemoryStorage:
     """Backup object store. R2 from env (R2_ACCOUNT_ID / ...) by default.
 
     TORTOISE_BACKUP_STORAGE=memory → process-wide MemoryStorage singleton
-    (E2E seam, #303). Unknown value → RuntimeError (fail-closed)."""
-    global _MEMORY_BACKUP_STORE
+    (E2E seam, #303). Unknown value → RuntimeError (fail-closed).
+
+    The R2 path is ALSO process-wide, keyed on the resolved R2 config (#3968):
+    N calls build one ``R2Storage`` (and therefore one lazily-built boto3
+    client), not N. An incomplete config still raises here, fail-closed — the
+    key is compared BEFORE any return, so a removed ``R2_*`` cannot be served
+    out of a previously-populated cache."""
+    global _MEMORY_BACKUP_STORE, _R2_BACKUP_STORE, _R2_BACKUP_STORE_CONFIG
     mode = os.environ.get("TORTOISE_BACKUP_STORAGE", "").strip().lower()
     if mode == "memory":
         if _MEMORY_BACKUP_STORE is None:
@@ -23079,7 +23249,15 @@ def _backup_storage() -> R2Storage | MemoryStorage:
         raise RuntimeError(
             f"TORTOISE_BACKUP_STORAGE={mode!r} unknown — use 'memory' or unset for R2"
         )
-    return R2Storage()
+    config = _r2_config_from_env()
+    if _R2_BACKUP_STORE is None or config != _R2_BACKUP_STORE_CONFIG:
+        # `R2Storage()` re-resolves the SAME env into the SAME tuple, so the
+        # cached store always describes `config`. Assign only AFTER a
+        # successful construction: a raise (missing R2_*) leaves the cache
+        # untouched rather than half-updated.
+        _R2_BACKUP_STORE = R2Storage()
+        _R2_BACKUP_STORE_CONFIG = config
+    return _R2_BACKUP_STORE
 
 
 def _backup_mirror_storage(cfg) -> R2Storage | None:
@@ -23244,7 +23422,16 @@ def _incident_subject(inc: dict) -> str:
     return tid
 
 
+# #4144: the public backups family is ALSO served under `/v1/`. The dashboard
+# reaches the API only through the same-origin BFF proxy
+# (`website/apps/dashboard/functions/api/v1/[[path]].ts`), which rebuilds the
+# upstream URL as `${API_ORIGIN}/v1/${rest}` — it cannot produce a bare path.
+# Served only at `/backups`, the dashboard's `loadBackups` got a 404 from Pages
+# (no `api/backups.ts` exists either) and the Backups card silently read as
+# empty. The alias is the SAME function object, so it cannot drift into a
+# second implementation.
 @app.get("/backups")
+@app.get("/v1/backups")
 async def backups_list(org: dict = Depends(get_current_org_session_ungated)):  # noqa: B008
     """List this org's backups (newest first) with timestamps + node counts.
 
@@ -23387,6 +23574,7 @@ async def _org_restore_lock(org_id: str) -> asyncio.Lock:
 
 
 @app.post("/backups", status_code=201)
+@app.post("/v1/backups", status_code=201)  # #4144 BFF-reachable alias
 async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     """Trigger an on-demand backup of the org graph (Builder plan, tier `pro`)."""
     org_id = org.get("org_id")
@@ -23526,6 +23714,7 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
 
 
 @app.post("/backups/restore")
+@app.post("/v1/backups/restore")  # #4144 BFF-reachable alias
 async def backups_restore(body: BackupRestoreRequest, request: Request, org: dict = Depends(get_current_org_session)):  # noqa: B008
     """Restore the org graph from a backup (Builder plan, tier `pro`; confirm=true required).
 
@@ -23644,6 +23833,13 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, org: dic
 # not true).
 
 _WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # noqa: F821
+# #2877: why the watcher is not running. `_WATCHER is None` ALONE cannot tell a
+# dead monitor from a deliberately-disabled one — it is also the fail-closed
+# default (no/invalid backup config) and the `BACKUP_WATCHER_DISABLED=1` kill
+# switch. Set only from the watcher-start `except` in `_lifespan`; cleared when
+# the watcher starts cleanly, so the one signal it carries is "wanted but
+# failed". Read by `_backup_watcher_health()` for /health.
+_WATCHER_START_ERROR: str | None = None
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600

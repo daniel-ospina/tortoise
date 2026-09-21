@@ -42,7 +42,7 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from 
 // #3874: the org's API-key allowance as the SERVER states it — the pre-cap
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
-import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom } from './keyAllowance.js'
+import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -2936,7 +2936,10 @@ function claimIntentInFlight() {
   // durable ROWS or the first-timer welcomeKey, and when a usable durable
   // exists the wizard mints a fresh provisioned key on demand (POST
   // /v1/team/keys) — held HERE in-memory, shown once in the command snippet;
-  // cap error routes to the API Keys tab (regenerate).
+  // cap error routes to REVOKE in the API Keys tab — a revoked row leaves the
+  // gate's count, freeing a slot. Rotate cannot work at the cap: its
+  // replacement mint rides that same capped route before the old row is
+  // revoked.
   const [wizardDurableKey, setWizardDurableKey] = React.useState('')
 
   // #2361 review-r1 (I6): the connect-step key is shown ONCE — an accidental
@@ -2957,44 +2960,32 @@ function claimIntentInFlight() {
   // this flag to stop the done step promising "running it creates a fresh key".
   const [wizardDurableCapped, setWizardDurableCapped] = React.useState(false)
   // #1998 fold-in: optional paste-your-own-durable-key fallback (closes the
-  // 402-cap loop — a user at max_api_keys regenerates in the API Keys tab and
-  // pastes the shown-once replacement here instead of dead-ending).
+  // 402-cap loop — a user at max_api_keys revokes a key in the API Keys tab to
+  // free a slot, then creates one here or pastes a key they already hold;
+  // rotate cannot work at the cap — its replacement mint rides the same capped
+  // route before the old row is revoked).
   const [wizardDurablePaste, setWizardDurablePaste] = React.useState('')
   // #2325: paste-your-own is an ESCAPE behind a disclosure for owner/admin
   // (their primary is the mint CTA below) — never a parallel third
   // affordance sitting next to the primary action. Members (no in-dashboard
   // mint) always see the paste box: it is their only path.
   const [wizardShowPaste, setWizardShowPaste] = React.useState(false)
-  // #1997 (W1): catalog-presented is marked when the build catalog
-  // RENDERS (not just on pick) — re-entry with fork=build already set must
-  // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
-  // the checkpoint is keyed-MERGE (replay no-op), but a per-ORG guard keeps
-  // the network quiet on re-renders (the latch is keyed by team id so a
-  // second build org in the same session still marks its own catalog —
-  // review P2, #1997).
-  const catalogMarkedRef = React.useRef({})
-  React.useEffect(() => {
-    if (wizardStep !== 2) return
-    const teamKey = orgIdRef.current || 'default'
-    const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
-    if (buildFork && !catalogMarkedRef.current[teamKey]) {
-      catalogMarkedRef.current[teamKey] = true
-      api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ step: 'catalog-presented' }),
-      }).catch(() => {})
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
+  // #1997 (W1) / #3913: the dashboard writes NO `catalog-presented` mark. The
+  // render-time effect that marked it when the catalog rendered was removed,
+  // and the build-fork PICK handler's optional mark is gone too (owner ruling
+  // 2026-09-20: the build fork completes on the two acts the server OBSERVES —
+  // harness-connected + first-points-filed — so nothing the browser does is a
+  // completion input). The step id stays ACCEPTED server-side (existing orgs
+  // carry it), which is why no client writer is needed.
 
   // #2004 (W8): the registry-backed builder catalog — fetched ONCE per
   // session from GET /v1/capabilities (tortoise/tool_registry.py
   // CAPABILITY_CATALOG) when the build branch renders on step 2. The static
   // placeholder in wizardFlow.js renders until the fetch resolves and stays
   // as the OFFLINE fallback (same names — never a blank catalog; the
-  // registry-presented mark above is untouched: this swap is SOURCE-only,
-  // the once-per-org catalog-presented step edge still fires on first
-  // build-fork render and is a keyed-MERGE no-op on replay).
+  // registry-presented swap is SOURCE-only; the dashboard fires NO
+  // catalog-presented step edge at all — #3913, it is an accepted server id,
+  // never a client write).
   const [wizardCatalog, setWizardCatalog] = React.useState(null)
   const catalogFetchedRef = React.useRef(false)
   React.useEffect(() => {
@@ -4700,12 +4691,13 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
-  // branch: the catalog render marks catalog-presented via W5's checkpoint
-  // (surface 4 write contract — the build-fork gate is evaluable; W8 #2004
-  // replaced the placeholder SOURCE with the registry endpoint, the
-  // mark/mechanism is unchanged). Fork SEMANTICS are W2-owned — W1 renders
-  // the shell only.
+  // #1997 (W1): fork-card step handler — checkpoint fork (set-once). #3913
+  // (owner ruling 2026-09-20): a BUILD pick records the fork and NOTHING else —
+  // the build gate completes on the two acts the server OBSERVES
+  // (harness-connected + first-points-filed), so no client step write is a
+  // completion input. W8 #2004 replaced the placeholder catalog SOURCE with
+  // the registry endpoint; the CARD still renders on a build pick. Fork
+  // SEMANTICS are W2-owned — W1 renders the shell only.
   async function handleWizardFork(forkId) {
     setWizardForkBusy(true)
     setWizardForkError('')
@@ -4730,25 +4722,14 @@ function claimIntentInFlight() {
         return
       }
       setWizardForkChosen(forkId)
-      // review P1 (#1997): the catalog-presented mark fires HERE, not in a
-      // step-2 effect — React batches setWizardForkChosen + setWizardStep(3)
-      // into ONE render where wizardStep===3, so the effect's step-2 guard
-      // never observes the fresh build pick. Fire-and-forget; keyed-MERGE
-      // (replay no-op). The step-2 effect above still covers RE-ENTRY with a
-      // persisted build fork (onboarding.fork === 'build').
-      // A build pick also STAYS on step 2 so the catalog renders (the user
-      // sees what they can build on before continuing) — the Continue button
-      // appears once a fork is chosen; self picks advance.
-      if (forkId === 'build') {
-        const teamKey = orgIdRef.current || 'default'
-        if (!catalogMarkedRef.current[teamKey]) {
-          catalogMarkedRef.current[teamKey] = true
-          api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-            method: 'POST', useSession: true,
-            body: JSON.stringify({ step: 'catalog-presented' }),
-          }).catch(() => {})
-        }
-      } else {
+      // #3913 (owner ruling 2026-09-20): a BUILD pick writes NO checkpoint step.
+      // The catalog-presented mark that used to fire here was deleted with the
+      // render-time effect — the build gate is the two acts the server OBSERVES
+      // (harness-connected + first-points-filed), so picking a fork must not
+      // record anything the gate could read. The catalog CARD still renders: a
+      // build pick stays on the fork step (the chosen state shows it) and the
+      // Continue button appears; a self pick advances to the connect step.
+      if (forkId !== 'build') {
         setWizardStep(2)
       }
     } catch (e) {
@@ -4897,26 +4878,39 @@ function claimIntentInFlight() {
       // key). wizardDurableKey keeps it in-memory so the connect snippet can
       // embed it THIS session; a reload re-gates (rows-resolution shows the
       // new durable exists → 'rows-durable' gate copy) and re-minting burns
-      // max_api_keys (free = 2) — the 402 handler routes to regenerate+paste.
+      // max_api_keys (free = 2) — the 402 handler routes to revoke+paste:
+      // revoking frees a slot, while rotate cannot work at the cap (its
+      // replacement mint rides the same capped route before the old row is
+      // revoked).
       // Refresh the team keys/sessions lists (createKey precedent) so the new
       // durable row lands in keys[] — the API Keys tab shows it and future
       // durableConnectKey rows-resolution matches it.
       await loadAll('').catch(() => {})
     } catch (e) {
-      // #1147: a tier-cap 402 is a LIMIT, not an error — surface the upgrade /
-      // regenerate path (the API Keys tab's regenerateKey does not grow the
-      // key count). Free tier max_api_keys = 2. The remedy ends at the paste
-      // box, which for owner/admin sits behind the disclosure (#2325 review
-      // P2) — open it so the error's "paste it below" lands on a visible field.
+      // #1147: a tier-cap 402 is a LIMIT, not an error — #4353: the remedy
+      // surfaced is REVOKE in the API Keys tab (a revoked row leaves the gate's
+      // count, freeing a slot), never regenerate/rotate, whose replacement mint
+      // rides this same capped route before the old row is revoked. Free tier
+      // max_api_keys = 2. The remedy ends at the paste box, which for
+      // owner/admin sits behind the disclosure (#2325 review P2) — open it so
+      // the error's "paste a key you already have above" lands on a visible
+      // field.
       if (e?.status === 402) {
         setWizardDurableCapped(true)  // this session's mint is capped (P2-7)
         setWizardShowPaste(true)
         setWizardDurableError(isBuildFork
-          // #3218: the remedy must name only affordances THIS branch renders —
-          // the build fork has no paste row, so "paste a key below" dead-ended
-          // (review cycle 1, P2).
+          // #3218: the build-fork arm names only the API Keys tab route. It is
+          // NOT the case that this branch has no paste row: the build fork's
+          // step-2 no-key branch renders {wizardKeyAffordance}, which for an
+          // owner/admin in mint mode resolves to wizardNoKeyAffordance and
+          // renders the paste disclosure — opened by this handler. The copy
+          // below is deliberately left byte-identical either way: whether it
+          // should also name the paste escape is a product call, not this
+          // gate's.
+          // (Named by symbol, never by line number: a citation into this file
+          // is a claim that re-stales on the next edit above it.)
           ? 'You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.'
-          : 'You\'ve reached your plan\'s limit of API keys — revoke or regenerate one in the API Keys tab (copy the new key there), then paste a key below.')
+          : 'You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.')
       } else {
         // #2246 (review) + #2297 POLICY A: reachable mint failures here are
         // the 402 cap above, a suspension 403, or transport — the server POST
@@ -5631,17 +5625,31 @@ function claimIntentInFlight() {
 
   async function loadBackups(key) {
     const _teamAtCall = orgIdRef.current // Round-10: staleness guard
-    // #2167 (rule 2): session-mode /backups pins ?org_id=<selected> and
+    // #2167 (rule 2): session-mode /v1/backups pins ?org_id=<selected> and
     // sends NO key header — the old shape team-scoped by the KEY header
     // (a zero-key session whose selected team ≠ first membership rendered
-    // the first membership's backups: /backups is ungated server-side, so
+    // the first membership's backups: /v1/backups is ungated server-side, so
     // _session_user_org resolves memberships[0] without the param).
-    // Key-mode (authMode 'apikey' — no session JWT exists there) keeps the
-    // key header as its authenticator.
-    // #1842 P1-2: /backups is session-dual-auth (get_current_org_session_ungated).
+    // #1842 P1-2: /v1/backups is session-dual-auth (get_current_org_session_ungated).
+    // Only the SESSION lane reaches this route: the BFF proxy requires the
+    // `__Host-session` cookie, strips any client-built `authorization` header and
+    // attaches its own Bearer, so key-mode (authMode 'apikey') cannot authenticate
+    // here at all — it does not render the backups surface.
+    // #4144: the `/v1/` prefix is REQUIRED, not cosmetic. `api()` targets the
+    // same-origin BFF proxy, whose TypeScript route is `functions/api/v1/[[path]].ts`
+    // and which rebuilds the upstream URL as `${API_ORIGIN}/v1/${rest}`. This call
+    // predates the #3501/#4054 migration to the proxy and was the one call site left
+    // without the prefix, so it asked `/api/backups` — a path with no Pages Function
+    // — and the Backups card silently read as empty (404 in the console). Every other
+    // call site in this file that reaches the HOSTED API goes through `/v1/…` (paths
+    // like `/session` and `/profile` are Pages Functions and are served directly).
+    // The route-side regression pin for this fix is tests/test_backups_v1_alias.py:
+    // it reads the LIVE route table and requires every public backup route to have a
+    // `/v1` alias. A file-wide guard over the dashboard's literal call paths is
+    // proposed in #4446 (a runtime-derived check, not a static text scan).
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
-      const b = await api(`/backups${q}`, { useSession: true })
+      const b = await api(`/v1/backups${q}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       // #2784: retain the whole array — the Graphs tab derives a per-graph
@@ -6767,19 +6775,23 @@ function claimIntentInFlight() {
             }
             const check = durableConnectKey('', pasted, keys)
             if (check.source === 'unknown') {
-              setWizardDurableError('That key does not match any key in this organization. Paste a key from this organization\'s API Keys tab, or ask an owner/admin to create one.')
+              // #4353: the owner arm names a create, which 402s at the cap for
+              // the same reason the other three rejections do — so it carries
+              // the same clause. The member arm routes to the owner/admin, the
+              // actor who sees the corrected at-cap remedy on the key surfaces.
+              setWizardDurableError(`That key does not match any key in this organization. ${isOwnerAdmin ? 'Paste a key from this organization\'s API Keys tab, or create one here.' + capRevokeFirstClause(team, keys) : 'Paste a key from this organization\'s API Keys tab, or ask an owner or admin to create one.'}`)
               return
             }
             if (check.source === 'bootstrap') {
-              setWizardDurableError(`That key can\'t be used — it was created for a login session and stops working after 24 hours. ${isOwnerAdmin ? 'Create a new key in the API Keys tab.' : 'Ask an owner or admin to create a new key for you.'}`)
+              setWizardDurableError(`That key can\'t be used — it was created for a login session and stops working after 24 hours. ${isOwnerAdmin ? 'Create a new key in the API Keys tab.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create a new key for you.'}`)
               return
             }
             if (check.source === 'expiring') {
-              setWizardDurableError(`It expires, and a key embedded in an agent must never expire. ${isOwnerAdmin ? 'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              setWizardDurableError(`It expires, and a key embedded in an agent must never expire. ${isOwnerAdmin ? 'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create or rotate a key for you.'}`)
               return
             }
             if (check.source === 'revoked' || check.source === 'disabled') {
-              setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create or rotate a key for you.'}`)
               return
             }
             setWizardDurableKey(pasted)
@@ -6876,8 +6888,7 @@ function claimIntentInFlight() {
         </button>
       </div>
       <p className="wizard-note">
-        Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it
-        without adding a key. Creating a new key here spends another of your plan&apos;s key slots.
+        {existingKeyNoteFrom(team, keys)}
       </p>
       {wizardShowPaste && wizardPasteRow}
       {!wizardShowPaste && wizardDurableError && (
