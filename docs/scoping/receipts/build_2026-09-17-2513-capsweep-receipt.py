@@ -137,6 +137,14 @@ SEAL_VERIFICATION = {
                "git cat-file -e, run once at seal on 2026-09-21"),
 }
 
+# Methodology narrative. Qualitative only: the raw hit count it used to quote
+# ("2503 hits") is NOT recorded in any surviving artifact, so it is omitted
+# rather than repeated as an un-checkable number. Canonical here so a raw run
+# and `--rederive` cannot disagree on it.
+LEG_MIX_OBSERVED = ("every retrieved hit carries match_source 'rrf' — so this "
+                    "is NOT a keyword/FTS-only run (the raw hit count is not "
+                    "recorded in this receipt)")
+
 
 def sha256(p):
     h = hashlib.sha256()
@@ -507,6 +515,8 @@ def rederive(src, dest):
         caps, per_q, receipt.get("run_integrity") or {}, retrieval_mode,
         retrieval_mode.get("reader_token_cap"), receipt.get("cohort") or {},
         {"branch": receipt.get("branch"),
+         "raw_root": (((receipt.get("staleness") or {})
+                       .get("raw_artifacts") or {}).get("declared_root")),
          "revision_measured": receipt.get("revision_measured")})
     write_receipt(out, dest)
 
@@ -546,9 +556,7 @@ def load_raw_measurement():
     retrieval_mode = {
         "retriever": "hybrid (fts + vector, RRF-fused)",
         "checkpoint_key": method.get("checkpoint_key"),
-        "leg_mix_observed": "every retrieved hit carries match_source "
-                            "'rrf' (2503 hits over the cap=10 OFF arm) — "
-                            "so this is NOT a keyword/FTS-only run",
+        "leg_mix_observed": LEG_MIX_OBSERVED,
         "embedder": method.get("embedder") or "BAAI/bge-small-en-v1.5 (384-dim)",
         "reader_item_cap": method.get("context_item_cap"),
         "reader_token_cap": method.get("context_token_cap"),
@@ -557,13 +565,14 @@ def load_raw_measurement():
             method.get("context_token_cap"))
 
 
-def provenance_from_git():
-    """The branch/revision provenance a RAW run records, read from the measured
-    worktree (WT). `--rederive` carries the receipt's recorded values through
-    instead, so it never needs WT to exist and can never rewrite provenance
-    from a different checkout."""
+def provenance_from_environment():
+    """The branch/revision/raw-root provenance a RAW run records, read from the
+    measured worktree (WT) and the environment. `--rederive` carries the
+    receipt's recorded values through instead, so it never needs WT to exist,
+    never depends on `$LME_RAW`, and can never rewrite provenance."""
     return {
         "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "raw_root": str(RAW),
         "revision_measured": {
             "sha": SHA,
             "subject": git("log", "-1", "--format=%s", SHA),
@@ -671,7 +680,7 @@ def build_receipt(caps, per_q, run_integrity, retrieval_mode, token_cap,
                 "tools/longmem_eval/build_cohorts.py",
             ],
             "raw_artifacts": {
-                "declared_root": str(RAW),
+                "declared_root": provenance.get("raw_root"),
                 "state_at_seal": (
                     "GONE \u2014 the directory does not exist, so the generator "
                     "can no longer read cap{10,15}/<arm>.json and THE CENSUS "
@@ -747,7 +756,7 @@ def build_receipt(caps, per_q, run_integrity, retrieval_mode, token_cap,
                              "16th distinct CANDIDATE row exists"),
         },
         "run_integrity": run_integrity,
-        "retrieval_mode": retrieval_mode,
+        "retrieval_mode": {**retrieval_mode, "leg_mix_observed": LEG_MIX_OBSERVED},
         "miss_class_closure": _closure(caps, per_q),
         "results": caps,
         "arm_vs_arm_flips": cap_flips,
@@ -998,7 +1007,8 @@ def print_summary(receipt):
 def main():
     caps, per_q, run_integrity, retrieval_mode, token_cap = load_raw_measurement()
     receipt = build_receipt(caps, per_q, run_integrity, retrieval_mode,
-                            token_cap, cohort_block(), provenance_from_git())
+                            token_cap, cohort_block(),
+                            provenance_from_environment())
     dest = Path(os.environ.get(
         "LME_RECEIPT_DEST",
         str(WT / "docs/scoping/receipts" / (

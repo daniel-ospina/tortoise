@@ -139,7 +139,7 @@
  "retrieval_mode": {
   "retriever": "hybrid (fts + vector, RRF-fused)",
   "checkpoint_key": "hnsw__hybrid__default__default",
-  "leg_mix_observed": "every retrieved hit carries match_source 'rrf' (2503 hits over the cap=10 OFF arm) \u2014 so this is NOT a keyword/FTS-only run",
+  "leg_mix_observed": "every retrieved hit carries match_source 'rrf' \u2014 so this is NOT a keyword/FTS-only run (the raw hit count is not recorded in this receipt)",
   "embedder": {
    "available": true,
    "model": "BAAI/bge-small-en-v1.5",
