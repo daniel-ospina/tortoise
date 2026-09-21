@@ -522,14 +522,20 @@ def test_failed_restore_still_retires_the_sidecar(sup, tmp_path):
     proj = sdk._get_proj()
     inner = proj.g._g
     real_query = inner.query
+    injected: list[str] = []
 
     def _inject(cypher, params=None, timeout=None):
         if "vecf32($emb)" in cypher and (params or {}).get("pid") == bad:
+            injected.append(params["pid"])
             raise RuntimeError("injected engine rejection")
         return real_query(cypher, params=params, timeout=timeout)
 
     with mock.patch.object(inner, "query", _inject):
         proj.rebuild_all(str(events))
+    # The premise must be SELF-VERIFIED: if the restore clause string ever
+    # changes, the injection would silently stop firing and this test would
+    # pass without exercising a failed restore (round-6 review).
+    assert injected == [bad], "the injected restore failure never fired"
     # Retirement is unconditional — a failed restore must not retain the blob.
     assert _load_prewipe_snapshot(prewipe_snapshot_path(str(events))) is None
     # The unrelated, successfully-restored id must NOT come back on rebuild #2.

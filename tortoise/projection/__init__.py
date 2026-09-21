@@ -3973,14 +3973,10 @@ class FalkorProjection(
         if restore_failures:
             logger.error(
                 "rebuild: %d snapshot derived restore(s) FAILED — the "
-                "pre-wipe derived of those id(s) was NOT restored, and NO "
-                "durable copy of it remains: the carrier is the in-memory "
-                "pre-wipe live :Point capture, while the sidecar (where one "
-                "was written at all) neither carries an embedding nor has an "
-                "entry for a log-covered id. Re-derive the value from its "
-                "source of truth (e.g. re-write the Point) if the indexed "
-                "dedup key / vector matters. The graph is otherwise rebuilt; "
-                "see the per-id warnings above",
+                "pre-wipe derived of those id(s) was NOT restored. "
+                "Re-derive the value from its source of truth (e.g. re-write "
+                "the Point) if the indexed dedup key / vector matters. The "
+                "graph is otherwise rebuilt; see the per-id warnings above",
                 restore_failures,
             )
 
@@ -4462,8 +4458,7 @@ class FalkorProjection(
         # succeeded — and a later raw delete of any of them would be resurrected
         # on every subsequent rebuild (never retiring for a permanently
         # unwritable value). The failure is surfaced by the ERROR summary in the
-        # tail instead, whose message states no durable copy of the value
-        # remains.
+        # tail instead.
         if snapshot_pending:
             _clear_prewipe_snapshot(snapshot_path)
         node_count = self.g.query(
