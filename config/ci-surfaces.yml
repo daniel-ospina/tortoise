@@ -43,7 +43,10 @@ surfaces:
   - test_control_plane_offload_3498.py
   # #4015: the analytics emit's off-loop + fail-soft contract (the Stripe
   # webhook's failure path included). Same dual registration as the loop-
-  # responsiveness guards above: the file it guards is tortoise/hosted_api.py.
+  # responsiveness guards above: the file it guards is tortoise/hosted_api.py
+  # (which selects `api`), and the `core` half is load-bearing for the seams it
+  # monkeypatches — tortoise/monitoring.py (the offload pool), plus the
+  # billing/notify paths the Stripe tests drive — which fall through to `core`.
   - test_analytics_offloop_4015.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py

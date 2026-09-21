@@ -23,8 +23,11 @@ These tests are behavioural where it matters:
 The structural pin for "no async body calls the blocking helper directly"
 lives in ``tests/test_health_ready_nonblocking.py``
 (``test_control_plane_seam_calls_are_all_offloaded``, inventory includes
-``_track_analytics_event``); this file adds the shape pin that the ONE direct
-call site is inside the off-loop entry point.
+``_track_analytics_event``); the ``best_effort`` op-set invariant lives in
+``tests/test_control_plane_offload_3498.py``
+(``test_never_raise_offload_sites_pass_best_effort``). This file adds the shape
+pin that the ONE direct call site is inside the off-loop entry point's
+offloaded callable.
 """
 
 from __future__ import annotations
@@ -322,12 +325,18 @@ def test_stripe_webhook_analytics_offload_failure_does_not_500(monkeypatch):
     """An OFFLOAD failure (missed bound / saturated telemetry pool) is
     swallowed by the seam itself (``best_effort=True``), so the webhook stays
     200 and the notification still fires. This pins the SEAM contract; the
-    handler's own guard is falsified by the raising-emit test above."""
+    handler's own guard is falsified by the raising-emit test above.
+
+    Deterministic: the worker signals an Event BEFORE it blocks, so the test
+    never races thread-pool start-up against the 0.05 s bound (#4015 review).
+    """
     order: list[str] = []
+    started = threading.Event()
     _wire_stripe_webhook(monkeypatch, order)
 
     def _slow(org_id, event_name, properties=None):
         order.append("analytics")
+        started.set()
         time.sleep(0.4)
 
     monkeypatch.setattr(ha, "_track_analytics_event", _slow)
@@ -336,7 +345,12 @@ def test_stripe_webhook_analytics_offload_failure_does_not_500(monkeypatch):
     resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
 
     assert resp.status_code == 200
-    assert order.index("notify") < order.index("analytics")
+    assert order.index("notify") < order.index("analytics"), (
+        f"the notification must fire before the telemetry attempt: {order}"
+    )
+    # The offloaded worker genuinely STARTED (so this is the bound path, not a
+    # refused submission), and its result was abandoned rather than 500ing.
+    assert started.wait(5.0), "the telemetry worker never started"
 
 
 # ── the shape pin: ONE direct call site, inside the off-loop entry point ────
@@ -344,53 +358,78 @@ def test_stripe_webhook_analytics_offload_failure_does_not_500(monkeypatch):
 
 def test_track_analytics_event_is_only_called_from_the_off_loop_entry_point():
     """#4015 AC1 (shape): ``hosted_api`` has exactly ONE **direct-call** site
-    for the blocking helper — the ``_cp_offload``-wrapped lambda inside
-    ``_emit_analytics_off_loop``. A new direct call (the regression this issue
-    exists for) adds a second site and fails here, and the site is off-loop by
-    construction rather than by argument.
+    for the blocking helper, and it lives INSIDE the callable the offload seam
+    is handed — so the site is off-loop by construction rather than by
+    argument. A new direct call (the regression this issue exists for) adds a
+    second site and fails here.
+
+    The two halves are BOUND (#4015 review): asserting only that the helper
+    contains SOME ``_cp_offload(..., best_effort=True)`` call left a mutation
+    green — moving the direct call out of the lambda while keeping a dummy
+    ``_cp_offload(lambda: None, ...)`` put the blocking POST back on the loop.
 
     Out of this pin's scope by design: partial-application lanes — the
     capture-cost ``asyncio.to_thread(_track_analytics_event, …)`` and
     ``mcp_server``'s retained emitter — which carry their own off-loop
     guarantees and are pinned by their own tests.
+
+    The ``best_effort=True`` half is co-owned by
+    ``tests/test_control_plane_offload_3498.py::test_never_raise_offload_sites_pass_best_effort``
+    (which also pins the op-set invariant); this one additionally binds the
+    flag to the same call site.
     """
     tree = ast.parse(HOSTED_API.read_text())
-    call_sites: list[tuple[str, int]] = []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for node in ast.walk(fn):
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "_track_analytics_event"):
-                call_sites.append((fn.name, node.lineno))
+    parents = {child: parent for parent in ast.walk(tree)
+               for child in ast.iter_child_nodes(parent)}
 
-    assert call_sites, "_track_analytics_event is no longer called at all?"
-    assert len(call_sites) == 1, (
+    def _nearest_func(node):
+        cur = parents.get(node)
+        while cur is not None:
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cur
+            cur = parents.get(cur)
+        return None
+
+    # ONE walk of the module: a call nested in an inner def is attributed to
+    # that inner def exactly once (the previous double walk counted it twice).
+    direct = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Call)
+              and isinstance(n.func, ast.Name)
+              and n.func.id == "_track_analytics_event"]
+    assert direct, "_track_analytics_event is no longer called at all?"
+    assert len(direct) == 1, (
         "every analytics emit must go through _emit_analytics_off_loop, but "
-        f"_track_analytics_event is called from: {call_sites} (#4015)"
+        "_track_analytics_event is called from: "
+        f"{[(getattr(_nearest_func(n), 'name', '?'), n.lineno) for n in direct]}"
+        " (#4015)"
     )
-    enclosing, lineno = call_sites[0]
-    assert enclosing == "_emit_analytics_off_loop", (
-        f"the one direct call site is in {enclosing!r} (line {lineno}) — it "
-        "must be the off-loop entry point (#4015)"
+    site = direct[0]
+    enclosing = _nearest_func(site)
+    assert enclosing is not None and enclosing.name == "_emit_analytics_off_loop", (
+        f"the one direct call site is in {getattr(enclosing, 'name', 'module')!r} "
+        f"(line {site.lineno}) — it must be the off-loop entry point (#4015)"
     )
 
-    # And that entry point's call is wrapped by the offload seam.
-    helper = next(
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.AsyncFunctionDef)
-        and n.name == "_emit_analytics_off_loop")
+    # ... and it must be INSIDE the callable the seam is handed.
     offloads = [
-        n for n in ast.walk(helper)
+        n for n in ast.walk(enclosing)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Name) and n.func.id == "_cp_offload"
     ]
-    assert offloads, (
-        "_emit_analytics_off_loop no longer offloads its call — the blocking "
-        "POST is back on the event loop (#4015)"
+    assert len(offloads) == 1, (
+        "_emit_analytics_off_loop must offload EXACTLY one call — the blocking "
+        f"POST is otherwise back on the event loop (#4015): {len(offloads)} found"
     )
-    kwargs = {kw.arg: kw.value for kw in offloads[0].keywords}
+    offload = offloads[0]
+    assert offload.args and isinstance(offload.args[0], (ast.Lambda, ast.Name)), (
+        "the _cp_offload argument is not an offloaded callable (#4015)"
+    )
+    assert any(node is site for node in ast.walk(offload.args[0])), (
+        "the direct _track_analytics_event call is NOT inside the _cp_offload "
+        "callable — an inline emit plus a dummy _cp_offload would leave the "
+        "blocking POST on the event loop (#4015)"
+    )
+    kwargs = {kw.arg: kw.value for kw in offload.keywords}
     assert (isinstance(kwargs.get("best_effort"), ast.Constant)
             and kwargs["best_effort"].value is True), (
         "the analytics emit lost best_effort=True — telemetry would be able "

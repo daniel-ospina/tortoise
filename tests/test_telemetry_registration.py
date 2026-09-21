@@ -565,11 +565,14 @@ class _Collector(ast.NodeVisitor):
         self.calls: list[_Call] = []
         self.scopes: list[dict[str, set[str]]] = []
         self.func_stack: list[str] = []
+        self.func_nodes: list[ast.AST] = []
 
     def visit_FunctionDef(self, node):
         self.scopes.append(_dict_assignments(node, self.helper_returns))
         self.func_stack.append(node.name)
+        self.func_nodes.append(node)
         self.generic_visit(node)
+        self.func_nodes.pop()
         self.func_stack.pop()
         self.scopes.pop()
 
@@ -583,23 +586,60 @@ class _Collector(ast.NodeVisitor):
         self.calls.append(_Call(self.path, node.lineno, func, event,
                                 _resolve_keys(props_arg, self.scopes)))
 
-    def _is_entry_point_passthrough(self, node) -> bool:
-        """True only for the verbatim forward inside ``_emit_analytics_off_loop``.
+    #: The entry point's parameters, in signature order.
+    _ENTRY_POINT_PARAMS = ("org_id", "event_name", "properties")
 
-        The call must sit in that function AND pass the caller's
-        ``org_id``/``event_name``/``properties`` through by name. Keying the
-        skip on the enclosing function alone would also hide any other call
-        written into the helper (#4015 review); keying it on the exact
-        argument names leaves such a call recorded, where the count pin
-        catches it.
+    def _is_entry_point_passthrough(self, node) -> bool:
+        """True only for the UNTOUCHED forward inside ``_emit_analytics_off_loop``.
+
+        Two conditions, both required (#4015 review):
+
+        1. The call sits in that function and passes the caller's
+           ``org_id``/``event_name``/``properties`` through **by name**
+           (positionally or by keyword). Anything else — a literal dict, a
+           call, an expression — is not the pass-through and gets RECORDED,
+           where the count pin catches it.
+        2. No parameter is REBOUND anywhere in the helper's body. Without
+           this, a one-line injection such as
+           ``properties = {**(properties or {}), "unregistered_key": 1}``
+           keeps the call looking verbatim (the argument is still the name
+           ``properties``) while the injected key reaches the sink from every
+           routed site — and `_literal_dict_keys` cannot resolve a `**`
+           unpacking, so the assignment walk would not catch it either. A
+           rebound parameter is the shape that actually closes the hole, not
+           a reworded claim.
         """
         if not self.func_stack \
                 or self.func_stack[-1] != "_emit_analytics_off_loop":
             return False
-        if len(node.args) < 3:
+        if self._entry_point_rebinds_a_parameter():
             return False
-        return [a.id for a in node.args[:3] if isinstance(a, ast.Name)] == \
-            ["org_id", "event_name", "properties"]
+        values: dict[str, ast.expr] = {}
+        for i, arg in enumerate(node.args[:len(self._ENTRY_POINT_PARAMS)]):
+            values[self._ENTRY_POINT_PARAMS[i]] = arg
+        for kw in node.keywords:
+            if kw.arg in self._ENTRY_POINT_PARAMS:
+                values[kw.arg] = kw.value
+        if set(values) != set(self._ENTRY_POINT_PARAMS):
+            return False
+        return all(
+            isinstance(values[p], ast.Name) and values[p].id == p
+            for p in self._ENTRY_POINT_PARAMS)
+
+    def _entry_point_rebinds_a_parameter(self) -> bool:
+        """True when the helper assigns to any of its own parameters."""
+        names = set(self._ENTRY_POINT_PARAMS)
+        for stmt in ast.walk(self.func_nodes[-1]):
+            if isinstance(stmt, ast.Assign):
+                targets = stmt.targets
+            elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                targets = [stmt.target]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id in names:
+                    return True
+        return False
 
     def visit_Call(self, node):
         callee = _callee_name(node.func)
@@ -616,14 +656,11 @@ class _Collector(ast.NodeVisitor):
             # double-count and leave the inventory with a phantom unresolved
             # site. Skip it; count the call sites.
             #
-            # The skip is CALL-shaped, never merely function-scoped (#4015
-            # review): a skip keyed only on the enclosing function would also
-            # silence any OTHER call written into the helper — e.g. injecting
-            # a key (`{**(properties or {}), "unregistered_key": 1}`) would
-            # keep `len(calls)` at 11 and pass the allowlist while the key
-            # reached the sink from all five routed sites. Anything that is
-            # not the verbatim pass-through is therefore RECORDED, and the
-            # count pin below fails on it.
+            # The skip is deliberately narrow (see
+            # ``_is_entry_point_passthrough``): it fires only for the UNTOUCHED
+            # forward. Any other call written into the helper — an injected
+            # dict passed AS the argument, or a rebound ``properties`` — is
+            # RECORDED, so the count pin below fails on it.
             self.generic_visit(node)
             return
         if callee in ("_track_analytics_event", "_emit_analytics_off_loop"):

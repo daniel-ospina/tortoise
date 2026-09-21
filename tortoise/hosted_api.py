@@ -21552,13 +21552,12 @@ def _track_analytics_event(org_id: str, event_name: str,
             # #4015: the client is built PER EVENT, deliberately. The write is
             # off-loop now (``_emit_analytics_off_loop`` → the telemetry pool),
             # so a fresh TCP+TLS handshake costs a telemetry WORKER SLOT, never
-            # an event-loop stall. Reusing a pooled client is a throughput
-            # optimisation for that pool, not a fix for the defect this issue
-            # names; and this sink must keep working in a HALF-CONFIGURED env
-            # (the #3677/#3820 contract — a singleton built from the env goes
-            # stale when the env changes, and one built at import time cannot
-            # exist for an unconfigured process). Deferred as its own change
-            # with its own measurement.
+            # an event-loop stall — it is not the defect this issue names.
+            # Reusing a pooled client is a throughput optimisation for that
+            # pool and needs its own measurement plus a lifecycle it does not
+            # have today (lazy construction gated on ``configured``, because
+            # this sink must keep serving a HALF-CONFIGURED env and degrade to
+            # the JSONL — the #3677/#3820 contract); tracked as #4462.
             with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
                 resp = client.post(
                     f"{url}/rest/v1/analytics_events",
@@ -22185,7 +22184,10 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
 
     It is the one entry point for the sites that #4352 routed through
     ``_cp_offload``; the capture-cost lane (``_emit_capture_ledger``) keeps its
-    own dedicated executor, and ``mcp_server`` its own retained emitter.
+    own ``asyncio.to_thread`` path — still off-loop, but on the loop's SHARED
+    default executor rather than a pool of its own, so it is not isolated from
+    the probe/abuse work — and ``mcp_server`` its own retained emitter. Moving
+    the capture lane here is part of the deferred pooling change, #4462.
 
     ``_track_analytics_event`` is a synchronous ``httpx.Client`` POST and
     ``hosted_api`` runs a SINGLE uvicorn worker, so calling it inline from an
@@ -22195,11 +22197,16 @@ async def _emit_analytics_off_loop(org_id: str, event_name: str,
     dedicated ``telemetry`` pool: the auth-critical ``auth`` pool can never be
     parked by an analytics burst, and the event loop is never occupied.
 
-    ``best_effort=True`` swallows an OFFLOAD failure — a missed wait bound or a
+    ``best_effort=True`` bounds FAILURE, not LATENCY — this emit is AWAITED,
+    so a saturated telemetry pool can add up to the seam's
+    ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S`` (10 s) to one request before it
+    returns. The emit is not fire-and-forget because the #3821 strict-mode
+    escape below must be able to propagate, and a detached dispatch cannot
+    carry it. The wait bound swallows an OFFLOAD failure — a missed bound or a
     saturated telemetry backlog — because telemetry must never gate the request
-    path. The ONE exception that still escapes is the #3821 strict-mode
-    ``UnregisteredTelemetryKey``: that guard exists precisely so a misregistered
-    prop cannot be silently swallowed, and the onboarding wrapper
+    path with an ERROR. The ONE exception that still escapes is the #3821
+    strict-mode ``UnregisteredTelemetryKey``: that guard exists precisely so a
+    misregistered prop cannot be silently swallowed, and the onboarding wrapper
     (``_track_onboarding_event``) depends on the escape.
 
     A caller whose failure path is UNRECOVERABLE guards the call itself: the
@@ -26108,8 +26115,9 @@ async def webhooks_stripe(request: Request):
             # this line is best-effort. ``notify_billing_event`` is documented
             # never-raise (tortoise/notify.py), so it cannot abort itself; the
             # audit and telemetry legs — either of which could otherwise 500
-            # the webhook AND strand the notification — follow it. (Before
-            # #4015 the analytics POST sat here, synchronously on the loop.)
+            # the webhook AND strand the notification — follow it. (#4352 had
+            # already moved the analytics POST behind ``_cp_offload``; what
+            # this change adds here is the notify-first order and the guards.)
             notify_billing_event(
                 notify_kind, {"org_id": org_id, "tier": tier},
                 {"subscription_status": etype},
