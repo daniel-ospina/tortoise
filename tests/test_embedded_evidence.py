@@ -1033,3 +1033,319 @@ class TestRecordConstructionReadsTheCanonicalConstants:
         ok, reasons = ee.closes_issue(rec)
         assert ok is False
         assert "red-file-list-differs" in reasons
+
+
+# ── #4203: every conjunct flips in BOTH directions on a PRODUCED record ──────
+
+class TestConjunctFalsifiability:
+    """#4203 — five `closes_issue` conjuncts were non-falsifiable.
+
+    Two could never PASS on a produced record (their fields were hardcoded, so
+    the producer could not reach them: `no-rate-change`,
+    `certification-not-on-shipping-surface`). Three could never FAIL (their
+    inputs were literals: the per-run half of `pin-not-airtight`, and
+    `certificate-not-bound-to-review-head`). A conjunct that cannot pass, or
+    cannot fail, reads as protection while supplying none.
+
+    Each test below drives `_build_record` — the PRODUCER, not a hand-built
+    dict — and mutates exactly the input one conjunct reads, asserting the flip
+    in BOTH directions. A test that only fed `closes_issue` a dict would stay
+    green on the original defect, where the producer could never emit the
+    passing shape.
+    """
+
+    @staticmethod
+    def _run(files, run_id, bucket):
+        red = bucket != "green"
+        return {
+            "run_id": run_id,
+            "bucket": bucket,
+            "files": list(files),
+            "returncode": 1 if red else 0,
+            "step_wall_s": 1.0,
+            "observed": len(files),
+            "executed": len(files),
+            "skipped": 0,
+            "load": {"before": 1.0, "after": 1.0, "band": "L-A"},
+            "redis_log_cause": "module-fork-eexist" if red else None,
+            "cause_evidence": {},
+            "timed_out": bucket == "timeout-red",
+            # The independent side `same_file_list` reads is a junit OBSERVATION.
+            "observed_files": ee._JunitObservation(
+                tuple(files), tuple([files[0]]) if red else (), f"junit-{run_id}.xml"
+            ),
+        }
+
+    @staticmethod
+    def _produce(
+        monkeypatch,
+        tmp_path,
+        *,
+        runs,
+        pairing_ref=None,
+        baseline=None,
+        measured_digests=None,
+        review_digest=("sha256:review-clean", False),
+        checkout_head="a" * 40,
+        measured_commit="b" * 40,
+        **arg_over,
+    ):
+        import argparse
+
+        measured_path = tmp_path / "worktree"
+        pair_path = tmp_path / "pairing-worktree"
+
+        # No real worktree, no real git, no real subprocess: the test drives the
+        # producer's LOGIC. `_worktree_at` is the one seam that materializes a ref.
+        monkeypatch.setattr(
+            ee, "_worktree_at",
+            lambda ref, run_root, name: (tmp_path / name, True),
+        )
+        monkeypatch.setattr(ee.subprocess, "run", lambda *a, **k: None)
+        monkeypatch.setattr(
+            ee, "_manifest_receipt",
+            lambda files, marker, out_dir: {
+                "path": "stub",
+                "digest": "sha256:0",
+                "count": len(files),
+                "unique_count": len(files),
+                "marker": marker,
+            },
+        )
+
+        def _run_once(files, root, run_root, run_id, marker, timeout):
+            if Path(root) == pair_path:
+                assert baseline is not None, "pairing ref declared without a baseline run"
+                return baseline
+            return runs[run_id - 1]
+
+        monkeypatch.setattr(ee, "_run_once", _run_once)
+        monkeypatch.setattr(ee, "load1", lambda: 1.0)
+        monkeypatch.setattr(ee, "_tool_version", lambda: "blob0")
+
+        digests = list(measured_digests or [("sha256:tree-stable", False)] * len(runs))
+
+        def _porcelain_digest(cwd, exclude=None):
+            if Path(cwd) == measured_path:
+                return digests.pop(0)
+            return review_digest
+
+        monkeypatch.setattr(ee, "_porcelain_digest", _porcelain_digest)
+
+        def _git(*a, cwd=None):
+            if a == ("rev-parse", "HEAD"):
+                # The invoking checkout's HEAD vs the worktree's measured commit —
+                # two independent reads, which is the whole point of the conjunct.
+                return checkout_head if cwd is None else measured_commit
+            if a[0] == "rev-parse" and a[1].endswith("^{tree}"):
+                return "c" * 40
+            return "d" * 40
+
+        monkeypatch.setattr(ee, "_git", _git)
+
+        args = argparse.Namespace(
+            selection="family",
+            n=len(runs),
+            ref="deadbeef",
+            pairing_ref=pairing_ref,
+            marker=ee.DEFAULT_MARKER,
+            load_ceiling=1e9,
+            run_timeout=1,
+            record_role="closing",
+            record_out=None,
+            cmd="run",
+            environment_error=None,
+            surface=None,
+            surface_assertion=None,
+        )
+        for k, v in arg_over.items():
+            setattr(args, k, v)
+        return ee._build_record(args)
+
+    def test_tree_move_between_runs_sets_tree_moved(self, monkeypatch, tmp_path):
+        """`pin-not-airtight`'s per-run half: PASS on a stable tree, FAIL on a move."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            measured_digests=[("sha256:tree-a", False), ("sha256:tree-a", False)],
+        )
+        assert [r["tree_moved"] for r in rec["runs"]] == [False, False]
+        assert "pin-not-airtight" not in ee.closes_issue(rec)[1]
+
+        # MUTATION: an edit between run 1 and run 2 moves the measured tree.
+        rec2 = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            measured_digests=[("sha256:tree-a", False), ("sha256:tree-b", False)],
+        )
+        assert [r["tree_moved"] for r in rec2["runs"]] == [False, True]
+        ok2, reasons2 = ee.closes_issue(rec2)
+        assert ok2 is False
+        assert "pin-not-airtight" in reasons2
+
+    def test_certificate_is_bound_to_head_sha(self, monkeypatch, tmp_path):
+        """`certificate-not-bound-to-review-head`: the head is read independently."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        same = "a" * 40
+
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            checkout_head=same, measured_commit=same,
+        )
+        assert rec["pin"]["head_sha"] == rec["pin"]["commit"]
+        assert "certificate-not-bound-to-review-head" not in ee.closes_issue(rec)[1]
+
+        # MUTATION: the branch moved past the measured commit (a post-review edit).
+        rec2 = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            checkout_head="e" * 40, measured_commit=same,
+        )
+        assert rec2["pin"]["head_sha"] != rec2["pin"]["commit"]
+        ok2, reasons2 = ee.closes_issue(rec2)
+        assert ok2 is False
+        assert "certificate-not-bound-to-review-head" in reasons2
+
+    def test_certificate_invalidated_by_post_review_edit(self, monkeypatch, tmp_path):
+        """A dirty reviewing checkout invalidates the head binding."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        same = "a" * 40
+
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            checkout_head=same, measured_commit=same,
+            review_digest=("sha256:review-clean", False),
+        )
+        assert rec["pin"]["post_review_dirty"] is False
+        assert "certificate-not-bound-to-review-head" not in ee.closes_issue(rec)[1]
+
+        # MUTATION: an uncommitted post-review edit lands in the checkout.
+        rec2 = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            checkout_head=same, measured_commit=same,
+            review_digest=("sha256:review-dirty", True),
+        )
+        assert rec2["pin"]["post_review_dirty"] is True
+        ok2, reasons2 = ee.closes_issue(rec2)
+        assert ok2 is False
+        assert "certificate-not-bound-to-review-head" in reasons2
+
+    def test_certification_binds_to_the_shipping_surface(self, monkeypatch, tmp_path):
+        """The producer can reach a PASS; an internal seam or empty assertion fails."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        assert rec["red"]["at_fixed_commit"]["surface"] == "tortoise_search"
+        assert "certification-not-on-shipping-surface" not in ee.closes_issue(rec)[1]
+
+        # MUTATION 1: the proof is asserted against an INTERNAL helper.
+        rec2 = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            surface="TortoiseSDK.search",
+            surface_assertion="tests/test_x.py::test_internal",
+        )
+        ok2, reasons2 = ee.closes_issue(rec2)
+        assert ok2 is False
+        assert "certification-not-on-shipping-surface" in reasons2
+
+        # MUTATION 2: a member surface with no resolving test-ID.
+        rec3 = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            surface="tortoise_recall",
+            surface_assertion="",
+        )
+        ok3, reasons3 = ee.closes_issue(rec3)
+        assert ok3 is False
+        assert "certification-not-on-shipping-surface" in reasons3
+
+    def test_shipping_surfaces_are_declared(self, monkeypatch, tmp_path):
+        """The constant is the two agent-facing names; the producer RECORDS it,
+        and the conjunct CONSUMES it rather than a private copy."""
+        assert ee.SHIPPING_SURFACES == ("tortoise_search", "tortoise_recall")
+
+        # The producer must carry the CALLER-declared surface into the record.
+        # (On the pre-#4203 tool the field was a `None` literal and this fails.)
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            surface="tortoise_search",
+            surface_assertion="tests/test_x.py::test_consumer_surface",
+        )
+        assert rec["red"]["at_fixed_commit"]["surface"] == "tortoise_search"
+        assert rec["red"]["at_fixed_commit"]["surface_assertion"] == (
+            "tests/test_x.py::test_consumer_surface"
+        )
+
+        rec2 = _nonclosing_record()
+        rec2["red"]["at_fixed_commit"]["surface"] = "tortoise_search"
+        rec2["red"]["at_fixed_commit"]["surface_assertion"] = "tests/x.py::test_y"
+        assert "certification-not-on-shipping-surface" not in ee.closes_issue(rec2)[1]
+        # MUTATION: empty the constant — the same record must now fail. This proves
+        # the conjunct consumes the constant rather than a private copy.
+        monkeypatch.setattr(ee, "SHIPPING_SURFACES", ())
+        assert "certification-not-on-shipping-surface" in ee.closes_issue(rec2)[1]
+
+    def test_at_fixed_commit_rate_change_required(self, monkeypatch, tmp_path):
+        """`no-rate-change`: reachable PASS on a real rate change, fails otherwise."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        baseline_red = self._run(files, 1, "unexpected-divergence")
+
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref", baseline=baseline_red,
+        )
+        assert rec["red"]["at_fixed_commit"] == {
+            "attempted": True,
+            "appeared": False,
+            "rate_change": True,
+            "mutation": None,
+            "mutation_operator": None,
+            "mutation_target_is_fix_branch": False,
+            "mutation_red_returned": False,
+            "surface": None,
+            "surface_assertion": None,
+        }
+        assert "no-rate-change" not in ee.closes_issue(rec)[1]
+
+        # MUTATION 1: the "fix" changed nothing — the red still appears at the
+        # measured (fixed) commit.
+        red = [
+            self._run(files, 1, "unexpected-divergence"),
+            self._run(files, 2, "unexpected-divergence"),
+        ]
+        rec2 = self._produce(
+            monkeypatch, tmp_path, runs=red,
+            pairing_ref="pairref", baseline=baseline_red,
+        )
+        assert rec2["red"]["at_fixed_commit"]["appeared"] is True
+        assert rec2["red"]["at_fixed_commit"]["rate_change"] is False
+        assert "no-rate-change" in ee.closes_issue(rec2)[1]
+
+        # MUTATION 2: the pairing ref is GREEN for the selection — there is no red
+        # to have changed, so no rate change can be claimed.
+        rec3 = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref", baseline=self._run(files, 1, "green"),
+        )
+        assert rec3["red"]["at_fixed_commit"]["rate_change"] is False
+        assert "no-rate-change" in ee.closes_issue(rec3)[1]
+
+    def test_internal_seam_only_mutation_is_non_closing(self, monkeypatch, tmp_path):
+        """Plan R1: an internal-helper-only proof is non-closing (exit 1)."""
+        files = list(ee.FAMILY_REPRODUCERS)
+        runs = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=runs,
+            surface="TortoiseSDK.search",
+            surface_assertion="tests/test_x.py::test_internal",
+        )
+        assert "certification-not-on-shipping-surface" in ee.closes_issue(rec)[1]
