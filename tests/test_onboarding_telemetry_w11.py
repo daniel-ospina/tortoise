@@ -4,9 +4,14 @@ The two events ride the EXISTING PostHog seam (``tortoise/analytics.py``) and
 are gated on **structural dedup**: ``onboarding.state.write_completed_step``
 returns ``created=True`` only for the write that NEWLY creates the
 ``COMPLETED_STEP`` edge, and every writer emits only when it observed that
-transition. The edge is the domain fact, so the events are exact-once per org
-by construction — restart-safe and multi-worker-safe, with no threshold, no
-second dedup store and no in-process set.
+transition. The edge is the domain fact, so the events are exact-once per
+EDGE CREATION by construction — restart-safe and multi-worker-safe, with no
+threshold, no second dedup store and no in-process set. (``first-points-filed``
+is write-once, so for it that is once per org forever; ``decide-completed`` is
+the one W11 edge with a sanctioned removal path — the #3912 false-completion
+repair — after which a genuine re-completion creates the edge again and
+re-emits. See ``analytics.onboarding_decide_complete``. The residual
+funnel-accuracy question is filed as #4458.)
 
 The load-bearing tests (each would go RED if emission were ungated):
 
@@ -133,7 +138,7 @@ def _checkpoint(client, step):
     return client.post("/v1/onboarding/state/checkpoint", json={"step": step})
 
 
-# ── the core: exact-once by construction ──────────────────────────────
+# ── the core: exact-once per edge creation ────────────────────────────
 
 class TestExactOnce:
     def test_repeat_write_emits_exactly_once(self, client, edges, emitted):
