@@ -828,7 +828,14 @@ def _gc_close(db_ref) -> None:
     db = db_ref()
     if db is None:
         return  # not a redislite-pinned client — nothing to do
-    client = getattr(db, "client", db)
+    # #4487 review: `getattr(db, "client", db)` is NOT safe — a raw embedded
+    # `Redis` exposes `.client` as a BOUND METHOD (its self-constructing clone
+    # helper), so the old form treated that method as the inner client and
+    # bailed at the `socket_file is None` guard below, leaving the owner
+    # record (which the #4487 patch now writes) unreleased. A callable is
+    # never an inner client.
+    _inner = getattr(db, "client", None)
+    client = _inner if (_inner is not None and not callable(_inner)) else db
     # #4214: `_gc_close` runs both on ordinary mid-run collection and on
     # `weakref`'s exit pass. Only the latter may skip work: mid-run GC-time
     # reclamation is the #1475 close-on-GC contract and must keep running.
@@ -907,22 +914,26 @@ def _gc_close(db_ref) -> None:
     _neutralize_redislite_cleanup(client)
     if not pid_before:
         _remove_ephemeral_socket_dir(rdir, sock_path)
-    _release_owner_quietly(db)
+    # #4487 review: `_cleanup()` can null `socket_file`, so hand the socket we
+    # captured BEFORE it to the release fallback (a raw client has no
+    # idempotent `_t_release_owner` to fall back on).
+    _release_owner_quietly(db, sock_path)
 
 
-def _release_owner_quietly(db) -> None:
+def _release_owner_quietly(db, sock: str | None = None) -> None:
     """#3599: release a client's owner claim from GC/**non-raising** contexts.
 
     Prefers the guarded wrapper's idempotent ``_t_release_owner``; a raw
     redislite client has no such method and falls back to a direct
-    ``forget_owner`` on its own socket path.
+    ``forget_owner`` on ``sock`` (the caller-captured path) or its own socket
+    path.
     """
     try:
         release = getattr(db, "_t_release_owner", None)
         if release is not None:
             release()
             return
-        forget_owner(owner_socket_of(db))
+        forget_owner(sock or owner_socket_of(db))
     except Exception:  # GC/teardown context: never raise
         pass
 
@@ -1037,7 +1048,17 @@ def close_embedded_clients() -> int:
         # #1371 fast-close probe reads ``dbdir``/``socket_file`` off the
         # INNER redislite client (the wrapper has neither — it only owns
         # ``close()`` → ``client._cleanup()``).
-        inner = getattr(client, "client", client)
+        # #4487 review: a raw embedded `Redis` exposes `.client` as a bound
+        # method; never treat a callable as the inner client.
+        _c = getattr(client, "client", None)
+        inner = _c if (_c is not None and not callable(_c)) else client
+        # #4487 review (cycle 2): capture the socket BEFORE any teardown —
+        # redislite's `_cleanup()` nulls `socket_file`, and a raw client has
+        # no idempotent `_t_release_owner` to fall back on, so a post-teardown
+        # `owner_socket_of(inner)` resolves None and STRANDS the claim (the
+        # refcount then short-circuits `record_owner` forever, leaving a later
+        # live server on this path uninstrumented — the #4487 class).
+        sock_before = getattr(inner, "socket_file", None) or owner_socket_of(inner)
         try:
             # #4214: this is the #2203 terminating-signal teardown — the
             # process is about to die (`os.kill(self, signum)` follows), so
@@ -1045,7 +1066,7 @@ def close_embedded_clients() -> int:
             # close rather than delaying the death it exists to perform.
             if atexit_fast_close(inner, at_exit=True):
                 closed += 1
-                _release_owner(client, inner)
+                _release_owner(client, inner, sock_before)
                 continue
         except Exception:
             pass  # probe/gating failure -> fall through to the normal close
@@ -1055,7 +1076,7 @@ def close_embedded_clients() -> int:
                 t_close()
             except Exception:
                 pass  # teardown context: never raise
-            _release_owner(client, inner)
+            _release_owner(client, inner, sock_before)
             closed += 1
             continue
         cleanup = getattr(client, "_cleanup", None)
@@ -1068,24 +1089,25 @@ def close_embedded_clients() -> int:
             # `_cleanup` aborted must not re-run it from `__del__`.
             _neutralize_redislite_cleanup(inner)
             closed += 1
-        _release_owner(client, inner)
+        _release_owner(client, inner, sock_before)
     return closed
 
 
-def _release_owner(client, inner) -> None:
+def _release_owner(client, inner, sock: str | None = None) -> None:
     """#3599: release a client's owner-record claim (never raises).
 
     Prefers the guarded wrapper's idempotent ``_t_release_owner`` (which
     also handles the refcount when one process holds several clients on a
     shared server); a raw redislite client has no such method and falls
-    back to a direct ``forget_owner``.
+    back to a direct ``forget_owner`` on ``sock`` (the caller-captured path,
+    taken BEFORE teardown nulls ``socket_file``) or its own socket path.
     """
     try:
         release = getattr(client, "_t_release_owner", None)
         if release is not None:
             release()
             return
-        forget_owner(owner_socket_of(inner) if inner is not None else None)
+        forget_owner(sock if sock is not None else owner_socket_of(inner))
     except Exception:  # teardown context: never raise
         pass
 
@@ -1240,8 +1262,22 @@ def owner_socket_of(client) -> str | None:
     client at ``.client``) and a raw redislite client (which owns
     ``socket_file`` directly). Host/port (server-mode) constructions have no
     ``socket_file`` and correctly yield None — there is no child to reap.
+
+    #4487 review: the client's OWN ``.socket_file`` is read FIRST. An embedded
+    redislite ``Redis`` exposes ``.client`` as a BOUND METHOD (its
+    self-constructing clone helper), so the old
+    ``getattr(client, "client", None) or client`` resolved a raw client's
+    inner to that method, found no ``socket_file`` there, and returned None —
+    silently breaking every RELEASE fallback for raw clients (the record the
+    #4487 patch writes was then never released). A callable ``.client`` is
+    never an inner client.
     """
-    inner = getattr(client, "client", None) or client
+    sock = getattr(client, "socket_file", None)
+    if isinstance(sock, str) and sock:
+        return sock
+    inner = getattr(client, "client", None)
+    if inner is None or callable(inner):
+        return None
     sock = getattr(inner, "socket_file", None)
     return sock if isinstance(sock, str) and sock else None
 
@@ -1326,3 +1362,83 @@ def forget_owner(socket_file: str | None) -> bool:
     with contextlib.suppress(OSError):
         os.rmdir(d)
     return removed
+
+
+# ── #4487: instrument EVERY redislite construction, not just the guarded one ─
+#
+# `record_owner` is called from the guarded `tortoise.FalkorDB` constructor
+# (tortoise/__init__.py), so a spawn that goes through that choke-point is
+# instrumented. But a RAW `redislite.falkordb_client.FalkorDB(...)` or
+# `redislite.client.Redis(...)` bypasses the guard entirely and writes NO
+# owner record. Measured 2026-09-21 on this host: an active lane's raw
+# reproduction script left a live, detached redis-server with no
+# `.tortoise-owners` dir — exactly the class the reaper cannot confirm under
+# `--only-safe` while any suite is live (#4487).
+#
+# Patch redislite's OWN constructor seam — `RedisMixin.__init__`, the base of
+# both `Redis` and `FalkorDB` — so EVERY construction in a process that
+# imports tortoise records an owner, including raw ones. This mirrors the
+# existing #3653 `_cleanup` patch above: installed once at import, additive,
+# and it leaves a process that never imports tortoise untouched (the
+# documented "non-tortoise users unaffected" boundary is preserved — the
+# patch is a property of importing tortoise, not of importing redislite).
+#
+# The guarded constructor's own `record_owner` call is REMOVED in the same
+# change: `record_owner` is refcounted per (process, socket path), so two
+# writers for one client would make close() release only one claim and leave
+# the record (with a LIVE pid) pinning the server forever — a fail-closed
+# leak the reaper could never clear. ONE writer only.
+_ORIGINAL_REDISLITE_INIT = None
+
+
+def _install_owner_record_patch() -> None:
+    """#4487: record an owner for every redislite construction (once).
+
+    Wraps `RedisMixin.__init__` so that a client constructed by ANY caller —
+    guarded or raw — records this process as an owner of the server it just
+    started. Runs AFTER the original init (redislite sets `socket_file`
+    inside it); a construction that aborts mid-init records nothing, matching
+    the guard's previous behaviour. Never raises — a `record_owner` I/O
+    failure must never break client construction.
+    """
+    global _ORIGINAL_REDISLITE_INIT
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to patch
+        return
+    if getattr(RedisMixin, "_tortoise_owner_record_patch", False):
+        return
+    original = RedisMixin.__init__
+    _ORIGINAL_REDISLITE_INIT = original
+
+    def _init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        # `record_owner` / `owner_socket_of` are defined above and resolved
+        # at call time; the guard keeps construction unconditional.
+        #
+        # Resolve the socket from the object we are patching FIRST: this
+        # seam fires on the object that OWNS the server (redislite's `Redis`,
+        # including the inner client a `FalkorDB` wrapper builds), whose own
+        # `.socket_file` is authoritative. `owner_socket_of` is the fallback
+        # for any wrapper shape — it is NOT the primary read here because an
+        # inner embedded `Redis` carries its own `.client` attribute, and
+        # `owner_socket_of`'s `getattr(client, 'client', ...)` would then
+        # follow that to a client with no `socket_file` and wrongly report
+        # None (measured: the first cut of this patch wrote no record).
+        try:
+            sock = getattr(self, "socket_file", None)
+            if not (isinstance(sock, str) and sock):
+                sock = owner_socket_of(self)
+            record_owner(sock)
+        except Exception:
+            pass
+
+    RedisMixin.__init__ = _init
+    RedisMixin._tortoise_owner_record_patch = True
+
+
+# Installed at import, at the END of the module so `record_owner` and
+# `owner_socket_of` are defined first. `tortoise/__init__.py` imports this
+# module before it defines the guarded `FalkorDB`, so the patch is always in
+# place before any tortoise construction.
+_install_owner_record_patch()
