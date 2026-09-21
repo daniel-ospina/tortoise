@@ -59,7 +59,7 @@ def test_points_cap_fails_closed_402(api, tenant_factory):
     the cap 402 (fail-closed quota) — never a silent over-write."""
     t = tenant_factory("smallcap")
     h = {"Authorization": f"Bearer {t['api_key']}"}
-    bump_team_tier(api, t["team_id"], "e2e_small")
+    bump_team_tier(api, t["org_id"], "e2e_small")
     r = api.get("/v1/team", headers=h)
     assert r.status == 200 and r.json()["tier"] == "e2e_small", r.text()
 

@@ -482,7 +482,7 @@ class TestCanonicalizerRootPath:
     @pytest.mark.parametrize("path", [
         "/mcp/../other", "/mcp/..;/other", "//mcp", "/mcp//",
         "/mcp%2f", "/mcp%2F", "/Mcp", "/mcpfoo", "/mcp/x",
-        "/mcp/teams/t1", "/MCP",
+        "/mcp/organizations/t1", "/MCP",
     ])
     def test_bypass_family_is_not_rewritten(self, path):
         """Traversal / shadowing family, driven through a RAW ASGI scope.

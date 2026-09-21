@@ -947,10 +947,12 @@ def test_complete_wires_scaled_deadline(monkeypatch):
             return '{"ok": true}'
 
     def fake_call_once(model, system, user, *, deadline_s, max_tokens, stats):
-        # #2134 Task 0: _call_once now returns the 4-tuple
-        # (resp, finish, prompt_tokens, completion_tokens)
+        # #3359: _call_once returns the 7-tuple
+        # (resp, finish, prompt_tokens, completion_tokens,
+        #  cost_usd, cost_provider, cost_model) — the cost driver rides the
+        # return value, not the caller's stats dict.
         seen["deadline_s"], seen["max_tokens"] = deadline_s, max_tokens
-        return ("ok", model.last_finish_reason, 0, 0)
+        return ("ok", model.last_finish_reason, 0, 0, None, None, None)
 
     monkeypatch.setattr(v2, "_call_once", fake_call_once)
     assert v2._complete(_Rec(), "s", "u", max_tokens=16000) == "ok"

@@ -367,6 +367,36 @@ def test_fingerprint_membership_retry_knobs(tmp_path):
         runner._load_checkpoint(str(cp3), fp)
 
 
+def test_fingerprint_membership_session_workers(tmp_path):
+    """#1744 (review P1): ``session_workers`` is ALWAYS a fingerprint member —
+    since the parallel path went live it changes graph content (the batched
+    phase order drops cross-session NOOP/DELETE/supersession consolidation),
+    so a sw=1 checkpoint must refuse a sw>1 resume (and a pre-#1744
+    checkpoint with no key refuses under the new defaults)."""
+    base = dict(reader_model="mock-reader", judge_model="mock-judge",
+                ks=(5,), top_k=5, split="s", ingest_mode="v2",
+                extractor_model=None, max_retries=3,
+                dataset_fingerprint="x", rerank_config={})
+    fp1 = runner._build_fingerprint(**base)
+    assert fp1["session_workers"] == 1  # ALWAYS present (defaults to 1)
+
+    fp4 = runner._build_fingerprint(**base, session_workers=4)
+    assert fp4["session_workers"] == 4
+    cp4 = tmp_path / "cp4.json"
+    runner._save_checkpoint(str(cp4), [], [], fp4)
+    with pytest.raises(runner.CheckpointStaleError) as ei:
+        runner._load_checkpoint(str(cp4), fp1)
+    assert "session_workers" in str(ei.value)
+
+    # a pre-#1744 checkpoint carries NO key → refuses on resume
+    legacy = dict(fp1)
+    legacy.pop("session_workers")
+    cp_legacy = tmp_path / "cp_legacy.json"
+    runner._save_checkpoint(str(cp_legacy), [], [], legacy)
+    with pytest.raises(runner.CheckpointStaleError):
+        runner._load_checkpoint(str(cp_legacy), fp1)
+
+
 # ── Task 1 test (c)/(k): write-stage retry recovery with the ordering pin ──
 
 

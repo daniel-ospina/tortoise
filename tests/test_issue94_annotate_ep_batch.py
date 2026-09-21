@@ -172,10 +172,11 @@ class TestAnnotateEpBatchIssue94:
         assert claim_ep.confidence_mean == 0.5
         assert claim_ep.contention == 1.0
 
-    def test_prior_baseline_is_a_measured_belief(self, sdk):
-        """A persisted prior (set_point_baseline → ep_alpha/ep_beta) IS
-        measurement: has_ep=True and confidence_mean = the prior mean —
-        the same number sdk.get_confidence returns pre-EP."""
+    def test_prior_baseline_is_prior_only_not_measured(self, sdk):
+        """A persisted baseline prior (set_point_baseline → ep_alpha/ep_beta)
+        is NOT EP measurement (#3276): pre-EP it reads has_ep=False /
+        measured=False / baseline=True, while confidence_mean stays the prior
+        mean — the same number sdk.get_confidence returns pre-EP."""
         claim = sdk.create_point("statement", "A baseline-backed claim")
         claim_id = claim["id"]
 
@@ -187,7 +188,9 @@ class TestAnnotateEpBatchIssue94:
 
         result = annotate_ep_batch(graph, [claim_id])
         ep = result[claim_id]
-        assert ep.has_ep is True, "a persisted prior must count as has_ep"
+        # #3276: a declared baseline is prior-only until EP actually runs.
+        assert ep.has_ep is False, "a persisted prior alone is not measurement"
+        assert ep.measured is False and ep.baseline is True, ep
         assert ep.confidence_mean == pytest.approx(18.0 / 20.0, abs=1e-4)
         # The EP read (TortoiseEP.compute_confidence — the read under
         # sdk.get_confidence) agrees with the search annotation.

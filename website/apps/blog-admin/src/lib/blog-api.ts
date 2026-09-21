@@ -315,12 +315,14 @@ export async function purgePostCache(slug: string): Promise<void> {
   if (existing) return existing;
   const run = (async () => {
     try {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
-      if (!token) return;
+      // #3501/#4171: no token to attach — the HttpOnly `__Host-session` cookie
+      // rides along on this same-origin request, and the app-origin /blog/api
+      // proxy attaches the server-minted credential upstream. Attaching a bearer
+      // token here was the exposure.
       await fetch('/blog/api/purge', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug }),
       });
     } catch {
@@ -334,7 +336,8 @@ export async function purgePostCache(slug: string): Promise<void> {
 }
 
 // ── AI generation (#1861 generate-seo, #1863 generate-cover) ─────────────
-// Server-side only (admin-gated); the editor sends the user's access token.
+// Server-side only (admin-gated /blog/api/*, reached through the app-origin
+// same-origin proxy #4171 — the browser never holds the credential).
 // Fail-open for the caller: generation errors surface as thrown errors the
 // editor catches (toast) — generation never blocks save.
 
@@ -355,12 +358,10 @@ export async function generateSeo(input: {
   body: string;
   tags: string[];
 }): Promise<GenerateSeoResult> {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
-  if (!token) throw new Error('No session');
   const res = await fetch('/blog/api/generate-seo', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -383,12 +384,10 @@ export async function generateCover(input: {
   mode: 'founder' | 'abstract';
   slug?: string;
 }): Promise<GenerateCoverResult> {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
-  if (!token) throw new Error('No session');
   const res = await fetch('/blog/api/generate-cover', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
