@@ -3447,11 +3447,21 @@ _adapter.register_all(TOOL_REGISTRY, {
 
 def _retired_warning(spec: Any) -> dict[str, Any]:
     """The machine-readable warning carried on the result and on the tool itself."""
+    # The declared `sdk_method` is published only when it actually resolves. Five
+    # registry entries declare a binding that does not exist (the #3838 drift), and
+    # the generated doc marks them `~~method~~ (no such method)`; the runtime warning
+    # is a machine-readable payload, so it must not assert as fact what the doc
+    # calls out as a false declaration.
+    from tortoise.sdk import TortoiseSDK
+
+    declared = spec.sdk_method or None
+    resolved = declared if declared and hasattr(TortoiseSDK, declared) else None
     return {
         "name": spec.name,
         "retired": True,
         "use_instead": spec.retired_use_instead,
-        "sdk_method": spec.sdk_method,
+        "sdk_method": resolved,
+        "sdk_method_exists": resolved is not None,
         "message": (
             f"RETIRED TOOL: `{spec.name}` has been retired from the Tortoise MCP "
             f"surface. It still answers, but it is no longer advertised. Call "

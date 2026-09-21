@@ -195,11 +195,14 @@ def derive_class(name: str, callers: set[str], agent_reachable: bool) -> str:
 # row field. Completeness of the cluster set is a human review step, not a lint
 # check — the lint checks properties OVER the declared set.
 SEED_CLUSTERS: list[tuple[str, list[str]]] = [
-    # `tortoise_get`'s own description names what it consolidates: "get_point /
-    # get_entity / get_operator / get_events / get_session / get_governance". The
-    # first cut of this seeder listed only four of the six and left the other two
-    # to be culled as orphans — caught in review of the recommendations (#3863).
-    ("fetch-by-id", ["tortoise_get", "tortoise_get_point", "tortoise_get_operator", "tortoise_get_entity",
+    # `tortoise_get_entity` is the CANONICAL fetch-by-id tool — an owner decision in
+    # `docs/product/canonical-mcp-tools.md` (approved, approval_pr 4120), which rules
+    # that `tortoise_get_entity` must not be retired and that `tortoise_get` retires
+    # into it instead. The canonical member is the first listed, so it is listed first
+    # here; the five per-type getters and `tortoise_get` are the names that fold in.
+    # (An earlier cut seeded the cluster with `tortoise_get` first; that put the
+    # canonical flag on the name the decision retires.)
+    ("fetch-by-id", ["tortoise_get_entity", "tortoise_get", "tortoise_get_point", "tortoise_get_operator",
                      "tortoise_get_events", "tortoise_get_session", "tortoise_get_governance"]),
     ("create", ["tortoise_create_entity", "tortoise_create_subject", "tortoise_create_object", "tortoise_create_event", "tortoise_create_document"]),
     ("delete", ["tortoise_delete", "tortoise_delete_point", "tortoise_delete_entity"]),
@@ -543,6 +546,16 @@ def cmd_cut(args: argparse.Namespace) -> int:
         # AC11/§6.1 item 4(i)/§6.3 declare this union; this is what makes it true.
         agent_reachable = reached or bool({"mcp-handler", "cli"} & set(reached_paths))
         cls = derive_class(name, callers.get(name, set()), agent_reachable)
+        # `bound_by` now includes RETIRED names (marked `(retired)`), so the count
+        # cannot be read as advertised-surface usage: a retired name is explicitly NOT
+        # a registered tool. Splitting the count keeps the column honest — a method
+        # reached only by retired names says so instead of claiming registered
+        # reachers it does not have.
+        reachers = sorted(bound_by[name])
+        n_retired = sum(1 for r in reachers if r.endswith("(retired)"))
+        reach_phrase = f"{len(reachers) - n_retired} registered tool(s)"
+        if n_retired:
+            reach_phrase += f" and {n_retired} retired name(s)"
         sdk_out.append(
             {
                 "name": f"sdk:{name}",
@@ -558,7 +571,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
                 "canonical": None,
                 "job": f"Public SDK method TortoiseSDK.{name}.",
                 "dependency": (
-                    f"reached by {len(bound_by[name])} registered tool(s): {', '.join(sorted(bound_by[name]))}"
+                    f"reached by {reach_phrase}: {', '.join(reachers)}"
                     if reached
                     else f"reached by no registered MCP tool; caller categories: {', '.join(reached_paths) or 'none outside tests'}"
                 ),
@@ -571,7 +584,7 @@ def cmd_cut(args: argparse.Namespace) -> int:
                 # session_index_health, volunteer_context) — the row said "callers: cli" while
                 # the reason denied it. Never assert a negative the caller scan did not verify.
                 "reason": (
-                    f"reached by {len(bound_by[name])} registered tool(s)"
+                    f"reached by {reach_phrase}"
                     if reached
                     else (
                         f"no MCP tool binds it; callers: {', '.join(reached_paths)}"
@@ -642,6 +655,10 @@ def cmd_cut(args: argparse.Namespace) -> int:
             "use_instead": e.retired_use_instead,
             "sdk_method": getattr(e, "sdk_method", None) or None,
             "http_policy": bool(getattr(e, "http_policy", False)),
+            # Carried so `approval_status: approved` has a place to record the
+            # decision for a retirement, exactly as it does for a live row: a
+            # retirement shrinks the surface and needs the same human approval.
+            "approval": None,
         }
         for e in RETIRED_TOOL_REGISTRY
     ]

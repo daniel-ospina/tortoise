@@ -141,8 +141,23 @@ NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
 # Writer-annotated tools that are NOT in WRITE_TOOL_NAMES because they are
 # HTTP-excluded (operator-only) and self-guard with _http_excluded_error().
 NON_HTTP_WRITER_TOOLS: frozenset[str] = frozenset({
-    "tortoise_backfill_v25", "tortoise_dream", "tortoise_org_create",
+    "tortoise_backfill_v25", "tortoise_dream", "tortoise_index_sessions",
+    "tortoise_ingest_corpus", "tortoise_org_create",
 })
+
+
+def served_registry() -> list:
+    """Every entry the server can RESOLVE — live plus retired (#3883).
+
+    A retired name is not advertised, but it is still served (through the
+    warning shim) and still callable by name, so the capability guards must
+    cover it: an HTTP-excluded retired writer is exposed by exactly the same
+    path as a live one, and exempting it from the guard removes the only
+    tripwire on the self-guard that keeps it off the tenant surface.
+    """
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
+    return [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
 
 # Filesystem-walk API method names.  A call to one of these (on a non-projection
 # receiver) marks the operation as reaching a filesystem path.

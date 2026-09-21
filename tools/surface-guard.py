@@ -563,7 +563,13 @@ def main(argv: list[str]) -> int:
             "surface has been approved, so it must not pass."
         )
     if status == "approved":
-        for row in rows:
+        # A RETIREMENT is a surface change too (#3883/#3863): it SHRINKS the
+        # agent-facing surface, and `retired:` is not part of `rows` — so an
+        # approval loop over `rows` alone left every retired name exempt from
+        # the one human-approval control (the same exempt-class defect an
+        # earlier round fixed for the `sdk:` rows).
+        retired_rows = doc.get("retired") or []
+        for row in [*rows, *retired_rows]:
             if not isinstance(row, dict):
                 problems.append(f"malformed row (not a mapping): {row!r}")
                 continue

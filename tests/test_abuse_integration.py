@@ -728,9 +728,11 @@ class TestIntrospection:
         be write-classified (or a self-guarding HTTP-excluded tool).  The old
         hardcoded destructive set could not fire for a merged/renamed tool, and
         the annotation-derived set went empty when a merge picked read-only."""
-        from tool_surface_capabilities import write_classification_violations  # noqa: I001
-        from tortoise.tool_registry import TOOL_REGISTRY
-        violations = write_classification_violations(TOOL_REGISTRY)
+        from tool_surface_capabilities import (
+            served_registry,
+            write_classification_violations,
+        )
+        violations = write_classification_violations(served_registry())
         assert violations == [], (
             "a graphs:read-only MCP key could reach a write: " + "; ".join(violations))
 

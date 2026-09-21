@@ -1,6 +1,6 @@
 manifest_version: 1
 issue: 3863
-cut_at_commit: 3be34cdd103eb06e0010867a1e6338dd1f8f6e07
+cut_at_commit: c01ad93b5
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -23,70 +23,86 @@ counts:
     link: 4
     operate: 7
 retired:
-- name: tortoise_get_entity
-  use_instead: tortoise_get(id, type="entity")
-  sdk_method: get_entity
+- name: tortoise_get
+  use_instead: tortoise_get_entity(id, type=...)
+  sdk_method: null
   http_policy: true
+  approval: null
 - name: tortoise_get_events
-  use_instead: tortoise_get(None, type="events")
+  use_instead: tortoise_get_entity(None, type="events")
   sdk_method: get_events
   http_policy: true
+  approval: null
 - name: tortoise_get_governance
-  use_instead: tortoise_get(id, type="governance")
+  use_instead: tortoise_get_entity(id, type="governance")
   sdk_method: get_owned_entities
   http_policy: true
+  approval: null
 - name: tortoise_get_operator
-  use_instead: tortoise_get(id, type="operator")
+  use_instead: tortoise_get_entity(id, type="operator")
   sdk_method: get_point
   http_policy: true
+  approval: null
 - name: tortoise_get_point
-  use_instead: tortoise_get(id, type="point")
+  use_instead: tortoise_get_entity(id, type="point")
   sdk_method: get_point
   http_policy: true
+  approval: null
 - name: tortoise_health
   use_instead: tortoise_overview(section="health")
   sdk_method: health
   http_policy: true
+  approval: null
 - name: tortoise_index_sessions
   use_instead: tortoise_index_files(directory)
   sdk_method: index_sessions
   http_policy: false
+  approval: null
 - name: tortoise_ingest_corpus
   use_instead: tortoise_index_files(directory)
   sdk_method: ingest_corpus
   http_policy: false
+  approval: null
 - name: tortoise_list_pointkinds
   use_instead: tortoise_overview(section="pointkinds")
   sdk_method: list_pointkinds
   http_policy: true
+  approval: null
 - name: tortoise_list_sources
   use_instead: tortoise_overview(section="sources")
   sdk_method: list_sources
   http_policy: true
+  approval: null
 - name: tortoise_list_tags
   use_instead: tortoise_overview(section="tags")
   sdk_method: list_tags
   http_policy: true
+  approval: null
 - name: tortoise_paginated_query
   use_instead: tortoise_query(offset=..., limit=...)
   sdk_method: paginated_query
   http_policy: true
+  approval: null
 - name: tortoise_query_points_by_tag
   use_instead: tortoise_query(tag=...)
   sdk_method: query_points_by_tag
   http_policy: true
+  approval: null
 - name: tortoise_stale
   use_instead: tortoise_overview(section="stale")
   sdk_method: stale_points
   http_policy: true
+  approval: null
 - name: tortoise_status
   use_instead: tortoise_overview(section="status")
   sdk_method: status
   http_policy: true
+  approval: null
 - name: tortoise_taxonomy
   use_instead: tortoise_overview(section="taxonomy")
   sdk_method: taxonomy
   http_policy: true
+  approval: null
 rows:
 - name: tortoise_query
   served_from: tortoise/mcp_server.py:7dc2585e3d3af508
@@ -795,32 +811,30 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_get
-  served_from: tortoise/mcp_server.py:6efd10a1ed4b5f91
+- name: tortoise_get_entity
+  served_from: tortoise/mcp_server.py:226a2c6087c5beb3
   family: graph
   family_rank: 2
   served: http
-  sdk_method: ''
+  sdk_method: get_entity
   group_source: mapped
   keyword: fetch
   keyword_rank: 1
   cluster: fetch-by-id
   canonical: true
-  job: 'Fetch a node by id — consolidates get_point/get_entity/get_operator/get_events/get_session/get_governance.
-    type: point|operator|entity|event|session|events|governance. Omitted type → auto-detect by id lookup (id|eventId|url,
-    then session_id/sessionId).'
-  dependency: 'handler-served: no declared SDK link'
+  job: Get any entity by ID, eventId, or url.
+  dependency: declares TortoiseSDK.get_entity (resolves)
   lifecycle: active
-  used_by: never called, tooling, skill-docs, docs
+  used_by: never called, tooling, docs
   recommendation: keep
   basis: observed
-  reason: not called over MCP, but used by tooling, skill-docs — removing it would break that
+  reason: not called over MCP, but used by tooling — removing it would break that
   recommended_family: graph
   proposed: true
   exemption: false
   approval: null
   class: agent-reachable
-  cluster_canonical: tortoise_get
+  cluster_canonical: tortoise_get_entity
   cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
     approval
 - name: tortoise_create_entity
@@ -1477,14 +1491,14 @@ rows:
   used_by: never called, tooling, docs
   recommendation: merge
   basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
+  reason: '`tortoise_get_entity` in the same group already does this job (its own description names what it consolidates),
     so this is one name too many — the caller keeps working either way'
   recommended_family: graph
   proposed: true
   exemption: false
   approval: null
   class: agent-reachable
-  cluster_canonical: tortoise_get
+  cluster_canonical: tortoise_get_entity
   cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
     approval
 - name: tortoise_search_sessions
@@ -1543,6 +1557,7 @@ rows:
   # Genuine served-surface change (#4009): the ERR_QUOTA 402-mapping added by
   # fced38374 (#3665), carried by PR #3780 — 03a29c8a37a39663 -> 20fc9c5db96c8fd3.
   # A line shift is not a fingerprint change since #4170, so no line-only row exists.
+  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
   approval: '#3780 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
@@ -3388,7 +3403,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_entity.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_entity (retired)'
+  dependency: 'reached by 1 registered tool(s): tortoise_get_entity'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -3410,11 +3425,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_events.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_events (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_events (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3454,11 +3469,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_owned_entities.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_governance (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_get_governance (retired)'
   lifecycle: active
   used_by: docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3476,11 +3491,12 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_point.
-  dependency: 'reached by 2 registered tool(s): tortoise_get_operator (retired), tortoise_get_point (retired)'
+  dependency: 'reached by 0 registered tool(s) and 2 retired name(s): tortoise_get_operator (retired), tortoise_get_point
+    (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
-  reason: reached by 2 registered tool(s)
+  reason: reached by 0 registered tool(s) and 2 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3784,11 +3800,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.index_sessions.
-  dependency: 'reached by 1 registered tool(s): tortoise_index_sessions (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_index_sessions (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3828,11 +3844,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.ingest_corpus.
-  dependency: 'reached by 1 registered tool(s): tortoise_ingest_corpus (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_ingest_corpus (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4180,11 +4196,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_pointkinds.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_pointkinds (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_pointkinds (retired)'
   lifecycle: active
   used_by: skill-docs, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4224,11 +4240,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_sources.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_sources (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_sources (retired)'
   lifecycle: active
   used_by: skill-docs, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4246,11 +4262,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_tags.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_tags (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_tags (retired)'
   lifecycle: active
   used_by: docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4598,11 +4614,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.paginated_query.
-  dependency: 'reached by 1 registered tool(s): tortoise_paginated_query (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_paginated_query (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -4708,11 +4724,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.query_points_by_tag.
-  dependency: 'reached by 1 registered tool(s): tortoise_query_points_by_tag (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_query_points_by_tag (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5126,11 +5142,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.stale_points.
-  dependency: 'reached by 1 registered tool(s): tortoise_stale (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_stale (retired)'
   lifecycle: active
   used_by: docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5148,11 +5164,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.status.
-  dependency: 'reached by 1 registered tool(s): tortoise_status (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_status (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -5280,11 +5296,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.taxonomy.
-  dependency: 'reached by 1 registered tool(s): tortoise_taxonomy (retired)'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_taxonomy (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false

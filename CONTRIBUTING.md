@@ -44,8 +44,10 @@ later), we need a clear license grant from every outside contributor. See the
 ## The MCP tool surface and public SDK methods cannot grow by accident
 
 Adding an entry to `TOOL_REGISTRY` in [`tortoise/tool_registry.py`](tortoise/tool_registry.py) does not
-just register a tool — it **expands what every agent can see**. That surface grew to 99 MCP tools and
-152 public SDK methods without anyone deciding it should, so it is now gated.
+just register a tool — it **expands what every agent can see**. That surface grew to 98 MCP tools and
+150 public SDK methods without anyone deciding it should, so it is now gated. (The #3863 curation then
+retired 16 names; the live surface is 82 MCP tools, and the gate's baseline in
+`config/surface-manifest.yml` records every one of them.)
 
 The gate: **`tools/surface-guard.py`** (CI job `surface-guard`, part of the required `python-ci-gate`)
 compares the live declaration against the approved baseline in

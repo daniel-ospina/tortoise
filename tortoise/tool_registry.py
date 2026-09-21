@@ -1476,12 +1476,20 @@ GROUP_BY_NAME: dict[str, str] = {
 # approved baseline's `retired:` block, and re-cut by a human, exactly as an
 # addition requires approval.
 RETIRED_USE_INSTEAD: dict[str, str] = {
-    # Tier 1 — tortoise_get() already calls the handler; the name is redundant.
-    "tortoise_get_point": 'tortoise_get(id, type="point")',
-    "tortoise_get_entity": 'tortoise_get(id, type="entity")',
-    "tortoise_get_events": 'tortoise_get(None, type="events")',
-    "tortoise_get_operator": 'tortoise_get(id, type="operator")',
-    "tortoise_get_governance": 'tortoise_get(id, type="governance")',
+    # Tier 1 — `tortoise_get_entity` is the canonical fetch-by-id tool; the
+    # per-type getters and `tortoise_get` are redundant names for it.
+    #
+    # ⚠ This direction is an OWNER DECISION, not an implementation preference:
+    # `docs/product/canonical-mcp-tools.md` (approved, approval_pr 4120) rules
+    # that `tortoise_get_entity` must NOT be retired and that the map must
+    # retire `tortoise_get` in its place. Retiring the pair the other way sends
+    # every caller of `get_entity` to a name that is itself retired — a churn
+    # loop — which is why the pointers below name `tortoise_get_entity`.
+    "tortoise_get_point": 'tortoise_get_entity(id, type="point")',
+    "tortoise_get": 'tortoise_get_entity(id, type=...)',
+    "tortoise_get_events": 'tortoise_get_entity(None, type="events")',
+    "tortoise_get_operator": 'tortoise_get_entity(id, type="operator")',
+    "tortoise_get_governance": 'tortoise_get_entity(id, type="governance")',
     # Tier 1 — tortoise_overview() already calls the handler; the name is redundant.
     "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',
     "tortoise_list_tags": 'tortoise_overview(section="tags")',

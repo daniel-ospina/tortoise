@@ -101,10 +101,12 @@ class TestRegistryEquivalence:
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
         assert "tortoise_audit" in names, "Missing #348 tortoise_audit tool"
         # W1–W4 consolidated tools (#888): recall (W1), update/delete/
-        # operator_action/create_edge (W2), overview/get (W3), ingest (W4)
+        # operator_action/create_edge (W2), overview/get_entity (W3), ingest (W4).
+        # W3's fetch tool is `tortoise_get_entity` — `tortoise_get` retires into it
+        # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
         w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
                             "tortoise_operator_action", "tortoise_create_edge",
-                            "tortoise_overview", "tortoise_get", "tortoise_ingest"}
+                            "tortoise_overview", "tortoise_get_entity", "tortoise_ingest"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
         # #454-era surface tools covered by this PR's tests
@@ -548,16 +550,20 @@ class TestCapabilityModel:
         assert "compute_confidence" in handler_operations("tortoise_compute_confidence").operations
 
     def test_operator_only_and_filesystem_capabilities_are_http_excluded(self):
-        from tool_surface_capabilities import privileged_exposure_violations
+        from tool_surface_capabilities import (
+            privileged_exposure_violations,
+            served_registry,
+        )
 
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert privileged_exposure_violations(TOOL_REGISTRY) == []
+        assert privileged_exposure_violations(served_registry()) == []
 
     def test_write_capability_is_classified(self):
-        from tool_surface_capabilities import write_classification_violations
+        from tool_surface_capabilities import (
+            served_registry,
+            write_classification_violations,
+        )
 
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert write_classification_violations(TOOL_REGISTRY) == []
+        assert write_classification_violations(served_registry()) == []
 
     def test_bindings_resolve(self):
         from tool_surface_capabilities import binding_resolution_violations
@@ -690,11 +696,13 @@ class TestCapabilityModel:
         assert handler_self_guards("tortoise_probe_helper_guard", _PROBE_SRC)
 
     def test_exemption_set_is_exact(self):
-        """2b: the non-HTTP writer exemption set is exactly NON_HTTP_WRITER_TOOLS."""
-        from tool_surface_capabilities import exemption_set_violations
+        """2b: the non-HTTP writer exemption set is exactly NON_HTTP_WRITER_TOOLS —
+        measured over the SERVED set, retired names included (#3883): a retired
+        writer is still callable by name, so it is not exempt from the guard."""
+        from tool_surface_capabilities import exemption_set_violations, served_registry
 
-        from tortoise.tool_registry import TOOL_REGISTRY, _rw
-        assert exemption_set_violations(TOOL_REGISTRY) == []
+        from tortoise.tool_registry import _rw
+        assert exemption_set_violations(served_registry()) == []
         rogue = _probe("tortoise_rogue_writer", "query", annotations=_rw(),
                        http_policy=False)
         assert exemption_set_violations([rogue])
