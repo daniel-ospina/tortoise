@@ -507,7 +507,8 @@ def test_fingerprint_and_resume_refuse_a_total_cap_change(tmp_path):
     assert done == {} and failures == []
 
     # an arm-OFF fingerprint carries NO cap key at all (the knob is inert —
-    # a pre-knob arm-OFF checkpoint keeps resuming byte-identically)
+    # a checkpoint that already carries the always-present C4 bools keeps
+    # resuming byte-identically; a pre-C4 one is refused by those bools)
     off = _run._build_fingerprint(**dict(base, session_reinjection=False))
     assert "session_reinjection_total_cap" not in off
 

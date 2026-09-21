@@ -1287,8 +1287,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C4 (#2517/#2568, #2513): the source-session
                        # re-injection arm + its guard ablation — ALWAYS
                        # present as resolved bools (the sibling-arm
-                       # convention), so a pre-feature checkpoint refuses
-                       # on resume and an arm/guard flip can never cross.
+                       # convention), so a fingerprint-bearing pre-feature
+                       # checkpoint refuses on resume and an arm/guard flip
+                       # can never cross.
                        session_reinjection: bool = False,
                        session_reinjection_guard: bool = True,
                        # C4 (#2513, delta-review P1): the RESOLVED injection
@@ -1324,10 +1325,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # cross-session NOOP / DELETE / supersession
                        # consolidation records the interleaved sequential
                        # path writes. ALWAYS present (the retry-constant
-                       # precedent): a pre-#1744 checkpoint carries no key,
-                       # so ANY resume under the new defaults refuses via
-                       # CheckpointStaleError (the SAFE direction) instead of
-                       # silently crossing the toggle.
+                       # precedent): a fingerprint-bearing pre-#1744
+                       # checkpoint carries no key, so a resume under the new
+                       # defaults refuses via CheckpointStaleError (the SAFE
+                       # direction) instead of silently crossing the toggle.
                        session_workers: int = 1,
                        # #1786 (R5): the eval's HYBRID-arm retrieval deadline
                        # (ms) — conditional presence (present iff non-default:
@@ -1415,8 +1416,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "judge_rubric_id_hash": _sha16(JUDGE_RUBRIC_ID),
         "rerank": rerank_config,
         # #1786 (P1-1/P1-2): the three retry constants are ALWAYS present —
-        # a deliberate default-fingerprint change so a pre-feature checkpoint
-        # resumed under post-feature DEFAULTS refuses instead of silently
+        # a deliberate default-fingerprint change so a fingerprint-bearing
+        # pre-feature checkpoint resumed under post-feature DEFAULTS refuses
+        # instead of silently
         # changing retry semantics (0 retries → 2 write retries + 1 R2 + 2
         # resumes). ``--retry-failed`` is NOT fingerprinted (a recorded
         # resume-mode, methodology + checkpoint field — Task 2 Step 1).
@@ -1430,9 +1432,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "session_workers": session_workers,
         # C4 (#2517/#2568, #2513): the source-session re-injection arm +
         # its guard ablation — ALWAYS present (the retry-constant
-        # precedent): a pre-feature checkpoint carries no key, so ANY
-        # resume under the new defaults refuses via CheckpointStaleError
-        # (the safe direction) instead of silently crossing the arm; an
+        # precedent): a fingerprint-bearing pre-feature checkpoint carries
+        # no key, so a resume under the new defaults refuses via
+        # CheckpointStaleError (the safe direction) instead of silently
+        # crossing the arm; an
         # arm-ON checkpoint can never be resumed with the arm OFF, nor
         # the guard flipped either way.
         "session_reinjection": session_reinjection,
