@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>License — Tortoise (BUSL-1.1)</title>
-  <meta name="description" content="How the Tortoise software is licensed: source-available under the Business Source License 1.1 (BUSL-1.1), with a $5M revenue Additional Use Grant and conversion to MPL 2.0 after four years.">
+  <title>License — Tortoise (engine BUSL-1.1; client Apache-2.0; skills MIT)</title>
+  <meta name="description" content="How the Tortoise software is licensed per surface: the engine is source-available under the Business Source License 1.1 (BUSL-1.1) with a $5M revenue Additional Use Grant and conversion to MPL 2.0 after four years; the thin client is Apache-2.0; the served skills and installer are MIT.">
   <meta name="theme-color" content="#060b14">
   <link rel="canonical" href="https://tortoise.premiselabs.co/license">
   <style>
@@ -126,25 +126,26 @@
   <div class="wrap">
     <nav class="topbar">
       <a href="/">← Back to product</a>
+      <a href="/blog">Blog</a>
       <span class="host">tortoise.premiselabs.co</span>
     </nav>
 
     <header>
       <p class="doc-type">License</p>
-      <h1>Tortoise License — Business Source License 1.1</h1>
-      <p class="lede">A plain-language explanation of how the Tortoise software is licensed. Tortoise is a source-available project licensed under the Business Source License 1.1 (BUSL-1.1).</p>
+      <h1>Tortoise License — engine BUSL-1.1, client Apache-2.0, skills MIT</h1>
+      <p class="lede">A plain-language explanation of how each part of the Tortoise software is licensed. The engine is source-available under the Business Source License 1.1 (BUSL-1.1); the thin client, the served skills and the installer are permissively licensed.</p>
       <div class="meta">
         <div>
           <span class="label">Last updated</span>
-          <span class="value">2026-08-08</span>
+          <span class="value">2026-09-21</span>
         </div>
         <div>
           <span class="label">Effective date</span>
-          <span class="value">Effective date: 2026-08-08</span>
+          <span class="value">Effective date: 2026-09-21</span>
         </div>
         <div>
           <span class="label">Version</span>
-          <span class="value">1.0</span>
+          <span class="value">1.1</span>
         </div>
       </div>
     </header>
@@ -155,7 +156,35 @@
       </div>
 
       <h2>1. In short</h2>
-      <p>Tortoise is licensed under the <strong>Business Source License 1.1 (BUSL-1.1)</strong>. BUSL-1.1 is <strong>not an open-source license</strong>; it is a source-available license. The source code is public, and you may copy, modify, create derivative works, redistribute, and make <strong>non-production</strong> use of it freely. Production use is free under the Additional Use Grant described below, within its limits.</p>
+      <p><strong>Each part of Tortoise carries the licence that matches how it is consumed.</strong> The <strong>engine</strong> (<code>tortoise-graph</code>) is licensed under the <strong>Business Source License 1.1 (BUSL-1.1)</strong>. BUSL-1.1 is <strong>not an open-source license</strong>; it is a source-available license. Its source code is public, and you may copy, modify, create derivative works, redistribute, and make <strong>non-production</strong> use of it freely. Production use is free under the Additional Use Grant described below, within its limits.</p>
+      <p>The artifacts a consumer <em>copies, vendors, or adapts</em> are permissively licensed instead, so that using them never inherits the engine's terms:</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Artifact</th>
+            <th>Licence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Tortoise engine (<code>tortoise-graph</code>)</th>
+            <td><strong>Business Source License 1.1</strong> (source-available) — the self-hosted/hosted server; see the parameters below</td>
+          </tr>
+          <tr>
+            <th>Thin client (<code>tortoise-client</code>)</th>
+            <td><strong>Apache-2.0</strong> — the network driver you install to connect to the engine</td>
+          </tr>
+          <tr>
+            <th>Agent skills (served consumer surface)</th>
+            <td><strong>MIT License</strong> — the skills served at <code>app.premiselabs.co/skills/</code></td>
+          </tr>
+          <tr>
+            <th>Skills installer (<code>install-tortoise-skills.sh</code>)</th>
+            <td><strong>MIT License</strong> — carried in the script's own header, so a <code>curl … | bash</code> run receives it</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>These permissive surfaces are deliberate. Tortoise's licensing boundary sits at the <strong>network</strong>: a product that only <em>connects</em> to Tortoise is never bound by the engine's licence, and the artifacts it receives are permissively licensed so they can be vendored and adapted freely.</p>
 
       <h2>2. The license parameters</h2>
       <table>
@@ -205,7 +234,14 @@
       <p>On the Change Date — four years after each version of Tortoise is published — that version is made available under the <strong>Mozilla Public License 2.0 (MPL 2.0)</strong>, which is OSI-approved. The Change Date applies separately to each version, so each version converts on its own schedule.</p>
 
       <h2>8. The full license text</h2>
-      <p>The complete, authoritative license text is available at <a href="https://github.com/daniel-ospina/tortoise/blob/main/LICENSE">https://github.com/daniel-ospina/tortoise/blob/main/LICENSE</a>. If you have questions about the license, open an issue at <a href="https://github.com/daniel-ospina/tortoise/issues">https://github.com/daniel-ospina/tortoise/issues</a>.</p>
+      <p>Each licensed work publishes its own authoritative text:</p>
+      <ul>
+        <li><strong>Engine</strong> (Business Source License 1.1) — <a href="https://github.com/daniel-ospina/tortoise/blob/main/LICENSE">github.com/daniel-ospina/tortoise/blob/main/LICENSE</a></li>
+        <li><strong>Thin client</strong> (Apache-2.0) — <a href="https://github.com/daniel-ospina/tortoise/blob/main/client/LICENSE">github.com/daniel-ospina/tortoise/blob/main/client/LICENSE</a></li>
+        <li><strong>Served skills</strong> (MIT License) — <a href="https://app.premiselabs.co/skills/LICENSE">app.premiselabs.co/skills/LICENSE</a></li>
+        <li><strong>Skills installer</strong> (MIT License) — the <code>SPDX-License-Identifier: MIT</code> header and permission notice carried inside <a href="https://app.premiselabs.co/install-tortoise-skills.sh">install-tortoise-skills.sh</a> itself, so a <code>curl … | bash</code> run receives it. It is served alongside <code>skills/LICENSE</code>, but that file covers the skills tree, not the script.</li>
+      </ul>
+      <p>If you have questions about the license, open an issue at <a href="https://github.com/daniel-ospina/tortoise/issues">https://github.com/daniel-ospina/tortoise/issues</a>.</p>
 
       <div class="warn">
         <p><strong>This page is an explanation, not legal advice — the LICENSE file is authoritative.</strong></p>
@@ -227,6 +263,11 @@
             <td>1.0</td>
             <td>2026-08-08</td>
             <td>Initial publication of the license explainer.</td>
+          </tr>
+          <tr>
+            <td>1.1</td>
+            <td>2026-09-21</td>
+            <td>Disclose the permissive surfaces instead of stating BSL-only: the thin client is Apache-2.0 (#526); the served skills and the installer are MIT (#4366, #4398).</td>
           </tr>
         </tbody>
       </table>

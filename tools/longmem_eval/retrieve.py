@@ -1708,6 +1708,7 @@ def retrieve_for_question(
     sr_latency_ms = 0.0
     if reinjection_on and not is_tr and pool:
         from tortoise import session_reinjection as _sr
+
         # MEASUREMENT-ONLY knob (#2513 total-cap sweep). At the shipped turn
         # grain the C5 re-cap does NOT bound injected turn points, so the
         # TOTAL budget is the only volume guard on the injection

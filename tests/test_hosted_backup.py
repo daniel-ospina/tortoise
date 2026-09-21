@@ -259,6 +259,111 @@ def test_empty_graph_dump_restore():
         proj2.close()
 
 
+# ── #3902: the event-log counter survives the backup boundary ────────────
+# Embedded-lane parity for tests/test_restore_seq_3902.py (the docker-lane
+# full-pipeline regression). ``dump_graph`` excludes the :GraphEventMeta
+# label (#1625), so its ``last_seq`` counter must be carried as the top-level
+# ``event_meta`` block — otherwise a restore rebuilds the :GraphEvent log and
+# ``next_seq`` hands out a colliding seq 1.
+
+
+class _GProj:
+    """event_store's next_seq/append_event read only ``proj.g``."""
+
+    def __init__(self, g):
+        self.g = g
+
+
+def _seed_event_log(proj, n: int = 3) -> None:
+    """Emit ``n`` events through the REAL next_seq/append_event path, so
+    ``last_seq`` lands exactly as in production."""
+    from tortoise.event_store import append_event, next_seq
+
+    for i in range(n):
+        seq = next_seq(proj)
+        append_event(proj, seq, "test.event", {"i": i},
+                     f"ev-{i}-{os.urandom(4).hex()}")
+
+
+def test_dump_carries_event_meta_and_restore_preserves_counter():
+    """Acceptance 1 (#3902): a new dump carries the counter and the restored
+    graph continues the seq at max(restored seq) + 1."""
+    from tortoise.event_store import next_seq
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_event_log(proj, 3)
+        dump = dump_graph(proj.g, graph_name="tortoise")
+        assert dump["event_meta"] == {"last_seq": 3, "first_seq": 1}
+        # #1625 stays in force: the counter node is NOT in the node set.
+        assert dump["node_count"] == 3  # the three :GraphEvent nodes only
+        assert all("GraphEventMeta" not in n["labels"] for n in dump["nodes"])
+        proj.close()
+
+        proj2 = _make_proj(tmp, "t2.db")
+        assert restore_graph(proj2.g, dump) == {"nodes": 3, "edges": 0}
+        row = proj2.g.query(
+            "MATCH (m:GraphEventMeta) RETURN m.last_seq, m.first_seq"
+        ).result_set
+        assert row == [[3, 1]]
+        assert next_seq(proj2) == 4  # max(restored seq) + 1, not a colliding 1
+        proj2.close()
+
+
+def test_restore_old_dump_without_event_meta_rederives_counter():
+    """Acceptance 3 (#3902): a pre-fix artifact (no counter) must re-derive
+    the watermark from the restored log. Revert the re-derivation and this
+    returns 1 over a restored log holding seq 1."""
+    from tortoise.event_store import next_seq
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_event_log(proj, 3)
+        dump = dump_graph(proj.g, graph_name="tortoise")
+        dump.pop("event_meta", None)  # simulate every backup written before #3902
+        proj.close()
+
+        proj2 = _make_proj(tmp, "t2.db")
+        restore_graph(proj2.g, dump)
+        seqs = [int(r[0]) for r in proj2.g.query(
+            "MATCH (e:GraphEvent) RETURN e.seq ORDER BY e.seq").result_set]
+        assert seqs == [1, 2, 3]
+        row = proj2.g.query(
+            "MATCH (m:GraphEventMeta) RETURN m.last_seq, m.first_seq"
+        ).result_set
+        assert row == [[3, 1]]
+        assert next_seq(proj2) == 4
+        proj2.close()
+
+
+def test_restore_backup_swap_preserves_counter(monkeypatch):
+    """Acceptance 4 (#3902): the counter written into the temp graph is
+    carried by GRAPH.COPY temp→live, so the LIVE graph continues the seq."""
+    from tortoise.event_store import next_seq
+
+    _set_env_key(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp)
+        _seed_event_log(proj, 3)
+        registry = proj.db.select_graph("registry_tortoise")
+        store = MemoryStorage()
+        manifest = create_backup(
+            proj, registry, store, org_id="team_3902", graph_name="tortoise")
+        dump_key = next(
+            k for k in store.list("backups/team_3902/")
+            if k.endswith("dump.enc")
+        )
+
+        restore_backup(
+            proj.db, registry, store, dump_key,
+            org_id="team_3902", graph_name="tortoise",
+        )
+        live = proj.db.select_graph("tortoise")
+        assert next_seq(_GProj(live)) == 4
+        proj.close()
+        assert manifest["graph_name"] == "tortoise"
+
+
 def test_restore_rejects_bad_format_and_labels():
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
@@ -629,7 +734,7 @@ def test_restore_rejects_unreadable_manifest(monkeypatch):
         proj.close()
 
 
-def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
+def test_restore_verify_count_mismatch_swaps_live_graph(monkeypatch):
     """#1625: verification keys off the AUTHENTICATED payload node LIST, not
     the forgeable plaintext manifest node_count. Forge the manifest's
     node_count (the plaintext a naive verifier would trust) → restore must
@@ -639,6 +744,7 @@ def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
         _seed(proj.g)
+        source_dump = dump_graph(proj.g, graph_name="tortoise")
         registry = proj.db.select_graph("registry_tortoise")
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
@@ -657,11 +763,26 @@ def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         # restore must SUCCEED (verification derives from the authenticated
-        # payload nodes list, not the forgeable manifest node_count)
+        # payload nodes list, not the forgeable manifest node_count) AND must
+        # actually SWAP the live graph — a silent no-op restore would leave
+        # the pre-restore marker in place.
         restore_backup(
             proj.db, registry, store, dump_key,
             org_id="team_x", graph_name="tortoise",
         )
+        # re-select: the projection's graph handle is stale after the swap
+        live = proj.db.select_graph("tortoise")
+        assert live.query(
+            "MATCH (p:Point {id:'pt-x'}) RETURN count(p)"
+        ).result_set[0][0] == 0, "pre-restore marker survived — restore did not swap"
+        live_dump = dump_graph(live, graph_name="tortoise")
+        assert _norm_nodes(live_dump["nodes"]) == _norm_nodes(source_dump["nodes"]), (
+            "restored node set differs from the backed-up payload")
+        # Edge-endpoint preservation — a count-preserving rewire would otherwise
+        # pass the node-set check above (matches the sibling
+        # test_create_backup_list_and_restore_swap).
+        assert _norm_edges(live_dump["edges"], live_dump["nodes"]) == _norm_edges(
+            source_dump["edges"], source_dump["nodes"])
         proj.close()
 
 
@@ -694,7 +815,7 @@ def test_restore_integrity_failure_keeps_live_graph(monkeypatch):
 
 def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
     """Swap failure: live graph deleted, verified temp graph remains recoverable."""
-    from falkordb import Graph
+    import tortoise.hosted_backup as hb
 
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
@@ -706,13 +827,17 @@ def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
         create_backup(proj, registry, store, org_id="team_x", graph_name="tortoise")
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
-        def _boom_copy(self, clone):
-            if clone == "tortoise":  # only the temp→live promotion fails
-                raise RuntimeError("copy boom")
-            return real_copy(self, clone)
+        real_copy = hb._issue_graph_copy
 
-        real_copy = Graph.copy
-        monkeypatch.setattr(Graph, "copy", _boom_copy)
+        def _boom_copy(redis_client, src_name, dst_name):
+            if dst_name == "tortoise":  # only the temp→live promotion fails
+                raise RuntimeError("copy boom")
+            return real_copy(redis_client, src_name, dst_name)
+
+        # #3813: the swap's GRAPH.COPY is now issued through the restore's own
+        # client (its own read bound), so the failpoint lives at that seam
+        # instead of ``falkordb.Graph.copy``.
+        monkeypatch.setattr(hb, "_issue_graph_copy", _boom_copy)
         with pytest.raises(RuntimeError, match="copy boom"):
             restore_backup(
                 proj.db, registry, store, dump_key,

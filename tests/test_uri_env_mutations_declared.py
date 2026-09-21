@@ -118,11 +118,20 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                              r'monkeypatch\.setenv\(\s*$'],  # #2251: URI-mode namespace-derivation envelope tests force the docker branch of _make_sdk/_registry_anchor with a RECORD-ONLY __init__ spy (the setenv IS the point — the (db_path=None, namespace=...) construction contract is pinned without touching a server)
     "test_index_cli.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_index_restore.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
+    "test_issue_4010_sessions_unlimited.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #4010: resolver/clearing unit tests force the embedded lane (db_path-pinned store; the delenv IS the point — no lane leak, monkeypatch auto-undo)
     "test_mcp_client.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_mcp_http.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_mcp_server_auth_modes.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                                           r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # C2 #2111: tenant-mode MCP tests force the registry/embedded lane (delenv IS the point) + #2657 ask-exposure: per-test fresh-URI live probe (setenv IS the test input)
     "test_metering.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #3825: the metering-WINDOW tests force the EMBEDDED registry lane (the
+    # delenv IS the point — the fixture puts a real billing anchor on an org's
+    # `:Team` node and drives the ledger in the same store; a URI redirect
+    # would split the anchor from the ledger and the test would prove nothing
+    # about the writer). The fixture-param monkeypatch auto-restores at
+    # teardown, so no lane leaks into a later docker-lane test.
+    "test_metering_period_window.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_migration_consumers.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_onboarding_integration.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_pack_state.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
@@ -235,7 +244,7 @@ _EXEMPT_FROM_ENV_MUTATION_GUARD = frozenset() | {
     "test_wipe_server.py",
     "test_round_trip_parity.py",
     "test_loopback_predicate_single_source.py",
-    # documented lifecycle carve-outs (Task 9 17-file set)
+    # documented lifecycle carve-outs (Task 9 carve-out set)
     "test_embedded_lifecycle.py",
     "test_embedded_lifecycle_fast_close.py",
     "test_reaper.py",

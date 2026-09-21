@@ -14,6 +14,8 @@ aboutObjects: tortoise-hosted-platform
 
 # Registry/Knowledge-Graph Backup DR — Runbook (#596)
 
+> **Retention/deletion windows:** the single source of truth is `docs/retention-and-deletion.md`. Do not restate a window here — link that document.
+
 > "registry" naming is retained from the registry-era design — the content is
 > **per-team knowledge graphs** (control-plane metadata migrates to Supabase
 > under #669). Since #2313 the sweep covers EVERY active graph of a team
@@ -75,6 +77,33 @@ false on every tier today). The driver cron (`registry-backup-cron.yml`,
 **Achieved freshness is MEASURED, not assumed** (best-practice gap 6d):
 - per-team/per-graph tri-state archive-age vs `BACKUP_STALE_THRESHOLD_MIN` —
   watcher poll → `GET /v1/internal/backups/status` → `per_team` (+ heartbeat);
+  the per-team census is gated by the SAME eligibility predicate the sweep
+  uses (`enumerate_eligible_orgs`: `tier != 'free' AND backup_enabled`), so an
+  org outside it reads `not_eligible`, not `never` — `never` means a backup
+  was OWED and is missing (#3658). On the watcher census, a non-eligible org
+  opens no DR incident (the driver's direct-R2 leg remains eligibility-blind —
+  it lists every `backups/*/` prefix). This holds while eligibility is
+  CONFIRMED: an unconfirmed eligibility read falls back to the last confirmed
+  set and reports `eligible_degraded` on the watcher heartbeat; a first-contact
+  failure fails OPEN (all orgs treated as targets), so a non-eligible org can
+  read `never` until the read recovers. An eligibility read is CREDIBLE only
+  if it names at least one org the watcher actually watches: an empty result,
+  or a set naming no known org (a padded, foreign, or character-iterated id),
+  counts as UNCONFIRMED — none of them can be told apart from a read that
+  answered with nothing, and treating any as confirmed would put every census
+  org in `not_eligible` and resolve the whole DR surface. The cost is the
+  mirror case — an all-free deployment, or a census read that misses the
+  eligible orgs, keeps the gate off (re-alerting the non-eligible tail), which
+  is the safe direction. (Residuals: a persistent eligibility-only read
+  failure can likewise withhold a newly-eligible org's alarm; and see #4315
+  below.) A SEPARATE
+  residual is shared with the sweep itself: `enumerate_eligible_orgs` is a
+  PostgREST row LIST with no pagination, so a silently SHORT read can classify
+  an org that HAS archives as `not_eligible` and close its live incidents (#4315
+  — self-healing on the next complete poll, but the blip suppresses a real alarm
+  and pushes a false resolution). It is NOT covered by the census's
+  `per_team = census ∪ r2_orgs` invariant, because eligibility is checked before
+  the archive read.
 - per-run sweep roll-up (totals/failures/streaks) — `/status` → `last_sweep`;
 - driver direct-R2 DEFAULT-graph age leg (app-down case) — files STALE with
   the measured age in minutes;
@@ -403,7 +432,7 @@ redaction (DSN/header/prefix/quoted/newline-split shapes and the
 `compatible:`/`patch:`/`author:` false-positive guards, `last_sweep`, the purge
 body), self-heal tiers (incl. `SWEEP_NO_COVERAGE`),
 the dual-key delete, the multi-team tab-separated pool, the enabled+stale and
-enabled+unmeasurable cases, and
+enabled+unmeasurable cases, the empty-prefix measured-empty case (#3659), and
 dedup open/closed/404/blip/backfill. (The driver carries the exec bit so the
 harness invokes it directly — a `$(bash script)` command substitution trips the
 agent worktree guard, #1484.)
@@ -417,7 +446,7 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 | Kind | Meaning | Triage |
 |---|---|---|
 | STALE | a graph's newest archive is older than `BACKUP_STALE_THRESHOLD_MIN` (90) — subject `team` (default) or `team:graph` (custom) | Check sweep logs; run the sweep; R2 connectivity |
-| NEVER_BACKED_UP | an active graph exists with no archive yet (custom-graph incidents carry `team:graph`) | Confirm graph is new/empty; if old, investigate |
+| NEVER_BACKED_UP | an ELIGIBLE active graph exists with no archive yet (custom-graph incidents carry `team:graph`); orgs the sweep does not target (`tier=='free'` or `backup_enabled=false`) are `not_eligible` and open nothing when eligibility is CONFIRMED (an unconfirmed read fails open and is flagged `eligible_degraded`) — #3658 | Confirm graph is new/empty; if old, investigate |
 | METADATA_LOST | archives exist but the graph's per-graph state object missing | Re-run sweep (state re-created) |
 | BACKUP_SET_MISSING | state exists but no archives (bulk delete/erroneous prune) | Investigate R2; restore from a retained archive if possible |
 | DRIVER_DOWN | driver heartbeat stale (> 4h) — workflow disabled/dead | Re-enable the workflow; GH 60-day auto-disable |
@@ -433,6 +462,7 @@ Every backup + DR operator (sweep, purge, re-baseline, drill, scheduled drill, a
 | DATA_LOSS_CANDIDATE | a team's node count dropped >50% (or >0→0) | **Manual close only** — verify + re-baseline or restore |
 | P0_GUARD_FAIL | a dump named the wrong graph or was empty — objects deleted | Investigate the sweep; alert auto-consolidates |
 | RESTORE_DRILL_FAILED | the #2317 scheduled monthly drill failed or breached the ≤15-min RTO (subject `global`; detail carries team/archive/duration) | Investigate the drill record (`ops/drills/last.json`); re-drill after fixing the restore path; auto-resolves on the next successful/no-candidates scheduled run |
+| ANALYTICS_SINK_DEGRADED | #3820: the `analytics_events` write sink degraded. Subject-less (platform-level). Detail carries counts + a reason code only — `outcome` (`fallback` = the event is on the local JSONL; `dropped` = it reached no sink at all), `reason` (`fallback_dir_unavailable`/`fallback_append_failed`/`supabase_env_incomplete`), and `fallback`/`dropped`/`supabase`/`unconfigured` counts. Filed on the first `dropped`, or once the degraded streak reaches 3 consecutive writes; resolved by the next 2xx write (after a restart the FIRST 2xx write of the new process resolves the pre-restart incident — the resolve is probed once per process, not gated on the process-local latch). **Not gated on `BACKUP_SWEEP_ENABLED`** (D5a) — it files on a backups-disabled deployment too, and needs only the alert credentials (`DR_ISSUES_PAT` + `GH_REPO` + the R2 dedup seam); with no PAT the counter + WARNING are the residual. D5b's absence half (a sink that silently STOPS emitting) is deferred — it needs a heartbeat this sink does not emit (tracked: #3944) | Treat as a **sink outage, not a DR outage**: check the Fly secrets `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` and the Supabase project status / RLS on `analytics_events`. After the #3820 review, a `fallback` with reason `supabase_env_incomplete` means exactly ONE of the pair is set — #3677's own shape (a URL with the key resolving to `""`); check for a renamed key. `fallback` events are recoverable from `~/.tortoise/analytics_fallback.jsonl` (an ephemeral Fly rootfs — copy it off the machine before the next deploy/replacement). `dropped` events are gone. Cross-check `tortoise_analytics_events_total{outcome=…}` on `/metrics` **where a scrape exists** — in today's production nothing scrapes it, so the incident is the signal (#3820) |
 
 ## Restore / drill
 - **Drill endpoint:** `POST /v1/internal/backups/drill` `{org_id, backup_key}` — internal-key only; restores into `_drill_*` scratch (live-phase binds scratch; registry end-stamp skipped; ≥1h cooldown). Zero production writes — asserted server-side. The archive's key shape names its graph; the target resolves through the ACTIVE-graph seam — **drilling a deleted/quarantined graph's archive is refused (409)** (#2313 tombstone guard, #2304). #2317: every drill records pass/fail + measured restore time (`duration_s` / `rto_s` / `within_rto`) to `ops/drills/last.json` (surfaced on `/status` → `last_drill`) — restore time is measured against the committed ≤15-min RTO, not assumed.
