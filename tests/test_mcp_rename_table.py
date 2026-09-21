@@ -439,7 +439,7 @@ def test_b1_lists_exactly_the_disagreements() -> None:
     # The finding's tracking reference is a LITERAL here, not imported from the
     # generator, so dropping or renumbering it reds. That the issue itself still
     # exists is NOT verifiable offline — see the residual note in the PR body.
-    assert "tortoise #4475" in b1, (
+    assert re.search(r"tortoise #4475\b", b1), (
         "B1 no longer names the tracking issue for the disagreements"
     )
 
@@ -454,12 +454,26 @@ def test_snapshot_provenance_is_pinned() -> None:
     """
     doc = _doc()
     sha = "c01ad93b569e514e94d0d813c0216de9cb746d3b"
-    assert sha in doc, (
-        "the document no longer records the commit the #4031 snapshot was read from"
+    # EXACT, not substring: `"…d3b" in doc` also passes for `…d3baf`, so the pin
+    # would not have named one tree. The ref is `branch @ sha` in the document.
+    m = re.search(r"`([^`]+) @ ([0-9a-f]{40})`", doc)
+    assert m, (
+        "the document no longer records its snapshot as `branch @ sha`"
     )
-    assert "origin/feat/3883-retired-name-warning" in doc, (
-        "the document no longer names the branch the snapshot came from"
+    assert m.group(1) == "origin/feat/3883-retired-name-warning", (
+        f"the snapshot branch is {m.group(1)!r}"
     )
+    assert m.group(2) == sha, (
+        f"the snapshot commit is {m.group(2)!r}, expected {sha!r}"
+    )
+    # The Reproduce block is what a reader runs; nothing read it, so the script name
+    # could be renamed in the generator and the document would instruct a reader to
+    # run a file that does not exist.
+    for cmd in (
+        "uv run python tools/mcp_rename_table.py          # regenerate this file",
+        "uv run python tools/mcp_rename_table.py --check  # verify, non-zero exit on drift",
+    ):
+        assert cmd in doc, f"the Reproduce block no longer contains: {cmd!r}"
 
 
 # ── The generator's failure paths ────────────────────────────────────────────
