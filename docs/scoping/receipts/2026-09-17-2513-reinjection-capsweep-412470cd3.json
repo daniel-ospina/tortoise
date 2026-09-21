@@ -32,7 +32,7 @@
   ],
   "raw_artifacts": {
    "declared_root": "/tmp/lme2513/ms71",
-   "state_at_seal": "GONE \u2014 the directory does not exist, so the generator can no longer read cap{10,15}/<arm>.json and THE CENSUS BELOW CANNOT BE REGENERATED. It is the only surviving record of this census; only the derived summary blocks (each falsifier's `measured`, and `verified_at_seal`) remain recomputable, and only from `results` itself (`--rederive`). /tmp/lme-v2-p100.json (the 100-Q profile whose '53% of misses' figure titles issue #2513) is also gone, so that issue's cited evidence no longer exists on disk either."
+   "state_at_seal": "GONE \u2014 the directory does not exist, so the generator can no longer read cap{10,15}/<arm>.json and THE CENSUS BELOW CANNOT BE REGENERATED. It is the only surviving record of this census; only the derived blocks remain recomputable from `results` itself (`--rederive`): each falsifier's `measured`. `verified_at_seal` is NOT derivable from `results` \u2014 it is a seal-time literal re-emitted verbatim. /tmp/lme-v2-p100.json (the 100-Q profile whose '53% of misses' figure titles issue #2513) is also gone, so that issue's cited evidence no longer exists on disk either."
   },
   "cohort_anchor": "STILL VALID: the cohort file named in `cohort.file` is present and its sha256 still equals `cohort.sha256`, so the gold labels behind the (A)/(B) split remain checkable even though the arm artifacts do not.",
   "still_derivable_from_this_artifact": [

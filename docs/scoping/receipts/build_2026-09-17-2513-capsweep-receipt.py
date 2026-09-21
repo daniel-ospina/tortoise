@@ -15,11 +15,13 @@ Overrides (the defaults are this machine's run-time provenance):
                     checkout must point this at the measured branch
   LME_RECEIPT_DEST  output path (default <LME_WT>/docs/scoping/receipts/...)
 
-`--rederive <receipt.json>` recomputes an existing receipt's derived blocks
-(each falsifier's `measured`, and `verified_at_seal`) from its OWN `results`
-instead of from arm artifacts, and writes it back. The raw artifacts behind
-this receipt are gone, so that is the only way to keep it in agreement with
-this generator.
+`--rederive <receipt.json>` rebuilds an existing receipt from its own recorded
+blocks (its `results`, `run_integrity`, `retrieval_mode` and `cohort`) instead
+of from arm artifacts, and writes it back. Each falsifier `measured` block is
+recomputed from `results`; `verified_at_seal` is re-emitted from this
+generator's seal-time literal (it is NOT derivable from `results`). The raw
+artifacts behind this receipt are gone, so that is the only way to keep it in
+agreement with this generator.
 """
 from __future__ import annotations
 
@@ -105,8 +107,17 @@ def gold_pool_census(qid, ranked_ids):
 
 
 def git(*a):
-    return subprocess.run(["git", "-C", str(WT), *a], capture_output=True,
-                          text=True).stdout.strip()
+    """Run git in the measured worktree, FAILING LOUDLY on a non-zero exit.
+
+    A silent empty stdout here would be written into the receipt's provenance
+    (`branch`, `revision_measured.subject`) as if it were a real value."""
+    r = subprocess.run(["git", "-C", str(WT), *a], capture_output=True,
+                       text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(a)} in {WT} failed rc={r.returncode}: "
+            f"{r.stderr.strip()}")
+    return r.stdout.strip()
 
 
 # SEAL-TIME FACTS — a LITERAL, recorded once when this receipt was sealed
@@ -480,19 +491,23 @@ def rederive(src, dest):
     """Rebuild an EXISTING receipt canonically from its own recorded blocks.
 
     The raw arm artifacts are gone, so a normal run cannot reproduce the
-    census. `results` is the surviving measurement record, though, so the whole
-    receipt — every derived data block AND every prose field — is rebuilt from
-    it by the SAME `build_receipt` a raw run uses. That is what keeps the
-    artifact and the generator from drifting: there is only one producer.
+    census. `results` is the surviving measurement record, though, so the
+    receipt is rebuilt by the SAME `build_receipt` a raw run uses — every
+    derived block from `results`, every prose/static field (and the
+    branch/revision provenance) from the receipt itself or this generator's
+    literals. That keeps the artifact and the generator from drifting: one
+    producer.
     """
     receipt = json.loads(Path(src).read_text())
     caps = receipt.get("results") or {}
     per_q = {f"{cap}_{arm}": block.get("per_question") or {}
              for cap, arms in caps.items() for arm, block in arms.items()}
     retrieval_mode = receipt.get("retrieval_mode") or {}
-    out = build_receipt(caps, per_q, receipt.get("run_integrity") or {},
-                        retrieval_mode, retrieval_mode.get("reader_token_cap"),
-                        receipt.get("cohort") or {})
+    out = build_receipt(
+        caps, per_q, receipt.get("run_integrity") or {}, retrieval_mode,
+        retrieval_mode.get("reader_token_cap"), receipt.get("cohort") or {},
+        {"branch": receipt.get("branch"),
+         "revision_measured": receipt.get("revision_measured")})
     write_receipt(out, dest)
 
 
@@ -542,8 +557,28 @@ def load_raw_measurement():
             method.get("context_token_cap"))
 
 
+def provenance_from_git():
+    """The branch/revision provenance a RAW run records, read from the measured
+    worktree (WT). `--rederive` carries the receipt's recorded values through
+    instead, so it never needs WT to exist and can never rewrite provenance
+    from a different checkout."""
+    return {
+        "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "revision_measured": {
+            "sha": SHA,
+            "subject": git("log", "-1", "--format=%s", SHA),
+            "tree": "clean at launch",
+            "verified_by": ("tools/longmem_eval/guard_measured_revision.py "
+                            f"--rev {SHA} --paths tortoise/ tools/ -> rc=0 after "
+                            "removing 88 pre-existing __pycache__ byte-caches "
+                            "(guard class 16, #3712); all runs launched with "
+                            "-B + PYTHONDONTWRITEBYTECODE=1"),
+        },
+    }
+
+
 def build_receipt(caps, per_q, run_integrity, retrieval_mode, token_cap,
-                  cohort_block):
+                  cohort_block, provenance):
     """Assemble the WHOLE receipt from the measurement-derived `caps`/`per_q`
     plus the (raw- or receipt-sourced) integrity/methodology/cohort blocks.
 
@@ -598,23 +633,14 @@ def build_receipt(caps, per_q, run_integrity, retrieval_mode, token_cap,
         "kind": ("retrieval-only re-measurement of the C4 re-injection arm at "
                  "POINTKIND='event' turn grain over the WHOLE multi-session "
                  "class of the s[150:250] tail, plus a TOTAL-BUDGET cap sweep"),
-        "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
-        "revision_measured": {
-            "sha": SHA,
-            "subject": git("log", "-1", "--format=%s", SHA),
-            "tree": "clean at launch",
-            "verified_by": ("tools/longmem_eval/guard_measured_revision.py "
-                            f"--rev {SHA} --paths tortoise/ tools/ -> rc=0 after "
-                            "removing 88 pre-existing __pycache__ byte-caches "
-                            "(guard class 16, #3712); all runs launched with "
-                            "-B + PYTHONDONTWRITEBYTECODE=1"),
-        },
+        "branch": provenance.get("branch"),
+        "revision_measured": provenance.get("revision_measured"),
         # ⛔ STALENESS. The census below is a HISTORICAL record of ONE revision,
         # never a claim about current main. 412470cd3 is not on origin/main and
         # never was, the module the arm measures is absent from main entirely,
         # and the raw arm artifacts are gone — so the receipt is NOT current and
-        # its CENSUS is not regenerable (only the derived summary blocks are,
-        # from `results`; `--rederive`). Recorded in the artifact itself so the
+        # its CENSUS is not regenerable (only the falsifier `measured` blocks
+        # are, from `results`; `--rederive`). Recorded in the artifact itself so the
         # next reader cannot quote these numbers as current.
         "staleness": {
             "status": ("STALE-BY-DESIGN \u2014 a sealed historical measurement of ONE "
@@ -650,10 +676,11 @@ def build_receipt(caps, per_q, run_integrity, retrieval_mode, token_cap,
                     "GONE \u2014 the directory does not exist, so the generator "
                     "can no longer read cap{10,15}/<arm>.json and THE CENSUS "
                     "BELOW CANNOT BE REGENERATED. It is the only surviving "
-                    "record of this census; only the derived summary blocks "
-                    "(each falsifier's `measured`, and `verified_at_seal`) "
-                    "remain recomputable, and only from `results` itself "
-                    "(`--rederive`). /tmp/lme-v2-p100.json (the 100-Q profile "
+                    "record of this census; only the derived blocks remain "
+                    "recomputable from `results` itself (`--rederive`): each "
+                    "falsifier's `measured`. `verified_at_seal` is NOT "
+                    "derivable from `results` — it is a seal-time literal "
+                    "re-emitted verbatim. /tmp/lme-v2-p100.json (the 100-Q profile "
                     "whose '53% of misses' figure titles issue #2513) is also "
                     "gone, so that issue's cited evidence no longer exists on "
                     "disk either."),
@@ -971,7 +998,7 @@ def print_summary(receipt):
 def main():
     caps, per_q, run_integrity, retrieval_mode, token_cap = load_raw_measurement()
     receipt = build_receipt(caps, per_q, run_integrity, retrieval_mode,
-                            token_cap, cohort_block())
+                            token_cap, cohort_block(), provenance_from_git())
     dest = Path(os.environ.get(
         "LME_RECEIPT_DEST",
         str(WT / "docs/scoping/receipts" / (
@@ -986,9 +1013,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--rederive", metavar="RECEIPT",
-        help=("refresh the derived blocks (falsifier `measured`, "
-              "`verified_at_seal`) of an EXISTING receipt from its own "
-              "`results` instead of reading arm artifacts, then write it back"))
+        help=("rebuild an EXISTING receipt from its own recorded blocks "
+              "instead of from arm artifacts, then write it back; each "
+              "falsifier `measured` is recomputed from `results`, "
+              "`verified_at_seal` is re-emitted from the seal-time literal"))
     parser.add_argument("--dest", metavar="PATH",
                         help="output path for --rederive (default: in place)")
     args = parser.parse_args()
