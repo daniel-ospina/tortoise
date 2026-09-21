@@ -399,8 +399,7 @@ def test_sidecar_recovery_keeps_the_durable_content_hash(sup, tmp_path):
     — see the sibling pin below.
     """
     from tortoise.ids import content_hash
-    from tortoise.projection import (
-        _write_prewipe_snapshot, prewipe_snapshot_path)
+    from tortoise.projection import _write_prewipe_snapshot, prewipe_snapshot_path
 
     events, sdk = sup
     pid = "pt-rec"
@@ -446,8 +445,7 @@ def test_sidecar_recovery_prefers_the_live_capture_over_stale_leftover(
     the sidecar is written directly rather than through `_oracle`'s parameters.
     """
     from tortoise.ids import content_hash
-    from tortoise.projection import (
-        _write_prewipe_snapshot, prewipe_snapshot_path)
+    from tortoise.projection import _write_prewipe_snapshot, prewipe_snapshot_path
 
     events, sdk = sup
     pid = "pt-stale"
@@ -493,7 +491,10 @@ def test_failed_restore_still_retires_the_sidecar(sup, tmp_path):
     sidecar).
     """
     from tortoise.projection import (
-        _load_prewipe_snapshot, _write_prewipe_snapshot, prewipe_snapshot_path)
+        _load_prewipe_snapshot,
+        _write_prewipe_snapshot,
+        prewipe_snapshot_path,
+    )
 
     events, sdk = sup
     good, bad = "pt-good", "pt-bad"

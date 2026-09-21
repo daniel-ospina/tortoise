@@ -3953,7 +3953,7 @@ class FalkorProjection(
                 params["emb"] = list(emb)
             try:
                 self.g.query(
-                    f"MATCH (n:Point {{id:$pid}}) SET " + ", ".join(clauses),
+                    "MATCH (n:Point {id:$pid}) SET " + ", ".join(clauses),
                     params=params,
                 )
             except Exception as e:
