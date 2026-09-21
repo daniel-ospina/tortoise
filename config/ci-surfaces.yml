@@ -9,6 +9,7 @@ surfaces:
   # #3820: the analytics sink's OUTCOME contract + degraded-sink incident. Load-bearing
   # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
   - test_analytics_fallback_alert.py
+  - test_backups_v1_alias.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
   - test_battery_parity_mabench.py
@@ -1853,3 +1854,4 @@ durations:
   test_website_static.py: 0.0
   test_weights.py: 0.0
   test_weights_mitigation.py: 0.0
+  test_backups_v1_alias.py: 0.01
