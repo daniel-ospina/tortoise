@@ -141,8 +141,7 @@ NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
 # Writer-annotated tools that are NOT in WRITE_TOOL_NAMES because they are
 # HTTP-excluded (operator-only) and self-guard with _http_excluded_error().
 NON_HTTP_WRITER_TOOLS: frozenset[str] = frozenset({
-    "tortoise_backfill_v25", "tortoise_dream", "tortoise_index_sessions",
-    "tortoise_ingest_corpus", "tortoise_org_create",
+    "tortoise_backfill_v25", "tortoise_dream", "tortoise_org_create",
 })
 
 # Filesystem-walk API method names.  A call to one of these (on a non-projection

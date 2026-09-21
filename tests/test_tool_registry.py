@@ -75,10 +75,10 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """83 live tools = 99 − the 16 owner-approved retirements (#3863).
+        """82 live tools = 98 − the 16 owner-approved retirements (#3863).
         The census is bumped per add."""
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 83, f"Expected 83, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 82, f"Expected 82, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 retired names are NOT live, and each one is declared retired.
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}

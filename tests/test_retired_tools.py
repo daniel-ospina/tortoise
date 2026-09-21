@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from fastmcp.tools.base import ToolResult
 
 from tortoise import mcp_server as ms
@@ -54,7 +55,7 @@ class TestDeclaration:
             for n in dir(TortoiseSDK)
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
-        assert len(public) == 152, f"SDK surface changed: {len(public)} != 152"
+        assert len(public) == 150, f"SDK surface changed: {len(public)} != 150"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK
@@ -187,3 +188,40 @@ class TestWarning:
             assert filtered == {"tortoise_query"}
 
         asyncio.run(_check())
+
+
+class TestScopeGate:
+    """#4170 x #3883: a retired name still resolves through the scope gate.
+
+    A retired name is still SERVED (through the warning shim), so the gate must
+    be able to read its permission. While the lookup covered live tools only, a
+    scoped caller reached the gate and was told "Unknown tool - denied" - the
+    silent disappearance #3883 exists to prevent, for the keys least able to
+    debug it.
+    """
+
+    def test_every_retired_name_resolves_for_the_gate(self):
+        from tortoise.tool_registry import get_tool_by_name
+
+        by_name = get_tool_by_name()
+        missing = {s.name for s in RETIRED_TOOL_REGISTRY} - set(by_name)
+        assert not missing, f"retired names unresolvable by the gate: {missing}"
+
+    def test_retired_reader_passes_a_read_scope(self):
+        spec = next(s for s in RETIRED_TOOL_REGISTRY if not s.writes)
+        token = ms._current_scopes.set(["graphs:read"])
+        try:
+            ms._enforce_mcp_tool_scope(spec.name)  # must not raise
+        finally:
+            ms._current_scopes.reset(token)
+
+    def test_retired_name_without_a_data_scope_is_gated_not_unknown(self):
+        spec = next(s for s in RETIRED_TOOL_REGISTRY if not s.writes)
+        token = ms._current_scopes.set([])
+        try:
+            with pytest.raises(ms.AuthorizationError) as excinfo:
+                ms._enforce_mcp_tool_scope(spec.name)
+        finally:
+            ms._current_scopes.reset(token)
+        assert "Unknown tool" not in str(excinfo.value), (
+            "a retired name must be gated by its own permission, not denied as unknown")

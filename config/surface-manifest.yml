@@ -8,8 +8,8 @@ approval_status: pending-owner-approval
 approval_principal: null
 approval_pr: null
 counts:
-  tools: 83
-  sdk_public_methods: 152
+  tools: 82
+  sdk_public_methods: 150
   retired: 16
   keyword_distribution:
     fetch: 14
@@ -17,7 +17,7 @@ counts:
     update: 8
     delete: 6
     list: 9
-    find: 7
+    find: 6
     trace: 2
     check: 8
     link: 4

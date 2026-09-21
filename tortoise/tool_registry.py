@@ -1214,11 +1214,16 @@ _TOOL_BY_NAME: dict[str, ToolDefinition] | None = None
 def get_tool_by_name() -> dict[str, ToolDefinition]:
     """Registry indexed by tool name — the scope gate's single lookup.
 
+    Retired entries are INCLUDED (#3883): a retired name still resolves and is
+    still served (through the warning shim), so it must carry a permission the
+    gate can read. Omitting them made the gate answer a scoped caller with
+    "Unknown tool — denied" instead of the retirement warning.
+
     Cached: the registry is immutable after import, and this is on the
     per-tool-call hot path."""
     global _TOOL_BY_NAME
     if _TOOL_BY_NAME is None:
-        _TOOL_BY_NAME = {t.name: t for t in TOOL_REGISTRY}
+        _TOOL_BY_NAME = {t.name: t for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)}
     return _TOOL_BY_NAME
 
 
