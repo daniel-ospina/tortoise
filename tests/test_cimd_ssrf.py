@@ -611,11 +611,30 @@ def test_settle_cannot_reopen_a_rolled_over_window(monkeypatch):
     would REOPEN budget the window is meant to have closed)."""
     monkeypatch.setattr(cimd, "FETCH_MAX_S", 5.0)
     monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 100.0)
-    cimd._budget_reserve()
+    window = cimd._budget_reserve()
     with cimd._BUDGET_LOCK:          # simulate the roll-over resetting spent
+        cimd._BUDGET_STARTED += cimd.RATE_WINDOW_S + 1
         cimd._BUDGET_SPENT = 0.0
-    cimd._budget_settle(0.1)
+    cimd._budget_settle(0.1, window)
     assert cimd._BUDGET_SPENT >= 0.0
+
+
+def test_old_window_settle_does_not_erase_a_live_reservation(monkeypatch):
+    """A cross-window settle must charge its ACTUAL elapsed, never refund a
+    reservation the new window already reset — subtracting would credit the
+    window up to a full reservation and cancel a fetch admitted into it."""
+    monkeypatch.setattr(cimd, "FETCH_MAX_S", 5.0)
+    monkeypatch.setattr(cimd, "FETCH_BUDGET_S", 100.0)
+    old_window = cimd._budget_reserve()          # W1 reservation
+    with cimd._BUDGET_LOCK:                      # roll W1 -> W2
+        cimd._BUDGET_STARTED += cimd.RATE_WINDOW_S + 1
+        cimd._BUDGET_SPENT = 0.0
+    cimd._budget_reserve()                       # a LIVE W2 reservation
+    assert cimd._BUDGET_SPENT == 5.0
+    cimd._budget_settle(0.1, old_window)         # W1's fetch settles late
+    assert pytest.approx(5.1) == cimd._BUDGET_SPENT, (
+        "the old window's settle must ADD its elapsed, not refund the live "
+        "reservation")
 
 
 def test_budget_refusal_does_not_charge_the_rate_limiter(monkeypatch):

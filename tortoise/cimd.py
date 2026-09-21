@@ -91,7 +91,7 @@ __all__ = [
 ]
 
 # ── Caps (module constants, kept deliberately strict; the two FEATURE levers
-#    above are the env-overridable surface) ─────────────────────────────────
+#    below are the env-overridable surface) ─────────────────────────────────
 
 CLIENT_ID_MAX_LEN = 2048
 DOCUMENT_MAX_BYTES = 64 * 1024
@@ -122,8 +122,9 @@ STORE_CAP = 256
 # escape the accounting.
 MAX_IN_FLIGHT_FETCHES = 4
 FETCH_BUDGET_S = 120.0
-#: Wall-clock deadline for ONE fetch, across EVERY phase. ``READ_TIMEOUT_S``
-#: is a per-socket-read timeout, not a total one, so a server that trickles the
+#: Wall-clock deadline for ONE fetch, across every SOCKET phase
+#: (``READ_TIMEOUT_S`` is a per-socket-read timeout, not a total one, so a server
+#: that trickles the
 #: status line, the headers, or the body keeps resetting it; ``_DeadlineStream``
 #: caps each read/write/TLS timeout by the remaining deadline (and
 #: ``_PinningNetworkBackend`` caps each connect attempt), so the CONNECT loop,
@@ -454,15 +455,17 @@ def _budget_remaining_locked(now: float) -> float:
     return FETCH_BUDGET_S - _BUDGET_SPENT
 
 
-def _budget_reserve() -> None:
-    """Reserve ``FETCH_MAX_S`` against the window, refusing when it does not fit.
+def _budget_reserve() -> float:
+    """Reserve ``FETCH_MAX_S`` against the CURRENT window; return its start time.
 
     Reserving the WORST CASE up front (rather than charging the actual duration
     after the fact) is what makes the window budget a true upper bound:
     concurrent admissions cannot overshoot it, and a fetch that is ABANDONED
     (its caller's offload bound expired while the worker kept running) keeps its
-    full reservation charged until it finishes. :func:`_budget_settle` refunds
-    the unused remainder once the fetch returns.
+    full reservation charged until it finishes. The returned window start is the
+    reservation's GENERATION, which :func:`_budget_settle` needs so a
+    cross-window settle cannot refund a reservation the new window already
+    reset (that would erase a live reservation made there).
     """
     now = time.monotonic()
     global _BUDGET_SPENT
@@ -471,18 +474,26 @@ def _budget_reserve() -> None:
             raise CimdError(
                 "CIMD fetch wall-clock budget exhausted for this window.")
         _BUDGET_SPENT += FETCH_MAX_S
+        return _BUDGET_STARTED
 
 
-def _budget_settle(elapsed: float) -> None:
+def _budget_settle(elapsed: float, window: float) -> None:
     """Replace the ``FETCH_MAX_S`` reservation with the ACTUAL elapsed time.
 
     Called in a ``finally``, so a failed fetch still pays for the time it
-    occupied. The result is CLAMPED at zero: a concurrent window roll-over can
-    reset the reservation this settle would remove, and a negative
-    ``_BUDGET_SPENT`` would REOPEN budget the window is meant to have closed.
+    occupied. ``window`` is the start time returned by :func:`_budget_reserve`:
+    when it no longer matches the current window, the reservation it belonged to
+    was ALREADY reset by the roll-over, so this settle must not subtract a
+    second time (which would credit the window up to a full reservation and
+    cancel a LIVE reservation made there) — it charges the actual elapsed
+    instead. Same-window settles replace the reservation, clamped at zero so a
+    negative ``_BUDGET_SPENT`` can never reopen the budget.
     """
     global _BUDGET_SPENT
     with _BUDGET_LOCK:
+        if window != _BUDGET_STARTED:
+            _BUDGET_SPENT += elapsed
+            return
         _BUDGET_SPENT = max(0.0, _BUDGET_SPENT + elapsed - FETCH_MAX_S)
 
 
@@ -727,7 +738,7 @@ def resolve_client_metadata(client_id: str, *, supported_scopes: set[str],
     if not sem.acquire(timeout=IN_FLIGHT_WAIT_S):
         raise CimdError("CIMD fetch concurrency limit reached.")
     try:
-        _budget_reserve()
+        reserved_window = _budget_reserve()
         started = time.monotonic()
         try:
             # The rate-limit charge and the fetch share ONE settled region: a
@@ -736,7 +747,7 @@ def resolve_client_metadata(client_id: str, *, supported_scopes: set[str],
             _charge_rate_limit(urlparse(client_id).hostname or "")
             document = fetch_client_metadata(client_id)
         finally:
-            _budget_settle(time.monotonic() - started)
+            _budget_settle(time.monotonic() - started, reserved_window)
         record = validate_document(
             client_id, document,
             supported_scopes=supported_scopes,
