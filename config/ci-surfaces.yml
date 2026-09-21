@@ -1157,6 +1157,7 @@ tier1:
 - test_ranking.py
 - test_ranking_w4b.py
 - test_reaper_orphan.py
+- test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan (fast, no-DB file scan, so a docs-only PR runs it)
 - test_sdk_dedup.py
 - test_sdk_ep.py
 - test_supabase_control.py
