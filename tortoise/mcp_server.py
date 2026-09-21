@@ -253,8 +253,8 @@ def _hold_mcp_dispatch_after_request(task) -> None:
 
     Called on the TIMEOUT path only. The cancellation path is the opposite case
     (the cancellation is propagated into the dispatch); see the ``except
-    BaseException`` branch in ``_await_under_mcp_wait_bound``. The gauge exits
-    in a ``finally`` so a raising abandoned dispatch cannot leak a slot.
+    asyncio.CancelledError`` branch in ``_await_under_mcp_wait_bound``. The gauge
+    exits in a ``finally`` so a raising abandoned dispatch cannot leak a slot.
     """
     monitoring.workload_enter()
     _pending_mcp_wait_bound.add(task)
@@ -444,6 +444,14 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                 and payload["error"].startswith("Authentication required")):
             status, error_kind = "auth_error", "stdio_auth_gate"
         return result
+    except asyncio.CancelledError:
+        # A cancelled dispatch is neither an "ok" nor an exec error — classifying
+        # it as timeout or success would hide the cancellation rate in the same
+        # mcp_tool_call series the bound is measured from. (Pre-existing: the
+        # generic `except Exception` never saw CancelledError, so a cancelled
+        # call emitted status="ok".)
+        status, error_kind = "cancelled", "caller_cancelled"
+        raise
     except Exception as exc:
         status, error_kind = _classify_mcp_call_error(exc)
         raise

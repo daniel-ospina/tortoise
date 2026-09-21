@@ -2225,7 +2225,8 @@ _TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
 #: Handlers abandoned past the bound, held only so their late exception is
 #: retrieved (never "exception was never retrieved"). Entries remove themselves
 #: on completion — the set self-drains. (This is the BREACH path only; a
-#: cancelled request is drained in the ``except BaseException`` branch, not
+#: cancelled request is drained in the ``except asyncio.CancelledError`` branch,
+#: not
 #: tracked here. No test awaits this set.)
 _pending_wait_bound_requests: set = set()
 _pending_wait_bound_telemetry: set = set()
@@ -2412,7 +2413,7 @@ def _track_wait_bound_request(task) -> None:
     predicate reads) consistent.
 
     NOT used on the CANCELLATION path, where the opposite is required: see the
-    ``except BaseException`` branch in ``WaitBoundMiddleware.__call__``.
+    ``except asyncio.CancelledError`` branch in ``WaitBoundMiddleware.__call__``.
     """
     _pending_wait_bound_requests.add(task)
 

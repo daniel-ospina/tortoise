@@ -337,6 +337,32 @@ async def test_cancellation_propagates_into_the_handler(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancellation_cleanup_error_propagates(monkeypatch):
+    """A REAL error from the handler's cancellation cleanup must surface.
+
+    The middleware suppresses only the child's CancelledError. A broader
+    `suppress(BaseException)` would retrieve and discard a genuine cleanup
+    failure, where the direct await this middleware replaced surfaced it — so
+    the suppression's narrowness is load-bearing and is pinned here.
+    """
+    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
+    entered = asyncio.Event()
+
+    async def app(scope, receive, send):
+        entered.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            raise RuntimeError("cleanup boom") from None
+
+    job = asyncio.ensure_future(_drive(ha.WaitBoundMiddleware(app), _scope()))
+    await entered.wait()
+    job.cancel()
+    with pytest.raises(RuntimeError, match="cleanup boom"):
+        await job
+
+
+@pytest.mark.asyncio
 async def test_an_already_started_response_is_never_replaced(monkeypatch):
     """A response that has already begun streaming cannot be substituted — we
     let it finish rather than emit a second, contradictory status."""
@@ -635,6 +661,47 @@ async def test_mcp_cancellation_propagates_into_the_tool(monkeypatch):
         except Exception:
             pass
         ms._pending_mcp_wait_bound.clear()
+
+
+@pytest.mark.asyncio
+async def test_mcp_cancellation_cleanup_error_propagates(monkeypatch):
+    """The MCP seam surfaces a real error from the tool's cancellation cleanup.
+
+    Same load-bearing narrowness as the REST half: `suppress(BaseException)`
+    would swallow it.
+    """
+    from fastmcp.exceptions import ToolError
+    from fastmcp.tools import FunctionTool
+
+    from tortoise import mcp_server as ms
+
+    entered = asyncio.Event()
+
+    async def _bound_cleanup_boom() -> dict:
+        entered.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            raise RuntimeError("cleanup boom") from None
+
+    ms.mcp.add_tool(FunctionTool.from_function(
+        _bound_cleanup_boom, name="_bound_cleanup_boom",
+        description="wait-bound test: raising cancellation cleanup"))
+    monkeypatch.setattr(ha, "_TRANSPORT_WAIT_BOUND_S", 30.0)
+    monkeypatch.setattr(ha, "_track_analytics_event", lambda *a, **k: None)
+    try:
+        job = asyncio.ensure_future(ms.mcp.call_tool("_bound_cleanup_boom"))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        job.cancel()
+        # FastMCP wraps a tool-body exception in ToolError; the point is that a
+        # REAL error surfaces instead of only the cancellation.
+        with pytest.raises(ToolError, match="cleanup boom"):
+            await job
+    finally:
+        try:  # noqa: SIM105
+            ms.mcp.local_provider.remove_tool("_bound_cleanup_boom")
+        except Exception:
+            pass
 
 
 # ── the cold half: a VERIFICATION, not a build ────────────────────────────
