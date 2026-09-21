@@ -32,6 +32,8 @@ import json
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
 from tools import embedded_evidence as ee
 
 
@@ -1088,6 +1090,7 @@ class TestConjunctFalsifiability:
         review_digest=("sha256:review-clean", False),
         checkout_head="a" * 40,
         measured_commit="b" * 40,
+        ancestor_rc=0,
         **arg_over,
     ):
         import argparse
@@ -1101,7 +1104,20 @@ class TestConjunctFalsifiability:
             ee, "_worktree_at",
             lambda ref, run_root, name: (tmp_path / name, True),
         )
-        monkeypatch.setattr(ee.subprocess, "run", lambda *a, **k: None)
+
+        class _FakeGitProc:
+            returncode = 0
+
+        def _fake_run(cmd, *a, **k):
+            proc = _FakeGitProc()
+            # `_strict_ancestor` asks git a yes/no question through the rc of
+            # `merge-base --is-ancestor`; the test controls the answer.
+            if (isinstance(cmd, list) and len(cmd) >= 2
+                    and cmd[0] == "git" and cmd[1] == "merge-base"):
+                proc.returncode = ancestor_rc
+            return proc
+
+        monkeypatch.setattr(ee.subprocess, "run", _fake_run)
         monkeypatch.setattr(
             ee, "_manifest_receipt",
             lambda files, marker, out_dir: {
@@ -1151,7 +1167,7 @@ class TestConjunctFalsifiability:
             marker=ee.DEFAULT_MARKER,
             load_ceiling=1e9,
             run_timeout=1,
-            record_role="closing",
+            record_role="historical-attestation",
             record_out=None,
             cmd="run",
             environment_error=None,
@@ -1339,6 +1355,66 @@ class TestConjunctFalsifiability:
         assert rec3["red"]["at_fixed_commit"]["rate_change"] is False
         assert "no-rate-change" in ee.closes_issue(rec3)[1]
 
+    def test_pairing_ref_must_be_strict_ancestor(self, monkeypatch, tmp_path):
+        """C1/D16: equal, descendant or unrelated pairing refs are usage errors.
+
+        `--pairing-ref` drives `rate_change`, so without the ancestry check a red
+        measured at ANY ref made `no-rate-change` satisfiable and the record's
+        central claim (the red appeared BEFORE the fix) rested on an arbitrary sha.
+        """
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        baseline_red = self._run(files, 1, "unexpected-divergence")
+
+        # POSITIVE: a strict ancestor is accepted and labelled from the ancestry.
+        rec = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref", baseline=baseline_red,
+            record_role="closing", ancestor_rc=0,
+        )
+        assert rec["pin"]["pairing_ref"] is not None
+        assert rec["red"]["ref_role"] == "last-before-first-family-fix"
+
+        # EQUAL: the pairing ref IS the measured commit (no `merge-base` call).
+        with pytest.raises(ee.UsageError):
+            self._produce(
+                monkeypatch, tmp_path, runs=green,
+                pairing_ref="pairref", baseline=baseline_red,
+                record_role="closing", ancestor_rc=0,
+                measured_commit="d" * 40,
+            )
+
+        # DESCENDANT / UNRELATED: `merge-base --is-ancestor` answers rc 1.
+        with pytest.raises(ee.UsageError):
+            self._produce(
+                monkeypatch, tmp_path, runs=green,
+                pairing_ref="pairref", baseline=baseline_red,
+                record_role="closing", ancestor_rc=1,
+            )
+
+    def test_ref_role_is_derived_not_declared(self, monkeypatch, tmp_path):
+        files = list(ee.FAMILY_REPRODUCERS)
+        green = [self._run(files, 1, "green"), self._run(files, 2, "green")]
+        no_pair = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            record_role="historical-attestation",
+        )
+        assert no_pair["red"]["ref_role"] == "pinned-head-pre-fix"
+        with_pair = self._produce(
+            monkeypatch, tmp_path, runs=green,
+            pairing_ref="pairref",
+            baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
+        )
+        assert with_pair["red"]["ref_role"] == "last-before-first-family-fix"
+
+    def test_closing_role_without_pairing_ref_writes_no_record(self, tmp_path):
+        """M52/C1: the documented usage error is exit 2 and NO record."""
+        out = tmp_path / "rec.json"
+        rc = ee.main(["run", "--record-role", "closing", "--record-out", str(out)])
+        assert rc == 2
+        assert not out.exists()
+
     def test_internal_seam_only_mutation_is_non_closing(self, monkeypatch, tmp_path):
         """Plan R1: an internal-helper-only proof is non-closing (exit 1)."""
         files = list(ee.FAMILY_REPRODUCERS)
@@ -1368,6 +1444,7 @@ class TestConjunctFalsifiability:
             runs=green,
             pairing_ref="pairref",
             baseline=self._run(files, 1, "unexpected-divergence"),
+            record_role="closing",
             checkout_head=same,
             measured_commit=same,
             surface="tortoise_search",

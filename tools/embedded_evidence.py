@@ -1197,6 +1197,13 @@ def _write_record(rec: dict, out: Path) -> None:
 
 
 def _build_record(args: argparse.Namespace) -> dict:
+    # M52/C1: `closing` is accepted ONLY with an explicit `--pairing-ref` — without
+    # it there is no ref to pair against, so a closing claim has no antecedent and
+    # the role is a label with nothing behind it. Enforced BEFORE any measurement or
+    # record construction: a usage error writes NO record and exits 2 (this used to
+    # fall through to exit 3 and still write a record).
+    if args.record_role == "closing" and not args.pairing_ref:
+        raise UsageError("--record-role closing requires --pairing-ref")
     from tools.ci_selection import load_manifest
 
     run_root = Path(tempfile.mkdtemp(prefix="pi-embedded-evidence-"))
@@ -1275,14 +1282,36 @@ def _build_record(args: argparse.Namespace) -> dict:
     # unreachable for EVERY record the producer could emit.
     baseline_run = None
     pair_ref = None
+    pairing_is_ancestor = False
     if args.pairing_ref:
         pair_ref = _git("rev-parse", f"{args.pairing_ref}^{{commit}}")
+        # C1/D16: a `--pairing-ref` must be a STRICT ancestor of the measured commit.
+        # Equal, descendant or unrelated is a usage error, validated BEFORE the
+        # baseline so a bad ref costs no measurement and writes no record. This is
+        # load-bearing: `--pairing-ref` drives `rate_change`, so without it an
+        # arbitrary ref would make `no-rate-change` satisfiable by a red measured
+        # anywhere.
+        pairing_is_ancestor = _strict_ancestor(pair_ref, commit)
+        if not pairing_is_ancestor:
+            raise UsageError(
+                f"--pairing-ref {pair_ref} must be a strict ancestor of the "
+                f"measured commit {commit}"
+            )
         pair_root = run_root / "pairing"
         pair_root.mkdir(parents=True, exist_ok=True)
         pair_measured, pair_added = _worktree_at(pair_ref, run_root, "pairing-worktree")
         try:
+            pair_base_digest, _pbd = _porcelain_digest(
+                pair_measured, exclude=args.record_out
+            )
             baseline_run = _run_once(files, pair_measured, pair_root, 1, args.marker,
                                      args.run_timeout)
+            pair_post_digest, _ppd = _porcelain_digest(
+                pair_measured, exclude=args.record_out
+            )
+            # The baseline is a RUN too: persist its own tree state so `pin-not-airtight`
+            # and a re-evaluating verifier can see whether the pairing worktree moved.
+            baseline_run["tree_moved"] = pair_post_digest != pair_base_digest
         finally:
             if pair_added:
                 subprocess.run(
@@ -1390,7 +1419,12 @@ def _build_record(args: argparse.Namespace) -> dict:
         },
         "red": {
             "ref": red_ref,
-            "ref_role": "pinned-head-pre-fix" if not args.pairing_ref else "last-before-first-family-fix",
+            # D16/C1: DERIVED from the ancestry RESULT, never from flag presence.
+            "ref_role": (
+                "per-cause" if (pairing_is_ancestor and getattr(args, "cause", None))
+                else "last-before-first-family-fix" if pairing_is_ancestor
+                else "pinned-head-pre-fix"
+            ),
             "ref_tree_object": red_ref_tree,
             "cause": cause,
             "cause_evidence": cause_evidence,
@@ -1483,6 +1517,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         rec = _build_record(args)
+    except UsageError as exc:
+        print(f"usage error: {exc}", file=sys.stderr)
+        return 2
     except RuntimeError as exc:
         print(f"environment error: {exc}", file=sys.stderr)
         return 2
