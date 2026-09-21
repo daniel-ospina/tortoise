@@ -1,18 +1,29 @@
 ---
-title: "Tortoise — Canonical Ontology v3.13"
+title: "Tortoise — Canonical Ontology v3.14"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-18
+updated: 2026-09-20
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.13
+# Tortoise — Canonical Ontology v3.14
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.14 (2026-09-20, issue #4369 — the "claim" gloss is declared):**
+> - §5: **"claim"** is declared as the sanctioned user-facing **gloss** for a logic-layer
+>   Point (the asserted belief — extraction emits `pointKind: statement`; the legacy write
+>   kinds remain valid Point kinds). It is **not a distinct kind**: no `claim` type, no
+>   `claim` pointKind, and never a node write value; word-carrying identifiers (the EP slot
+>   `claim_id`, the pack-manifest `storeAs: claim` bucket) are untouched. The canonical
+>   machine vocabulary is unchanged (Point / `statement`) — the declaration makes the
+>   document's belief-node usages of the noun resolve against a declared term instead of an
+>   accretion. **No rename** (decision option A): the 775 code identifiers,
+>   `tortoise/weights.py`'s single-source docstring and the shipped skill keep the word.
 >
 > **Changelog v3.13 (2026-09-18, issue #3980 — the `valid_from` kwarg precondition):**
 > - §4.7/§4.1 (`validTo`): the resolution order is unchanged
@@ -223,7 +234,7 @@ Five core types.
 |---|------|-------------------|------------|-------|
 | 1 | **Subject** | `prov:Agent` / `org:Organization` / `foaf:Person` | Any entity that can act | Who acts |
 | 2 | **Object** | `prov:Entity` / `schema:Thing` | Persistent things that exist, are produced, or are acted upon | What persists |
-| 3 | **Point** | `prov:Entity` (specialized) | A node in the belief graph — claims, decisions, structural artifacts | What we believe |
+| 3 | **Point** | `prov:Entity` (specialized) | A node in the belief graph — claims, decisions, structural artifacts (the sanctioned user-facing gloss for a belief Point is **"claim"** — §5) | What we believe |
 | 4 | **Event** | `prov:Activity` (instantiated) / `schema:Event` | Temporal occurrence — the verb. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object) | What happened |
 | 5 | **Source** | `prov:Entity` (provenance) / `pav:Source` | Provenance anchor — where content was extracted from | Where it came from |
 
@@ -696,6 +707,19 @@ decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY 
 > removed (issue #1013 — episodic records are Event nodes with eventKind
 > `occurrence`/`turn`). The legacy kinds remain valid write kinds for
 > compatibility; extraction emits `statement` only.
+
+> **Sanctioned gloss — "claim" (#4369).** Where **"claim"** names a belief node, it is a
+> **logic-layer Point** — the asserted belief (extraction emits the single kind
+> `pointKind: statement`; the legacy write kinds remain valid Point kinds for write-compat,
+> above). "Claim" is the sanctioned plain-English gloss for that node, used where "Point"
+> would read as internal jargon to a customer; per option A a belief-node use of the noun is
+> correct in canonical prose too, and the machine vocabulary is unchanged
+> (Point / `statement`).
+> **It is not a distinct kind:** there is no `claim` type and no `claim` pointKind, and
+> "claim" is never a node write value (no type, kind, edge, or property on the entity model
+> is named `claim`). Word-carrying identifiers are untouched — the EP slot `claim_id` (§3)
+> and the pack-manifest `storeAs: claim` stream bucket are not node kinds; the bucket is a
+> manifest label.
 
 ### Object Kind Vocabulary (core)
 
