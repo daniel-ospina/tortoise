@@ -850,6 +850,7 @@ reused verbatim because its fixed `.tmp` name is not writer-safe):
   // pairing ref is declared and the paired red is re-run in the same invocation):
   // "python3 tools/embedded_evidence.py run --selection family --n 10 --ref <fix-commit>
   //    --pairing-ref <last-before-first-family-fix> --record-role closing
+  //    --surface tortoise_search --surface-assertion <resolving-test-id>
   //    --record-out <repo>/docs/evidence/3827-green.json"
   "exit_code": 1
 }
@@ -2452,8 +2453,14 @@ list, and it mandates **no new code** — if executing it requires a tool change
 # AT THE FAMILY FIX'S PR (a fixed commit exists), same lane, same selection:
 python3 tools/embedded_evidence.py run --selection family --n 10 --ref <fix-commit> \
   --pairing-ref <last-commit-before-first-family-fix> --record-role closing \
+  --surface tortoise_search --surface-assertion <resolving-test-id> \
   --record-out <repo>/docs/evidence/3827-green.json
 ```
+
+(`--surface`/`--surface-assertion` are R1/D23 and are **required for closing**: the conjunct
+`certification-not-on-shipping-surface` admits only a `SHIPPING_SURFACES` member with a non-empty
+resolving test-ID, and the tool cannot infer which test exercises the agent-facing surface — so the
+closing invocation must declare them (#4203; a caller cannot certify a binding it never declared).
 
 (`--ref` makes the recorded `reproduce` string self-contained — M28. `--pairing-ref` is the explicit,
 validated pre-fix ref (C1: a **strict ancestor of the measured commit**; equal/descendant/unrelated ⇒
