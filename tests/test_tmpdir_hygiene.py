@@ -7,6 +7,7 @@ teardown having run).
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -194,6 +195,47 @@ def test_tracker_dead_pid_does_not_short_circuit_a_live_second_pid(
         os.remove(os.path.join(path, "redis.pid"))
         os.remove(os.path.join(path, "falkor.pid"))
         os.rmdir(path)
+
+
+def test_tracker_leaves_the_data_dir_of_a_live_registered_server():
+    """#4479: the tracker must not delete the configured DATA dir of a live server.
+
+    redislite keeps `redis.pid` in its own instance dir and records that path in
+    `<dbfilename>.settings` inside the data dir — so the data dir has no pid file of
+    its own, and the guard must follow the registry to the real pid file.
+    """
+    import json
+    import subprocess
+
+    instance = tempfile.mkdtemp(prefix="ask_hygiene_inst_")
+    pid_file = os.path.join(instance, "redis.pid")
+    with open(pid_file, "w") as fh:
+        fh.write(str(os.getpid()))  # a live pid (this process)
+    with TrackedTempfileArtifacts() as tracker:
+        path = tempfile.mkdtemp(prefix="tortoise_shared_embedded_")
+        with open(os.path.join(path, "shared.db.settings"), "w") as fh:
+            json.dump({"pidfile": pid_file, "dbfilename": "shared.db"}, fh)
+    try:
+        assert os.path.isdir(path)  # left for the reaper, never removed
+        assert [p for p, _ in tracker.skipped_live] == [path]
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(instance, ignore_errors=True)
+
+    # ...and the no-leak-back half: a DEAD registered server must not strand the dir.
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    dead_instance = tempfile.mkdtemp(prefix="ask_hygiene_deadinst_")
+    dead_pid = os.path.join(dead_instance, "redis.pid")
+    with open(dead_pid, "w") as fh:
+        fh.write(str(proc.pid))
+    with TrackedTempfileArtifacts() as tracker2:
+        dead_path = tempfile.mkdtemp(prefix="tortoise_shared_embedded_dead_")
+        with open(os.path.join(dead_path, "shared.db.settings"), "w") as fh:
+            json.dump({"pidfile": dead_pid, "dbfilename": "shared.db"}, fh)
+    assert not os.path.exists(dead_path)
+    assert tracker2.skipped_live == []
+    shutil.rmtree(dead_instance, ignore_errors=True)
 
 
 def test_protected_reason_is_none_for_a_provably_dead_pid():

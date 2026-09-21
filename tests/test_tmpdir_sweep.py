@@ -6,6 +6,7 @@ litter by running these.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
@@ -336,10 +337,9 @@ def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
     drift: both used `os.path.isfile`, which answers False for an EXISTING
     non-regular pid file, so the same guarded entry read as unguarded in BOTH.
 
-    This test pins the equivalence across every decision branch of both guards: each
-    filesystem shape, the branches reached through an injected I/O failure, and both
-    twins of the `_PID_FILENAMES` probe loop (a DEAD first pid and an ABSENT first pid),
-    plus the tuple itself. A one-sided change to either copy fails here.
+    This test pins the two copies' VERDICTS equal (removable vs protected) for every shape
+    below, and the injected branches' reason strings; the non-injected branches are compared
+    by verdict only.
 
     The injections exist for DETERMINISM, not because the states are unreachable: an
     unreadable pid file is also reachable by `chmod 0o000` (see
@@ -406,12 +406,14 @@ def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
                  if sweep_mod._live_pid_protects(path) is None}
     assert removable == {"absent", "dead"}, removable
 
-    # Channel 3 — the branches reached only through an injected I/O failure. Each
-    # injects exactly one failure for the pid file and requires BOTH guards to agree AND
-    # to flip the verdict. The probe's pid is PROVABLY DEAD so its baseline is removable:
-    # if a monkeypatch ever stops matching the symbol the guard actually calls, the
-    # baseline assertion below still holds while the flip fails, so a vacuous injection is
-    # caught instead of passing on an already-protected directory.
+    # Channel 3 — the branches exercised here by an injected failure. The injections are for
+    # cross-host determinism, not because the states are unreachable (see the docstring).
+    # Each injection is run twice, with a `PermissionError` and with a plain `OSError`, so a
+    # guard whose handler was narrowed to `except PermissionError` cannot stay green. The
+    # probe's pid is PROVABLY DEAD so its baseline is removable: if a monkeypatch ever stops
+    # matching the symbol the guard actually calls, the baseline assertion below still holds
+    # while the flip fails, so a vacuous injection is caught instead of passing on an
+    # already-protected directory.
     probe = _shape("injected", _pid(str(proc.pid)))
     pid_file = os.path.join(probe, "redis.pid")
     assert sweep_mod._live_pid_protects(probe) is None
@@ -434,40 +436,45 @@ def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
             f"injected {expected_reason!r} produced {tracker_reason!r} — "
             f"the tracker's injection reached a different branch")
 
-    def _open_raises(file, *args, **kwargs):
-        if os.path.basename(str(file)) == "redis.pid":
-            raise PermissionError("injected: unreadable pid file")
-        return real_open(file, *args, **kwargs)
+    def _open_raises(exc: Exception):
+        def _patched(file, *args, **kwargs):
+            if os.path.basename(str(file)) == "redis.pid":
+                raise exc
+            return real_open(file, *args, **kwargs)
+        return _patched
 
-    with monkeypatch.context() as mp:
-        mp.setattr(builtins, "open", _open_raises)
-        _flips("unreadable redis.pid")
+    def _lstat_raises(exc: Exception):
+        def _patched(path, *args, **kwargs):
+            if os.path.basename(str(path)) == "redis.pid":
+                raise exc
+            return real_lstat(path, *args, **kwargs)
+        return _patched
 
-    def _lstat_raises(path, *args, **kwargs):
-        if os.path.basename(str(path)) == "redis.pid":
-            raise PermissionError("injected: unstattable pid file")
-        return real_lstat(path, *args, **kwargs)
-
-    with monkeypatch.context() as mp:
-        mp.setattr(os, "lstat", _lstat_raises)
-        _flips("unstattable redis.pid")
+    for exc in (PermissionError("injected"), OSError(errno.EIO, "injected")):
+        with monkeypatch.context() as mp:
+            mp.setattr(builtins, "open", _open_raises(exc))
+            _flips("unreadable redis.pid")
+        with monkeypatch.context() as mp:
+            mp.setattr(os, "lstat", _lstat_raises(exc))
+            _flips("unstattable redis.pid")
 
     def _kill_raises(exc):
         # Fire on the pid READ FROM THE FILE (the probe's dead child), not on this
         # process: the baseline pid must stay provably dead so the entry starts out
-        # removable, and the injection is what flips it.
+        # removable, and the injection is what flips it. `sig` is asserted to be 0 —
+        # the guard must PROBE, never deliver a real signal to a live server.
         def _patched(pid, sig):
+            assert sig == 0, f"the guard sent signal {sig!r}, not a 0 probe"
             if pid == proc.pid:
                 raise exc
             return real_kill(pid, sig)
         return _patched
 
-    with monkeypatch.context() as mp:
-        mp.setattr(os, "kill", _kill_raises(PermissionError("injected")))
-        _flips("no permission to signal")
-    with monkeypatch.context() as mp:
-        mp.setattr(os, "kill", _kill_raises(OSError("injected")))
-        _flips("probe failed")
+    for exc in (PermissionError("injected"), OSError(errno.EIO, "injected")):
+        with monkeypatch.context() as mp:
+            mp.setattr(os, "kill", _kill_raises(exc))
+            _flips("no permission to signal" if isinstance(exc, PermissionError)
+                   else "probe failed")
 
     # Channel 4 — BOTH twins of the probe loop: a first pid file that is ABSENT and one
     # that is provably DEAD must each fall through to a live second pid, in either mirror.
@@ -493,7 +500,102 @@ def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
             fh.write(str(proc.pid))
 
     _second_pid_is_live("pair-dead-first", _write_dead_first)
+
+    # Channel 5 — the registry-declared owner (#4479). A data dir holding no pid file
+    # of its own but a `.settings` naming a live server's pid file is protected; a
+    # dead / gone / malformed one stays reclaimable (the no-leak-back half).
+    registry_shapes: list[tuple[str, str]] = []
+
+    def _registry_shape(label: str, pid_text: str | None,
+                        *, malformed: bool = False) -> None:
+        holder = _shape(label, lambda path: None)
+        registry_shapes.append((label, holder))
+        if malformed:
+            with open(os.path.join(holder, "shared.db.settings"), "w") as fh:
+                fh.write("{not json")
+            return
+        instance = tempfile.mkdtemp(prefix="ask_parity_inst_", dir=str(tmp_path))
+        pid_file = os.path.join(instance, "redis.pid")
+        if pid_text is not None:
+            with open(pid_file, "w") as fh:
+                fh.write(pid_text)
+        with open(os.path.join(holder, "shared.db.settings"), "w") as fh:
+            json.dump({"pidfile": pid_file, "dbfilename": "shared.db"}, fh)
+
+    _registry_shape("registry-live", str(os.getpid()))
+    _registry_shape("registry-dead", str(proc.pid))
+    _registry_shape("registry-gone", None)
+    _registry_shape("registry-malformed", None, malformed=True)
+    for label, path in registry_shapes:
+        sweep_removable = sweep_mod._live_pid_protects(path) is None
+        tracker_removable = tracker(path) is None
+        assert sweep_removable == tracker_removable, (
+            f"the two guards disagree on the {label!r} shape: sweep "
+            f"removable={sweep_removable}, tracker removable={tracker_removable}")
+    assert {label for label, path in registry_shapes
+            if sweep_mod._live_pid_protects(path) is None} == {
+        "registry-dead", "registry-gone", "registry-malformed"}
     assert os.path.exists(pid_file)
+
+
+def test_registry_pidfile_of_a_live_server_protects_a_data_dir(tmp_path):
+    """#4479: redislite keeps `redis.pid` in its own instance dir and records that
+    path in `<dbfilename>.settings` inside the DATA dir — so a data dir with no pid
+    file of its own belongs to a live server and must not be reclaimed."""
+    data_dir = tmp_path / "tortoise_shared_embedded_live"
+    data_dir.mkdir()
+    instance = tmp_path / "inst_live"
+    instance.mkdir()
+    (instance / "redis.pid").write_text(str(os.getpid()))
+    (data_dir / "shared.db.settings").write_text(json.dumps({
+        "pidfile": str(instance / "redis.pid"),
+        "unixsocket": str(instance / "redis.socket"),
+        "dbdir": str(data_dir),
+        "dbfilename": "shared.db",
+    }))
+    ts = time.time() - _OLD_H * 3600.0
+    os.utime(data_dir, (ts, ts))
+
+    assert _live_pid_protects(str(data_dir)) is not None
+    result = sweep(str(tmp_path), apply=True, older_than_hours=24.0)
+    assert data_dir.exists()
+    assert result.removed == []
+    assert any("live redis pid" in d.reason for d in result.kept)
+
+
+def test_dead_registered_server_does_not_strand_its_data_dir(tmp_path):
+    """The no-leak-back half of #4479: a DEAD instance's registry survives in its
+    data dir, so the registry may only SUPPLY a pid file for the ordinary liveness
+    probe — treating it as a live owner would strand every orphaned data dir."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    for label, pid_text in (("dead", str(proc.pid)), ("gone", None)):
+        data_dir = tmp_path / f"tortoise_shared_embedded_{label}"
+        data_dir.mkdir()
+        instance = tmp_path / f"inst_{label}"
+        instance.mkdir()
+        pid_file = instance / "redis.pid"
+        if pid_text is not None:
+            pid_file.write_text(pid_text)
+        (data_dir / "shared.db.settings").write_text(
+            json.dumps({"pidfile": str(pid_file), "dbfilename": "shared.db"}))
+        ts = time.time() - _OLD_H * 3600.0
+        os.utime(data_dir, (ts, ts))
+        assert _live_pid_protects(str(data_dir)) is None, label
+
+    malformed = tmp_path / "tortoise_shared_embedded_malformed"
+    malformed.mkdir()
+    (malformed / "shared.db.settings").write_text("{not json")
+    ts = time.time() - _OLD_H * 3600.0
+    os.utime(malformed, (ts, ts))
+    assert _live_pid_protects(str(malformed)) is None
+
+    result = sweep(str(tmp_path), apply=True, older_than_hours=24.0)
+    assert sorted(d.name for d in result.removed) == [
+        "tortoise_shared_embedded_dead",
+        "tortoise_shared_embedded_gone",
+        "tortoise_shared_embedded_malformed",
+    ]
 
 
 def test_sweep_refuses_a_non_finite_age_gate(tmp_path):

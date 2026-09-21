@@ -246,37 +246,38 @@ def test_every_conftest_module_level_tests_import_is_shared():
     imports at module level are therefore NOT covered here; that residual is measured on
     #4486, not asserted away.
 
-    The import set is read from the AST, not a line regex: an indented or conditional
-    module-level import (e.g. `tests/conftest.py:143`) and the `from tests import x`
-    spelling of an import whose module is a package member must all be seen, and a
-    function-local import must not be.
+    The import set is read from the AST and the walk is GENERIC: it recurses into every
+    nested statement container (class bodies, `match` cases, `except*` blocks, with/for
+    bodies, ...) and stops only at function-like nodes, whose bodies are not module level.
+    Enumerating the containers to descend into is what let an earlier version of this ratchet
+    be narrower than the rule it documents, so there is no such list here. Relative imports
+    (`from . import _x`) are deliberately unmatched: `tests/` has no `__init__.py`, so they
+    cannot appear at conftest module level today, and this test states that rather than
+    pretending they are covered.
     """
     conftest_path = Path(__file__).resolve().parent / "conftest.py"
-    tree = ast.parse(conftest_path.read_text())
+    module = ast.parse(conftest_path.read_text())
     imported: set[str] = set()
 
-    def walk(statements) -> None:
-        for node in statements:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+    def walk(node) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 continue  # a function-local import is not module level
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name.startswith("tests."):
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    if alias.name == "tests" or alias.name.startswith("tests."):
                         imported.add(alias.name)
-            elif isinstance(node, ast.ImportFrom):
-                if node.module == "tests":
-                    for alias in node.names:
+                continue
+            if isinstance(child, ast.ImportFrom):
+                if child.level == 0 and child.module == "tests":
+                    for alias in child.names:
                         imported.add(f"tests.{alias.name}")
-                elif node.module and node.module.startswith("tests."):
-                    imported.add(node.module)
-            elif isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
-                walk(node.body)
-                walk(getattr(node, "orelse", []) or [])
-                walk(getattr(node, "finalbody", []) or [])
-                for handler in getattr(node, "handlers", []) or []:
-                    walk(handler.body)
+                elif child.level == 0 and child.module and child.module.startswith("tests."):
+                    imported.add(child.module)
+                continue
+            walk(child)
 
-    walk(tree.body)
+    walk(module)
     assert imported, "expected tests/conftest.py to import a tests.* module at module level"
     for module in sorted(imported):
         rel = module.replace(".", "/") + ".py"

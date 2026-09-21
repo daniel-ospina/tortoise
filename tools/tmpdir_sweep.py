@@ -215,64 +215,124 @@ def _dir_size(path: str) -> int:
     return total
 
 
+def _pid_file_reason(pid_file: str, name: str) -> tuple[bool, str | None]:
+    """Probe one pid file. Returns `(present, reason)`.
+
+    `present` False means there is no such file. With `present` True, a `None`
+    reason means the pid is PROVABLY DEAD (the orphaned-dir case the sweep
+    exists to reclaim) and a string means the entry must be PROTECTED.
+
+    Fail-CLOSED: a pid file that is present but cannot be proven dead protects
+    the entry — unreadable, unparseable, non-positive, out-of-range, or
+    present-but-not-a-regular-file. The probe is `os.lstat`, not
+    `os.path.isfile`: `isfile` answers False for a path that EXISTS but is not
+    a regular file (FIFO, dangling symlink, device, directory) and for a path
+    whose parent cannot be stat-ed — all of which must read as "present but
+    unprovable" (declared threat class 3).
+
+    `tests/_tmpdir_hygiene.py::_pid_file_reason` is the deliberate mirror; the
+    two must stay equivalent (`test_the_two_guards_agree_on_every_shape`).
+    """
+    try:
+        st = os.lstat(pid_file)
+    except FileNotFoundError:
+        return False, None
+    except OSError as exc:
+        return True, f"unstattable {name} ({exc}) (treated as live)"
+    if not stat.S_ISREG(st.st_mode):
+        return True, f"non-regular {name} (treated as live)"
+    try:
+        with open(pid_file, encoding="utf-8", errors="replace") as fh:
+            raw = fh.read().strip()
+    except OSError:
+        return True, f"unreadable {name} (treated as live)"
+    try:
+        pid = int(raw)
+    except ValueError:
+        return True, f"unparseable {name} (treated as live)"
+    if pid <= 0:
+        return True, f"nonsensical pid {pid} in {name}"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True, None  # provably dead -> orphaned dir, safe to reclaim
+    except PermissionError:
+        return True, f"pid {pid} alive (no permission to signal)"
+    except OverflowError:
+        return True, f"pid {pid} out of range (treated as live)"
+    except OSError:
+        return True, f"pid {pid} probe failed (treated as live)"
+    return True, f"live redis pid {pid}"
+
+
+# redislite records the instance's pid-file path in `<dbfilename>.settings`
+# INSIDE the configured data dir, while the pid file itself lives in a
+# separate `tempfile.mkdtemp()` instance dir. So a data dir with no pid file
+# of its own can still belong to a LIVE server (#4479).
+_SETTINGS_SUFFIX = ".settings"
+
+
+def _registry_pidfile(entry_path: str) -> str | None:
+    """The pid file of the server that declares `entry_path` its data dir.
+
+    Reads the redislite settings registry (JSON) written into the data dir and
+    returns its `pidfile` value, or None when there is no readable registry.
+
+    A None is deliberately NOT a protection: the registry of a DEAD instance
+    survives in its data dir, so treating it as a live owner would strand
+    every orphaned data dir — trading #4299's backlog back for this guard. The
+    registry only ever SUPPLIES a pid file for the ordinary liveness probe to
+    judge, and a non-regular/malformed registry is skipped rather than trusted.
+    """
+    try:
+        entries = sorted(os.listdir(entry_path))
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.endswith(_SETTINGS_SUFFIX):
+            continue
+        registry = os.path.join(entry_path, entry)
+        try:
+            st = os.lstat(registry)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        try:
+            with open(registry, encoding="utf-8", errors="replace") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        pidfile = data.get("pidfile") if isinstance(data, dict) else None
+        if isinstance(pidfile, str) and pidfile:
+            return pidfile
+    return None
+
+
 def _live_pid_protects(entry_path: str) -> str | None:
     """Return a reason string when a live embedded server owns the entry.
 
     Fail-closed: a pid file that is present but CANNOT BE PROVEN DEAD
-    protects the entry rather than exposing it to removal — unreadable,
-    unparseable, non-positive, out-of-range, or present-but-not-a-regular-
-    file. A DEAD pid does not protect: that is exactly the orphaned-dir case
-    the sweep exists to reclaim.
-
-    The probe is `os.lstat`, not `os.path.isfile`: `isfile` answers False for
-    a path that EXISTS but is not a regular file (FIFO, dangling symlink,
-    device, directory) and for a path whose parent cannot be stat-ed — all of
-    which this guard must read as "present but unprovable". Treating any of
-    them as "no pid file" is a fail-open (declared threat class 3), and the
-    tracker's mirror of this function must decide identically (pinned by
-    `tests/test_tmpdir_sweep.py::test_the_two_guards_agree_on_every_shape`).
+    protects the entry rather than exposing it to removal. A DEAD pid does not
+    protect: that is exactly the orphaned-dir case the sweep exists to
+    reclaim.
 
     `tests/_tmpdir_hygiene.py::_protected_reason` is the deliberate mirror of
-    this function; a change here must be made there too, or the parity test
+    this function; a change here must be made there too, or
+    `tests/test_tmpdir_sweep.py::test_the_two_guards_agree_on_every_shape`
     fails.
     """
     for name in _PID_FILENAMES:
-        pid_file = os.path.join(entry_path, name)
-        try:
-            st = os.lstat(pid_file)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            return f"unstattable {name} ({exc}) (treated as live)"
-        if not stat.S_ISREG(st.st_mode):
-            return f"non-regular {name} (treated as live)"
-        try:
-            with open(pid_file, encoding="utf-8", errors="replace") as fh:
-                raw = fh.read().strip()
-        except OSError:
-            return f"unreadable {name} (treated as live)"
-        try:
-            pid = int(raw)
-        except ValueError:
-            return f"unparseable {name} (treated as live)"
-        if pid <= 0:
-            return f"nonsensical pid {pid} in {name}"
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            # PROVABLY dead: this pid file does not protect the entry. Keep
-            # checking the REMAINING pid files — returning here would let a
-            # dead first pid short-circuit a live second one, which is a
-            # fail-open the moment a second pid file is ever added to
-            # `_PID_FILENAMES`.
-            continue
-        except PermissionError:
-            return f"pid {pid} alive (no permission to signal)"
-        except OverflowError:
-            return f"pid {pid} out of range (treated as live)"
-        except OSError:
-            return f"pid {pid} probe failed (treated as live)"
-        return f"live redis pid {pid}"
+        present, reason = _pid_file_reason(os.path.join(entry_path, name), name)
+        if present and reason is not None:
+            return reason
+    # No pid file of its own (or only provably dead ones). The entry may still
+    # be a live server's DATA dir — see `_registry_pidfile`.
+    declared = _registry_pidfile(entry_path)
+    if declared is not None:
+        present, reason = _pid_file_reason(declared, os.path.basename(declared))
+        if present and reason is not None:
+            return reason
     return None
 
 
