@@ -324,6 +324,10 @@ class TestFastMCPAdapter:
             operator_only = (sdk_filesystem_methods() | sdk_operator_only_mutators()
                              | set(HTTP_EXCLUDED_SDK_METHODS))
             excluded = {e.name for m in operator_only for e in by_method.get(m, [])}
+            # `by_method` covers the SERVED set (#3883), but the adapter registers the
+            # LIVE registry — a retired name is served through the warning shim instead,
+            # which the two assertions below pin. So compare against the live half.
+            excluded &= {e.name for e in TOOL_REGISTRY}
             assert "tortoise_org_create" in excluded  # non-vacuity sentinel
 
             mcp = FastMCP("test_excluded")
