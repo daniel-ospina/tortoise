@@ -436,6 +436,7 @@ surfaces:
   - test_capture_session_supersession_e2e.py
   - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api
   - test_rebuild_turn_points_3947.py
+  - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
@@ -757,6 +758,7 @@ surfaces:
   - test_value_extractor.py
   - test_wipe_server.py
   - test_wiring_phase01.py
+  - test_workflow_secret_interpolation.py
   - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py
@@ -1446,6 +1448,7 @@ durations:
   test_sdk_ep.py: 2.0
   test_session_context.py: 2.0
   test_slack_connector.py: 2.0
+  test_workflow_secret_interpolation.py: 2.0  # #4361: new file, no CI junit measurement yet — flat 2.0s floor (#4221 precedent)
   test_action_endpoints_dual_auth.py: 1.9
   test_cross_lens_candidates.py: 1.9
   test_ep_operatorless.py: 1.9
@@ -1774,6 +1777,7 @@ durations:
   test_probe_json_mode.py: 0.0
   test_reader_prerendered.py: 0.0
   test_render.py: 0.0
+  test_rebuild_recreate_content_parity.py: 2.0  # #4042: differential live-apply() parity for the same-file delete→recreate/re-emit content boundary
   test_restore_container_recovery.py: 0.0
   test_sdk_adapter_cap.py: 0.0
   test_sentry.py: 0.0

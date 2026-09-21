@@ -85,7 +85,7 @@ currently absorbs `get_confidence`, which is read-labelled but writes. See **Ope
 |---|---|
 | `analyze` | spends LLM tokens at read time. Write-time LLM cost is ours; read-time LLM is not offered |
 | `diary_read` | dissolves into `list_knowledge(kind="diary")` |
-| `backfill_v25` | proposed for archive — a one-shot migration to ONTOLOGY **v2.5**; the ontology is now **v3.13** (`docs/ONTOLOGY.md:2`, which itself supersedes v2.5). Zero customers, pre-beta: no legacy graphs exist to migrate. The baseline records it `lifecycle: active` with `recommendation: review`, so archiving is a proposal here, not a recorded status. Rebuild against the then-current schema if ever needed |
+| `backfill_v25` | proposed for archive — a one-shot migration to ONTOLOGY **v2.5**; the ontology is now **v3.14** (`docs/ONTOLOGY.md:2`, which itself supersedes v2.5). Zero customers, pre-beta: no legacy graphs exist to migrate. The baseline records it `lifecycle: active` with `recommendation: review`, so archiving is a proposal here, not a recorded status. Rebuild against the then-current schema if ever needed |
 
 **Already gone before this list:** `ask` — eval-only, removed by issue #3849 / PR #3929.
 It is not a row above because this table lists tools *this change* removes.

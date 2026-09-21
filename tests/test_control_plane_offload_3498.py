@@ -221,6 +221,79 @@ def test_best_effort_uses_a_separate_pool_from_auth():
     assert telemetry.workers == monitoring.CONTROL_PLANE_TELEMETRY_WORKERS
 
 
+def test_oauth_pool_is_separate_from_auth_and_telemetry():
+    """#3669: a CIMD fetch is attacker-reachable, so its pool must be its OWN —
+    sharing ``auth`` would let a fetch flood park every auth slot (the #3498
+    review P1 argument applied to a new attacker class)."""
+    auth = monitoring.control_plane_worker("auth")
+    oauth = monitoring.control_plane_worker("oauth")
+    telemetry = monitoring.control_plane_worker("telemetry")
+    assert oauth is not auth and oauth is not telemetry
+    assert oauth.workers == monitoring.CONTROL_PLANE_OAUTH_WORKERS
+
+
+def test_oauth_offload_routes_to_the_oauth_pool(monkeypatch):
+    """WIRING guard: reverting ``_oauth_offload`` to the auth pool would keep
+    every behavioural test green, so record what it actually passes."""
+    seen: list[tuple[str, object]] = []
+
+    async def _recorder(fn, *, op, pool="auth", timeout=None):
+        seen.append((pool, timeout))
+        return "ok"
+
+    monkeypatch.setattr(ha, "run_control_plane_call", _recorder)
+
+    async def _run():
+        await ha._oauth_offload(lambda: None, op="read-only")
+        await ha._oauth_offload(lambda: None, op="grant", no_wait_bound=True)
+
+    asyncio.run(_run())
+    assert [pool for pool, _t in seen] == ["oauth", "oauth"], (
+        f"_oauth_offload used pools {seen} — the OAuth lane must never share "
+        "the auth pool (#3669)"
+    )
+    # The reading lane is bounded by the seam default; the MUTATING grant lane
+    # must be awaited WITHOUT a wait bound (inf), or the bound would abandon a
+    # mid-write grant and answer a retryable state it cannot observe (#2863).
+    assert seen[0][1] is None
+    assert seen[1][1] == float("inf")
+
+
+def test_fetch_deadline_sits_below_the_offload_bound():
+    """Constant ordering: a fetch must return before its caller's offload bound
+    would abandon it. ``_DeadlineStream`` bounds every SOCKET phase (connect,
+    TLS, status/header reads, body); the OS resolver's ``getaddrinfo`` tail is
+    the one exception (see ``cimd.FETCH_MAX_S``), and is bounded in aggregate by
+    the in-flight cap and the budget rather than by this ordering."""
+    from tortoise import cimd
+    assert cimd.FETCH_MAX_S <= monitoring.CONTROL_PLANE_OFFLOAD_TIMEOUT_S
+
+
+def test_oauth_pool_is_larger_than_the_in_flight_cap():
+    """The CIMD in-flight cap must be the binding constraint on concurrent
+    fetches (defence in depth), with the remaining oauth workers still free for
+    the token grants and registry reads."""
+    from tortoise import cimd
+    assert monitoring.CONTROL_PLANE_OAUTH_WORKERS > cimd.MAX_IN_FLIGHT_FETCHES
+
+
+def test_oauth_offload_maps_failure_to_the_oauth_503(monkeypatch):
+    """The OAuth lane's fail-closed error is the RFC 6749 §5.2
+    ``temporarily_unavailable`` shape its consumers parse (#2863) — NOT the
+    FastAPI ``control_plane_unavailable`` body the auth/REST lane uses."""
+    from tortoise.oauth import OAuthTemporarilyUnavailable
+
+    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.05)
+
+    async def _run():
+        await ha._oauth_offload(lambda: time.sleep(0.4), op="slow")
+
+    with pytest.raises(OAuthTemporarilyUnavailable) as excinfo:
+        asyncio.run(_run())
+    assert excinfo.value.status == 503
+    assert excinfo.value.error == "temporarily_unavailable"
+
+
 def test_unknown_pool_fails_closed():
     """The pool selector is the only thing keeping best-effort work off auth
     capacity — a typo must raise, not silently fall back to the auth pool."""
@@ -235,7 +308,7 @@ def test_cp_offload_routes_best_effort_to_the_telemetry_pool(monkeypatch):
     Record what ``_cp_offload`` actually passes."""
     seen: list[str] = []
 
-    async def _recorder(fn, *, op, pool="auth"):
+    async def _recorder(fn, *, op, pool="auth", timeout=None):
         seen.append(pool)
         return "ok"
 
