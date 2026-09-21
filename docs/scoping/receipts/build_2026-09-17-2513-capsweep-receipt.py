@@ -297,6 +297,69 @@ def main():
                             "(guard class 16, #3712); all runs launched with "
                             "-B + PYTHONDONTWRITEBYTECODE=1"),
         },
+        # ⛔ STALENESS. The census below is a HISTORICAL record of ONE revision,
+        # never a claim about current main. 412470cd3 is not on origin/main and
+        # never was, the module the arm measures is absent from main entirely,
+        # and the raw arm artifacts are gone — so this receipt is both NOT
+        # current and NOT regenerable. Recorded in the artifact itself so the
+        # next reader cannot quote these numbers as current.
+        "staleness": {
+            "status": ("STALE-BY-DESIGN \u2014 a sealed historical measurement of ONE "
+                       "revision, not a statement about current main"),
+            "caveat": (
+                "EVERY NUMBER IN THIS RECEIPT DESCRIBES REVISION 412470cd3 AND "
+                "NOTHING ELSE; it is NOT a current-main result and must not be "
+                "quoted as one. 412470cd3 is the measurement tip of branch "
+                "fix/2513-retrieval-evidence, it is NOT an ancestor of "
+                "origin/main (`git merge-base --is-ancestor 412470cd3 "
+                "origin/main` exits non-zero), and the module this arm measures "
+                "\u2014 tortoise/session_reinjection.py (472 lines at 412470cd3) "
+                "\u2014 is ABSENT from origin/main entirely. The headline figures "
+                "(session_recall@5 OFF 0.831 / ON-cap10 0.9225; evidence_recall@5 "
+                "OFF 0.527 / ON-cap10 0.4706) are therefore the record of what "
+                "an UNMERGED arm did at 412470cd3 on 2026-09-16, not a "
+                "measurement of the tree anyone can check out from main today."),
+            "measured_at": "2026-09-16T22:44:49-05:00",
+            "measured_revision": SHA,
+            "measured_branch": "fix/2513-retrieval-evidence",
+            "open_pr_carrying_the_measured_revision": 3577,
+            "verified_at_seal": {
+                "date": "2026-09-21",
+                "origin_main": "a36fd686eec2b6cdb21fc21af45e365dd64974a2",
+                "commits_in_origin_main_not_in_measured_revision": 306,
+                "merge_base": "a079767f1655c2a7ba3a0daa78b83200e16d6c61",
+                "method": ("git merge-base --is-ancestor / git rev-list "
+                           "--count / git cat-file -e"),
+            },
+            "measured_surface_absent_from_origin_main": [
+                "tortoise/session_reinjection.py",
+                "tools/longmem_eval/guard_measured_revision.py",
+                "tools/longmem_eval/build_cohorts.py",
+            ],
+            "raw_artifacts": {
+                "declared_root": str(RAW),
+                "state_at_seal": (
+                    "GONE \u2014 the directory does not exist, so the generator "
+                    "can no longer read cap{10,15}/<arm>.json and THIS RECEIPT "
+                    "CANNOT BE REGENERATED. It is the only surviving record of "
+                    "this census. /tmp/lme-v2-p100.json (the 100-Q profile "
+                    "whose '53% of misses' figure titles issue #2513) is also "
+                    "gone, so that issue's cited evidence no longer exists on "
+                    "disk either."),
+            },
+            "cohort_anchor": (
+                "STILL VALID: the cohort file named in `cohort.file` is present "
+                "and its sha256 still equals `cohort.sha256`, so the gold labels "
+                "behind the (A)/(B) split remain checkable even though the arm "
+                "artifacts do not."),
+            "still_derivable_from_this_artifact": [
+                "The (A)/(B)/(C) split of the cap10 ON residual re-derives from "
+                "`per_question` alone: A=1 (ba358f49 \u2014 gold session 28 "
+                "contributes 0 rows to the ranked pool), B=9, C=0.",
+                "The OFF-arm identity across servers (off / off_b) and across "
+                "caps, as recorded in `reproducibility`.",
+            ],
+        },
         "substrate": {
             "embedder": "BAAI/bge-small-en-v1.5 (384-dim, local "
                         "SentenceTransformer) — the real embedder; retrieval "
