@@ -84,6 +84,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_tenancy_spine.py": {"registry": "prod-coupled"},   # C5 #2114 — registry seeding in _spine_env
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
+    "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
     "test_import_endpoint.py": {"registry": "import-ledger"},
     "test_issue_4010_sessions_unlimited.py": {"registry": "prod-coupled"},  # #4010: registry seeding (org_create + registry-lane auth) mirrors test_quota/test_commit_endpoint
     "test_index_mcp.py": {"registry": "prod-coupled",

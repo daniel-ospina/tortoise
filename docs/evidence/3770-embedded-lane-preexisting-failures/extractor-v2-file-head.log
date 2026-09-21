@@ -1,0 +1,35 @@
+........................................................................ [ 28%]
+........................................................................ [ 56%]
+.....................................s.................................. [ 85%]
+......................................                                   [100%]
+=============================== warnings summary ===============================
+tests/test_extractor_v2.py::TestParseLadder::test_extractor_escalation_tokens_env_semantics
+  /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry/tests/test_extractor_v2.py:794: UserWarning: escalation budget 16000 <= base cap 16000 — a length-truncation is now RESIDUAL (fail-loud), never a partial-accept (P2-15)
+    assert v2._extractor_escalation_tokens(16000) == expect
+
+tests/test_extractor_v2.py::TestParseLadder::test_extractor_escalation_tokens_env_semantics
+  /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry/tests/test_extractor_v2.py:798: UserWarning: TORTOISE_EXTRACTOR_ESCALATION_TOKENS='15999' out of range [16000..64000] — using 32000
+    assert v2._extractor_escalation_tokens(16000) == 32000
+
+tests/test_extractor_v2.py::TestParseLadder::test_extractor_escalation_tokens_env_semantics
+  /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry/tests/test_extractor_v2.py:798: UserWarning: TORTOISE_EXTRACTOR_ESCALATION_TOKENS='64001' out of range [16000..64000] — using 32000
+    assert v2._extractor_escalation_tokens(16000) == 32000
+
+tests/test_extractor_v2.py::TestParseLadder::test_extractor_escalation_tokens_env_semantics
+  /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry/tests/test_extractor_v2.py:798: UserWarning: TORTOISE_EXTRACTOR_ESCALATION_TOKENS='0' out of range [16000..64000] — using 32000
+    assert v2._extractor_escalation_tokens(16000) == 32000
+
+tests/test_extractor_v2.py::TestParseLadder::test_extractor_escalation_tokens_env_semantics
+  /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry/tests/test_extractor_v2.py:798: UserWarning: TORTOISE_EXTRACTOR_ESCALATION_TOKENS='999999' out of range [16000..64000] — using 32000
+    assert v2._extractor_escalation_tokens(16000) == 32000
+
+tests/test_extractor_v2.py::TestParseLadder::test_extractor_escalation_tokens_env_semantics
+  /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry/tests/test_extractor_v2.py:798: UserWarning: invalid TORTOISE_EXTRACTOR_ESCALATION_TOKENS='abc' — using 32000
+    assert v2._extractor_escalation_tokens(16000) == 32000
+
+tests/test_extractor_v2.py::TestParseLadder::test_extractor_escalation_tokens_env_semantics
+  /Users/danielospina/Documents/GitHub/tortoise/.worktrees/feat/2552-operator-edges-retry/tests/test_extractor_v2.py:798: UserWarning: invalid TORTOISE_EXTRACTOR_ESCALATION_TOKENS='32.5' — using 32000
+    assert v2._extractor_escalation_tokens(16000) == 32000
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+253 passed, 1 skipped, 7 warnings in 15.47s
