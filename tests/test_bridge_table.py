@@ -94,6 +94,68 @@ def _sdk_defs_independently() -> set[str]:
     raise AssertionError("no `class TortoiseSDK` found in tortoise/sdk.py")
 
 
+def test_c2_lists_exactly_the_bindings_that_do_not_resolve() -> None:
+    """C2 must list every unresolvable `sdk_method`, and nothing else.
+
+    Round 4 of the #4177 review found this section unguarded: replacing the
+    blocker function with one that returns `[]` for the C2 half renders
+    "None." where five findings belong, and **all eight tests still pass** -
+    because no test reads C2 at all and `--check` compares the doc to the same
+    mutated render. A "find the declaration defects" section that can silently
+    empty itself is worse than absent.
+
+    Expected values are derived from the registry here, not from the generator.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools.bridge_table import _registry_rows
+
+    defs = _sdk_defs_independently()
+    expected = {
+        r["name"]: r["sdk_method"]
+        for r in _registry_rows()
+        if r["sdk_method"] and r["sdk_method"] not in defs
+    }
+    assert expected, "no unresolvable bindings found - the registry may have changed"
+
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    # Take the C2 section up to the next heading, then match its table rows. Do
+    # NOT split on a blank line first: the table's header row is itself preceded
+    # by one, so that truncates to the section title and silently parses nothing.
+    c2 = doc.split("### C2")[1]
+    c2 = re.split(r"\n###? ", c2)[0]
+    rows = re.findall(
+        r"^\| `([a-z_][a-z0-9_]*)` \| `([A-Za-z_][A-Za-z0-9_]*)` \| `tool_registry\.py:(\d+)` \|",
+        c2, re.M,
+    )
+    listed = {name: binding for name, binding, _ in rows}
+
+    assert listed == expected, (
+        "Part C2 does not list exactly the bindings that fail to resolve.\n"
+        f"  listed but resolvable: {sorted(set(listed) - set(expected))}\n"
+        f"  missing from C2 ({len(set(expected) - set(listed))}): {sorted(set(expected) - set(listed))}"
+    )
+
+    # The `Source` line numbers are generated too, so assert them against the
+    # registry rather than only checking that *a* number is present.
+    import ast
+
+    tree = ast.parse((ROOT / "tortoise" / "tool_registry.py").read_text(encoding="utf-8"))
+    truth: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id != "ToolDefinition":
+                continue
+            for kw in node.keywords:
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                    truth[kw.value.value] = node.lineno
+    bad_lines = [
+        f"{name}: cited :{line}, defined at :{truth.get(name)}"
+        for name, _, line in rows
+        if truth.get(name) != int(line)
+    ]
+    assert not bad_lines, "Part C2 cites the wrong line for:\n  " + "\n  ".join(bad_lines)
+
+
 def test_part_b_line_numbers_point_at_the_right_tool() -> None:
     """Every `tool_registry.py:N` citation must equal the tool's real definition line.
 
@@ -255,6 +317,7 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
 
     merged = {d for d, n in sources.items() if n > 1 and d != "REMOVED"}
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    defs = _sdk_defs_independently()
 
     assert len(merged) == 17, f"merged set changed size: {len(merged)}"
     # Every merged target must appear in Part A, and nothing else may.
@@ -266,6 +329,69 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
         f"  listed but not merged: {sorted(listed - merged)}\n"
         f"  merged but not listed: {sorted(merged - listed)}"
     )
+    # The summary sentence is generated from the same numbers, so assert it too:
+    # a mutated count would otherwise regenerate a self-consistent wrong document.
+    summary = re.search(
+        r"\*\*(\d+) merged targets\. (\d+) of them have a method behind them today\.\*\*"
+        r" The other \*\*(\d+)\*\*",
+        doc,
+    )
+    assert summary, "Part A's summary sentence is missing or changed shape"
+    n_merged, n_ok, n_remaining = (int(g) for g in summary.groups())
+    assert n_merged == len(merged), f"summary says {n_merged} merged, table lists {len(merged)}"
+    truth_ok = sum(1 for t in merged if (t.split(":", 1)[1] if t.startswith("sdk:") else t) in defs)
+    assert n_ok == truth_ok, f"summary says {n_ok} implemented, {truth_ok} are"
+    assert n_remaining == len(merged) - truth_ok, (
+        f"summary says {n_remaining} remaining, {len(merged) - truth_ok} are"
+    )
+
+    # The "Sources absorbed" column is a count, so a rendering mutation would
+    # produce a self-consistent-looking but wrong number. The presence check is
+    # not decorative: without it an empty match skips the loop entirely and the
+    # surface goes silently unguarded (found by the round-11 verifier).
+    counts_in_doc = dict(re.findall(
+        r"^\| `([a-z_][a-z0-9_]*)` \| (\d+) \| .*? \| .*? \|$", part_a, re.M
+    ))
+    assert counts_in_doc, "Part A's `Sources absorbed` column did not parse - the surface is unguarded"
+    assert len(counts_in_doc) == len(merged), (
+        f"Part A's counts column has {len(counts_in_doc)} rows, the merged set has {len(merged)}"
+    )
+    for target, rendered in counts_in_doc.items():
+        assert int(rendered) == sources.get(target, 0), (
+            f"Part A says {target} absorbed {rendered} tools, the map says {sources.get(target, 0)}"
+        )
+
+    # The destination-counts table must agree with the same map, and sum to the
+    # registry size. Assert presence rather than guarding with `if`, so a
+    # generator that stops emitting the table reds this test instead of skipping it.
+    dest_rows = dict(re.findall(r"^\| `([A-Za-z_:]+)` \| (\d+) \|$", doc, re.M))
+    assert dest_rows, "the destination-counts table did not parse - the surface is unguarded"
+    assert len(dest_rows) == len(sources), (
+        f"the counts table has {len(dest_rows)} rows, the map has {len(sources)} destinations"
+    )
+    assert sum(int(v) for v in dest_rows.values()) == 98, (
+        "the destination-counts table does not sum to 98: "
+        f"{sum(int(v) for v in dest_rows.values())}"
+    )
+    for dest, rendered in dest_rows.items():
+        assert int(rendered) == sources.get(dest, 0), (
+            f"the counts table says {dest} has {rendered} sources, the map says {sources.get(dest, 0)}"
+        )
+
+    # The rendered total cell and the prose counts are counts too, and both were
+    # unguarded: mutating only the total line passed every test.
+    total_cell = re.search(r"^\| \*\*total\*\* \| \*\*(\d+)\*\* \|$", doc, re.M)
+    assert total_cell, "the destination-counts table has no `**total**` row"
+    assert int(total_cell.group(1)) == 98, (
+        f"the counts table's total cell says {total_cell.group(1)}, the registry has 98"
+    )
+    prose = re.search(r"Destination rows: \*\*(\d+)\*\*\. Registry tools: \*\*(\d+)\*\*\.", doc)
+    assert prose, "the `Destination rows / Registry tools` prose counts are missing"
+    assert int(prose.group(1)) == len(dest_rows), (
+        f"prose says {prose.group(1)} destination rows, the table has {len(dest_rows)}"
+    )
+    assert int(prose.group(2)) == 98, f"prose says {prose.group(2)} registry tools, there are 98"
+
     # The specific regression both prior rounds found.
     assert "record_decision" not in listed, (
         "record_decision has one source, so it is not merged, and must not be in Part A"

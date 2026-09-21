@@ -122,8 +122,9 @@ beta surface adds four, drops three and splits one:
 
 ## ⛔ Cross-artifact tensions — do not let the target silently close an owner-open item
 
-`docs/product/canonical-mcp-tools.md` is **owner-approved and merged**, and it carries four items left **open**, three marked literally
-**"OPEN — owner decision"** and `run_onboarding` marked **"OPEN — decision"**. The beta target has already made a call on all four. **A draft
+`docs/product/canonical-mcp-tools.md` is **owner-approved and merged**, and it carries **five** items left **open**: three marked literally **"OPEN — owner decision"**
+(`packs_list`, `pack_install`, `graph_set_recording`), `run_onboarding` marked **"OPEN — decision"**,
+and `manage_deployment` marked **"placement OPEN"**. The beta target has already made a call on all five. **A draft
 making a call does not resolve an owner-open item**, and no lane may treat it as resolved merely
 because the bridge table renders a destination. Each needs the owner, or an explicit statement that
 the beta supersedes it.
@@ -179,7 +180,7 @@ that names its replacement.
 | **2.2** | The 4 merges (`create_entity`, `link_entities`, `delete_knowledge`, `update_knowledge`) dispatching internally | 2.1 |
 | **2.3** | `update_memory_graph` — **the rename path that is currently missing** | 2.1 |
 | **2.4** | The Contracts section enforced: pagination cursors, truncation notice, typed errors | 2.1 |
-| **2.5** | 145 retired names → warning aliases | 1.4 |
+| **2.5** | 146 retired names → warning aliases (`150 - 4` reused verbatim) | 1.4 |
 | **2.6** | `check_connection` (the `check_key` + `verify_connection` collapse) | — |
 
 ### Phase 3 — the MCP server

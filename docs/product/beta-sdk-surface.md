@@ -260,7 +260,7 @@ Recorded so they are not silently dropped. None is required for beta:
 | `file_decision` | → rows 20/21 **`write_question`** + **`record_decision`**. It was filing a *question* and calling it a decision. |
 | `graph_delete`, `graph_restore`, `graph_list`, `graph_set_name` | → rows 30–33 `*_memory_graph*`. |
 | narrow aliases absorbed by `graph_overview` — `taxonomy`, `list_pointkinds`, `list_tags`, `list_namespaces`, `list_graphs`, `status`, `stale`, `check_structure`, `list_topics` | **Deleted, not folded.** The approved list contains the container and not the aliases; shipping both is the merge failing at its own goal. |
-| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), though no dedicated test file — it is exercised from other suites. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |
+| `list_sources` | **Not discarded.** Present at `tortoise/sdk.py` with an MCP tool and a CLI command (`tortoise/__main__.py`), and it is covered by `tests/test_enumeration_surfaces.py` and `tests/test_connector_sources.py`. It folds into **row 4 `list_knowledge(kind='source')`** — the *question* it asks stays first-class and gains the credibility tier; it no longer needs its own method. |
 | `capture_session` / `commit_session` | → row 16 `mine_knowledge_from_session`, one method. The backend is the target graph's configuration. |
 | `file_decision`'s `options`/`evidence`/`choice` | Preserved in `record_decision`'s inline shortcut form. |
 
