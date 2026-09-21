@@ -432,7 +432,7 @@ SOURCE_PATTERNS = {
             # it. Named here because a SOURCE_PATTERNS match beats the
             # non-python skip. A docs-only hand-edit of the generated file still
             # skips the matrix by the repo's deliberate docs-PR policy — see
-            # tortoise #4297.
+            # tortoise #4454.
             "tools/bridge_table.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate

@@ -13,7 +13,7 @@ runs with the ordinary suite. It is registered in BOTH `api` and `core` in
 SOURCE_PATTERNS — because `tools/` and `docs/` are in NON_PYTHON_PREFIXES, an
 edit to the generator alone used to select NO surface, so the gate did not run on
 the PR that can break it. Residual: a change touching ONLY the docs skips the
-matrix by the repo's deliberate docs-PR policy (filed as tortoise #4297).
+matrix by the repo's deliberate docs-PR policy (filed as tortoise #4454).
 """
 from __future__ import annotations
 
@@ -332,7 +332,7 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     generator's own predicate, and pins the three facts the document asserts.
     """
     sys.path.insert(0, str(ROOT))
-    from tools.bridge_table import DESTINATION, TARGET_MCP, _registry_rows
+    from tools.bridge_table import DESTINATION, DISCRIMINATORS, TARGET_MCP, _registry_rows
 
     sources: dict[str, int] = {}
     for dest in DESTINATION.values():
@@ -382,6 +382,22 @@ def test_part_a_merged_set_is_recomputed_independently() -> None:
     for target, rendered in counts_in_doc.items():
         assert int(rendered) == sources.get(target, 0), (
             f"Part A says {target} absorbed {rendered} tools, the map says {sources.get(target, 0)}"
+        )
+
+    # The `Discriminator` column is the ONE authored cell in Part A, so it is also
+    # the only one no computation can catch: overwriting every row with the same
+    # placeholder left all tests green and the design fact silently unreachable.
+    discs_in_doc = dict(re.findall(
+        r"^\| `([a-z_][a-z0-9_]*)` \| \d+ \| (.+?) \| .+? \|$", part_a, re.M
+    ))
+    assert discs_in_doc, "Part A's `Discriminator` column did not parse - the surface is unguarded"
+    assert set(discs_in_doc) == set(counts_in_doc), (
+        "Part A's Discriminator column and its counts column cover different rows"
+    )
+    for target, rendered in discs_in_doc.items():
+        want = DISCRIMINATORS.get(target, "*(none — dispatch is by argument)*")
+        assert rendered.strip() == want, (
+            f"Part A says {target}'s discriminator is {rendered.strip()!r}, the map says {want!r}"
         )
 
     # The destination-counts table must agree with the same map, and sum to the
@@ -513,14 +529,14 @@ def test_part_b_columns_are_not_unchecked() -> None:
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
     part_b = doc.split("## Part B")[1].split("## Part C")[0]
 
-    parsed: dict[str, tuple[str, str]] = {}
+    parsed: dict[str, tuple[str, str, str]] = {}
     for line in part_b.splitlines():
         m = re.match(
             r"^\| \d+ \| `([a-z_][a-z0-9_]*)` \| `[^`]+` \| (.+?) \| (yes|no) \| (.+?) \|$",
             line,
         )
         if m:
-            parsed[m.group(1)] = (m.group(3), m.group(4).strip())
+            parsed[m.group(1)] = (m.group(2), m.group(3), m.group(4).strip())
 
     assert parsed, "Part B rendered no parseable rows - did its column shape change?"
     assert set(parsed) == set(rows), (
@@ -529,10 +545,20 @@ def test_part_b_columns_are_not_unchecked() -> None:
         f"  only in registry: {sorted(set(rows) - set(parsed))}"
     )
 
-    for name, (read_only, dest_cell) in parsed.items():
+    for name, (binding, read_only, dest_cell) in parsed.items():
         expected_ro = "yes" if rows[name]["read_only"] else "no"
         assert read_only == expected_ro, (
             f"Part B says {name} read-only={read_only}, the registry says {expected_ro}"
+        )
+        # The SDK binding is a claim too: what the tool declares today, plus a
+        # marker when that name does not resolve. Blanking the whole column to
+        # `**none declared**` left every test green.
+        declared = rows[name]["sdk_method"]
+        want_bind = f"`{declared}`" if declared else "**none declared**"
+        if declared and not rows[name]["resolves"]:
+            want_bind += " ⚠️ **does not resolve**"
+        assert binding.strip() == want_bind, (
+            f"Part B says {name} binds {binding.strip()!r}, the registry says {want_bind!r}"
         )
         expected_dest = DESTINATION[name]
         # The cell carries the destination name, plus a marker when it is a target
