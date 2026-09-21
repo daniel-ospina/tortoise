@@ -467,6 +467,7 @@ surfaces:
   - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api
   - test_rebuild_turn_points_3947.py
   - test_rebuild_recreate_content_parity.py  # #4042: a pre-recreation PointRevised must not leak content/embedding/content_hash onto a re-created same-id Point (live apply()/fold() parity; same-journal-file content boundary)
+  - test_rebuild_graph_only_derived_parity.py  # #4305: rebuild_all must not lose live-valid content_hash/embedding for a graph-only Point on a falsy re-emit, nor let the synthetic #548 tail clobber it (live apply() parity, 21 shapes)
   - test_restore_container_recovery.py
   - test_retention_promise.py  # #4179: retention/deletion promise — constants agree + scatter scan
   - test_session_attribution.py
@@ -1832,6 +1833,7 @@ durations:
   test_reader_prerendered.py: 0.0
   test_render.py: 0.0
   test_rebuild_recreate_content_parity.py: 2.0  # #4042: differential live-apply() parity for the same-file delete→recreate/re-emit content boundary
+  test_rebuild_graph_only_derived_parity.py: 2.0  # #4305: differential live-apply() parity for graph-only (out-of-journal) Point derived — falsy re-emit + synthetic-tail clobber
   test_restore_container_recovery.py: 0.0
   test_sdk_adapter_cap.py: 0.0
   test_sentry.py: 0.0
