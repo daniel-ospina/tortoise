@@ -11,7 +11,8 @@ Covers:
   1. signup → org → fork → connect → seed → decide one sitting (mock agent
      via checkpoint calls + merged GET states) → gate-complete wire.
   2. Dismissal alone never completes (no decide edge).
-  3. build fork: decide does NOT complete; catalog-presented does.
+  3. build fork: completes on the two observed acts (harness-connected +
+     first-points-filed); decide AND catalog-presented complete nothing.
   4. Grandfathered wire stability (DE2E-6): legacy wizard PATCH completes →
      wire true (guard); the FIRST agent step edge flips control to the node.
   5. Checkpoint created/noop signals (the W11 surface; event emission is
@@ -117,20 +118,27 @@ def test_dismissal_alone_never_completes(api):
     assert st["last_decide_attempt"] == "dismissed"
 
 
-def test_build_fork_uses_catalog_not_decide(api):
+def test_build_fork_completes_on_the_two_observed_acts(api):
     _org_id, headers = _register(api, "build")
     _checkpoint(api, headers, {"fork": "build"})
     _checkpoint(api, headers, {"step": "harness-connected"})
-    _checkpoint(api, headers, {"step": "first-points-filed"})
-    # decide does NOT complete a build org (catalog is the build gate step)
+    # #3913: ONE observed act is not enough (fail-closed)
+    r = api.get("/v1/onboarding/state", headers=headers)
+    assert r.json()["onboarding"]["status"] == "active"
+    # decide does NOT complete a build org — asserted while the org is still
+    # ACTIVE. (Asserting `complete` after first-points-filed completed it is a
+    # tautology: it proves nothing about the decide edge.)
     r = _checkpoint(api, headers, {"step": "decide-completed"})
     assert r.json()["onboarding"]["status"] == "active"
-    # catalog-presented (dashboard PATCH surface) completes it
+    # the second observed act completes the build fork
+    r = _checkpoint(api, headers, {"step": "first-points-filed"})
+    assert r.json()["onboarding"]["status"] == "complete"
+    assert r.json()["onboarding"]["onboarding_complete"] is True
+    # catalog-presented stays an accepted, optional record on the complete org
     r = api.patch("/v1/onboarding/state", headers=headers,
                   data={"catalog_presented": True})
     assert r.status == 200, r.text()
     assert r.json()["onboarding"]["status"] == "complete"
-    assert r.json()["onboarding"]["onboarding_complete"] is True
 
 
 def test_grandfathered_wire_stable_then_node_governs(api):

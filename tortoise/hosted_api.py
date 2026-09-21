@@ -19077,9 +19077,11 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
     strict mode). Returns the MERGED PROJECTION — the writer echo
     can never diverge from GET.
 
-    NOTE: step-edge writes via this router (PATCH catalog-presented) trigger
-    the post-write gate eval; the checkpoint calls state.py writers directly
-    and evals via _maybe_apply_completion."""
+    NOTE: this router's step-edge branch is NOT on the PATCH catalog path —
+    `patch_onboarding_state` pops `catalog_presented` and writes the edge +
+    evals itself, and the checkpoint path calls the state.py writers directly.
+    Any other caller that hands a step id to this router does get the
+    post-write gate eval."""
     jsonb_fields: dict[str, object] = {}
     wrote_step = False
     # #2006 (W11): the steps whose COMPLETED_STEP edge THIS call created —
@@ -19387,8 +19389,11 @@ class OnboardingStatePatchRequest(BaseModel):
     github_docs_scope: list[dict] | None = None
     # #2001 (W5): FLOW keys DECLARED on the PATCH surface so a stray client
     # send is REJECTED loudly (403/422) instead of silently dropped — and
-    # catalog-presented, the ONE step key the dashboard writes (W1/W8 first
-    # catalog render, step-edge MERGE). All other FLOW keys are
+    # catalog-presented, the ONE step key a client may still PATCH (step-edge
+    # MERGE — an optional record, never a completion requirement). Since #3913
+    # (owner ruling 2026-09-20) NO dashboard path sends it: the fork card writes
+    # only the fork (or its unsure marker), never a step, and the id stays
+    # accepted for agent/external callers and for existing orgs' completed_steps. All other FLOW keys are
     # server-owned / checkpoint-owned on this surface.
     catalog_presented: bool | None = None
     harness_connected: bool | None = None
@@ -19448,10 +19453,12 @@ async def get_capabilities(org: dict = Depends(get_current_org_session_ungated))
     The indexers+extractors registry rows from tool_registry.py
     ``CAPABILITY_CATALOG`` (R2-9 — no new infra): one canonical list for the
     registry endpoint AND the dashboard's build-path catalog read (W8
-    replaced W1's static placeholder source with this endpoint; the
-    dashboard's first build-fork render marks the catalog-presented
-    checkpoint via the existing W1/W5 mechanism — presentation only, never
-    a billing gate). Org-independent static registry data (no graph
+    replaced W1's static placeholder source with this endpoint; the BUILD
+    fork pick records the FORK ONLY — since #3913 (owner ruling 2026-09-20)
+    no dashboard path writes catalog-presented, and the id stays accepted for
+    agent/external callers. Presentation only, never a billing gate, never a
+    build-completion requirement). Org-independent static
+    registry data (no graph
     touch — never 'unavailable'); dual-auth like the onboarding state reads.
 
     Contract: ``200 {modules: [{name, kind: indexer|extractor, description,
@@ -19567,7 +19574,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     updates = _validate_scope_payload(updates)
     # #2001 (W5): per-key-type write-surface ownership at the PATCH
     # boundary — server-owned FLOW keys 403, agent-step keys 422, the one
-    # dashboard step (catalog-presented) MERGEs the step edge.
+    # client-writable step (catalog-presented) MERGEs the step edge. Since
+    # #3913 the dashboard no longer sends it; the surface stays open for
+    # agent/external callers.
     _sent_owned = [k for k in _PATCH_SERVER_OWNED_KEYS if k in updates]
     if _sent_owned:
         raise HTTPException(
@@ -19626,8 +19635,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 # #2001 (W5): agent/internal checkpoint — the ONLY surface for the agent
 # steps + fork/compact set-once + last_decide_attempt LWW + member_progress.
-# Per-step write-surface ownership (scope pin 8): the dashboard PATCHes only
-# operational keys + catalog-presented; agents checkpoint everything else.
+# Per-step write-surface ownership (scope pin 8): the PATCH surface accepts
+# operational keys + catalog-presented (no dashboard path has sent the latter
+# since #3913); agents checkpoint everything else.
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
@@ -19887,16 +19897,18 @@ class _OrgSeedSurface:
 
 def _next_onboarding_step(org_id: str, proj) -> str | None:
     """First incomplete fork-aware step after the seed (the decide nudge
-    target): self fork → decide; build → catalog-presented; compact →
-    harness-connected. 'done' when the gate already satisfied the status."""
+    target): self fork → decide; build/compact → harness-connected (the
+    #3913 build gate is the two observed acts; first-points-filed is written
+    by the seed itself, so after a successful seed only harness-connected can
+    still be open). 'done' when the gate already satisfied the status."""
     node = _os.read_onboarding_node(proj, org_id)
     if node is None or node.get("status") == _os.STATUS_COMPLETE:
         return "done"
     steps = set(_os.completed_steps(proj, org_id))
-    if bool(node.get("compact")):
+    # #3913: build no longer trails catalog-presented — build and compact share
+    # the reduced post-seed checklist (the seed files first-points-filed).
+    if bool(node.get("compact")) or node.get("fork") == _os.FORK_BUILD:
         order = ("harness-connected",)
-    elif node.get("fork") == _os.FORK_BUILD:
-        order = ("harness-connected", "catalog-presented")
     else:
         order = ("harness-connected", "decide-completed")
     for step in order:
