@@ -11,11 +11,24 @@ Measured on ``main`` with both probes stubbed to ~0 ms and one unrelated task
 occupying the default executor's only worker:
 
     /health        : NO ANSWER within 8.0s        (probe never ran)
-    /health/ready  : HTTP 503 after 6020ms        (probe never ran)
+    /health/ready  : HTTP 503 after 6021ms        (probe never ran)
 
 ``publish-selfhost.yml`` curls ``/health/ready`` and fails the publish on a
 non-200, so that false 503 blocks a release of a perfectly healthy image;
 ``/health`` is the 60 s boot-wait in the same workflow.
+
+**The pool is ``monitoring.daemon_worker`` (#3498's bounded multi-worker
+form)** — the shared, reviewed primitive #3286 records as the unification
+target, not a second bespoke executor. Two properties come from that choice and
+are pinned here directly, because they are the reason for it:
+
+* the workers are DAEMON, so a probe parked in a socket read cannot delay
+  interpreter exit (``concurrent.futures.thread._python_exit`` JOINS a
+  ``ThreadPoolExecutor``'s non-daemon workers; #2203's ``docker stop`` SIGKILLs
+  10 s after SIGTERM and a wedged non-daemon worker eats that budget);
+* the backlog is BOUNDED (``_SingleSlotWorker.MAX_BACKLOG``), so a saturated
+  pool REFUSES a submission instead of buffering without bound — this change's
+  own complaint about the default executor applied to its replacement.
 
 The suite is deliberately two-layered, in the style of
 ``test_health_ready_nonblocking.py``:
@@ -36,6 +49,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import concurrent.futures
+import contextvars
 import threading
 import time
 from pathlib import Path
@@ -46,22 +60,24 @@ REPO = Path(__file__).resolve().parent.parent
 SELFHOST = REPO / "tortoise" / "selfhost.py"
 SELFHOST_SRC = SELFHOST.read_text()
 
-#: handler -> the pool that handler must own. Two pools, never one: see
-#: ``test_liveness_and_readiness_do_not_share_a_pool``.
-POOLS = {
-    "health": "_LIVENESS_PROBE_EXECUTOR",
-    "health_ready": "_READY_PROBE_EXECUTOR",
+#: handler -> the (pool-NAME constant, pool-WIDTH constant) lane it must own.
+#: Two lanes, never one: see ``test_probe_lanes_are_distinct_pools``.
+LANES = {
+    "health": ("_LIVENESS_PROBE_WORKER", "_LIVENESS_PROBE_WORKERS"),
+    "health_ready": ("_READY_PROBE_WORKER", "_READY_PROBE_WORKERS"),
 }
 
-#: pool -> its production ``thread_name_prefix``. Pinned in the AST test below so
-#: the fixture, the assertions and the production source cannot drift apart (a
-#: silent rename would otherwise make the thread assertions vacuous).
-THREAD_PREFIXES = {
-    "_LIVENESS_PROBE_EXECUTOR": "selfhost-liveness-probe",
-    "_READY_PROBE_EXECUTOR": "selfhost-ready-probe",
+#: name constant -> the production pool name. It is ALSO the daemon thread-name
+#: prefix (``_SingleSlotWorker`` suffixes a multi-worker pool's threads with
+#: ``-<i>``), so these are pinned in the AST test below and asserted against the
+#: threads the probes actually run on — a silent rename must not make the thread
+#: assertions vacuous.
+POOL_NAMES = {
+    "_LIVENESS_PROBE_WORKER": "selfhost-liveness-probe",
+    "_READY_PROBE_WORKER": "selfhost-ready-probe",
 }
 
-#: pool -> the FEWEST workers it may have.
+#: width constant -> the FEWEST workers it may carry.
 #:
 #: Liveness 2: its probe is inner-bounded (``monitoring.PROBE_TIMEOUT``), so a
 #: worker always comes back; two absorbs an overlapping poll.
@@ -75,27 +91,47 @@ THREAD_PREFIXES = {
 #: readiness fan-in. Exercised by
 #: ``test_readiness_fan_in_does_not_produce_a_false_503``.
 POOL_MIN_WORKERS = {
-    "_LIVENESS_PROBE_EXECUTOR": 2,
-    "_READY_PROBE_EXECUTOR": 6,
+    "_LIVENESS_PROBE_WORKERS": 2,
+    "_READY_PROBE_WORKERS": 6,
+}
+
+#: name constant -> its width constant (the two halves of one lane).
+LANE_WIDTH = {
+    "_LIVENESS_PROBE_WORKER": "_LIVENESS_PROBE_WORKERS",
+    "_READY_PROBE_WORKER": "_READY_PROBE_WORKERS",
 }
 
 
-def _prod_max_workers(pool: str) -> int:
-    """The pool's real ``max_workers``, read from the source under test.
+def _module_assign(name: str) -> ast.Assign:
+    for node in ast.parse(SELFHOST_SRC).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            return node
+    raise AssertionError(f"module-level {name} not found in selfhost.py")
 
-    The fixture must mirror PRODUCTION's width, not invent its own: a fixture
-    that hardcodes 2 would make the behavioural tests validate the fixture and
-    let a too-narrow production pool pass. Falls back to the pinned minimum on
-    pre-fix code, where the pool does not exist.
+
+def _module_literal(name: str):
+    """The literal value of a module-level assignment (str or int)."""
+    value = _module_assign(name).value
+    assert isinstance(value, ast.Constant), (
+        f"{name} must be a plain literal constant (got {ast.dump(value)[:80]}) — it is "
+        "read by the pins and by the fixture, so it must not be computed"
+    )
+    return value.value
+
+
+def _prod_workers(width_const: str) -> int:
+    """The lane's production width, read from the source under test.
+
+    The assertions must mirror PRODUCTION's width, not invent their own: a test
+    that hardcoded 2 would let a too-narrow production width pass.
     """
-    try:
-        ctor = _module_assign(pool).value
-    except AssertionError:
-        return POOL_MIN_WORKERS[pool]
-    if not isinstance(ctor, ast.Call) or getattr(ctor.func, "id", None) != "ThreadPoolExecutor":
-        return POOL_MIN_WORKERS[pool]
-    value = next((kw.value for kw in ctor.keywords if kw.arg == "max_workers"), None)
-    return value.value if isinstance(value, ast.Constant) and isinstance(value.value, int) else POOL_MIN_WORKERS[pool]
+    width = _module_literal(width_const)
+    assert isinstance(width, int) and not isinstance(width, bool), (
+        f"{width_const} must be an int, got {width!r}"
+    )
+    return width
 
 
 # ── AST helpers ────────────────────────────────────────────────────────────
@@ -108,13 +144,11 @@ def _handler(name: str) -> ast.AsyncFunctionDef:
     raise AssertionError(f"{name} not found in selfhost.py")
 
 
-def _module_assign(name: str) -> ast.Assign:
-    for node in ast.parse(SELFHOST_SRC).body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == name for t in node.targets
-        ):
+def _func(name: str) -> ast.FunctionDef:
+    for node in ast.walk(ast.parse(SELFHOST_SRC)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
-    raise AssertionError(f"module-level {name} not found in selfhost.py")
+    raise AssertionError(f"{name} not found in selfhost.py")
 
 
 def _calls(nodes, attr: str | None = None, func_name: str | None = None):
@@ -151,43 +185,98 @@ def _names_in(node: ast.AST) -> set[str]:
 # ── structural pins ────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("pool", sorted(POOLS.values()))
-def test_probe_pool_is_module_level_sized_and_named(pool):
+@pytest.mark.parametrize("name_const", sorted(POOL_NAMES))
+def test_probe_lane_is_named_and_sized(name_const):
     """A per-call or default pool would reproduce the defect: per-call pools
     churn a thread per request (and cannot be bounded), and the default pool is
-    the shared resource under attack. Each pool must be module-level,
-    explicitly sized, and named so the thread is identifiable in a dump."""
-    assign = _module_assign(pool)
-    ctor = assign.value
-    assert isinstance(ctor, ast.Call) and getattr(ctor.func, "id", None) == "ThreadPoolExecutor", (
-        f"{pool} must be a module-level ThreadPoolExecutor"
+    the shared resource under attack. Each lane must name a pool and pin its
+    width, and the name must be the exact string the thread assertions use."""
+    assert _module_literal(name_const) == POOL_NAMES[name_const], (
+        f"{name_const} is {_module_literal(name_const)!r}, expected "
+        f"{POOL_NAMES[name_const]!r} — the behavioural tests assert probes run on "
+        "that exact daemon-thread name, so a rename must not silently pass"
     )
-    kwargs = {kw.arg: kw.value for kw in ctor.keywords}
-    assert "max_workers" in kwargs, f"{pool} must pin max_workers"
-    assert not (
-        isinstance(kwargs["max_workers"], ast.Constant) and kwargs["max_workers"].value is None
-    ), f"{pool} with max_workers=None is the default (shared, cpu-derived) sizing"
-    assert isinstance(kwargs["max_workers"], ast.Constant) and isinstance(
-        kwargs["max_workers"].value, int
-    ), f"{pool} must pin an integer max_workers"
-    assert kwargs["max_workers"].value >= POOL_MIN_WORKERS[pool], (
-        f"{pool} has max_workers={kwargs['max_workers'].value}, below the required "
-        f"{POOL_MIN_WORKERS[pool]} — a pool narrower than the shared default executor "
-        "it replaced converts readiness fan-in into a queue-timeout false 503"
-    )
-    assert "thread_name_prefix" in kwargs, (
-        f"{pool} is unnamed — invisible in a thread dump, so a starved or wedged "
-        "probe cannot be identified in production"
-    )
-    assert kwargs["thread_name_prefix"].value == THREAD_PREFIXES[pool], (
-        f"{pool}'s thread_name_prefix is {kwargs['thread_name_prefix'].value!r}, "
-        f"expected {THREAD_PREFIXES[pool]!r} — the behavioural tests assert probes run "
-        "on that exact thread name, so a rename must not silently pass"
+    width_const = LANE_WIDTH[name_const]
+    width = _prod_workers(width_const)
+    assert width >= POOL_MIN_WORKERS[width_const], (
+        f"{width_const}={width} is below the required {POOL_MIN_WORKERS[width_const]} "
+        "— a lane narrower than the shared default executor it replaced converts "
+        "readiness fan-in into a queue-timeout false 503"
     )
 
 
-def test_liveness_and_readiness_do_not_share_a_pool():
-    """The pool split is load-bearing, not tidiness.
+def test_probe_worker_resolves_to_the_shared_daemon_primitive():
+    """#3286: the lanes are ``monitoring.daemon_worker`` pools, and the reason
+    is load-bearing, so pin the two properties the choice buys.
+
+    A ``ThreadPoolExecutor`` would satisfy every other pin here while
+    (a) joining its NON-daemon workers at interpreter exit — a probe parked in a
+    socket read then delays ``docker stop``'s drain past the #2203 budget and
+    blocks process exit — and (b) buffering submissions without bound, which is
+    the very complaint this change makes about the default executor.
+    """
+    import tortoise.monitoring as mon
+    from tortoise import selfhost as sh
+
+    lanes = {
+        name_const: sh._probe_worker(_module_literal(name_const), _prod_workers(LANE_WIDTH[name_const]))
+        for name_const in POOL_NAMES
+    }
+    # distinct RESOURCES, not merely distinct names (the names differ by
+    # construction — see test_probe_lanes_are_distinct_pools).
+    assert lanes["_LIVENESS_PROBE_WORKER"] is not lanes["_READY_PROBE_WORKER"], (
+        "the two lanes resolve to the SAME pool — an unbounded readiness probe "
+        "would then starve liveness, the defect this change removes"
+    )
+    for name_const, worker in lanes.items():
+        assert isinstance(worker, mon._SingleSlotWorker), (
+            f"{name_const} resolved to {type(worker).__name__}, not the "
+            "_SingleSlotWorker daemon primitive — a ThreadPoolExecutor here "
+            "reintroduces the non-daemon interpreter-exit join (#3286)"
+        )
+        # process-wide: the registry is keyed by name, so a second resolution
+        # must return the SAME pool rather than leaking a new one per request.
+        assert sh._probe_worker(_module_literal(name_const), 1) is worker, (
+            f"{name_const} is not process-wide — resolving it twice built a "
+            "second pool, so its width and backlog would not be the pinned ones"
+        )
+        assert worker.workers >= POOL_MIN_WORKERS[LANE_WIDTH[name_const]], (
+            f"{name_const} has {worker.workers} worker(s) — see POOL_MIN_WORKERS"
+        )
+        assert worker._threads and all(t.daemon for t in worker._threads), (
+            f"{name_const} has non-daemon worker(s) — they are JOINED at "
+            "interpreter exit, so a parked probe blocks shutdown (#3286)"
+        )
+        assert worker._max_backlog == mon._SingleSlotWorker.MAX_BACKLOG, (
+            f"{name_const}'s backlog is {worker._max_backlog!r}, not the primitive's "
+            f"bounded {mon._SingleSlotWorker.MAX_BACKLOG} — an unbounded queue is "
+            "the defect, not its fix"
+        )
+
+
+def test_probe_worker_starts_no_threads_at_import():
+    """``daemon_worker`` starts its threads on CALL, so a module-level call would
+    spawn them as a side effect of ``import tortoise.selfhost`` — including in
+    every test and tool that only wants the app object."""
+    module_calls = [
+        node
+        for node in ast.parse(SELFHOST_SRC).body
+        if isinstance(node, (ast.Assign, ast.Expr))
+        for node in ast.walk(node)
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) == "daemon_worker"
+             or getattr(node.func, "id", None) == "_probe_worker")
+    ]
+    assert not module_calls, (
+        f"selfhost.py calls _probe_worker/daemon_worker at module level (line(s) "
+        f"{[c.lineno for c in module_calls]}) — that starts the pools at import; "
+        "resolve them lazily inside the handler instead"
+    )
+    assert "_probe_worker(" in SELFHOST_SRC, "the lazy resolver disappeared"
+
+
+def test_probe_lanes_are_distinct_pools():
+    """The lane split is load-bearing, not tidiness.
 
     ``/health/ready``'s probe calls ``sdk._get_proj()`` DIRECTLY, so it is
     bounded only by the FalkorDB client's socket timeouts (5 s connect /
@@ -199,54 +288,47 @@ def test_liveness_and_readiness_do_not_share_a_pool():
     the hosted twin reaches the same conclusion from the other direction, see
     ``test_health_ready_nonblocking.py``'s outer>inner bound pin.)
     """
-    distinct = set()
-    constructions = {}
-    for handler, pool in POOLS.items():
+    names = {name_const: _module_literal(name_const) for name_const in POOL_NAMES}
+    assert len(set(names.values())) == len(names), (
+        f"the two lanes share a pool NAME ({names}) — a single named pool cannot "
+        "be split, and the pin below asserts distinct names on that basis"
+    )
+    for handler, (name_const, _width_const) in LANES.items():
         node = _handler(handler)
-        # The pin must guard the RESOURCE, not the spelling of its name:
-        # ``_READY_PROBE_EXECUTOR = _LIVENESS_PROBE_EXECUTOR`` keeps two distinct
-        # names while sharing one pool, and the handler-level assertions below
-        # would not notice. Each pool must be its own construction.
-        ctor = _module_assign(pool).value
-        assert isinstance(ctor, ast.Call) and getattr(ctor.func, "id", None) == "ThreadPoolExecutor", (
-            f"{pool} is not its own ThreadPoolExecutor construction — aliasing one pool "
-            "under two names reintroduces the shared-pool defect this split exists to fix"
-        )
-        constructions[pool] = ctor
         submits = list(_calls(_walk_own_body(node), func_name="_submit_probe"))
         assert len(submits) == 1, f"selfhost {handler} must dispatch exactly one probe"
-        args = submits[0].args
-        assert len(args) >= 1, f"selfhost {handler}'s _submit_probe call passes no executor"
-        assert isinstance(args[0], ast.Name), (
-            f"selfhost {handler} passes a non-module executor expression to _submit_probe"
+        # The pool must be resolved from THIS lane's constants — never hardcoded,
+        # never the other lane's.
+        resolved = {
+            call.args[0].id
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+            and getattr(call.func, "id", None) == "_probe_worker"
+            and call.args
+            and isinstance(call.args[0], ast.Name)
+        }
+        assert resolved == {name_const}, (
+            f"selfhost {handler} resolves {sorted(resolved) if resolved else 'nothing'}, "
+            f"expected {{{name_const!r}}} — each handler must own its lane"
         )
-        assert args[0].id == pool, (
-            f"selfhost {handler} dispatches through {args[0].id!r}, expected {pool!r}"
-        )
-        distinct.add(pool)
-        # The other pool must not appear anywhere in this handler.
-        other = {p for p in POOLS.values() if p != pool}
+        other = {n for n in POOL_NAMES if n != name_const} | {
+            w for n, w in LANE_WIDTH.items() if n != name_const
+        }
         assert not (other & _names_in(node)), (
             f"selfhost {handler} references {sorted(other & _names_in(node))} — the two "
             "handlers must not share a pool"
         )
-    assert distinct == set(POOLS.values()), "the handlers do not use two distinct pools"
-    assert len({id(c) for c in constructions.values()}) == len(constructions), (
-        "the two probe pools are the same AST node — they must be separate objects"
-    )
 
 
 def test_submit_probe_targets_the_given_pool_only():
-    """``_submit_probe`` is the single seam. It must submit to the executor it
-    is GIVEN and never to the loop's default executor (``run_in_executor(None,
-    ...)``) or through ``to_thread`` (which always uses the default pool)."""
-    node = next(
-        n
-        for n in ast.walk(ast.parse(SELFHOST_SRC))
-        if isinstance(n, ast.FunctionDef) and n.name == "_submit_probe"
-    )
+    """``_submit_probe`` is the single seam. It must submit to the pool it is
+    GIVEN and never to the loop's default executor (``run_in_executor(None,
+    ...)``) or through ``to_thread`` (which always uses the default pool), and
+    it must propagate contextvars (a bare ``run_in_executor`` does not —
+    cpython#78195 — and the SDK/projection layer reads them)."""
+    node = _func("_submit_probe")
     params = [a.arg for a in node.args.args]
-    assert params and params[0] == "executor", (
+    assert params and params[0] == "pool", (
         f"_submit_probe must take the pool as its first parameter, got {params} — a "
         "hardcoded module pool reintroduces the sharing this split exists to prevent"
     )
@@ -258,9 +340,9 @@ def test_submit_probe_targets_the_given_pool_only():
         assert isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name), (
             f"_submit_probe submits to a non-Name receiver at line {call.lineno}"
         )
-        assert call.func.value.id == "executor", (
+        assert call.func.value.id == "pool", (
             f"_submit_probe submits to {call.func.value.id!r} at line {call.lineno} — it "
-            "must submit to its executor argument"
+            "must submit to its pool argument"
         )
 
     assert not list(_calls(body, attr="to_thread")), (
@@ -272,9 +354,18 @@ def test_submit_probe_targets_the_given_pool_only():
         assert not (isinstance(first, ast.Constant) and first.value is None), (
             f"run_in_executor(None, ...) at line {call.lineno} uses the DEFAULT executor"
         )
+    assert any(
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "copy_context"
+        for call in body
+        if isinstance(call, ast.Call)
+    ), (
+        "_submit_probe does not copy the caller's contextvars — a bare thread-pool "
+        "submit loses them (cpython#78195), and the SDK/projection layer reads them"
+    )
 
 
-@pytest.mark.parametrize("name", sorted(POOLS))
+@pytest.mark.parametrize("name", sorted(LANES))
 def test_health_handlers_do_not_touch_db_code_on_the_loop(name):
     """Both endpoints (not just readiness) — /health is the 60 s boot-wait in
     publish-selfhost.yml and hung indefinitely when its probe queued."""
@@ -336,13 +427,15 @@ class _StubSDK:
 
 @pytest.fixture
 def selfhost(monkeypatch, tmp_path):
-    """The selfhost module with fresh, named, SEPARATE probe pools and a stubbed
-    SDK/probe.
+    """The selfhost module with a stubbed SDK/probe.
 
-    The pools are replaced per test so the tests can assert on the THREAD each
-    probe ran on, and so no worker leaks between tests. The handlers resolve the
-    module globals by name, so patching them exercises the same seam production
-    uses.
+    The pools are NOT replaced: the probes run on the REAL process-wide
+    ``monitoring.daemon_worker`` pools production resolves, so the thread-name
+    and width assertions validate production's resource rather than a
+    fixture-local stand-in. (Replacing them would let a mis-named or too-narrow
+    production pool pass — the failure mode round-1 review found in this suite.)
+    The workers are daemons parked on a queue, so they cost the process nothing
+    at exit and need no teardown.
     """
     import importlib
 
@@ -361,27 +454,7 @@ def selfhost(monkeypatch, tmp_path):
     monkeypatch.setattr(
         mon, "probe_db", lambda sdk=None: {"ok": True, "latency_ms": 0.1, "error": None}
     )
-
-    pools = {}
-    for pool_name in POOLS.values():
-        # Production's real width, read from the source — never a fixture-local
-        # guess, which would let a too-narrow production pool pass the
-        # behavioural tests (see ``test_readiness_fan_in_does_not_produce_a_false_503``).
-        pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=_prod_max_workers(pool_name),
-            thread_name_prefix=THREAD_PREFIXES[pool_name],
-        )
-        pools[pool_name] = pool
-        # raising=False: on the PRE-FIX code these attributes do not exist, and the
-        # behavioural tests must still get far enough to fail on the DEFECT (a
-        # starved probe) rather than on a missing fixture attribute — otherwise the
-        # mutation proof would only show that a global was renamed.
-        monkeypatch.setattr(sh, pool_name, pool, raising=False)
-    try:
-        yield sh
-    finally:
-        for pool in pools.values():
-            pool.shutdown(wait=False)
+    yield sh
 
 
 class _Saturated:
@@ -465,7 +538,7 @@ def test_health_answers_on_its_own_pool_while_the_default_pool_is_saturated(
         "liveness handler must not be able to pass this test"
     )
     assert all(t.startswith("selfhost-liveness-probe") for t in seen), (
-        f"probes ran on threads {seen}, not the dedicated liveness pool — "
+        f"probes ran on threads {seen}, not the dedicated liveness lane — "
         "they are still riding a shared executor (#3035)"
     )
     assert elapsed < 8.0, (
@@ -476,7 +549,7 @@ def test_health_answers_on_its_own_pool_while_the_default_pool_is_saturated(
 
 def test_ready_does_not_lie_while_the_default_pool_is_saturated(selfhost, monkeypatch):
     """The regression that actually blocks releases: a starved readiness probe
-    returned 503 for a HEALTHY database (measured 6020 ms, probe never ran),
+    returned 503 for a HEALTHY database (measured 6021 ms, probe never ran),
     and publish-selfhost.yml fails the publish on a non-200 /health/ready."""
     seen: list[str] = []
     monkeypatch.setattr(
@@ -500,9 +573,42 @@ def test_ready_does_not_lie_while_the_default_pool_is_saturated(selfhost, monkey
     assert r.json()["status"] == "ready"
     assert len(seen) == 2, "the readiness probe did not run once per request"
     assert all(t.startswith("selfhost-ready-probe") for t in seen), (
-        f"readiness probes ran on threads {seen}, not the dedicated readiness pool"
+        f"readiness probes ran on threads {seen}, not the dedicated readiness lane"
     )
     assert elapsed < 8.0, f"/health/ready took {elapsed:.2f}s while starved (#3287)"
+
+
+def test_submit_probe_propagates_contextvars(selfhost, monkeypatch):
+    """The dispatch seam must carry the CALLER's contextvars into the worker.
+
+    ``asyncio.to_thread`` did (that is why #2988's move off-loop did not break
+    the SDK/projection layer), and a bare ``run_in_executor(pool, fn)`` does not
+    (cpython#78195). Losing them is silent — the probe answers from the wrong
+    tenant/graph scope — so pin the property behaviourally: a ContextVar set in
+    the request's task must be visible inside the probe.
+    """
+    import tortoise.monitoring as mon
+
+    probe_var = contextvars.ContextVar("probe-context-var", default="unset")
+    seen: list[str] = []
+
+    def _probe(sdk=None):
+        seen.append(probe_var.get())
+        return {"ok": True, "latency_ms": 0.1, "error": None}
+
+    monkeypatch.setattr(mon, "probe_db", _probe)
+
+    async def scenario():
+        async with _client(selfhost) as ac:
+            probe_var.set("caller-scope")
+            return await ac.get("/health")
+
+    r = asyncio.run(scenario())
+    assert r.status_code == 200, r.text
+    assert seen == ["caller-scope"], (
+        f"the probe saw {seen!r} instead of the caller's ContextVar value — the "
+        "dispatch seam is dropping contextvars (cpython#78195)"
+    )
 
 
 def test_readiness_fan_in_does_not_produce_a_false_503(selfhost, monkeypatch):
@@ -526,6 +632,7 @@ def test_readiness_fan_in_does_not_produce_a_false_503(selfhost, monkeypatch):
     held = 0.5
     bound = 1.2
     concurrent_requests = 6
+    width = _prod_workers("_READY_PROBE_WORKERS")
     monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", bound)
     monkeypatch.setattr(_StubSDK, "_get_proj", lambda self: time.sleep(held))
 
@@ -546,20 +653,24 @@ def test_readiness_fan_in_does_not_produce_a_false_503(selfhost, monkeypatch):
     assert codes == [200] * concurrent_requests, (
         f"{codes.count(503)} of {concurrent_requests} concurrent /health/ready requests "
         f"returned 503 for a HEALTHY database (probe held {held}s, bound {bound}s, "
-        f"pool max_workers={_prod_max_workers('_READY_PROBE_EXECUTOR')}) — the pool is "
-        "too narrow: queued requests time out before a worker ever runs their probe, "
-        "and publish-selfhost.yml fails the release on that false 503"
+        f"_READY_PROBE_WORKERS={width}) — the lane is too narrow: queued requests time "
+        "out before a worker ever runs their probe, and publish-selfhost.yml fails the "
+        "release on that false 503"
     )
 
 
 def test_liveness_answers_while_readiness_workers_are_parked(selfhost, monkeypatch):
-    """The pool split's regression test (found in review of this change).
+    """The lane split's regression test (found in review of this change).
 
     ``/health/ready``'s probe is ``sdk._get_proj()`` with NO internal bound, so
-    concurrent readiness probes park every worker of the readiness pool. A
+    concurrent readiness probes park every worker of the readiness lane. A
     SHARED pool would then hang ``/health`` — i.e. the unbounded probe would
     starve the liveness probe, which is the original defect one level down.
-    With two pools, liveness is structurally immune.
+    With two lanes, liveness is structurally immune.
+
+    Both readiness workers are parked by construction (2 concurrent requests is
+    >= the liveness width, and the assertion below is about the readiness LANE
+    being unable to reach liveness at all).
     """
     release = threading.Event()
     monkeypatch.setattr(selfhost, "_READY_PROBE_TIMEOUT_S", 0.3)
@@ -567,8 +678,8 @@ def test_liveness_answers_while_readiness_workers_are_parked(selfhost, monkeypat
 
     async def scenario():
         async with _Saturated(), _client(selfhost) as ac:
-            # Park every readiness worker: both of these time out at 0.3s
-            # while their workers stay blocked on release.
+            # Park readiness workers: both of these time out at 0.3s while their
+            # workers stay blocked on release.
             parked = await asyncio.gather(
                 ac.get("/health/ready"), ac.get("/health/ready")
             )
@@ -595,9 +706,9 @@ def test_liveness_answers_while_readiness_workers_are_parked(selfhost, monkeypat
     )
 
 
-def test_readiness_pool_actually_has_two_usable_workers(selfhost, monkeypatch):
-    """At least two readiness workers must be usable concurrently (the pool is
-    wider — see ``POOL_MIN_WORKERS``). A single-slot pool would serialise the
+def test_readiness_lane_actually_has_two_usable_workers(selfhost, monkeypatch):
+    """At least two readiness workers must be usable concurrently (the lane is
+    wider — see ``POOL_MIN_WORKERS``). A single-slot lane would serialise the
     deploy gate's probe behind any other readiness poll."""
     entered = threading.Event()
     release = threading.Event()
@@ -636,7 +747,7 @@ def test_readiness_pool_actually_has_two_usable_workers(selfhost, monkeypatch):
         release.set()
 
     assert both, (
-        "a second readiness probe never reached a second worker — the pool is "
+        "a second readiness probe never reached a second worker — the lane is "
         f"single-slot (threads seen: {threads})"
     )
     for r in responses:
