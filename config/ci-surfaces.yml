@@ -398,6 +398,7 @@ surfaces:
   - test_bridge_table.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
+  - test_ci_expected_manifests.py
   - test_client_cli_probe.py
   # #3677: dual-registered with `api` for the same reason as test_boot_regressions.py
   # above. `api` is the arm that actually fires on a tortoise/hosted_api.py-only change;
@@ -1703,6 +1704,14 @@ durations:
   test_signup_form_safety.py: 0.2
   test_tool_registry.py: 0.2
   test_user_identity_authority.py: 0.2
+  # #4207: the file's junit testcase time from run 35530373858, whose head
+  # (8a1a59d33) is an EARLIER revision of this file: 7 test functions and 3
+  # `_run_guard` subprocess call sites there, against 11 and 8 at HEAD (five
+  # outcome/budget tests were added after that measurement, and the #4351 split
+  # removed the workflow-text half). So this is a first-cut weight, NOT a
+  # measurement of the current file, and its direction is not asserted either
+  # way. Refresh from the first post-merge main run that includes it.
+  test_ci_expected_manifests.py: 0.157
   bench/test_bench_core.py: 0.1
   eval/harness/test_harness_corpus.py: 0.1
   eval/write_path/test_write_path_grading.py: 0.1
