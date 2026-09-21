@@ -1588,16 +1588,14 @@ _SCORECARD_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="activation-scorecard")
 
 
-async def _run_dream_on_pool(fn, sdk_factory, /, *args,
-                             on_submit_failure=None, **kwargs):
-    """Run one long dream pass on the dream pool; the helper owns the close.
+async def _run_dream_on_pool(fn, sdk_factory, /, *args, **kwargs):
+    """Run one long dream pass on the dream pool; the WORK ITEM owns the close.
 
     #3773: ``sdk_factory`` builds the SDK INSIDE the worker thread — building
     it on the loop made its connect / embedded anchor probe on-loop work
     immediately before the pass. ``fn`` receives the built SDK as its FIRST
     argument. (The REST ``dream`` handler already holds an SDK it built through
-    the #3773 graph-pool seam, and passes ``lambda: sdk`` plus
-    ``on_submit_failure=sdk.close``.)
+    the #3773 graph-pool seam, and passes ``lambda: sdk``.)
 
     #3718 (code review): the pass AND the close are ONE worker hand-off.
     Letting the coroutine's ``finally`` close instead runs the close on the
@@ -1614,20 +1612,16 @@ async def _run_dream_on_pool(fn, sdk_factory, /, *args,
     worker thread, so a cancellation cannot tear the SDK down mid-pass
     (``TortoiseSDK.close()`` is idempotent — ``_t_closed``).
 
-    ``on_submit_failure`` is the one path the item's close cannot cover: if
-    ``_submit_off_loop`` raises BEFORE the item is enqueued (executor shutdown,
-    "can't start new thread"), the factory never runs — fine for the factory
-    caller — but a PRE-BUILT-SDK caller (``lambda: sdk``) would strand that
-    SDK. The caller that owns the SDK passes its ``close``, so the close is
-    still owned end-to-end. It must NOT be used to close on cancellation (that
-    is the loop-side close under a running pass this design removes).
-
-    Why not ``add_done_callback`` on the future — the first shape of this
-    change, corrected in review: ``ThreadPoolExecutor.submit`` puts the work
-    item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't start
-    new thread", so a submit ``RuntimeError`` does NOT prove the pass never
-    ran. ``on_submit_failure`` fires only when ``_submit_off_loop`` itself
-    raises (the item was never accepted); a duplicate close is a no-op.
+    There is deliberately NO loop-side close on a submit failure. A first shape
+    closed the caller-supplied SDK in an ``except BaseException`` around the
+    submit; that was removed (round 3 review) because ``ThreadPoolExecutor.
+    submit`` puts the work item on the queue BEFORE ``_adjust_thread_count()``
+    can raise "can't start new thread" — so a submit ``RuntimeError`` does NOT
+    prove the item never ran, and closing there could tear the SDK down under
+    a pass an existing worker had already picked up (the CPython #87185 class
+    this design removes). A pre-enqueue failure instead strands the pre-built
+    caller's SDK to GC — bounded and transient, and the same lifecycle the
+    sibling write handlers' SDKs already have (they never close explicitly).
     """
     def _pass_and_close():
         sdk = sdk_factory()
@@ -1636,12 +1630,7 @@ async def _run_dream_on_pool(fn, sdk_factory, /, *args,
         finally:
             sdk.close()
 
-    try:
-        cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
-    except BaseException:
-        if on_submit_failure is not None:
-            on_submit_failure()
-        raise
+    cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
     return await asyncio.wrap_future(cfut)
 
 
@@ -5505,8 +5494,7 @@ async def dream(
                 sdk._mark_dirty(queued_roots)
             return sdk.dream(dirty_only=True)
 
-    return await _run_dream_on_pool(_run_dream, lambda: sdk,
-                                    on_submit_failure=sdk.close)
+    return await _run_dream_on_pool(_run_dream, lambda: sdk)
 
 
 @app.get("/v1/dream/health")

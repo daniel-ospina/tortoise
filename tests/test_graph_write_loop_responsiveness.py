@@ -276,13 +276,17 @@ def test_offloaded_data_sdk_binds_the_actor_for_the_write(monkeypatch):
         "the actor did not reach the worker thread the write runs in")
 
 
-def test_dream_pool_submit_failure_closes_a_prebuilt_sdk(monkeypatch):
-    """#3773 (code-review round 2): the REST dream path passes a PRE-BUILT SDK.
+def test_dream_pool_submit_failure_does_not_close_under_the_item(monkeypatch):
+    """#3773 (code-review rounds 2-3): a submit failure MUST NOT close the SDK.
 
-    If the dream-pool submit raises BEFORE the item is enqueued, the item's own
-    ``finally`` close cannot run — so the caller that owns the SDK must supply
-    ``on_submit_failure`` or the SDK (and its projection) is stranded. The
-    factory path is safe without it (the factory never runs).
+    ``ThreadPoolExecutor.submit`` enqueues the work item BEFORE
+    ``_adjust_thread_count()`` can raise "can't start new thread", so a submit
+    ``RuntimeError`` does NOT prove the item never ran. Closing the REST
+    dream path's pre-built SDK from the submit-failure branch could therefore
+    tear it down under a pass an existing worker had already picked up (the
+    CPython #87185 class the design removes). The close is owned strictly by
+    the work item; a pre-enqueue failure strands the SDK to GC — bounded and
+    transient, the same lifecycle the sibling write handlers' SDKs have.
     """
     import tortoise.hosted_api as ha_mod
 
@@ -296,17 +300,18 @@ def test_dream_pool_submit_failure_closes_a_prebuilt_sdk(monkeypatch):
     sdk = _Sdk()
 
     def _boom(*_args, **_kwargs):
-        raise RuntimeError("cannot schedule new futures after shutdown")
+        raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(ha_mod, "_submit_off_loop", _boom)
 
     async def _run():
-        await ha_mod._run_dream_on_pool(
-            lambda _s: None, lambda: sdk, on_submit_failure=sdk.close)
+        await ha_mod._run_dream_on_pool(lambda _s: None, lambda: sdk)
 
     with pytest.raises(RuntimeError):
         asyncio.run(_run())
-    assert sdk.closed == 1, "a submit failure stranded the pre-built SDK"
+    assert sdk.closed == 0, (
+        "a submit failure closed the SDK — submit can raise AFTER the item was "
+        "enqueued, so this can tear it down under a live pass")
 
 
 async def _quiesce_dream_drain() -> None:
