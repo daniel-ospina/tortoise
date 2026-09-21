@@ -1777,21 +1777,22 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 # it from_content_missing / to_content_missing / edge_missing. S3 must never
 # dedup the extraction against the transcript it is extracting.
 #
-# The row test is the graded memory layer's own belt-and-braces shape: an id
-# ANCHORED on the capture's ``session_id`` (``^{session_id}_t\d+$`` — the
-# identity ``runner._turn_id_pattern`` uses and the reliable turn/claim
-# discriminator) AND a turn marker on the row (the production ``pointKind ==
-# "event"``, or the ``[role] …`` content leg ``retrieval._is_turn_point`` uses).
-# The marker leg is load-bearing: ``create_point`` accepts explicit caller ids, so
-# a shape-only ``_t\d+$`` would drop a real caller-minted Point, and
-# ``retrieval.py`` records the D3 decision that the ``{session_id}_t{i}`` prefix
-# "is unverifiable — ANY caller id ending in ``_t<digits>`` would be read as a
-# session … the shape of an id is not evidence that a capture happened".
-# Requiring a marker means a caller-minted Point whose id merely collides with
-# the session's turn namespace (the class ``tests/test_d3_session_identity.py``
-# documents as reachable) survives the prior set. With no session id the filter
-# is a NO-OP: keeping an echo is a missed dedup, dropping a real prior is memory
-# loss.
+# The row test is the extractor's OWN predicate (not a copy of the graded
+# layer's): an id ANCHORED on the capture's ``session_id``
+# (``\A{session_id}_t\d+\Z`` — the same identity ``runner._turn_id_pattern``
+# builds, applied more strictly: ``fullmatch`` rejects the trailing newline that
+# its ``.match`` + ``$`` would accept) AND a turn marker on the row (the
+# production ``pointKind == "event"``, or the ``[role] …`` content leg
+# ``retrieval._is_turn_point`` uses). The graded layer's two legs are
+# independently sufficient (a union); here the id is deliberately conjoined with
+# a marker (an intersection), because ``create_point`` accepts explicit caller
+# ids, ``retrieval.py`` records the D3 decision that the ``{session_id}_t{i}``
+# prefix "is unverifiable — ANY caller id ending in ``_t<digits>`` would be read
+# as a session … the shape of an id is not evidence that a capture happened",
+# and a caller-minted Point whose id merely collides with the session's turn
+# namespace (the class ``tests/test_d3_session_identity.py`` documents as
+# reachable) must survive the prior set. With no session id the filter is a
+# NO-OP: keeping an echo is a missed dedup, dropping a real prior is memory loss.
 #
 # Scope and its bound — two things this does NOT do, both tracked in #4509:
 #   * other ingest lanes' transcript rows with different id shapes (the longmem
@@ -1823,12 +1824,14 @@ _FTS_LIMIT_MAX = 10000
 def _is_turn_echo_id(session_id, point_id) -> bool:
     r"""True for one of ``session_id``'s own turn echoes (``{session_id}_t{i}``).
 
-    The anchored ID leg only — pair it with :func:`_is_turn_echo_row` for the
-    graded layer's full belt-and-braces test. ``re.fullmatch`` (NOT
-    ``str.isdigit``) keeps the predicate exactly ``^{session_id}_t\d+$``:
-    ``isdigit()`` also accepts category-No numerics such as ``²``, which would
-    make it broader than the pattern it claims to be. False whenever the session
-    id is unknown, so a caller that cannot name its session never drops a row."""
+    The anchored ID leg only — pair it with :func:`_is_turn_echo_row`. The match
+    is ``\A{session_id}_t\d+\Z`` (``re.fullmatch``) — NOT a shape test, and NOT
+    ``str.isdigit``: ``isdigit()`` also accepts category-No numerics such as
+    ``²``, and ``fullmatch`` is deliberately stricter than the graded layer's
+    ``_turn_id_pattern`` + ``.match`` (whose ``$`` accepts one trailing
+    newline). Stricter can only MISS a drop, never lose a real prior. False
+    whenever the session id is unknown, so a caller that cannot name its session
+    never drops a row."""
     if not session_id or not point_id:
         return False
     return bool(re.fullmatch(

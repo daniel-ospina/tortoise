@@ -1007,13 +1007,21 @@ class TestS3:
         assert v2._TURN_ECHO_CONTENT_RE.flags == _ROLE_PREFIX_RE.flags
 
     def test_turn_echo_id_agrees_with_the_graded_layer_pattern(self):
-        """The id leg is the graded layer's ``_turn_id_pattern`` identity —
-        pinned so the two implementations cannot drift apart silently."""
+        """The id leg is the graded layer's ``_turn_id_pattern`` identity on every
+        id WITHOUT a trailing newline — and deliberately STRICTER on the one that
+        has one (``fullmatch`` is ``\\A…\\Z``; the runner's ``.match`` + ``$``
+        accepts a single trailing newline). Both sides of that divergence are
+        asserted so the difference is pinned and visible rather than latent."""
         from tests.eval.write_path.runner import _turn_id_pattern
         pat = _turn_id_pattern("s1")
         for pid in ("s1_t0", "s1_t12", "s2_t1", "s10_t1", "s1_t", "s1_tx",
                     "pt_ab_t3", "acme_t5"):
             assert v2._is_turn_echo_id("s1", pid) == bool(pat.match(pid)), pid
+        # the deliberate divergence: the runner's ``$`` accepts a trailing
+        # newline, this predicate does not (stricter = a missed drop, never
+        # memory loss)
+        assert bool(pat.match("s1_t3\n")) is True
+        assert v2._is_turn_echo_id("s1", "s1_t3\n") is False
 
     def test_turn_echo_filter_is_point_only(self, monkeypatch):
         """An echo-shaped id on the event/entity legs is untouched — the drop
@@ -1027,12 +1035,12 @@ class TestS3:
                              "point_kind": "statement"}]
                 if entity_type == "event":
                     return [{"id": "s1_t3", "content": "[user] owner paused",
-                             "kind": "core:decision"}]
+                             "point_kind": "core:decision"}]
                 if entity_type in ("object", "subject"):
                     # echo-shaped id AND transcript content — still preserved on
                     # the entity leg, which carries no such drop
                     return [{"id": "s1_t4", "content": "[user] a named entity",
-                             "kind": "core:plan"}]
+                             "point_kind": "core:plan"}]
                 return []
 
         res = v2.search_graph(MockSDK(), S2_FIXTURE, "The story. First para.",
@@ -1058,9 +1066,9 @@ class TestS3:
                 if entity_type != "point":
                     return []
                 rows = ([{"id": f"s1_t{i}", "content": f"[user] turn {i}",
-                          "kind": "event"} for i in range(5)]
+                          "point_kind": "event"} for i in range(5)]
                         + [{"id": "pt_real", "content": "a real claim",
-                            "kind": "statement"}])
+                            "point_kind": "statement"}])
                 return rows[:limit]  # the real callee truncates to `limit`
 
         sdk = MockSDK()
@@ -1083,9 +1091,9 @@ class TestS3:
                 if entity_type != "point":
                     return []
                 rows = [{"id": "s1_t0", "content": "[user] hi",
-                         "kind": "event"},
+                         "point_kind": "event"},
                         {"id": "pt_real", "content": "a real claim",
-                         "kind": "statement"}]
+                         "point_kind": "statement"}]
                 return rows[:limit]
 
         res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY", limit=1,
@@ -1210,6 +1218,35 @@ class TestS3:
         with pytest.raises(_ReachedS3):
             v2.extract_session_v2(MockModel([]), conv, session_id="sess-42")
         assert seen.get("session_id") == "sess-42"
+
+    def test_capture_extraction_anchor_is_the_turn_id_session(self, monkeypatch):
+        """The session id the EXTRACTOR is handed is the same one the capture
+        minted the turn ids from (``f"{session_id}_t{i}"``) — the identity the
+        S3 filter anchors on. Pinned at the sdk seam, because the tests above can
+        only see the id the extractor is given, not where it came from: rewriting
+        ``sdk._extract_session_v2``'s forward to ``session_id=None`` leaves them
+        all green while the filter becomes a no-op on the real capture path."""
+        import tortoise.extractor_v2 as ev2
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        seen = {}
+
+        class _ReachedExtractor(Exception):
+            pass
+
+        def _recorder(model, conversation, **kw):
+            seen.update(kw)
+            raise _ReachedExtractor()
+
+        monkeypatch.setattr(ev2, "extract_session_v2", _recorder)
+        from tortoise.sdk import TortoiseSDK
+        sdk = object.__new__(TortoiseSDK)  # the request path needs no graph
+        with pytest.raises(_ReachedExtractor):
+            sdk._extract_session_v2([{"role": "user", "content": "hi"}],
+                                    "sess-7", "2026-01-01T00:00:00Z")
+        # the extraction anchor and the turn-id prefix are ONE identity
+        assert seen.get("session_id") == "sess-7"
+        assert v2._is_turn_echo_id(seen["session_id"],
+                                   f"{seen['session_id']}_t0")
 
     def test_degrades_on_backend_error(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
