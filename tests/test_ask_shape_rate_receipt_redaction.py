@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.ask_shape_rate import (
     _fresh_db,
+    _install_redacting_excepthook,
     _substrate_label,
     _write_receipt,
 )
@@ -204,3 +205,97 @@ def test_no_credential_reaches_the_committed_receipt_body(monkeypatch,
     # have destroyed it.
     assert json.loads(written)["instrument"] == "tools/ask_shape_rate.py"
     assert str(out) in written
+
+
+def _decoded_strings(value):
+    """Every string reachable in a decoded JSON tree (keys included)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, str):
+                yield k
+            yield from _decoded_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _decoded_strings(v)
+
+
+#: Credentials that ALSO collide with JSON syntax or with non-ASCII
+#: serialization — the shapes that a post-serialization ``re.sub`` corrupts or
+#: misses (``null`` rewrote the literal ``null``; ``false``/``true`` rewrote
+#: booleans; ``pä55w0rd`` survived as ``\u00e4``).
+SYNTAX_COLLIDING = [*LEAKY, "null", "false", "true", "2024", "pä55w0rd"]
+
+
+@pytest.mark.parametrize("secret", SYNTAX_COLLIDING)
+def test_the_receipt_is_redacted_AND_stays_valid_json(monkeypatch, tmp_path,
+                                                      secret):
+    """The redaction walks the OBJECT TREE, so it cannot corrupt the document.
+
+    Measured before the fix: a credential of ``null``/``false``/``true`` (or a
+    non-ASCII one, which ``json.dumps`` escapes) was substituted into the
+    SERIALIZED text, producing an unparseable receipt the tool still reported
+    as written — silent loss of the evidence artifact.
+    """
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+    fault = (f"ConnectionError: Error 8 connecting to {secret.lower()}:16379. "
+             "nodename nor servname provided, or not known")
+    out = tmp_path / "receipt.json"
+    receipt = {
+        "instrument": "tools/ask_shape_rate.py",
+        "substrate": _substrate_label(),
+        "movement_control_required": True,
+        "measured_latency": None,
+        "n_questions": 21,
+        "live": {"per_question": [{"question_id": "q1", "error": fault,
+                                   "l1_abstain": False}]},
+        "movement": {"M1": {"per_question": [{"question_id": "q1",
+                                              "error": fault}]}},
+    }
+    _write_receipt(SimpleNamespace(receipt=str(out)), receipt)
+    written = out.read_text()
+    parsed = json.loads(written)          # <-- must still be VALID JSON
+    assert parsed["instrument"] == "tools/ask_shape_rate.py"
+    # non-string leaves are untouched: a credential is never a literal
+    assert parsed["movement_control_required"] is True
+    assert parsed["measured_latency"] is None
+    assert parsed["n_questions"] == 21
+    for text in _decoded_strings(parsed):
+        assert secret not in text, f"{secret!r} leaked into {text!r}"
+        assert secret.lower() not in text.lower(), (
+            f"{secret!r} leaked (case-insensitive) into {text!r}")
+    if secret.lower() not in ("null", "true", "false"):
+        # and for a non-colliding token, not in the raw document either
+        assert secret not in written
+        assert secret.lower() not in written.lower()
+
+
+def test_the_excepthook_redacts_an_uncaught_traceback(monkeypatch, capsys):
+    """``seed_timing()`` has no ``try`` and ``main()`` has only a ``finally``,
+    so an SDK connection failure propagates and the interpreter prints the
+    traceback — whose last line NAMES the endpoint, i.e. the password when the
+    substrate URI put it in the host slot (round-5 finding; measured on the
+    real CLI as a stderr leak into CI logs)."""
+    secret = "S3cret-Pa55w0rd"
+    monkeypatch.setenv("TORTOISE_ASK_SHAPE_DB_URI",
+                       f"docker://:@{secret}/invalid/g")
+    saved = sys.excepthook
+    try:
+        _install_redacting_excepthook()
+        try:
+            raise ConnectionError(
+                f"Error 8 connecting to {secret.lower()}:16379. "
+                "nodename nor servname provided, or not known")
+        except ConnectionError:
+            sys.excepthook(*sys.exc_info())
+    finally:
+        sys.excepthook = saved
+    err = capsys.readouterr().err
+    assert secret not in err
+    assert secret.lower() not in err.lower()
+    # a redaction, not a suppression: the diagnostic survives
+    assert "ConnectionError" in err
+    assert "Error 8 connecting to" in err
+    assert "Traceback (most recent call last)" in err
