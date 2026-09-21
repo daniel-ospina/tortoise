@@ -1929,12 +1929,22 @@ def _restore_swap_timeout_s() -> float:
 #: hypothesis and the DESTINATION's content is the verdict. Defaults to the
 #: read bound, so a restore's total copy budget is 2x its configured read
 #: bound and still finite.
+#: Floor for a POSITIVE settle value. Below this a value can only busy-spin
+#: (it is not a disable switch — a non-positive value falls back to the read
+#: bound, see :func:`_restore_swap_settle_s`).
+_RESTORE_SWAP_SETTLE_MIN_S = 0.05
+
+
 def _restore_swap_settle_s() -> float:
     """Resolve the post-timeout OUTCOME-poll bound, in seconds.
 
-    ``TORTOISE_RESTORE_SWAP_SETTLE_S``, defaulting to the read bound
-    (:func:`_restore_swap_timeout_s`). Floored at 0.05s so a mis-set value can
-    never busy-spin, capped at the read bound's own ceiling.
+    ``TORTOISE_RESTORE_SWAP_SETTLE_S``. Empty, non-numeric, non-finite and
+    non-positive values all fall back to the read bound
+    (:func:`_restore_swap_timeout_s`) — a settle of ``0`` is NOT a "disable"
+    switch, because a restore that reports a failure without checking the
+    operation is the #4233 false-red. A positive value is then clamped to
+    ``[0.05, _RESTORE_SWAP_TIMEOUT_MAX_S]`` (each clamp logged, like the
+    read bound's resolver).
     """
     raw = os.environ.get("TORTOISE_RESTORE_SWAP_SETTLE_S")
     if raw is None or not str(raw).strip():
@@ -1949,7 +1959,15 @@ def _restore_swap_settle_s() -> float:
         logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is not a finite "
                        "positive bound — using the read bound", raw)
         return _restore_swap_timeout_s()
-    return max(0.05, min(v, _RESTORE_SWAP_TIMEOUT_MAX_S))
+    if v < _RESTORE_SWAP_SETTLE_MIN_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r is below the %.2fs "
+                       "floor — clamping", raw, _RESTORE_SWAP_SETTLE_MIN_S)
+        return _RESTORE_SWAP_SETTLE_MIN_S
+    if v > _RESTORE_SWAP_TIMEOUT_MAX_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_SETTLE_S=%r exceeds the %.0fs "
+                       "ceiling — clamping", raw, _RESTORE_SWAP_TIMEOUT_MAX_S)
+        return _RESTORE_SWAP_TIMEOUT_MAX_S
+    return v
 
 
 class RestoreCopyTimeoutError(RuntimeError):
@@ -2026,12 +2044,13 @@ _RESTORE_SWAP_SETTLE_POLL_S = 0.25
 def _restore_copy_settled(db, src_name: str, dst_name: str) -> bool:
     """True when a timed-out copy's DESTINATION holds the SOURCE's content.
 
-    ``GRAPH.COPY`` installs ``dst_name`` only after the whole source graph has
-    been loaded, so for the restore's two copies — whose destination is either
-    freshly deleted (the swap) or brand new (the pre-restore safety copy) —
-    the destination EXISTING with the source's counts IS the operation's
-    success condition (#4233). Node AND edge counts are compared, so a
-    truncated install can never be accepted as the copy's outcome.
+    ``GRAPH.COPY`` publishes the destination only once the whole source graph
+    has been loaded, so for the restore's two copies — whose destination is
+    either freshly deleted (the swap) or brand new (the pre-restore safety
+    copy) — a destination the copy itself created, holding the source's
+    counts, IS the operation's success condition (#4233). Both halves are
+    re-read LIVE, so a partial or torn install can never be accepted: node AND
+    edge counts are compared.
 
     Deliberately never QUERIES a graph ``GRAPH.LIST`` does not name: a Cypher
     read on a missing graph CREATES an empty one (verified on FalkorDB
@@ -2116,12 +2135,18 @@ def _is_client_read_timeout(exc: BaseException) -> bool:
 
 
 def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
-                                   role: str, intact_name: str) -> None:
+                                   role: str, intact_name: str,
+                                   settled: list[bool] | None = None) -> None:
     """Run a long GRAPH.COPY for the restore over its own read bound (#3813).
 
     Raises ``RestoreCopyTimeoutError`` when that bound expires, keeping the
     originating timeout as ``__cause__``, so callers report a TIMEOUT rather
     than a dead connection or a failed copy.
+
+    ``settled`` (#4233): optional out-param. ``True`` is appended when the
+    bound expired but the copy's OUTCOME proved it completed, so a caller can
+    surface the overrun (the #3845 ``fork_slot`` precedent) instead of leaving
+    it only in the log.
     """
     client = _restore_copy_client(db)
     # A timed-out copy may only be resolved by a destination IT produced. If
@@ -2147,6 +2172,8 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
                 "GRAPH.COPY completed — %s now holds the source's content",
                 role, _restore_swap_timeout_s(), dst_name,
             )
+            if settled is not None:
+                settled.append(True)
         else:
             raise RestoreCopyTimeoutError(
                 role=role, timeout_s=_restore_swap_timeout_s(),
@@ -2182,19 +2209,27 @@ def count_data_nodes(db, graph_name: str) -> int:
     the marker is also what keeps a marker-only change from reading as data
     loss.
 
-    Reuses the single ``_is_export_skip_node`` predicate (never a second,
-    hand-written Cypher exclusion) so a new skip class cannot drift this count
-    away from the dump's. The read is the sweep dump's own cost class, on an
-    operator action.
+    The count is a server-side AGGREGATE — one row, so it is immune to
+    FalkorDB's ``RESULTSET_SIZE`` cap (default 10000), which truncates a
+    non-aggregate ``MATCH (n) RETURN labels(n), properties(n)`` read and would
+    silently DEFLATE the count for a larger graph. Its skip classes are built
+    from the SAME ``_EXPORT_SKIP_LABELS`` / ``_EXPORT_SKIP_META_KEYS``
+    constants :func:`_is_export_skip_node` uses, so a new skip class cannot
+    drift this count away from the dump's node set.
     """
-    from tortoise.hosted_api import _is_export_skip_node
-    rows = db.select_graph(graph_name).query(
-        "MATCH (n) RETURN labels(n), properties(n)").result_set
-    return sum(
-        1 for row in rows
-        if not _is_export_skip_node([str(l) for l in (row[0] or [])],  # noqa: E741
-                                    dict(row[1] or {}))
+    from tortoise.hosted_api import (
+        _EXPORT_SKIP_LABELS,
+        _EXPORT_SKIP_META_KEYS,
     )
+    return int(db.select_graph(graph_name).query(
+        "MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) "
+        "AND NOT ('Meta' IN labels(n) AND n.key IN $meta_keys) "
+        "RETURN count(n)",
+        params={
+            "skip_labels": sorted(str(l) for l in _EXPORT_SKIP_LABELS),  # noqa: E741
+            "meta_keys": sorted(str(k) for k in _EXPORT_SKIP_META_KEYS),
+        },
+    ).result_set[0][0])
 
 
 def _restore_into_temp_verify_swap(
@@ -2406,6 +2441,7 @@ def _restore_into_temp_verify_swap(
     # DROPPED/lost — a missing graph raises on delete but the copy below seeds
     # it. A genuine delete failure surfaces as a copy failure ("destination key
     # already exists") and the verified temp graph remains intact.
+    swap_settled: list[bool] = []
     try:
         live_g.delete()
     except Exception as e:
@@ -2421,6 +2457,10 @@ def _restore_into_temp_verify_swap(
                 db, temp_name, live_name,
                 role="Restore swap",
                 intact_name=f"verified temp graph {temp_name}",
+                # #4233: record a copy that outlived the read bound but was
+                # proven complete, so the drill record can attribute an RTO
+                # breach (the #3845 fork_slot precedent).
+                settled=swap_settled,
             ),
         )
         if recovery is not None:
@@ -2506,6 +2546,12 @@ def _restore_into_temp_verify_swap(
         "restored": counts,
         "restored_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }
+    if swap_settled:
+        # #4233: the swap's GRAPH.COPY outlived the restore's read bound and
+        # was proven complete by its outcome. Reported distinctly (the #3845
+        # `fork_slot` precedent) so a drill that breaches the RTO because of
+        # it is attributable, not just visible as a longer duration.
+        result["copy_read_bound_overrun"] = True
     if fork_slot is not None:
         # #3845: report the wedge DISTINCTLY from a slow copy, and what was
         # done about it, so an operator sees "fork slot wedged" rather than a

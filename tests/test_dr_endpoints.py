@@ -2032,13 +2032,15 @@ class TestRestoreSwapReadBound:
         assert hb._is_client_read_timeout(ei.value), ei.value
 
     def test_read_bound_expiry_is_resolved_by_the_copys_outcome(
-            self, client, dr_env, mem_storage, monkeypatch):
+            self, client, monkeypatch):
         """#4233 — the read bound is a HYPOTHESIS, not a verdict.
 
         When the client read timeout fires but the server-side copy actually
         COMPLETED, the restore must succeed: the settle poll confirms the
         destination holds the source's content instead of reporting a timeout
-        that never happened. This is the contended-runner flake.
+        that never happened. This is the contended-runner flake. The source
+        carries an EDGE as well, so the edge half of the parity check is
+        non-trivial.
 
         The injected seam does the real (fork-free) copy and THEN raises the
         exact masked read-timeout shape the embedded lane produced — the
@@ -2071,18 +2073,25 @@ class TestRestoreSwapReadBound:
                 "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
                 params={"id": f"pt-{i}", "c": f"c{i}"},
             )
+        source.query(
+            "MATCH (a:Point {id:'pt-0'}), (b:Point {id:'pt-1'}) "
+            "CREATE (a)-[:LINKED]->(b)")
         payload = hb.dump_graph(source)
+        assert payload["edge_count"] == 1, payload["edge_count"]
         target = db.select_graph("org_settle_target")
         target.query("MATCH (n) DETACH DELETE n")
         target.query(
             "CREATE (p:Point {id:'stale', content:'old', pointKind:'claim'})")
 
-        hb._restore_into_temp_verify_swap(
+        result = hb._restore_into_temp_verify_swap(
             db, payload, live_name="org_settle_target")
 
         rows = db.select_graph("org_settle_target").query(
             "MATCH (n:Point) RETURN n.id ORDER BY n.id").result_set
         assert [r[0] for r in rows] == ["pt-0", "pt-1"]
+        # #4233: the overrun is surfaced on the result, so an RTO breach
+        # caused by it is attributable (the #3845 fork_slot precedent).
+        assert result.get("copy_read_bound_overrun") is True
 
     def test_read_bound_expiry_without_the_copy_is_still_a_timeout(
             self, client, dr_env, mem_storage, monkeypatch):
@@ -2118,3 +2127,160 @@ class TestRestoreSwapReadBound:
         detail = r.json()["detail"]
         assert "timed out" in detail.lower(), detail
         assert "not restored" in detail.lower(), detail
+
+    def test_restore_copy_settled_requires_content_parity(self, client):
+        """#4233 — the settle predicate is CONTENT parity, not existence.
+
+        A destination that merely EXISTS (a stale graph, a torn install) must
+        never be accepted as the copy's outcome. Node AND edge counts are
+        compared.
+
+        RED (mutation): reduce ``_restore_copy_settled`` to an existence
+        check — the wrong-content assertions below then read True (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        src = db.select_graph("org_settle_source")
+        src.query("MATCH (n) DETACH DELETE n")
+        for i in range(2):
+            src.query("CREATE (p:Point {id:$id})", params={"id": f"pt-{i}"})
+        src.query(
+            "MATCH (a:Point {id:'pt-0'}), (b:Point {id:'pt-1'}) "
+            "CREATE (a)-[:LINKED]->(b)")
+
+        dst = db.select_graph("org_settle_target")
+        dst.query("MATCH (n) DETACH DELETE n")
+        # exists — but the wrong NODE count
+        dst.query("CREATE (p:Point {id:'only'})")
+        assert hb._restore_copy_settled(
+            db, "org_settle_source", "org_settle_target") is False
+        # node parity — but the wrong EDGE count
+        dst.query("CREATE (p:Point {id:'second'})")
+        assert hb._restore_copy_settled(
+            db, "org_settle_source", "org_settle_target") is False
+        # exact parity
+        dst.query(
+            "MATCH (a:Point {id:'only'}), (b:Point {id:'second'}) "
+            "CREATE (a)-[:LINKED]->(b)")
+        assert hb._restore_copy_settled(
+            db, "org_settle_source", "org_settle_target") is True
+
+    def test_preexisting_destination_is_never_settled(self, client,
+                                                      monkeypatch):
+        """#4233 — a destination that already existed when the copy was issued
+        is never accepted as the copy's outcome.
+
+        The swap's live-delete is best-effort. If it failed, a destination
+        holding matching counts would otherwise read as a successful restore
+        of a graph the copy never wrote. Fail-closed.
+
+        RED (mutation): make ``_graph_present`` return False unconditionally —
+        the pre-seeded destination is then accepted and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.5")
+        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        # Source and destination hold the SAME content, and the destination is
+        # NOT deleted — exactly the failed-live-delete shape.
+        for name in ("org_settle_source", "org_settle_target"):
+            g = db.select_graph(name)
+            g.query("MATCH (n) DETACH DELETE n")
+            g.query("CREATE (p:Point {id:'pt-0'})")
+
+        def timeout_only(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_only)
+        with pytest.raises(hb.RestoreCopyTimeoutError):
+            hb._graph_copy_with_restore_bound(
+                db, "org_settle_source", "org_settle_target",
+                role="test swap", intact_name="test intact")
+
+    def test_graph_present_fails_closed(self):
+        """#4233 — an unreadable listing must never authorize a settle.
+
+        ``_graph_present`` is the guard that refuses to treat a pre-existing
+        destination as the copy's output, so a probe failure must read
+        PRESENT, not absent.
+
+        RED (mutation): return False on the except branch — this fails.
+        """
+        import tortoise.hosted_backup as hb
+
+        class _Broken:
+            @staticmethod
+            def list_graphs():
+                raise RuntimeError("listing unavailable")
+
+        assert hb._graph_present(_Broken(), "org_settle_target") is True
+
+    def test_settle_accepts_a_copy_that_lands_during_the_poll(self, client,
+                                                              monkeypatch):
+        """#4233 — the settle is a POLL, not a single check.
+
+        The contended-runner shape is a copy that lands DURING the settle
+        window, after the read bound expired. A destination that materializes
+        a moment later must still be accepted; collapsing the loop to one
+        check would miss it.
+
+        RED (mutation): replace ``_await_restore_copy_settled``'s loop with a
+        single ``_restore_copy_settled`` call — the destination is absent on
+        that first call and this fails (verified).
+        """
+        import threading
+        import time as _time
+
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "3")
+        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        src = db.select_graph("org_settle_source")
+        src.query("MATCH (n) DETACH DELETE n")
+        src.query("CREATE (p:Point {id:'pt-0'})")
+        if "org_settle_target" in db.list_graphs():
+            db.select_graph("org_settle_target").delete()
+
+        def timeout_then_land(redis_client, src_name, dst_name):
+            def _land():
+                _time.sleep(0.6)
+                hb.restore_graph(db.select_graph(dst_name),
+                                 hb.dump_graph(db.select_graph(src_name)))
+            threading.Thread(target=_land, daemon=True).start()
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", timeout_then_land)
+        hb._graph_copy_with_restore_bound(
+            db, "org_settle_source", "org_settle_target",
+            role="test swap", intact_name="test intact")
+        assert "org_settle_target" in db.list_graphs()
+
+    def test_restore_swap_settle_bound_resolution(self, monkeypatch):
+        """#4233 — the settle knob's resolution, pinned.
+
+        Empty/non-numeric/non-finite/non-positive all fall back to the READ
+        bound (a settle of 0 is not a disable switch); a positive value is
+        clamped to [0.05, 3600]. This is also what keeps the other guards from
+        silently waiting the 120s read bound if the env var stops being read.
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_TIMEOUT_S", "120")
+        for raw, expected in [
+            (None, 120.0), ("", 120.0), ("abc", 120.0), ("nan", 120.0),
+            ("inf", 120.0), ("0", 120.0), ("-1", 120.0),
+            ("0.001", 0.05), ("2", 2.0), ("9999", 3600.0),
+        ]:
+            if raw is None:
+                monkeypatch.delenv("TORTOISE_RESTORE_SWAP_SETTLE_S",
+                                   raising=False)
+            else:
+                monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", raw)
+            assert hb._restore_swap_settle_s() == expected, raw

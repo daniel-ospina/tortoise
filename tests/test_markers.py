@@ -200,6 +200,13 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         '"org_swap_target"': "test-constructed",   # live target + read-back
         '"org_bound_source"': "test-constructed",  # seeded source (ordinary-bound guard)
         '"org_bound_target"': "test-constructed",  # live target (ordinary-bound guard)
+        # #4233 outcome-settle guards — same direct-helper shape as the #3813
+        # block above: a raw source and a raw destination whose names are
+        # handed straight to `_restore_into_temp_verify_swap` /
+        # `_graph_copy_with_restore_bound` / `_restore_copy_settled` and read
+        # back. Test-constructed, not production-shape.
+        '"org_settle_source"': "test-constructed",  # seeded source
+        '"org_settle_target"': "test-constructed",  # destination + read-back
     },
     "test_eval_ingest_cache.py": {
         'f"org_{namespace}"': "endpoint-constrained",  # #2626 regression — own-graph cleanup delete (namespace=icache-<tag>-<uuid>, docker lane)
