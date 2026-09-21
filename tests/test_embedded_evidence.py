@@ -1608,12 +1608,15 @@ class TestConjunctFalsifiability:
         )
         assert rec["record_role"] == "closing"
 
-    def test_closing_role_without_pairing_ref_writes_no_record(self, tmp_path):
-        """M52/C1: the documented usage error is exit 2 and NO record."""
+    def test_closing_role_without_pairing_ref_writes_no_record(self, tmp_path, capsys):
+        """M52/C1: the documented usage error is exit 2, with NO record written."""
         out = tmp_path / "rec.json"
         rc = ee.main(["run", "--record-role", "closing", "--record-out", str(out)])
         assert rc == 2
         assert not out.exists()
+        # It must be the USAGE error, not an environment error — otherwise the test
+        # would pass on a host where the real work failed before the precondition.
+        assert "usage error" in capsys.readouterr().err
 
     def test_internal_seam_only_mutation_is_non_closing(self, monkeypatch, tmp_path):
         """Plan R1: an internal-helper-only proof is non-closing (exit 1)."""
