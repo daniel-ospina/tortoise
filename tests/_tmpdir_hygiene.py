@@ -49,6 +49,14 @@ logger = logging.getLogger(__name__)
 
 _PID_FILENAMES = ("redis.pid",)
 
+# ⚠️ TEMPORARY DIAGNOSTIC PROBE (PR #4076 blocker) — REMOVE BEFORE LANDING.
+# A redislite instance directory IS a `tempfile.mkdtemp()` result
+# (redislite/client.py:209), so it lands in the tracked set; the pid guard
+# below cannot see the window before redis-server writes its pidfile. This
+# probe leaves every redislite instance dir to the reaper, to measure whether
+# the tracker's removal of those dirs is what reds test_pack_state in CI.
+_REDISLITE_INSTANCE_MARKERS = ("redis.config", "redis.socket")
+
 
 def _protected_reason(path: str) -> str | None:
     """Why `path` must NOT be removed, or None when teardown is safe.
@@ -60,6 +68,11 @@ def _protected_reason(path: str) -> str | None:
     file at all) permits removal — the reaper cannot reclassify a directory
     this fixture has already deleted.
     """
+    # ⚠️ TEMPORARY DIAGNOSTIC PROBE (PR #4076 blocker) — REMOVE BEFORE LANDING.
+    for marker in _REDISLITE_INSTANCE_MARKERS:
+        if os.path.lexists(os.path.join(path, marker)):
+            return f"redislite instance dir ({marker} present) — left to the reaper"
+
     for name in _PID_FILENAMES:
         pid_file = os.path.join(path, name)
         if not os.path.isfile(pid_file):
