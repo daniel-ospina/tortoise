@@ -868,3 +868,31 @@ def test_2884_supersede_decay_survives_bare_same_id_reemit(journaled):
     assert post["confidence"] == pytest.approx(0.5), (
         f"a bare same-id re-emit suppressed the live supersede decay: "
         f"live={live} post={post}")
+
+
+def test_2884_invalidate_decay_survives_bare_same_id_reemit(journaled):
+    """The INVALIDATE decay is a belief write too, so it must take the SAME
+    anchor as supersede (`last_ann_drop_seq`) and NOT the terminalizing
+    `last_recreate_seq`. A bare same-id re-emit after the invalidate MERGEs
+    live and keeps the DECAYED belief (0.5), so replay must decay as well.
+
+    Pins that the two families cannot hold OPPOSITE policies for one journal
+    shape: gating this one on `last_recreate_seq` suppressed the decay on the
+    re-emit and left replay at the pre-invalidate value while live held 0.5."""
+    _db, events, sdk = journaled
+    pid = sdk.create_point("statement", "old I", status="live")["id"]
+    corr = sdk.create_point("statement", "corrector I", status="live")["id"]
+    _set_confidence(sdk, pid, 0.9)
+    _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9)
+    sdk.invalidate_point(pid, corr)    # live decay → 0.5
+    _raw_append(events, sdk, "PointAdded",
+                point={"id": pid, "content": "old I", "pointKind": "",
+                       "status": "outdated"})
+    live = _state(sdk, [pid])[pid]
+    assert live["confidence"] == pytest.approx(0.5)
+
+    sdk._get_proj().rebuild_all(str(events))
+    post = _state(sdk, [pid])[pid]
+    assert post["confidence"] == pytest.approx(0.5), (
+        f"a bare same-id re-emit suppressed the live invalidate decay: "
+        f"live={live} post={post}")

@@ -3446,7 +3446,12 @@ class FalkorProjection(
             if ev.get("type") != "PointSuperseded":
                 continue
             _sd_rid = ev.get("id")
-            if not isinstance(_sd_rid, str):
+            # Mirror ``_fold_point_superseded``'s applicability guard
+            # (``if not oid or not new_id: return 0``): the sweep fold IGNORES
+            # an event that lacks ``new_id``, so the inline decay must not fire
+            # for one either — live never decayed for such an event, and a
+            # decay here would be a belief write the graph never received.
+            if not isinstance(_sd_rid, str) or not ev.get("new_id"):
                 continue
             _sd_drop = last_ann_drop_seq.get(("Point", _sd_rid))
             if _sd_drop is not None and seq <= _sd_drop:
@@ -3813,12 +3818,20 @@ class FalkorProjection(
                 # while live ended at the later writer's value. Inline
                 # application makes journal order decide, as live
                 # chronology does; the sweep keeps the stamp/CORRECTS half.
-                # The survivor rule is the sweep's OWN anchor
-                # (``last_recreate_seq``) so a pre-recreation fold's decay
-                # is dropped here too — it died with the deleted node live.
+                # #2884 A3b: the BELIEF decay anchors on the REAL hard-delete
+                # boundary (``last_ann_drop_seq``) — the same anchor the
+                # supersede pre-pass and the ConfidenceChanged fold use.
+                # ``last_recreate_seq`` is the STATUS half's anchor: it is
+                # advanced by ANY PointAdded, including a bare same-id re-emit
+                # that MERGEs live (``n.confidence = coalesce($cf,
+                # n.confidence)``) and therefore KEEPS the decayed belief.
+                # Gating belief on it suppressed the decay for that shape, so
+                # replay ended at the pre-invalidate value while live held the
+                # decayed one. The two families cannot hold opposite policies
+                # for one journal shape.
                 if isinstance(ev.get("id"), str):
                     _inv_rid = ev["id"]
-                    _inv_anchor = last_recreate_seq.get(("Point", _inv_rid))
+                    _inv_anchor = last_ann_drop_seq.get(("Point", _inv_rid))
                     if _inv_anchor is None or seq > _inv_anchor:
                         self._decay_point_belief(_inv_rid)
                     point_re_stamp_folds.append((seq, ev))
