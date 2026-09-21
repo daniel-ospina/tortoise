@@ -67,8 +67,8 @@ The tier-limit soft-block (UX-D4) is the upgrade *argument surface*. When a cap 
 |---|---|---|---|---|---|
 | 1 | Landing (product.html) | Clicks "Connect your agent →" | → /signup | — | — |
 | 2 | Signup (signup.html) | Chooses GitHub OAuth OR email/password (Google OAuth shown in P-6 but **out of v1 scope** — GitHub + email only) | Supabase auth; **if email confirmation ON** → "check your inbox" branch (NEW); if OFF → direct | Duplicate email → "already exists, sign in"; **GitHub OAuth cancel/failure → return to signup with error state** | `user_signed_up` (web, identify user_id) |
-| 3 | Provision (server, invisible) | — | auth hook → tenant-provision edge fn → /internal/provision → team + namespace + demo seed + team_memberships row | Hook not wired; env missing; key hash mismatch (E2E-1 finds) | `tenant_provisioned` (server: user_id, team_id, status) |
-| 4 | Welcome (welcome.html) — **first visit** | Sees team name + tier + **API key revealed ONCE** + copy button | Polls team_memberships / receives key via provision delivery; key nulled after reveal (A13) | Key "pending" >30s → retry msg; no session → error state | `email_confirmed` (web) |
+| 3 | Provision (server, invisible) | — | auth hook → tenant-provision edge fn → /internal/provision → team + namespace + demo seed + org_memberships row | Hook not wired; env missing; key hash mismatch (E2E-1 finds) | `tenant_provisioned` (server: user_id, org_id, status) |
+| 4 | Welcome (welcome.html) — **first visit** | Sees team name + tier + **API key revealed ONCE** + copy button | Polls org_memberships / receives key via provision delivery; key nulled after reveal (A13) | Key "pending" >30s → retry msg; no session → error state | `email_confirmed` (web) |
 | 4b | Welcome — **returning visit (UX-D2)** | Provisioned user returns to welcome.html | Key already nulled → **NO re-reveal**; shows "Your team is ready → Open Dashboard" + "Lost your key? Regenerate in dashboard" (→ J-2) | No session → sign-in first; key already consumed → never re-shown | — |
 | 5 | Welcome → connect | Copies MCP config (or CLI quickstart) | Copy button; snippet pre-filled with key | — | — |
 | 6 | Dashboard (app.premiselabs.co) | Opens "Open Dashboard →" | **Cross-subdomain session cookie** → auto-authed (no key paste) | Session not shared → falls back to API-key login; **session expired mid-use → redirect to sign-in** | `dashboard_opened` (web, user_id) |
@@ -109,7 +109,7 @@ The tier-limit soft-block (UX-D4) is the upgrade *argument surface*. When a cap 
 | Step | Surface | User action | System behavior | Edge cases |
 |---|---|---|---|---|
 | 1 | Dashboard top bar | Selects team from switcher | Session resolves memberships; context switches | Freelancer: own team billed separately from client team |
-| 1b | Dashboard | (zero-teams state) | User has 0 team memberships (owner/member removed via E8) → "Create your first team" state | Prevents dead-end. **Team deletion is OUT of v1 scope (no DELETE /v1/teams endpoint)** |
+| 1b | Dashboard | (zero-teams state) | User has 0 team memberships (owner/member removed via E8) → "Create your first team" state | Prevents dead-end. **Team deletion is OUT of v1 scope (no DELETE /v1/organizations endpoint)** |
 | 2 | Dashboard (team view) | Selects graph from dropdown | Lists graphs in team (1..N per tier) | Free/Solo: cap reached → inline soft-block + upgrade CTA (UX-D4); **zero-graphs state REMOVED (default graph guaranteed — 4.2 backfill + no graph-deletion endpoint; switcher always shows ≥1)** |
 | 3 | Dashboard | Creates a point in team A's graph | Goes to team A namespace; key scoping per team | Key from team A fails against team B (E2E-10) |
 | 4 | Team tier | Owner invites Bob (member) / Carol (admin) | Invitation flow + RBAC | Free/Solo/Pro: invites disabled |
@@ -170,15 +170,15 @@ System-level workflows backing the journeys. Automation points, manual triggers,
 ```
 Supabase signup (OAuth/email)
   → auth.users INSERT
-  → [DB trigger] handle_new_user() → team_memberships placeholder row (team_id='', key_hash='pending', role='owner')
+  → [DB trigger] handle_new_user() → org_memberships placeholder row (org_id='', key_hash='pending', role='owner')
   → [Auth hook] after_user_created → Edge Function tenant-provision
-  → Edge: validate UUID → derive team_name → generate team_id (truncated UUID hex: `crypto.randomUUID().replace(/-/g,"").substring(0,26)` — NOT a real ULID) → generate tt_ key (32B hex)
+  → Edge: validate UUID → derive org_name → generate org_id (truncated UUID hex: `crypto.randomUUID().replace(/-/g,"").substring(0,26)` — NOT a real ULID) → generate tt_ key (32B hex)
   → Edge: hashApiKey (PBKDF2-HMAC-SHA256, per-key salt, pepper) — MUST match auth.py
   → POST /internal/provision (FASTAPI_INTERNAL_KEY bearer)
   → FastAPI: validate patterns → create Team node (tier-driven limits) → create APIKey node → Membership (owner)
   → POST /internal/demo (demo seed, best-effort) — **NOTE: edge fn currently calls `/v1/internal/demo` (404; route is `/internal/demo`) → demo seeding dead in prod — fix edge URL or add alias**
-  → Edge: update placeholder row (user_id + team_id='') → flip to real team_id + upsert api_key plaintext (to be nulled after reveal, A13) — **idempotent keyed on user_id: skip mint if a non-pending membership exists (race-safe vs reconciliation sweep, P2-9)**
-  → welcome.html polls team_memberships (or receives key via one-time delivery) → reveal ONCE → null plaintext
+  → Edge: update placeholder row (user_id + org_id='') → flip to real org_id + upsert api_key plaintext (to be nulled after reveal, A13) — **idempotent keyed on user_id: skip mint if a non-pending membership exists (race-safe vs reconciliation sweep, P2-9)**
+  → welcome.html polls org_memberships (or receives key via one-time delivery) → reveal ONCE → null plaintext
 ```
 
 **Automation points:** trigger, hook, edge function, internal endpoints — all automated.
@@ -189,7 +189,7 @@ Supabase signup (OAuth/email)
 | Hook not wired on remote | E2E walk shows no membership row | Fix Supabase dashboard config (A1) |
 | Provisioning rate-limit (NEW — abuse posture 8b) | repeated provision attempts for one identity | edge-fn per-identity limiter → 429/blocked (contract in E2E-1 negative) |
 | Edge fn env missing (pepper, FASTAPI_URL, service key) | Edge 500; welcome stuck "pending" | Set Supabase secrets; retry |
-| Provision 502 (FastAPI unreachable) | team_memberships stays pending | Retry edge; alert |
+| Provision 502 (FastAPI unreachable) | org_memberships stays pending | Retry edge; alert |
 | Key hash mismatch (PBKDF2 divergence) | Key validates against nothing | Fix hashApiKey parity test (exists: test_hosted_auth) |
 | Email confirmation ON | signUp returns no session; hook fires PRE-confirmation (keys minted for unconfirmed emails) | J-1 step 2 confirmation branch (E2E-8); **gate key reveal on email_confirmed + cleanup for never-confirmed accounts (abuse vector, A11)** |
 | Demo seed failure | Edge calls `/v1/internal/demo` (404 — route is `/internal/demo`); `.catch()` swallows it | **Fix edge URL or add `/v1/internal/demo` alias; E2E walk verifies demo points exist (J-1 step 7)** |
@@ -206,7 +206,7 @@ Rotate: mint new via E1 → grace overlap (optional) → revoke old → clients 
 
 **Automation:** all CRUD automated. **Manual:** none.
 **Failure modes:** rate-limit on minting (abuse posture); revoking only key → warn/block; key_prefix collision (uuid hex — negligible).
-**⚠ Dependency (P2-4):** `get_current_team` (hosted_api.py:455) only accepts Bearer `tt_` keys. Recovery requires a **NEW API-side auth path** — Supabase JWT → user_id → Membership → team resolution — so a keyless user can mint via **`POST /v1/session/key` (E1)**, then list/revoke via `/v1/team/keys` with the minted key (`/v1/team/keys` stays strictly `tt_`-authed — no JWT auth there). W-3 covers the dashboard-side cookie bridge, not API auth; this new resolution is a required backend piece of the #518 fix.
+**⚠ Dependency (P2-4):** `get_current_org` (hosted_api.py:455) only accepts Bearer `tt_` keys. Recovery requires a **NEW API-side auth path** — Supabase JWT → user_id → Membership → team resolution — so a keyless user can mint via **`POST /v1/session/key` (E1)**, then list/revoke via `/v1/team/keys` with the minted key (`/v1/team/keys` stays strictly `tt_`-authed — no JWT auth there). W-3 covers the dashboard-side cookie bridge, not API auth; this new resolution is a required backend piece of the #518 fix.
 
 ## W-2b: Invitation + RBAC (Team tier — NEW, backs J-4 step 4)
 
@@ -226,7 +226,7 @@ owner invites bob@example.com (member) / carol@example.com (admin)
 
 ```
 user with 0 memberships → "Create your first team" state
-  → NEW POST /v1/teams (session-authed; per-user creation rate-limit — NOT a tier limit; multi-team is a user capability per pricing semantics)
+  → NEW POST /v1/organizations (session-authed; per-user creation rate-limit — NOT a tier limit; multi-team is a user capability per pricing semantics)
   → registry Team node + Membership (owner) + graph namespace
   → tier limits from pricing.json (canonical — decision 1d; **no teams-per-tier field — per-user team-creation rate limit (abuse posture); '1 team' is pricing-page copy only**) + per-user creation rate limit (429, not a tier block)
 ```
@@ -239,7 +239,7 @@ user with 0 memberships → "Create your first team" state
 ```
 Signup on tortoise.premiselabs.co (PKCE) → session cookie Domain=.premiselabs.co
   → dashboard on app.premiselabs.co reads same cookie → getSession() → authenticated
-  → dashboard resolves teams via team_memberships junction (M:N) → team switcher
+  → dashboard resolves teams via org_memberships junction (M:N) → team switcher
   → API calls: session-scoped tt_ key from POST /v1/session/key (bootstrap) → api.premiselabs.co
   → signOut() clears parent-domain cookie → signed out everywhere
 ```
@@ -457,53 +457,53 @@ New/modified GUI: welcome (states added), dashboard (team/graph switcher, empty 
 
 ## 4.1 Supabase `user_teams` → decoupled junction (M:N user↔team)
 
-**Current:** `user_teams` (user_id UNIQUE → 1 team/user). **Target:** rename to `team_memberships` junction; drop UNIQUE(user_id); add role + status + invited_email; (user_id, team_id) unique.
+**Current:** `user_teams` (user_id UNIQUE → 1 team/user). **Target:** rename to `org_memberships` junction; drop UNIQUE(user_id); add role + status + invited_email; (user_id, org_id) unique.
 
 ```sql
 -- Migration 0003: decouple user↔team (M:N) — product ontology
 -- 1) Rename + drop 1:1 constraint
-ALTER TABLE public.user_teams RENAME TO team_memberships;
-ALTER TABLE public.team_memberships DROP CONSTRAINT uq_user_teams_user;
+ALTER TABLE public.user_teams RENAME TO org_memberships;
+ALTER TABLE public.org_memberships DROP CONSTRAINT uq_user_teams_user;
 
 -- 2) New columns
-ALTER TABLE public.team_memberships
+ALTER TABLE public.org_memberships
   ADD COLUMN role          text NOT NULL DEFAULT 'owner',  -- owner | admin | member
   ADD COLUMN status        text NOT NULL DEFAULT 'active', -- active | invited | removed
   ADD COLUMN invited_email text,                            -- pre-signup invite target
-  ADD CONSTRAINT uq_member_team UNIQUE (user_id, team_id),
+  ADD CONSTRAINT uq_member_team UNIQUE (user_id, org_id),
   ADD CONSTRAINT chk_member_or_invite CHECK (user_id IS NOT NULL OR invited_email IS NOT NULL);
 
 -- 3) Partial unique: one ACTIVE invite per (team, email) — NULLs are distinct in unique
 --    constraints, so without this duplicate invites to the same email are allowed.
-CREATE UNIQUE INDEX uq_team_invite_email ON team_memberships (team_id, invited_email)
+CREATE UNIQUE INDEX uq_team_invite_email ON org_memberships (org_id, invited_email)
   WHERE status = 'invited';
 
 -- 4) ⛔ RE-CREATE trigger functions — they reference the old table name and would
 --    break every signup after the rename (P0-1):
---    handle_new_user(): INSERT INTO team_memberships (user_id, team_id, team_name,
+--    handle_new_user(): INSERT INTO org_memberships (user_id, org_id, org_name,
 --      key_hash, graph_name, role) VALUES (NEW.id, '', 'provisioning...', 'pending', '', 'owner')
---      ON CONFLICT (user_id, team_id) DO NOTHING;
---    update_user_team(): UPDATE team_memberships SET ... WHERE user_id = p_user_id;
+--      ON CONFLICT (user_id, org_id) DO NOTHING;
+--    update_user_team(): UPDATE org_memberships SET ... WHERE user_id = p_user_id;
 --    (DROP + CREATE both functions in 0003.)
 
 -- 5) ⛔ Application-code references (P1 — NOT covered by ALTER TABLE RENAME; all
 --    break after the rename unless updated in the same change):
---    • supabase/functions/tenant-provision/index.ts:123  supabase.from("user_teams") → "team_memberships" (upsert; set role='owner')
---    • website/welcome.html (poll + reveal)              .from("user_teams") → "team_memberships" + call reveal_api_key RPC (4.1b)
---    • J-1 step 4, W-1, W-3 workflow text: "user_teams" → "team_memberships"
+--    • supabase/functions/tenant-provision/index.ts:123  supabase.from("user_teams") → "org_memberships" (upsert; set role='owner')
+--    • website/welcome.html (poll + reveal)              .from("user_teams") → "org_memberships" + call reveal_api_key RPC (4.1b)
+--    • J-1 step 4, W-1, W-3 workflow text: "user_teams" → "org_memberships"
 --    Grep gate: `grep -rn "user_teams" supabase/ website/ tortoise/` must return zero hits post-migration.
 
 -- 6) ⛔ Placeholder-row M:N semantics (P1): handle_new_user inserts placeholder
---    (user_id, team_id='', key_hash='pending', role='owner'). Under uq_member_team
---    (user_id, team_id), the placeholder is a DISTINCT row from the real membership.
+--    (user_id, org_id='', key_hash='pending', role='owner'). Under uq_member_team
+--    (user_id, org_id), the placeholder is a DISTINCT row from the real membership.
 --    Provisioning must UPDATE the placeholder row specifically
---    (WHERE user_id = X AND team_id = '') then flip team_id to the real value in
+--    (WHERE user_id = X AND org_id = '') then flip org_id to the real value in
 --    the SAME upsert — no second row, no phantom membership. E6/reveal filter
---    team_id='' defensively. Multi-team E2E asserts no phantom row.
+--    org_id='' defensively. Multi-team E2E asserts no phantom row.
 
 -- 7) ⛔ Column-level api_key protection (P1): RLS filters ROWS, not columns —
 --    row-owner SELECT can read api_key directly, bypassing reveal RPC null-once.
-REVOKE SELECT (api_key) ON public.team_memberships FROM authenticated;
+REVOKE SELECT (api_key) ON public.org_memberships FROM authenticated;
 ```
 
 **RLS (owner-row read + invitee + service role):**
@@ -512,7 +512,7 @@ REVOKE SELECT (api_key) ON public.team_memberships FROM authenticated;
 - `service_role`: ALL.
 - **Accept path (P1-4):** authenticated users have NO UPDATE policy. Accept (invited → active, set user_id) MUST go through a service-role FastAPI endpoint (or targeted RLS policy). The accept endpoint routes through SDK `membership_create` (or the same tier-driven `max_users` gate) so Team-tier limits can't be bypassed. **Token-only accept in v1 (decision 1e); invitee email-match SELECT policy retained defensively but not the accept path.**
 
-**Re-invite of removed member (P2-5):** a `status='removed'` row keeps its (user_id, team_id) pair → re-invite conflicts with uq_member_team. Re-invite = `ON CONFLICT (user_id, team_id) DO UPDATE SET status='invited', invited_email=$email`.
+**Re-invite of removed member (P2-5):** a `status='removed'` row keeps its (user_id, org_id) pair → re-invite conflicts with uq_member_team. Re-invite = `ON CONFLICT (user_id, org_id) DO UPDATE SET status='invited', invited_email=$email`.
 
 **Decision — invite representation:** membership-row-with-status (v1). SDK `invitation_create` exists — align or wrap; accept path uses SDK `membership_create`.
 
@@ -522,7 +522,7 @@ REVOKE SELECT (api_key) ON public.team_memberships FROM authenticated;
 
 **Target (SECURITY DEFINER RPC — atomic reveal + null):**
 ```sql
-CREATE OR REPLACE FUNCTION public.reveal_api_key(p_user_id uuid, p_team_id text)
+CREATE OR REPLACE FUNCTION public.reveal_api_key(p_user_id uuid, p_org_id text)
 RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE k text;
 BEGIN
@@ -530,16 +530,16 @@ BEGIN
   -- prove they are the row owner, else any authed user could exfiltrate + null
   -- another user's key. auth.uid() is available inside SECURITY DEFINER functions.
   IF auth.uid() IS NULL OR auth.uid() <> p_user_id THEN RETURN NULL; END IF;
-  SELECT api_key INTO k FROM public.team_memberships
-   WHERE user_id = p_user_id AND team_id = p_team_id AND status = 'active' AND role = 'owner';
+  SELECT api_key INTO k FROM public.org_memberships
+   WHERE user_id = p_user_id AND org_id = p_org_id AND status = 'active' AND role = 'owner';
   IF k IS NULL OR k = 'pending' THEN RETURN NULL; END IF;
-  UPDATE public.team_memberships SET api_key = NULL, updated_at = now()
-   WHERE user_id = p_user_id AND team_id = p_team_id;
+  UPDATE public.org_memberships SET api_key = NULL, updated_at = now()
+   WHERE user_id = p_user_id AND org_id = p_org_id;
   RETURN k;  -- shown once; nulled atomically
 END; $$;
 GRANT EXECUTE ON FUNCTION public.reveal_api_key TO authenticated;
 ```
-- welcome.html calls `reveal_api_key(user_id, team_id)` (no `.single()`, no client SELECT of `api_key`).
+- welcome.html calls `reveal_api_key(user_id, org_id)` (no `.single()`, no client SELECT of `api_key`).
 - The key remains **team-scoped (owner row only)**; `APIKey` node (hash) is the source of truth for auth.
 
 ## 4.2 Control-plane registry (FalkorDB `control_plane` graph)
@@ -555,17 +555,17 @@ GRANT EXECUTE ON FUNCTION public.reveal_api_key TO authenticated;
 ```
 **New Graph node (team↔graph 1:N):**
 ```
-(:Graph { id, team_id, name, kind: 'default'|'custom', created_at, point_count })
+(:Graph { id, org_id, name, kind: 'default'|'custom', created_at, point_count })
 (:Graph)-[:BELONGS_TO]->(:Team)
 ```
-Existing `team_{team_id}` namespace = the team's **default graph** (graph.id='default'). **Custom-graph namespaces are RESERVED but NOT minted in v1** (decision E2E-11 — all writes resolve the default graph until a custom-graph consumer exists); E5 returns `graph_name` as an identifier string only. `max_graphs` enforced by counting `(:Graph {team_id})`.
+Existing `org_{org_id}` namespace = the team's **default graph** (graph.id='default'). **Custom-graph namespaces are RESERVED but NOT minted in v1** (decision E2E-11 — all writes resolve the default graph until a custom-graph consumer exists); E5 returns `graph_name` as an identifier string only. `max_graphs` enforced by counting `(:Graph {org_id})`.
 
-**Backfill (P2-6):** (a) set `tier='free'` + limits on existing Team nodes; (b) create `(:Graph {id:'default', team_id})` per existing team AND make `/v1/team`/points endpoints resolve the default graph for back-compat (no break); (c) `point_count` is denormalized — document count-query as the source or a maintenance path.
+**Backfill (P2-6):** (a) set `tier='free'` + limits on existing Team nodes; (b) create `(:Graph {id:'default', org_id})` per existing team AND make `/v1/team`/points endpoints resolve the default graph for back-compat (no break); (c) `point_count` is denormalized — document count-query as the source or a maintenance path.
 
 ## 4.3 APIKey node (unchanged shape, tier-driven limits)
 
 ```
-(:APIKey { id, team_id, key_hash, key_prefix, created_by, created_at, revoked_at })
+(:APIKey { id, org_id, key_hash, key_prefix, created_by, created_at, revoked_at })
 ```
 Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallback — make tier-driven). `points`/`sessions` limits: keep flat fallbacks (1000/1000) in v1 OR fold into `ops_allowance` — **decision: keep points/sessions flat in v1; ops_allowance (write ops) is the billing metric, decided in billing epic** (P2-7).
 
@@ -575,10 +575,10 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 |---|---|---|
 | user↔team unique (user, team) | DB | `uq_member_team` |
 | one active invite per (team, email) | DB | partial unique index |
-| team↔graph 1:N | App/registry | count `(:Graph {team_id})` vs `max_graphs` |
+| team↔graph 1:N | App/registry | count `(:Graph {org_id})` vs `max_graphs` |
 | max_users per team | SDK | `membership_create` (exists) — tier-driven; **invite-accept path uses it too** |
 | max_teams per user | App | **NOT a tier limit** — per-user team-creation rate limit (abuse posture); multi-team is a user capability |
-| key scoping | API | `get_current_team` resolves key→team (exists) |
+| key scoping | API | `get_current_org` resolves key→team (exists) |
 | API key auth bootstrap (session→team) | NEW API | JWT → user_id → membership → team (W-2 dependency) |
 | api_key null-once | DB/API | `reveal_api_key` RPC (4.1b) |
 
@@ -619,7 +619,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
                │ session cookie (same-site, shared)
 ┌──────────────▼──────────────────────────────────────────────────────┐
 │ SUPABASE (ybetwichurajbfswfeqa)                                     │
-│  Auth (OAuth + email) · team_memberships (M:N junction, RLS)       │
+│  Auth (OAuth + email) · org_memberships (M:N junction, RLS)       │
 │  reveal_api_key RPC · auth hook → tenant-provision (edge fn)        │
 └──────────────┬──────────────────────────────────────────────────────┘
                │ service-role / internal key
@@ -629,7 +629,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 │  /v1/team · /v1/team/keys (POST/GET/DELETE) · /v1/sessions ·        │
 │  /v1/points · /v1/search · /v1/context                              │
 │  NEW: session→team auth bootstrap (JWT→user→membership) ·           │
-│  /v1/teams (create) · invite accept (uuid4 token — NOT JWT-signed, │
+│  /v1/organizations (create) · invite accept (uuid4 token — NOT JWT-signed, │
 │  token-only in v1) · email-gap = manual support (decision 1e) ·    │
 │  tier enforcement · /v1/session/key (session-scoped key mint) ·     │
 │  reconciliation sweep for stuck pending provisionings               │
@@ -641,7 +641,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 │ FALKORDB                                                             │
 │  control_plane registry: Team (tier+limits) · Membership (role) ·   │
 │    APIKey (hash) · Invitation · Graph (1:N)                         │
-│  tenant namespaces: team_{id} (default graph) · team_{id}_{gid}     │
+│  tenant namespaces: org_{id} (default graph) · org_{id}_{gid}     │
 │    (custom graphs — reserved, NOT minted in v1; writes → default)  │
 │    (custom graphs)                                                   │
 └─────────────────────────────────────────────────────────────────────┘
@@ -653,10 +653,10 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 |---|---|---|---|
 | Static pages (CF Pages) | Auth UI, key reveal, pricing | signup/welcome/pricing HTML | Supabase JS, reveal RPC |
 | Dashboard SPA | Team/graph context, key mgmt, onboarding | React app | Supabase session cookie, hosted API |
-| Supabase | Auth, junction table, RLS, reveal RPC | team_memberships | — |
+| Supabase | Auth, junction table, RLS, reveal RPC | org_memberships | — |
 | tenant-provision edge fn | Signup → provision orchestration | provisioning glue | Supabase, FastAPI internal |
 | hosted_api (FastAPI) | Multi-tenant API, tier enforcement, key lifecycle | /v1/* + /internal/* | FalkorDB registry |
-| MCP sub-app | Agent-facing MCP surface | /mcp (58 tools) | hosted_api auth (shared — in-process middleware stack: `get_current_team` + `TeamResolutionMiddleware` share the FastAPI app; `tt_` key arrives via Authorization header on streamable-HTTP/SSE connect, resolved by TeamResolutionMiddleware) |
+| MCP sub-app | Agent-facing MCP surface | /mcp (58 tools) | hosted_api auth (shared — in-process middleware stack: `get_current_org` + `TeamResolutionMiddleware` share the FastAPI app; `tt_` key arrives via Authorization header on streamable-HTTP/SSE connect, resolved by TeamResolutionMiddleware) |
 | FalkorDB | Registry + tenant graphs | Team/Membership/APIKey/Graph | — |
 
 **Clean boundaries:** browser never touches FalkorDB; dashboard never touches edge fn; edge fn never touches tenant namespaces directly (calls FastAPI). Session auth (Supabase) is orthogonal to API auth (tt_ keys) with the bootstrap bridge.
@@ -665,7 +665,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 
 1. **Cross-subdomain session** (A5): PKCE + parent-domain cookie (`Domain=.premiselabs.co`), custom storage adapter or @supabase/ssr. Both pages configured identically.
 2. **Auth model (reconciled, P1):** TWO auth tiers, cleanly separated:
-   - **Session endpoints E1–E8** (`/v1/session/key`, `/v1/teams`, `/v1/invites*`, `/v1/graphs`, `/v1/teams/{id}/members*`): authenticated by **Supabase JWT (JWKS-verified server-side)**. These are the account/session surface — the dashboard uses its session JWT here, no `tt_` key needed.
+   - **Session endpoints E1–E8** (`/v1/session/key`, `/v1/organizations`, `/v1/invites*`, `/v1/graphs`, `/v1/organizations/{id}/members*`): authenticated by **Supabase JWT (JWKS-verified server-side)**. These are the account/session surface — the dashboard uses its session JWT here, no `tt_` key needed.
    - **Data-plane endpoints** (`/v1/points`, `/v1/search`, `/v1/sessions`, `/v1/team`, `/v1/team/keys`, MCP): authenticated by **`tt_` key** (unchanged). The dashboard holds a **session-scoped `tt_` key** (minted via E1) in sessionStorage for these.
    - This replaces the earlier "only E1 verifies JWTs" draft (contradicted E2–E8). The bootstrap endpoint (E1) mints the session key; it is NOT the only JWT-verified endpoint.
 2b. **JWT verification (P1):** all E1–E8 verify Supabase access tokens via **JWKS fetch from `{SUPABASE_URL}/auth/v1/.well-known/jwks.json`** with issuer + audience (project ref) + `exp` validation, cached with TTL; KID-miss → refetch-then-fail; bounded fetch timeout + retry; alert on E1 5xx/401 rate. Per-identity rate limit on E1 (mint rate limit — J-2 abuse posture). Shared-HMAC rejected.
@@ -673,7 +673,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 4. **Tier enforcement:** Team node carries limits; checks in SDK/hosted_api; registry count queries for race safety.
 5. **Decoupling:** junction table (M:N) + Graph node (1:N); default graph back-compat.
 6. **#338 alignment:** hosted `auth_mode="tenant"` unchanged; self-host daemon = `"static"/"none"` (separate image, no hosted machinery).
-7. **Failure handling:** demo seed best-effort with E2E verification — **fix the known 404 first: edge fn calls `/v1/internal/demo` (index.ts:137) but the route is `/internal/demo` (hosted_api.py:784); correct the edge URL or add an alias**; provisioning retry with exponential backoff + jitter + max attempts in the edge fn (thundering-herd guard), pending-state on welcome, server-side reconciliation (cron/ops sweep re-provisions pending rows > N min) — **provision is IDEMPOTENT keyed on user_id: edge fn checks for an existing non-pending team_memberships row before minting; /internal/provision returns existing team if membership already resolved (race-safe vs in-flight edge retries, P2-9)**; abuse posture (rate limit minting, unconfirmed-user cleanup).
+7. **Failure handling:** demo seed best-effort with E2E verification — **fix the known 404 first: edge fn calls `/v1/internal/demo` (index.ts:137) but the route is `/internal/demo` (hosted_api.py:784); correct the edge URL or add an alias**; provisioning retry with exponential backoff + jitter + max attempts in the edge fn (thundering-herd guard), pending-state on welcome, server-side reconciliation (cron/ops sweep re-provisions pending rows > N min) — **provision is IDEMPOTENT keyed on user_id: edge fn checks for an existing non-pending org_memberships row before minting; /internal/provision returns existing team if membership already resolved (race-safe vs in-flight edge retries, P2-9)**; abuse posture (rate limit minting, unconfirmed-user cleanup).
 
 ## 5.4 Failure modes
 
@@ -700,15 +700,15 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 
 | Endpoint | Method | Auth | Contract |
 |---|---|---|---|
-| /v1/team | GET | tt_ key | `{team_id, tier, max_users, max_graphs, point_count}` — no max_teams (user-level capability) |
+| /v1/team | GET | tt_ key | `{org_id, tier, max_users, max_graphs, point_count}` — no max_teams (user-level capability) |
 | /v1/team/keys | POST | **tt_ key ONLY (unchanged — see E1 for session mint)** | `{id, key, key_prefix, created_at}` (key shown once) · **gains 402 on tier cap (auth unchanged, additive)** |
 | /v1/team/keys | GET | tt_ key | `[{id, key_prefix, created_at, last_used_at, revoked_at}]` |
 | /v1/team/keys/{id} | DELETE | tt_ key | 204 · **409 "would leave team keyless" (only-key revoke block, J-2)** |
 | /v1/sessions | GET/POST | tt_ key | session list / create |
 | /v1/points | GET/POST | tt_ key | point CRUD |
 | /v1/search | GET | tt_ key | `{q, ...}` → results |
-| /internal/provision | POST | FASTAPI_INTERNAL_KEY | `{team_id, team_name, api_key_hash, created_by}` → `{team_id, api_key, graph_name}` |
-| /internal/demo | POST | FASTAPI_INTERNAL_KEY | `{team_id}` → demo seeded |
+| /internal/provision | POST | FASTAPI_INTERNAL_KEY | `{org_id, org_name, api_key_hash, created_by}` → `{org_id, api_key, graph_name}` |
+| /internal/demo | POST | FASTAPI_INTERNAL_KEY | `{org_id}` → demo seeded |
 
 > **Auth-transition rule (P1-4):** `/v1/team/keys` POST stays `tt_`-authed — **no breaking change**. Session-scoped minting goes through E1 exclusively. J-2 step 2 / W-2 updated: "mint via `POST /v1/session/key`, then list/revoke via `/v1/team/keys` with the minted key".
 
@@ -717,23 +717,23 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 ### E1: POST /v1/session/key — session-scoped key mint (PRIMARY dashboard auth)
 ```
 Auth: Supabase JWT (JWKS-verified) → user_id
-Body: { team_id?: string, purpose?: 'bootstrap'|'recovery' }   # purpose defaults 'bootstrap'; team_id optional — resolution rule below
-200: { key: "tt_...", key_prefix, expires_at: ISO|null, team_id }
+Body: { org_id?: string, purpose?: 'bootstrap'|'recovery' }   # purpose defaults 'bootstrap'; org_id optional — resolution rule below
+200: { key: "tt_...", key_prefix, expires_at: ISO|null, org_id }
      # bootstrap → expires_at 24h; recovery → expires_at null (persistent, revocable)
 403: no membership · 402: max_api_keys cap (recovery mint — **unless user has no usable key → auto-revoke oldest orphaned, per E2E-3**) · 429: rate limit
 ```
-**Resolution rule (P2-8):** single membership → that team; multiple → `400 "team_id required"`; zero → `403` with detail pointing to E2 (create team).
+**Resolution rule (P2-8):** single membership → that team; multiple → `400 "org_id required"`; zero → `403` with detail pointing to E2 (create team).
 **Key lifecycle (P1 — three fixes):**
 - **`purpose` param (P1):** `bootstrap` mints the 24h ephemeral session key (dashboard auth); **`recovery` mints a PERSISTENT revocable key (no 24h expiry)** — otherwise the #518 recovery deliverable mints a self-destructing key. Recovery keys count against tier `max_api_keys` (Free 2/Solo 5/Pro 10/Team 20+); bootstrap keys are **EXEMPT** from the cap (counted separately, swept when expired) — else a Free user's 2nd dashboard tab hits 402 and the J-1/J-3 flagship flow breaks.
 - **Reuse-before-mint (P1):** E1 reuses an existing unexpired bootstrap key for (user, team) from sessionStorage before minting — no mint-per-load.
-- `APIKey` node gains `expires_at` + `created_via:'bootstrap'|'recovery'|'dashboard'|'provision'`; `get_current_team` rejects expired keys. SignOut: client-side discard + 24h server backstop. Expired bootstrap keys swept by the reconciliation job. **Orphaned unrevealed provision keys: reconciliation sweep expires/revoles `created_via='provision'` keys not revealed within N hours.**
+- `APIKey` node gains `expires_at` + `created_via:'bootstrap'|'recovery'|'dashboard'|'provision'`; `get_current_org` rejects expired keys. SignOut: client-side discard + 24h server backstop. Expired bootstrap keys swept by the reconciliation job. **Orphaned unrevealed provision keys: reconciliation sweep expires/revoles `created_via='provision'` keys not revealed within N hours.**
 **Purpose:** dashboard primary auth (decision 2), key recovery (J-2), powers E6/E2 context.
 
-### E2: POST /v1/teams — team creation (W-2c, J-4 zero-teams)
+### E2: POST /v1/organizations — team creation (W-2c, J-4 zero-teams)
 ```
 Auth: Supabase JWT (JWKS-verified) → user_id
 Body: { name: string (1..64, [a-zA-Z0-9 _-]) }
-201: { team_id, graph_name: "team_{team_id}" (default graph, graph.id='default'), tier: 'free' }
+201: { org_id, graph_name: "org_{org_id}" (default graph, graph.id='default'), tier: 'free' }
 409: name collision · **429: team-creation rate-limit (abuse posture — not a tier block)**
 ```
 **Purpose:** create-first-team empty state; tier defaults Free (upgrades = billing epic).
@@ -741,7 +741,7 @@ Body: { name: string (1..64, [a-zA-Z0-9 _-]) }
 ### E3: POST /v1/invites — invite to team (W-2b, J-4 step 4, Team tier)
 ```
 Auth: Supabase JWT → team membership (owner/admin)
-Body: { team_id, email, role: 'admin'|'member' }
+Body: { org_id, email, role: 'admin'|'member' }
 201: { invite_id, status: 'invited', token, expires_at }
 403: not owner/admin · 402: max_users reached · 409: active invite exists
 ```
@@ -751,7 +751,7 @@ Body: { team_id, email, role: 'admin'|'member' }
 ```
 Auth: Supabase JWT (post-signup user)
 Body: { token }                      # plaintext uuid4 token from E3 (token-only accept in v1 — decision 1e)
-201: { team_id, role }
+201: { org_id, role }
 400: invalid/expired token · 402: max_users reached at accept · 409: already a member
 **Email-match fallback DROPPED for v1 (decision 1e):** GitHub-OAuth email gap documented as a known limitation with manual support path (mirrors deferred invite email delivery).
 **Token single-use (P2):** accept CONSUMES the token (Invitation node `consumed_at` set / deleted); second accept of the same token by a different user → 409.
@@ -761,20 +761,20 @@ Body: { token }                      # plaintext uuid4 token from E3 (token-only
 ### E5: POST /v1/graphs — create graph in team (W-4, J-4 step 2)
 ```
 Auth: Supabase JWT → team membership
-Body: { team_id, name }
-201: { graph_id, graph_name: "team_{tid}_{gid}", kind: 'custom' }
+Body: { org_id, name }
+201: { graph_id, graph_name: "org_{tid}_{gid}", kind: 'custom' }
 403: no membership in team · 404: unknown team · 409: graph name collision in team · 402: max_graphs reached
 ```
 **Purpose:** team↔graph 1:N; Free/Solo caps enforced here.
 
-### E6: GET /v1/teams — list my memberships (J-3/J-4 team switcher)
+### E6: GET /v1/organizations — list my memberships (J-3/J-4 team switcher)
 ```
 Auth: Supabase JWT
-200: [{ team_id, team_name, tier, role, graph_count, default_graph_id }]   # excludes team_id='' placeholder rows (4.1 step 6)
+200: [{ org_id, org_name, tier, role, graph_count, default_graph_id }]   # excludes org_id='' placeholder rows (4.1 step 6)
 ```
 **Purpose:** populates team switcher; drives per-team billing display.
 
-### E7: GET /v1/graphs?team_id= — list graphs in team (P2-7, J-4 switcher)
+### E7: GET /v1/graphs?org_id= — list graphs in team (P2-7, J-4 switcher)
 ```
 Auth: Supabase JWT → team membership
 200: [{ graph_id, name, kind: 'default'|'custom', point_count }]
@@ -785,9 +785,9 @@ Auth: Supabase JWT → team membership
 ### E8: Member management (P1-1 — P-5 surface)
 | Endpoint | Method | Purpose | Errors |
 |---|---|---|---|
-| /v1/teams/{team_id}/members | GET | list members | 403 non-member · 404 |
-| /v1/teams/{team_id}/members/{user_id} | DELETE | remove member | 403 non-owner/admin · **409 owner cannot be removed/demoted** |
-| /v1/teams/{team_id}/members/{user_id} | PATCH | role change (admin/member) | 403 · 409 owner-demotion |
+| /v1/organizations/{org_id}/members | GET | list members | 403 non-member · 404 |
+| /v1/organizations/{org_id}/members/{user_id} | DELETE | remove member | 403 non-owner/admin · **409 owner cannot be removed/demoted** |
+| /v1/organizations/{org_id}/members/{user_id} | PATCH | role change (admin/member) | 403 · 409 owner-demotion |
 | /v1/invites/{invite_id} | DELETE | cancel invite | 403 · 404 |
 | /v1/invites/{invite_id}/resend | POST | resend (rate-limited 429) | 403 · 404 · 429 |
 
@@ -795,7 +795,7 @@ Auth: Supabase JWT → team membership
 
 ```
 { "detail": "message" }          # FastAPI default — keep
-400 Bad Request                  # E1 team_id required · E4 invalid/expired token
+400 Bad Request                  # E1 org_id required · E4 invalid/expired token
 402 Payment Required             # tier limit → client shows soft-block + upgrade CTA
 403 Forbidden                    # RBAC violation / no membership
 404 Not Found                    # unknown team/invite/member
@@ -811,11 +811,11 @@ Auth: Supabase JWT → team membership
 |---|---|---|
 | user_signed_up | web | user_id, auth_provider, utm |
 | email_confirmed | web | user_id |
-| tenant_provisioned | server | user_id, team_id, status (`confirmed`|`unconfirmed`) — **carries confirmation state (P2-11)** |
+| tenant_provisioned | server | user_id, org_id, status (`confirmed`|`unconfirmed`) — **carries confirmation state (P2-11)** |
 | tenant_cleaned_up | server | user_id, reason: unconfirmed-expired |
-| dashboard_opened | web | user_id, team_id |
-| session_key_minted | server | user_id, team_id (fires per mint; funnel counts distinct users) |
-| first_api_call (activation) | server middleware | user_id, team_id, endpoint, latency |
+| dashboard_opened | web | user_id, org_id |
+| session_key_minted | server | user_id, org_id (fires per mint; funnel counts distinct users) |
+| first_api_call (activation) | server middleware | user_id, org_id, endpoint, latency |
 
 **Funnel filtering (P2-11):** the `signed_up → provisioned → dashboard_opened → first_api_call` funnel excludes never-confirmed accounts (filter on `tenant_provisioned.status='confirmed'` OR the `tenant_cleaned_up` event).
 
@@ -823,17 +823,17 @@ Auth: Supabase JWT → team membership
 
 | RPC | Purpose | Auth |
 |---|---|---|
-| reveal_api_key(user_id, team_id) | atomic reveal+null (A13) | SECURITY DEFINER + auth.uid() guard + role='owner' |
+| reveal_api_key(user_id, org_id) | atomic reveal+null (A13) | SECURITY DEFINER + auth.uid() guard + role='owner' |
 | (none other needed — membership CRUD via FastAPI service-role) | | |
 
 ## 6.6 APIKey node extension (P1-2)
 
 ```
-(:APIKey { id, team_id, key_hash, key_prefix, created_by, created_at, revoked_at,
+(:APIKey { id, org_id, key_hash, key_prefix, created_by, created_at, revoked_at,
            expires_at,          ← NEW — session keys (E1)
            created_via })        ← NEW — 'bootstrap' | 'recovery' | 'dashboard' | 'provision' (E1 purpose → created_via; 'bootstrap'=24h ephemeral, 'recovery'=persistent revocable)
 ```
-`get_current_team`: reject when `revoked_at IS NOT NULL` **OR** (`expires_at` IS NOT NULL AND `expires_at < now`).
+`get_current_org`: reject when `revoked_at IS NOT NULL` **OR** (`expires_at` IS NOT NULL AND `expires_at < now`).
 
 ---
 
@@ -845,10 +845,10 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Setup:** remote Supabase with email confirmation **OFF** (assert the actual setting in setup — flipped toggle fails loudly, not confusingly), fresh browser profile, no account for test-email
 - **STALE 2026-08-10 (#801):** prod confirmations are ON (SMTP-era, #832) — the OFF variant is retired for hosted prod. The mocked welcome suite (`tests/e2e/test_welcome_page.py`) + the live no-429 smoke own this journey (see `docs/plans/2026-08-10-801-signup-rate-plan.md`); a live OFF run would require toggling prod auth config (rejected, Approach B).
 - **Steps:** 1) land on /signup 2) fill email+password 3) Create account 4) land on /welcome.html 5) read key, refresh page
-- **Assertions (user-visible primary):** `tt_` key shown once with copy button · refresh shows returning-user state (no re-reveal) · key authenticates against GET /v1/team. **Supporting (DB-level):** `team_memberships` row exists (pin the post-migration name; role=owner, status=active) · FalkorDB team + default graph exist · demo points present (**after demo-seed 404 fix**) · **service-role check: `api_key IS NULL` after reveal**
+- **Assertions (user-visible primary):** `tt_` key shown once with copy button · refresh shows returning-user state (no re-reveal) · key authenticates against GET /v1/team. **Supporting (DB-level):** `org_memberships` row exists (pin the post-migration name; role=owner, status=active) · FalkorDB team + default graph exist · demo points present (**after demo-seed 404 fix**) · **service-role check: `api_key IS NULL` after reveal**
 - **Poll strategy (async provisioning):** welcome shows the pending/retry state first, then bounded poll — wait for key-reveal or error state within N seconds (deterministic regardless of provisioning latency)
 - **Negative:** duplicate email → "already exists, sign in" · wrong password (<6 chars) → inline error · no session on welcome → error state
-- **Negative (security, reveal RPC — NEW):** authenticated user B (member of another team) calls `reveal_api_key(user_id=A, team_id=T)` → returns NULL AND does NOT null A's key · non-owner row member calling RPC → NULL · authenticated SELECT on `team_memberships` cannot read `api_key` column (RLS exclusion) · DB-level `api_key IS NULL` after reveal
+- **Negative (security, reveal RPC — NEW):** authenticated user B (member of another team) calls `reveal_api_key(user_id=A, org_id=T)` → returns NULL AND does NOT null A's key · non-owner row member calling RPC → NULL · authenticated SELECT on `org_memberships` cannot read `api_key` column (RLS exclusion) · DB-level `api_key IS NULL` after reveal
 
 ## E2E-2: Hosted signup (OAuth) → provision → key revealed once
 - **Setup:** controlled test GitHub account **with a public verified email + email scope granted on the OAuth app** (pin the fallback: if the account lacks a verified email, skip with flag OR assert via the manual-support/key-delivery path); OAuth app configured
@@ -860,7 +860,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Setup:** provisioned user, Supabase session, NO remembered tt_ key
 - **Steps:** 1) dashboard (session-authed) 2) Lost your key? Generate a new one → `POST /v1/session/key` (E1) 3) copy new key 4) revoke old via /v1/team/keys/{id}
 - **Assertions:** new key minted without pre-existing key · shown once · authenticates against /v1/team · **revoked old key fails auth immediately (401) — pin this, no "or grace" ambiguity** · E1 mint at `max_api_keys` cap → 402 (NEW)
-- **Negative:** rate limit on mint (429) · expired session → 401 · **expired bootstrap key rejected by get_current_team (backdated expires_at via fixture → 401)** · **only-key revoke in a SEPARATE single-key scenario: revoking the only key → 409 warn**
+- **Negative:** rate limit on mint (429) · expired session → 401 · **expired bootstrap key rejected by get_current_org (backdated expires_at via fixture → 401)** · **only-key revoke in a SEPARATE single-key scenario: revoking the only key → 409 warn**
 - **#518 property pinned (P2):** recovery key returns `expires_at: null` AND authenticates against /v1/team after 24h; bootstrap key returns `expires_at = +24h` — a regression to 24h recovery keys fails this test
 - **Keyless-at-cap recovery (P2):** user with NO usable key at max_api_keys cap → recovery mint **succeeds** (auto-revokes the oldest orphaned key to free a slot, or exempt from cap with a hard per-identity recovery limit — decision: auto-revoke oldest orphaned) — asserts recovery never dead-ends for the #518 user
 - **Bootstrap-key active backstop (P2):** max active bootstrap keys per (user, team) = 3 (swept by reconciliation) — asserted via fixture
@@ -906,9 +906,9 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 ## E2E-10: User↔team decoupling — one user, two teams in parallel
 - **Setup:** Alice owns Solo team; client's Team team invites her
 - **Steps:** accept invite → switch teams in switcher → use key from team A against team B
-- **Assertions:** E6 lists both teams · team switcher works · **key from team A fails against team B (401)** · per-team billing display correct · E1 resolves team_id required (400) on ambiguity
+- **Assertions:** E6 lists both teams · team switcher works · **key from team A fails against team B (401)** · per-team billing display correct · E1 resolves org_id required (400) on ambiguity
 - **Negative:** removed from team → zero-teams state → create-team dialog (E2). **Zero-graphs state removed (P2):** the data model guarantees a default graph per team (4.2 backfill + back-compat) and no graph-deletion endpoint is in scope — the empty state is unreachable; the switcher always shows ≥1 graph.
-- **Phantom-row assertion (4.1 step 6):** multi-team user's E6 list contains NO row with team_id='' (placeholder filtered) — asserted in this test
+- **Phantom-row assertion (4.1 step 6):** multi-team user's E6 list contains NO row with org_id='' (placeholder filtered) — asserted in this test
 - **Billing display:** assert the tier/labels shown per team (per-team billing semantics visible); actual payment collection is out-of-scope (billing epic) — do NOT assert charges
 
 ## E2E-11: Team↔graph 1:N — multiple graphs with tier limits
@@ -948,7 +948,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
   - **Provisioning rate-limit (abuse posture, deliverable 8b):** E2E-1 negative extension — repeated provision attempts for the same identity exceed the per-identity limit → 429/blocked.
   - **Demo-graph size cap (deliverable 8b):** E2E-1 negative extension — demo seeding stops or is capped at the size cap.
   - **Stuck-pending → reconciliation (W-1 failure path):** E2E-1 negative extension — simulate hook/edge failure → row stuck at `status='pending'` → welcome shows pending/error → reconciliation sweep re-provisions → resolves to active + key reveals once.
-  - **Concurrent-provision race (P2):** fire TWO provision attempts in parallel (in-flight edge retry + sweep) → assert EXACTLY ONE Team node in FalkorDB, ONE APIKey mint, `/internal/provision` returns the existing team on the second call, zero duplicate/phantom team_memberships rows (E6 filter).
+  - **Concurrent-provision race (P2):** fire TWO provision attempts in parallel (in-flight edge retry + sweep) → assert EXACTLY ONE Team node in FalkorDB, ONE APIKey mint, `/internal/provision` returns the existing team on the second call, zero duplicate/phantom org_memberships rows (E6 filter).
 
 ---
 
@@ -970,7 +970,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - Key recovery routes through **E1 (POST /v1/session/key, purpose='recovery' — persistent)** everywhere (J-2, W-2, E2E-3, 6.1 auth-transition rule) — no stale `/v1/team/keys`-via-session references, no 24h expiry on recovery keys (fixed P1-4).
 - `reveal_api_key` RPC has the **auth.uid() guard** in data model (4.1b) AND negative tests in E2E-1.
 - Demo-seed 404 bug flagged in W-1, architecture decision 7, AND E2E-1 setup (prerequisite fix).
-- `team_memberships` name pinned across migration, workflows, E2E (no `user_teams` chameleon).
+- `org_memberships` name pinned across migration, workflows, E2E (no `user_teams` chameleon).
 - Tier limits single-sourced from **`product/pricing.json`** (canonical — decision 1d; pricing.md is the generated mirror; enforced at runtime from the JSON; data model 4.5, W-4, E2E-13/14 reference it).
 - BSL + $5M AUG license framing consistent across pricing.md, pricing page (P-3), E2E-14, #338 alignment.
 
@@ -1003,18 +1003,18 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 
 **Order (each step independently verifiable, run 0003 in ONE transaction during low traffic):**
 1. **Migration 0003** (rename → columns → unique → REVOKE api_key → trigger re-create → reveal RPC) — one transaction; migration smoke test first.
-2. **Edge fn** (team_memberships + role='owner' + demo URL fix) — deploy + verify a test signup.
-3. **welcome.html** (team_memberships poll + reveal RPC call) — deploy.
+2. **Edge fn** (org_memberships + role='owner' + demo URL fix) — deploy + verify a test signup.
+3. **welcome.html** (org_memberships poll + reveal RPC call) — deploy.
 4. **FastAPI** (E1–E8, tier enforcement, session bootstrap) — deploy; verify E1 with a test JWT.
 5. **Dashboard SPA** (session auth, E1 mint) — deploy.
 
-**Rollback (mid-flight, per step):** 1) rename back `team_memberships` → `user_teams`, drop new columns/constraints, re-create original functions + RLS; 2–5) revert the artifact + restore prior version. Test rollback of step 1 explicitly before prod window.
+**Rollback (mid-flight, per step):** 1) rename back `org_memberships` → `user_teams`, drop new columns/constraints, re-create original functions + RLS; 2–5) revert the artifact + restore prior version. Test rollback of step 1 explicitly before prod window.
 
 ## 8.3 Improvement opportunities
 
 1. **provision_test_user fixture** as a shared test primitive — one fixture powers 8 E2E cases; invest in its robustness (tier injection, demo_seed flag, key return).
 1b. **Invite/RBAC surface (E3/E4/E8, W-2b, P-5) — KEEP in scope (owner build-now directive):** reviewers flagged it's unreachable by real users until billing ships (tiers only fixture-injectable). Decision: build it now per the owner's "build identified things now while design context is fresh" rule — it ships fixture-tested + admin-testable; the billing epic wires the upgrade path that makes it user-reachable. The data model (role/status/invited_email) is required for decoupling regardless; the API surface is cheap now, costly to retrofit later.
-1c. **`user_teams` → `team_memberships` rename — KEEP (decision):** reviewers flagged it as cosmetic churn creating trigger-recreation risk. Decision: the semantic change (1:1 → M:N junction) is real and the name communicates it; the risk is fully mitigated (trigger re-creation + grep gate + rollback step). Renaming later would be MORE costly (contracts/docs/tests already pin it).
+1c. **`user_teams` → `org_memberships` rename — KEEP (decision):** reviewers flagged it as cosmetic churn creating trigger-recreation risk. Decision: the semantic change (1:1 → M:N junction) is real and the name communicates it; the risk is fully mitigated (trigger re-creation + grep gate + rollback step). Renaming later would be MORE costly (contracts/docs/tests already pin it).
 1d. **Pricing single-source → mechanical (P2):** create `product/pricing.json` (full tier/limits table incl. max_api_keys 2/5/10/20+ and ops/size placeholders) as an EXPLICIT epic deliverable; pricing.md is doc-generated from it; the pricing page AND E2E-13/14 assert against the JSON; **FastAPI/Team-node creation loads limits from pricing.json at runtime (no hand-edited copies in code)**; no markdown parsing in tests.
 1e. **E4 email-match fallback — DROP for v1:** ship token-only accept; document the GitHub-OAuth email gap as a known limitation with manual support path (mirrors deferred invite email delivery).
 1f. **Planned Pro/Team features (declared intent in pricing.md, tracked NOT built):** per-graph API keys, daily backups + restore, usage dashboard (ops consumed / overage runway / per-graph), webhooks on memory events, data export (JSONL), Team audit log, per-graph ReBAC (access-policy layer on existing Graph BELONGS_TO Team + Membership — schema already supports it). Each becomes a future issue; the pricing page shows current vs planned features honestly (no over-promise).

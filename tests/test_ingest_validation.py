@@ -16,6 +16,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_ingest_validation.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -33,6 +34,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 def _query(sdk, cypher: str, params: dict | None = None):
@@ -555,17 +557,20 @@ class TestTerminalStatusGuard:
             sdk.ingest(bundle)
 
     def test_bundle_local_terminal_dedup_after_rebuild(self, sdk):
-        # #2971: after a `rebuild_all` the journal replay leaves EVERY Point
-        # with `content_hash = NULL` (`_upsert_point_props`'s fixed SET list
-        # omits it, `_emit_event` strips it), so the content-hash MATCH the
-        # guard used missed for every point and the cycle-17/18 guard silently
-        # stopped matching. The bundle is then rejected only at Phase-2
-        # `_check_endpoint_race` — a mid-write raise AFTER earlier bundle
-        # items committed (verified on origin/main: point count 1 -> 2, an
-        # orphan left behind), the exact partial-mutation class the Phase-1
-        # guard exists to prevent. Simulate that post-rebuild state (clear the
-        # terminal point's `content_hash`) and assert the guard rejects the
-        # direct edge in Phase 1 via the hash-less content+kind fallback.
+        # #2971: a Point can carry `content_hash = NULL` — a crash between the
+        # node CREATE and the props SET (a partial write), or a graph written
+        # before #2795 D2. (A rebuild no longer produces it: #2795 D2 has
+        # `_upsert_point_props` RE-DERIVE the hash from the replayed content,
+        # so a rebuilt graph keeps its hashes.) With the hash absent, the
+        # content-hash MATCH the guard used missed that point and the
+        # cycle-17/18 guard silently stopped matching it. The bundle is then
+        # rejected only at Phase-2 `_check_endpoint_race` — a mid-write raise
+        # AFTER earlier bundle items committed (verified: point count 1 -> 2,
+        # an orphan left behind), the exact partial-mutation class the Phase-1
+        # guard exists to prevent. Simulate the hash-less state directly
+        # (clear the terminal point's `content_hash`) and assert the guard
+        # rejects the direct edge in Phase 1 via the hash-less content+kind
+        # fallback.
         #
         # Scope note: this simulates the TERMINAL-STATUS state the guard
         # matches (`status='superseded'`, `outdated` unset). A point superseded
@@ -596,36 +601,47 @@ class TestTerminalStatusGuard:
     def test_terminal_dedup_hit_mirrors_create_point_dedup_predicate(self, sdk):
         # #2971 predicate leg: the guard exists to catch a bundle-local ref
         # that will DEDUP onto a terminal point, so its watch set must equal
-        # `create_point`'s dedup set — the WRITE PATH predicate
-        # `n.is_operator = false`, NOT the counting form
-        # `(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL`
-        # (`summarize_structure` / `list_pointkinds` / `ep.py::_graph_claim_count`).
-        # The counting form diverges both ways: it FALSELY rejects legacy
-        # property-absent plain Points (which create_point does NOT dedup, so
-        # no terminal edge would ever be wired) and, with `op_type IS NULL`, it
-        # MISSES the reachable `is_operator=false + op_type` hybrid that
-        # create_point DOES dedup — turning the Phase-1 guard into a Phase-2
-        # mid-write raise. Both halves are pinned below.
+        # the WRITE PATH's dedup set. Since #2949 that set is defined ONCE, in
+        # the shared `_dedup_match_clauses`: `(n.is_operator IS NULL OR
+        # n.is_operator = false) AND (n.op_type IS NULL OR n.is_operator =
+        # false)`. The assertion below is therefore GUARD == WRITER, checked on
+        # both sides rather than hard-coded: whatever the writer resolves, the
+        # guard must resolve too — otherwise the guard fails OPEN (the writer
+        # dedups a terminal point, the guard does not see it) or FALSELY
+        # rejects (the guard matches a node the writer would never dedup onto).
+        # The `op_type` disjunct is deliberately NOT the counting form's bare
+        # `... AND n.op_type IS NULL` (`summarize_structure` /
+        # `list_pointkinds` / `ep.py::_graph_claim_count`): a bare
+        # `op_type IS NULL` conjunct drops the reachable `is_operator=false +
+        # op_type` hybrid that the writer DOES dedup, turning Phase 1 into a
+        # Phase-2 mid-write raise (#2949 review).
         g = sdk._get_proj().g
         # reachable hybrid: modern is_operator=false PLUS a caller-supplied
-        # op_type; create_point's dedup (bare `is_operator = false`) matches it
+        # op_type; the writer's shared predicate matches it
         sdk.create_point("statement", "hybrid content", op_type="IMPL",
                          status="superseded")
-        # legacy property-absent plain Point — create_point does NOT dedup it
+        # legacy property-absent plain Point (no is_operator, no op_type) —
+        # the writer DOES dedup it (the #2949 F1 fix; before it the guard
+        # failed OPEN on exactly this shape)
         g.query("CREATE (n:Point {id:'legacy-plain', "
                 "content:'legacy content', pointKind:'statement', "
                 "status:'superseded'})")
         # legacy operator (op_type set, is_operator ABSENT) — a :Point node,
-        # but never a plain-Point dedup target (create_point does NOT dedup it)
+        # but excluded by the predicate's `op_type` disjunct, so never a
+        # plain-Point dedup target on EITHER side
         g.query("CREATE (o:Point {id:'legacy-op', op_type:'IMPL', "
                 "content:'operator content', pointKind:'statement', "
                 "status:'superseded'})")
-        assert sdk._find_terminal_dedup_hit(
-            "hybrid content", "statement") is not None
-        assert sdk._find_terminal_dedup_hit(
-            "legacy content", "statement") is None
+        for content in ("hybrid content", "legacy content"):
+            writer = sdk._find_point_by_content(content, pointKind="statement")
+            guard = sdk._find_terminal_dedup_hit(content, "statement")
+            assert writer is not None, f"the writer must dedup {content!r}"
+            assert guard == writer, f"guard/writer disagree on {content!r}"
+        # the excluded legacy operator shape is None on BOTH sides
         assert sdk._find_terminal_dedup_hit(
             "operator content", "statement") is None
+        assert sdk._find_point_by_content(
+            "operator content", pointKind="statement") is None
 
     def test_terminal_dedup_fallback_gated_on_writer_hash_state(self, sdk):
         # #2971 gating leg: `create_point` / `ingest_bundle` reach their A10
@@ -633,8 +649,10 @@ class TestTerminalStatusGuard:
         # a hash-present sibling means the writer resolves there and never
         # consults a hash-less point. The guard must mirror that ordering, or
         # it FALSELY rejects a bundle whose edge legally lands on a LIVE
-        # hash-present duplicate (review of #2971 caught it). The post-rebuild
-        # steady state has no hash anywhere, so the fallback still fires there.
+        # hash-present duplicate (review of #2971 caught it). When every
+        # duplicate is genuinely hash-less (a partial write, or a graph written
+        # before #2795 D2) there is no hash for the writer to resolve to, so
+        # the fallback still fires.
         term = sdk.create_point("statement", "same content",
                                 status="superseded")
         _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",

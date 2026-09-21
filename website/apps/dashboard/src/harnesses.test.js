@@ -9,10 +9,11 @@ import {
   HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS,
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
-  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT,
-  HARNESS_OAUTH,
+  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
+  PI_CAPTURE_INSTALL,
+  HARNESS_OAUTH, CANONICAL_MCP_URL,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
-  harnessDisplayName,
+  harnessDisplayName, knownHarnessName,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
@@ -26,9 +27,11 @@ test('DE2E-5: the 7-harness vocabulary — self-install (4) + teach-human (3, in
   assert.equal(overlap.length, 0, 'self-install and teach-human are disjoint')
   assert.deepEqual(HARNESS_SELF_INSTALL.sort(), ['claude', 'codex', 'cursor', 'pi'].sort())
   // #1701: chatgpt joins the teach-human vocabulary (no local shell/cloud —
-  // the HUMAN completes the connector steps) AND is the OAuth-only harness.
+  // the HUMAN completes the connector steps) AND is an OAuth-only harness.
+  // #2865: the two Claude connector leaves join it — their recipe is key-less
+  // OAuth now, so HARNESS_OAUTH is the vocabulary the live connect step reads.
   assert.deepEqual(HARNESS_TEACH_HUMAN.sort(), ['claude-desktop', 'claude-web', 'chatgpt'].sort())
-  assert.deepEqual(HARNESS_OAUTH, ['chatgpt'])
+  assert.deepEqual(HARNESS_OAUTH, ['claude-desktop', 'claude-web', 'chatgpt'])
   assert.equal(HARNESS_OAUTH.filter((h) => HARNESS_SELF_INSTALL.includes(h)).length, 0,
     'OAuth harnesses are never self-install (no key-mint surface)')
   assert.equal(HARNESS_OAUTH.filter((h) => !HARNESS_TEACH_HUMAN.includes(h)).length, 0,
@@ -88,6 +91,15 @@ test('#2912: family resolution + preferred surface + display names', () => {
   assert.equal(preferredSurface(cursor, 'pi'), 'cursor')
   assert.equal(harnessDisplayName('codexDesktop'), 'Codex Desktop')
   assert.equal(harnessDisplayName('claude-desktop'), 'Claude Desktop')
+  // #3428 (lane B3, review cycle 1 P2-1): `knownHarnessName` is the user-facing
+  // lookup — a KNOWN leaf (including the HARNESS_EXTRA_NAMES-only Codex
+  // Desktop) resolves, and an unknown id returns null so the CALLER owns the
+  // neutral fallback (unlike harnessDisplayName, which falls back to the raw
+  // id and would leak "codexDesktop" into the sentence).
+  assert.equal(knownHarnessName('codexDesktop'), 'Codex Desktop')
+  assert.equal(knownHarnessName('claude-desktop'), 'Claude Desktop')
+  assert.equal(knownHarnessName('pi'), 'Pi')
+  assert.equal(knownHarnessName('not-a-harness'), null)
 })
 
 test('#2328/#2329: Codex Desktop variant — terminal-less config path, .agents/skills, no .codex/skills', () => {
@@ -149,16 +161,41 @@ test('DE2E-5: 4 self-install harnesses carry a config-write command + skill inst
 })
 
 test('DE2E-5: teach-human harnesses carry exact manual steps + verify handoff (Claude Desktop/Web)', () => {
+  // #2865: both Claude connector surfaces are key-less OAuth — no `Authorization`
+  // request header, no API key, and the canonical NO-slash connector URL that
+  // matches the server's RFC 8707 resource indicator (#2864).
   const desktop = UNIVERSAL_COMMAND['claude-desktop'](KEY)
   assert.match(desktop, /Connectors/, 'desktop: Connectors UI named')
   assert.match(desktop, /Server URL/, 'desktop: server URL field')
-  assert.match(desktop, /Authorization/, 'desktop: request-header field')
+  assert.match(desktop, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'desktop: canonical connector URL (no slash)')
+  assert.match(desktop, /Authorize/, 'desktop: OAuth Authorize step')
   assert.match(desktop, /tortoise_health/, 'desktop: agent verifies')
+  assert.ok(!desktop.includes('Authorization'), 'desktop: no Bearer recipe (that is the blocker)')
+  assert.match(desktop, /Leave Request headers empty/, 'desktop: the field is named only to say it stays empty')
+  assert.ok(!/beta/i.test(desktop), 'desktop: no beta caveat')
+  assert.ok(!desktop.includes(KEY), 'desktop: never embeds the key')
+  // #3428/#2937 (lane B3, review cycle 1 P2-3): the dashboard Continue click no
+  // longer writes the checkpoint (the human writer is deleted), so the copy must
+  // name the real writer instead of promising the click does it.
+  assert.match(desktop, /first successful write/, 'desktop: the real checkpoint writer is named')
+  assert.ok(!desktop.includes('harness-connected checkpoint'),
+    'desktop: the deleted human writer (#3428) must not be promised')
   const web = UNIVERSAL_COMMAND['claude-web'](KEY)
   assert.match(web, /Connectors/, 'web: connector steps')
   assert.match(web, /Server URL/, 'web: server URL step')
+  assert.match(web, /https:\/\/api\.premiselabs\.co\/mcp[^\/]/, 'web: canonical connector URL (no slash)')
+  assert.match(web, /Authorize/, 'web: OAuth Authorize step')
   assert.match(web, /tortoise_health/, 'web: agent verifies')
-  assert.match(web, /harness-connected/, 'web: checkpoint handoff (dashboard Continue)')
+  // #3428/#2937 (lane B3, review cycle 1 P2-3): retargeted off the deleted
+  // human writer — the copy now names the agent's first successful write.
+  assert.match(web, /first successful write/, 'web: the real checkpoint writer is named')
+  assert.ok(!web.includes('harness-connected checkpoint'),
+    'web: the deleted human writer (#3428) must not be promised')
+  assert.ok(!web.includes('Authorization'), 'web: no Bearer recipe')
+  assert.ok(!web.includes(KEY), 'web: never embeds the key')
+  // #2865: the Continue label tells the truth on a manual connector surface.
+  assert.equal(HARNESS_CONTINUE_LABEL['claude-desktop'], "I've connected it — Continue →")
+  assert.equal(HARNESS_CONTINUE_LABEL['claude-web'], "I've connected it — Continue →")
 })
 
 test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector steps + skills-as-prompt copy', () => {
@@ -186,11 +223,22 @@ test('#1701 DE2E-5: chatgpt is the key-less OAuth harness — OAuth connector st
   assert.match(cmd, /OAuth/, 'command: OAuth')
   assert.match(cmd, /Follow these workflows/, 'command: workflows prompt embedded')
   assert.match(cmd, /are we connected\?/, 'command: in-chat verify question')
-  assert.match(cmd, /harness-connected/, 'command: checkpoint handoff (dashboard Continue)')
+  // #3428/#2937 (lane B3, review cycle 1 P2-3): retargeted off the deleted
+  // human writer — the copy now names the agent's first successful write.
+  assert.match(cmd, /first successful write/, 'chatgpt: the real checkpoint writer is named')
+  assert.ok(!cmd.includes('harness-connected checkpoint'),
+    'chatgpt: the deleted human writer (#3428) must not be promised')
   assert.ok(!cmd.includes('tt_'), 'chatgpt copy must never carry a key prefix')
   assert.ok(!cmd.includes(KEY), 'chatgpt copy must never embed the test key')
   assert.ok(!cmd.includes('tortoise_health'), 'chatgpt copy verifies IN CHAT — never tortoise_health')
   assert.ok(!cmd.includes('api.premiselabs.co/mcp/'), 'chatgpt copy must not use the slash URL form')
+  // #2865: ONE canonical connector constant — chatgpt, claude-desktop and
+  // claude-web all carry the no-slash form (the keyed MCP_URL stays slashed).
+  assert.equal(CANONICAL_MCP_URL, 'https://api.premiselabs.co/mcp')
+  for (const h of ['chatgpt', 'claude-desktop', 'claude-web']) {
+    assert.ok(UNIVERSAL_COMMAND[h](KEY).includes(CANONICAL_MCP_URL),
+      `${h}: connector copy carries the canonical no-slash URL`)
+  }
   assert.equal(HARNESS_COPY_LABEL.chatgpt, 'Copy prompt')
   assert.equal(HARNESS_CONTINUE_LABEL.chatgpt, "I've connected it — Continue →")
   assert.ok(HARNESS_INTRO.chatgpt && HARNESS_INTRO.chatgpt.includes('paste the prompt'), 'chatgpt intro points at the chat paste')
@@ -241,4 +289,117 @@ test('A0 rollback: legacy HARNESS_* exports preserved (archived #1643 wizard + c
   assert.equal(typeof HARNESS_CAPTURE_SUPPORT, 'object')
   // the legacy exports still render a per-harness command for the archived surface
   assert.match(HARNESS_INSTALL.claude(KEY), /claude mcp add/)
+})
+
+// #3575: the capture-INSTALL seam — `HARNESS_CAPTURE_SUPPORT[h] === true` is a
+// capability claim, and it is only honest when the product actually INSTALLS a
+// capture step. These pin the three legs (declared seam ⟺ in-repo artifact ⟺
+// install step) so the Pi false PASS — `pi: true` with no capture install —
+// cannot regress.
+test('#3575: capture support is derived from the seam, and every supported harness installs it', () => {
+  const seamHarnesses = Object.keys(HARNESS_CAPTURE_SEAM)
+  for (const h of HARNESS_ORDER) {
+    assert.equal(
+      HARNESS_CAPTURE_SUPPORT[h],
+      seamHarnesses.includes(h),
+      `${h}: HARNESS_CAPTURE_SUPPORT must equal seam presence (derived, not asserted)`,
+    )
+    if (!HARNESS_CAPTURE_SUPPORT[h]) continue
+    const artifact = HARNESS_CAPTURE_SEAM[h]
+    assert.match(artifact, /^tortoise\//, `${h}: seam artifact must be in-repo`)
+    // The install step may live in the MCP-setup copy (Pi/Codex embed it) or
+    // in the capture-install surface (Cursor's copy is a JSON file, so its
+    // capture step is a connect-wizard step + the Memory-sources row).  Either
+    // surface must name the declared artifact — capability is not a claim.
+    const surface = `${HARNESS_INSTALL[h](KEY)}\n${HARNESS_CAPTURE_INSTALL[h] || ''}`
+    assert.ok(
+      surface.includes(artifact),
+      `HARNESS_INSTALL/${h} capture-install surface must install its declared seam ${artifact}`,
+    )
+  }
+})
+
+test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  assert.match(pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+  assert.match(pi, /\.pi\/agent\/extensions/)
+  // the Memory-sources inline row installs the SAME seam (one shared constant)
+  assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
+  assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+})
+
+// #3818 (P2-4): the copy-paste Codex capture install must honour the SAME
+// `$CODEX_HOME` override the installer does. A hardcoded `~/.codex` command
+// writes the hook into a file Codex never reads on a non-default setup — the
+// silent no-capture the seam exists to prevent, on the surface most likely to
+// be read.
+test('#3818: the Codex capture install copy honours $CODEX_HOME', () => {
+  const codex = HARNESS_CAPTURE_INSTALL.codex
+  assert.ok(codex, 'HARNESS_CAPTURE_INSTALL.codex present')
+  assert.match(codex, /\$\{CODEX_HOME:-\$HOME\/\.codex\}/,
+    'the copy must use the ${CODEX_HOME:-$HOME/.codex} default the installer honours')
+  // Pin the COMMANDS, not just the prose: a comment naming $CODEX_HOME left
+  // the actual mkdir/cp/chmod lines hardcoded to ~/.codex.
+  const commandLines = codex.split('\n').filter((l) => /^(mkdir|cp|chmod)\b/.test(l))
+  assert.ok(commandLines.length >= 3, commandLines)
+  for (const line of commandLines) {
+    assert.ok(line.includes('CODEX_HOME'),
+      `command ignores $CODEX_HOME: ${line}`)
+    assert.ok(!line.includes('~/.codex'),
+      `command hardcodes ~/.codex: ${line}`)
+  }
+})
+
+// #3819: the Cursor capture install. Cursor's MCP copy is a JSON file (so the
+// capture step lives in HARNESS_CAPTURE_INSTALL + HARNESS_STEPS.cursor), the
+// registration is HOME-scoped at `~/.cursor` (Cursor has no config-dir env
+// var), and the IDE-ONLY limitation is disclosed — Cursor's own docs say
+// cloud agents have no editor-lifetime session boundary, and the disclosure
+// must sit where the user chooses Cursor, not in a footnote.
+test('#3819: the Cursor capture install is home-scoped, flat, and discloses the IDE-only limit', () => {
+  const cursor = HARNESS_CAPTURE_INSTALL.cursor
+  assert.ok(cursor, 'HARNESS_CAPTURE_INSTALL.cursor present')
+  assert.match(cursor, /tortoise\/cursor-hooks\/session-end\.sh/,
+    'the capture step must name the declared seam artifact')
+  assert.match(cursor, /~\/\.cursor\/hooks\.json/,
+    'the copy must name ~/.cursor/hooks.json, the one path Cursor reads')
+  assert.doesNotMatch(cursor, /CURSOR_HOME:-/,
+    'Cursor has NO config-dir env var — do not teach a ${CURSOR_HOME:-…} default')
+  assert.match(cursor, /sessionEnd/, 'the copy must name the sessionEnd event')
+  // the flat entry shape is load-bearing — a nested matcher group invalidates
+  // Cursor's WHOLE hooks.json (its validator rejects a non-string command)
+  assert.match(cursor, /FLAT/,
+    'the copy must warn that the entry is flat (a nested entry disables all Cursor hooks)')
+  // Cursor's validator also requires a document `version`
+  assert.match(cursor, /version/,
+    'the copy must warn that hooks.json needs a numeric version')
+  // the IDE-only limitation is disclosed on the install surface
+  assert.match(cursor, /IDE-ONLY/)
+  assert.match(cursor, /[Cc]loud [Aa]gent/,
+    'the disclosure must name cloud agents explicitly')
+  assert.match(cursor, /no editor-lifetime session boundary/,
+    'the disclosure quotes the constraint that makes the gap real')
+})
+
+// #3713 P2-3 (review of #3721): Pi loads a top-level `tortoise-capture.ts` AND
+// a `tortoise-capture/index.ts` as TWO extensions (no basename dedupe), so a
+// pre-existing agent-infra `tortoise-capture/` double-POSTs every session_id
+// alongside the seam. The install step must disable the legacy entry, and it
+// must do so non-destructively. Structure-only: this pins the guard text, not
+// the shell's behaviour (the guard is a copy-paste snippet, not an executed
+// unit). Removing any leg REDs this test.
+test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double-register)', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  // the colliding legacy path is named...
+  assert.match(pi, /~\/\.pi\/agent\/extensions\/tortoise-capture\b/,
+    'the guard must name the legacy entry Pi loads as a second extension')
+  // ...a symlink (the usual agent-infra bootstrap shape) is unlinked...
+  assert.match(pi, /\[ -L ~\/\.pi\/agent\/extensions\/tortoise-capture \]/,
+    'the symlink leg must be guarded by -L (unlink the link, never the target)')
+  // ...and a real directory is renamed to a name the loader SKIPS (dotfile).
+  assert.match(pi, /\.tortoise-capture\.disabled/,
+    'a real directory must be renamed to a dot-prefixed name `collectAutoExtensionEntries` skips')
+  // non-negotiable: never recursively delete user files from the install snippet.
+  assert.doesNotMatch(pi, /rm\s+-/,
+    'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
 })

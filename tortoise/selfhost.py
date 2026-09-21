@@ -3,9 +3,9 @@
 Thin single-tenant FastAPI app: MCP Streamable HTTP at /mcp + /health.
 NO Supabase, NO hosted platform machinery (registry auth, tenant
 provisioning, dream queue). The self-host image ships this app — grep gate:
-no hosted_api / supabase / TeamResolutionMiddleware imports reachable from
+no hosted_api / supabase / OrgResolutionMiddleware imports reachable from
 this module (auth_mode is "static"|"none", so create_http_app never imports
-TeamResolutionMiddleware).
+OrgResolutionMiddleware).
 
 Environment:
   TORTOISE_DB_URI        durable FalkorDB (connection string) — recommended
@@ -46,8 +46,16 @@ ALLOWED_ORIGINS = os.environ.get(
 TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 
 # #2988: wall bound for /health/ready's probe. A black-holed DB must be
-# REPORTED (503) rather than waited out — it is a safety net, not the mechanism
-# (see the ordering invariant on hosted_api._READY_PROBE_TIMEOUT_S).
+# REPORTED (503) rather than waited out — it is a safety net, not the mechanism.
+# NOTE this path does NOT share the hosted layered-timeout ALIGNMENT: the probe
+# below is ``asyncio.wait_for(to_thread(lambda: ..._get_proj()), 6.0)``, which
+# wraps a probe with NO inner bound of its own, and ``to_thread`` runs on the
+# SHARED default executor, whose thread is NON-daemon and is JOINED at loop
+# shutdown — so a DB call that outlives 6.0s leaves a worker that keeps blocking
+# process exit (a hang class the hosted HealthProbe path avoids with its own
+# daemon worker). ``hosted_api._READY_PROBE_TIMEOUT_S`` was superseded by the
+# hosted ``_READY_PROBE`` / ``CONTROL_PLANE_HARD_TIMEOUT`` bounds; this constant
+# is the self-host path's own independent backstop.
 _READY_PROBE_TIMEOUT_S = 6.0
 
 
@@ -148,56 +156,6 @@ app.add_middleware(
     limit_get=True,
     paths_prefix=("/v1",),
 )
-
-
-# ── #1987 Task 9: path-scoped /v1/ask exception handlers on selfhost.app ──
-# Mirrors the hosted mechanism (P1-3/P1-6): capture the STARLETTE-keyed
-# default handlers BEFORE the overrides; /v1/ask gets the canonical
-# {"error": …} body (401 STATUS-derived — ``_require_key``'s detail is
-# non-canonical; 400/502/504 detail-keyed when canonical); every other path
-# keeps FastAPI's default {"detail": …} via the captured default (awaited —
-# the default handler is a coroutine; never re-raised; ``exc.headers``
-# preserved). Registered on the APP (``fastapi.APIRouter`` has no
-# exception_handler — P1-6). The 8 existing selfhost error bodies are
-# untouched by construction (path-scoped).
-import starlette.exceptions as _starlette_exceptions  # noqa: E402
-from fastapi.exceptions import RequestValidationError as _RequestValidationError  # noqa: E402
-
-_selfhost_default_http_exc = app.exception_handlers[
-    _starlette_exceptions.HTTPException]
-_selfhost_default_validation = app.exception_handlers.get(
-    _RequestValidationError)
-
-
-@app.exception_handler(_starlette_exceptions.HTTPException)
-async def _selfhost_ask_http_handler(request, exc):
-    from tortoise.schemas import (  # noqa: I001
-        ASK_ERROR_CODES, CODE_UNAUTHORIZED,
-    )
-    if request.url.path == "/v1/ask":
-        status = exc.status_code
-        detail = exc.detail
-        if status == 401:
-            return JSONResponse({"error": {"code": CODE_UNAUTHORIZED}},
-                                status_code=401, headers=exc.headers)
-        if (status in (400, 502, 504)
-                and isinstance(detail, str) and detail in ASK_ERROR_CODES):
-            return JSONResponse({"error": {"code": detail}},
-                                status_code=status, headers=exc.headers)
-    return await _selfhost_default_http_exc(request, exc)
-
-
-@app.exception_handler(_RequestValidationError)
-async def _selfhost_ask_validation_handler(request, exc):
-    """Malformed JSON on /v1/ask → 400 ``invalid_question`` (parity with
-    hosted, P1-3); other paths keep FastAPI's default 422."""
-    from tortoise.schemas import CODE_INVALID_QUESTION
-    if request.url.path == "/v1/ask":
-        return JSONResponse({"error": {"code": CODE_INVALID_QUESTION}},
-                            status_code=400)
-    if _selfhost_default_validation is not None:
-        return await _selfhost_default_validation(request, exc)
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 

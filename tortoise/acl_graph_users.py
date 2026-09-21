@@ -2,12 +2,12 @@
 
 The empirical recipe (falkordb 4.20.4, 2026-09-01) implemented exactly:
 
-    ACL SETUSER tenant_<gid> on ><pw> ~team_{tid}_{gid} \\
+    ACL SETUSER tenant_<gid> on ><pw> ~org_{tid}_{gid} \\
         +GRAPH.QUERY +GRAPH.RO_QUERY +PING
 
 - ONE user per graph (username `tenant_<gid>` — gid is unique so usernames
   are unique). The key pattern is the graph's exact namespace
-  (`team_{tid}_{gid}`, the shape registry ``_graph_create`` and supabase
+  (`org_{tid}_{gid}`, the shape registry ``_graph_create`` and supabase
   ``_provision_graph`` both derive) — NOT the research doc's ``~tenant_a``
   shorthand (that matched repro graphs literally named tenant_a).
 - NEVER ``+@all`` / GRAPH.LIST / KEYS / SCAN / CONFIG / DEBUG / UDF / AUTH;
@@ -66,15 +66,15 @@ def _username_for(graph_id: str) -> str:
     return f"tenant_{graph_id}"
 
 
-def _graph_namespace(team_id: str, graph_id: str) -> str:
+def _graph_namespace(org_id: str, graph_id: str) -> str:
     """The FalkorDB graph name the ACL pattern must match — the exact
     namespace both control-plane modes derive (registry _graph_create +
-    supabase _provision_graph): team_{team_id}_{graph_id}."""
-    if not re.fullmatch(r"[0-9A-Za-z_-]+", team_id):
+    supabase _provision_graph): org_{org_id}_{graph_id}."""
+    if not re.fullmatch(r"[0-9A-Za-z_-]+", org_id):
         raise AclLayerError(
             f"refusing to build an ACL pattern from unsafe team id "
-            f"{team_id!r} — ids must be [0-9A-Za-z_-].")
-    return f"team_{team_id}_{graph_id}"
+            f"{org_id!r} — ids must be [0-9A-Za-z_-].")
+    return f"org_{org_id}_{graph_id}"
 
 
 def _admin_client():
@@ -214,7 +214,7 @@ def _ensure_default_user_secured(client) -> None:
             "first.")
 
 
-def _registry_store_credential(team_id: str, graph_id: str,
+def _registry_store_credential(org_id: str, graph_id: str,
                                username: str, password: str) -> None:
     """Persist {username, password} on the registry Graph node (D4). The key
     itself never carries the FalkorDB password — the app resolves it
@@ -229,9 +229,9 @@ def _registry_store_credential(team_id: str, graph_id: str,
         from tortoise.hosted_api import _make_sdk
         sdk = _make_sdk(namespace="registry")
         sdk._get_registry().query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) "
             "SET g.acl_user=$u, g.acl_pass=$p",
-            params={"gid": graph_id, "tid": team_id, "u": username,
+            params={"gid": graph_id, "tid": org_id, "u": username,
                     "p": password},
         )
     except Exception as e:
@@ -240,7 +240,7 @@ def _registry_store_credential(team_id: str, graph_id: str,
             "degrades — C5 reads absence fail-closed): %s", graph_id, e)
 
 
-def _stored_acl_password(team_id: str, graph_id: str) -> str | None:
+def _stored_acl_password(org_id: str, graph_id: str) -> str | None:
     """Reuse a previously stored password when the user already exists —
     an idempotent re-run must not invalidate a stored credential (crash
     between SETUSER and store)."""
@@ -251,8 +251,8 @@ def _stored_acl_password(team_id: str, graph_id: str) -> str | None:
         from tortoise.hosted_api import _make_sdk
         sdk = _make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.acl_pass",
-            params={"gid": graph_id, "tid": team_id},
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.acl_pass",
+            params={"gid": graph_id, "tid": org_id},
         ).result_set
         return rows[0][0] if rows and rows[0][0] else None
     except Exception:
@@ -268,7 +268,7 @@ def _user_exists_on(client, username: str) -> bool:
         return False
 
 
-def create_acl_user(graph_id: str, team_id: str) -> dict | None:
+def create_acl_user(graph_id: str, org_id: str) -> dict | None:
     """Create/upsert the per-graph ACL user (hardened recipe, D1).
 
     Returns {username, password, graph} on success. None when the ACL layer
@@ -296,7 +296,7 @@ def create_acl_user(graph_id: str, team_id: str) -> dict | None:
         return None
     _ensure_default_user_secured(client)
     username = _username_for(graph_id)
-    graph_name = _graph_namespace(team_id, graph_id)
+    graph_name = _graph_namespace(org_id, graph_id)
     from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
         if _user_exists_on(client, username):
@@ -313,11 +313,11 @@ def create_acl_user(graph_id: str, team_id: str) -> dict | None:
     # Registry (selfhost) mode: reuse the stored password when present (the
     # full-reset upsert keeps ONE live secret either way — no exists-read
     # TOCTOU, no append churn).
-    stored = _stored_acl_password(team_id, graph_id)
+    stored = _stored_acl_password(org_id, graph_id)
     password = stored if stored is not None else os.urandom(24).hex()
     if not _setuser(client, username, graph_name, password):
         return None  # layer down mid-op — fail-soft
-    _registry_store_credential(team_id, graph_id, username, password)
+    _registry_store_credential(org_id, graph_id, username, password)
     _acl_save(client)
     return {"username": username, "password": password, "graph": graph_name}
 
@@ -394,7 +394,7 @@ def acl_user_exists(graph_id: str) -> bool:
     return cfg is not None
 
 
-def credential_for_graph(team_id: str, graph_id: str) -> dict | None:
+def credential_for_graph(org_id: str, graph_id: str) -> dict | None:
     """C5 seam — the app-layer resolution reads {username, password, graph}
     server-side from the registry node (the per-graph key never carries the
     FalkorDB password). Returns None when unprovisioned/storage-absent
@@ -406,13 +406,13 @@ def credential_for_graph(team_id: str, graph_id: str) -> dict | None:
         from tortoise.hosted_api import _make_sdk
         sdk = _make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) "
             "RETURN g.acl_user, g.acl_pass",
-            params={"gid": graph_id, "tid": team_id},
+            params={"gid": graph_id, "tid": org_id},
         ).result_set
         if not rows or not rows[0][0]:
             return None
         return {"username": rows[0][0], "password": rows[0][1],
-                "graph": _graph_namespace(team_id, graph_id)}
+                "graph": _graph_namespace(org_id, graph_id)}
     except Exception:
         return None

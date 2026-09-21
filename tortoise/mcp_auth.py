@@ -4,13 +4,13 @@ Serves as the auth/rate-limit boundary for the MCP Streamable HTTP endpoint
 mounted at /mcp on the hosted FastAPI app. Imports ONLY tortoise.sdk +
 starlette — mcp_server imports from here (one-directional; no circular import).
 
-Design: per-request team-scoped SDK via ContextVar. TeamResolutionMiddleware
+Design: per-request org-scoped SDK via ContextVar. OrgResolutionMiddleware
 validates the Bearer tt_/tk_ token (API_KEY_PREFIXES) against the control
 plane — Supabase
 (lookup_hash, #767 plan Task 3) when SUPABASE_URL + service key are set,
 otherwise the FalkorDB registry (apikey_verify) — and sets
-_current_team_id / _transport_mode. Tools resolve the request-scoped SDK via
-_get_team_sdk(). Fail-closed: if _transport_mode is None (unset/misconfigured),
+_current_org_id / _transport_mode. Tools resolve the request-scoped SDK via
+_get_org_sdk(). Fail-closed: if _transport_mode is None (unset/misconfigured),
 _safe() rejects ALL operations — it never depends on is_dev_mode(), which
 returns True in hosted production (TORTOISE_API_KEY unset).
 """
@@ -33,18 +33,18 @@ from starlette.responses import JSONResponse
 from tortoise.sdk import TortoiseSDK
 
 # ── ContextVars ─────────────────────────────────────────────────────────────
-# Reserved placeholder team id for selfhost transports (auth_mode "static"/"none",
+# Reserved placeholder org id for selfhost transports (auth_mode "static"/"none",
 # #338): no tenant resolution happens, and the graph namespace is isolated under
-# team_selfhost. Quota is N/A for this placeholder — selfhost has no billing.
-SELFHOST_TEAM_ID = "selfhost"
-_current_team_id: ContextVar[str | None] = ContextVar("_current_team_id", default=None)
-# #329: resolved team quota limits (from the registry Team node), cached 60s
+# org_selfhost. Quota is N/A for this placeholder — selfhost has no billing.
+SELFHOST_ORG_ID = "selfhost"
+_current_org_id: ContextVar[str | None] = ContextVar("_current_org_id", default=None)
+# #329: resolved org quota limits (from the registry Org node), cached 60s
 # with the auth cache so MCP write tools enforce the SAME limits REST sees.
-_current_team_limits: ContextVar[dict | None] = ContextVar("_current_team_limits", default=None)
-# C5 #2114 (D-C5-4): graph scope rides the ContextVars — the resolved team's
+_current_org_limits: ContextVar[dict | None] = ContextVar("_current_org_limits", default=None)
+# C5 #2114 (D-C5-4): graph scope rides the ContextVars — the resolved org's
 # C1 tenancy fields (graph_id / FULL graph namespace / flat scopes /
-# legacy_full_access), set by TeamResolutionMiddleware at resolution time so
-# _get_team_sdk() + the tool-call scope gate see the SAME scope REST sees.
+# legacy_full_access), set by OrgResolutionMiddleware at resolution time so
+# _get_org_sdk() + the tool-call scope gate see the SAME scope REST sees.
 _current_graph_id: ContextVar[str | None] = ContextVar("_current_graph_id", default=None)
 _current_graph_namespace: ContextVar[str | None] = ContextVar(
     "_current_graph_namespace", default=None)
@@ -73,28 +73,28 @@ def _get_base_sdk() -> TortoiseSDK:
     return _ms._get_sdk()
 
 
-# ── Team-scoped SDK (D2) ────────────────────────────────────────────────────
-def _get_team_sdk() -> TortoiseSDK:
-    """Request-scoped SDK: team namespace in HTTP mode, base SDK in stdio.
+# ── Org-scoped SDK (D2) ────────────────────────────────────────────────────
+def _get_org_sdk() -> TortoiseSDK:
+    """Request-scoped SDK: org namespace in HTTP mode, base SDK in stdio.
 
     C5 #2114 (D-C5-4): a graph-bound key (graph_id + namespace ContextVars
     set at resolution) opens ITS OWN graph via the SDK graph-name seam
     (TortoiseSDK(graph_name=ns) — the namespace derivation would prepend
-    team_). The middleware resolution already proved key→graph ownership
+    org_). The middleware resolution already proved key→graph ownership
     (the same trusted resolver REST uses: graph_id/scopes only resolve from
     the owned Graph node / graphs row) and graph-delete revokes the graph's
     keys (C3) — a deleted graph's key fails resolution (401), so no
     per-call re-probe (REST's _data_sdk probe is defense-in-depth for the
     resolve→open window; MCP's resolve→open window is the same request).
-    Team-wide keys / OAuth / selfhost → the default graph (unchanged)."""
-    team_id = _current_team_id.get()
-    if team_id is None:
+    Org-wide keys / OAuth / selfhost → the default graph (unchanged)."""
+    org_id = _current_org_id.get()
+    if org_id is None:
         return _get_base_sdk()
     gid = _current_graph_id.get()
     ns = _current_graph_namespace.get()
     if gid and ns:
         return TortoiseSDK(graph_name=ns)
-    return TortoiseSDK(namespace=team_id)
+    return TortoiseSDK(namespace=org_id)
 
 
 # ── HTTP tool allow-list (derived from registry; #454) ────────────────
@@ -109,8 +109,35 @@ ERR_UNAUTHORIZED = -32001
 ERR_RATE_LIMIT = -32002
 ERR_EXCLUDED = -32004
 ERR_REGISTRY = -32005
-# #308 (R5): suspended team — mirrors REST 403 SUSPENDED (appeal link in data)
+# #308 (R5): suspended org — mirrors REST 403 SUSPENDED (appeal link in data)
 ERR_SUSPENDED = -32006
+
+
+# ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────
+# An org-resolution outage (control plane or registry unreachable) is a
+# RETRYABLE dependency condition, not a hard outage. Before this the 503
+# carried no ``Retry-After``, so an MCP client connecting at startup had no
+# instruction to back off — and the reported symptom is exactly that: Pi's
+# ``mcp-client`` connects eagerly with a 15s connect budget and NO retry, so a
+# single 503 during the startup connect silently costs the whole session its
+# Tortoise tools (#3144). The header (integer seconds, RFC 7231 §7.1.3) is what
+# turns an unrecoverable-looking failure into an actionable one.
+#
+# Env-overridable and clamped to a sane range: an operator may tune the
+# advertised back-off, but a misconfigured value can never advertise 0 seconds
+# (a busy-retry that hammers a down dependency) or an absurd window.
+#
+# Read at CALL time, not frozen in a module constant: ``mcp_server`` imports
+# this module BEFORE its ``_load_dotenv()`` runs, so an import-time read would
+# silently ignore a value set in ``.env`` (the #880 freeze class — the sibling
+# health-probe knobs are call-time reads for exactly this reason).
+def _resolve_auth_retry_after_s() -> int:
+    """Seconds advertised in ``Retry-After`` on the auth-plane 503 (clamped)."""
+    try:
+        v = int(os.environ.get("TORTOISE_MCP_AUTH_RETRY_AFTER", "5"))
+    except (TypeError, ValueError):
+        return 5
+    return max(1, min(v, 3600))
 
 
 def _jsonrpc_error(code: int, message: str, data: dict | None = None,
@@ -235,8 +262,8 @@ def _unauthorized_challenge(request: Request,
     return {"WWW-Authenticate": f'Bearer resource_metadata="{url}"'}
 
 
-class TeamResolutionMiddleware(BaseHTTPMiddleware):
-    """Bearer token → team_id ContextVar. 401 pre-tool-leak (D3, D17).
+class OrgResolutionMiddleware(BaseHTTPMiddleware):
+    """Bearer token → org_id ContextVar. 401 pre-tool-leak (D3, D17).
 
     Accepts THREE credential families (#524, C2 #2111 — additive, never
     breaking):
@@ -245,8 +272,8 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         Supabase-backed
         (#767): resolves via tortoise.supabase_control.resolve_api_key
         (lookup_hash exact-match; api_keys.revoked_at authoritative;
-        tier/quota from teams) — the SAME shared function REST
-        get_current_team uses. Registry apikey_verify (O(keys) salted-hash
+        tier/quota from orgs) — the SAME shared function REST
+        get_current_org uses. Registry apikey_verify (O(keys) salted-hash
         scan) stays for selfhost.
       * ``oat_<token>`` — OAuth 2.1 access tokens (hosted-only, D3):
         introspected via tortoise.oauth.resolve_oauth_access_token (D6 —
@@ -266,7 +293,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         # a header that 404s.
         self._emit_challenge = emit_challenge
         self._init_lock = asyncio.Lock()
-        self._cache: OrderedDict[str, tuple[float, dict, dict]] = OrderedDict()  # (ts, team, limits)
+        self._cache: OrderedDict[str, tuple[float, dict, dict]] = OrderedDict()  # (ts, org, limits)
         self._max_cache = max_cache
 
     async def _get_registry_sdk(self) -> TortoiseSDK:
@@ -321,10 +348,10 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         cached = self._cache.get(token)
         if cached and now - cached[0] < 60:
             # #308 (delta 14): a suspension signal forces a FRESH resolution —
-            # a cached entry can never serve a suspended team. The set is a
+            # a cached entry can never serve a suspended org. The set is a
             # cache-invalidation signal only; durable suspended_at decides.
             from tortoise.abuse import is_suspended_signal
-            if is_suspended_signal(cached[1].get("team_id") or ""):
+            if is_suspended_signal(cached[1].get("org_id") or ""):
                 cached = None
             # C2 (#2111) defense-in-depth: a deleg=0 minted key must never
             # ride a warm cache entry. Fresh resolution gates BEFORE the
@@ -336,13 +363,13 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 self._cache.pop(token, None)
                 cached = None
         if cached and now - cached[0] < 60:
-            team, limits = cached[1], cached[2]
+            org, limits = cached[1], cached[2]
             self._cache.move_to_end(token)  # true LRU
         else:
             try:
                 # #767 (plan Task 3): Supabase-backed resolution (lookup_hash)
                 # when the control plane is Supabase-backed — the SAME shared
-                # function REST get_current_team uses (single source of truth,
+                # function REST get_current_org uses (single source of truth,
                 # REST + MCP cannot drift). Registry apikey_verify stays for
                 # selfhost. #524: OAuth access tokens (oat_) introspect via
                 # tortoise.oauth — hosted-only (registry mode has no OAuth
@@ -353,24 +380,29 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 if is_supabase_enabled():
                     if is_oauth:
                         from tortoise.oauth import resolve_oauth_access_token
-                        team = resolve_oauth_access_token(
+                        org = resolve_oauth_access_token(
                             get_control_plane(), token)
                     else:
-                        team = resolve_api_key(get_control_plane(), token)
+                        org = resolve_api_key(get_control_plane(), token)
                 else:
                     if is_oauth:
-                        team = None
+                        org = None
                     else:
                         sdk = await self._get_registry_sdk()
-                        team = sdk.apikey_verify(token)
+                        org = sdk.apikey_verify(token)
             except Exception:
-                # Registry down → 503, never 500/stack-trace
+                # Registry/control plane down → 503, never 500/stack-trace.
+                # The 503 carries ``Retry-After`` (#3144/#3812): an auth-plane
+                # outage is retryable, and an MCP client that cannot read a
+                # back-off treats it as a hard outage and gives up on the
+                # startup connect.
                 return _jsonrpc_error(
                     ERR_REGISTRY,
                     "Authentication temporarily unavailable. Try again shortly.",
                     status=503,
+                    headers={"Retry-After": str(_resolve_auth_retry_after_s())},
                 )
-            if team is None:
+            if org is None:
                 return _jsonrpc_error(
                     ERR_UNAUTHORIZED,
                     "Unauthorized: invalid API key. "
@@ -381,7 +413,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             # C2 (#2111) → C5 (#2114) one-level-deep guard (code-review P1,
             # #2b): a MINTED (deleg=0) key drives MCP tools ONLY when it
             # carries a data scope (graphs:read/write) — C5 routes it to its
-            # OWN graph (_get_team_sdk) and the tool-call scope gate enforces
+            # OWN graph (_get_org_sdk) and the tool-call scope gate enforces
             # read/write. A deleg=0 key WITHOUT a data scope stays rejected
             # (a keys:manage/team:manage-only child has no graph data to
             # exercise; escalation scopes never land on children). Pre-C5
@@ -389,9 +421,9 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             # (Supabase) and apikey_verify (registry, extended in C2) both
             # carry delegation_depth + scopes. tk_ keys minted with deleg=NULL
             # (an owner-minted scoped key — C3 surface) pass regardless.
-            if not is_oauth and team.get("delegation_depth") == 0 and not (
+            if not is_oauth and org.get("delegation_depth") == 0 and not (
                     {"graphs:read", "graphs:write"}
-                    & set(team.get("scopes") or [])):
+                    & set(org.get("scopes") or [])):
                 # jsonrpc -32001 (ERR_UNAUTHORIZED) with HTTP 403 — mirrors
                 # the ERR_SUSPENDED precedent (403 status + data payload
                 # carrying a machine-readable code): MCP clients switching
@@ -412,7 +444,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             # failure is swallowed. OAuth tokens have no api_keys row
             # (key_id None) → no write.
             try:
-                _key_id = team.get("key_id")
+                _key_id = org.get("key_id")
                 if _key_id:
                     from datetime import UTC, datetime
                     if is_supabase_enabled():
@@ -432,18 +464,18 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             # #308 (R5): durable suspension check — the sole rejection
             # authority. Pop the LRU entry so a re-resolution is required
             # after un-suspension; clear the signal when the fresh
-            # resolution says the team is NOT suspended (AC8 self-heal).
+            # resolution says the org is NOT suspended (AC8 self-heal).
             from tortoise.abuse import (appeal_url, clear_suspended,  # noqa: I001
                                         is_suspended_signal, suspended_message)
-            suspended_at = team.get("suspended_at")
+            suspended_at = org.get("suspended_at")
             if suspended_at is None and not is_supabase_enabled():
                 # Registry mode: apikey_verify returns no suspension state —
-                # read the durable Team prop the abuse store writes (delta 4).
+                # read the durable Org prop the abuse store writes (delta 4).
                 try:
                     sdk = await self._get_registry_sdk()
                     rows = sdk._get_registry().query(
                         "MATCH (t:Team {id: $id}) RETURN t.suspended_at",
-                        params={"id": team.get("team_id")},
+                        params={"id": org.get("org_id")},
                     ).result_set
                     suspended_at = rows[0][0] if rows else None
                 except Exception:
@@ -455,56 +487,61 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     {"code": "SUSPENDED", "appeal_url": appeal_url()},
                     status=403,
                 )
-            if is_suspended_signal(team.get("team_id") or ""):
-                clear_suspended(team.get("team_id") or "")
+            if is_suspended_signal(org.get("org_id") or ""):
+                clear_suspended(org.get("org_id") or "")
             if is_supabase_enabled():
                 # The Supabase resolution already carries tier/quota from the
-                # teams row (one round-trip) — use it directly as the limits
+                # orgs row (one round-trip) — use it directly as the limits
                 # dict so REST and MCP enforce identical limits (#329).
-                limits = team
+                limits = org
             else:
-                # #329: resolve quota limits (registry Team node) — fail-closed
-                # enforcement still applies with defaults if resolution fails.
-                from tortoise.quota import resolve_team_limits
+                # #329: resolve quota limits (registry Org node). A resolution
+                # FAILURE leaves a keyless {"org_id": ...} — fail-closed, not
+                # "defaults": `enforce_org_limit` raises QuotaCheckError on a
+                # MISSING limit key for every resource (#310 GAP-B, #4010), so
+                # a degraded resolution refuses writes rather than granting
+                # them. (The old comment claimed "defaults" applied; there are
+                # none, and sessions' 1000 fallback was deleted in #4010.)
+                from tortoise.quota import resolve_org_limits
                 try:
-                    limits = resolve_team_limits(team["team_id"])
+                    limits = resolve_org_limits(org["org_id"])
                 except Exception:
-                    limits = {"team_id": team["team_id"]}
+                    limits = {"org_id": org["org_id"]}
             # #2600 (#2664, review #8): alias actor_user_id before caching
             # so the cache always holds an already-aliased dict — never
             # mutates a cached object on a warm hit.
             from tortoise.sdk import _alias_actor_user_id
-            _alias_actor_user_id(team)
+            _alias_actor_user_id(org)
             if len(self._cache) >= self._max_cache:
                 self._cache.popitem(last=False)  # evict LRU
-            self._cache[token] = (now, team, limits)
-        _current_team_id.set(team["team_id"])
-        _current_team_limits.set(limits)
-        # #2600: canonical actor_user_id ContextVar — the team dict is
+            self._cache[token] = (now, org, limits)
+        _current_org_id.set(org["org_id"])
+        _current_org_limits.set(limits)
+        # #2600: canonical actor_user_id ContextVar — the org dict is
         # already aliased before it was cached (cache-miss) or is carrying
         # actor_user_id from the cached entry (cache-hit); this line reads
         # whichever is present (None → unattributed).
         from tortoise.sdk import _current_actor_user_id
-        _current_actor_user_id.set(team.get("actor_user_id"))
+        _current_actor_user_id.set(org.get("actor_user_id"))
         # C5 #2114 (D-C5-4): graph scope rides the resolution — the SAME C1
-        # tenancy fields REST get_current_team carries. Session/legacy/OAuth
-        # resolutions (no graph_id) leave the defaults → team-wide SDK.
-        _current_graph_id.set(team.get("graph_id"))
-        _current_graph_namespace.set(team.get("graph_namespace"))
-        _current_scopes.set(team.get("scopes"))
-        _current_legacy_full_access.set(team.get("legacy_full_access"))
+        # tenancy fields REST get_current_org carries. Session/legacy/OAuth
+        # resolutions (no graph_id) leave the defaults → org-wide SDK.
+        _current_graph_id.set(org.get("graph_id"))
+        _current_graph_namespace.set(org.get("graph_namespace"))
+        _current_scopes.set(org.get("scopes"))
+        _current_legacy_full_access.set(org.get("legacy_full_access"))
         _transport_mode.set("http")
         # #308 (R4, delta 10): geo check on EVERY post-auth request —
         # cache-hit and cache-miss alike, so an IP-rotation burst cannot ride
         # the 60s LRU past detection. Best-effort; in-process seen-cache makes
-        # the hot path allocation-free (durable lookup once/team/24h).
+        # the hot path allocation-free (durable lookup once/org/24h).
         try:
             from tortoise import abuse as _abuse
             if not _abuse.abuse_disabled():
                 country = _abuse.resolve_country(request.headers)
-                if country and team.get("team_id"):
+                if country and org.get("org_id"):
                     await asyncio.to_thread(
-                        _abuse.check_new_country, team["team_id"], country,
+                        _abuse.check_new_country, org["org_id"], country,
                         _abuse.get_engine().store)
         except Exception:
             pass  # best-effort — geo telemetry never breaks the request
@@ -517,25 +554,25 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
 class TransportModeMiddleware(BaseHTTPMiddleware):
     """Self-host transport init (auth_mode="static" | "none", #338).
 
-    TeamResolutionMiddleware sets these ContextVars for tenant mode; selfhost
+    OrgResolutionMiddleware sets these ContextVars for tenant mode; selfhost
     modes have no tenant resolution, so this middleware initializes them:
     _transport_mode="http" (passes _safe()'s fail-closed gate — auth was
     enforced at transport: static key check or localhost-bound none mode) and
-    _current_team_id="selfhost" (isolated team_selfhost graph namespace).
+    _current_org_id="selfhost" (isolated org_selfhost graph namespace).
 
     #1987 Task 8 (P1-2/P1-4): ALSO sets the ``_selfhost_transport`` ContextVar
     (tortoise/transport.py) — the transport-keyed metering/budget exemption
     channel. The selfhost HTTP MCP transport is the ONLY selfhost path whose
-    team_id is truthy ("selfhost"), so it is the only one that NEEDS the
+    org_id is truthy ("selfhost"), so it is the only one that NEEDS the
     flag: ``record_ask_usage`` and the ask budget helper no-op on it alongside
-    ``not team_id`` (stdio team_id=None needs no flag), closing the
+    ``not org_id`` (stdio org_id=None needs no flag), closing the
     phantom-record hole — the value "selfhost" is NEVER the exemption key (a
-    hosted team with the raw id "selfhost" is legal and must record usage).
+    hosted org with the raw id "selfhost" is legal and must record usage).
     """
 
     async def dispatch(self, request: Request, call_next):
         _transport_mode.set("http")
-        _current_team_id.set(SELFHOST_TEAM_ID)
+        _current_org_id.set(SELFHOST_ORG_ID)
         # C5: selfhost/static transports have no graph scope — clear any
         # prior tenant request's ContextVars (ContextVar defaults are
         # per-request here, but an explicit reset is cheap + future-proof).
@@ -587,7 +624,7 @@ class StaticKeyMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         # GET metadata route + DELETE (stateless no-op) skip auth, matching
-        # TeamResolutionMiddleware behavior.
+        # OrgResolutionMiddleware behavior.
         if request.method != "POST":
             return await call_next(request)
         if self._api_key is None:

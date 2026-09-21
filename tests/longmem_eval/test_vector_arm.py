@@ -58,7 +58,14 @@ from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).parent.parent / "fixtures" / "longmemeval_mini.json"
 
-_FAKE_DIM = 32
+_FAKE_DIM = 32  # token-hash bucket count — the vectors' only information
+# #4280: the STORED width must be the store's index width. A narrower vector is
+# refused by an indexed store (`create_point` → `encode_for_store` → the store's
+# `required_embedding_dim`), so this buckets into ``_FAKE_DIM`` and then
+# ZERO-PADS to :data:`EMBEDDING_DIM`. Padding adds only exact 0.0 terms, so
+# every cosine — and therefore every hand-computed rank/threshold in this
+# module — is unchanged, while the vector is storable on BOTH lanes (embedded
+# and a `TORTOISE_DB_URI` server, which has the 384-dim Point HNSW index).
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -75,7 +82,7 @@ def _fake_vec(text: str) -> list[float]:
     dims: dict[str, float] = {}
     for tok in _TOKEN_RE.findall((text or "").lower()):
         dims[tok] = dims.get(tok, 0.0) + 1.0
-    vec = [0.0] * _FAKE_DIM
+    vec = [0.0] * emb.EMBEDDING_DIM
     for tok, c in dims.items():
         vec[zlib.crc32(tok.encode("utf-8")) % _FAKE_DIM] += c
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
@@ -496,6 +503,31 @@ def test_encode_cache_intercepts_ingest_and_reuses(tmp_path, monkeypatch):
             assert calls["n"] == 0  # every text served from the disk cache
         finally:
             sdk.close()
+
+
+def test_encode_cache_intercepts_the_batched_embedder(tmp_path, monkeypatch):
+    """#4194: the cache wraps the BATCHED form too.
+
+    ``compute_embedding`` now delegates to ``compute_embeddings``, and the
+    capture turn write calls the batched form directly. Wrapping only the
+    single form would silently let that write path bypass the cache.
+    """
+    calls = {"n": 0}
+
+    def _counting_batch(texts, max_tokens=512):
+        calls["n"] += 1
+        return [_fake_vec(t) for t in texts]
+
+    monkeypatch.setattr(emb, "compute_embeddings", _counting_batch)
+    cache = encode_cache.EncodeCache(tmp_path / "c.json", model_id="m")
+    with cache.active():
+        assert emb.compute_embeddings(["a", "b"]) == [
+            _fake_vec("a"), _fake_vec("b")]
+        assert calls["n"] == 1  # ONE batched encode for both misses
+        assert emb.compute_embeddings(["a", "b"]) == [
+            _fake_vec("a"), _fake_vec("b")]
+        assert calls["n"] == 1  # second call served from the cache
+    assert emb.compute_embeddings is _counting_batch  # restored
 
 
 def test_encode_query_routes_through_active_cache(tmp_path):

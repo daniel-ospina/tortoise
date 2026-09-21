@@ -90,27 +90,27 @@ test('buildDocsJobBody: omit-empty; org preserved', () => {
 })
 
 // ── gating predicates (#1893, scope-verify P1/P2): the one-shot hydration
-// and persist gating decisions are PURE and node-tested — the null-teamId
+// and persist gating decisions are PURE and node-tested — the null-orgId
 // dead-path, the repos-fetch-failure prune hazard, and the persist gate.
 
 test('shouldHydrate: false before repos load or onboarding resolves', () => {
-  assert.equal(shouldHydrate({ reposLoaded: false, onboarding: null, reposLoadFailed: false, currentTeamId: 't1', hydratedTeamId: null }), false)
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: null, reposLoadFailed: false, currentTeamId: 't1', hydratedTeamId: null }), false)
+  assert.equal(shouldHydrate({ reposLoaded: false, onboarding: null, reposLoadFailed: false, currentOrgId: 't1', hydratedOrgId: null }), false)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: null, reposLoadFailed: false, currentOrgId: 't1', hydratedOrgId: null }), false)
 })
 
 test('shouldHydrate: false while repos fetch failed (never prune on a failed fetch)', () => {
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: true, currentTeamId: 't1', hydratedTeamId: null }), false)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: true, currentOrgId: 't1', hydratedOrgId: null }), false)
 })
 
-test('shouldHydrate: false until the team resolves (no null-teamId dead-path)', () => {
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentTeamId: null, hydratedTeamId: null }), false)
+test('shouldHydrate: false until the team resolves (no null-orgId dead-path)', () => {
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentOrgId: null, hydratedOrgId: null }), false)
 })
 
 test('shouldHydrate: true exactly once per team; false once hydrated', () => {
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentTeamId: 't1', hydratedTeamId: null }), true)
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentTeamId: 't1', hydratedTeamId: 't1' }), false)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentOrgId: 't1', hydratedOrgId: null }), true)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentOrgId: 't1', hydratedOrgId: 't1' }), false)
   // a team switch re-hydrates (new team id)
-  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentTeamId: 't2', hydratedTeamId: 't1' }), true)
+  assert.equal(shouldHydrate({ reposLoaded: true, onboarding: {}, reposLoadFailed: false, currentOrgId: 't2', hydratedOrgId: 't1' }), true)
 })
 
 test('shouldPersist: gated on hydration having completed', () => {

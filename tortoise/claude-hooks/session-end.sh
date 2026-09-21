@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
+# tortoise-hook-version: 3
 # Tortoise session capture for Claude Code — SessionEnd hook (#564).
+#
+# The `tortoise-hook-version` marker above is the install-contract generation
+# for this hook (see tortoise/hook_install.py). Bump it on ANY behavioural
+# edit — `tortoise hooks status` and `tortoise doctor` read it to tell an
+# already-installed copy it is stale.
 #
 # Fires when a Claude Code session ends: converts the session transcript
 # (Claude Code's .jsonl) into Tortoise's text-turn format (User:/Assistant:)
@@ -13,8 +19,11 @@
 #   cp tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
 #   chmod +x .claude/hooks/session-end.sh
 #   # then add to .claude/settings.json:
+#   # #3754: the explicit timeout is load-bearing — Claude Code cancels SessionEnd
+#   # at its 1.5s default; the budget rises to the highest per-hook timeout (60 is
+#   # the documented ceiling). This hook measured 9.26s on a real hosted run.
 #   #   { "hooks": { "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command",
-#   #       "command": ".claude/hooks/session-end.sh" }] }] } }
+#   #       "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }
 #
 # Requires TORTOISE_API_KEY + TORTOISE_API_URL (hosted) or a local `tortoise`
 # install with hosted capture configured. For a LOCAL-only graph, replace the
@@ -105,7 +114,6 @@ if [ -z "$TORTOISE_BIN" ]; then
   # AND the legacy sweep's embedding behavior (--metadata). The corpus dir is
   # passed POSITIONALLY, resolved via session_corpus_dir() (honors
   # TORTOISE_SESSION_CORPUS else ~/.tortoise/docs/conversations).
-  # tortoise-hook-version: 2
   SWEEP_CORPUS="$("$PYTHON_BIN" -c "
 import sys, os
 sys.path.insert(0, '$TORTOISE_MODULE')
@@ -147,7 +155,6 @@ else
 from tortoise.session_indexer import session_corpus_dir
 print(session_corpus_dir())" 2>/dev/null || true)"
   [ -z "$SWEEP_CORPUS" ] && SWEEP_CORPUS="$HOME/.tortoise/docs/conversations"
-  # tortoise-hook-version: 2
   # CHILD_STDERR debug-redirect is OPT-IN: only when the operator set it
   # (never force-write a file at every session close)
   if [ -z "${TORTOISE_INDEX_CHILD_STDERR:-}" ]; then

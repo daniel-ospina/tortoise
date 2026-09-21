@@ -138,7 +138,7 @@ anon claim/Protect surface is gated by early returns before the removed regions.
    Drop the now-dead `skipBootstrap` opt + comment. Rotate is now available on every
    durable row (uniform) and never installs the replacement into the browser. The
    rotate `confirm()` gains the row's name/prefix/created (same disclosure as trash).
-10. **recoverKey L4310-4384** (UI-dead, zero callers) + `fallbackTeamIdRef` (L1118/
+10. **recoverKey L4310-4384** (UI-dead, zero callers) + `fallbackOrgIdRef` (L1118/
     L3174) + its comment refs (L2321/2746) → deleted. Endpoint stays.
 11. **revokeKey heldKeyClearState legs L4274-4301** (slot/cache clear) → deleted; keep
     the mechanical DELETE + confirm + staleness guards + tail `loadAll`.
@@ -149,7 +149,7 @@ anon claim/Protect surface is gated by early returns before the removed regions.
     JWT-gated L3615 — the adopt legs become dead with an empty cache; removed).
     **createKey** L4086-4111: drop the `activeKey`/`cachedForTeam` machinery and the
     post-mint staleness comparison entirely (it would compare '' to '' — permanent
-    no-op); KEEP the `teamIdRef` identity guard (L4096-4097) + `setNewKey` + `loadAll`.
+    no-op); KEEP the `orgIdRef` identity guard (L4096-4097) + `setNewKey` + `loadAll`.
     Grep `teamKeysRef` → 0 after.
 13. **Dead auth-plumbing cleanup**: `const headers = apiKey ? {Authorization…} : {}`
     (L1147) + api()'s `authHeaders = headers` default → remove (api() defaults to {} and

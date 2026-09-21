@@ -6,10 +6,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import tempfile
 from typing import ClassVar
+from uuid import uuid4
 
 import pytest
+import redis
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
@@ -73,7 +76,7 @@ def _quiet_watcher(monkeypatch):
 @pytest.fixture(autouse=True)
 def _clean_team_graphs(monkeypatch):
     """Epic #1647 (PR #1684 CI-fix): the DR tests seed the RAW team_team_x
-    graph (select_graph(f"team_{team_id}")) — NON-test-prefixed, so the
+    graph (select_graph(f"org_{org_id}")) — NON-test-prefixed, so the
     server lane's wipe_server skips it and seeds ACCUMULATE across tests
     (CREATE not MERGE → duplicate Points → rebaseline count 6 != 3). The
     embedded lane's wipe() clears everything per test; the server lane must
@@ -89,7 +92,7 @@ def _clean_team_graphs(monkeypatch):
             _sdk = _ha._make_sdk(namespace="registry")
             _db = _sdk._get_proj().db
             for _g in list(_db.list_graphs() or []):
-                if _g.startswith("team_") and not _g.startswith("team_test_"):
+                if _g.startswith("org_") and not _g.startswith("org_test_"):
                     try:  # noqa: SIM105
                         _db.select_graph(_g).delete()
                     except Exception:
@@ -121,15 +124,40 @@ def mem_storage(monkeypatch):
 _SEED_SDKS: list = []
 
 
-def _seed_team(team_id: str = "team_x", nodes: int = 2) -> None:
+def _reset_graph(db, graph_name: str) -> None:
+    """DETACH-DELETE every node in ``graph_name`` before seeding it (#3745).
+
+    These tests assert on RAW node counts (``MATCH (n) RETURN count(n)`` —
+    drill's ``== 2``, the sweep manifests' ``node_count``), which counts
+    whatever the graph holds, not just the seed. A graph can already carry
+    the projection's INTERNAL ``:Meta {key:'point_fts_v2'}`` bookkeeping
+    marker: ``FalkorProjection._ensure_indexes`` MERGEs it whenever a
+    projection is opened ON that graph, and an SDK that opens its projection
+    on this graph (``_make_sdk(graph_name=...)`` — the sweep / re-baseline /
+    acl-reconcile seams) writes it into the CURRENT ``TORTOISE_DB_PATH``.
+    Because ``patched_tortoise_sdk`` re-pins that path per test, work
+    deferred past a test's teardown lands in the NEXT test's temp DB — so
+    the seed accumulated one bookkeeping node and the counts read 3 == 2 /
+    2 == 1.
+
+    Seeding from an EMPTY graph is the same contract ``_clean_team_graphs``
+    already gives the server lane (it drops the raw ``org_*`` graphs before
+    each test); this makes the embedded lane mirror it instead of letting
+    the count depend on what a previous test left behind.
+    """
+    db.select_graph(graph_name).query("MATCH (n) DETACH DELETE n")
+
+
+def _seed_team(org_id: str = "team_x", nodes: int = 2) -> None:
     # The path arg is IGNORED under the client fixture's patched __init__
     # (all current callers use client); the SDK binds to the per-test temp DB.
     sdk = TortoiseSDK(namespace="registry")
     _SEED_SDKS.append(sdk)
     reg = sdk._get_registry()
-    reg.query("MATCH (t:Team {id:$id}) DELETE t", params={"id": team_id})
-    reg.query("CREATE (t:Team {id:$id, tier:'pro'})", params={"id": team_id})
-    g = sdk._get_proj().db.select_graph(f"team_{team_id}")
+    reg.query("MATCH (t:Team {id:$id}) DELETE t", params={"id": org_id})
+    reg.query("CREATE (t:Team {id:$id, tier:'pro'})", params={"id": org_id})
+    _reset_graph(sdk._get_proj().db, f"org_{org_id}")
+    g = sdk._get_proj().db.select_graph(f"org_{org_id}")
     for i in range(nodes):
         g.query(
             "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
@@ -171,7 +199,7 @@ class TestDrStatus:
             "last_team_count": 2,
             "last_sweep_at": "2026-09-06T10:00:00+00:00",
             "graph_totals": {"attempted": 3, "backed_up": 2, "errors": 1},
-            "graph_failures": [{"team_id": "team_x", "graph_id": "g_a",
+            "graph_failures": [{"org_id": "team_x", "graph_id": "g_a",
                                 "error": "boom", "streak": 2}],
             "graph_error_streaks": {"team_x:g_a": 2},
             # #2823: the dialect the sweep enumerated. This is the field that
@@ -366,7 +394,7 @@ class TestDrSweep:
         manifests = [k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")]
         assert len(manifests) == 1
         manifest = json.loads(mem_storage.download(manifests[0]))
-        assert manifest["graph_name"] == "team_team_x"
+        assert manifest["graph_name"] == "org_team_x"
         assert manifest["node_count"] == 2
 
     def test_sweep_reports_resolved_control_plane(self, client, dr_env, mem_storage):
@@ -392,10 +420,10 @@ class TestDrSweep:
         """
         from tests.fake_control_plane import FakeControlPlane
 
-        cp = FakeControlPlane().seed("teams", [
-            {"id": "team_s1", "graph_name": "team_team_s1",
+        cp = FakeControlPlane().seed("organizations", [
+            {"id": "team_s1", "graph_name": "org_team_s1",
              "tier": "pro", "backup_enabled": True},
-            {"id": "team_s2", "graph_name": "team_team_s2",
+            {"id": "team_s2", "graph_name": "org_team_s2",
              "tier": "pro", "backup_enabled": True},
         ])
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
@@ -405,7 +433,8 @@ class TestDrSweep:
         # Seed the DATA plane (FalkorDB stays the graph store in both lanes).
         db = ha_mod._make_sdk(namespace=None)._get_proj().db
         for tid in ("team_s1", "team_s2"):
-            g = db.select_graph(f"team_{tid}")
+            _reset_graph(db, f"org_{tid}")
+            g = db.select_graph(f"org_{tid}")
             g.query("CREATE (p:Point {id:'p1', content:'c', pointKind:'claim'})")
 
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
@@ -456,7 +485,7 @@ class TestDrSweep:
         `no_teams` — NOT `enum_failed` — and still reports its dialect."""
         from tests.fake_control_plane import FakeControlPlane
 
-        cp = FakeControlPlane().seed("teams", [])
+        cp = FakeControlPlane().seed("organizations", [])
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                             lambda: True)
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
@@ -499,7 +528,7 @@ class TestSupabaseLaneSeam:
     satisfy.
     """
 
-    TEAM: ClassVar[dict] = {"id": "team_s1", "graph_name": "team_team_s1",
+    TEAM: ClassVar[dict] = {"id": "team_s1", "graph_name": "org_team_s1",
                           "tier": "pro", "backup_enabled": True}
 
     @staticmethod
@@ -516,7 +545,19 @@ class TestSupabaseLaneSeam:
         import tortoise.hosted_api as ha
         from tests.fake_control_plane import FakeControlPlane
 
-        cp = FakeControlPlane().seed("teams", [dict(TestSupabaseLaneSeam.TEAM)])
+        # #3745: a PER-TEST graph name. These tests assert on the graph's RAW
+        # node count (`node_count`) and the graph projection MERGEs its own
+        # internal `:Meta {key:'point_fts_v2'}` bookkeeping marker into
+        # whatever `TORTOISE_DB_PATH` is current whenever a projection is
+        # opened ON that graph — so work deferred past a sibling test's
+        # teardown lands in the NEXT test's temp DB under the SAME graph name
+        # and inflates the count (2 == 1). A unique name per test makes that
+        # structurally impossible: the stale writer's target no longer exists
+        # in this test's DB, so the seed is the only content (the same
+        # per-test isolation `_clean_team_graphs` gives the server lane).
+        monkeypatch.setitem(TestSupabaseLaneSeam.TEAM, "graph_name",
+                            f"org_team_s1_{uuid4().hex[:8]}")
+        cp = FakeControlPlane().seed("organizations", [dict(TestSupabaseLaneSeam.TEAM)])
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                             lambda: True)
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
@@ -536,8 +577,9 @@ class TestSupabaseLaneSeam:
         """The graph store stays FalkorDB in both lanes — the Supabase lane
         only changes where TEAMS/GRAPHS rows are read from."""
         import tortoise.hosted_api as ha
-        g = ha._make_sdk(namespace=None)._get_proj().db.select_graph(
-            TestSupabaseLaneSeam.TEAM["graph_name"])
+        db = ha._make_sdk(namespace=None)._get_proj().db
+        _reset_graph(db, TestSupabaseLaneSeam.TEAM["graph_name"])
+        g = db.select_graph(TestSupabaseLaneSeam.TEAM["graph_name"])
         g.query("CREATE (p:Point {id:'p1', content:'c', pointKind:'claim'})")
 
     @pytest.mark.parametrize("path,body", [
@@ -565,14 +607,14 @@ class TestSupabaseLaneSeam:
         that rebuilt no ACLs after a full-platform restore."""
         monkeypatch.setattr(
             "tortoise.acl_graph_users.create_acl_user",
-            lambda graph_id, team_id: {"username": "u"})
+            lambda graph_id, org_id: {"username": "u"})
         cp = self._fortify_supabase_lane(monkeypatch)
         r = client.post("/v1/internal/backups/acl-reconcile",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "reconciled"
-        assert body["teams"] == 1, body
+        assert body["organizations"] == 1, body
         assert body["results"]["team_s1"]["status"] == "reconciled"
         assert cp.query_count > 0
 
@@ -588,9 +630,9 @@ class TestSupabaseLaneSeam:
         cp = self._fortify_supabase_lane(monkeypatch)
         expired = (datetime.now(UTC) - timedelta(days=30)).isoformat()
         cp.seed("graphs", [{
-            "id": "g_old", "team_id": "team_s1", "name": "g_old",
+            "id": "g_old", "org_id": "team_s1", "name": "g_old",
             "kind": "custom", "status": "deleted",
-            "namespace": "team_team_s1_g_old", "deleted_at": expired,
+            "namespace": "org_team_s1_g_old", "deleted_at": expired,
             "purged_at": None,
         }])
         r = client.post("/v1/internal/backups/purge", headers=INTERNAL_HEADERS,
@@ -613,7 +655,7 @@ class TestSupabaseLaneSeam:
         cp = self._fortify_supabase_lane(monkeypatch)
         self._seed_data_plane()
         r = client.post("/v1/internal/backups/re-baseline",
-                        headers=INTERNAL_HEADERS, json={"team_id": "team_s1"})
+                        headers=INTERNAL_HEADERS, json={"org_id": "team_s1"})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "rebaselined", body
@@ -623,14 +665,14 @@ class TestSupabaseLaneSeam:
     def test_drill_resolves_the_active_graph_via_the_supabase_seam(
             self, client, dr_env, mem_storage, monkeypatch):
         """The drill resolves its target graph through the seam AFTER the
-        team_id/backup_key validation — a body without a real archive key
+        org_id/backup_key validation — a body without a real archive key
         short-circuits before the seam and proves nothing."""
         cp = self._fortify_supabase_lane(monkeypatch)
         self._seed_data_plane()
-        key = _default_drill_key(client, mem_storage, team="team_s1")
-        ha_mod._LAST_DRILL_AT = 0.0
+        key = _default_drill_key(client, mem_storage, org_id="team_s1")
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-                        json={"team_id": "team_s1", "backup_key": key})
+                        json={"org_id": "team_s1", "backup_key": key})
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "drill_ok", r.text
         assert cp.query_count > 0
@@ -641,7 +683,7 @@ class TestSupabaseLaneSeam:
         self._seed_data_plane()
         assert client.post("/v1/internal/backups/sweep",
                            headers=INTERNAL_HEADERS).json()["status"] == "backed_up"
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -657,7 +699,7 @@ class TestSupabaseLaneSeam:
         legacy flat manifest lists under its actual custom graph instead of
         being mislabeled as the default."""
         cp = self._fortify_supabase_lane(monkeypatch)
-        cp.seed("graphs", [{"id": "g_custom", "team_id": "team_s1",
+        cp.seed("graphs", [{"id": "g_custom", "org_id": "team_s1",
                             "name": "g_custom", "kind": "custom",
                             "status": "active",
                             "namespace": "team_team_s1_g_custom"}])
@@ -665,14 +707,14 @@ class TestSupabaseLaneSeam:
         mem_storage.upload(
             f"backups/{backup_id}/manifest.json",
             json.dumps({
-                "backup_id": backup_id, "team_id": "team_s1",
+                "backup_id": backup_id, "org_id": "team_s1",
                 "graph_name": "team_team_s1_g_custom",
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "node_count": 1, "edge_count": 0, "sha256": "0" * 64,
             }).encode())
         ha_mod.app.dependency_overrides[
-            ha_mod.get_current_team_session_ungated
-        ] = lambda: {"team_id": "team_s1"}
+            ha_mod.get_current_org_session_ungated
+        ] = lambda: {"org_id": "team_s1"}
         try:
             r = client.get("/backups", headers=INTERNAL_HEADERS)
         finally:
@@ -767,7 +809,7 @@ class TestSupabaseLaneSeam:
         # The provider the lifespan WIRED IN must enumerate the Supabase teams
         # (BackupWatcher stores it as `_teams`) — a partial revert that calls the
         # seam but hands the watcher the raw registry handle fails here.
-        assert watcher.watcher._teams() == ["team_s1"]
+        assert watcher.watcher._orgs() == ["team_s1"]
 
 class TestDrRebaseline:
     def test_rebaseline_requires_team(self, client, dr_env, mem_storage):
@@ -775,14 +817,14 @@ class TestDrRebaseline:
         assert r.status_code == 400
 
     def test_rebaseline_rejects_malformed_ids(self, client, dr_env, mem_storage):
-        """#2377: team_id/graph_id flow into R2 state keys — charset-gate the
+        """#2377: org_id/graph_id flow into R2 state keys — charset-gate the
         shape before any write (defense in depth; rows are server-generated
         today, but this endpoint must never mint keys off an attacker-shaped
         id)."""
         bad = [
-            {"team_id": "team_x", "graph_id": "../esc"},
-            {"team_id": "team_x", "graph_id": "g_a/b"},
-            {"team_id": "../team", "graph_id": "default"},
+            {"org_id": "team_x", "graph_id": "../esc"},
+            {"org_id": "team_x", "graph_id": "g_a/b"},
+            {"org_id": "../team", "graph_id": "default"},
         ]
         for body in bad:
             r = client.post("/v1/internal/backups/re-baseline",
@@ -799,7 +841,7 @@ class TestDrRebaseline:
         )
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x"},
+            json={"org_id": "team_x"},
         )
         assert r.status_code == 200
         assert r.json()["node_count"] == 3
@@ -812,7 +854,8 @@ class TestDrDrill:
         r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS, json={})
         assert r.status_code == 400
 
-    def test_drill_restores_to_scratch(self, client, dr_env, mem_storage):
+    def test_drill_restores_to_scratch(self, client, dr_env, mem_storage,
+                                       monkeypatch):
         _seed_team("team_x", nodes=2)
         # Produce a real archive for team_x via the sweep pipeline.
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
@@ -822,19 +865,24 @@ class TestDrDrill:
         ][0]
         backup_key = manifest.replace("/manifest.json", "/dump.enc")
 
-        ha_mod._LAST_DRILL_AT = 0.0  # clear cooldown
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)  # clear cooldown
         r2 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": backup_key},
+            json={"org_id": "team_x", "backup_key": backup_key},
         )
         assert r2.status_code == 200, r2.text
         body = r2.json()
         assert body["status"] == "drill_ok"
         assert body["target_graph"].startswith("_drill_")
-        # Live graph untouched, scratch cleaned.
+        # Live graph untouched, scratch cleaned. The count is taken over
+        # `:Point` — the label `_seed_team` writes, and the convention the
+        # sibling backup/restore tests use (tests/test_backup_e2e.py:70) — so
+        # the projection's internal `:Meta {key:'point_fts_v2'}` bookkeeping
+        # node cannot be mistaken for restored data (#3745: it made this read
+        # 3 == 2 whenever a projection had been opened on the graph).
         sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
-        live = sdk._get_proj().db.select_graph("team_team_x")
-        assert live.query("MATCH (n) RETURN count(n)").result_set[0][0] == 2
+        live = sdk._get_proj().db.select_graph("org_team_x")
+        assert live.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 2
         graphs = sdk._get_proj().db.list_graphs()
         assert body["target_graph"] not in graphs
         # Zero production writes (review P2-8): no registry end-stamp, no
@@ -870,31 +918,31 @@ class TestDrDrill:
 
         # 3. The drill (which passes cfg.backup_key) must decrypt the OLD
         #    archive through the retained stream key — no manual recovery.
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r2 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": backup_key},
+            json={"org_id": "team_x", "backup_key": backup_key},
         )
         assert r2.status_code == 200, r2.text
         assert r2.json()["status"] == "drill_ok"
         monkeypatch.undo()
 
-    def test_drill_cooldown(self, client, dr_env, mem_storage):
+    def test_drill_cooldown(self, client, dr_env, mem_storage, monkeypatch):
         _seed_team("team_x", nodes=1)
         client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         manifest = [  # noqa: RUF015
             k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")
         ][0]
         backup_key = manifest.replace("/manifest.json", "/dump.enc")
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r1 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": backup_key},
+            json={"org_id": "team_x", "backup_key": backup_key},
         )
         assert r1.status_code == 200
         r2 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": backup_key},
+            json={"org_id": "team_x", "backup_key": backup_key},
         )
         assert r2.status_code == 429
 
@@ -903,15 +951,16 @@ class TestDrRebaselinePerGraph:
     """#2313 Task 5: re-baseline resolves the ACTIVE-graph seam (per-graph
     state; tombstone guard)."""
 
-    def _seed_custom(self, team_id="team_x", gid="g_c1", ns="team_team_x_g_c1"):
+    def _seed_custom(self, org_id="team_x", gid="g_c1", ns="team_team_x_g_c1"):
         sdk = TortoiseSDK(namespace="registry")
         _SEED_SDKS.append(sdk)
         reg = sdk._get_registry()
         reg.query(
-            "CREATE (g:Graph {id:$gid, team_id:$tid, kind:'custom', "
+            "CREATE (g:Graph {id:$gid, org_id:$tid, kind:'custom', "
             "namespace:$ns, status:'active'})",
-            params={"gid": gid, "tid": team_id, "ns": ns},
+            params={"gid": gid, "tid": org_id, "ns": ns},
         )
+        _reset_graph(sdk._get_proj().db, ns)
         g = sdk._get_proj().db.select_graph(ns)
         g.query("CREATE (p:Point {id:'c-0', content:'c', pointKind:'claim'})")
 
@@ -919,7 +968,7 @@ class TestDrRebaselinePerGraph:
         _seed_team("team_x", nodes=3)
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x"},
+            json={"org_id": "team_x"},
         )
         assert r.status_code == 200
         assert r.json()["graph_id"] == "default"
@@ -938,7 +987,7 @@ class TestDrRebaselinePerGraph:
         )
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "graph_id": "g_c1"},
+            json={"org_id": "team_x", "graph_id": "g_c1"},
         )
         assert r.status_code == 200
         assert r.json()["node_count"] == 1
@@ -954,11 +1003,11 @@ class TestDrRebaselinePerGraph:
         sdk = TortoiseSDK(namespace="registry")
         _SEED_SDKS.append(sdk)
         sdk._get_registry().query(
-            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_dead', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_dead', status:'deleted'})")
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "graph_id": "g_dead"},
+            json={"org_id": "team_x", "graph_id": "g_dead"},
         )
         assert r.status_code == 400
         assert "not an active graph" in r.json()["detail"]
@@ -975,27 +1024,30 @@ class TestDrDrillPerGraph:
         assert len(keys) == 1
         return keys[0].replace("/manifest.json", "/dump.enc")
 
-    def test_drill_custom_graph_restores_to_scratch(self, client, dr_env, mem_storage):
+    def test_drill_custom_graph_restores_to_scratch(self, client, dr_env,
+                                                    mem_storage, monkeypatch):
         _seed_team("team_x", nodes=2)
         sdk = TortoiseSDK(namespace="registry")
         _SEED_SDKS.append(sdk)
         reg = sdk._get_registry()
         reg.query(
-            "CREATE (g:Graph {id:'g_c1', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_c1', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_c1', status:'active'})")
+        _reset_graph(sdk._get_proj().db, "team_team_x_g_c1")
         g = sdk._get_proj().db.select_graph("team_team_x_g_c1")
         g.query("CREATE (p:Point {id:'c-0', content:'c', pointKind:'claim'})")
         key = self._sweep_and_pick(client, mem_storage, "g_c1")
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": key},
+            json={"org_id": "team_x", "backup_key": key},
         )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "drill_ok"
         assert r.json()["target_graph"].startswith("_drill_")
 
-    def test_drill_refuses_tombstoned_after_backup(self, client, dr_env, mem_storage):
+    def test_drill_refuses_tombstoned_after_backup(self, client, dr_env,
+                                                   mem_storage, monkeypatch):
         """Back the custom graph up while ACTIVE, then tombstone it (a graph
         deleted AFTER its last backup) — the drill's resolution must refuse:
         quarantined archives are never a drill/restore source (#2304)."""
@@ -1004,17 +1056,18 @@ class TestDrDrillPerGraph:
         _SEED_SDKS.append(sdk)
         reg = sdk._get_registry()
         reg.query(
-            "CREATE (g:Graph {id:'g_x', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_x', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_x', status:'active'})")
+        _reset_graph(sdk._get_proj().db, "team_team_x_g_x")
         g = sdk._get_proj().db.select_graph("team_team_x_g_x")
         g.query("CREATE (p:Point {id:'x-0', content:'x', pointKind:'claim'})")
         key = self._sweep_and_pick(client, mem_storage, "g_x")
         reg.query(
             "MATCH (g:Graph {id:'g_x'}) SET g.status = 'deleted'")
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": key},
+            json={"org_id": "team_x", "backup_key": key},
         )
         assert r.status_code == 409, r.text
         assert "not an active graph" in r.json()["detail"]
@@ -1098,12 +1151,12 @@ class TestReconcile:
         for e in entries:
             reg.query(
                 "CREATE (k:APIKey {id:$id, key_prefix:$prefix, hash:'test', "
-                "team_id:$tid, created_by:$by, created_at:$now, "
+                "org_id:$tid, created_by:$by, created_at:$now, "
                 "revoked_at:$rev, expires_at:$exp, created_via:$via})",
                 params={
                     "id": e["id"],
                     "prefix": e.get("prefix", "tt_test"),
-                    "tid": e.get("team_id", "team-reconcile"),
+                    "tid": e.get("org_id", "team-reconcile"),
                     "by": "test",
                     "now": "2025-01-01T00:00:00+00:00",
                     "rev": e.get("revoked_at"),
@@ -1239,24 +1292,24 @@ class TestDrAclReconcile:
         # eligible for hosted backup (acl reconcile enumerates eligible teams)
         reg.query("MATCH (t:Team {id:'team_x'}) SET t.backup_enabled = true")
         reg.query(
-            "CREATE (g:Graph {id:'g_a', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_a', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_a', status:'active'})")
         reg.query(
-            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_dead', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_dead', status:'deleted'})")
         calls: list = []
         monkeypatch.setattr(
             "tortoise.acl_graph_users.create_acl_user",
-            lambda graph_id, team_id: calls.append((graph_id, team_id)) or {"username": "u"},
+            lambda graph_id, org_id: calls.append((graph_id, org_id)) or {"username": "u"},
         )
         r = client.post(
             "/v1/internal/backups/acl-reconcile", headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "reconciled"
-        team_res = body["results"]["team_x"]
-        assert team_res["custom_graphs_ok"] == 1
-        assert team_res["default_skipped"] == 1
+        org_res = body["results"]["team_x"]
+        assert org_res["custom_graphs_ok"] == 1
+        assert org_res["default_skipped"] == 1
         # the ACTIVE custom graph is rebuilt; the tombstone is never touched
         assert ("g_a", "team_x") in calls
         assert ("g_dead", "team_x") not in calls
@@ -1280,12 +1333,12 @@ class _FakeAlerts:
     def __init__(self):
         self.calls: list = []
 
-    def open_incident(self, kind, team_id="", detail=None):
-        self.calls.append(("open", kind, team_id, dict(detail or {})))
+    def open_incident(self, kind, org_id="", detail=None):
+        self.calls.append(("open", kind, org_id, dict(detail or {})))
         return True
 
-    def resolve_incident(self, kind, team_id=""):
-        self.calls.append(("resolve", kind, team_id))
+    def resolve_incident(self, kind, org_id=""):
+        self.calls.append(("resolve", kind, org_id))
         return True
 
 
@@ -1298,14 +1351,14 @@ def _backdate_archive(store, backup_key: str, created_at: str) -> None:
     store.upload(mkey, json.dumps(manifest).encode())
 
 
-def _default_drill_key(client, mem_storage, team="team_x") -> str:
+def _default_drill_key(client, mem_storage, org_id="team_x") -> str:
     """Sweep the team once and return the NEWEST default-graph archive key
     (a sweep always adds one archive; retention keeps older ones)."""
     r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
     assert r.json()["status"] == "backed_up", r.text
-    keys = [k for k in mem_storage.list(f"backups/{team}/default/")
+    keys = [k for k in mem_storage.list(f"backups/{org_id}/default/")
             if k.endswith("dump.enc")]
-    assert keys, f"no default archive for {team}"
+    assert keys, f"no default archive for {org_id}"
     return sorted(keys)[-1]  # newest (lexicographic ts == chronological)
 
 
@@ -1321,6 +1374,21 @@ class TestDrDrillScheduled:
     """#2317 scheduled drill endpoint: oldest-eligible selection, records,
     incidents, cooldown, /status surfacing."""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_drill_state(self, monkeypatch, mem_storage):
+        """#2878: the drill cooldown is MODULE state (`ha_mod._LAST_DRILL_AT`)
+        that both drill handlers overwrite on every accepted request, and the
+        drill record is written to a fixed storage key.
+
+        A bare ``ha_mod._LAST_DRILL_AT = …`` in a test body is never reverted,
+        so a cooldown left by one test 429s the next drill in the same process
+        — an order-dependent flake whose failing test moved run to run. Pin it
+        through ``monkeypatch`` (auto-reverted) so every test starts cleared and
+        the module ends where it started; drop any stale drill record so no test
+        inherits the previous test's record."""
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
+        mem_storage.delete(ha_mod._DRILL_RECORD_KEY)
+
     def test_requires_config(self, client, mem_storage):
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
@@ -1330,7 +1398,6 @@ class TestDrDrillScheduled:
                                                 mem_storage, monkeypatch):
         fake = _FakeAlerts()
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1353,7 +1420,6 @@ class TestDrDrillScheduled:
         assert first != second
         fake = _FakeAlerts()
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1383,8 +1449,9 @@ class TestDrDrillScheduled:
         _SEED_SDKS.append(sdk)
         reg = sdk._get_registry()
         reg.query(
-            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_dead', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_dead', status:'active'})")
+        _reset_graph(sdk._get_proj().db, "team_team_x_g_dead")
         g = sdk._get_proj().db.select_graph("team_team_x_g_dead")
         g.query("CREATE (p:Point {id:'d-0', content:'d', pointKind:'claim'})")
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
@@ -1397,7 +1464,6 @@ class TestDrDrillScheduled:
         reg.query("MATCH (g:Graph {id:'g_dead'}) SET g.status = 'deleted'")
         fake = _FakeAlerts()
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1416,7 +1482,6 @@ class TestDrDrillScheduled:
         mem_storage.upload(key, b"corrupt-blob")  # sha256 mismatch
         fake = _FakeAlerts()
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 409, r.text
@@ -1428,7 +1493,10 @@ class TestDrDrillScheduled:
         mem_storage.delete(key)
         mem_storage.delete(key.replace("/dump.enc", "/manifest.json"))
         _default_drill_key(client, mem_storage, "team_x")
-        ha_mod._LAST_DRILL_AT = 0.0
+        # the 409 above already consumed the cooldown slot (the handler stamps
+        # _LAST_DRILL_AT at ACCEPT, before the integrity check) — clear it for
+        # the recovery drill. monkeypatch, so the reset cannot leak (#2878).
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r2 = client.post("/v1/internal/backups/drill-scheduled",
                          headers=INTERNAL_HEADERS)
         assert r2.status_code == 200, r2.text
@@ -1447,7 +1515,6 @@ class TestDrDrillScheduled:
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1458,11 +1525,14 @@ class TestDrDrillScheduled:
         assert _has_open(fake.calls, ha_mod._DRILL_FAILED_KIND)
         assert not _has_resolve(fake.calls, ha_mod._DRILL_FAILED_KIND)
 
-    def test_respects_shared_cooldown(self, client, dr_env, mem_storage):
+    def test_respects_shared_cooldown(self, client, dr_env, mem_storage,
+                                      monkeypatch):
         import time as _time
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
-        ha_mod._LAST_DRILL_AT = _time.time()  # simulate a drill < 1h ago
+        # a drill accepted <1h ago — via monkeypatch so it is reverted after
+        # the test (a bare module-global write here leaked the cooldown, #2878).
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", _time.time())
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 429
@@ -1473,7 +1543,6 @@ class TestDrDrillScheduled:
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: _FakeAlerts())
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.json()["status"] == "drill_ok"
@@ -1489,10 +1558,9 @@ class TestDrDrillScheduled:
         time is written for every drill, not just the scheduled one."""
         _seed_team("team_x", nodes=2)
         key = _default_drill_key(client, mem_storage)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": key},
+            json={"org_id": "team_x", "backup_key": key},
         )
         assert r.status_code == 200, r.text
         body = r.json()
@@ -1564,10 +1632,344 @@ class TestBackupsSurfaceUnits:
 
     def test_incident_subject_mapping(self):
         _sub = ha_mod._incident_subject
-        assert _sub({"kind": "STALE", "team_id": "team_x"}) == "team_x"
+        assert _sub({"kind": "STALE", "org_id": "team_x"}) == "team_x"
         # custom-graph incidents carry graph_id → "{team}:{gid}"
-        assert _sub({"team_id": "team_x", "graph_id": "g_c1"}) == "team_x:g_c1"
+        assert _sub({"org_id": "team_x", "graph_id": "g_c1"}) == "team_x:g_c1"
         # default-graph incidents stay team-level (back-compat alert keys)
-        assert _sub({"team_id": "team_x", "graph_id": "default"}) == "team_x"
+        assert _sub({"org_id": "team_x", "graph_id": "default"}) == "team_x"
         # team-level kinds have no graph_id
-        assert _sub({"kind": "NO_ELIGIBLE_TEAMS", "team_id": ""}) == ""
+        assert _sub({"kind": "NO_ELIGIBLE_TEAMS", "org_id": ""}) == ""
+
+
+class TestRestoreSwapReadBound:
+    """#3813 — the restore swap's GRAPH.COPY is a long SERVER-SIDE operation
+    (FalkorDB forks a child that encodes the whole graph; the caller stays
+    blocked for the entire copy), so its read bound belongs to the restore and
+    NOT to an ordinary request.
+
+    Every assertion is on the OBSERVABLE the caller gets — HTTP status + detail,
+    and which graphs do or do not exist afterwards — never on the bound
+    constant.
+    """
+
+    #: Server-side delay injected into the copy. Must outlive the ordinary read
+    #: bound AND the ordinary client's bounded retry (1 retry × bound + jitter),
+    #: so the mutated (ordinary-bound) run cannot slip through on a retry.
+    _SLOW_COPY_S = 4.0
+
+    def test_swap_copy_outliving_the_ordinary_bound_completes(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC1 — a copy whose server-side work outlives the ordinary request
+        read bound still completes, and the live graph holds the RESTORED
+        content.
+
+        RED (mutation): drop ``kwargs["socket_timeout"]`` from
+        ``hosted_backup._restore_copy_client`` so the copy runs on the ordinary
+        client — the 4s hold then dies at the 1s ordinary bound and this fails
+        with ``RestoreCopyTimeoutError`` at 1s instead of returning. The
+        ordinary client's 1 retry cannot rescue it: 2 × 1s + jitter still < 4s.
+
+        Legitimate form that stays green: the swap keeps its OWN explicit,
+        generous, finite bound while #2850's ordinary bound stays at 1s for
+        every other operation.
+        """
+        import tortoise.hosted_backup as hb
+
+        # Ordinary requests keep #2850's fail-fast bound; the copy under test is
+        # deliberately slower than it, while the swap's own bound is not. (60 is
+        # the floor — the largest bound a *legal* ordinary configuration can
+        # reach — so this is the tightest still-generous swap bound.)
+        monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "1")
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_TIMEOUT_S", "60")
+
+        delay = self._SLOW_COPY_S
+        calls: list[tuple[str, str]] = []
+
+        def slow_copy(redis_client, src_name, dst_name):
+            # Record the seam so the assertion below can prove the restore
+            # actually routed its copy through here — a regression that reverts
+            # the copy step to ``Graph.copy`` would otherwise leave this green.
+            calls.append((src_name, dst_name))
+            # The property under test is WHICH read bound governs this client,
+            # not how the bytes move. A blocking server-side read on the SAME
+            # client is the deterministic hold: the server does not answer
+            # until it elapses, exactly like a GRAPH.COPY that outlives the
+            # bound. Applied to the SWAP copy (whose source is the verified
+            # temp graph) — the pre-restore copy is the same code path.
+            #
+            # The promotion itself is deliberately fork-free. A real GRAPH.COPY
+            # forks a server child whose embedded-lane lifecycle is unreliable
+            # (observed: the child hangs, wedging the server's module-fork slot
+            # and turning every later copy into "could not fork" — the companion
+            # defect to #3813, filed separately). Letting this guard depend on
+            # that fork would make it a probe for the OTHER defect instead of
+            # this one. The two timeout guards below inject at the same seam but
+            # replace the copy with a mock that raises immediately: they cover
+            # timeout CLASSIFICATION, not a real copy's read bound. This guard
+            # likewise does not exercise a real long GRAPH.COPY — by design.
+            if "_restore_" in src_name:
+                redis_client.execute_command(
+                    "BLPOP", "_restore_swap_bound_probe", str(float(delay)))
+            from falkordb import Graph
+            dump = hb.dump_graph(Graph(redis_client, src_name))
+            hb.restore_graph(Graph(redis_client, dst_name), dump)
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", slow_copy)
+
+        # A stale live graph plus a payload built from a seeded source graph,
+        # then the swap driven directly so the LIVE graph's content is
+        # observable afterwards (the drill endpoint deletes its scratch target
+        # on success, which would hide it).
+        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        source = db.select_graph("org_swap_source")
+        source.query("MATCH (n) DETACH DELETE n")
+        for i in range(2):
+            source.query(
+                "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
+                params={"id": f"pt-{i}", "c": f"c{i}"},
+            )
+        payload = hb.dump_graph(source)
+        target = db.select_graph("org_swap_target")
+        target.query("MATCH (n) DETACH DELETE n")
+        target.query(
+            "CREATE (p:Point {id:'stale', content:'old', pointKind:'claim'})")
+
+        hb._restore_into_temp_verify_swap(
+            db, payload, live_name="org_swap_target")
+
+        # The seam WAS reached, and the delayed (swap) branch taken: otherwise
+        # "the bound is generous" would be satisfied vacuously by a regression
+        # that reverts the copy step to ``Graph.copy`` (which never comes here).
+        assert calls, "restore never reached the _issue_graph_copy seam"
+        assert any("_restore_" in src for src, _ in calls), calls
+
+        # The live graph now holds the RESTORED content (not 200-shaped
+        # nothing).
+        rows = db.select_graph("org_swap_target").query(
+            "MATCH (n:Point) RETURN n.id ORDER BY n.id").result_set
+        assert [r[0] for r in rows] == ["pt-0", "pt-1"]
+
+    def test_masked_read_timeout_is_reported_as_a_timeout(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC2 — a read timeout during GRAPH.COPY is reported as a TIMEOUT: the
+        503 detail says so, names the verified temp graph as intact, and says
+        the destination was NOT restored. It is never reported as a dead
+        connection.
+
+        The injected error is the EXACT shape the embedded lane produced:
+        redis-py closes the socket on a read timeout and then seeks in the
+        now-closed parser buffer, so ``redis.exceptions.TimeoutError: Timeout
+        reading from socket`` arrives chained behind ``ValueError: I/O
+        operation on closed file``.
+
+        RED (mutation): make ``_is_client_read_timeout`` blind to the masked
+        form (or drop the ``except RestoreCopyTimeoutError`` branch) — the
+        detail then reads "Restore swap failed …: I/O operation on closed
+        file" and this fails on the timeout assertions.
+        """
+        import tortoise.hosted_backup as hb
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+
+        def masked_timeout(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError(
+                    "Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", masked_timeout)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+                        json={"org_id": "team_x", "backup_key": key})
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert "timed out" in detail.lower(), detail
+        assert "not restored" in detail.lower(), detail
+        assert "i/o operation on closed file" not in detail.lower(), detail
+        assert "restore swap failed" not in detail.lower(), detail
+        # The verified temp graph is intact AND identifiable, and it is NOT the
+        # live target (a timer-out must never be reported as a swap).
+        m = re.search(r"(\w+_restore_\w+)", detail)
+        assert m, detail
+        temp_name = m.group(1)
+        target_name = temp_name.split("_restore_")[0]
+        sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+        graphs = sdk._get_proj().db.list_graphs()
+        assert temp_name in graphs, (temp_name, graphs)
+        assert target_name not in graphs, (target_name, graphs)
+
+    def test_restore_timeout_is_never_reaped_as_a_wedge(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC3 (#3813 x #3845) — a restore COPY TIMEOUT is never classified as
+        a fork-slot wedge, even when the wedge EVIDENCE is on.
+
+        Both branches are live on the restore path and their inputs are
+        independent: the copy can raise its own ``RestoreCopyTimeoutError``
+        while our daemon is genuinely carrying a lingering module-fork child.
+        On that overlap the TIMEOUT must win — reaping the child and re-issuing
+        the copy would start a SECOND server-side fork while the first may
+        still be running (the reason the branch exists at all, #3813).
+
+        Both wedge signals are forced ON here. On a plain docker-lane run
+        ``fork_slot_is_wedged`` is always False and the #3845 guards inject a
+        ``ResponseError`` — never a ``RestoreCopyTimeoutError`` — so round 1's
+        suite left this branch unpinned (dropping the guard kept it green).
+        Forcing the signals is what makes the assertion non-vacuous.
+
+        RED (mutation): replace the guard with ``if False and isinstance(...)``
+        — the forced wedge signals then match, ``recover_fork_slot`` runs, and
+        this fails on the call-count and on the status/detail.
+        """
+        import tortoise.hosted_backup as hb
+        from tortoise.fork_slot import ForkSlotRecovery
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+
+        # The masked shape the embedded lane produced: the redis client read
+        # timeout chained behind the parser's ValueError.
+        def masked_timeout(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError(
+                    "Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", masked_timeout)
+        # Force BOTH wedge-evidence signals ON: a wedge classifier that is
+        # consulted AT ALL would call this copy a wedge. Reaching either one is
+        # the bug under test.
+        monkeypatch.setattr(hb, "is_fork_refusal", lambda exc: True)
+        monkeypatch.setattr(hb, "fork_slot_is_wedged", lambda *a, **kw: True)
+
+        recoveries: list = []
+
+        def spy_recover(*args, **kwargs):
+            recoveries.append(args)
+            return ForkSlotRecovery(
+                wedged=True, recovered=True, killed_pids=[4242],
+                detail="reaped 1 hung child")
+
+        monkeypatch.setattr(hb, "recover_fork_slot", spy_recover)
+
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+                        json={"org_id": "team_x", "backup_key": key})
+
+        # The TIMEOUT is the verdict — never a wedge.
+        assert r.status_code == 503, r.text
+        body = r.text.lower()
+        detail = r.json()["detail"]
+        assert "timed out" in detail.lower(), detail
+        assert "not restored" in detail.lower(), detail
+        assert "wedge" not in body, detail
+        assert "fork slot" not in body, detail
+        # The wedge recovery was NEVER invoked: no child was reaped, and no
+        # second server-side fork was issued while the first may still run.
+        assert recoveries == [], recoveries
+
+    def test_dead_connection_is_reported_differently_from_a_timeout(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC2 (mirror) — a genuinely unusable connection is NOT reported as a
+        timeout. Same status (503), different detail: the two verdicts are
+        distinguishable from outside, on the observable alone.
+
+        RED (mutation): make ``_is_client_read_timeout`` return True
+        unconditionally (classify every copy failure as a timeout) — the detail
+        then claims a timeout for a dead connection and this fails.
+        """
+        import tortoise.hosted_backup as hb
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+
+        def dead_connection(redis_client, src_name, dst_name):
+            raise redis.exceptions.ConnectionError("Connection reset by peer")
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", dead_connection)
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+                        json={"org_id": "team_x", "backup_key": key})
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert "restore swap failed" in detail.lower(), detail
+        assert "timed out" not in detail.lower(), detail
+        # ... and the verified temp graph is still recoverable.
+        m = re.search(r"(\w+_restore_\w+)", detail)
+        assert m, detail
+        sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+        assert m.group(1) in sdk._get_proj().db.list_graphs(), detail
+
+    def test_ordinary_operations_keep_failing_fast_with_their_own_bound(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#2850 intact — the fix must NOT be "give every DB call a longer
+        bound". Only the restore's copies get a generous read bound; an
+        ORDINARY operation on the SAME connection after a restore still fails
+        fast on the ordinary request bound (that is the whole point of #2850:
+        a stalled call must not park a thread / the event loop).
+
+        RED (mutation): widen the ordinary bound instead of decoupling the
+        swap — e.g. raise ``projection._DB_TIMEOUT_MIN_S`` above the configured
+        ordinary bound so ``_socket_timeouts()`` falls back to its (larger)
+        default. The ordinary probe below then stops failing fast and this
+        fails with ``DID NOT RAISE Exception`` (verified).
+        """
+        import time
+
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "1")
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_TIMEOUT_S", "60")
+
+        calls: list[tuple[str, str]] = []
+
+        def slow_copy(redis_client, src_name, dst_name):
+            # Record the seam so the assertion below can prove the restore
+            # actually routed its copy through here (see the AC1 guard above).
+            calls.append((src_name, dst_name))
+            # Fork-free (see the AC1 guard) — this guard is about the ORDINARY
+            # client, not about GRAPH.COPY's embedded-lane fork.
+            if "_restore_" in src_name:
+                redis_client.execute_command("BLPOP", "_bound_probe", "2.0")
+            from falkordb import Graph
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", slow_copy)
+
+        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        source = db.select_graph("org_bound_source")
+        source.query("MATCH (n) DETACH DELETE n")
+        source.query(
+            "CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
+        payload = hb.dump_graph(source)
+        target = db.select_graph("org_bound_target")
+        target.query("MATCH (n) DETACH DELETE n")
+        target.query(
+            "CREATE (p:Point {id:'stale', content:'old', pointKind:'claim'})")
+        hb._restore_into_temp_verify_swap(db, payload, live_name="org_bound_target")
+
+        # The seam WAS reached (see the AC1 guard) — a mutation that reverts the
+        # restore copy to ``Graph.copy`` would otherwise leave this green while
+        # the delayed swap copy silently stopped exercising the bound.
+        assert calls, "restore never reached the _issue_graph_copy seam"
+        assert any("_restore_" in src for src, _ in calls), calls
+
+        # ... and the ORDINARY client is untouched by the restore: an ordinary
+        # operation outliving the configured 1s ordinary bound still fails fast.
+        # (The observable ceiling is the ordinary client's own bounded retry —
+        # 1 attempt + _EMBEDDED_RETRY_COUNT(1) x 1s + jitter ~= 2.1s — which is
+        # still far short of the 4s hold the server was told to wait.)
+        ordinary = getattr(db, "connection", None) or getattr(db, "client", None)
+        started = time.monotonic()
+        with pytest.raises(Exception) as ei:
+            ordinary.execute_command("BLPOP", "_ordinary_bound_probe", "4.0")
+        elapsed = time.monotonic() - started
+        assert elapsed < 3.0, (
+            f"an ordinary operation waited {elapsed:.1f}s — the ordinary read "
+            f"bound (#2850) was widened by the restore"
+        )
+        # ... and it failed AS a timeout, not as some other error.
+        assert hb._is_client_read_timeout(ei.value), ei.value

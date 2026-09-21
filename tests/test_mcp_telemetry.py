@@ -25,7 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastmcp.tools import FunctionTool  # noqa: I001
-from tortoise.mcp_auth import _current_team_id, _transport_mode
+from tortoise.mcp_auth import _current_org_id, _transport_mode
 
 TEST_TOOLS = [
     ("_telemetry_echo", "echo(message: str) -> dict", "telemetry test: echo"),
@@ -57,10 +57,10 @@ def _telemetry_gated() -> dict:
 def _transport_context():
     """Stdio-mode transport context (same as test_mcp_server)."""
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
+    _current_org_id.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
+    _current_org_id.set(None)
 
 
 @pytest.fixture
@@ -86,8 +86,8 @@ def captured_events(monkeypatch):
     from tortoise import mcp_server
     events = []
 
-    def _capture(team_id, tool_name, status, latency_ms, error_kind):
-        events.append({"team_id": team_id, "tool_name": tool_name,
+    def _capture(org_id, tool_name, status, latency_ms, error_kind):
+        events.append({"org_id": org_id, "tool_name": tool_name,
                        "status": status, "latency_ms": latency_ms,
                        "error_kind": error_kind})
 
@@ -112,15 +112,15 @@ class TestEventPerCall:
         assert ev["status"] == "ok"
         assert ev["error_kind"] is None
         assert isinstance(ev["latency_ms"], int) and ev["latency_ms"] >= 0
-        # Unauthenticated path (stdio, no team context) → empty team_id.
-        assert ev["team_id"] == ""
+        # Unauthenticated path (stdio, no team context) → empty org_id.
+        assert ev["org_id"] == ""
 
-    async def test_team_id_resolved_from_auth_context(self, test_tools,
+    async def test_org_id_resolved_from_auth_context(self, test_tools,
                                                       captured_events):
         from tortoise.mcp_server import mcp
-        _current_team_id.set("team_abc")
+        _current_org_id.set("team_abc")
         await mcp.call_tool("_telemetry_echo", {"message": "hi"})
-        assert captured_events[0]["team_id"] == "team_abc"
+        assert captured_events[0]["org_id"] == "team_abc"
 
     async def test_latency_measured_around_execution(self, test_tools,
                                                      captured_events):
@@ -163,7 +163,7 @@ class TestStatusCategories:
         ev = captured_events[0]
         assert ev["status"] == "auth_error"
         assert ev["error_kind"] == "stdio_auth_gate"
-        assert ev["team_id"] == ""
+        assert ev["org_id"] == ""
 
     async def test_exec_error_status(self, test_tools, captured_events):
         """Raised tool body error → exec_error with the CAUSE class name."""
@@ -246,7 +246,7 @@ class TestFailSafe:
     async def test_emitter_exception_does_not_break_call(self, test_tools,
                                                          monkeypatch):
         from tortoise import mcp_server
-        def _boom(team_id, tool_name, status, latency_ms, error_kind):
+        def _boom(org_id, tool_name, status, latency_ms, error_kind):
             raise RuntimeError("telemetry exploded")
         monkeypatch.setattr(mcp_server, "_emit_mcp_tool_call_telemetry", _boom)
         result = await mcp_server.mcp.call_tool("_telemetry_echo", {"message": "hi"})
@@ -255,7 +255,7 @@ class TestFailSafe:
     async def test_emitter_exception_does_not_mask_tool_error(self, test_tools,
                                                               monkeypatch):
         from tortoise import mcp_server
-        def _boom(team_id, tool_name, status, latency_ms, error_kind):
+        def _boom(org_id, tool_name, status, latency_ms, error_kind):
             raise RuntimeError("telemetry exploded")
         monkeypatch.setattr(mcp_server, "_emit_mcp_tool_call_telemetry", _boom)
         with pytest.raises(Exception) as ei:
@@ -266,7 +266,7 @@ class TestFailSafe:
         """_track_analytics_event raising must not propagate from the emitter."""
         from tortoise import mcp_server, hosted_api  # noqa: I001
 
-        def _broken(team_id, event_name, properties=None):
+        def _broken(org_id, event_name, properties=None):
             raise RuntimeError("supabase down")
         monkeypatch.setattr(hosted_api, "_track_analytics_event", _broken)
         # No exception, even though the underlying writer explodes.
@@ -292,6 +292,10 @@ class TestRealWritePath:
         # Force the local JSONL fallback (no Supabase configured).
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+        # #3820 (cycle-2 P1): the canonical key name too — `SUPABASE_SERVICE_KEY`
+        # is LEGACY, and an ambient production `SUPABASE_SERVICE_ROLE_KEY` would
+        # otherwise make this "no Supabase" premise false.
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
         fallback = tmp_path / "analytics_fallback.jsonl"
         monkeypatch.setattr(hosted_api, "_ANALYTICS_FALLBACK_PATH", str(fallback))
 
@@ -302,7 +306,7 @@ class TestRealWritePath:
 
         assert fallback.exists()
         event = json.loads(fallback.read_text().strip().splitlines()[0])
-        assert event["team_id"] == "team_x"
+        assert event["org_id"] == "team_x"
         assert event["event_name"] == "mcp_tool_call"
         props = event["properties"]
         assert props["tool_name"] == "tortoise_create_point"

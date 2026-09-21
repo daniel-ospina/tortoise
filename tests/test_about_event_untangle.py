@@ -20,6 +20,7 @@ reinterpretation, no migration).
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -177,8 +178,9 @@ def test_mining_no_about_event_provenance(mining_sdk):
 
 @pytest.fixture()
 def mining_sdk():
-    sdk = TortoiseSDK(os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_mining_1417_"), "test.db"),
-        namespace=TEST_GRAPH)
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_mining_1417_")
+    sdk = TortoiseSDK(os.path.join(tmpdir, "test.db"), namespace=TEST_GRAPH)
     yield sdk
     sdk.close()
+    # #4096: reclaim this fixture's temp tree on teardown.
+    shutil.rmtree(tmpdir, ignore_errors=True)

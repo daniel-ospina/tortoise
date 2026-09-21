@@ -15,6 +15,7 @@ Runnable with: python -m pytest tests/test_orient_direct_consolidation.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -32,21 +33,22 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
 
 
 @pytest.fixture
@@ -424,9 +426,12 @@ class TestRegistry:
         from tortoise.tool_registry import TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_overview" in names
-        assert "tortoise_get" in names
+        # `tortoise_get` retires into `tortoise_get_entity` (owner decision,
+        # docs/product/canonical-mcp-tools.md @ approval_pr 4120), so the live
+        # W3 fetch tool is `get_entity`.
+        assert "tortoise_get_entity" in names
         for t in TOOL_REGISTRY:
-            if t.name in ("tortoise_overview", "tortoise_get"):
+            if t.name in ("tortoise_overview", "tortoise_get_entity"):
                 assert t.http_policy is True
                 assert t.annotations.readOnlyHint is True
 
@@ -436,17 +441,17 @@ class TestRegistry:
         import tortoise.mcp_server as mcp_mod
         from tortoise.tool_registry import TOOL_REGISTRY
         for t in TOOL_REGISTRY:
-            if t.name in ("tortoise_overview", "tortoise_get"):
+            if t.name in ("tortoise_overview", "tortoise_get_entity"):
                 assert t.name in mcp_mod.__dict__, t.name
                 assert callable(mcp_mod.__dict__[t.name])
 
     def test_group_assignments(self):
         from tortoise.tool_registry import GROUP_BY_NAME
         assert GROUP_BY_NAME["tortoise_overview"] == "reasoning"
-        assert GROUP_BY_NAME["tortoise_get"] == "graph"
+        assert GROUP_BY_NAME["tortoise_get_entity"] == "graph"
 
     def test_http_allowed_derived(self):
         from tortoise.tool_registry import get_http_allowed
         allowed = get_http_allowed()
         assert "tortoise_overview" in allowed
-        assert "tortoise_get" in allowed
+        assert "tortoise_get_entity" in allowed

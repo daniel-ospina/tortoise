@@ -40,6 +40,25 @@ test('fork options are self + build + unsure (#2407) with Organization-aware cop
   assert.ok(!/workspace/i.test(copy))
 })
 
+// #3218: reported copy defects on the fork card.
+test('#3218: fork copy is first-person, names the SDK on the build branch, and never contradicts itself', () => {
+  const [self, build, unsure] = WIZARD_FORK_OPTIONS
+  assert.equal(self.label, 'For my internal setup', 'the self option reads in the first person')
+  assert.match(build.description, /Tortoise SDK/,
+    'the build branch ends in an SDK call (connect-build step 2) — the description must name it')
+  assert.match(build.description, /capability catalog/,
+    'the catalog promise stays (the registry-backed list still renders)')
+  // #2407 semantics: ONLY 'unsure' leaves fork NULL, so only it may promise a
+  // later answer. A description that says "you pick once" AND "any time" read
+  // as one self-contradicting sentence (the reported defect).
+  assert.match(unsure.description, /any time/i, 'the deferral path names the later answer')
+  assert.doesNotMatch(unsure.description, /pick once|once per/i,
+    'the set-once consequence belongs on the step sub, not on the deferral option')
+  // the step sub keeps the TRUE set-once fact (server: 409 fork_already_set)
+  assert.match(WIZARD_STEPS[1].sub, /once per Organization/i,
+    'the step states the set-once consequence — it is the only place it can be said')
+})
+
 test('offline fallback mirrors the 3 canonical catalog module names (W8 #2004 endpoint contract)', () => {
   assert.deepEqual(BUILD_CATALOG_PLACEHOLDER.map((m) => m.name), [
     'Session recorder', 'Session extractor', 'Document indexer',
@@ -151,9 +170,11 @@ test('#2325 (review P2): labels never exceed the server\'s 64-char clamp, and th
 // above the lede "your agent isn't connected yet" — the headline said the
 // opposite of the state. The overrides are pure logic, so they are unit-tested
 // here instead of pinned by a source grep.
-test('#2912: wizardStageLabel names the stage, with the org-holding and paused overrides', () => {
-  // the plain case: the step's own label, for every step
+test('#2912 + #3428: wizardStageLabel names the stage, with org-holding, paused and not-connected overrides', () => {
+  // the plain case: the step's own label, for every step EXCEPT step 3, whose
+  // own label is a connection CLAIM (asserted separately below).
   for (const [i, s] of WIZARD_STEPS.entries()) {
+    if (i === 3) continue
     assert.equal(wizardStageLabel(i), s.label, `step ${i} label`)
   }
   // step 0 on an org-holding account is a read-only summary
@@ -162,12 +183,48 @@ test('#2912: wizardStageLabel names the stage, with the org-holding and paused o
   // other steps are unaffected by hasOrg (the header used to leak the receipt
   // "Your Organization" above every later step)
   assert.equal(wizardStageLabel(2, { hasOrg: true }), WIZARD_STEPS[2].label)
-  // the paused reconnect: "You're all set" would contradict the step
+  // the paused reconnect: "You're all set" would contradict the step. review
+  // cycle 6 (item 2): the observation phrasing — the categorical "your agent is
+  // not connected yet" is false for a captured session, and the body beneath it
+  // refuses to assert the absence.
   assert.equal(wizardStageLabel(3, { paused: true }),
-    'Setup paused — your agent is not connected yet')
-  assert.equal(wizardStageLabel(3), "You're all set")
+    'Setup paused — no connection observed yet')
+  // #3428/#2937 (lane B3): "You're all set" is a harness-connected CLAIM, and
+  // the DELETED human writer used to manufacture it from a click. Step 3 may
+  // only say it on a server-observed connection. The default is the honest
+  // understatement (fail-honest), so a caller that forgets `connected` can
+  // never claim a connection we did not observe.
+  //
+  // MUTATION (cycle 6 item 2): reverting either self-fork arm to the categorical
+  // wording ("Not connected yet" / "Setup paused — your agent is not connected
+  // yet") fails here — pinning one arm while the other over-claims is exactly
+  // how the self-fork contradiction survived cycle 5.
+  assert.equal(wizardStageLabel(3), 'No connection observed yet')
+  assert.equal(wizardStageLabel(3, { connected: false }), 'No connection observed yet')
+  assert.equal(wizardStageLabel(3, { connected: true }), "You're all set")
+  // review cycle 4 (item 13) + cycle 6 (item 2): BOTH forks state what was
+  // OBSERVED, so the `buildFork` input no longer changes the outcome — it stays
+  // in the signature because both call sites pass it (wizardArchived.test.js
+  // pins that call shape). MUTATION: reintroducing a fork-specific label in
+  // either direction fails the matching assertion below.
+  assert.equal(wizardStageLabel(3, { buildFork: true }), 'No connection observed yet')
+  assert.equal(wizardStageLabel(3, { buildFork: false }), 'No connection observed yet')
+  // `connected` outranks every fork/paused arm.
+  assert.equal(wizardStageLabel(3, { buildFork: true, connected: true }), "You're all set")
+  assert.equal(wizardStageLabel(3, { buildFork: true, paused: true }),
+    'Setup paused — no connection observed yet')
+  // the paused arm is fork-INDEPENDENT now (cycle 6 item 2): a self-fork skip
+  // reads the same observation, never the categorical sentence.
+  assert.equal(wizardStageLabel(3, { buildFork: false, paused: true }),
+    'Setup paused — no connection observed yet')
+  // a server connection OUTRANKS a local skip (#2361 r3): a connected org that
+  // pressed Skip must read as connected, never as paused. The two flags must
+  // not compose into the false reading.
+  assert.equal(wizardStageLabel(3, { connected: true, paused: true }), "You're all set")
   // paused only applies to the done step
   assert.equal(wizardStageLabel(2, { paused: true }), WIZARD_STEPS[2].label)
+  // `connected` is likewise a step-3-only override
+  assert.equal(wizardStageLabel(2, { connected: true }), WIZARD_STEPS[2].label)
   // the three step-2 ledes are distinct — the header says what each fork does
   assert.equal(WIZARD_STEPS[2].sub, 'Pick which harness to connect.')
   assert.ok(!/Connect Tortoise to your Organization/.test(WIZARD_STEPS[2].sub))
