@@ -793,9 +793,11 @@ def tortoise_create_point(kind: str, content: str,
                           dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
-    On first successful write from an incomplete org, auto-completes
-    onboarding (files remaining step edges + flips status to complete) —
-    no separate ceremony needed.
+    On a successful write from an incomplete org, records the onboarding
+    steps this write is evidence for (`harness-connected`,
+    `first-points-filed`, plus `decide-completed` for a decision-shaped
+    write) and hands completion to the canonical fork-aware gate — no
+    separate ceremony needed, and no step the write did not observe (#3784).
 
     dedup=True (default): idempotent — returns existing Point if content matches.
     dedup=False: force-create even if content is identical.
@@ -835,7 +837,17 @@ def tortoise_create_point(kind: str, content: str,
     merged["dedup"] = dedup
     result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
     if "error" not in result:
-        _maybe_onboarding_auto_complete()
+        # #3784: only a decision-shaped write observes the decision step —
+        # `decision` is the pointKind the documented EP decide protocol
+        # files (tortoise/onboarding/SKILL.md §5) and the one file_decision
+        # creates. Read the PERSISTED pointKind when the write returned one
+        # (the server must observe what was recorded, not what was asked
+        # for); any other kind observes no decision.
+        _recorded_kind = (result.get("pointKind") if isinstance(result, dict)
+                          else kind)
+        _maybe_onboarding_auto_complete(
+            decision_observed=(str(_recorded_kind or kind).strip().lower()
+                               == "decision"))
     return result
 
 
@@ -1549,7 +1561,8 @@ def tortoise_file_decision(options: Any, evidence: Any,
     result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
     if "error" not in result:
-        _maybe_onboarding_auto_complete()
+        # #3784: this call IS the observation — a decision was filed.
+        _maybe_onboarding_auto_complete(decision_observed=True)
     return result
 
 
@@ -2913,16 +2926,52 @@ def tortoise_onboarding_github_status() -> dict:
 
 # ── Auto-complete onboarding on first real write ────────────────
 # When an agent makes its first successful graph write (create_point or
-# file_decision), the server auto-files the remaining onboarding steps and
-# flips status to complete — no agent-side state machine ceremony needed.
+# file_decision), the server records the onboarding steps THAT WRITE IS
+# EVIDENCE FOR, then hands the completion decision to the canonical
+# fork-aware gate — no agent-side state machine ceremony needed.
+#
+# #3784: a step edge is a record of something the server OBSERVED. Filing a
+# step the write does not evidence records a fact the user never produced,
+# and the Setup guide then reports complete for work that did not happen.
 
-def _maybe_onboarding_auto_complete() -> None:
-    """After a successful agent write, auto-complete onboarding if not
-    already done. Idempotent: steps are FWW edges, replay is a no-op.
+def _maybe_onboarding_auto_complete(*,
+                                    decision_observed: bool = False) -> None:
+    """After a successful agent write, record the onboarding facts that
+    write is itself evidence for, then let the canonical gate decide
+    completion. Idempotent: steps are FWW edges, replay is a no-op.
 
-    Files harness-connected, first-points-filed, and decide-completed step
-    edges and flips status to complete. Invalidates the 60s TTL cache so
-    the MCP tools/list filter picks up the change immediately.
+    Observed steps (#3784) — the step's own label is the claim, so the
+    server may file it only on the event the label describes:
+    - ``harness-connected`` + ``first-points-filed``: a successful agent
+      tool call IS the observation for both — the harness reached the
+      server, and the two triggering tools file points (label: "Seed your
+      first memory").
+    - ``decide-completed`` (label: "Make your first decision"): filed ONLY
+      when the caller observed a decision — ``tortoise_file_decision``
+      succeeded, or ``tortoise_create_point(kind="decision")`` (the
+      documented EP decide protocol, ``tortoise/onboarding/SKILL.md`` §5).
+      A plain point write observes no decision and must not claim one.
+      (``skills/tortoise-decide/SKILL.md``'s option/criterion/evidence flow
+      is a DELIBERATE false negative — claiming a decision at the refinement
+      step would be the same unobserved fact, inverted. See #3916.)
+    - ``catalog-presented`` (label: "Review the catalog"): NEVER inferred
+      from a write. Its presentation is observed where it happens — the
+      dashboard's build-fork catalog render, or the agent catalog
+      checkpoint (``hosted_api._CHECKPOINT_STEPS``).
+
+    Status is SERVER-OWNED and fork-aware: completion is delegated to
+    ``hosted_api._maybe_apply_completion`` (the canonical
+    ``state.completion_gate_satisfied`` eval, honouring fork=None→self,
+    compact-first and fork_unsure_at), so this function can never flip an
+    org to complete while a required step is missing.
+
+    ``decision_observed`` is keyword-only and defaults to False: a caller
+    that forgets to declare its observation fails CLOSED (claims no
+    decision), never open.
+
+    Caches the ``tools/list`` verdict ``True`` only when ``_maybe_apply_completion``
+    reports a real transition to complete; that helper pops the entry itself,
+    so a completion is visible immediately.
 
     Only fires in HTTP (hosted) mode with a real org_id — stdio and
     self-host calls are no-ops."""
@@ -2939,16 +2988,11 @@ def _maybe_onboarding_auto_complete() -> None:
         from tortoise.hosted_api import (
             _get_onboarding_projection,
             _get_onboarding_state,
+            _maybe_apply_completion,
             _org_proj,
         )
         from tortoise.onboarding.state import (
-            STATUS_COMPLETE as _OS_COMPLETE,
-        )
-        from tortoise.onboarding.state import (
             write_completed_step as _os_write_step,
-        )
-        from tortoise.onboarding.state import (
-            write_status as _os_write_status,
         )
         proj = _org_proj(org_id)
         projection = _get_onboarding_projection(org_id)
@@ -2956,24 +3000,25 @@ def _maybe_onboarding_auto_complete() -> None:
         if isinstance(prog, bool) and prog:
             _onboarding_state_cache[org_id] = (now, True)
             return  # already complete
-        # File all remaining step edges (idempotent FWW) — safe if some
-        # already exist, skips nothing.
-        # Fork-aware: self fork needs decide-completed, build fork needs
-        # catalog-presented (unknown fork defaults to self behavior).
-        fork = projection.get("fork") or "self"
-        steps = ("harness-connected", "first-points-filed",
-                 "catalog-presented" if fork == "build" else "decide-completed")
+        # File ONLY the steps this write observed (#3784). Idempotent FWW
+        # edges — a replay is a no-op.
+        observed = ["harness-connected", "first-points-filed"]
+        if decision_observed:
+            observed.append("decide-completed")
         legacy_mirror = bool(
             _get_onboarding_state(org_id).get("onboarding_complete"))
-        for step in steps:
+        for step in observed:
             _os_write_step(proj, org_id, step,
                            status_from_mirror=legacy_mirror)
-        # Flip status (monotonic — no-op if already complete).
-        _os_write_status(proj, org_id, _OS_COMPLETE,
-                         status_from_mirror=legacy_mirror)
-        # Invalidate cache so tools/list retires onboarding tools
-        # immediately.
-        _onboarding_state_cache[org_id] = (now, True)
+        # Server-owned status → the canonical fork-aware gate decides, never
+        # this function (monotonic; a no-op if already complete).
+        if _maybe_apply_completion(org_id):
+            # The helper returned a real TRANSITION to complete — cache the
+            # tools/list verdict. An already-complete org never reaches here
+            # (the projection short-circuit above cached it), and caching
+            # True for an incomplete org would retire the onboarding tools
+            # from tools/list — a second false "you're all set".
+            _onboarding_state_cache[org_id] = (now, True)
     except Exception:
         # Fail-open: a transient graph/control-plane error must NOT block
         # the agent's write. Next write re-triggers this check.

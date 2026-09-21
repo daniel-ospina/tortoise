@@ -90,21 +90,35 @@ export function capLimitFrom(message, team) {
   return limit === null ? null : String(limit)
 }
 
-// #1147: create-path cap notice. The numbered sentence is the approved
-// wording; only the number's SOURCE changes (#3874) and only the
-// no-number-degraded sentence is new.
+// #1147: create-path cap notice. The numbered sentence — "You've reached
+// your plan's limit of N API keys." — is the approved wording; #3874 changed
+// only the number's SOURCE and added the no-number-degraded sentence.
+//
+// #2699: the remedy TAIL is not the approved #1147 one. It read "or regenerate
+// an existing key instead", which is unreachable AT the cap: rotate mints the
+// replacement through the SAME capped POST /v1/team/keys (see
+// rotateCapNoticeFrom), so "regenerate" 402s exactly like "create". The tail
+// now names the no-cost action that does work at the cap — revoke an existing
+// key (a revoked row leaves the gate's count, freeing a slot) — or upgrade.
+// It deliberately does NOT say "unused" (which presumes a spare slot-holder
+// exists; the count can be held by rows the table hides), does NOT promise a
+// SINGLE revoke always suffices (an over-cap org stays at/over the gate until
+// enough rows are revoked), and does NOT promise the upgrade frees a key
+// immediately.
 export function upgradeNoticeFrom(message, team) {
   const limit = capLimitFrom(message, team)
   if (limit === null) {
-    return "You've reached your plan's API key limit. Upgrade to add more — or regenerate an existing key instead."
+    return "You've reached your plan's API key limit. Revoke an existing key to free a slot — or upgrade to add more."
   }
-  return `You've reached your plan's limit of ${limit} API keys. Upgrade to add more — or regenerate an existing key instead.`
+  return `You've reached your plan's limit of ${limit} API keys. Revoke an existing key to free a slot — or upgrade to add more.`
 }
 
 // #2229: rotate-path cap notice. Rotate mints the REPLACEMENT before revoking
-// the old key, so a team AT max_api_keys 402s on the mint leg — the generic
-// notice's "regenerate instead" tail would loop here (regenerating needs the
-// same free slot). Truthful escape: revoke an unused key first, or upgrade.
+// the old key, so a team AT max_api_keys 402s on the mint leg. Unlike the
+// create-path notice above, this one also states WHY the obvious move fails
+// (the replacement needs a free slot before the old key is revoked) — that
+// mechanism clause is what keeps rotate's notice its own string (#2699 left
+// it byte-identical). Truthful escape: revoke an unused key first, or upgrade.
 export function rotateCapNoticeFrom(message, team) {
   const limit = capLimitFrom(message, team)
   if (limit === null) {

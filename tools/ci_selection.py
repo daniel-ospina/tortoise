@@ -559,6 +559,15 @@ TOOL_CARVEOUTS = (
     # (fail closed). Pinned by
     # test_ci_selection.test_finding_provenance_tool_change_fails_closed_to_full.
     "tools/finding_provenance.py",
+    # #3827: the embedded-lane evidence harness owns
+    # tests/test_embedded_evidence.py. Same silent-drop class as the preflight
+    # carve-out above: no SOURCE_PATTERNS entry matches the path, so a
+    # harness-only change is swallowed by the flat "tools/" prefix, `changed`
+    # comes back empty, and select() takes the docs-only return — the harness's
+    # own guard test never runs on the PR that edits the harness. That is the
+    # exact "proxy silent in the case it exists to cover" class this harness is
+    # written to detect, so it must not apply to the harness itself.
+    "tools/embedded_evidence.py",
 )
 
 
