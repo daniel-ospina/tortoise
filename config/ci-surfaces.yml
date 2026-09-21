@@ -100,6 +100,12 @@ surfaces:
   - test_body_cap_sweep.py
   - test_bridge_mcp.py
   - test_bridge_table.py  # #4282: Phase 0.1 bridge table must not drift from tool_registry.py/sdk.py
+  # #4282 Phase 0.3b: the SDK rename table's drift/claim guard. Registered here
+  # AND under `core`, for the same reason as test_bridge_table.py above: it
+  # guards `tools/sdk_rename_table.py` + the GENERATED
+  # `docs/product/sdk-rename-table.md`, and `tools/` + `docs/` are non-python
+  # prefixes, so a generator-only edit would otherwise select no surface.
+  - test_sdk_rename_table.py
   - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
@@ -426,6 +432,13 @@ surfaces:
   # gap is #4454's job, not this registration's; do not read this entry as
   # covering a hand-edited document.
   - test_mcp_rename_table.py
+  # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
+  # keyed on SOURCE PATTERNS, and the files this guard protects
+  # (`tools/sdk_rename_table.py`, the GENERATED
+  # `docs/product/sdk-rename-table.md`, and the two docs that state the target
+  # names and the group partition) are not api-owned. `core` is the
+  # docs/default surface.
+  - test_sdk_rename_table.py
   - test_capture_cost_measurement.py
   - test_capture_entity_attachment_3664.py
   - test_ci_expected_manifests.py
@@ -1608,6 +1621,7 @@ durations:
   # earlier reading is superseded and must not be restated as fact. Refresh from
   # the first CI junit run that includes it.
   test_mcp_rename_table.py: 240.0
+  test_sdk_rename_table.py: 45.0  # 18 tests; one subprocess `--check` (fresh ~16s tortoise.sdk import) + 17 in-process; measured 43s-45s locally
   test_connector_sources.py: 1.5
   test_e2e9_point_in_time.py: 1.5
   test_file_human_approval.py: 1.5
