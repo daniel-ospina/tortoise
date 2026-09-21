@@ -336,11 +336,16 @@ def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
     drift: both used `os.path.isfile`, which answers False for an EXISTING
     non-regular pid file, so the same guarded entry read as unguarded in BOTH.
 
-    This test pins the equivalence across EVERY decision branch of both guards:
-    the four filesystem shapes, the four branches that need an injected I/O
-    failure (unreadable, unstattable, `os.kill` EACCES, `os.kill` generic
-    OSError), and the `_PID_FILENAMES` probe loop plus the tuple itself. A
-    one-sided change to either copy fails here.
+    This test pins the equivalence across every decision branch of both guards: each
+    filesystem shape, the branches reached through an injected I/O failure, and both
+    twins of the `_PID_FILENAMES` probe loop (a DEAD first pid and an ABSENT first pid),
+    plus the tuple itself. A one-sided change to either copy fails here.
+
+    The injections exist for DETERMINISM, not because the states are unreachable: an
+    unreadable pid file is also reachable by `chmod 0o000` (see
+    `test_unreadable_pid_protects_a_stale_dir`), and a non-searchable parent reaches the
+    unstattable branch. Injecting them pins every branch on every host — independent of
+    the effective uid and of which process happens to be unsignalable.
     """
     import builtins
     import tempfile
@@ -401,21 +406,33 @@ def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
                  if sweep_mod._live_pid_protects(path) is None}
     assert removable == {"absent", "dead"}, removable
 
-    # Channel 3 — the branches that cannot be reached from filesystem state
-    # alone. Each injects one I/O failure for the pid file only and requires
-    # BOTH guards to agree AND to treat the entry as unprovable (protected).
-    probe = _shape("injected", _pid(str(os.getpid())))
+    # Channel 3 — the branches reached only through an injected I/O failure. Each
+    # injects exactly one failure for the pid file and requires BOTH guards to agree AND
+    # to flip the verdict. The probe's pid is PROVABLY DEAD so its baseline is removable:
+    # if a monkeypatch ever stops matching the symbol the guard actually calls, the
+    # baseline assertion below still holds while the flip fails, so a vacuous injection is
+    # caught instead of passing on an already-protected directory.
+    probe = _shape("injected", _pid(str(proc.pid)))
     pid_file = os.path.join(probe, "redis.pid")
+    assert sweep_mod._live_pid_protects(probe) is None
+    assert tracker(probe) is None
     real_open, real_lstat, real_kill = builtins.open, os.lstat, os.kill
 
-    def _guarded(target_path: str) -> None:
+    def _flips(expected_reason: str) -> None:
         sweep_reason = sweep_mod._live_pid_protects(probe)
         tracker_reason = tracker(probe)
         assert (sweep_reason is None) == (tracker_reason is None), (
-            f"guards disagree on injected {target_path}: "
+            f"guards disagree on injected {expected_reason!r}: "
             f"sweep={sweep_reason!r}, tracker={tracker_reason!r}")
         assert sweep_reason is not None, (
-            f"injected {target_path} left the entry REMOVABLE (fail-open)")
+            f"injected {expected_reason!r} left the entry REMOVABLE (fail-open) — "
+            f"the injection did not reach the guard")
+        assert expected_reason in sweep_reason, (
+            f"injected {expected_reason!r} produced {sweep_reason!r} — "
+            f"the injection reached a different branch")
+        assert expected_reason in tracker_reason, (
+            f"injected {expected_reason!r} produced {tracker_reason!r} — "
+            f"the tracker's injection reached a different branch")
 
     def _open_raises(file, *args, **kwargs):
         if os.path.basename(str(file)) == "redis.pid":
@@ -424,7 +441,7 @@ def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
 
     with monkeypatch.context() as mp:
         mp.setattr(builtins, "open", _open_raises)
-        _guarded("open() OSError -> unreadable")
+        _flips("unreadable redis.pid")
 
     def _lstat_raises(path, *args, **kwargs):
         if os.path.basename(str(path)) == "redis.pid":
@@ -433,34 +450,49 @@ def test_the_two_guards_agree_on_every_shape(tmp_path, monkeypatch):
 
     with monkeypatch.context() as mp:
         mp.setattr(os, "lstat", _lstat_raises)
-        _guarded("os.lstat OSError -> unstattable")
+        _flips("unstattable redis.pid")
 
     def _kill_raises(exc):
+        # Fire on the pid READ FROM THE FILE (the probe's dead child), not on this
+        # process: the baseline pid must stay provably dead so the entry starts out
+        # removable, and the injection is what flips it.
         def _patched(pid, sig):
-            if pid == os.getpid():
+            if pid == proc.pid:
                 raise exc
             return real_kill(pid, sig)
         return _patched
 
     with monkeypatch.context() as mp:
         mp.setattr(os, "kill", _kill_raises(PermissionError("injected")))
-        _guarded("os.kill PermissionError -> alive, no permission")
+        _flips("no permission to signal")
     with monkeypatch.context() as mp:
         mp.setattr(os, "kill", _kill_raises(OSError("injected")))
-        _guarded("os.kill OSError -> probe failed")
+        _flips("probe failed")
 
-    # Channel 4 — the probe LOOP: a provably dead FIRST pid must not
-    # short-circuit a live SECOND one, in either mirror.
-    pair = _shape("pair", lambda path: None)
-    with open(os.path.join(pair, "redis.pid"), "w") as fh:
-        fh.write(str(proc.pid))                      # provably dead
-    with open(os.path.join(pair, "second.pid"), "w") as fh:
-        fh.write(str(os.getpid()))                   # this process: live
-    with monkeypatch.context() as mp:
-        mp.setattr(sweep_mod, "_PID_FILENAMES", ("redis.pid", "second.pid"))
-        mp.setattr(hygiene_mod, "_PID_FILENAMES", ("redis.pid", "second.pid"))
-        assert sweep_mod._live_pid_protects(pair) is not None
-        assert tracker(pair) is not None
+    # Channel 4 — BOTH twins of the probe loop: a first pid file that is ABSENT and one
+    # that is provably DEAD must each fall through to a live second pid, in either mirror.
+    # An absent first pid is the `FileNotFoundError` twin; covering only the dead one
+    # leaves `return`/`break` there free to ship one-sided.
+    def _second_pid_is_live(label: str, write_first) -> None:
+        pair = _shape(label, lambda path: None)
+        write_first(pair)
+        with open(os.path.join(pair, "second.pid"), "w") as fh:
+            fh.write(str(os.getpid()))               # this process: live
+        with monkeypatch.context() as mp:
+            mp.setattr(sweep_mod, "_PID_FILENAMES", ("redis.pid", "second.pid"))
+            mp.setattr(hygiene_mod, "_PID_FILENAMES", ("redis.pid", "second.pid"))
+            assert sweep_mod._live_pid_protects(pair) is not None, (
+                f"sweep: a live second pid did not protect after a {label} first pid")
+            assert tracker(pair) is not None, (
+                f"tracker: a live second pid did not protect after a {label} first pid")
+
+    _second_pid_is_live("pair-absent-first", lambda pair: None)
+
+    def _write_dead_first(pair: str) -> None:
+        with open(os.path.join(pair, "redis.pid"), "w") as fh:
+            fh.write(str(proc.pid))
+
+    _second_pid_is_live("pair-dead-first", _write_dead_first)
     assert os.path.exists(pid_file)
 
 

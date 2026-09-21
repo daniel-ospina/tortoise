@@ -111,16 +111,13 @@ SHARED_MODULES = (
     "tortoise/projection/",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
-    # #4069: `tests/_tmpdir_hygiene.py` is imported at conftest MODULE level
-    # (`tests/conftest.py:1148`) and re-exports the suite-wide autouse
-    # `track_tempfile_artifacts` fixture, so it is functionally part of
-    # conftest: it patches `tempfile.mkdtemp` and deletes directories for
-    # EVERY surface's tests — and, not being a `test_*.py` file, the manifest
-    # never classifies it, so without this entry a change to it selected
-    # `core` only. `tests/_embedded.py` is the same shape, four module-level
-    # conftest imports and 27 importers, and was still under-selecting.
-    # `tests/test_ci_selection.py::test_every_conftest_module_level_import_is_shared`
-    # now DERIVES this list from conftest instead of enumerating it.
+    # #4069: suite-wide test helpers re-exported by `tests/conftest.py`. Both are
+    # imported at conftest MODULE level and hand their fixtures to every surface's
+    # tests, and neither is a `test_*.py` file, so the manifest never classifies
+    # them: without these entries a change to one selected `core` only, and a break
+    # it induced in an api/eval/onboarding/ep/battery test never ran on the PR that
+    # made it (#1349/#3332/#3910). The `tests.*` half of that rule is enforced by
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`.
     "tests/_tmpdir_hygiene.py",
     "tests/_embedded.py",
     "pyproject.toml",

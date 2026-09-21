@@ -8,6 +8,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 """
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 import shutil
@@ -230,35 +231,54 @@ def test_shared_module_goes_full():
     assert r2["full"] is True
 
 
-def test_every_conftest_module_level_import_is_shared():
-    """#4069: a module conftest imports at MODULE level is suite-wide by construction.
+def test_every_conftest_module_level_tests_import_is_shared():
+    """#4069: a `tests/` helper conftest imports at MODULE level is suite-wide.
 
-    `tests/conftest.py` re-exports suite-wide fixtures (the session-shared embedded
-    projection, the per-test tempfile tracker), so a module it imports at module level
-    runs for EVERY surface's tests. Such a module is not a `test_*.py` file, so the
-    manifest never classifies it: unless it is listed in `SHARED_MODULES`, a change to
-    it selects `core` only, and an api/onboarding/battery break it induces never runs on
-    the PR that made it (the #1349/#3332/#3910 silent-under-selection class).
+    `tests/conftest.py` re-exports suite-wide fixtures, so a `tests/` helper it imports at
+    module level runs for EVERY surface's tests; the manifest never classifies it (it is
+    not a `test_*.py` file), so unless it is in `SHARED_MODULES` a change to it selects
+    `core` only and an api/onboarding/battery break it induces never runs on the PR that
+    made it (the #1349/#3332/#3910 silent-under-selection class).
 
-    DERIVED, not enumerated. The cycle-5 review finding pinned one module with a literal
-    assertion; the cycle-6 review then measured that `tests/_embedded.py` — imported at
-    conftest module level four times, imported by 27 test files, 9 of them outside
-    `core` — was still selecting `core` only. There is deliberately no exemption list:
-    "source of a suite-wide fixture" is exactly what `SHARED_MODULES` encodes, so the
-    rule is checkable without naming any module.
+    Scope is deliberately `tests.*` only: this criterion justifies a *test helper* being
+    suite-wide, not a product module (whose classification is its own path pattern plus
+    the cross-cutting judgment list `SHARED_MODULES` carries). The product modules conftest
+    imports at module level are therefore NOT covered here; that residual is measured on
+    #4486, not asserted away.
+
+    The import set is read from the AST, not a line regex: an indented or conditional
+    module-level import (e.g. `tests/conftest.py:143`) and the `from tests import x`
+    spelling of an import whose module is a package member must all be seen, and a
+    function-local import must not be.
     """
-    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text()
-    imported = sorted({
-        match.group(1)
-        for line in conftest_src.splitlines()
-        for match in (
-            re.match(r"^from (tests\.[\w.]+) import", line),
-            re.match(r"^import (tests\.[\w.]+)", line),
-        )
-        if match
-    })
-    assert imported, "expected tests/conftest.py to import at least one tests.* module"
-    for module in imported:
+    conftest_path = Path(__file__).resolve().parent / "conftest.py"
+    tree = ast.parse(conftest_path.read_text())
+    imported: set[str] = set()
+
+    def walk(statements) -> None:
+        for node in statements:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue  # a function-local import is not module level
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("tests."):
+                        imported.add(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == "tests":
+                    for alias in node.names:
+                        imported.add(f"tests.{alias.name}")
+                elif node.module and node.module.startswith("tests."):
+                    imported.add(node.module)
+            elif isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
+                walk(node.body)
+                walk(getattr(node, "orelse", []) or [])
+                walk(getattr(node, "finalbody", []) or [])
+                for handler in getattr(node, "handlers", []) or []:
+                    walk(handler.body)
+
+    walk(tree.body)
+    assert imported, "expected tests/conftest.py to import a tests.* module at module level"
+    for module in sorted(imported):
         rel = module.replace(".", "/") + ".py"
         assert rel in SHARED_MODULES, (
             f"{rel} is imported at conftest MODULE level (so it runs for every "
