@@ -170,7 +170,7 @@ jobs:
       # to the app origin (the `tortoise-dashboard` project) so it is
       # same-origin with its `__Host-session` cookie; it is now built and staged
       # into `website/apps/dashboard/dist/admin/` by the `deploy-dashboard` job.
-      # This project keeps only the single-hop `/admin` → app origin 301 in
+      # This project keeps only the single-hop `/admin` → app origin 302 in
       # `functions/_middleware.ts`. An `admin/` tree reappearing here would be
       # dead weight (the middleware redirects before any asset is read).
       # A denylist fails LOUD: an over-eager exclusion 404s a page that the
@@ -794,5 +794,9 @@ jobs:
           TORTOISE_TEST_CARVE_OUT: '1'
           BASE_URL: https://premiselabs.co
           TORTISE_HOST: https://tortoise.premiselabs.co
+          # The gate assertion runs on the session origin (#4054/#4171); without
+          # this the suite falls back to its https default, which happens to
+          # match — pass it explicitly so the two cannot drift apart silently.
+          APP_HOST: https://app.premiselabs.co
         run: |
           python3 -m pytest tests/e2e/test_blog.py -v -m "not blog_write"

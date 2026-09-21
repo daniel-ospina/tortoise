@@ -328,6 +328,28 @@ class _EntityHandlers:
         ``_content_hash`` — so in those cases the existing value is PRESERVED.
         #4042's pass-1b content boundary needs that outcome exactly, never a
         ``bool(content)`` guess. Every other caller ignores the return.
+
+        #4457: when a NEW embedding is written, the ``REMOVE n.embedding``
+        clause rides in the SAME query ahead of the SET list. On the embedded
+        engine (falkordblite/redislite) a ``vecf32`` overwrite of an existing
+        vector property can be SILENTLY DISCARDED — measured there as landing
+        only once some component moves by ~1.0, which real embedder output
+        never does (the server lane lands the same write, which is why only
+        the embedded lane reddened). So the node kept its OLD vector and a
+        rebuilt Point's ``embedding`` no longer derived from its ``content``.
+        ``REMOVE``-first is the workaround this repo's own test helper
+        documents (``tests/test_precision_leak_4028.py``); the OTHER
+        vector-write sites carry the same overwrite shape and are NOT fixed by
+        this clause (tracked in #4520). On the server lane the final state is
+        unchanged, and because the clause is emitted ONLY when a new vector is
+        being written, the preserve-on-None semantics above are untouched.
+        See the query below.
+
+        The parity tests exercise this with REAL embedder output, whose
+        per-component deltas are well below the threshold. A probe whose
+        per-component delta reaches ~1.0 — a plain 0/1 one-hot swap, exactly
+        1.0 — LANDS and therefore MISSES the discard; the engine defect is
+        tracked separately (#4520).
         """
         op = p.get("operator")
         if not isinstance(op, dict):
@@ -435,8 +457,16 @@ class _EntityHandlers:
             set_clauses.append("n.is_episodic=$episodic")
             params["episodic"] = bool(p["is_episodic"])
         # Phase 2 #49: context removed — never written
+        # #4457: clear the property FIRST, in the same atomic query, so the
+        # conditional `vecf32` write below actually lands on the embedded
+        # engine (the overwrite there can be silently discarded — see the
+        # docstring). Only emitted when a new embedding is being written, so
+        # the CASE's preserve-the-existing-value branch is unaffected, and
+        # `MERGE`-created nodes simply have nothing to remove.
+        embed_clear = "REMOVE n.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
+            "MERGE (n:Point {id:$id}) " + embed_clear
+            + "SET " + ", ".join(set_clauses),
             params=params,
         )
         # Ontology v2.1: also store extractedFrom as property for query convenience.
