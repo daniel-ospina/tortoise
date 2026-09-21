@@ -44,7 +44,7 @@ jobs:
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE" ] || BASE="origin/main"
-          CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || true)
+          CHANGED=$(git diff --no-renames --name-only "$BASE...HEAD" 2>/dev/null || true)
           echo "changed files vs $BASE:"
           echo "$CHANGED"
           cat > /tmp/ci-gates.py <<'PY'
@@ -149,7 +149,12 @@ jobs:
                   and not f.startswith("website/apps/"),
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
-                         "tests/test_tenant_provision_cors.mjs"),
+                         "tests/test_tenant_provision_cors.mjs",
+                         # #4481: the blog SSR markdown renderer's harness. Its
+                         # subject (website/functions/blog/_lib.ts) already
+                         # matches the website/ prefix, but the harness itself
+                         # needs a path entry or a test-only PR would not run it.
+                         "tests/test_blog_markdown.mjs"),
                   # #3501: the BFF auth suites live here and had NO path entry,
                   # so a PR touching only them could not trigger the job that
                   # runs them — the job would be skipped, not failed.
@@ -452,7 +457,13 @@ jobs:
       - name: Get changed markdown files
         id: changed
         run: |
-          FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
+          # `--no-renames` is deliberate here, though this is a lint-target list
+          # rather than a changed-set SELECTION set (so the pin that enforces the
+          # flag workflow-wide still applies to it): a rename's deleted .md source
+          # path is tolerated because markdownlint-cli exits 0 on a nonexistent
+          # path, and plain .md deletions already produce exactly such paths.
+          # See tests/test_ci_selection.py::test_every_changed_set_diff_disables_rename_detection.
+          FILES=$(git diff --no-renames --name-only "${{ github.event.pull_request.base.sha }}"...HEAD -- '*.md' || true)
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
       - name: Markdownlint (changed files)
         if: steps.changed.outputs.files != ''
@@ -852,6 +863,8 @@ jobs:
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+      - name: Run blog SSR markdown renderer harness (#4481)
+        run: node --experimental-strip-types tests/test_blog_markdown.mjs
 
   legal-e2e:
     runs-on: ubuntu-latest
