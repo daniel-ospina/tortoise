@@ -36,7 +36,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tortoise.sdk import TortoiseSDK  # noqa: E402
-from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY  # noqa: E402
+from tortoise.tool_registry import (  # noqa: E402
+    RETIRED_TOOL_REGISTRY,
+    TOOL_REGISTRY,
+)
+
+_REPLACEMENT_RE = re.compile(r"^([A-Za-z0-9_]+)")
 
 REGISTRY_SRC = ROOT / "tortoise" / "tool_registry.py"
 MCP_SRC = ROOT / "tortoise" / "mcp_server.py"
@@ -107,16 +112,16 @@ DESTINATION = {
     # ── Search / read ───────────────────────────────────────────────
     "tortoise_search": "search_knowledge",
     "tortoise_query": "search_knowledge",
-    "tortoise_paginated_query": "list_knowledge",
-    "tortoise_query_points_by_tag": "list_knowledge",
+    "tortoise_paginated_query": "search_knowledge",
+    "tortoise_query_points_by_tag": "search_knowledge",
     "tortoise_search_sessions": "search_knowledge",
     "tortoise_suggest_entry_points": "search_knowledge",
     "tortoise_issue_insight": "search_knowledge",
-    "tortoise_list_sources": "list_knowledge",
+    "tortoise_list_sources": "graph_overview",
     "tortoise_list_topics": "list_knowledge",
-    "tortoise_list_tags": "list_knowledge",
+    "tortoise_list_tags": "graph_overview",
     "tortoise_list_namespaces": "list_knowledge",
-    "tortoise_list_pointkinds": "list_knowledge",
+    "tortoise_list_pointkinds": "graph_overview",
     "tortoise_list_graphs": "tenancy:list_memory_graphs",
     "tortoise_taxonomy": "graph_overview",
     "tortoise_overview": "graph_overview",
@@ -143,7 +148,7 @@ DESTINATION = {
     # ── Traversal ───────────────────────────────────────────────────
     "tortoise_traverse": "explore_connections",
     "tortoise_expand_relationships": "explore_connections",
-    "tortoise_get_events": "poll_events",
+    "tortoise_get_events": "get_entity",
     "tortoise_events_poll": "poll_events",
     # ── Review queues ───────────────────────────────────────────────
     "tortoise_review_connections": "review_link_candidates",
@@ -271,7 +276,13 @@ def _registry_rows() -> list[dict]:
             # The only resolution test that matters: is there a real method?
             "resolves": bool(declared) and hasattr(TortoiseSDK, declared),
             "read_only": bool(getattr(entry.annotations, "readOnlyHint", False)),
-            "retired": bool(getattr(entry, "retired_use_instead", None)),
+            # The tool the retirement warning actually sends the caller to.
+            "use_instead": (
+                m.group(1)
+                if (u := getattr(entry, "retired_use_instead", None))
+                and (m := _REPLACEMENT_RE.match(u))
+                else ""
+            ),
         })
     return rows
 
@@ -375,7 +386,8 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
         "",
         "Every `file:line` in this document is **read from the source at build time**, so it cannot",
         "drift from the code it cites. The destination map is data in the generator; every count",
-        "below is arithmetic computed against the live registry. The generator **fails the build**",
+        "below is arithmetic computed against the **served registry** — the live tools plus the",
+        "16 retired names, which still answer through the #3883 warning shim. The generator **fails the build**",
         "if the map and the registry disagree — a mismatch is a finding, not something to reconcile.",
         "",
         f"**Registry: {total} tools → {on_mcp} absorbed into the {len(TARGET_MCP)} MCP targets · "
@@ -437,7 +449,12 @@ def render(rows: list[dict], sdk_defs: dict[str, int]) -> str:
             f"{'yes' if r['read_only'] else 'no'} | `{DESTINATION[r['name']]}` |"
         )
 
+    n_retired = sum(1 for r in rows if r.get("use_instead"))
     out += [
+        "",
+        f"**{n_retired}** of these are RETIRED names (#3883): off the advertised surface, but they",
+        "still answer through the warning shim, and each one's `Destination` is the destination of",
+        f"the replacement that warning names. The other **{len(rows) - n_retired}** are live.",
         "",
         "### Destination counts",
         "",

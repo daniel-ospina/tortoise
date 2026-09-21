@@ -4,7 +4,8 @@
 
 Every `file:line` in this document is **read from the source at build time**, so it cannot
 drift from the code it cites. The destination map is data in the generator; every count
-below is arithmetic computed against the live registry. The generator **fails the build**
+below is arithmetic computed against the **served registry** — the live tools plus the
+16 retired names, which still answer through the #3883 warning shim. The generator **fails the build**
 if the map and the registry disagree — a mismatch is a finding, not something to reconcile.
 
 **Registry: 98 tools → 81 absorbed into the 26 MCP targets · 1 absorbed into a builder-only SDK method (not on the MCP) · 2 tenancy (SDK/REST only) · 14 retired.**
@@ -26,12 +27,12 @@ something derivable from today's code.
 
 | Target tool | Sources absorbed | Discriminator | Exists |
 |---|---|---|---|
-| `graph_overview` | 10 | `section=` | **no — Part C1** |
-| `list_knowledge` | 10 | `kind=` | **no — Part C1** |
+| `graph_overview` | 13 | `section=` | **no — Part C1** |
 | `check_confidence` | 7 | *(none — dispatch is by argument)* | **no — Part C1** |
+| `get_entity` | 7 | `type=` | yes |
+| `search_knowledge` | 7 | `mode=` (full-text / hybrid) | **no — Part C1** |
 | `create_entity` | 6 | `type=` | yes |
-| `get_entity` | 6 | `type=` | yes |
-| `search_knowledge` | 5 | `mode=` (full-text / hybrid) | **no — Part C1** |
+| `list_knowledge` | 5 | `kind=` | **no — Part C1** |
 | `update_knowledge` | 4 | *(which fields — incl. the retract fields)* | **no — Part C1** |
 | `adjust_relationship` | 3 | *(strength)* | **no — Part C1** |
 | `delete_knowledge` | 3 | *(node or link)* | **no — Part C1** |
@@ -41,10 +42,9 @@ something derivable from today's code.
 | `review_link_candidates` | 3 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `link_entities` | 2 | *(relation kind)* | **no — Part C1** |
 | `manage_source_trust` | 2 | *(none — dispatch is by argument)* | **no — Part C1** |
-| `poll_events` | 2 | *(none — dispatch is by argument)* | **no — Part C1** |
 | `supersede_knowledge` | 2 | *(link policy)* | **no — Part C1** |
 
-**17 merged targets. 2 of them have a method behind them today.** The other **15** are Phase 2 work, not renames.
+**16 merged targets. 2 of them have a method behind them today.** The other **14** are Phase 2 work, not renames.
 
 ## Part B — every current tool and its single destination
 
@@ -86,7 +86,7 @@ something derivable from today's code.
 | 34 | `tortoise_get` | `tool_registry.py:1104` | **none declared** | yes | `get_entity` |
 | 35 | `tortoise_get_confidence` | `tool_registry.py:415` | `get_confidence` | yes | `check_confidence` |
 | 36 | `tortoise_get_entity` | `tool_registry.py:997` | `get_entity` | yes | `get_entity` |
-| 37 | `tortoise_get_events` | `tool_registry.py:893` | `get_events` | yes | `poll_events` |
+| 37 | `tortoise_get_events` | `tool_registry.py:893` | `get_events` | yes | `get_entity` |
 | 38 | `tortoise_get_governance` | `tool_registry.py:1084` | `get_owned_entities` | yes | `get_entity` |
 | 39 | `tortoise_get_operator` | `tool_registry.py:490` | `get_point` | yes | `get_entity` |
 | 40 | `tortoise_get_point` | `tool_registry.py:261` | `get_point` | yes | `get_entity` |
@@ -105,9 +105,9 @@ something derivable from today's code.
 | 53 | `tortoise_list_dedup_candidates` | `tool_registry.py:343` | `list_dedup_candidates` | yes | `review_link_candidates` |
 | 54 | `tortoise_list_graphs` | `tool_registry.py:636` | `list_graphs` | yes | `tenancy:list_memory_graphs` |
 | 55 | `tortoise_list_namespaces` | `tool_registry.py:184` | `list_namespaces` | yes | `list_knowledge` |
-| 56 | `tortoise_list_pointkinds` | `tool_registry.py:168` | `list_pointkinds` | yes | `list_knowledge` |
-| 57 | `tortoise_list_sources` | `tool_registry.py:176` | `list_sources` | yes | `list_knowledge` |
-| 58 | `tortoise_list_tags` | `tool_registry.py:243` | `list_tags` | yes | `list_knowledge` |
+| 56 | `tortoise_list_pointkinds` | `tool_registry.py:168` | `list_pointkinds` | yes | `graph_overview` |
+| 57 | `tortoise_list_sources` | `tool_registry.py:176` | `list_sources` | yes | `graph_overview` |
+| 58 | `tortoise_list_tags` | `tool_registry.py:243` | `list_tags` | yes | `graph_overview` |
 | 59 | `tortoise_list_topics` | `tool_registry.py:780` | `list_topics` | yes | `list_knowledge` |
 | 60 | `tortoise_mine_conversations` | `tool_registry.py:329` | `mine_corpus` | no | `mine_knowledge_from_directory` |
 | 61 | `tortoise_mitigate_operator` | `tool_registry.py:499` | `mitigate_operator` | no | `adjust_relationship` |
@@ -123,11 +123,11 @@ something derivable from today's code.
 | 71 | `tortoise_overview` | `tool_registry.py:1093` | **none declared** | yes | `graph_overview` |
 | 72 | `tortoise_pack_install` | `tool_registry.py:226` | `upsert_tenant_manifest` ⚠️ **does not resolve** | no | `REMOVED` |
 | 73 | `tortoise_packs_list` | `tool_registry.py:215` | `get_tenant_packs` ⚠️ **does not resolve** | yes | `REMOVED` |
-| 74 | `tortoise_paginated_query` | `tool_registry.py:111` | `paginated_query` | yes | `list_knowledge` |
+| 74 | `tortoise_paginated_query` | `tool_registry.py:111` | `paginated_query` | yes | `search_knowledge` |
 | 75 | `tortoise_promote_point` | `tool_registry.py:363` | `promote_point` | no | `refresh_confidence` |
 | 76 | `tortoise_provenance` | `tool_registry.py:845` | `provenance` | yes | `check_confidence` |
 | 77 | `tortoise_query` | `tool_registry.py:98` | `query` | yes | `search_knowledge` |
-| 78 | `tortoise_query_points_by_tag` | `tool_registry.py:251` | `query_points_by_tag` | yes | `list_knowledge` |
+| 78 | `tortoise_query_points_by_tag` | `tool_registry.py:251` | `query_points_by_tag` | yes | `search_knowledge` |
 | 79 | `tortoise_recall` | `tool_registry.py:301` | `recall_state` | yes | `check_confidence` |
 | 80 | `tortoise_retract_point` | `tool_registry.py:576` | `retract_point` | no | `update_knowledge` |
 | 81 | `tortoise_review_connections` | `tool_registry.py:809` | `review_connections` | yes | `review_link_candidates` |
@@ -149,17 +149,21 @@ something derivable from today's code.
 | 97 | `tortoise_update_point` | `tool_registry.py:460` | `update_point` | no | `update_knowledge` |
 | 98 | `tortoise_validate_domain` | `tool_registry.py:128` | `validate_domain` | yes | `graph_overview` |
 
+**16** of these are RETIRED names (#3883): off the advertised surface, but they
+still answer through the warning shim, and each one's `Destination` is the destination of
+the replacement that warning names. The other **82** are live.
+
 ### Destination counts
 
 | Destination | Count |
 |---|---|
 | `REMOVED` | 14 |
-| `graph_overview` | 10 |
-| `list_knowledge` | 10 |
+| `graph_overview` | 13 |
 | `check_confidence` | 7 |
+| `get_entity` | 7 |
+| `search_knowledge` | 7 |
 | `create_entity` | 6 |
-| `get_entity` | 6 |
-| `search_knowledge` | 5 |
+| `list_knowledge` | 5 |
 | `update_knowledge` | 4 |
 | `adjust_relationship` | 3 |
 | `delete_knowledge` | 3 |
@@ -169,12 +173,12 @@ something derivable from today's code.
 | `review_link_candidates` | 3 |
 | `link_entities` | 2 |
 | `manage_source_trust` | 2 |
-| `poll_events` | 2 |
 | `supersede_knowledge` | 2 |
 | `approve_merge` | 1 |
 | `graph_set_recording` | 1 |
 | `mine_knowledge_from_directory` | 1 |
 | `mine_knowledge_from_session` | 1 |
+| `poll_events` | 1 |
 | `record_decision` | 1 |
 | `register_source` | 1 |
 | `sdk:write_knowledge_batch` | 1 |
