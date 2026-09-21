@@ -451,14 +451,21 @@ def _redact_substrate_text(text: str) -> str:
     and a token of ANY LENGTH is redacted. The worst case is therefore an
     OVER-redacted diagnostic line, never a leaked credential — a receipt whose
     error text reads oddly is the correct failure direction, and saying so is
-    why there is no length floor. A value that cannot be parsed contributes
-    nothing and the text is returned unchanged — and makes no claim about it
-    (the parse is never echoed).
+    why there is no length floor.
+
+    An ABSENT or blank env value leaves the text unchanged. A value that cannot
+    be PARSED still contributes its own RAW string — it is added to the set
+    BEFORE the ``try`` — so only its derived components (netloc / hostname /
+    username / password) are unavailable, and a message quoting the raw URI is
+    redacted all the same. The parse's own error text is never echoed, so this
+    function makes no claim about WHY a value failed to parse.
 
     NOT applied inside ``_substrate_error``: its result feeds ``_run_arm``'s
     ``expected_error_prefix`` comparison, and redacting a token that happens to
     occur inside that prefix would silently disable a designed-error
-    discriminator. It is applied where the text is WRITTEN instead.
+    discriminator. It is applied where the text is EMITTED instead —
+    :func:`_fault_record` (receipt and stdout), :func:`_write_receipt` (the
+    committed file) and the excepthook :func:`main` installs (stderr).
     """
     if not text:
         return text
