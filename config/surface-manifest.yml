@@ -364,7 +364,8 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
+  approval: '#3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_calibrate_summary
@@ -2041,7 +2042,8 @@ rows:
   recommended_family: null
   proposed: false
   exemption: false
-  approval: null
+  # Re-carried verbatim by the #3883 re-cut, which resets per-row approval to null.
+  approval: '#3949 @daniel-ospina'
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_file_human_approval
