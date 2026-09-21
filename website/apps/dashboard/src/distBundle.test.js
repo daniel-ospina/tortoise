@@ -236,7 +236,7 @@ test('#3428/#2937: the shipped-script scan covers every asset chunk AND every in
   }
 })
 
-test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three checkpoint sites across EVERY shipped script', () => {
+test('#3428/#2937 / #3913 (cycle 8 item 1): the artifact is authoritative — two checkpoint sites across EVERY shipped script', () => {
   // The source pin can be split ('/v1/onboarding/' + 'state/checkpoint') and a
   // sibling/public module can move the URL out of main.jsx entirely (M3/M10/
   // M6/M9). A *src* literal cannot be split past the bundler: esbuild folds an
@@ -257,14 +257,16 @@ test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three chec
       sites.push({ name: s.name, index: m.index, js: s.js })
     }
   }
-  assert.equal(sites.length, 3,
-    `exactly THREE checkpoint call sites may exist across every shipped script — found ${sites.length} ` +
+  assert.equal(sites.length, 2,
+    `exactly TWO checkpoint call sites may exist across every shipped script — found ${sites.length} ` +
     `(${[...new Set(sites.map((s) => s.name))].join(', ') || 'none'}). ` +
     // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
-    // even when the count was LOWER than three, which describes the wrong failure.
-    (sites.length > 3
-      ? 'A 4th means a checkpoint writer was re-introduced (M3/M6/M9/M10 all shipped one and passed the old entry-only scan)'
-      : 'Fewer than three means a legitimate checkpoint site is missing from the shipped bundle — check the build'))
+    // even when the count was LOWER than expected, which describes the wrong failure.
+    // #3913 removed the render-time catalog-presented effect (the build gate no
+    // longer requires it), leaving the fork write + the optional handler mark.
+    (sites.length > 2
+      ? 'A 3rd means a checkpoint writer was re-introduced (the #3913 ruling removed the render effect)'
+      : 'Fewer than two means a legitimate checkpoint site is missing from the shipped bundle — check the build'))
   for (const site of sites) {
     const window = site.js.slice(site.index, site.index + 400)
     assert.doesNotMatch(window, /harness-connected/,

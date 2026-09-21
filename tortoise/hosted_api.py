@@ -19238,8 +19238,9 @@ class OnboardingStatePatchRequest(BaseModel):
     github_docs_scope: list[dict] | None = None
     # #2001 (W5): FLOW keys DECLARED on the PATCH surface so a stray client
     # send is REJECTED loudly (403/422) instead of silently dropped — and
-    # catalog-presented, the ONE step key the dashboard writes (W1/W8 first
-    # catalog render, step-edge MERGE). All other FLOW keys are
+    # catalog-presented, the ONE step key the dashboard writes (W1/W8 on a
+    # BUILD fork pick, step-edge MERGE — an optional record since #3913,
+    # never a completion requirement). All other FLOW keys are
     # server-owned / checkpoint-owned on this surface.
     catalog_presented: bool | None = None
     harness_connected: bool | None = None
@@ -19299,10 +19300,11 @@ async def get_capabilities(org: dict = Depends(get_current_org_session_ungated))
     The indexers+extractors registry rows from tool_registry.py
     ``CAPABILITY_CATALOG`` (R2-9 — no new infra): one canonical list for the
     registry endpoint AND the dashboard's build-path catalog read (W8
-    replaced W1's static placeholder source with this endpoint; the
-    dashboard's first build-fork render marks the catalog-presented
-    checkpoint via the existing W1/W5 mechanism — presentation only, never
-    a billing gate). Org-independent static registry data (no graph
+    replaced W1's static placeholder source with this endpoint; a BUILD pick
+    in the fork card records the catalog-presented checkpoint via the
+    existing W1/W5 mechanism — presentation only, never a billing gate, and
+    since #3913 never a build-completion requirement). Org-independent static
+    registry data (no graph
     touch — never 'unavailable'); dual-auth like the onboarding state reads.
 
     Contract: ``200 {modules: [{name, kind: indexer|extractor, description,
@@ -19719,16 +19721,18 @@ class _OrgSeedSurface:
 
 def _next_onboarding_step(org_id: str, proj) -> str | None:
     """First incomplete fork-aware step after the seed (the decide nudge
-    target): self fork → decide; build → catalog-presented; compact →
-    harness-connected. 'done' when the gate already satisfied the status."""
+    target): self fork → decide; build/compact → harness-connected (the
+    #3913 build gate is the two observed acts; first-points-filed is written
+    by the seed itself, so after a successful seed only harness-connected can
+    still be open). 'done' when the gate already satisfied the status."""
     node = _os.read_onboarding_node(proj, org_id)
     if node is None or node.get("status") == _os.STATUS_COMPLETE:
         return "done"
     steps = set(_os.completed_steps(proj, org_id))
-    if bool(node.get("compact")):
+    # #3913: build no longer trails catalog-presented — build and compact share
+    # the reduced post-seed checklist (the seed files first-points-filed).
+    if bool(node.get("compact")) or node.get("fork") == _os.FORK_BUILD:
         order = ("harness-connected",)
-    elif node.get("fork") == _os.FORK_BUILD:
-        order = ("harness-connected", "catalog-presented")
     else:
         order = ("harness-connected", "decide-completed")
     for step in order:

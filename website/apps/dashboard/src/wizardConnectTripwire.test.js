@@ -526,7 +526,7 @@ function normalizeBodyValue(v) {
   return v.replace(/['"`\s]/g, '')
 }
 
-test('#3428/#2937: exactly the three known checkpoint call sites may exist, each with an allowlisted body', () => {
+test('#3428/#2937 / #3913: exactly the two known checkpoint call sites may exist, each with an allowlisted body', () => {
   // review cycle 7 (item 1-ii): the dist-level probe audits ONE serialized
   // literal, so a writer can be reinstated by moving the POST into a small
   // helper — the body becomes `{step:r}`, the exact probe never appears, and a
@@ -544,14 +544,16 @@ test('#3428/#2937: exactly the three known checkpoint call sites may exist, each
       sites.push({ file: mod.file, index: m.index, window: mod.src.slice(m.index, m.index + 400) })
     }
   }
-  assert.equal(sites.length, 3,
-    `exactly THREE /v1/onboarding/state/checkpoint call sites may exist across src/ — found ` +
+  assert.equal(sites.length, 2,
+    `exactly TWO /v1/onboarding/state/checkpoint call sites may exist across src/ — found ` +
     `${sites.length} (${[...new Set(sites.map((s) => s.file.replace(`${here}/`, '')))].join(', ') || 'none'}). ` +
     // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
-    // even when the count was LOWER than three, describing the wrong failure.
-    (sites.length > 3
-      ? 'A 4th means a checkpoint writer was re-introduced'
-      : 'Fewer than three means a legitimate checkpoint site is missing (or the src walk lost a module)'))
+    // even when the count was LOWER than expected, describing the wrong failure.
+    // #3913 removed the render-time catalog-presented effect (the build gate no
+    // longer requires it), leaving the fork write + the optional handler mark.
+    (sites.length > 2
+      ? 'A 3rd means a checkpoint writer was re-introduced (the #3913 ruling removed the render effect)'
+      : 'Fewer than two means a legitimate checkpoint site is missing (or the src walk lost a module)'))
   for (const site of sites) {
     const rel = site.file.replace(`${here}/`, '')
     assert.doesNotMatch(site.window, /harness-connected/,

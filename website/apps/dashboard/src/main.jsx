@@ -2963,36 +2963,26 @@ function claimIntentInFlight() {
   // affordance sitting next to the primary action. Members (no in-dashboard
   // mint) always see the paste box: it is their only path.
   const [wizardShowPaste, setWizardShowPaste] = React.useState(false)
-  // #1997 (W1): catalog-presented is marked when the build catalog
-  // RENDERS (not just on pick) — re-entry with fork=build already set must
-  // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
-  // the checkpoint is keyed-MERGE (replay no-op), but a per-ORG guard keeps
-  // the network quiet on re-renders (the latch is keyed by team id so a
-  // second build org in the same session still marks its own catalog —
-  // review P2, #1997).
+  // #1997 (W1) / #3913: catalog-presented is recorded from the fork HANDLER
+  // (handleWizardFork, on a BUILD pick) — never a gate input any more. The
+  // render-time effect that marked it when the catalog rendered was removed
+  // (owner ruling 2026-09-20: the build fork completes on the two acts the
+  // server OBSERVES — harness-connected + first-points-filed — so a passive
+  // card render must not be a completion requirement). The step id stays
+  // accepted (existing orgs carry it), so the remaining handler mark is an
+  // optional record, replay-safe (keyed-MERGE). Ref-guarded per org so the
+  // network stays quiet on re-renders; keyed by team id so a second build org
+  // in the same session still marks its own (review P2, #1997).
   const catalogMarkedRef = React.useRef({})
-  React.useEffect(() => {
-    if (wizardStep !== 2) return
-    const teamKey = orgIdRef.current || 'default'
-    const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
-    if (buildFork && !catalogMarkedRef.current[teamKey]) {
-      catalogMarkedRef.current[teamKey] = true
-      api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ step: 'catalog-presented' }),
-      }).catch(() => {})
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
 
   // #2004 (W8): the registry-backed builder catalog — fetched ONCE per
   // session from GET /v1/capabilities (tortoise/tool_registry.py
   // CAPABILITY_CATALOG) when the build branch renders on step 2. The static
   // placeholder in wizardFlow.js renders until the fetch resolves and stays
   // as the OFFLINE fallback (same names — never a blank catalog; the
-  // registry-presented mark above is untouched: this swap is SOURCE-only,
-  // the once-per-org catalog-presented step edge still fires on first
-  // build-fork render and is a keyed-MERGE no-op on replay).
+  // registry-presented swap is SOURCE-only; the once-per-org
+  // catalog-presented step edge still fires from the fork handler
+  // (handleWizardFork) on a build pick and is a keyed-MERGE no-op on replay).
   const [wizardCatalog, setWizardCatalog] = React.useState(null)
   const catalogFetchedRef = React.useRef(false)
   React.useEffect(() => {
@@ -4699,11 +4689,12 @@ function claimIntentInFlight() {
   }
 
   // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
-  // branch: the catalog render marks catalog-presented via W5's checkpoint
-  // (surface 4 write contract — the build-fork gate is evaluable; W8 #2004
-  // replaced the placeholder SOURCE with the registry endpoint, the
-  // mark/mechanism is unchanged). Fork SEMANTICS are W2-owned — W1 renders
-  // the shell only.
+  // branch: a BUILD pick still records catalog-presented via W5's checkpoint
+  // (surface 4 write contract). #3913: that record is now OPTIONAL — the build
+  // gate completes on harness-connected + first-points-filed, so the mark is
+  // never a completion input. W8 #2004 replaced the placeholder SOURCE with
+  // the registry endpoint; the mark/mechanism is unchanged. Fork SEMANTICS are
+  // W2-owned — W1 renders the shell only.
   async function handleWizardFork(forkId) {
     setWizardForkBusy(true)
     setWizardForkError('')
@@ -4730,10 +4721,10 @@ function claimIntentInFlight() {
       setWizardForkChosen(forkId)
       // review P1 (#1997): the catalog-presented mark fires HERE, not in a
       // step-2 effect — React batches setWizardForkChosen + setWizardStep(3)
-      // into ONE render where wizardStep===3, so the effect's step-2 guard
-      // never observes the fresh build pick. Fire-and-forget; keyed-MERGE
-      // (replay no-op). The step-2 effect above still covers RE-ENTRY with a
-      // persisted build fork (onboarding.fork === 'build').
+      // into ONE render where wizardStep===3, so a step-2 effect could never
+      // observe a fresh build pick. #3913: the render-time effect is gone
+      // entirely; this handler mark is now an OPTIONAL record (never a gate
+      // input). Fire-and-forget; keyed-MERGE (replay no-op).
       // A build pick also STAYS on step 2 so the catalog renders (the user
       // sees what they can build on before continuing) — the Continue button
       // appears once a fork is chosen; self picks advance.

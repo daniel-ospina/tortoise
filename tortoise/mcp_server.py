@@ -2957,7 +2957,10 @@ def _maybe_onboarding_auto_complete(*,
     - ``catalog-presented`` (label: "Review the catalog"): NEVER inferred
       from a write. Its presentation is observed where it happens — the
       dashboard's build-fork catalog render, or the agent catalog
-      checkpoint (``hosted_api._CHECKPOINT_STEPS``).
+      checkpoint (``hosted_api._CHECKPOINT_STEPS``). #3913 (owner ruling
+      2026-09-20): it is NO LONGER a build-gate requirement — the build fork
+      completes on the two observed acts above — so this id remains an
+      accepted, OPTIONAL record, never a completion input.
 
     Status is SERVER-OWNED and fork-aware: completion is delegated to
     ``hosted_api._maybe_apply_completion`` (the canonical

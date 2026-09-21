@@ -1070,9 +1070,11 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     """#1997 (W1, review P1 regression): picking the BUILD fork on the fork
     card must mark catalog-presented via the checkpoint (the render-time
     effect cannot observe the fresh pick — React batches the fork-chosen +
-    advance states — so the handler fires it directly). The build-fork gate
-    (harness-connected + first-points-filed + catalog-presented) must be
-    evaluable. #2323: the org-holding journey never mints a second org.
+    advance states — so the handler fires it directly). #3913: the
+    catalog-presented mark is now an OPTIONAL record — the build-fork gate is
+    the two observed acts (harness-connected + first-points-filed), never a
+    catalog render — but the handler write is retained and still asserted.
+    #2323: the org-holding journey never mints a second org.
 
     The catalog pin is deliberately two-sided (#2763): the fork card renders the
     STATIC placeholder because the registry fetch is gated on the connect step

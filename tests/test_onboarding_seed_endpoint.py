@@ -5,8 +5,8 @@ exactly two Subjects (Organization/organization + User/naturalPerson linked
 memberOf), collision detection (never silent merge of distinct identities),
 person→naturalPerson normalization, never-invented identity (email-derived
 person name requires confirmation), fork-aware completion (self = two
-Subjects + decide + connected; build defers decide to catalog-presented;
-compact = seed-lite org anchor + connected).
+Subjects + decide + connected; build/compact complete on the two observed
+acts — connected + first-points-filed, #3913).
 
 Runs in the docker lane (TORTOISE_DB_URI) — real FalkorDB graph assertions
 (Subject kinds, memberOf edge, onboards edge/org_subject_id, step-edge
@@ -316,21 +316,23 @@ class TestSeedJourney:
         finally:
             tc.__exit__(None, None, None)
 
-    def test_build_fork_defers_decide_to_catalog(self):
-        """Build fork: two Subjects + connected are NOT complete; the
-        catalog-presented checkpoint completes WITHOUT any decide."""
+    def test_build_fork_completes_on_the_seed_plus_connected(self):
+        """#3913: build fork — the seed files first-points-filed, so a prior
+        harness-connected checkpoint means the two observed acts are in and
+        the org completes WITHOUT any decide or catalog-presented."""
         tc, _org_id, _email = _registered()
         try:
             tc.post("/v1/onboarding/state/checkpoint", json={"fork": "build"})
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
             res = _seed(tc, org_name="Acme", person_name="Alex")
-            assert res["onboarding"]["status"] == "active"
-            assert res["next"] == "catalog-presented"
+            assert res["onboarding"]["status"] == "complete"
+            assert res["next"] == "done"
+            # decide never enters the build picture
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "decide-completed"})
-            # decide alone can NEVER complete a build fork
-            assert r.json()["onboarding"]["status"] == "active"
+            assert r.json()["onboarding"]["status"] == "complete"
+            # catalog-presented is an accepted, optional record
             r2 = tc.post("/v1/onboarding/state/checkpoint",
                          json={"step": "catalog-presented"})
             assert r2.json()["onboarding"]["status"] == "complete"
