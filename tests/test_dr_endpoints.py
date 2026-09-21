@@ -148,6 +148,18 @@ def _reset_graph(db, graph_name: str) -> None:
     db.select_graph(graph_name).query("MATCH (n) DETACH DELETE n")
 
 
+def _held_proj_db():
+    """A data-plane `db` handle whose SDK is HELD for the session.
+
+    `ha_mod._make_sdk(namespace=None)` returns a FRESH SDK per call; capturing
+    only its `.db` lets the SDK be collected (close-on-GC) and the handle go
+    dead mid-test — the same hazard `_SEED_SDKS` documents for seeds. Hold it.
+    """
+    sdk = ha_mod._make_sdk(namespace=None)
+    _SEED_SDKS.append(sdk)
+    return sdk._get_proj().db
+
+
 def _seed_team(org_id: str = "team_x", nodes: int = 2) -> None:
     # The path arg is IGNORED under the client fixture's patched __init__
     # (all current callers use client); the SDK binds to the per-test temp DB.
@@ -431,7 +443,7 @@ class TestDrSweep:
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                             lambda: cp)
         # Seed the DATA plane (FalkorDB stays the graph store in both lanes).
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         for tid in ("team_s1", "team_s2"):
             _reset_graph(db, f"org_{tid}")
             g = db.select_graph(f"org_{tid}")
@@ -915,7 +927,7 @@ class TestDrRebaseline:
             _is_export_skip_node,
         )
 
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         g = db.select_graph("org_settle_source")
         g.query("MATCH (n) DETACH DELETE n")
         g.query("CREATE (p:Point {id:'data-1'})")           # content
@@ -936,6 +948,41 @@ class TestDrRebaseline:
         )
         assert hb.count_data_nodes(db, "org_settle_source") == expected
         assert expected == 4, expected  # 1 Point + 3 content Meta nodes
+
+    def test_count_data_nodes_is_immune_to_the_resultset_cap(self, client):
+        """#4233 — the count is an AGGREGATE, so RESULTSET_SIZE cannot cap it.
+
+        The whole reason ``count_data_nodes`` is a server-side aggregate is
+        that a non-aggregate ``MATCH (n) RETURN labels(n), properties(n)`` read
+        is truncated at ``RESULTSET_SIZE`` (default 10000) and would silently
+        DEFLATE the count for a larger graph. Lower the cap below the node
+        count and assert the full count survives.
+
+        RED (mutation): revert ``count_data_nodes`` to the non-aggregate read +
+        ``_is_export_skip_node`` filter — the capped read returns only the cap
+        and this fails (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        db = _held_proj_db()
+        conn = db.connection
+        g = db.select_graph("org_settle_source")
+        g.query("MATCH (n) DETACH DELETE n")
+        for i in range(6):
+            g.query("CREATE (p:Point {id:$id})", params={"id": f"p-{i}"})
+        g.query("CREATE (m:Meta {key:'point_fts_v2'})")  # content-neutral marker
+
+        prev = conn.execute_command("GRAPH.CONFIG", "GET", "RESULTSET_SIZE")
+        try:
+            conn.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE", 3)
+            # a non-aggregate read really is capped here ...
+            assert len(g.query("MATCH (n) RETURN labels(n), properties(n)")
+                       .result_set) == 3
+            # ... but the aggregate is not: full data-node count survives.
+            assert hb.count_data_nodes(db, "org_settle_source") == 6
+        finally:
+            conn.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE",
+                                 int(prev[1]))
 
 
 class TestDrDrill:
@@ -1809,7 +1856,7 @@ class TestRestoreSwapReadBound:
         # then the swap driven directly so the LIVE graph's content is
         # observable afterwards (the drill endpoint deletes its scratch target
         # on success, which would hide it).
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         source = db.select_graph("org_swap_source")
         source.query("MATCH (n) DETACH DELETE n")
         for i in range(2):
@@ -2038,7 +2085,7 @@ class TestRestoreSwapReadBound:
 
         monkeypatch.setattr(hb, "_issue_graph_copy", slow_copy)
 
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         source = db.select_graph("org_bound_source")
         source.query("MATCH (n) DETACH DELETE n")
         source.query(
@@ -2107,7 +2154,7 @@ class TestRestoreSwapReadBound:
 
         monkeypatch.setattr(hb, "_issue_graph_copy", copy_then_timeout)
 
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         source = db.select_graph("org_settle_source")
         source.query("MATCH (n) DETACH DELETE n")
         for i in range(2):
@@ -2134,6 +2181,47 @@ class TestRestoreSwapReadBound:
         # #4233: the overrun is surfaced on the result, so an RTO breach
         # caused by it is attributable (the #3845 fork_slot precedent).
         assert result.get("copy_read_bound_overrun") is True
+
+    def test_drill_record_carries_the_copy_overrun(self, client, dr_env,
+                                                   mem_storage, monkeypatch):
+        """#4233 — the overrun is attributed from the PERSISTED drill record.
+
+        Returning the flag from ``_restore_into_temp_verify_swap`` is not
+        enough: an unattended scheduled drill is reviewed from its persisted
+        record, so the record must carry it — otherwise the attribution the
+        flag exists for never reaches an operator.
+
+        RED (mutation): drop the ``copy_read_bound_overrun`` entry from
+        ``_drill_execute``'s ``detail`` — the record assertions below fail
+        (verified).
+        """
+        import tortoise.hosted_backup as hb
+
+        monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "2")
+
+        def copy_then_timeout(redis_client, src_name, dst_name):
+            from falkordb import Graph
+            hb.restore_graph(Graph(redis_client, dst_name),
+                             hb.dump_graph(Graph(redis_client, src_name)))
+            try:
+                raise redis.exceptions.TimeoutError("Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", copy_then_timeout)
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
+        r = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"org_id": "team_x", "backup_key": key},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["copy_read_bound_overrun"] is True, body
+        assert body["record"]["detail"]["copy_read_bound_overrun"] is True
+        rec = json.loads(mem_storage.download(ha_mod._DRILL_RECORD_KEY))
+        assert rec["detail"]["copy_read_bound_overrun"] is True
 
     def test_read_bound_expiry_without_the_copy_is_still_a_timeout(
             self, client, dr_env, mem_storage, monkeypatch):
@@ -2182,7 +2270,7 @@ class TestRestoreSwapReadBound:
         """
         import tortoise.hosted_backup as hb
 
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         src = db.select_graph("org_settle_source")
         src.query("MATCH (n) DETACH DELETE n")
         for i in range(2):
@@ -2223,7 +2311,7 @@ class TestRestoreSwapReadBound:
         import tortoise.hosted_backup as hb
 
         monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "0.5")
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         # Source and destination hold the SAME content, and the destination is
         # NOT deleted — exactly the failed-live-delete shape.
         for name in ("org_settle_source", "org_settle_target"):
@@ -2280,7 +2368,7 @@ class TestRestoreSwapReadBound:
         import tortoise.hosted_backup as hb
 
         monkeypatch.setenv("TORTOISE_RESTORE_SWAP_SETTLE_S", "3")
-        db = ha_mod._make_sdk(namespace=None)._get_proj().db
+        db = _held_proj_db()
         src = db.select_graph("org_settle_source")
         src.query("MATCH (n) DETACH DELETE n")
         src.query("CREATE (p:Point {id:'pt-0'})")

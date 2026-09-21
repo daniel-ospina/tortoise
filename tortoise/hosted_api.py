@@ -24670,6 +24670,10 @@ async def backups_drill_scheduled(request: Request):
                     "rto_s": result.get("rto_s"),
                     "org_id": (result.get("record") or {}).get("org_id"),
                     "backup_key": (result.get("record") or {}).get("backup_key"),
+                    # #4233: if the swap's GRAPH.COPY outlived the restore's
+                    # read bound, name it — that is the attributable cause.
+                    "copy_read_bound_overrun": result.get(
+                        "copy_read_bound_overrun"),
                 },
             )
         except Exception:

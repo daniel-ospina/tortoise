@@ -1920,15 +1920,6 @@ def _restore_swap_timeout_s() -> float:
     return v
 
 
-#: #4233: after the restore copy's client read bound expires, how long the
-#: restore keeps checking the OPERATION's outcome before reporting a timeout.
-#: A client read bound ends the blocking READ; it does not cancel the
-#: server-side ``GRAPH.COPY`` (#3813). Under a contended runner the bound can
-#: expire while the copy is still progressing, and the wall clock alone cannot
-#: distinguish that from a genuinely broken copy — so the bound is a
-#: hypothesis and the DESTINATION's content is the verdict. Defaults to the
-#: read bound, so a restore's total copy budget is 2x its configured read
-#: bound and still finite.
 #: Floor for a POSITIVE settle value. Below this a value can only busy-spin
 #: (it is not a disable switch — a non-positive value falls back to the read
 #: bound, see :func:`_restore_swap_settle_s`).
@@ -1945,6 +1936,15 @@ def _restore_swap_settle_s() -> float:
     operation is the #4233 false-red. A positive value is then clamped to
     ``[0.05, _RESTORE_SWAP_TIMEOUT_MAX_S]`` (each clamp logged, like the
     read bound's resolver).
+
+    Why it exists (#4233): a client read bound ends the blocking READ; it does
+    not cancel the server-side ``GRAPH.COPY`` (#3813). Under a contended runner
+    the bound can expire while the copy is still progressing, and the wall
+    clock alone cannot distinguish that from a genuinely broken copy — so the
+    bound is a hypothesis and the DESTINATION's content is the verdict. The
+    default equals the read bound, so each COPY's client-side budget is finite
+    at 2x that bound; a restore issues the pre-restore safety copy AND the
+    swap, and ``_graph_copy_or_diagnose`` may retry a wedged copy.
     """
     raw = os.environ.get("TORTOISE_RESTORE_SWAP_SETTLE_S")
     if raw is None or not str(raw).strip():
@@ -2198,7 +2198,7 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
 
 
 def count_data_nodes(db, graph_name: str) -> int:
-    """Count a graph's USER nodes — exactly the node set :func:`dump_graph` exports.
+    """Count a graph's USER nodes — the set :func:`dump_graph` filters to.
 
     #1625/#4233: the projection's runtime bookkeeping (``EpMeta`` /
     ``GraphEventMeta`` / ``TeamMeta`` label-wide, plus ``Meta`` nodes keyed
@@ -2220,8 +2220,15 @@ def count_data_nodes(db, graph_name: str) -> int:
     NULL-SAFE (``n.key IS NOT NULL AND n.key IN …``) to match the predicate's
     Python semantics: a ``:Meta`` node with NO ``key`` is CONTENT there, and
     Cypher three-valued logic would otherwise drop it from the count. The
-    parity is pinned by
+    equivalence holds for the scalar (string) ``key`` shape the schema writes;
+    a LIST-valued key makes the Python predicate raise (its own pre-existing
+    defect) while this count treats it as data. The parity is pinned by
     ``tests/test_dr_endpoints.py::TestDrRebaseline::test_count_data_nodes_matches_the_dump_node_set``.
+
+    ⚠️ Above FalkorDB's ``RESULTSET_SIZE`` (default 10000) this is the
+    COMPLETE data-node count while ``dump_graph``'s own node read is truncated
+    (#4515) — so it is the more-correct value there, and the two surfaces
+    diverge by design until #4515 is fixed.
     """
     from tortoise.hosted_api import (
         _EXPORT_SKIP_LABELS,
