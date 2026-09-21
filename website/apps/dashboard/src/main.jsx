@@ -2,6 +2,8 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
+// #4336: TIER_LABELS is the display-name map; its parity against
+// product.html's `labels` map is pinned by tests/test_website_static.py.
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
@@ -5551,7 +5553,7 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           // #1875: render the API's detail (upgrade vs at-capacity)
-          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite members.')
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Builder or Team tier — upgrade to invite members.')
           setBusy(false)
           return
         }
@@ -8309,7 +8311,7 @@ function claimIntentInFlight() {
                     {(currentOrgName || 'O').charAt(0).toUpperCase()}
                   </span>
                   <span className="account-org-name">{currentOrgName || 'No organization'}</span>
-                  {team?.tier && <span className="tier-badge">{team.tier}</span>}
+                  {team?.tier && <span className="tier-badge">{TIER_LABELS[team.tier] || team.tier}</span>}
                 </div>
                 {teams.length > 1 && (
                   <>
@@ -8480,7 +8482,7 @@ function claimIntentInFlight() {
         )}
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
-            {team.tier || 'free'} tier · Upgrade
+            {(TIER_LABELS[team.tier] || team.tier || 'free')} tier · Upgrade
           </a>
         )}
         {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
@@ -9502,7 +9504,7 @@ function claimIntentInFlight() {
                 for Free/Solo (the old copy rendered for Pro too and
                 contradicted the working invite form). */}
             {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
+              <p className="dim small">Invites require the Builder or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add members</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>

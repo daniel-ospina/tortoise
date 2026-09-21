@@ -11854,7 +11854,7 @@ async def _provision_preflight(org: dict) -> None:
     if org.get("tier", "free") in _GRAPH_TIER_BLOCKED:
         raise HTTPException(
             status_code=402,
-            detail="Custom graphs require the Pro plan. Upgrade to create "
+            detail="Custom graphs require the Builder plan. Upgrade to create "
                    "multiple graphs.",
             headers={"X-Upgrade-CTA": "pro"},
         )
@@ -13422,7 +13422,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             tier = org.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Pro or Team tier — upgrade to invite members")
+                                    detail="Invites require the Builder or Team tier — upgrade to invite members")
             # #1965: per-org lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per org_id; the count
@@ -13494,7 +13494,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Pro or Team tier — upgrade to invite members")
+                                detail="Invites require the Builder or Team tier — upgrade to invite members")
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -14535,7 +14535,7 @@ async def resend_invite(invitation_id: str, org_id: str, request: Request,
 async def expire_invite(invitation_id: str, org_id: str,
                         user: dict = Depends(get_current_user)):  # noqa: B008
     """#2003 (W7): admin expire-now — a PENDING invitation dies immediately
-    (link dead, leaves pending lists, Pro seat freed). Owner/admin only.
+    (link dead, leaves pending lists, a Builder-plan (`pro`) seat freed). Owner/admin only.
     Consumed invitations are not expire-able (409)."""
     from tortoise.supabase_control import (
         InvitationError,
@@ -23017,7 +23017,7 @@ def _require_backup_tier(org: dict) -> None:
     if not hourly_backups_enabled(tier):
         raise HTTPException(
             status_code=402,
-            detail="Backups are a Pro feature — upgrade to enable hourly backups",
+            detail="Backups are a Builder feature — upgrade to enable hourly backups",
         )
 
 
@@ -23122,7 +23122,7 @@ async def backups_list(org: dict = Depends(get_current_org_session_ungated)):  #
     loadBackups call carries NO key when a recoverable mint failure left
     apiKey empty (the overview reads ride the session JWT), so a bare
     get_current_org dependency 401'd and the Backups card silently
-    disappeared for Pro users. Ungated dual-auth accepts session JWT OR
+    disappeared for Builder-plan (`pro`) users. Ungated dual-auth accepts session JWT OR
     tt_ key; only org["org_id"] is read below, so a session-resolved
     dict behaves identically."""
     org_id = org.get("org_id")
@@ -23258,7 +23258,7 @@ async def _org_restore_lock(org_id: str) -> asyncio.Lock:
 
 @app.post("/backups", status_code=201)
 async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """Trigger an on-demand backup of the org graph (Pro tier)."""
+    """Trigger an on-demand backup of the org graph (Builder plan, tier `pro`)."""
     org_id = org.get("org_id")
     if not org_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -23397,7 +23397,7 @@ async def backups_create(org: dict = Depends(get_current_org_gated)):  # noqa: B
 
 @app.post("/backups/restore")
 async def backups_restore(body: BackupRestoreRequest, request: Request, org: dict = Depends(get_current_org_session)):  # noqa: B008
-    """Restore the org graph from a backup (Pro tier; confirm=true required).
+    """Restore the org graph from a backup (Builder plan, tier `pro`; confirm=true required).
 
     Restores into a temp graph, verifies node/edge counts against the payload,
     then swaps (pre-restore safety copy → delete live → copy temp). The live
