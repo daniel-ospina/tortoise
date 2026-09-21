@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import tempfile
 from unittest import mock
@@ -48,6 +49,7 @@ def db_env():
         os.environ.pop("TORTOISE_DB_URI", None)
     else:
         os.environ["TORTOISE_DB_URI"] = old_uri
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def _run_context():

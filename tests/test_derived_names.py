@@ -234,6 +234,24 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_uri\)",
         r"from_uri\(_uri\(\)\)",
     ],
+    # #3902: same two shapes as #3154 above — module live-FalkorDB
+    # availability probe over candidate URIs (construct + RETURN 1 + close,
+    # never DETACHs), plus the per-test `db` fixture. SAFETY IS NOT "the URI
+    # path is test-prefixed": the fixture's ``from_uri(_uri())`` resolves to
+    # the SHARED env-URI graph (tortoise_test_b5_3902 fallback, or the job's
+    # own path when TORTOISE_DB_URI is set), NOT a _name() per-test graph
+    # (from_uri passes graph_name=, not path=, so the redirect seam cannot
+    # apply). It is safe only because neither handle is ever bulk-DETACHed:
+    # every DETACH DELETE in this file targets a `graph_name=`-qualified
+    # projection built from _name() -> test_restore3902_<stem>_<uuid> (L98
+    # via _seed_event_log, L246) or a `select_graph(_name(...))` handle (L279),
+    # and the fixture teardown deletes only the names its test registered.
+    # The regex is deliberately narrow to the two call shapes that exist
+    # today so a new one reds instead.
+    "test_restore_seq_3902.py": [
+        r"from_uri\(_uri\)",
+        r"from_uri\(_uri\(\)\)",
+    ],
     "test_session_capture_e2e.py": [r"from_uri\(os\.environ\[.TORTOISE_DB_URI.\]\)"],
     "test_ingest.py": [
         # module availability probe (env pre-set to a test-prefixed URI)

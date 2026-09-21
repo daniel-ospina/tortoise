@@ -10,6 +10,7 @@ Note: the `context` kwarg was REMOVED from the API in #49 — pointKind is
 the filtering dimension (see sdk.create_point's explicit TypeError).
 Runs with FalkorDBLite (embedded) — no Docker needed.
 """
+
 from __future__ import annotations  # noqa: I001
 
 import gc
@@ -99,17 +100,18 @@ def _restore_db_env():
 # Test: queryPriorResearch
 # ══════════════════════════════════════════════════════════════════════
 
+
 class TestQueryPriorResearch:
     """§6.3: queryPriorResearch(domain) returns claims matching that kind."""
 
     def test_returns_existing_claims_by_kind(self):
         sdk = _fresh_sdk()
-        sdk.create_point("competitor-analysis",
-                         "El Dato competes with OpenTable",
-                         authoredBy="research-skill")
-        sdk.create_point("competitor-analysis",
-                         "Competitor X has 20% market share",
-                         authoredBy="research-skill")
+        sdk.create_point(
+            "competitor-analysis", "El Dato competes with OpenTable", authoredBy="research-skill"
+        )
+        sdk.create_point(
+            "competitor-analysis", "Competitor X has 20% market share", authoredBy="research-skill"
+        )
         sdk.create_point("statement", "Unrelated claim", authoredBy="other")
         sdk.close()
 
@@ -122,8 +124,7 @@ class TestQueryPriorResearch:
 
     def test_returns_claims_by_kind_match(self):
         sdk = _fresh_sdk()
-        sdk.create_point("decision", "Deploy FalkorDB in production",
-                         authoredBy="research-skill")
+        sdk.create_point("decision", "Deploy FalkorDB in production", authoredBy="research-skill")
         sdk.close()
 
         results = tortoise_client.query_prior_research("decision")
@@ -148,16 +149,15 @@ class TestQueryPriorResearch:
         empty, so the client guards it to a no-match, with a positive
         control proving the seeded point is visible via its real kind."""
         _fresh_sdk()
-        tortoise_client.write_strategy_points(
-            [{"content": "Seed"}], kind="decision")
+        tortoise_client.write_strategy_points([{"content": "Seed"}], kind="decision")
         assert tortoise_client.query_prior_research("") == []
         assert len(tortoise_client.query_prior_research("decision")) == 1
-
 
 
 # ══════════════════════════════════════════════════════════════════════
 # Test: writeStrategyPoints + queryExistingStrategies
 # ══════════════════════════════════════════════════════════════════════
+
 
 class TestStrategyPoints:
     """§6.3: writeStrategyPoints → persisted → queryExistingStrategies."""
@@ -166,12 +166,16 @@ class TestStrategyPoints:
         _fresh_sdk()  # wire tortoise_client to fresh db
 
         points = [
-            {"content": "Focus on B2B carousel pipeline in Q3",
-             "authoredBy": "define-strategy-skill",
-             "confidence": 0.8},
-            {"content": "Defer mobile app until Q4",
-             "authoredBy": "define-strategy-skill",
-             "confidence": 0.9},
+            {
+                "content": "Focus on B2B carousel pipeline in Q3",
+                "authoredBy": "define-strategy-skill",
+                "confidence": 0.8,
+            },
+            {
+                "content": "Defer mobile app until Q4",
+                "authoredBy": "define-strategy-skill",
+                "confidence": 0.9,
+            },
         ]
         created = tortoise_client.write_strategy_points(points)
         assert len(created) == 2
@@ -204,6 +208,7 @@ class TestStrategyPoints:
 # Test: Vision queries
 # ══════════════════════════════════════════════════════════════════════
 
+
 class TestVisionPoints:
     """Vision Point query/write from the skill wiring contracts."""
 
@@ -226,9 +231,12 @@ class TestVisionPoints:
 
     def test_query_visions_filters_by_kind(self):
         sdk = _fresh_sdk()
-        sdk.create_point("vision", "El Dato will be the OS for restaurant discovery",
-                         authoredBy="define-vision-skill",
-                         confidence=0.6)
+        sdk.create_point(
+            "vision",
+            "El Dato will be the OS for restaurant discovery",
+            authoredBy="define-vision-skill",
+            confidence=0.6,
+        )
         sdk.create_point("statement", "Not a vision", authoredBy="test")
         sdk.close()
 
@@ -252,6 +260,7 @@ class TestVisionPoints:
 # Test: write_claim (generic single-claim writer)
 # ══════════════════════════════════════════════════════════════════════
 
+
 class TestWriteClaim:
     """Generic write_claim function used by research skill."""
 
@@ -259,7 +268,8 @@ class TestWriteClaim:
         _fresh_sdk()
 
         result = tortoise_client.write_claim(
-            "El Dato has 5 active competitors", kind="statement",
+            "El Dato has 5 active competitors",
+            kind="statement",
             authored_by="research-skill",
             confidence=0.8,
         )
@@ -276,7 +286,8 @@ class TestWriteClaim:
         _fresh_sdk()
 
         result = tortoise_client.write_claim(
-            "Competitors may launch similar feature in Q3", kind="hypothesis",
+            "Competitors may launch similar feature in Q3",
+            kind="hypothesis",
             authored_by="research-skill",
             confidence=0.2,
         )
@@ -291,20 +302,22 @@ class TestWriteClaim:
         _fresh_sdk()
 
         zero = tortoise_client.write_claim(
-            "Zero-confidence claim", kind="hypothesis", confidence=0.0)
+            "Zero-confidence claim", kind="hypothesis", confidence=0.0
+        )
         assert zero["confidence"] == 0.0
         full = tortoise_client.write_claim(
-            "Full-confidence claim", kind="hypothesis", confidence=1.0)
+            "Full-confidence claim", kind="hypothesis", confidence=1.0
+        )
         assert full["confidence"] == 1.0
 
-        created = tortoise_client.write_strategy_points(
-            [{"content": "S0", "confidence": 0.0}])
+        created = tortoise_client.write_strategy_points([{"content": "S0", "confidence": 0.0}])
         assert created[0]["confidence"] == 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════
 # Test: graceful degradation (issue #343)
 # ══════════════════════════════════════════════════════════════════════
+
 
 class TestGracefulDegradation:
     """Issue #343: unset/invalid TORTOISE_DB_URI must degrade, never crash.
@@ -351,7 +364,7 @@ class TestGracefulDegradation:
             assert tortoise_client.query_existing_visions(point_kind="") == []
             assert tortoise_client.write_strategy_points([{"content": "x"}]) == []
             claim = tortoise_client.write_claim("x", kind="statement")
-            assert claim == {"error": "tortoise_unavailable", "id": "", "written": False}
+            assert claim == {"error": "degraded", "id": "", "written": False}
             status = tortoise_client.status()
             assert status["available"] is False
             assert "TORTOISE_DB_URI" in status["message"]
@@ -365,11 +378,17 @@ class TestGracefulDegradation:
         tuple itself is self-referential: removing a class from the tuple
         would silently drop that parametrized case. This test fails if a
         required class is removed."""
-        required = [ImportError, ValueError, RuntimeError, ConnectionError,
-                    OSError, sqlite3.OperationalError,
-                    redis_exc.ConnectionError, redis_exc.TimeoutError]
-        missing = [c for c in required
-                   if c not in tortoise_client._UNAVAILABLE_ERRORS]
+        required = [
+            ImportError,
+            ValueError,
+            RuntimeError,
+            ConnectionError,
+            OSError,
+            sqlite3.OperationalError,
+            redis_exc.ConnectionError,
+            redis_exc.TimeoutError,
+        ]
+        missing = [c for c in required if c not in tortoise_client._UNAVAILABLE_ERRORS]
         assert missing == [], f"Unavailable classes missing from tuple: {missing}"
 
     def test_unreachable_docker_uri_real_trigger_degrades(self, capsys):
@@ -388,7 +407,7 @@ class TestGracefulDegradation:
         assert tortoise_client.query_existing_strategies() == []
         assert tortoise_client.write_strategy_points([{"content": "x"}]) == []
         claim = tortoise_client.write_claim("x", kind="statement")
-        assert claim == {"error": "tortoise_unavailable", "id": "", "written": False}
+        assert claim == {"error": "degraded", "id": "", "written": False}
         assert tortoise_client.status()["available"] is False
         assert "tortoise unavailable" in capsys.readouterr().err
 
@@ -410,12 +429,15 @@ class TestGracefulDegradation:
         query (falsy guard) (#343)."""
         _fresh_sdk()
         tortoise_client.write_strategy_points(
-            [{"content": "Vision A", "authoredBy": "t"},
-             {"content": "Vision B", "authoredBy": "t"}],
+            [
+                {"content": "Vision A", "authoredBy": "t"},
+                {"content": "Vision B", "authoredBy": "t"},
+            ],
             kind="vision",
         )
         tortoise_client.write_strategy_points(
-            [{"content": "Strategy S", "authoredBy": "t"}], kind="strategy")
+            [{"content": "Strategy S", "authoredBy": "t"}], kind="strategy"
+        )
 
         by_kind = tortoise_client.query_existing_visions(point_kind="strategy")
         assert len(by_kind) == 1
@@ -448,7 +470,11 @@ class TestGracefulDegradation:
     def test_relative_db_path_is_config_error_not_crash(self):
         """Relative TORTOISE_DB_PATH raises ValueError at SDK construction
         (RELATIVE_PATH_ERROR) — the REAL trigger for the constructor-value
-        error class. Every contract degrades, never crashes."""
+        error class. Every contract degrades, never crashes.
+
+        #3832 (D5): this is the NEVER-CONFIGURED arm, so `write_claim` reports
+        the distinct `unconfigured` value (it used to collapse into the down
+        daemon's outage value, which #343's crash fix introduced)."""
         self._clear_db_env()
         os.environ["TORTOISE_DB_PATH"] = "relative/tortoise.db"
         assert tortoise_client._get_sdk() is None
@@ -457,8 +483,37 @@ class TestGracefulDegradation:
         assert tortoise_client.query_existing_visions() == []
         assert tortoise_client.write_strategy_points([{"content": "x"}]) == []
         claim = tortoise_client.write_claim("x", kind="statement")
-        assert claim == {"error": "tortoise_unavailable", "id": "", "written": False}
+        assert claim == {"error": "unconfigured", "id": "", "written": False}
         assert tortoise_client.status()["available"] is False
+        assert tortoise_client.status()["status"] == "unconfigured"
+
+    def test_unconfigured_and_unreachable_report_distinct_values(self):
+        """#3832 (D5) BOTH-DIRECTIONS GUARD: the never-configured payload is
+        DISTINCT from a down daemon's, and a down daemon keeps its own
+        `degraded` term. The value changes; the never-raise contract
+        does not (neither arm raises, neither tracebacks)."""
+        # Never configured: construction fails from the current config.
+        self._clear_db_env()
+        os.environ["TORTOISE_DB_PATH"] = "relative/tortoise.db"
+        assert tortoise_client.status()["status"] == "unconfigured"
+        assert tortoise_client.write_claim("x", kind="statement") == {
+            "error": "unconfigured",
+            "id": "",
+            "written": False,
+        }
+
+        # Down / unreachable: the SDK constructs, the first use fails — this
+        # arm is UNCHANGED and must never take the new value.
+        tortoise_client._close_cached_sdk()
+        self._clear_db_env()
+        os.environ["TORTOISE_DB_URI"] = "docker://localhost:1"
+        assert tortoise_client._get_sdk() is not None
+        assert tortoise_client.status()["status"] == "degraded"
+        assert tortoise_client.write_claim("x", kind="statement") == {
+            "error": "degraded",
+            "id": "",
+            "written": False,
+        }
 
     def test_unset_uri_logs_actionable_warning(self, capsys):
         """The degradation path must surface the actionable message
@@ -476,20 +531,38 @@ class TestGracefulDegradation:
         assert payload["status"] == "noop"
         assert "warning" in payload
 
-    @pytest.mark.parametrize("argv,out_key,out_value", [
-        (["tortoise_client.py", "query-prior-research", "--domain", "x"], "count", 0),
-        (["tortoise_client.py", "query-strategies"], "count", 0),
-        (["tortoise_client.py", "query-visions"], "count", 0),
-        (["tortoise_client.py", "write-points", "--kind", "strategy",
-          "--points-json", '[{"content": "x"}]'], "written", 0),
-        (["tortoise_client.py", "write-claim", "--content", "x"],
-         "error", "tortoise_unavailable"),
-        (["tortoise_client.py", "status"], "available", False),
-    ])
+    @pytest.mark.parametrize(
+        "argv,out_key,out_value",
+        [
+            (["tortoise_client.py", "query-prior-research", "--domain", "x"], "count", 0),
+            (["tortoise_client.py", "query-strategies"], "count", 0),
+            (["tortoise_client.py", "query-visions"], "count", 0),
+            (
+                [
+                    "tortoise_client.py",
+                    "write-points",
+                    "--kind",
+                    "strategy",
+                    "--points-json",
+                    '[{"content": "x"}]',
+                ],
+                "written",
+                0,
+            ),
+            (["tortoise_client.py", "write-claim", "--content", "x"], "error", "unconfigured"),
+            (["tortoise_client.py", "status"], "available", False),
+        ],
+    )
     def test_cli_subcommands_degrade(self, argv, out_key, out_value, capsys, monkeypatch):
         """Every CLI subcommand degrades to JSON output with NO SystemExit
-        (exit-0 contract) when the SDK is unavailable (#343). Real trigger:
-        relative TORTOISE_DB_PATH raises the constructor ValueError."""
+        when the SDK is unavailable (#343). Real trigger: relative
+        TORTOISE_DB_PATH raises the constructor ValueError.
+
+        #3832 (D5) SUPERSEDES the old "(exit-0 contract)" note here: `main()`
+        now RETURNS the process exit code instead of always leaving it at 0
+        (the real-process pin is test_cli_process_exits_not_configured). It
+        still never raises SystemExit on a degradation — the code is returned,
+        not raised, so in-process callers keep their old shape."""
         self._clear_db_env()
         os.environ["TORTOISE_DB_PATH"] = "relative/tortoise.db"
         monkeypatch.setattr(sys, "argv", argv)
@@ -497,23 +570,54 @@ class TestGracefulDegradation:
         payload = json.loads(capsys.readouterr().out)
         assert payload[out_key] == out_value
 
-    def test_cli_process_exits_zero(self):
-        """Real-process CLI contract: degradation → returncode 0, JSON
-        stdout, actionable stderr — no traceback. A relative
-        TORTOISE_DB_PATH forces the config error deterministically (no
-        default embedded-DB side effects); PYTHONPATH is pinned so the
-        `tortoise` package resolves regardless of ambient environment."""
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "FLY_APP_NAME")}
+    def test_cli_exit_code_follows_the_command_not_a_second_probe(self, capsys, monkeypatch):
+        """#3832 (D5) regression pin: the exit code reflects the COMMAND's own
+        outcome. A command that succeeded must exit 0 even if a later status
+        probe WOULD report a degradation — the CLI reads the command's logged
+        degradation and does not re-probe. (Re-probing also emitted a SECOND
+        stderr warning for one command and could fail a command whose payload
+        already said the write succeeded.)"""
+        _fresh_sdk()
+        monkeypatch.setattr(sys, "argv", ["tortoise_client.py", "query-strategies"])
+        with patch.object(
+            tortoise_client, "status", return_value={"available": False, "status": "degraded"}
+        ):
+            assert tortoise_client.main() == 0
+        assert json.loads(capsys.readouterr().out)["count"] == 0
+
+    def test_cli_process_exits_not_configured(self):
+        """Real-process CLI contract (#3832 / D5): a never-configured client
+        exits **4**, with a JSON stdout payload, an actionable stderr warning
+        and no traceback. A relative TORTOISE_DB_PATH forces the config error
+        deterministically (no default embedded-DB side effects); PYTHONPATH is
+        pinned so the `tortoise` package resolves regardless of ambient
+        environment.
+
+        This pin MOVED off 0: #526's *exit 0 on degradation* clause is
+        superseded for the CLI probe only (the library still never raises), so
+        a degraded probe cannot look like success to an agent harness."""
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "FLY_APP_NAME")
+        }
         env["TORTOISE_DB_PATH"] = "relative/tortoise.db"
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
         proc = subprocess.run(
-            [sys.executable, str(tortoise_client.__file__),
-             "query-prior-research", "--domain", "x"],
-            capture_output=True, text=True, timeout=120, env=env,
+            [
+                sys.executable,
+                str(tortoise_client.__file__),
+                "query-prior-research",
+                "--domain",
+                "x",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
             cwd=str(Path(__file__).resolve().parents[1]),
         )
-        assert proc.returncode == 0, proc.stderr
+        assert proc.returncode == 4, proc.stderr  # unconfigured (#3832)
         assert json.loads(proc.stdout)["count"] == 0
         assert "tortoise init" in proc.stderr
         # Trigger determinism (relative path raises the config ValueError,
@@ -529,44 +633,78 @@ class TestGracefulDegradation:
         covers the CLI string→float confidence path at the 0.0 boundary,
         the empty-batch no-op, and --kind forwarding to vision."""
         _fresh_sdk()
-        monkeypatch.setattr(sys, "argv", [
-            "tortoise_client.py", "write-points", "--kind", "strategy",
-            "--points-json", '[{"content": "cli healthy path"}]',
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "tortoise_client.py",
+                "write-points",
+                "--kind",
+                "strategy",
+                "--points-json",
+                '[{"content": "cli healthy path"}]',
+            ],
+        )
         tortoise_client.main()
         payload = json.loads(capsys.readouterr().out)
         assert payload["written"] == 1
         assert payload["results"][0]["pointKind"] == "strategy"
 
-        monkeypatch.setattr(sys, "argv", [
-            "tortoise_client.py", "write-points", "--kind", "strategy",
-            "--points-json", "[]",
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "tortoise_client.py",
+                "write-points",
+                "--kind",
+                "strategy",
+                "--points-json",
+                "[]",
+            ],
+        )
         tortoise_client.main()
         empty = json.loads(capsys.readouterr().out)
         assert empty["written"] == 0
         assert empty["results"] == []
 
-        monkeypatch.setattr(sys, "argv", [
-            "tortoise_client.py", "write-points", "--kind", "vision",
-            "--points-json", '[{"content": "cli vision"}]',
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "tortoise_client.py",
+                "write-points",
+                "--kind",
+                "vision",
+                "--points-json",
+                '[{"content": "cli vision"}]',
+            ],
+        )
         tortoise_client.main()
         vision = json.loads(capsys.readouterr().out)
         assert vision["written"] == 1
         assert vision["results"][0]["pointKind"] == "vision"
 
-        monkeypatch.setattr(sys, "argv", [
-            "tortoise_client.py", "write-claim", "--content", "cli claim",
-            "--kind", "hypothesis", "--confidence", "0.0",
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "tortoise_client.py",
+                "write-claim",
+                "--content",
+                "cli claim",
+                "--kind",
+                "hypothesis",
+                "--confidence",
+                "0.0",
+            ],
+        )
         tortoise_client.main()
         claim = json.loads(capsys.readouterr().out)
         assert claim["confidence"] == 0.0
 
     def test_cli_multi_command_session_single_sdk_no_unavailable(self, capsys, monkeypatch):
         """#1562 regression: a multi-command CLI session in ONE process must
-        NEVER return tortoise_unavailable after the first write.
+        NEVER return the outage term after the first write.
 
         Pre-fix, _get_sdk() built a FRESH SDK per command; with #1475's
         close-on-GC finalizer the collected SDK could shut the shared
@@ -577,7 +715,7 @@ class TestGracefulDegradation:
         constructed a new SDK, so `_get_sdk() is first` fails; post-fix one
         cached SDK serves the whole session. The behavioral asserts are a
         healthy-session smoke check (all four commands must succeed — never
-        tortoise_unavailable); gc.collect() between commands ensures no
+        degraded); gc.collect() between commands ensures no
         leaked per-command SDK accumulates across the session.
         """
         _fresh_sdk()
@@ -588,32 +726,58 @@ class TestGracefulDegradation:
             tortoise_client.main()
             return json.loads(capsys.readouterr().out)
 
-        payload = run([
-            "tortoise_client.py", "write-points", "--kind", "strategy",
-            "--points-json", '[{"content": "session cmd 1"}]',
-        ])
+        payload = run(
+            [
+                "tortoise_client.py",
+                "write-points",
+                "--kind",
+                "strategy",
+                "--points-json",
+                '[{"content": "session cmd 1"}]',
+            ]
+        )
         assert payload["written"] == 1
-        assert "tortoise_unavailable" not in json.dumps(payload)
+        assert "degraded" not in json.dumps(payload)
 
-        payload = run([
-            "tortoise_client.py", "write-points", "--kind", "strategy",
-            "--points-json", "[]",
-        ])
+        payload = run(
+            [
+                "tortoise_client.py",
+                "write-points",
+                "--kind",
+                "strategy",
+                "--points-json",
+                "[]",
+            ]
+        )
         assert payload["written"] == 0
         assert payload["results"] == []
 
-        payload = run([
-            "tortoise_client.py", "write-points", "--kind", "vision",
-            "--points-json", '[{"content": "session cmd 3"}]',
-        ])
+        payload = run(
+            [
+                "tortoise_client.py",
+                "write-points",
+                "--kind",
+                "vision",
+                "--points-json",
+                '[{"content": "session cmd 3"}]',
+            ]
+        )
         assert payload["written"] == 1
         assert payload["results"][0]["pointKind"] == "vision"
 
-        payload = run([
-            "tortoise_client.py", "write-claim", "--content", "session claim",
-            "--kind", "hypothesis", "--confidence", "0.0",
-        ])
-        # Pre-fix this could be {"error": "tortoise_unavailable", ...} → KeyError.
+        payload = run(
+            [
+                "tortoise_client.py",
+                "write-claim",
+                "--content",
+                "session claim",
+                "--kind",
+                "hypothesis",
+                "--confidence",
+                "0.0",
+            ]
+        )
+        # Pre-fix this could be {"error": "degraded", ...} → KeyError.
         assert payload["confidence"] == 0.0
 
         # Structural pin: the whole session reused ONE cached SDK.
@@ -700,17 +864,22 @@ class TestGracefulDegradation:
         differing outcomes."""
         _fresh_sdk()
         tortoise_client.write_strategy_points(
-            [{"content": "Vision A", "authoredBy": "t"},
-             {"content": "Vision B", "authoredBy": "t"}],
+            [
+                {"content": "Vision A", "authoredBy": "t"},
+                {"content": "Vision B", "authoredBy": "t"},
+            ],
             kind="vision",
         )
         tortoise_client.write_strategy_points(
-            [{"content": "Strategy S", "authoredBy": "t"}], kind="strategy")
+            [{"content": "Strategy S", "authoredBy": "t"}], kind="strategy"
+        )
         tortoise_client.write_strategy_points(
-            [{"content": "Statement T", "authoredBy": "t"}], kind="statement")
+            [{"content": "Statement T", "authoredBy": "t"}], kind="statement"
+        )
 
-        monkeypatch.setattr(sys, "argv", [
-            "tortoise_client.py", "query-visions", "--point-kind", "strategy"])
+        monkeypatch.setattr(
+            sys, "argv", ["tortoise_client.py", "query-visions", "--point-kind", "strategy"]
+        )
         tortoise_client.main()
         filtered = json.loads(capsys.readouterr().out)
         assert filtered["count"] == 1
@@ -723,8 +892,9 @@ class TestGracefulDegradation:
         assert all(p["pointKind"] == "vision" for p in default["results"])
 
         # Contrast: a hardcoded "vision" kind would return 2 here.
-        monkeypatch.setattr(sys, "argv", [
-            "tortoise_client.py", "query-prior-research", "--domain", "statement"])
+        monkeypatch.setattr(
+            sys, "argv", ["tortoise_client.py", "query-prior-research", "--domain", "statement"]
+        )
         tortoise_client.main()
         prior = json.loads(capsys.readouterr().out)
         assert prior["count"] == 1
@@ -742,11 +912,14 @@ class TestGracefulDegradation:
         assert status["available"] is True
         assert status["db_uri"] == os.environ["TORTOISE_DB_PATH"]
 
-    @pytest.mark.parametrize("argv,code", [
-        (["tortoise_client.py"], 1),  # no command → help + exit 1
-        (["tortoise_client.py", "bogus-cmd"], 2),  # argparse unknown
-        (["tortoise_client.py", "query-prior-research"], 2),  # missing --domain
-    ])
+    @pytest.mark.parametrize(
+        "argv,code",
+        [
+            (["tortoise_client.py"], 1),  # no command → help + exit 1
+            (["tortoise_client.py", "bogus-cmd"], 2),  # argparse unknown
+            (["tortoise_client.py", "query-prior-research"], 2),  # missing --domain
+        ],
+    )
     def test_cli_terminal_paths(self, argv, code, capsys, monkeypatch):
         """main()'s argparse-native terminal paths: no command → help +
         exit 1; unknown subcommand / missing required --domain →
@@ -767,22 +940,38 @@ class TestGracefulDegradation:
         """Unrelated loud-error path preserved: invalid --points-json still
         exits 1 with a JSON error (not swallowed by degradation)."""
         self._clear_db_env()
-        monkeypatch.setattr(sys, "argv", [
-            "tortoise_client.py", "write-points", "--kind", "strategy",
-            "--points-json", "{not json",
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "tortoise_client.py",
+                "write-points",
+                "--kind",
+                "strategy",
+                "--points-json",
+                "{not json",
+            ],
+        )
         with pytest.raises(SystemExit) as excinfo:
             tortoise_client.main()
         assert excinfo.value.code == 1
         err = json.loads(capsys.readouterr().err)
         assert err["error"] == "invalid-json"
 
-    @pytest.mark.parametrize("argv", [
-        ["tortoise_client.py", "write-points", "--kind", "strategy",
-         "--points-json", '[{"content": "x", "confidence": "high"}]'],
-        ["tortoise_client.py", "write-claim", "--content", "x",
-         "--confidence", "high"],
-    ])
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            [
+                "tortoise_client.py",
+                "write-points",
+                "--kind",
+                "strategy",
+                "--points-json",
+                '[{"content": "x", "confidence": "high"}]',
+            ],
+            ["tortoise_client.py", "write-claim", "--content", "x", "--confidence", "high"],
+        ],
+    )
     def test_cli_bad_input_emits_json_error(self, argv, capsys, monkeypatch):
         """CLI input errors (bad confidence) emit JSON + exit 1 — no raw
         traceback, consistent across both write subcommands (#343). Uses a
@@ -815,8 +1004,7 @@ class TestGracefulDegradation:
         adds coupling without signal)."""
         _fresh_sdk()
         with pytest.raises(ValueError):
-            tortoise_client.write_strategy_points(
-                [{"content": "x", "confidence": "high"}])
+            tortoise_client.write_strategy_points([{"content": "x", "confidence": "high"}])
         with pytest.raises(ValueError):
             tortoise_client.write_claim("x", kind="statement", confidence="high")
         with pytest.raises(KeyError):
@@ -829,11 +1017,12 @@ class TestGracefulDegradation:
         trigger: relative TORTOISE_DB_PATH makes the SDK unavailable."""
         self._clear_db_env()
         os.environ["TORTOISE_DB_PATH"] = "relative/tortoise.db"
-        assert tortoise_client.write_strategy_points(
-            [{"content": "x", "confidence": "high"}]) == []
-        assert tortoise_client.write_claim(
-            "x", kind="statement", confidence="high") == {
-            "error": "tortoise_unavailable", "id": "", "written": False}
+        assert tortoise_client.write_strategy_points([{"content": "x", "confidence": "high"}]) == []
+        assert tortoise_client.write_claim("x", kind="statement", confidence="high") == {
+            "error": "unconfigured",
+            "id": "",
+            "written": False,
+        }
 
     def test_non_locked_error_not_retried(self):
         """Only lock contention is retried: a non-locked error on the
@@ -868,8 +1057,7 @@ class TestGracefulDegradation:
                 {"id": "1", "pointKind": "strategy"},
                 redis_exc.ConnectionError("DB unreachable"),
             ]
-            assert tortoise_client.write_strategy_points(
-                [{"content": "a"}, {"content": "b"}]) == []
+            assert tortoise_client.write_strategy_points([{"content": "a"}, {"content": "b"}]) == []
 
     def test_locked_error_retried_then_succeeds(self):
         """Lock contention is transient: create_point raising a locked
@@ -894,7 +1082,8 @@ class TestGracefulDegradation:
         self._clear_db_env()
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk, patch("time.sleep"):
             mock_sdk.return_value.create_point.side_effect = sqlite3.OperationalError(
-                "database is locked")
+                "database is locked"
+            )
             assert tortoise_client.write_strategy_points([{"content": "a"}]) == []
 
     def test_status_healthy_reports_available(self):
@@ -930,7 +1119,8 @@ class TestGracefulDegradation:
         _fresh_sdk()
         assert tortoise_client.query_existing_visions() == []
         created = tortoise_client.write_strategy_points(
-            [{"content": "Vision control"}], kind="vision")
+            [{"content": "Vision control"}], kind="vision"
+        )
         assert len(created) == 1
         assert len(tortoise_client.query_existing_visions()) == 1
 

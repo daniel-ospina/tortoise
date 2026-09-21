@@ -55,13 +55,13 @@ TEST_TEAM = {
     "legacy_full_access": True,
     "tier": "free",
     "max_users": 1, "max_graphs": 1, "max_points": 10000,
-    "max_api_keys": 2, "max_sessions": 1000,
+    "max_api_keys": 2, "max_sessions": None,
 }
 TEST_TEAM_B = {"org_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
                # C5 #2114 (#2260): legacy tt_ class (see TEST_TEAM note).
                "legacy_full_access": True,
                "tier": "free", "max_users": 1, "max_graphs": 1,
-               "max_points": 10000, "max_api_keys": 2, "max_sessions": 1000}
+               "max_points": 10000, "max_api_keys": 2, "max_sessions": None}
 
 # The #1935 fixture shape: a declared object kind WITHOUT a kindDef (the
 # tenant-kind parity surface — FIX M declared-kind acceptance).

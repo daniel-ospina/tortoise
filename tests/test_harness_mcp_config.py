@@ -21,6 +21,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -147,6 +148,145 @@ class TestWizardCopyParity:
         assert "TORTOISE_API_KEY" in html
 
 
+class TestClaudeHookTimeouts:
+    """#3754: every shipped Claude Code capture snippet must pin a per-hook
+    `timeout`.
+
+    Claude Code cancels a SessionEnd hook at its **1.5 s default budget**; the
+    budget only rises to the highest per-hook `timeout` in the settings files,
+    **capped at 60 s**. `tortoise/claude-hooks/session-end.sh` measures 9.26 s
+    end-to-end on a real hosted run (CLI cold start ~1.2 s + `POST /v1/sessions`
+    ~4.4 s + the backgrounded index sweep), so the shipped seam — which
+    specified no `timeout` — was cancelled on a normal session and filed
+    nothing (debug log: `SessionEnd:other [...] cancelled`), silently, because
+    the hook is fail-open (`2>/dev/null || exit 0`).
+
+    That 60 s cap is the platform's only *documented* per-event ceiling, so the
+    guard's envelope is PER EVENT and each figure is labelled for what it is: 60 s
+    is SessionEnd's documented hard cap, while SessionStart is a command hook that
+    defaults to 600 s with no documented ceiling above it — the shipped 60 s
+    there is a PROJECT bound (~6× headroom over the digest path), not a
+    platform rule, so this guard must not reject a legitimate rise toward the
+    documented 600 s. The 9.26 s floor is a SessionEnd measurement, asserted
+    only where that measurement exists.
+
+    FOUR surfaces ship the same `settings.json` snippet, and a copy that loses
+    its `timeout` re-opens the bug on that surface alone:
+
+    1. `harnesses.js` `HARNESS_INSTALL.claude` — the full install copy
+    2. `harnesses.js` `HARNESS_CAPTURE_INSTALL.claude` — the Memory-sources step
+    3. `session-end.sh` header — the in-repo install comment
+    4. `session-start.sh` header — the in-repo install comment
+
+    Each is JSON-PARSED back out of the file rather than substring-matched (a
+    `"timeout": 60` sitting anywhere else in the file, or on the wrong event,
+    must not pass), and the per-surface event counts are pinned — a new copy
+    must be added here, not shipped unprotected.
+    """
+
+    HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
+    HOOKS = REPO_ROOT / "tortoise" / "claude-hooks"
+    # #3754: per-event envelope. SessionEnd 60 = documented hard cap (its hooks
+    # share a 1.5 s budget raised only to the highest per-hook `timeout`, "up to
+    # 60 seconds"). SessionStart 600 = the documented command-hook DEFAULT, and
+    # the bound this guard holds SessionStart to — the platform states no
+    # ceiling there, so claiming 60 for it was a false invariant.
+    MAX_TIMEOUT_S: ClassVar[dict[str, int]] = {"SessionEnd": 60, "SessionStart": 600}
+    # #3754: what each figure above IS, quoted into the failure message — a
+    # documented DEFAULT must never be reported as a ceiling (the exact
+    # overclaim this guard was corrected for).
+    ENVELOPE_KIND: ClassVar[dict[str, str]] = {
+        "SessionEnd": "the documented shared-budget cap",
+        "SessionStart": "the documented command-hook default",
+    }
+    # #3754: floors are MEASUREMENTS, and only SessionEnd has one (a real hosted
+    # run with the seam-literal settings). SessionStart carries the guard's upper
+    # bound only, rather than inheriting a session-END figure it never produced.
+    MEASURED_S: ClassVar[dict[str, float]] = {"SessionEnd": 9.26}
+    # surface → {event: number of snippets carrying that event}
+    SURFACES: ClassVar[dict[str, dict[str, int]]] = {
+        "harnesses.js": {"SessionStart": 2, "SessionEnd": 2},
+        "session-end.sh": {"SessionEnd": 1},
+        "session-start.sh": {"SessionStart": 1},
+    }
+
+    @staticmethod
+    def _snippets(text: str) -> list[dict]:
+        """Every `{ "hooks": ... }` object literal in `text`, JSON-parsed.
+
+        Brace-balanced so the multi-line literals in the shell-script headers
+        parse too; the `#` comment markers carry no JSON meaning and are
+        stripped from the span.
+        """
+        docs = []
+        for m in re.finditer(r'\{\s*"hooks"\s*:', text):
+            depth = 0
+            for j in range(m.start(), len(text)):
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            else:  # pragma: no cover - malformed source, not a test condition
+                raise AssertionError('unbalanced { "hooks": ... } literal')
+            docs.append(json.loads(text[m.start() : j + 1].replace("#", "")))
+        return docs
+
+    def _walk(self):
+        """`(surface, event, inner-hook-entry)` for every shipped snippet."""
+        texts = {"harnesses.js": self.HARNESSES.read_text(encoding="utf-8")}
+        for script in ("session-end.sh", "session-start.sh"):
+            texts[script] = (self.HOOKS / script).read_text(encoding="utf-8")
+        for name, text in texts.items():
+            for doc in self._snippets(text):
+                for event, groups in doc["hooks"].items():
+                    for group in groups:
+                        for entry in group["hooks"]:
+                            yield name, event, entry
+
+    def test_every_shipped_snippet_pins_a_hook_timeout(self):
+        assert set(self.MAX_TIMEOUT_S) == set(self.ENVELOPE_KIND), (
+            "MAX_TIMEOUT_S and ENVELOPE_KIND must list the same events: "
+            f"{sorted(self.MAX_TIMEOUT_S)} != {sorted(self.ENVELOPE_KIND)}"
+        )
+        for name, event, entry in self._walk():
+            timeout = entry.get("timeout")
+            assert isinstance(timeout, int) and not isinstance(timeout, bool), (
+                f"#3754: {name} ships a {event} hook entry with no integer "
+                f'"timeout" ({entry!r}) — Claude Code cancels SessionEnd at its '
+                f"1.5s default, so the session is silently never filed"
+            )
+            bound = self.MAX_TIMEOUT_S.get(event)
+            assert bound is not None, (
+                f"#3754: {name} ships a {event} hook entry and no documented "
+                f"timeout envelope is recorded for that event — add its "
+                f"platform figure to MAX_TIMEOUT_S before shipping the snippet"
+            )
+            assert timeout <= bound, (
+                f"#3754: {name} {event} timeout={timeout}s is above this "
+                f"guard's {event} bound ({bound}s — {self.ENVELOPE_KIND[event]})"
+            )
+            measured = self.MEASURED_S.get(event)
+            assert measured is None or measured < timeout, (
+                f"#3754: {name} {event} timeout={timeout}s does not clear the "
+                f"{measured}s measured {event} run — the hook would be "
+                f"cancelled mid-flight"
+            )
+
+    def test_snippet_surfaces_are_fully_pinned(self):
+        # An added or removed copy of the snippet must land here: an
+        # unprotected surface is exactly how this bug shipped (#3754).
+        counts: dict[str, dict[str, int]] = {}
+        for name, event, _ in self._walk():
+            counts.setdefault(name, {})
+            counts[name][event] = counts[name].get(event, 0) + 1
+        assert counts == self.SURFACES, (
+            f"the shipped settings.json snippet surfaces changed: {counts} != "
+            f"{self.SURFACES} — pin the new copy's hook timeout here"
+        )
+
+
 class TestSelfHostedStdioShapes:
     """`_harness_stdio_config` — self-hosted onboarding (stdio)."""
 
@@ -227,6 +367,134 @@ class TestPrintHarnessInstructions:
                     end = i
                     break
             json.loads("\n".join(lines[start : end + 1]))
+
+
+class TestCaptureInstallSeam:
+    """#3575: the capture-INSTALL seam.
+
+    ``HARNESS_CAPTURE_SUPPORT[h] === true`` is a capability claim, and it is
+    only honest when the product actually INSTALLS a capture step. This pins
+    the three legs the claim requires: (a) HARNESS_CAPTURE_SEAM names an
+    in-repo artifact, (b) that artifact is committed, and (c)
+    HARNESS_INSTALL[h] installs it. The #3575 defect was `pi: true` with no
+    (a)/(b)/(c) — a false PASS the user could not falsify.
+    """
+
+    HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
+
+    @classmethod
+    def _src(cls) -> str:
+        return cls.HARNESSES.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _object(src: str, name: str) -> str:
+        """Brace-balanced JS object literal for a harnesses.js const."""
+        idx = src.index(f"export const {name} =")
+        open_brace = src.index("{", idx)
+        depth = 0
+        for j in range(open_brace, len(src)):
+            if src[j] == "{":
+                depth += 1
+            elif src[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[open_brace : j + 1]
+        raise AssertionError(f"unbalanced object literal for {name}")
+
+    def _seam(self) -> dict[str, str]:
+        block = self._object(self._src(), "HARNESS_CAPTURE_SEAM")
+        return dict(re.findall(r"(\w+):\s*'([^']+)'", block))
+
+    @staticmethod
+    def _install_body(install: str, harness: str) -> str:
+        """Slice one harness's arrow-function body out of HARNESS_INSTALL."""
+        m = re.search(rf"\n\s+'?{re.escape(harness)}'?:\s*\((?:key)?\)", install)
+        assert m, f"HARNESS_INSTALL.{harness} not found"
+        tail = install[m.end() :]
+        nxt = re.search(r"\n\s+'?[a-zA-Z][\w-]*'?:\s*\((?:key)?\)", tail)
+        return tail[: nxt.start()] if nxt else tail
+
+    @staticmethod
+    def _constant_text(src: str, name: str) -> str:
+        """Body of an `export const NAME = ...` JS template literal ('' if the
+        constant is not a template literal — e.g. a plain string URL)."""
+        marker = f"export const {name} = `"
+        if marker not in src:
+            return ""
+        start = src.index(marker) + len(marker)
+        return src[start : src.index("`", start)]
+
+    def _expanded_install_body(self, install: str, harness: str) -> str:
+        """The harness's install body with any `${CONST}` it interpolates
+        expanded to that constant's text — so the artifact can live in a
+        shared constant (PI_CAPTURE_INSTALL) and still be pinned here."""
+        body = self._install_body(install, harness)
+        for const in re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", body):
+            body += "\n" + self._constant_text(self._src(), const)
+        return body
+
+    def test_pi_install_step_delivers_the_in_repo_capture_extension(self):
+        """#3575 bite: remove the capture step from HARNESS_INSTALL.pi (or the
+        artifact it copies) and this test fails."""
+        install = self._object(self._src(), "HARNESS_INSTALL")
+        pi_install = self._expanded_install_body(install, "pi")
+        assert "tortoise/pi-hooks/tortoise-capture.ts" in pi_install, (
+            "HARNESS_INSTALL.pi no longer installs the in-repo Pi capture extension"
+        )
+        assert ".pi/agent/extensions" in pi_install, (
+            "HARNESS_INSTALL.pi no longer installs the extension into Pi's discovery dir"
+        )
+        artifact = REPO_ROOT / "tortoise" / "pi-hooks" / "tortoise-capture.ts"
+        assert artifact.is_file(), f"seam artifact missing: {artifact}"
+
+    def test_capture_support_is_derived_from_the_seam_not_asserted(self):
+        """The #3575 defect was a hand-written `pi: true`. The supported
+        harnesses must be DERIVED from HARNESS_CAPTURE_SEAM."""
+        block = self._object(self._src(), "HARNESS_CAPTURE_SUPPORT")
+        for harness in ("claude", "pi"):
+            assert re.search(
+                rf"{harness}:\s*CAPTURE_SEAM_HARNESSES\.has\('{harness}'\)", block
+            ), f"HARNESS_CAPTURE_SUPPORT.{harness} must be derived, not asserted"
+        # any literal `true` must also be a declared seam
+        literal_true = set(re.findall(r"(\w[\w-]*):\s*true\b", block))
+        assert literal_true <= set(self._seam())
+
+    def _capture_install_body(self, harness: str) -> str:
+        """The harness's entry in HARNESS_CAPTURE_INSTALL, with a shared
+        constant (PI/CODEX/CURSOR_CAPTURE_INSTALL) expanded.  A harness whose
+        MCP copy is a JSON file (Cursor) carries its capture step here rather
+        than in HARNESS_INSTALL."""
+        block = self._object(self._src(), "HARNESS_CAPTURE_INSTALL")
+        m = re.search(
+            rf"\n\s*'?{re.escape(harness)}'?:\s*([A-Za-z_][A-Za-z0-9_]*)", block)
+        if not m:
+            return ""
+        name = m.group(1)
+        return self._constant_text(self._src(), name) or name
+
+    def test_every_seam_harness_is_committed_and_installed(self):
+        """The seam map is the general contract the other harnesses can be
+        checked against: declared ⟺ committed ⟺ installed.
+
+        The install step may live in the MCP-setup copy (Pi/Codex embed it) or
+        in the capture-install surface (Cursor's copy is a JSON file).  Either
+        surface must name the declared artifact."""
+        src = self._src()
+        seam = self._seam()
+        assert seam.get("pi") == "tortoise/pi-hooks/tortoise-capture.ts"
+        assert seam.get("claude") == "tortoise/claude-hooks/session-end.sh"
+        assert seam.get("cursor") == "tortoise/cursor-hooks/session-end.sh"
+        install = self._object(src, "HARNESS_INSTALL")
+        for harness, artifact in seam.items():
+            assert (REPO_ROOT / artifact).is_file(), (
+                f"HARNESS_CAPTURE_SEAM.{harness} names a missing artifact: {artifact}"
+            )
+            body = (self._expanded_install_body(install, harness)
+                    + "\n" + self._capture_install_body(harness))
+            assert artifact in body, (
+                f"HARNESS_INSTALL/{harness} capture-install surface does not "
+                f"install its declared seam {artifact}"
+            )
 
 
 class TestCommittedRepoMcpJson:

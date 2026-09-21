@@ -5,6 +5,7 @@ migrated in #398; the stale live-FalkorDB skip probe was removed as part of
 #344 so the fail-closed default-flip tests actually execute.
 """
 import os  # noqa: I001
+import shutil
 
 import pytest
 from tortoise.sdk import TortoiseSDK
@@ -25,6 +26,7 @@ def sdk():
     s = TortoiseSDK(db_path)
     yield s
     s.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 # ── Pipeline E2E ────────────────────────────────────────────────

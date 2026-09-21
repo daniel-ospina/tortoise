@@ -1,3 +1,14 @@
+---
+title: "Tortoise License Notes (#338 D3)"
+type: decisions
+domain: legal
+doc_status: draft
+created: 2026-08-07
+ownedBy: epistemic-team
+aboutSubjects: tortoise
+aboutObjects: tortoise-graph, tortoise-client, tortoise-skills-and-integrations
+---
+
 # Tortoise License Notes (#338 D3)
 
 **Date:** 2026-08-07
@@ -102,11 +113,11 @@ The #526 package split ships the engine as a server-only distribution
   and relicense the driver with no file-level copyleft obligations — the
   right shape for a thin network driver whose only job is to connect.
   MPL-2.0 (HashiCorp's SDK precedent) would impose file-level copyleft on a
-  ~3-module package with no offsetting benefit for the consumer.
+  ~4-module package with no offsetting benefit for the consumer.
 - **Boundary is physical, not behavioral:** the client dist contains ONLY
-  the client modules (mcp_client, config, exceptions) re-licensed under
-  Apache-2.0; engine code (sdk, projection, EP) never ships in the client
-  wheel. A client-only install cannot contain BSL code.
+  the client modules (mcp_client, config, exceptions, status_vocabulary)
+  re-licensed under Apache-2.0; engine code (sdk, projection, EP) never ships
+  in the client wheel. A client-only install cannot contain BSL code.
 - **Backstop:** `validation/check-license-surface.py` now asserts the client
   surfaces (client/LICENSE, client/pyproject.toml, client/README.md) declare
   Apache-2.0, and `client/verify_client.sh` (CI) proves no engine module or
@@ -114,3 +125,136 @@ The #526 package split ships the engine as a server-only distribution
 
 Pending legal sign-off on the Apache-2.0 choice (issue #526 Q1) — owner
 pick, documented here for review.
+
+---
+
+## 7. Consumer Skills Surface — MIT at the skills root (#4366, 2026-09-20)
+
+**OVERRIDES:** the repo-default inheritance of BSL 1.1 over every file that
+has no licence of its own — the artifacts a customer copies/adapts are MIT by
+owner decision, so the boundary sits at the **network** (§1) and never at an
+individual file.
+
+The skills the dashboard **serves** at `app.premiselabs.co/skills/**` are the
+same class of artifact as the #526 client dist (the "Client/Server Split"
+section): the thing a third party
+vendors and adapts, not the engine. They carried **no licence of their own**,
+so they inherited the repo's BSL 1.1 by default — which puts the BSL boundary
+at the *file* instead of at the *network*, the exact outcome §1 exists to
+avoid. Owner decision: *"For integrations and skills/workflows with tortoise we
+want that MIT licensed."*
+
+**Mechanism — a per-directory `LICENSE` at the skills root**, following #526's
+`client/LICENSE` pattern:
+
+| Path | Licence |
+|---|---|
+| `website/apps/dashboard/public/skills/LICENSE` | MIT (© 2026 Premise Labs) |
+| everything under `website/apps/dashboard/public/skills/` | covered by that file |
+
+**Why not a header on each file?** The served skills are *mirrored* content
+(the intended source of truth is the public MIT repo
+`daniel-ospina/tortoise-skills-and-integrations`, which itself carries one root
+`LICENSE` and no per-file notices). A per-file notice added here would make the
+tortoise copy diverge from the copy it mirrors — the same drift the one-source
+shape exists to prevent — and `tortoise-onboarding/SKILL.md` is byte-identical
+-by-test to `tortoise/onboarding/SKILL.md`, so touching it would force a
+licence notice into the product tree as well. The `LICENSE` file is emitted to
+`dist/` by the vite build exactly as the note in `public/_headers` describes,
+so it is served at `https://app.premiselabs.co/skills/LICENSE`.
+
+**Residual — the notice does not travel inside an installed copy (unfixed).**
+`install-tortoise-skills.sh` fetches only `$SKILLS_BASE/<name>/SKILL.md`; it
+never fetches `LICENSE`. A customer who runs the installer gets four skills
+with no licence notice on disk, so MIT's "included in all copies" condition is
+met for the *served tree* the directory licence covers, but not for the
+installed copy — the artifact most consumers actually receive. Closing that
+needs an owner decision (the installer file itself is reserved for #4327), and
+the options are: have the installer also fetch `LICENSE` into the harness dir;
+add the notice once **upstream** in the MIT repo's per-file content; inject the
+notice into the **served output only** (a build-time rewrite of
+`dist/skills/*/SKILL.md`, which leaves the in-tree bytes — and so the
+onboarding byte-identity contract — untouched and reaches every installed copy,
+including `tortoise-onboarding`, which has no upstream counterpart); or keep
+the installer as the notice-bearing channel. Tracked by a dedicated follow-up
+issue, not absorbed here; the first upstream-side move is the notice in the MIT
+repo, because a per-file notice added *here* would diverge this tree from the
+tree it mirrors.
+
+**How the mechanism is checked (and its limits).** Equality with the MIT repo
+is asserted on three declarations only — `MIT License`,
+`Copyright (c) 2026 Premise Labs`, `Permission is hereby granted, free of
+charge` — and the check **never fetches upstream**, so drift *relative to the
+MIT repo* is silent: a rewritten body passes as long as those three markers
+survive. The BSL scan has two marker classes, because a licence *declaration*
+and a prose *mention* look different and only one of them is a regression:
+
+- a **`BUSL` token** (with or without `-1.1`, case-insensitive) or the
+  versioned short form **`BSL 1.1`** — including the `BSL-1.1` / `BSL v1.1`
+  spellings vendored notices and `mariadb.com/bsl11` use — counts **anywhere**,
+  prose included: an artifact that names BSL anywhere is claiming it. The
+  *unversioned* acronym `BSL` is deliberately not a token: the served
+  `how-to-use-tortoise` skill writes `BSL` in prose, and the version is what
+  separates a claim from a mention.
+- the **canonical name** (`business source license [1.1]`) counts in a file's
+  first 20 lines (frontmatter + header comment, where a licence header lives)
+  **or anywhere** in a licence/notice file. A file is a licence/notice file
+  when its NAME carries a licence/notice token followed by a non-alphanumeric
+  or the end: `LICENSE`, `LICENSE.md`, `LICENSE-BSL`, `LICENSE 2.txt`,
+  `LICENSE (copy).txt`, `license copy.txt`, `third_party_licenses.txt`,
+  `THIRD-PARTY-NOTICES.txt`, `MIT.license`, `COPYING.LESSER`, `COPYRIGHT`,
+  `NOTICES.txt`, or any file under `LICENSES/`/`LICENCES/`/`NOTICES/`. A name
+  whose token continues as a word (`licensee-notes.md`, `licensing-notes.md`)
+  is prose about licensing, not a licence, and is scanned in the window only.
+  The whole-file rule exists because the engine's own BSL text carries the name
+  at line 2 *and* line 28 and never carries the `BUSL` token, so a composite
+  file that keeps the MIT markers and appends the BSL terms would otherwise
+  pass — and a stray `Business *Source* License` or British `Licence` spelling
+  in prose is not a declared marker of ours.
+
+Symlinked directories **are** followed (a skill dir symlinked into the surface
+is still served by the Pages copy, so it is still asserted). Reads — and the
+summary stream — are UTF-8-pinned, so a C/POSIX locale can neither silently skip
+every non-ASCII file (all four served skills are heavily non-ASCII) nor turn a
+diagnosis into a traceback. **Reach limits, stated rather than implicit:** a canonical-name declaration
+buried past the first 20 lines of a file that is *not* named as a licence/notice
+file is out of reach (including a name with no separator at all, `LICENSEBSL`);
+and a file that is not valid UTF-8 carries no assertion (the licence file itself
+is reported as an explicit error in that case, not a traceback).
+
+**Backstop (enforced in CI):** `validation/check-license-surface.py` asserts
+(1) the per-directory licence exists and declares MIT, and (2) **no file under
+the surface declares BSL** — so a new file dropped into `public/skills/` cannot
+silently re-import the engine licence. The `license-surface` job is a REQUIRED
+branch-protection check with no path gate.
+
+**Deliberately not covered here — residuals, none of them silently absorbed:**
+
+- **`public/install-tortoise-skills.sh`** (the customer-run installer) still
+  inherits BSL, and the `SKILL.md` copies it installs still carry no MIT
+  notice: the authorised route for the file is *sourcing* it from the MIT repo
+  (issue #4366 step 1), a generated-artifact question gated on the #3324
+  reopen. Filed as **#4398** with the four closure options and the durable
+  post-deploy probe. The owner's other installer research question — an
+  arrangement that is both MIT-licensed and single-source with no stale copy —
+  is answered in the same issue's shape, **no deploy change is made here**.
+- **Assumption 11 ("what should an installer do when it finds a same-named
+  artifact it did not create?") is answered, and not here.** The owner moved it
+  into #4366 as a research task; the `fix/4327-installer-overwrite` lane has
+  since researched and implemented it — back up once, then merge, preserving
+  foreign frontmatter keys and foreign banner/trailer seam blocks (its staged
+  diff + `tests/test_installer_preserves_foreign_skill_content.py` record the
+  owner ruling). This licence change does not re-open it.
+- **`public/skills/tortoise-onboarding/SKILL.md`** is covered by the MIT
+directory licence above, while its source of truth
+  (`tortoise/onboarding/SKILL.md`) stays product-BSL. Owner flagged this as the
+  one artifact that is "arguably product rather than integration" (#4366
+  step 5) and it depends on the #1998 implementation issue, so the directory
+  licence is a **forward declaration over that artifact**, not a settled
+  conclusion: if the owner rules it product, this licence needs an explicit
+  carve-out rather than a silent one.
+- **`website/license.html`** (served at `/license`, linked from every footer)
+  still says only "Tortoise is licensed under the Business Source License 1.1"
+  and does not mention the permissive surfaces (client Apache-2.0, skills MIT).
+  A pre-existing fourth disagreeing surface, unaffected and unfixed here;
+  filed as **#4399**.

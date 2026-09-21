@@ -9,9 +9,48 @@ ghost class #2490 eliminates).
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
+# #2795: cycle-free helper (tortoise/ids.py is stdlib-only). sdk.py imports
+# projection at module top, so the sdk-private `_content_hash` is NOT
+# importable here.
+from tortoise.ids import content_hash as _content_hash
 from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+
+logger = logging.getLogger(__name__)
+
+# #2894: FalkorDB stores scalars and arbitrarily NESTED arrays of scalars (a
+# tuple is encoded as an array); a map/dict-valued property — including an
+# array that contains one at any depth — raises on `SET n += $extra`.
+# Verified empirically against the docker lane (#2958 review): `[[1, 2], [3, 4]]`,
+# `[[[['deep']]]]` and `(1, 2)` are accepted and stored, while `{'k': 1}`,
+# `[1, {'a': 1}]`, bytes and sets are rejected. Shared predicate used by every
+# `_persist_extra_props` layer (Subject/Object/Document/Event/Source) and by
+# the Point open-set writer (#2795).
+_PERSISTABLE_SCALAR_TYPES: tuple = (str, bool, int, float)
+# Depth cap for the recursive array check — a self-referential structure must
+# not recurse without bound (a JSON payload cannot contain one, but the props
+# passthrough accepts a plain Python object).
+_PERSISTABLE_MAX_DEPTH: int = 32
+
+
+def _is_persistable_prop_value(value, _depth: int = 0) -> bool:
+    """True for values FalkorDB accepts as node properties (#2894, #2795).
+
+    Scalars and arbitrarily nested arrays of scalars (lists AND tuples) are
+    stored. Maps/dicts — including any array that contains one, at any depth —
+    and bytes/sets are rejected by the engine, so they are filtered before
+    the SET rather than crashing it. `bool` is a subclass of `int`, so it is
+    covered by `_PERSISTABLE_SCALAR_TYPES`.
+    """
+    if isinstance(value, _PERSISTABLE_SCALAR_TYPES):
+        return True
+    if _depth >= _PERSISTABLE_MAX_DEPTH:
+        return False
+    if isinstance(value, (list, tuple)):
+        return all(_is_persistable_prop_value(x, _depth + 1) for x in value)
+    return False
 
 
 def _now_iso() -> str:
@@ -52,6 +91,23 @@ def _build_search_text(title, summary=None, topics=None) -> str:
     return " ".join(filter(None, parts))
 
 
+def _seq_events(events):
+    """Yield ``(journal_seq, record)`` for a deferred-fold batch (#3722 P2).
+
+    ``rebuild_all``/``rebuild``/``recover_from_log`` buffer the deferred
+    records as ``(seq, record)`` pairs so the hard-delete staleness rule can
+    compare against the faithful journal order; a bare record is also
+    accepted (its list index is the seq), so a caller holding no envelope
+    still works and an older call site does not have to change shape.
+    """
+    for idx, item in enumerate(events):
+        if (isinstance(item, tuple) and len(item) == 2
+                and isinstance(item[1], dict)):
+            yield item[0], item[1]
+        else:
+            yield idx, item
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
@@ -69,6 +125,20 @@ class _EntityHandlers:
         "aboutEvent",        # handled as aboutEvent edge
         "aboutPoint",        # handled as aboutPoint edge
         "aboutDocument",     # handled as aboutDocument edge
+        # #3947 review (security): the capture turn loop's session-container
+        # link. A structural EDGE carrier exactly like the `about*` keys above
+        # — never a node property. The replay reads it from the RAW envelope
+        # before `_norm` (`{**ev, **ev["point"]}`) can splice the payload over
+        # it, so a point key of the same name cannot shadow (or forge) it; this
+        # entry makes `_persist_extra_props` drop an IN-PAYLOAD forgery (its
+        # `skip` set is `_META_KEYS | handled_keys`), which is the only way the
+        # key can reach a node at all — the envelope half never enters the
+        # payload dict the extra-props walk reads. It sits here rather than in
+        # `_POINT_DENY` because that list is for payload keys the replay
+        # DELIBERATELY drops, and a forgery is not a policy-drop; the boundary
+        # rejects in `sdk._sanitize_props` / mcp `_SERVER_MANAGED_PROPS` are
+        # where a tenant is told no.
+        "contains_session",
         # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
         # on api._emit) + corrects — structural, never node properties. One
@@ -128,9 +198,81 @@ class _EntityHandlers:
         "source_path",
         "_searchText",
     })
+    # #2795 (D2): every key owned by the fixed SET clauses of
+    # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
+    # keys). The open-set passthrough skips these so the declared writers keep
+    # precedence — `updatedAt`/`embedding` must never be reloaded from a
+    # payload. `content_hash` is NOT here: it is recomputed (see _POINT_DENY).
+    _POINT_HANDLED: frozenset = frozenset({
+        "id",  # MERGE key (n:Point {id:$id}) — not a SET clause
+        "content", "is_operator", "op_type", "pointKind", "status",
+        "authoredBy", "confidence", "createdAt", "created_at",
+        "validFrom", "validTo", "updatedAt", "embedding",
+        # A10 operator-scoped replay extension
+        "direction", "label",
+        # structural / edge-carried — never node props via passthrough
+        "operator", "provenance", "about_entities", "aboutEntities",
+        "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        # #2958 review: written by its own explicit clause in
+        # `_upsert_point_props` (`SET n.provenanceSource=$sid`), gated on
+        # provenance.source_id — the open passthrough must not supply it when
+        # that gate is closed.
+        "provenanceSource",
+        # Phase 2 #49: context was removed and is never written as a node
+        # prop — the old closed writer enforced this by omission; the open
+        # passthrough must keep it dropped.
+        "context", "new_context",
+    })
+    # #2795 (D2): recompute / non-persistable deny-list — the passthrough must
+    # never copy these from a payload. `embedding`/`content_hash`/`updatedAt`
+    # are recomputed by `_upsert_point_props`; `_nid`/`_graph_id` are replay
+    # bookkeeping. EP-owned props are denied because they are written only by
+    # ep.py/dream.py — an open-set passthrough would let a caller-supplied
+    # `posterior_alpha` overwrite EP state (D1 `payload_writable=False`).
+    # `reason` is deny-listed per D4. All of these were dropped by the old
+    # closed writer, so denying them preserves existing behaviour.
+    _POINT_DENY: frozenset = frozenset({
+        "embedding", "content_hash", "updatedAt", "_nid", "_graph_id",
+        "reason",
+        "c_cal", "posterior_alpha", "posterior_beta",
+        "ep_alpha", "ep_beta", "baseline_set", "baseline_source",
+        "inherited_at", "lastDreamedAt", "expiredAt", "outdated",
+    })
+    # #2795 (D2): D1's declared payload/capture props (contract.py has not
+    # landed yet) — known passthrough keys that must NOT trip the drift
+    # warning. NOTE (#2958 review): a LIST-valued entry here is INERT for that
+    # warning — the list policy in `_persist_extra_props` filters lists out
+    # BEFORE they can reach the extras dict the drift warning inspects, so such
+    # an entry is documentation-only until `_POINT_LIST_PROPS` is populated
+    # from D1's contract.py. `tags` is exactly that case: it is DENIED on
+    # replay (its raw-list half-restore is refused — #2897) and the drop is
+    # reported by the undeclared-list warning below, NOT suppressed here.
+    _POINT_DECLARED_PROPS: frozenset = frozenset({
+        "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
+        # #3689 review P2 (A): the four canonical annotator dims are legitimately
+        # carried on a PointAdded snapshot by `create_point(annotator_*=…)` /
+        # `_update_entity` — declaring them keeps the replay open-set
+        # passthrough from logging a FALSE `"Point prop %r is not declared"`
+        # drift warning on every rebuild.
+        "annotator_bias", "annotator_precision",
+        "annotator_consistency", "annotator_directness",
+    })
+    # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
+    # key is declared here. Arrays are not fulltext-indexed and the canonical
+    # form is the declared `flatten=list` STRING (`search_keys` -> space-joined
+    # by `_flatten_search_keys_prop`); `tags` is owned by its own `_sync_tags`
+    # path and its TAGGED-edge replay is out of scope (#2897), so a raw-list
+    # half-restore is refused. NOTE the live/rebuild boundary this creates:
+    # `sdk.create_point` still writes raw lists directly (`SET n += $props`),
+    # so a live `n.tags` exists while replay drops it — the pre-existing #2897
+    # gap (the drop is now REPORTED, not silent). Empty pre-D1: no list prop
+    # passes through the generic Point filter today. Replaced by contract.py's
+    # declared set in D1.
+    _POINT_LIST_PROPS: frozenset = frozenset()
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
-                              ev: dict, handled_keys: frozenset) -> None:
+                              ev: dict, handled_keys: frozenset,
+                              list_props: frozenset | None = None) -> dict:
         """Persist arbitrary caller-supplied props not explicitly handled.
 
         Computes the set difference between event dict keys and the union of
@@ -139,21 +281,53 @@ class _EntityHandlers:
 
         None values are excluded — Cypher null semantics in SET maps are
         unreliable (coalesce-based updates use explicit per-field clauses).
+        #2894: non-persistable values (maps/dicts at ANY depth, bytes, sets)
+        are filtered by `_is_persistable_prop_value` — the engine rejects them
+        on a SET, so dropping is the only non-crashing option. Nested scalar
+        ARRAYS (lists/tuples) ARE accepted by the engine and pass the filter
+        (#2958 review — the earlier flat-list-only rule silently dropped them).
+        #2795 (D2 mechanic 1): when `list_props` is supplied, a flat LIST is
+        # persisted only when its key is declared there; an undeclared list is
+        # denied, never written raw. `None` keeps the pre-existing permissive
+        # behaviour for the non-Point layers.
+
+        Returns the dict of props actually persisted (empty when none) so the
+        caller can report unrecognised keys (#2795 drift warning).
         """
         skip = self._META_KEYS | handled_keys
-        extra = {k: v for k, v in ev.items() if k not in skip and v is not None}
+        extra = {}
+        for k, v in ev.items():
+            if k in skip or v is None or not _is_persistable_prop_value(v):
+                continue
+            # #2958 review: a TUPLE is persisted by the engine as an array
+            # exactly like a list, so the list policy must cover both —
+            # otherwise a tuple-valued key bypasses the undeclared-list denial.
+            if isinstance(v, (list, tuple)) and list_props is not None \
+                    and k not in list_props:
+                continue
+            extra[k] = v
         if extra:
             self.g.query(
                 match_clause + " SET n += $extra",
                 params={**match_params, "extra": extra},
             )
+        return extra
 
-    def _upsert_point_props(self, p: dict) -> None:
+    def _upsert_point_props(self, p: dict) -> tuple[bool, bool]:
         """Write all Point node properties (no edges).
 
         Single source of truth for Point property parity between apply() and
         rebuild_all() (#330): rebuild pass 1a calls this so a rebuilt graph can
         never drift from the incrementally-applied graph on node properties.
+
+        Returns ``(embedding_written, content_hash_written)`` — the two
+        CONDITIONAL derived writes. The fixed SET list writes them as
+        ``n.embedding = CASE WHEN $embedding IS NOT NULL … ELSE n.embedding
+        END`` and ``n.content_hash = coalesce($ch, …)``, and computes neither
+        for an operator, falsy content, an unavailable embedder, or a raising
+        ``_content_hash`` — so in those cases the existing value is PRESERVED.
+        #4042's pass-1b content boundary needs that outcome exactly, never a
+        ``bool(content)`` guess. Every other caller ignores the return.
         """
         op = p.get("operator")
         if not isinstance(op, dict):
@@ -173,10 +347,31 @@ class _EntityHandlers:
         # produced a junk vector in the HNSW index.
         if not op and p.get("content"):
             try:
-                from tortoise.embeddings import compute_embedding
-                embedding = compute_embedding(p.get("content", ""))
+                from tortoise.embeddings import encode_for_store
+                embedding = encode_for_store(
+                    p.get("content", ""), self.required_embedding_dim)
             except Exception:
                 pass
+
+        # #2795 (D2): content_hash is DERIVED, not payload — recompute it from
+        # the content being written (mirrors create_point's `_content_hash`,
+        # #80). The old closed writer never wrote it, so every replayed node
+        # had content_hash=NULL and the indexed dedup MATCH degraded. Operators
+        # store no content (#548) — the writer synthesizes a fallback for them,
+        # so a hash would match nothing (noise): skip, mirroring the embedding
+        # carve-out above.
+        point_content_hash = None
+        if not op and p.get("content"):
+            try:
+                point_content_hash = _content_hash(p["content"])
+            except Exception:
+                # #2958 review: truthiness is not a type check — a truthy
+                # non-str content (int/list/dict) from a malformed or
+                # hand-edited JSONL line would raise inside
+                # sha256(text.encode). Rebuild is the RECOVERY path: leave the
+                # hash unset (the coalesce preserves any existing value)
+                # rather than crash the whole pass.
+                point_content_hash = None
 
         # Build SET clauses + params; context is optional (Phase 1 stop-writes, #49)
         set_clauses = [
@@ -187,6 +382,7 @@ class _EntityHandlers:
             "n.status=coalesce($st, n.status, 'live')",
             "n.authoredBy=coalesce($ab, n.authoredBy)",
             "n.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE n.embedding END",
+            "n.content_hash=coalesce($ch, n.content_hash)",
             "n.confidence=coalesce($cf, n.confidence)",
             "n.createdAt=coalesce($ca, n.createdAt, $now)",
             "n.validFrom=coalesce($vf, n.validFrom)",
@@ -200,6 +396,7 @@ class _EntityHandlers:
             "st": p.get("status"),
             "ab": p.get("authoredBy"),
             "embedding": embedding,
+            "ch": point_content_hash,
             "cf": p.get("confidence"),
             "ca": p.get("createdAt") or p.get("created_at"),
             "vf": p.get("validFrom"), "vt": p.get("validTo"),
@@ -221,6 +418,22 @@ class _EntityHandlers:
             if p.get("label") is not None:
                 set_clauses.append("n.label=$label")
                 params["label"] = p["label"]
+        # #3947: `is_episodic` is a SERVER-MANAGED node property — the
+        # points-quota discriminator (#1486, quota.py counts only
+        # `is_episodic IS NULL OR = false` Points). `create_point` writes it
+        # from its explicit kwarg on the LIVE path, but it sits in
+        # `_POINT_HANDLED`, so the open-set passthrough never carried it and
+        # every REPLAY silently dropped it: a rebuilt turn Point came back as
+        # a plain Point — counted against quota, invisible to the episodic
+        # reads. Live/replay parity gap, fixed here as an explicit clause
+        # gated on the payload's own value (the `provenanceSource` shape).
+        # The property stays unreachable from the generic passthrough, and
+        # the payload is a server-authored journal snapshot: a
+        # tenant-supplied `is_episodic` is rejected at the SDK
+        # (`_sanitize_props`) and MCP (`_SERVER_MANAGED_PROPS`) boundaries.
+        if p.get("is_episodic") is not None:
+            set_clauses.append("n.is_episodic=$episodic")
+            params["episodic"] = bool(p["is_episodic"])
         # Phase 2 #49: context removed — never written
         self.g.query(
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
@@ -246,13 +459,80 @@ class _EntityHandlers:
                 "MATCH (n:Point {id:$id}) SET n.provenanceSource=$sid",
                 params={"id": p["id"], "sid": prov["source_id"]},
             )
+        # #2795 (D2): open-set passthrough — parity with create_point's
+        # `SET n += $props` and with every other layer's _persist_extra_props.
+        # This is the shared live+replay writer, so door 3's live drop and
+        # rebuild's replay drop are fixed together. Handled + deny-listed keys
+        # are excluded (precedence: the fixed clauses above already wrote
+        # updatedAt/embedding/content_hash), and only persistable values
+        # survive the shared type filter (#2894).
+        extras = self._persist_extra_props(
+            "MATCH (n:Point {id:$id})", {"id": p["id"]}, p,
+            self._POINT_HANDLED | self._POINT_DENY,
+            list_props=self._POINT_LIST_PROPS,
+        )
+        for key in extras:
+            if key not in self._POINT_DECLARED_PROPS:
+                logger.warning(
+                    "Point prop %r is not declared — persisted via open-set "
+                    "passthrough (#2795); declare it in POINT_PROPS for parity",
+                    key)
+        # #2795 indicator 4 / D4: a prop that genuinely cannot be restored
+        # from the payload must be REPORTED, not dropped silently. The
+        # recompute keys (`embedding`/`updatedAt`/`_nid`/`_graph_id`) are
+        # fixed-clause/handled and excluded here to avoid noise; the genuinely
+        # payload-hostile set is `_POINT_DENY - _POINT_HANDLED`.
+        # #2958 review: warn ONCE per key per rebuild pass (the `_deny_drop_warned`
+        # set, reset by `rebuild_all`) — the #548 synthetic snapshot carries
+        # EP-owned state for every dreamed graph-only point, so a per-row
+        # warning emitted O(N) lines and buried genuine violations. On the live
+        # path the set persists for the process, which is the right cadence for
+        # a policy-level signal.
+        for key in self._POINT_DENY - self._POINT_HANDLED:
+            if p.get(key) is None:
+                continue
+            warned = getattr(self, "_deny_drop_warned", None)
+            if warned is None:
+                warned = self._deny_drop_warned = set()
+            if key in warned:
+                continue
+            warned.add(key)
+            logger.warning(
+                "Point prop %r dropped — deny-listed (recompute/EP-owned, "
+                "#2795); not restorable from the payload", key)
+        # (b) a policy-denied list is also reported: the live SDK writer
+        # still stores raw lists (e.g. `tags`), but replay refuses them, so the
+        # drop MUST be visible (#2795 indicator 4 / D7; `tags` -> #2897).
+        # #2958 review: tuples count as arrays here too (engine parity).
+        for key, val in p.items():
+            if not (isinstance(val, (list, tuple)) and val):
+                continue
+            if key in self._POINT_LIST_PROPS or key in self._POINT_HANDLED \
+                    or key in self._POINT_DENY or key in self._META_KEYS:
+                continue
+            logger.warning(
+                "Point list prop %r dropped — undeclared list props are never "
+                "written raw (#2795); not restorable from the payload", key)
+        # #4042: report which conditional derived writes actually landed (see
+        # the docstring). `embedding`/`point_content_hash` are exactly the
+        # values the `CASE`/`coalesce` clauses above gate on.
+        return embedding is not None, point_content_hash is not None
 
-    def _upsert_point_edges(self, p: dict) -> None:
-        """Wire all Point edges (provenance + about + operator).
+    def _upsert_point_edges(self, p: dict, contains_session: str | None = None) -> None:
+        """Wire all Point edges (provenance + about + operator + session).
 
         Single source of truth for Point edge parity between apply() and
         rebuild_all() pass 2 (#330) — same role as _upsert_point_props for
         node properties.
+
+        ``contains_session`` (#3947) is the CONTAINS-container link of an
+        episodic turn Point, and arrives on the EVENT envelope rather than in
+        the point payload: it is a capture-write structural fact, not a
+        Point property. The replay reads it from the **raw** envelope BEFORE
+        `_norm` (`{**ev, **ev["point"]}`) can splice the payload over it, so
+        a point key of the same name cannot shadow it; `_META_KEYS` is the
+        writer-side backstop that keeps the key out of the node, and the
+        SDK/MCP boundary rejects are the fail-closed backstop for tenants.
         """
         # Ontology v2.1: link Point → Source via extractedFrom edge.
         # #3263: many-to-many — one edge per source. _link_source fans a list
@@ -260,6 +540,23 @@ class _EntityHandlers:
         source_ref = p.get("extractedFrom")
         if source_ref:
             self._link_source(p["id"], source_ref)
+        # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
+        # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
+        # member of the deferred generic direct-edge replay (#1048: caller-
+        # authored `create_direct_edge` descriptors stay unaligned on
+        # rebuild): it carries no caller attrs, and it is the capture TURN LOOP
+        # ALONE that journals the link, on the turn's own PointAdded (the only
+        # two `contains_session=` emission sites are the SDK and hosted turn
+        # loops). The extractor-minted points are wired into the Session by
+        # OTHER, raw CONTAINS writes scattered through the capture/extraction
+        # path — every one of them unjournaled — so a journal-only `rebuild()`
+        # still drops those edges; only `rebuild_all`'s `:Session` snapshot
+        # restores them. That gap is #3664/#3722's scope. Do NOT read this fold
+        # as covering it: the list of unjournaled writers is deliberately not
+        # enumerated here, because line-number inventories rot (an earlier
+        # draft of this comment cited three and missed two).
+        if isinstance(contains_session, str) and contains_session:
+            self._link_session(contains_session, p["id"])
         # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
         about = p.get("aboutEntities")
         if about and isinstance(about, list):
@@ -268,10 +565,329 @@ class _EntityHandlers:
         if p.get("operator"):
             self._create_edges(p)
 
-    def _upsert(self, p: dict) -> None:
+    # #3664: the `EntityLinked` record's validated vocabulary. The record is
+    # replayed from a journal FILE, so its label / relationship-type strings
+    # must never be interpolated into Cypher unvalidated. Mirrors
+    # ``session_link.ENTITY_LINKED_*`` EXACTLY (kept local so the projection
+    # stays self-contained and import-free) — pinned by
+    # tests/test_capture_entity_attachment_3664.py::test_entity_linked_vocabulary_drift,
+    # because a silent divergence (writer accepts a predicate the fold
+    # rejects, or vice versa) loses the edge with no error.
+    _ENTITY_LINKED_RELS: frozenset = frozenset({
+        "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
+        "aboutDocument", "aboutAction", "aboutSource",
+    })
+    _ENTITY_LINKED_LABELS: frozenset = frozenset({
+        "Session", "Point", "Document", "Event", "Object", "Subject",
+        "Source",
+    })
+    # ONTOLOGY §3.2 triples — the field sets above are their projections, but
+    # membership in each set does NOT imply the COMBINATION is legal
+    # (``(Session)-[:aboutSubject]->(Subject)`` is in all three sets and in no
+    # triple). Mirrored EXACTLY from ``session_link.ENTITY_LINKED_TRIPLES`` and
+    # pinned by the drift test.
+    _ENTITY_LINKED_TRIPLES: frozenset = frozenset({
+        ("aboutSubject", "Point", "Subject"),
+        ("aboutSubject", "Document", "Subject"),
+        ("aboutSubject", "Event", "Subject"),
+        ("aboutObject", "Point", "Object"),
+        ("aboutObject", "Document", "Object"),
+        ("aboutObject", "Event", "Object"),
+        ("aboutObject", "Session", "Object"),
+        ("aboutEvent", "Point", "Event"),
+        ("aboutEvent", "Document", "Event"),
+        ("aboutPoint", "Event", "Point"),
+        ("aboutDocument", "Event", "Document"),
+        ("aboutSource", "Point", "Source"),
+        ("aboutSource", "Document", "Source"),
+        ("aboutSource", "Event", "Source"),
+        ("aboutAction", "Point", "Point"),
+    })
+
+    def _fold_entity_linked(self, ev: dict) -> int:
+        """#3664: fold an ``EntityLinked`` record into its live edge.
+
+        The capture entity-linking pass (``session_link.link_entity``) writes
+        ``(Session)-[:aboutObject]->(Object)`` / ``(Point)-[:aboutObject]->
+        (Object)`` edges LIVE and journals the flat logical identities. This
+        fold is the replay consumer: an idempotent MERGE keyed on the two
+        logical ids, so a JSONL wipe+rebuild reproduces the attachment
+        (live == rebuild). Returns 1 when the edge exists after the fold, 0
+        when the record is malformed or EITHER endpoint is absent (honest —
+        neither was re-created by any journaled event).
+
+        It MATCHes BOTH endpoints, so a 0-row fold is NOT target-specific: a
+        missing Session/Point SOURCE 0-rows exactly like a missing target.
+
+        Back-compat wrapper over :meth:`_fold_entity_linked_reason`, which
+        additionally distinguishes a MALFORMED record from an ABSENT endpoint
+        so the trailing sweeps can make the malformed case observable without
+        letting an honestly absent endpoint flood the log (review P2, #3722).
+        """
+        matched, _reason = self._fold_entity_linked_reason(ev)
+        return matched
+
+    def _fold_entity_linked_reason(self, ev: dict) -> tuple[int, str]:
+        """Fold one ``EntityLinked`` record; return ``(edge_present, reason)``.
+
+        ``reason`` is ``"ok"`` (the edge exists after the fold), ``"absent"``
+        (a well-formed link whose endpoint was not re-created — silent: an
+        absent entity is normal, not a defect), or ``"malformed"`` (unknown
+        ``edge_type``/label, a non-string field, or an unwritable id — the
+        record is a journal DEFECT). The malformed case WARNs here, and only
+        here, so EVERY consumer (``apply()``, ``rebuild_all``'s sweep, and
+        ``fold_deferred_entity_links``) gets the signal from one place, while
+        the absent case stays quiet.
+
+        The two ids come from a journal FILE and ride as Cypher parameters,
+        so they get the SAME ``_writable_id`` gate the sibling folds use
+        (``_revise_point`` / ``_apply_annotator`` / PointRetracted): a NUL or
+        lone-surrogate id raises at parameter parse, and ``rebuild_all``'s
+        sweep has no try/except — that raise would abort the rebuild AFTER
+        the wipe. A malformed id is a NO-OP here.
+        """
+        from tortoise.projection import _writable_id
+
+        def _malformed(why: str) -> tuple[int, str]:
+            logger.warning(
+                "EntityLinked fold dropped a MALFORMED record (%s): id=%r "
+                "source_id=%r source_label=%r target_id=%r target_label=%r "
+                "edge_type=%r — the journal line is not a replayable link",
+                why, ev.get("id") if isinstance(ev, dict) else None,
+                ev.get("source_id") if isinstance(ev, dict) else None,
+                ev.get("source_label") if isinstance(ev, dict) else None,
+                ev.get("target_id") if isinstance(ev, dict) else None,
+                ev.get("target_label") if isinstance(ev, dict) else None,
+                ev.get("edge_type") if isinstance(ev, dict) else None,
+            )
+            return 0, "malformed"
+
+        if not isinstance(ev, dict):
+            return 0, "malformed"
+        rel = ev.get("edge_type", "aboutObject")
+        # Type-check BEFORE the membership test: ``edge_type`` /
+        # ``source_label`` / ``target_label`` come from a journal FILE and a
+        # list/dict value raises ``TypeError: unhashable type`` on the frozen
+        # -set lookup. ``rebuild_all``'s sweep has no try/except, so that
+        # raise would abort the whole rebuild AFTER the wipe — a malformed
+        # line must be a NO-OP, exactly as this fold's docstring promises.
+        if not isinstance(rel, str) or rel not in self._ENTITY_LINKED_RELS:
+            return _malformed("unknown/non-string edge_type")
+        src_label = ev.get("source_label")
+        if not isinstance(src_label, str) \
+                or src_label not in self._ENTITY_LINKED_LABELS:
+            return _malformed("unknown/non-string source_label")
+        tgt_label = ev.get("target_label", "Object")
+        if not isinstance(tgt_label, str) \
+                or tgt_label not in self._ENTITY_LINKED_LABELS:
+            return _malformed("unknown/non-string target_label")
+        sid = ev.get("source_id") or ev.get("id")
+        tid = ev.get("target_id")
+        if not _writable_id(sid) or not _writable_id(tid):
+            return _malformed("unwritable/NUL-surrogate endpoint id")
+        # The COMBINATION must be a permitted ONTOLOGY §3.2 triple. Checking
+        # each field alone admits (Session)-[:aboutSubject]->(Subject) and
+        # (Point)-[:aboutPoint]->(Point), which the table forbids — and the
+        # fold would faithfully replay an edge the ontology does not have.
+        if (rel, src_label, tgt_label) not in self._ENTITY_LINKED_TRIPLES:
+            return _malformed("not a permitted ONTOLOGY §3.2 triple")
+        r = self.g.query(
+            f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+            f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
+            params={"sid": sid, "tid": tid},
+        )
+        n = int(r.result_set[0][0]) if r.result_set else 0
+        return (1, "ok") if n else (0, "absent")
+
+    def fold_deferred_entity_links(self, events,
+                                   hard_delete_seqs=None) -> int:
+        """Fold a trailing batch of ``EntityLinked`` records (#3664).
+
+        ``apply()`` is a ONE-record API, so it folds the type inline — correct
+        on the live path, where both endpoints already exist. The whole-journal
+        apply()-based replay engines (``rebuild()``, ``recover_from_log``,
+        ``backup.restore``'s JSONL fallback) buffer the records and call this
+        AFTER every creation event has applied, so a link whose endpoint is
+        created LATER in the journal still folds — the same forward-reference
+        treatment ``rebuild_all`` gives the type. Without this the engines
+        disagree on a forward-reference journal. The fold is an idempotent
+        MERGE, so deferral changes nothing else.
+
+        ``events`` is a sequence of ``(journal_seq, record)`` pairs — the seq
+        is what makes the HARD-DELETE staleness rule below possible. A bare
+        record is also accepted (its list index is its seq) so a caller with
+        no envelope still works.
+
+        ``hard_delete_seqs`` (``{id: {label: max_hard_delete_seq}}``, built
+        by ``projection.journal_hard_delete_seqs``) makes the fold HARD-DELETE
+        aware. ``_fold_entity_linked`` is an unconditional MATCH…MERGE, and
+        ids are reused routinely (name-deterministic for Object/Subject,
+        content-addressed for Points), so without this boundary a link whose
+        endpoint was deleted and later re-created under the SAME id came back
+        on replay while live had no such edge — the deleted link RESURRECTED.
+        A link at seq L whose source OR target has a hard delete at a seq
+        AFTER L **that can remove that endpoint's LABEL** is therefore
+        skipped. The label test is load-bearing (#3722 review cycle 5 P2):
+        ``EntityMutated`` replays ``_delete_entity_by_id`` (the six canonical
+        labels only) and ``PointsMerged`` removes Points only, so a journaled
+        hard delete can NEVER remove a ``:Session`` node — an id-only test
+        wrongly suppressed a live ``(Session)-[:aboutObject]->(Object)`` edge
+        whenever any other-label entity with the same id was deleted later.
+        The boundary is EXACT per ``(id, label)`` (#3722 review cycle 6 P2):
+        each label carries the max seq of a delete that can remove IT, so a
+        later ``PointsMerged`` never suppresses an ``Object``-side link whose
+        same-id ``Object`` was re-created after an earlier delete.
+        A later re-link (its own seq > the delete) is judged on its own seq
+        and survives, so the rule needs no extra state.
+
+        Returns the number of links APPLIED (the edge exists after the fold) —
+        the honest count: a MALFORMED record, an ABSENT endpoint, and a STALE
+        link are all DROPPED and never counted as applied (review P2, #3722).
+        """
+        # #3722 review (cycle 5): the label-aware staleness helper lives next
+        # to the reader that now publishes per-delete label sets (lazy import
+        # mirrors ``_writable_id`` — avoids the import cycle).
+        from tortoise.projection import _hard_delete_suppresses
+
+        hard_delete_seqs = hard_delete_seqs or {}
+        applied = 0
+        for seq, raw in _seq_events(events):
+            ev = self._norm(raw) if isinstance(raw, dict) else raw
+            if isinstance(ev, dict):
+                sid = ev.get("source_id") or ev.get("id")
+                tid = ev.get("target_id")
+                if (_hard_delete_suppresses(
+                        hard_delete_seqs, sid, ev.get("source_label"), seq)
+                        or _hard_delete_suppresses(
+                            hard_delete_seqs, tid,
+                            ev.get("target_label", "Object"), seq)):
+                    # Stale: the live endpoint was hard-deleted AFTER this
+                    # link, and its re-creation does not bring the edge back.
+                    continue
+            matched, _reason = self._fold_entity_linked_reason(ev)
+            applied += matched
+        return applied
+
+    def _fold_session_recorded(self, ev: dict) -> int:
+        """#3664: fold a ``SessionRecorded`` record into the :Session node.
+
+        The capture path MERGEs the Session with a raw graph write; this
+        record is its journal carrier, so the node (and any ``EntityLinked``
+        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``
+        and ``actor_user_id`` are coalesce-preserved (first writer wins,
+        mirroring the live merge), ``turn_count`` tracks the latest journaled
+        capture. Returns 1 when the node exists after the fold, 0 on a
+        malformed record.
+
+        BOTH the id and every journal-derived property value are gated for
+        WRITABILITY, not just type (review P1): a NUL / lone-surrogate id and
+        a map-valued ``created_at`` / ``turn_count`` / ``harness`` /
+        ``actor_user_id`` payload each raise at parameter parse, and ``rebuild_all`` folds this
+        record INLINE (no try/except) AFTER the wipe. A malformed id is a
+        NO-OP (return 0); a malformed field is OMITTED, never bound.
+
+        ``entity_links_attempted`` / ``entity_links_created`` are carried by a
+        SECOND ``SessionRecorded`` the capture emits after the link pass
+        (``sdk.capture_session``), so the counters the live raw SET writes are
+        durable too — ``recover_from_log`` / a journal-only ``rebuild()``
+        otherwise came back with them null (review P2, #3722).
+
+        ``capture_ok`` / ``capture_extractor`` ride a THIRD, TRAILING
+        ``SessionRecorded`` the capture emits right after the live
+        ``SET s.capture_ok / s.capture_extractor``. Without it those two came
+        back null on a journal-only rebuild, and null is CONSUMED by the
+        #2335 WI-2b TRUE-retry gate as the legacy "presumed captured" case — a
+        session whose capture FAILED stopped retrying (review P2, #3722).
+        Same overwrite semantics as the live SET (these are not
+        coalesce-preserved); a NUL-laden string is OMITTED by the shared value
+        gate, never bound.
+        """
+        from tortoise.projection import _annotator_value_ok, _writable_id
+
+        if not isinstance(ev, dict):
+            return 0
+        sid = ev.get("id")
+        if not _writable_id(sid) or not sid:
+            return 0
+        sets: list[str] = []
+        params: dict = {"sid": sid}
+        created_at = ev.get("created_at")
+        if created_at is not None and _annotator_value_ok(created_at):
+            sets.append("s.created_at=coalesce(s.created_at, $created_at)")
+            params["created_at"] = created_at
+        for prop in ("turn_count", "harness", "entity_links_attempted",
+                     "entity_links_created", "capture_ok",
+                     "capture_extractor"):
+            val = ev.get(prop)
+            if val is not None and _annotator_value_ok(val):
+                sets.append(f"s.{prop}=$v_{prop}")
+                params[f"v_{prop}"] = val
+        sets.append("s.is_episodic=true")
+        if ev.get("actor_user_id") is not None:
+            uid = ev["actor_user_id"]
+            if _annotator_value_ok(uid):
+                sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
+                params["uid"] = uid
+        r = self.g.query(
+            f"MERGE (s:Session {{id:$sid}}) SET {', '.join(sets)} "
+            "RETURN count(s)",
+            params=params,
+        )
+        return int(r.result_set[0][0]) if r.result_set else 0
+
+    def _link_session(self, session_id: str, point_id: str) -> None:
+        """Recreate the capture Session + its CONTAINS edge to one turn (#3947).
+
+        The `:Session` node is itself part of the unjournaled capture write
+        (the live loop MERGEs it raw, right before the turn loop), so a
+        replay has to recreate it here — carrying `is_episodic: true`, the
+        flag the ontology pins on the session container (ONTOLOGY §4.5: "The
+        capture graph's :Session node (session container, CONTAINS → turn
+        Points) also carries is_episodic: true").
+
+        Ordering mirrors the live loop: the node MERGE runs BEFORE the edge
+        MERGE — a full-path MERGE with a missing edge makes FalkorDB create
+        the whole path from scratch, duplicating the Point node (#490 review
+        P2-2).
+
+        FALLBACK (originally review F6): this recreates a MINIMAL Session —
+        `id` + `is_episodic` only. It is the path for a journal that carries
+        NO `SessionRecorded` for the session: a pre-#3664 journal, or a
+        journal-less/hosted lane whose live capture never journaled the node.
+        For such a journal a journal-only `rebuild()` has nothing to replay,
+        so `capture_ok`, `turn_count` and `created_at` come back absent, and a
+        later capture may read `capture_ok=None` as the legacy "presumed
+        captured" case (#2335) instead of retrying.
+
+        The durable JOURNAL carrier now exists (#3664, this change): the SDK
+        capture emits `SessionRecorded` (node props + the entity-link outcome
+        counters, and a trailing record carrying `capture_ok` /
+        `capture_extractor`), folded by `_fold_session_recorded` — so for any
+        post-#3664 journal `rebuild()` restores the full container and this
+        method's `SET s.is_episodic=true` is a harmless re-assertion. For
+        `rebuild_all` the pre-wipe `:Session` snapshot restore loop runs
+        BEFORE pass 2 (this method's only call site, reached via
+        `_upsert_point_edges`), so the full container is written FIRST and
+        this minimal MERGE is a no-op on properties — the stub is never
+        written, hence never overwritten. So the durability split is now:
+        `rebuild_all` carries the container (and its CONTAINS links) via the
+        pre-wipe sidecar; a journaled capture carries it via `SessionRecorded`;
+        only a journal with no `SessionRecorded` still yields the stub.
+        """
+        self.g.query(
+            "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+            params={"sid": session_id},
+        )
+        self.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": session_id, "tid": point_id},
+        )
+
+    def _upsert(self, p: dict, contains_session: str | None = None) -> None:
         """Upsert a Point: node properties via _upsert_point_props, then edges."""
         self._upsert_point_props(p)
-        self._upsert_point_edges(p)
+        self._upsert_point_edges(p, contains_session=contains_session)
 
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
@@ -442,8 +1058,9 @@ class _EntityHandlers:
         # Compute embedding for Subject name (#7845)
         embedding = None
         try:
-            from tortoise.embeddings import compute_embedding
-            embedding = compute_embedding(name)
+            from tortoise.embeddings import encode_for_store
+            embedding = encode_for_store(
+                name, self.required_embedding_dim)
         except Exception:
             pass
         # #1918: canonical id must win on MATCH too — parity with the #1155
@@ -505,8 +1122,9 @@ class _EntityHandlers:
         # Compute embedding from name (#7845)
         embedding = None
         try:
-            from tortoise.embeddings import compute_embedding
-            embedding = compute_embedding(name)
+            from tortoise.embeddings import encode_for_store
+            embedding = encode_for_store(
+                name, self.required_embedding_dim)
         except Exception:
             pass
         # #1155-P1: canonical id must win on MATCH too. The produces-edge
@@ -694,8 +1312,9 @@ class _EntityHandlers:
             ]))
             if doc_content.strip():
                 try:
-                    from tortoise.embeddings import compute_embedding
-                    embedding = compute_embedding(doc_content)
+                    from tortoise.embeddings import encode_for_store
+                    embedding = encode_for_store(
+                        doc_content, self.required_embedding_dim)
                 except Exception:
                     pass
         # #125 capture fields — use ev.get(field) with NO default so None →
@@ -820,8 +1439,9 @@ class _EntityHandlers:
             ]))
             if event_content.strip():
                 try:
-                    from tortoise.embeddings import compute_embedding
-                    embedding = compute_embedding(event_content)
+                    from tortoise.embeddings import encode_for_store
+                    embedding = encode_for_store(
+                        event_content, self.required_embedding_dim)
                 except Exception:
                     pass
         props = {

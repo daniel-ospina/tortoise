@@ -424,7 +424,7 @@ def test_welcome_provisioning_pipeline_is_dead_since_1566():
     implementation, and the tempting "fix" of deleting that line would leave
     the provisioning symbols themselves unpinned.
     """
-    src = Path("website/welcome.html").read_text()
+    src = Path("website/apps/dashboard/public/welcome.html").read_text()
     # Comments in welcome.html name the removed markers to explain #3501, so
     # the absence checks must run against comment-stripped source.
     src_code = re.sub(r"<!--.*?-->", "", src, flags=re.S)
