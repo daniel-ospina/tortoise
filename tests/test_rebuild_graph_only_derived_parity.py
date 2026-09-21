@@ -36,7 +36,7 @@ honored — an explicit path is not an embedded override (verified: the
 projection reports ``_is_embedded=False`` under the URI):
   TORTOISE_DB_URI='docker://:falkordb@localhost:6380/tortoise_test_b5_4305' \\
       .venv/bin/python -m pytest \\
-      tests/test_rebuild_recreate_content_parity.py -q --import-mode=importlib
+      tests/test_rebuild_graph_only_derived_parity.py -q --import-mode=importlib
 """
 from __future__ import annotations
 
@@ -151,6 +151,22 @@ def _point_deleted(pid: str) -> dict:
             "type": "EntityMutated", "initiated_by": "raw-producer",
             "projection_version": 2, "op": "delete", "id": pid,
             "label": "Point"}
+
+
+def _point_deleted_with_label(pid: str, label) -> dict:
+    """An ``EntityMutated`` delete carrying a NON-canonical / non-str label.
+
+    ``_delete_entity_by_id`` falls back to the legacy ID-WIDE delete for a
+    label that is not one of the canonical six, so the ``:Point`` really is
+    destroyed. The #4305 restore barrier must therefore use the same
+    ``_owns_point`` predicate the fold itself uses, not an inline
+    canonical-label tuple: the tuple disagrees for exactly this shape and the
+    tail then resurrects the destroyed incarnation's ``embedding`` onto the
+    re-created node (code-review gate round 1, P1 — strictly worse than base).
+    """
+    rec = _point_deleted(pid)
+    rec["label"] = label
+    return rec
 
 
 def _operator_added(pid: str, content: str) -> dict:
@@ -273,6 +289,16 @@ SHAPES = [
     # derives neither field — pins the `not op` half of the mirror.
     ("point_added_truthy_operator", "SEED",
      [_point_added_truthy_operator("pt-to", "OP")], "pt-to"),
+    # An UNKNOWN / non-str delete label is the legacy ID-WIDE delete in
+    # `_delete_entity_by_id`, so it destroys the `:Point` and must be a restore
+    # barrier. Re-create with a FALSY promote (derives nothing), so the only way
+    # to get it wrong is to restore the destroyed incarnation's derived.
+    ("delete_unknown_label_then_falsy_promote", "SEED",
+     [_point_deleted_with_label("pt-ul", "Zone"),
+      _point_promoted("pt-ul", "")], "pt-ul"),
+    ("delete_nonstr_label_then_falsy_promote", "SEED",
+     [_point_deleted_with_label("pt-nl", 123),
+      _point_promoted("pt-nl", "")], "pt-nl"),
 ]
 
 
@@ -350,6 +376,49 @@ def test_rebuild_is_idempotent_for_graph_only_derived(sup, tmp_path):
     first = _read_derived(sdk, pid)
     sdk._get_proj().rebuild_all(str(events))
     assert _read_derived(sdk, pid) == first == expected
+
+
+def test_sidecar_recovery_keeps_the_durable_content_hash(sup, tmp_path):
+    """#4305 code-review P1 — the #2943 sidecar-recovery path.
+
+    On this path the live `:Point` capture is a PARTIAL replay: the node was
+    recreated through `_upsert_point_props`, whose fixed SET list never writes
+    `content_hash`, so the live capture holds it ABSENT while the leftover
+    pre-wipe sidecar is the ONLY carrier. `_union_prewipe_snapshot` /
+    `_merge_entry` already merged the two correctly (fresh wins where present,
+    the leftover fills the gaps) — the restore tail must therefore read the
+    MERGED synthetic entry and let the live capture fill only what THAT leaves
+    absent, not prefer the live capture wholesale: doing so drops the sidecar's
+    hash, the `pid not in journal_hash_write` gate then skips the restore, and
+    the tail clears the sidecar — permanent loss of the indexed dedup key.
+    """
+    from tortoise.ids import content_hash
+    from tortoise.projection import (
+        _write_prewipe_snapshot, prewipe_snapshot_path)
+
+    events, sdk = sup
+    pid = "pt-rec"
+    # A partial-replay live node with FALSY content: `_upsert_point_props`
+    # derives neither conditional field, so the live capture has no hash.
+    _seed(sdk, pid, "")
+    assert _read_derived(sdk, pid)["content_hash"] is None
+    _write_journal(events, [])
+    # The durable leftover sidecar from the interrupted rebuild.
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(events)), {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded", "projection_version": 2,
+            "point": {"id": pid, "content": "", "pointKind": "statement",
+                      "content_hash": content_hash("SEED")},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+    sdk._get_proj().rebuild_all(str(events))
+    assert _read_derived(sdk, pid)["content_hash"] == content_hash("SEED")
 
 
 def test_revise_before_recreate_is_unchanged(sup, tmp_path):

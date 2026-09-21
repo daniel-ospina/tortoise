@@ -401,12 +401,19 @@ _SNAPSHOT_ENTRY_CHECK = {
     "session_snapshot": _validate_session_entry,
     "session_point_links": _validate_link_entry,
 }
-# Node properties a snapshot Point carries but `_upsert_point_props` does NOT
-# write (its SET list is fixed): restored verbatim in the pass-1b tail, because
-# `_upsert_point_props` would otherwise leave an invalidated Point EP-live
-# (#2488 ghost class) and a hash-less one invisible to every hash-keyed
-# dedup/terminal guard (#2971). Widening the SET list itself belongs to
-# #2948/#2958 — this keeps the repair inside the #2943 sidecar path.
+# Node properties a snapshot Point carries that the replay does not fully
+# reconstruct, restored by the pass-1b tail.
+#   * ``outdated``/``expiredAt``/``posterior_alpha``/``posterior_beta`` — not in
+#     `_upsert_point_props`'s fixed SET list; without them an invalidated Point
+#     comes back EP-live (#2488 ghost class). Restored VERBATIM, and only for a
+#     graph-only (synthetic) id — the original #2943 scope.
+#   * ``content_hash`` — the DERIVED dedup key (#2795/#2971). The replay writer
+#     writes it conditionally (`coalesce($ch, n.content_hash)`), so the tail
+#     restores it for ANY id — synthetic OR log-covered — but ONLY when no
+#     journal event owned the field (#4305: the journaled write is the newer
+#     writer, the snapshot the older one).
+# Widening the SET list itself belongs to #2948/#2958 — this keeps the repair
+# inside the #2943 sidecar path.
 _REPLAY_GAP_PROPS = ("outdated", "expiredAt", "posterior_alpha",
                      "posterior_beta", "content_hash")
 
@@ -2787,10 +2794,12 @@ class FalkorProjection(
                         continue  # log already covers this point
                     # Strip volatile properties the replay recomputes or that
                     # are not node properties. `content_hash` is NOT in this
-                    # list: `_upsert_point_props` never writes it (#2971), so
-                    # the sidecar is its only carrier and the pass-1b tail
-                    # re-applies it explicitly. `updatedAt` and `embedding`
-                    # are genuinely replay-owned.
+                    # list: it is `_upsert_point_props`'s CONDITIONAL write, and
+                    # the pass-1b tail is its carrier for the ids the journal
+                    # did not derive (see _REPLAY_GAP_PROPS). `embedding` is
+                    # stripped here — the sidecar-recovery path cannot restore
+                    # it — while a normal rebuild restores it from the live
+                    # pre-wipe capture; `updatedAt` is replay-owned.
                     clean = {k: v for k, v in props.items()
                              if k not in ("embedding", "updatedAt",
                                           "_nid", "_graph_id")}
@@ -3461,13 +3470,15 @@ class FalkorProjection(
                 rid = ev.get("id")
                 # #4305: a journaled hard delete destroys the incarnation the
                 # pre-wipe snapshot describes, so its derived must not be
-                # restored later. A non-Point label deletes a different node
-                # and never blocks the Point restore; a missing/unknown label
-                # is the legacy id-wide delete and may have hit the Point.
-                if ev.get("op") == "delete" and isinstance(rid, str):
-                    _del_label = ev.get("label")
-                    if _del_label is None or _del_label in ("Point", "Operator"):
-                        journal_deleted.add(rid)
+                # restored later. #4305 review P1: use the SAME label→ownership
+                # predicate the fold below and `pending_deleted` use
+                # (`_owns_point`), NOT an inline canonical-label tuple —
+                # `_delete_entity_by_id` falls back to the legacy ID-WIDE delete
+                # for a non-canonical/non-str label, so such a record really
+                # does destroy the `:Point` and must be a restore barrier.
+                if (ev.get("op") == "delete" and isinstance(rid, str)
+                        and _owns_point(ev.get("label"))):
+                    journal_deleted.add(rid)
                 anchor = None
                 if isinstance(rid, str):
                     label = ev.get("label")
@@ -3839,8 +3850,10 @@ class FalkorProjection(
         # the replay itself cannot rebuild. See _REPLAY_GAP_PROPS — this is what
         # keeps a graph-only Point that was invalidated (or hash-keyed) before
         # the wipe from coming back as a different node. Values are the
-        # pre-wipe capture's, i.e. the state of the node this wipe destroyed;
-        # the MATCH is a no-op for an id a journal event has since deleted.
+        # pre-wipe capture's, i.e. the state of the node this wipe destroyed.
+        # An id the journal HARD-deleted is SKIPPED entirely (the
+        # ``journal_deleted`` barrier below) — the snapshot describes the
+        # incarnation that delete destroyed, so it must not come back.
         #
         # #4305: the derived restore is FIELD-GATED by what the journal replay
         # itself determined, instead of being re-applied unconditionally to
@@ -3866,13 +3879,30 @@ class FalkorProjection(
         # `synthetic_events` alone so LOG-COVERED ids are reachable; synthetic
         # entries still union in for the #2943 sidecar-recovery path, where the
         # live graph is already wiped and only the sidecar carries the values.
-        restore_sources: dict[str, dict] = dict(existing_points)
+        restore_sources: dict[str, dict] = {}
         synthetic_ids: set[str] = set()
         for ev in synthetic_events:
             sp = ev.get("point") if isinstance(ev, dict) else None
             if isinstance(sp, dict) and isinstance(sp.get("id"), str):
-                restore_sources.setdefault(sp["id"], sp)
+                restore_sources[sp["id"]] = dict(sp)
                 synthetic_ids.add(sp["id"])
+        # #4305 review (P1): the live capture fills only what the (MERGED)
+        # synthetic entry leaves ABSENT — never the reverse. On the #2943
+        # sidecar-recovery path `existing_points` is a PARTIAL replay whose
+        # `content_hash` the fixed SET list never wrote, while
+        # `_union_prewipe_snapshot` has already gap-filled the synthetic entry
+        # from the leftover sidecar (`_merge_entry`: absences fill, presence
+        # wins). Preferring the live capture wholesale would drop the sidecar's
+        # hash, the gate would then skip the restore, and the tail would clear
+        # the sidecar — permanent loss of the indexed dedup key.
+        for pid, props in existing_points.items():
+            dst = restore_sources.get(pid)
+            if dst is None:
+                restore_sources[pid] = props
+                continue
+            for k, v in props.items():
+                if v is not None and dst.get(k) is None:
+                    dst[k] = v
         for pid, sp in restore_sources.items():
             if pid in journal_deleted:
                 continue
@@ -3889,8 +3919,18 @@ class FalkorProjection(
                     and pid not in journal_hash_write):
                 gap["content_hash"] = sp["content_hash"]
             emb = sp.get("embedding")
-            restore_embedding = (emb is not None
-                                 and pid not in journal_embed_write)
+            # #4305 review P2: only a numeric vector is writable through
+            # `vecf32()`. A corrupt/legacy store value (non-iterable, a string,
+            # mixed types) must DEGRADE to "not restored" rather than raise
+            # AFTER the wipe — the same recovery-path rule `_revise_point`
+            # follows for an unusable vector (#19).
+            restore_embedding = (
+                emb is not None
+                and pid not in journal_embed_write
+                and isinstance(emb, (list, tuple))
+                and all(isinstance(x, (int, float))
+                        and not isinstance(x, bool) for x in emb)
+            )
             if not gap and not restore_embedding:
                 continue
             clauses: list[str] = []
@@ -3904,10 +3944,21 @@ class FalkorProjection(
                 # the restored vector unsearchable.
                 clauses.append("n.embedding = vecf32($emb)")
                 params["emb"] = list(emb)
-            self.g.query(
-                f"MATCH (n:Point {{id:$pid}}) SET " + ", ".join(clauses),
-                params=params,
-            )
+            try:
+                self.g.query(
+                    f"MATCH (n:Point {{id:$pid}}) SET " + ", ".join(clauses),
+                    params=params,
+                )
+            except Exception as e:
+                # #4305 review P2: this runs AFTER the wipe, so a value the
+                # engine/driver rejects must not strand the rebuilt graph
+                # (#2943/#3689 recovery-path rule) — log and leave the replayed
+                # value in place.
+                logger.warning(
+                    "rebuild: snapshot derived restore for id %r failed "
+                    "(%s: %s) — leaving the replayed value in place",
+                    pid, type(e).__name__, e,
+                )
 
         # ── #3947 review: restore the :Session containers + their CONTAINS
         # edges from the pre-wipe snapshot ──
