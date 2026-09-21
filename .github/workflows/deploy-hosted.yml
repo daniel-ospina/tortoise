@@ -364,6 +364,7 @@ jobs:
           [ -n "$R2_SECRET_ACCESS_KEY" ] && GH_PRESENT="$GH_PRESENT R2_SECRET_ACCESS_KEY"
           [ -n "$RESEND_API_KEY" ] && GH_PRESENT="$GH_PRESENT RESEND_API_KEY"
           [ -n "$RESEND_FROM_EMAIL" ] && GH_PRESENT="$GH_PRESENT RESEND_FROM_EMAIL"
+          [ -n "$SENTRY_DSN" ] && GH_PRESENT="$GH_PRESENT SENTRY_DSN"
           [ -n "$STRIPE_PRICE_IDS" ] && GH_PRESENT="$GH_PRESENT STRIPE_PRICE_IDS"
           [ -n "$STRIPE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT STRIPE_SECRET_KEY"
           [ -n "$STRIPE_WEBHOOK_SECRET" ] && GH_PRESENT="$GH_PRESENT STRIPE_WEBHOOK_SECRET"
@@ -372,9 +373,11 @@ jobs:
           [ -n "$SUPABASE_URL" ] && GH_PRESENT="$GH_PRESENT SUPABASE_URL"
           [ -n "$TELEGRAM_BOT_TOKEN" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_BOT_TOKEN"
           [ -n "$TELEGRAM_CHAT_ID" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_CHAT_ID"
+          [ -n "$TORTOISE_AUDIT_DSN" ] && GH_PRESENT="$GH_PRESENT TORTOISE_AUDIT_DSN"
           [ -n "$TORTOISE_BACKUP_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY"
           [ -n "$TORTOISE_BACKUP_KEY_PREVIOUS" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY_PREVIOUS"
           [ -n "$TORTOISE_ENCRYPTION_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_ENCRYPTION_KEY"
+          [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && GH_PRESENT="$GH_PRESENT TORTOISE_LINK_INTENT_SECRET"
           [ -n "$TORTOISE_SECRET_PEPPER" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
           [ -n "$TURNSTILE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
           export GH_SECRETS_PRESENT="$GH_PRESENT"
@@ -432,6 +435,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
@@ -440,9 +444,11 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TORTOISE_AUDIT_DSN: ${{ secrets.TORTOISE_AUDIT_DSN }}
           TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
           TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
           TORTOISE_ENCRYPTION_KEY: ${{ secrets.TORTOISE_ENCRYPTION_KEY }}
+          TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
       # Migration drift gate (#1095): fail-closed check that repo migrations
@@ -515,6 +521,7 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
           RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           BILLING_FROM_EMAIL: ${{ secrets.BILLING_FROM_EMAIL }}
           BILLING_SUCCESS_URL: ${{ secrets.BILLING_SUCCESS_URL }}
           BILLING_CANCEL_URL: ${{ secrets.BILLING_CANCEL_URL }}
@@ -534,6 +541,8 @@ jobs:
           DR_ISSUES_PAT: ${{ secrets.DR_ISSUES_PAT }}
           BACKUP_ALERT_ASSIGNEE: ${{ secrets.BACKUP_ALERT_ASSIGNEE }}
           BACKUP_SIMULATE_ENABLED: ${{ secrets.BACKUP_SIMULATE_ENABLED }}
+          TORTOISE_AUDIT_DSN: ${{ secrets.TORTOISE_AUDIT_DSN }}
+          TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
           GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
@@ -658,6 +667,24 @@ jobs:
           [ -n "$GH_CLIENT_SECRET" ] && ARGS+=(GITHUB_CLIENT_SECRET="$GH_CLIENT_SECRET")
           [ -n "$GH_CALLBACK_URL" ] && ARGS+=(GITHUB_CALLBACK_URL="$GH_CALLBACK_URL")
           [ -n "$TORTOISE_ENCRYPTION_KEY" ] && ARGS+=(TORTOISE_ENCRYPTION_KEY="$TORTOISE_ENCRYPTION_KEY")
+          # #4126 adoption: the three remaining Fly-only secrets the deploy now
+          # MANAGES. Their GitHub Actions secrets were created FROM the live Fly
+          # value, so the first propagated deploy rewrites each to what the app
+          # already runs — behaviour-preserving — and from then on a GitHub
+          # rotation is the only step needed. Declared `gh-secret:` in
+          # .github/scripts/fly-managed-secrets.txt, with the matching probe line
+          # in the provenance gate above.
+          #   TORTOISE_AUDIT_DSN (#669/#771) — audit_events Supabase pooler DSN
+          #   TORTOISE_LINK_INTENT_SECRET (#1765) — HMAC key for link-intent refs;
+          #     unset → link-intent 503 (fail-closed)
+          #   SENTRY_DSN — error tracking; activates only when set
+          # Guarded, matching every other optional secret — and NOT a silent
+          # fallback to hand-management: an absent GitHub secret leaves the Fly
+          # value untouched, which the provenance gate reports as UNSOURCED and
+          # BLOCKS the deploy (#4126/#4259).
+          [ -n "$TORTOISE_AUDIT_DSN" ] && ARGS+=(TORTOISE_AUDIT_DSN="$TORTOISE_AUDIT_DSN")
+          [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && ARGS+=(TORTOISE_LINK_INTENT_SECRET="$TORTOISE_LINK_INTENT_SECRET")
+          [ -n "$SENTRY_DSN" ] && ARGS+=(SENTRY_DSN="$SENTRY_DSN")
           # #528 server analytics (PostHog) — absent key → analytics module no-ops.
           [ -n "$POSTHOG_API_KEY" ] && ARGS+=(POSTHOG_API_KEY="$POSTHOG_API_KEY")
           [ -n "$POSTHOG_HOST" ] && ARGS+=(POSTHOG_HOST="$POSTHOG_HOST")
