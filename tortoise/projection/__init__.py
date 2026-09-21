@@ -408,10 +408,14 @@ _SNAPSHOT_ENTRY_CHECK = {
 #     comes back EP-live (#2488 ghost class). Restored VERBATIM, and only for a
 #     graph-only (synthetic) id — the original #2943 scope.
 #   * ``content_hash`` — the DERIVED dedup key (#2795/#2971). The replay writer
-#     writes it conditionally (`coalesce($ch, n.content_hash)`), so the tail
-#     restores it for ANY id — synthetic OR log-covered — but ONLY when no
-#     journal event owned the field (#4305: the journaled write is the newer
-#     writer, the snapshot the older one).
+#     writes it CONDITIONALLY (`coalesce($ch, n.content_hash)`, deriving no
+#     value for falsy content), so the tail restores it for ANY id — synthetic
+#     OR log-covered — but ONLY when no journal event owned the field. The
+#     gate treats a journaled write as the newer writer; that is the design
+#     assumption, and it is ORDER-BLIND for an UNJOURNALED write that
+#     postdates a journaled one (the snapshot is then newer) — a filed
+#     residual (#4252), deliberate here because the alternative re-breaks the
+#     issue's shape H.
 # Widening the SET list itself belongs to #2948/#2958 — this keeps the repair
 # inside the #2943 sidecar path.
 _REPLAY_GAP_PROPS = ("outdated", "expiredAt", "posterior_alpha",
@@ -638,9 +642,10 @@ def _merge_entry(left: dict, fresh: dict, key: str) -> dict:
       a released quarantine or an older `content`/`status`.
     * Fresh-wins-everything throws away exactly what the leftover exists for.
       A partial replay recreates the node through `_upsert_point_props`, whose
-      fixed SET list omits `outdated`/`expiredAt`/`posterior_*`/`content_hash`
-      — so the fresh capture of that node has those properties ABSENT while
-      the leftover still carries the pre-wipe values.
+      CONDITIONAL `content_hash` write derives no value for falsy content (and
+      whose fixed SET list omits `outdated`/`expiredAt`/`posterior_*`) — so the
+      fresh capture of that node has those properties ABSENT while the leftover
+      still carries the pre-wipe values.
 
     `absences fill, presence wins` distinguishes them without guessing: a
     property the fresh capture lacks (or holds as null) is a replay gap; one
@@ -2797,9 +2802,10 @@ class FalkorProjection(
                     # list: it is `_upsert_point_props`'s CONDITIONAL write, and
                     # the pass-1b tail is its carrier for the ids the journal
                     # did not derive (see _REPLAY_GAP_PROPS). `embedding` is
-                    # stripped here — the sidecar-recovery path cannot restore
-                    # it — while a normal rebuild restores it from the live
-                    # pre-wipe capture; `updatedAt` is replay-owned.
+                    # not carried by the pre-wipe snapshot (the replay
+                    # re-derives it), while a rebuild restores it from the live
+                    # pre-wipe capture when one exists; `updatedAt` is
+                    # replay-owned.
                     clean = {k: v for k, v in props.items()
                              if k not in ("embedding", "updatedAt",
                                           "_nid", "_graph_id")}
@@ -3875,34 +3881,33 @@ class FalkorProjection(
         #     (`delete_then_falsy_recreate` — restoring it would be STRICTLY
         #     worse than the pre-fix behaviour, which is why the delete is a
         #     barrier rather than just another writer).
-        # The source map is the pre-wipe `:Point` capture, widened from
-        # `synthetic_events` alone so LOG-COVERED ids are reachable; synthetic
-        # entries still union in for the #2943 sidecar-recovery path, where the
-        # live graph is already wiped and only the sidecar carries the values.
-        restore_sources: dict[str, dict] = {}
+        # The source map is the pre-wipe `:Point` capture (so LOG-COVERED ids
+        # are reachable), with the MERGED `synthetic_events` entries filling
+        # only the fields the capture leaves ABSENT. The capture is the
+        # PRIMARY source: it is the newer state, and for an id carried by BOTH
+        # a leftover sidecar and a live node that has since become log-covered
+        # (or been raw-updated) there is no `_merge_entry` collision to resolve
+        # it — the pure-leftover entry would otherwise beat the newer live
+        # value. The synthetic half is what makes the #2943 sidecar-recovery
+        # path work: there the live capture is a partial replay whose
+        # `content_hash` the replay's CONDITIONAL writer left absent (falsy
+        # content), so only the sidecar has it.
+        restore_sources: dict[str, dict] = {
+            pid: dict(props) for pid, props in existing_points.items()}
         synthetic_ids: set[str] = set()
         for ev in synthetic_events:
             sp = ev.get("point") if isinstance(ev, dict) else None
-            if isinstance(sp, dict) and isinstance(sp.get("id"), str):
-                restore_sources[sp["id"]] = dict(sp)
-                synthetic_ids.add(sp["id"])
-        # #4305 review (P1): the live capture fills only what the (MERGED)
-        # synthetic entry leaves ABSENT — never the reverse. On the #2943
-        # sidecar-recovery path `existing_points` is a PARTIAL replay whose
-        # `content_hash` the fixed SET list never wrote, while
-        # `_union_prewipe_snapshot` has already gap-filled the synthetic entry
-        # from the leftover sidecar (`_merge_entry`: absences fill, presence
-        # wins). Preferring the live capture wholesale would drop the sidecar's
-        # hash, the gate would then skip the restore, and the tail would clear
-        # the sidecar — permanent loss of the indexed dedup key.
-        for pid, props in existing_points.items():
-            dst = restore_sources.get(pid)
-            if dst is None:
-                restore_sources[pid] = props
+            if not (isinstance(sp, dict) and isinstance(sp.get("id"), str)):
                 continue
-            for k, v in props.items():
+            synthetic_ids.add(sp["id"])
+            dst = restore_sources.get(sp["id"])
+            if dst is None:
+                restore_sources[sp["id"]] = dict(sp)
+                continue
+            for k, v in sp.items():
                 if v is not None and dst.get(k) is None:
                     dst[k] = v
+        restore_failures = 0
         for pid, sp in restore_sources.items():
             if pid in journal_deleted:
                 continue
@@ -3952,13 +3957,25 @@ class FalkorProjection(
             except Exception as e:
                 # #4305 review P2: this runs AFTER the wipe, so a value the
                 # engine/driver rejects must not strand the rebuilt graph
-                # (#2943/#3689 recovery-path rule) — log and leave the replayed
-                # value in place.
+                # (#2943/#3689 recovery-path rule) — degrade to "not
+                # restored" and leave the replayed value in place. A
+                # SYSTEMATIC failure must not be indistinguishable from that
+                # benign degradation, hence the count + single ERROR summary
+                # after the loop.
+                restore_failures += 1
                 logger.warning(
                     "rebuild: snapshot derived restore for id %r failed "
                     "(%s: %s) — leaving the replayed value in place",
                     pid, type(e).__name__, e,
                 )
+        if restore_failures:
+            logger.error(
+                "rebuild: %d snapshot derived restore(s) FAILED — the "
+                "pre-wipe derived of those id(s) was not restored (the "
+                "graph is otherwise rebuilt; see the per-id warnings above). "
+                "Retry after repairing the stored value(s)",
+                restore_failures,
+            )
 
         # ── #3947 review: restore the :Session containers + their CONTAINS
         # edges from the pre-wipe snapshot ──

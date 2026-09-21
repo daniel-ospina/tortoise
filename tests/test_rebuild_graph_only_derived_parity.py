@@ -382,15 +382,15 @@ def test_sidecar_recovery_keeps_the_durable_content_hash(sup, tmp_path):
     """#4305 code-review P1 — the #2943 sidecar-recovery path.
 
     On this path the live `:Point` capture is a PARTIAL replay: the node was
-    recreated through `_upsert_point_props`, whose fixed SET list never writes
-    `content_hash`, so the live capture holds it ABSENT while the leftover
-    pre-wipe sidecar is the ONLY carrier. `_union_prewipe_snapshot` /
-    `_merge_entry` already merged the two correctly (fresh wins where present,
-    the leftover fills the gaps) — the restore tail must therefore read the
-    MERGED synthetic entry and let the live capture fill only what THAT leaves
-    absent, not prefer the live capture wholesale: doing so drops the sidecar's
-    hash, the `pid not in journal_hash_write` gate then skips the restore, and
-    the tail clears the sidecar — permanent loss of the indexed dedup key.
+    recreated through `_upsert_point_props`, whose CONDITIONAL
+    `content_hash` write derives no value for falsy content, so the live
+    capture holds it ABSENT while the leftover pre-wipe sidecar is the ONLY
+    carrier. `_union_prewipe_snapshot` / `_merge_entry` already merged the two
+    correctly (fresh wins where present, the leftover fills the gaps) — the
+    restore tail must therefore let the synthetic/sidecar entry fill only what
+    the LIVE capture leaves absent. Preferring the synthetic entry wholesale
+    (the reverse precedence) drops a newer live value for a stale leftover one
+    — see the sibling pin below.
     """
     from tortoise.ids import content_hash
     from tortoise.projection import (
@@ -419,6 +419,55 @@ def test_sidecar_recovery_keeps_the_durable_content_hash(sup, tmp_path):
     })
     sdk._get_proj().rebuild_all(str(events))
     assert _read_derived(sdk, pid)["content_hash"] == content_hash("SEED")
+
+
+def test_sidecar_recovery_prefers_the_live_capture_over_stale_leftover(
+        sup, tmp_path):
+    """#4305 code-review round 2 (P1) — the source-precedence direction.
+
+    An id a LEFTOVER sidecar carries can ALSO be in the live capture (it
+    became log-covered after the sidecar was written, or a raw update postdates
+    it). No `_merge_entry` collision resolves it then, so the live capture —
+    the newer state — must be the PRIMARY source and the leftover only fill
+    its absences. The reverse restores a stale pre-wipe value over a newer live
+    one and loses the newer indexed dedup key, which the codebase treats as
+    strictly worse than NULL.
+
+    Deliberately NOT an oracle-match pin: the live value here comes from an
+    unjournaled update, which the harness's `seed + apply(records)` oracle
+    cannot express. It pins the never-worse direction against base/main, both
+    of which kept the live capture's value.
+    """
+    from tortoise.ids import content_hash
+    from tortoise.projection import (
+        _write_prewipe_snapshot, prewipe_snapshot_path)
+
+    events, sdk = sup
+    pid = "pt-stale"
+    # The live node carries the NEWER value (a raw update postdating the
+    # sidecar).
+    _seed(sdk, pid, "NEW")
+    assert _read_derived(sdk, pid)["content_hash"] == content_hash("NEW")
+    # A FALSY journal creation makes the id log-covered (no fresh synthetic
+    # event) and derives nothing on replay.
+    _write_journal(events, [_point_added(pid, "")])
+    # The durable leftover sidecar carries an OLDER value for the same id.
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(events)), {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": [{
+            "type": "PointAdded", "projection_version": 2,
+            "point": {"id": pid, "content": "OLD",
+                      "pointKind": "statement",
+                      "content_hash": content_hash("OLD")},
+        }],
+        "batch_snapshot": [],
+        "batch_point_links": [],
+        "session_snapshot": [],
+        "session_point_links": [],
+    })
+    sdk._get_proj().rebuild_all(str(events))
+    assert _read_derived(sdk, pid)["content_hash"] == content_hash("NEW")
 
 
 def test_revise_before_recreate_is_unchanged(sup, tmp_path):
