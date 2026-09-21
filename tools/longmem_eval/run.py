@@ -1487,9 +1487,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("retrieval_budget_ms", retrieval_budget_ms),
             # #2578 (Task 1): the TR item-cap knob — conditional presence
             # (absent at the 12 default, so the key itself perturbs nothing;
-            # a post-C4 checkpoint resumes byte-identically, a pre-C4 one is
-            # refused by the always-present arm/guard bools; a 16-checkpoint
-            # resumed at 12 refuses).
+            # a post-C4 checkpoint resumes byte-identically, a fingerprint-
+            # bearing pre-C4 one is refused by the always-present arm/guard
+            # bools; a 16-checkpoint resumed at 12 refuses).
             ("tr_top_k", tr_top_k),
             # #2976: the temporal retrieval-leg arm — conditional presence
             # ONLY when the env resolves ON, so the default fingerprint
@@ -3835,9 +3835,10 @@ def run_evaluation(
         retrieval_budget_ms=retrieval_budget_ms,
         # #2578 (Task 1): conditional presence — the DEFAULT tr_top_k (12)
         # fingerprints as absent, so the key itself perturbs nothing; a
-        # post-C4 checkpoint resumes byte-identically (a pre-C4 one is refused
-        # by the always-present arm/guard bools); a non-default value
-        # fingerprints (mismatched resumes refused by the existing gate).
+        # post-C4 checkpoint resumes byte-identically (a fingerprint-bearing
+        # pre-C4 one is refused by the always-present arm/guard bools); a
+        # non-default value fingerprints (mismatched resumes refused by the
+        # existing gate).
         tr_top_k=(tr_top_k if tr_top_k != DEFAULT_TR_TOP_K else None),
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
