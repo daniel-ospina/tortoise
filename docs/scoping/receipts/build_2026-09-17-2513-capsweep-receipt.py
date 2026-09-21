@@ -23,7 +23,6 @@ this generator.
 """
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json
 import os
@@ -51,10 +50,24 @@ SHA = "412470cd3"
 ARMS = ("off", "off_b", "inj_only", "on")
 
 # Gold-session census support. The cohort is the ONLY source of gold labels;
-# the arm artifact is the only source of the candidate pool.
-COHORT_LIST = _read_json(COHORT)
-COHORT_DATA = {q["question_id"]: q for q in COHORT_LIST}
-COHORT_ORDER = [q["question_id"] for q in COHORT_LIST]
+# the arm artifact is the only source of the candidate pool. Loaded LAZILY:
+# `--rederive` never needs it (it takes the run order from `results`), so the
+# module must import even when the cohort cache file is absent.
+_COHORT_CACHE = {}
+
+
+def cohort_list():
+    if "list" not in _COHORT_CACHE:
+        _COHORT_CACHE["list"] = _read_json(COHORT)
+    return _COHORT_CACHE["list"]
+
+
+def cohort_data():
+    if "data" not in _COHORT_CACHE:
+        _COHORT_CACHE["data"] = {q["question_id"]: q for q in cohort_list()}
+    return _COHORT_CACHE["data"]
+
+
 POINT_SESSION_RE = re.compile(r"^lme:(?P<qid>[0-9A-Za-z_]+):s(?P<sid>\d+):")
 GRADED_K = 5
 
@@ -73,7 +86,7 @@ def gold_pool_census(qid, ranked_ids):
     receipt alone. `gold_session_best_rank` is 0-based; null == ABSENT.
     """
     out = {"gold_sessions_in_pool": {}, "gold_session_best_rank": {}}
-    q = COHORT_DATA.get(qid)
+    q = cohort_data().get(qid)
     if q is None:
         return out
     pos = {s: i for i, s in enumerate(q["haystack_session_ids"])}
@@ -96,55 +109,22 @@ def git(*a):
                           text=True).stdout.strip()
 
 
-def git_rc(*a):
-    """Like git(), but keeps the exit code so a FAILED probe is not mistaken
-    for an empty result."""
-    return subprocess.run(["git", "-C", str(WT), *a], capture_output=True,
-                          text=True)
-
-
-def seal_verification(measured_sha):
-    """Facts about the MEASURED revision versus origin/main, computed HERE (at
-    seal time) from the repo's git state.
-
-    Unlike every other field in `staleness`, these are NOT derived from the
-    measurement \u2014 they describe the tree at the moment the receipt was built.
-    A re-run therefore RECOMPUTES the block (and re-dates it) instead of
-    re-emitting a frozen 2026-09-21 literal for whatever tree happens to be
-    checked out. Every probe degrades to null with a reason rather than to a
-    plausible value.
-    """
-    out = {
-        "date": datetime.date.today().isoformat(),
-        "provenance": ("computed by this generator from the repo's git state at "
-                       "generation time; NOT derived from the measurement"),
-        "method": ("git rev-parse origin/main / git rev-list --count / "
-                   "git merge-base --is-ancestor"),
-    }
-    probe = git_rc("rev-parse", "origin/main")
-    if probe.returncode != 0 or not probe.stdout.strip():
-        out.update({
-            "origin_main": None,
-            "commits_in_origin_main_not_in_measured_revision": None,
-            "merge_base": None,
-            "measured_revision_is_ancestor_of_origin_main": None,
-            "unavailable": ("git rev-parse origin/main failed: "
-                            + (probe.stderr.strip().splitlines()[-1]
-                               if probe.stderr.strip() else "no origin/main ref")),
-        })
-        return out
-    out["origin_main"] = probe.stdout.strip()
-    r_count = git_rc("rev-list", "--count", f"{measured_sha}..origin/main")
-    out["commits_in_origin_main_not_in_measured_revision"] = (
-        int(r_count.stdout.strip())
-        if r_count.returncode == 0 and r_count.stdout.strip() else None)
-    r_base = git_rc("merge-base", measured_sha, "origin/main")
-    out["merge_base"] = (r_base.stdout.strip()
-                         if r_base.returncode == 0 and r_base.stdout.strip()
-                         else None)
-    r_anc = git_rc("merge-base", "--is-ancestor", measured_sha, "origin/main")
-    out["measured_revision_is_ancestor_of_origin_main"] = (r_anc.returncode == 0)
-    return out
+# SEAL-TIME FACTS — a LITERAL, recorded once when this receipt was sealed
+# (2026-09-21), NOT derived from the measurement. It is deliberately NOT
+# recomputed on a re-run: re-probing git here would silently re-seal a
+# historical record and mutate it whenever origin/main moves. If this
+# generator is reused for a different measured revision, update by hand.
+SEAL_VERIFICATION = {
+    "date": "2026-09-21",
+    "origin_main": "a36fd686eec2b6cdb21fc21af45e365dd64974a2",
+    "commits_in_origin_main_not_in_measured_revision": 306,
+    "merge_base": "a079767f1655c2a7ba3a0daa78b83200e16d6c61",
+    "measured_revision_is_ancestor_of_origin_main": False,
+    "provenance": ("literal, captured at seal \u2014 NOT derived from the "
+                   "measurement and NOT recomputed on a re-run"),
+    "method": ("git merge-base --is-ancestor / git rev-list --count / "
+               "git cat-file -e, run once at seal on 2026-09-21"),
+}
 
 
 def sha256(p):
@@ -347,8 +327,10 @@ def derive_falsifier_measured(caps, per_q, reader_token_cap):
     c10_inj = (c10.get("arms") or {}).get("inj_only") or {}
 
     off10 = _pq(per_q, 10, "off") or {}
-    n20 = [q for q in COHORT_ORDER
-           if q in ((off10.get("session_recall@5")) or {})][:20]
+    # The n=20 prefix is "the first 20 questions of THIS RUN", so it is taken
+    # from the run's own outcome order (the key order of the arm's per-question
+    # map) — not from the cohort cache, which `--rederive` does not read.
+    n20 = list((off10.get("session_recall@5")) or {})[:20]
 
     def top5(cap_a, arm_a, cap_b, arm_b):
         a, b = _pq(per_q, cap_a, arm_a), _pq(per_q, cap_b, arm_b)
@@ -495,33 +477,30 @@ def _attach_measured(verdicts, measured):
 
 
 def rederive(src, dest):
-    """Recompute the derived blocks of an EXISTING receipt from its own
-    `results`, then write it back.
+    """Rebuild an EXISTING receipt canonically from its own recorded blocks.
 
-    The raw arm artifacts this receipt was built from are gone (`staleness.
-    raw_artifacts`), so a normal run cannot reproduce the census. `results` is
-    the surviving measurement record, though, so the falsifier `measured`
-    blocks and the seal block can still be recomputed from it \u2014 and must be,
-    because both are supposed to be functions of the recorded state rather
-    than literals.
+    The raw arm artifacts are gone, so a normal run cannot reproduce the
+    census. `results` is the surviving measurement record, though, so the whole
+    receipt — every derived data block AND every prose field — is rebuilt from
+    it by the SAME `build_receipt` a raw run uses. That is what keeps the
+    artifact and the generator from drifting: there is only one producer.
     """
     receipt = json.loads(Path(src).read_text())
     caps = receipt.get("results") or {}
     per_q = {f"{cap}_{arm}": block.get("per_question") or {}
              for cap, arms in caps.items() for arm, block in arms.items()}
-    token_cap = (receipt.get("retrieval_mode") or {}).get("reader_token_cap")
-    measured = derive_falsifier_measured(caps, per_q, token_cap)
-    receipt["falsifier_verdicts"] = _attach_measured(
-        receipt.get("falsifier_verdicts") or {}, measured)
-    staleness = receipt.get("staleness") or {}
-    if staleness.get("measured_revision"):
-        staleness["verified_at_seal"] = seal_verification(
-            staleness["measured_revision"])
-    Path(dest).write_text(json.dumps(receipt, indent=1, default=str) + "\n")
-    print("rewrote", dest)
+    retrieval_mode = receipt.get("retrieval_mode") or {}
+    out = build_receipt(caps, per_q, receipt.get("run_integrity") or {},
+                        retrieval_mode, retrieval_mode.get("reader_token_cap"),
+                        receipt.get("cohort") or {})
+    write_receipt(out, dest)
 
 
-def main():
+def load_raw_measurement():
+    """Read the arm artifacts once and return (caps, per_q, run_integrity,
+    retrieval_mode, token_cap). This is the ONLY path that needs the raw
+    artifacts; `--rederive` fills the same five values in from an existing
+    receipt's own blocks, so both paths feed the SAME `build_receipt`."""
     caps = {}
     for cap in (10, 15, 20):
         arms = {}
@@ -534,8 +513,43 @@ def main():
     per_q = {f"{cap}_{a}": arm_block(d)["per_question"]
              for cap in (10, 15, 20)
              for a in ARMS if (d := load(cap, a))}
-    token_cap = (load(10, "off") or {}).get("methodology", {}).get(
-        "context_token_cap")
+    off10 = load(10, "off") or {}
+    method = off10.get("methodology", {})
+    run_integrity = {
+        f"cap{cap}_{a}": {
+            "n_questions": len(load(cap, a).get("outcomes") or []),
+            "n_failed": load(cap, a).get("n_failed"),
+            "n_excluded": load(cap, a).get("n_excluded"),
+            "integrity_valid": (load(cap, a).get("integrity") or {}).get("valid"),
+            "ingest_latency_ms_mean": round(statistics.mean(
+                [o["ingest_latency_ms"] for o in load(cap, a)["outcomes"]
+                 if o.get("ingest_latency_ms") is not None]), 1),
+            "ingest_cached_field_present": any(
+                "ingest_cached" in o for o in load(cap, a)["outcomes"]),
+        }
+        for cap in (10, 15, 20) for a in ARMS if load(cap, a)}
+    retrieval_mode = {
+        "retriever": "hybrid (fts + vector, RRF-fused)",
+        "checkpoint_key": method.get("checkpoint_key"),
+        "leg_mix_observed": "every retrieved hit carries match_source "
+                            "'rrf' (2503 hits over the cap=10 OFF arm) — "
+                            "so this is NOT a keyword/FTS-only run",
+        "embedder": method.get("embedder") or "BAAI/bge-small-en-v1.5 (384-dim)",
+        "reader_item_cap": method.get("context_item_cap"),
+        "reader_token_cap": method.get("context_token_cap"),
+    }
+    return (caps, per_q, run_integrity, retrieval_mode,
+            method.get("context_token_cap"))
+
+
+def build_receipt(caps, per_q, run_integrity, retrieval_mode, token_cap,
+                  cohort_block):
+    """Assemble the WHOLE receipt from the measurement-derived `caps`/`per_q`
+    plus the (raw- or receipt-sourced) integrity/methodology/cohort blocks.
+
+    Every data block AND every prose field is produced HERE, so a `--rederive`
+    and a raw run of the same measurement are byte-identical — there is only
+    one producer, and no prose field can be stranded by a partial refresh."""
     measured = derive_falsifier_measured(caps, per_q, token_cap)
     out = {}
     # arm-vs-arm flips per cap
@@ -622,9 +636,9 @@ def main():
             "measured_revision": SHA,
             "measured_branch": "fix/2513-retrieval-evidence",
             "open_pr_carrying_the_measured_revision": 3577,
-            # Computed at seal time from the repo's git state, NOT a literal
-            # and NOT derived from the measurement. See seal_verification().
-            "verified_at_seal": seal_verification(SHA),
+            # LITERAL seal-time facts, captured at seal (2026-09-21) — NOT
+            # derived from the measurement and NOT recomputed on a re-run.
+            "verified_at_seal": SEAL_VERIFICATION,
             "measured_surface_absent_from_origin_main": [
                 "tortoise/session_reinjection.py",
                 "tools/longmem_eval/guard_measured_revision.py",
@@ -678,24 +692,7 @@ def main():
                        "(measured below)."),
             "reader": "mock (--retrieval-only --mock): no reader LLM is called",
         },
-        "cohort": {
-            "file": str(COHORT),
-            "sha256": sha256(COHORT),
-            "selector": ("instances[150:250], question_type == 'multi-session',"
-                         " in source order (the WHOLE class; 71 of the 100 tail"
-                         " questions)"),
-            "source": "longmemeval_s_cleaned.json sha256="
-                      "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
-                      " (verified against SPLIT_DIGESTS['s'])",
-            "provenance_sidecar": str(PROV),
-            "n": len(COHORT_LIST),
-            "composition": {"multi-session": len(COHORT_LIST)},
-            "built_by": "tools/longmem_eval/build_cohorts.py --cohort ms_tail",
-            "superset_of_prior_sample": ("ms10 == ms_tail[0:10] and ms20 == "
-                                         "ms_tail[10:20] — the superseded "
-                                         "receipt's n=20 sample is a strict "
-                                         "PREFIX of this cohort"),
-        },
+        "cohort": cohort_block,
         "arm_flags": {
             "off": "(none)",
             "off_b": "(none) — a SECOND OFF run on a second dedicated server, "
@@ -722,32 +719,8 @@ def main():
                              "binding guard and total_cap_hit fires only if a "
                              "16th distinct CANDIDATE row exists"),
         },
-        "run_integrity": {
-            f"cap{cap}_{a}": {
-                "n_questions": len(load(cap, a).get("outcomes") or []),
-                "n_failed": load(cap, a).get("n_failed"),
-                "n_excluded": load(cap, a).get("n_excluded"),
-                "integrity_valid": (load(cap, a).get("integrity") or {}).get("valid"),
-                "ingest_latency_ms_mean": round(statistics.mean(
-                    [o["ingest_latency_ms"] for o in load(cap, a)["outcomes"]
-                     if o.get("ingest_latency_ms") is not None]), 1),
-                "ingest_cached_field_present": any(
-                    "ingest_cached" in o for o in load(cap, a)["outcomes"]),
-            }
-            for cap in (10, 15, 20) for a in ARMS if load(cap, a)},
-        "retrieval_mode": {
-            "retriever": "hybrid (fts + vector, RRF-fused)",
-            "checkpoint_key": (load(10, "off") or {}).get("methodology", {}).get(
-                "checkpoint_key"),
-            "leg_mix_observed": "every retrieved hit carries match_source "
-                                "'rrf' (2503 hits over the cap=10 OFF arm) — "
-                                "so this is NOT a keyword/FTS-only run",
-            "embedder": (load(10, "off") or {}).get("methodology", {}).get(
-                "embedder") or "BAAI/bge-small-en-v1.5 (384-dim)",
-            "reader_item_cap": (load(10, "off") or {}).get("methodology", {}).get(
-                "context_item_cap"),
-            "reader_token_cap": token_cap,
-        },
+        "run_integrity": run_integrity,
+        "retrieval_mode": retrieval_mode,
         "miss_class_closure": _closure(caps, per_q),
         "results": caps,
         "arm_vs_arm_flips": cap_flips,
@@ -923,19 +896,51 @@ def main():
                        "only on the unmerged branch fix/2513-retrieval-evidence "
                        "(PR #3577), which first added it at commit "
                        "8f1af7f62a922c321f49c774e5f7dfba70e1c9a6 (blob "
-                       "74b14069306e2d634ad6df9a75c17f681742eedd). Read it by "
-                       "commit, not by path."),
+                       "e673d855e02b7db2483d813802d42e99b348d4df at that "
+                       "commit; blob 74b14069306e2d634ad6df9a75c17f681742eedd "
+                       "at the branch tip). Read it by commit, not by path."),
     })
     # `measured` is DERIVED here from `caps`/`per_q`, never a literal: this is
     # what keeps every falsifier's `measured` block in agreement with `results`.
     out["falsifier_verdicts"] = _attach_measured(
         out["falsifier_verdicts"], measured)
-    dest = Path(os.environ.get(
-        "LME_RECEIPT_DEST",
-        str(WT / "docs/scoping/receipts" / (
-            f"2026-09-17-2513-reinjection-capsweep-{SHA}.json"))))
-    dest.write_text(json.dumps(out, indent=1, default=str) + "\n")
+    return out
+
+
+def cohort_block():
+    """The cohort provenance block. Read from the cohort file only when a raw
+    run builds the receipt; `--rederive` passes the recorded block straight
+    through so it needs no cohort cache."""
+    n = len(cohort_list())
+    return {
+        "file": str(COHORT),
+        "sha256": sha256(COHORT),
+        "selector": ("instances[150:250], question_type == 'multi-session',"
+                     " in source order (the WHOLE class; 71 of the 100 tail"
+                     " questions)"),
+        "source": "longmemeval_s_cleaned.json sha256="
+                  "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+                  " (verified against SPLIT_DIGESTS['s'])",
+        "provenance_sidecar": str(PROV),
+        "n": n,
+        "composition": {"multi-session": n},
+        "built_by": "tools/longmem_eval/build_cohorts.py --cohort ms_tail",
+        "superset_of_prior_sample": ("ms10 == ms_tail[0:10] and ms20 == "
+                                     "ms_tail[10:20] — the superseded "
+                                     "receipt's n=20 sample is a strict "
+                                     "PREFIX of this cohort"),
+    }
+
+
+def write_receipt(receipt, dest):
+    Path(dest).write_text(json.dumps(receipt, indent=1, default=str) + "\n")
     print("wrote", dest)
+
+
+def print_summary(receipt):
+    caps = receipt["results"]
+    cap_sweep = receipt["cap_sweep"]
+    repro = receipt["reproducibility"]
     for cap, arms in sorted(caps.items(), key=lambda kv: int(kv[0])):
         print(f"\n=== cap {cap} ===")
         print(f"{'arm':<9}{'ra@5':>7}{'sr@5':>7}{'er@5':>7}{'rs@5':>7}"
@@ -961,6 +966,18 @@ def main():
     for k, v in repro.items():
         print(f"  {k}: top5_identical {v['top5_identical']}, "
               f"sr@5 +{v['session_recall@5']['n_improved']}/-{v['session_recall@5']['n_regressed']}")
+
+
+def main():
+    caps, per_q, run_integrity, retrieval_mode, token_cap = load_raw_measurement()
+    receipt = build_receipt(caps, per_q, run_integrity, retrieval_mode,
+                            token_cap, cohort_block())
+    dest = Path(os.environ.get(
+        "LME_RECEIPT_DEST",
+        str(WT / "docs/scoping/receipts" / (
+            f"2026-09-17-2513-reinjection-capsweep-{SHA}.json"))))
+    write_receipt(receipt, dest)
+    print_summary(receipt)
 
 
 if __name__ == "__main__":

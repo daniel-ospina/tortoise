@@ -18,12 +18,12 @@
   "open_pr_carrying_the_measured_revision": 3577,
   "verified_at_seal": {
    "date": "2026-09-21",
-   "provenance": "computed by this generator from the repo's git state at generation time; NOT derived from the measurement",
-   "method": "git rev-parse origin/main / git rev-list --count / git merge-base --is-ancestor",
    "origin_main": "a36fd686eec2b6cdb21fc21af45e365dd64974a2",
    "commits_in_origin_main_not_in_measured_revision": 306,
    "merge_base": "a079767f1655c2a7ba3a0daa78b83200e16d6c61",
-   "measured_revision_is_ancestor_of_origin_main": false
+   "measured_revision_is_ancestor_of_origin_main": false,
+   "provenance": "literal, captured at seal \u2014 NOT derived from the measurement and NOT recomputed on a re-run",
+   "method": "git merge-base --is-ancestor / git rev-list --count / git cat-file -e, run once at seal on 2026-09-21"
   },
   "measured_surface_absent_from_origin_main": [
    "tortoise/session_reinjection.py",
@@ -32,7 +32,7 @@
   ],
   "raw_artifacts": {
    "declared_root": "/tmp/lme2513/ms71",
-   "state_at_seal": "GONE \u2014 the directory does not exist, so the generator can no longer read cap{10,15}/<arm>.json and THIS RECEIPT CANNOT BE REGENERATED. It is the only surviving record of this census. /tmp/lme-v2-p100.json (the 100-Q profile whose '53% of misses' figure titles issue #2513) is also gone, so that issue's cited evidence no longer exists on disk either."
+   "state_at_seal": "GONE \u2014 the directory does not exist, so the generator can no longer read cap{10,15}/<arm>.json and THE CENSUS BELOW CANNOT BE REGENERATED. It is the only surviving record of this census; only the derived summary blocks (each falsifier's `measured`, and `verified_at_seal`) remain recomputable, and only from `results` itself (`--rederive`). /tmp/lme-v2-p100.json (the 100-Q profile whose '53% of misses' figure titles issue #2513) is also gone, so that issue's cited evidence no longer exists on disk either."
   },
   "cohort_anchor": "STILL VALID: the cohort file named in `cohort.file` is present and its sha256 still equals `cohort.sha256`, so the gold labels behind the (A)/(B) split remain checkable even though the arm artifacts do not.",
   "still_derivable_from_this_artifact": [
@@ -12557,7 +12557,7 @@
     },
     "reader_token_cap": 8000
    },
-   "verdict": "NO CONTEXT-TOKEN REGRESSION at the shipped cap (7795.5 -> 7799.2, +3.7 tokens; the window is already 97.4% of the 8000-token cap in EVERY arm, so the reader is saturated before any injection). At cap=15 the token mean DROPS (7768.6) because the extra injected items displace base items. The arm's own block cost is 19.0 ms mean / 53.9 ms p95 \u2014 process-level retrieval latency is NOT a cost proxy in this campaign (host contention)."
+   "verdict": "NO CONTEXT-TOKEN REGRESSION at the shipped cap (7795.5 -> 7799.2, +3.7 tokens; the window is already 97.4% of the 8000-token cap in EVERY arm, so the reader is saturated before any injection). At cap=15 the token mean DROPS (7768.6) because the extra injected items displace base items. The arm's own block latency was measured at run time but is NOT in any surviving artifact and is not re-derivable from this receipt, so it is deliberately not cited here \u2014 process-level retrieval latency is NOT a cost proxy in this campaign (host contention)."
   },
   "4_inertness_and_isolation": {
    "measured": {
@@ -12617,12 +12617,12 @@
   "THE 'ingest_cached=true PAYS INGEST ONCE' PREMISE DOES NOT HOLD IN THIS LANE. run.py's _cache_armed requires ingest_mode == 'v2'; this campaign is ingest_mode='deterministic' (as the superseded campaign was), so the #2080 ingest cache is INERT: no outcome carries ingest_cached and EVERY arm paid its own ~141 s/question deterministic ingest. Ingest was NOT paid once. Switching to v2 would have changed the substrate (LLM-extracted graph) and broken comparability with the superseded receipt.",
   "'ONE DB PER ARM' IS IMPLEMENTED AS ONE SERVER PER ARM, because it is the only mechanism that actually isolates: the graph NAME is namespace-derived (team_default__default__<qid>) and the docker:// URI path is DECORATIVE, so three different DB names on one server share graph names and are isolated only by a per-question wipe. Each arm here ran against its own dedicated container (same image digest/config), which is why the off-vs-off_b identity is meaningful.",
   "cap=20 \u2014 a plateau control ABOVE the structural fan-out (5 seeds x 3 per session = 15), where total_cap_hit must be False by construction \u2014 was NOT run (budget). The sweep has exactly two settings, 10 (shipped) and 15 (max reachable).",
-  "PROCESS-LEVEL LATENCY IS NOT A COST PROXY IN THIS CAMPAIGN. The host was under extreme fleet contention (1-min load 110-230 on 10 CPUs; 5+ concurrent pi sessions plus Chrome/OrbStack); ingest measured 141 s/question versus 28 s for the same work in a low-load 3-question smoke. Use the ISOLATED SR block latency (19.0 ms mean / 53.9 ms p95).",
+  "PROCESS-LEVEL LATENCY IS NOT A COST PROXY IN THIS CAMPAIGN. The host was under extreme fleet contention (1-min load 110-230 on 10 CPUs; 5+ concurrent pi sessions plus Chrome/OrbStack); ingest measured 141 s/question versus 28 s for the same work in a low-load 3-question smoke. The isolated SR-block latency was recorded only in this receipt's original narrative; it is NOT in any surviving artifact and cannot be re-derived, so it is not cited as evidence here.",
   "THE CAP-15 REGRESSION RESTS ON ONE QUESTION (d3ab962e, session_recall@5 1.0 -> 0.5). The defensible claim is 'the delta does not improve when the cap is raised', NOT 'raising the cap hurts' \u2014 one question cannot carry an effect size.",
   "--retrieval-only --mock exits rc=1 in _print_summary (pre-existing bug, TypeError on acc['overall']); the report JSON is written before that, so every artifact here is complete (n=71, n_failed=0, integrity.valid=true in all 7 runs).",
   "A pre-existing FLAKY test was observed while verifying this change: tests/test_eval_retrieval_budget.py::test_deadline_degradation_records_timeout_reason failed once (redislite socket in a tmpdir) and passed on rerun; it does not touch the re-injection arm. Recorded, not filed (category B: test flakiness of the machinery, nothing but time lost).",
   "The 88 pre-existing __pycache__ byte-caches under tortoise/ and tools/ were removed before the guard would pass (guard class 16, #3712). All runs were launched with -B + PYTHONDONTWRITEBYTECODE=1 so the measured surface stayed byte-code-free.",
-  "R2 (RESIDUAL, NOT VERDICT-CHANGING): the recorded `command` uses `--checkpoint <arm>.cp.json` with NO cap component in the filename. Under the PRE-fix revision the cap was not part of the checkpoint fingerprint, so the cap-15 arms were RESUME-ELIGIBLE against the cap-10 checkpoint file \u2014 a resume would have blended two injection volumes into one artifact while it declared one config. It is refuted in fact, not by construction: the recorded census still separates the arms (cap10 on dropped_by_cap 879 / total_cap_hit_questions 30 vs cap15 on 823 / 6, i.e. the cap-15 arms really did admit MORE volume and trip the total budget LESS often, which a wholesale resume of cap-10 outcomes could not produce), and every arm paid its own ~141 s/question deterministic ingest (the #2080 ingest cache is inert in this lane), so a full resume was not what happened. The numbers are therefore NOT wholesale-blended. The delta review's fix DOES close this class going forward: the resolved cap now rides the checkpoint fingerprint, so the pre-fix resume this limitation describes is now REFUSED by `CheckpointStaleError` (and the seam is pinned end to end by `tests/test_eval_reinjection_cap_resume.py`)."
+  "R2 (RESIDUAL, NOT VERDICT-CHANGING): the recorded `command` uses `--checkpoint <arm>.cp.json` with NO cap component in the filename. Under the PRE-fix revision the cap was not part of the checkpoint fingerprint, so the cap-15 arms were RESUME-ELIGIBLE against the cap-10 checkpoint file \u2014 a resume would have blended two injection volumes into one artifact while it declared one config. It is refuted in fact, not by construction: the recorded census still separates the arms (cap10 on dropped_by_cap 879 / total_cap_hit_questions 30 vs cap15 on 823 / 6, i.e. the cap-15 arms really did admit MORE volume and trip the total budget LESS often, which a wholesale resume of cap-10 outcomes could not produce), and every arm paid its own ~141 s/question deterministic ingest (the #2080 ingest cache is inert in this lane), so a full resume was not what happened. The numbers are therefore NOT wholesale-blended. The delta review's fix DOES close this class going forward: the resolved cap now rides the checkpoint fingerprint, so the pre-fix resume this limitation describes is now REFUSED by `CheckpointStaleError`. CAVEAT: the seam test that pins that end to end, `tests/test_eval_reinjection_cap_resume.py`, is NOT at HEAD or on origin/main either \u2014 it exists only on the unmerged commit 195c4186a9db95dff976360892f1f9ea8613e8f5 (branch fix/2513-retrieval-evidence, PR #3577), so read it by commit."
  ],
- "supersedes": "the sample this run supersedes: docs/scoping/receipts/2026-09-16-2517-reinjection-turn-c1e6f7f2d.json (n=20 = ms_tail[0:20], pooled recall_all@5 OFF 0.65 -> ON 0.90, total_cap_hit 7/20, cap=10 only)"
+ "supersedes": "the sample this run supersedes: docs/scoping/receipts/2026-09-16-2517-reinjection-turn-c1e6f7f2d.json (n=20 = ms_tail[0:20], pooled recall_all@5 OFF 0.65 -> ON 0.90, total_cap_hit 7/20, cap=10 only). CAVEAT: that path is NOT at HEAD or on origin/main \u2014 it exists only on the unmerged branch fix/2513-retrieval-evidence (PR #3577), which first added it at commit 8f1af7f62a922c321f49c774e5f7dfba70e1c9a6 (blob e673d855e02b7db2483d813802d42e99b348d4df at that commit; blob 74b14069306e2d634ad6df9a75c17f681742eedd at the branch tip). Read it by commit, not by path."
 }
