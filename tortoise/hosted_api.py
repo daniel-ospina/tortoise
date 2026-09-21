@@ -2143,7 +2143,7 @@ app.add_middleware(InFlightMiddleware)
 # OVERRIDES: uniform per-route timeout bounds (the common server practice) — we
 # apply ONE bound at the transport and deliberately EXEMPT `POST /v1/context`,
 # which keeps its recorded 300ms-p95 / 2.4s-ceiling / reduced-answer-on-breach
-# behaviour (`tortoise/volunteer.py:76` SLO_MS, the hard ceiling in the POST
+# behaviour (`tortoise/volunteer.py:77` SLO_MS, the hard ceiling in the POST
 # handler below). That fallback-instead-of-error is a RECORDED DECISION, not an
 # oversight, and a uniform bound would silently reverse it. The exemption is
 # intentional — do not "fix" it by making the bounds uniform.
@@ -2196,7 +2196,10 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
 )
 
 #: Analytics event name for a breach. Recorded through the EXISTING writer (no
-#: new table, no new metric endpoint) and only when an org has resolved.
+#: new table, no new metric endpoint). At this layer an org has usually NOT yet
+#: resolved — auth runs INSIDE the middleware stack — so the event is written
+#: with an empty `org_id` on the MCP surface and the pre-auth REST path alike.
+#: The `path` prop is what makes "which routes breach" answerable.
 _TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
 
 #: Handlers abandoned past the bound, held only so their late exception is
@@ -2205,10 +2208,26 @@ _TRANSPORT_WAIT_BOUND_EVENT = "transport_wait_bound_exceeded"
 _pending_wait_bound_requests: set = set()
 _pending_wait_bound_telemetry: set = set()
 
+#: Breach telemetry gets its OWN single-worker pool, not the loop's shared
+#: default executor. `_track_analytics_event` is a BLOCKING httpx POST (5 s),
+#: and this module's #3060 doctrine keeps such work off the default pool
+#: precisely because ~80 sites plus the auth abuse hooks share it. A breach
+#: burst happens under exactly the overload that CAUSES breaches, so parking
+#: default-pool workers here could stall unrelated requests. One worker, and a
+#: hard ceiling on the pending set: past it the event is DROPPED — the refusal
+#: is what the caller needs, and telemetry must never become the latency this
+#: unit exists to bound.
+_WAIT_BOUND_TELEMETRY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="wait-bound-telemetry")
+_WAIT_BOUND_TELEMETRY_MAX_PENDING = 16
+
 
 def _is_jsonrpc_surface(route_path: str) -> bool:
-    """True for the mounted MCP app's route path, EXACTLY (`/mcpfoo` is a
-    sibling, not the MCP surface — same boundary the path canonicalizer uses)."""
+    """True for the mounted MCP app's route path: `/mcp` and every `/mcp/…`
+    subpath (the app is mounted there). This agrees with the path canonicalizer
+    on excluding the `/mcpfoo` sibling, but is deliberately BROADER than the
+    canonicalizer's exact `/mcp` match — `/mcp/…` is not a path the canonical
+    layer rewrites, it is one the mounted app serves."""
     return route_path == "/mcp" or route_path.startswith("/mcp/")
 
 
@@ -2281,9 +2300,10 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
 
     ``_track_analytics_event`` does a BLOCKING ``httpx`` POST (5 s timeout), so
     putting it on the request path would create the very latency this bound
-    exists to cut. Dispatched exactly as ``tortoise/mcp_server.py:208-224``
-    does: the default executor when a loop is running, else a daemon thread.
-    Never raises, never blocks.
+    exists to cut. Dispatched off-loop in the shape ``tortoise/mcp_server.py:184-207``
+    uses, refined to a DEDICATED executor by this module's #3060 doctrine (see
+    ``_WAIT_BOUND_TELEMETRY_EXECUTOR``), or a daemon thread when there is no
+    loop. Never raises, never blocks.
     """
     props = {"path": route_path, "method": method, "latency_ms": latency_ms}
 
@@ -2298,8 +2318,12 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
     except RuntimeError:
         loop = None
     if loop is not None and not loop.is_closed():
+        if (len(_pending_wait_bound_telemetry)
+                >= _WAIT_BOUND_TELEMETRY_MAX_PENDING):
+            _logger.debug("wait-bound telemetry queue full — dropping breach")
+            return
         try:
-            fut = loop.run_in_executor(None, _write)
+            fut = loop.run_in_executor(_WAIT_BOUND_TELEMETRY_EXECUTOR, _write)
             _pending_wait_bound_telemetry.add(fut)
             fut.add_done_callback(_pending_wait_bound_telemetry.discard)
             return
@@ -2350,6 +2374,15 @@ class WaitBoundMiddleware:
     response that has already STARTED streaming is allowed to finish (an ASGI
     response cannot be replaced mid-flight), and the abandoned handler's late
     response is DROPPED rather than sent over a reply it no longer owns.
+
+    ⚠️ What this bound CANNOT do: an ``asyncio`` deadline only fires while the
+    loop runs. A handler that blocks the loop synchronously (``time.sleep``, a
+    direct FalkorDB call — a live class in this module, #3060/#3718) finishes
+    before the timer callback can run, so it is NOT converted into a refusal.
+    The bound is strictly additive there, never a cure; removing that class is
+    #3718's direction (move the blocking work off-loop). Pinned so the limit is
+    visible rather than assumed —
+    ``test_synchronous_handler_is_not_bounded_it_is_stated_not_assumed``.
     """
 
     def __init__(self, app):
@@ -2396,14 +2429,32 @@ class WaitBoundMiddleware:
         refused = True
         state = scope.get("state")
         org_id = state.get("org_id") if isinstance(state, dict) else None
-        _emit_wait_bound_breach(org_id or "", route_path,
+        # The ASGI server percent-DECODES the path, so `/v1/x/%0d%0a…` arrives
+        # with embedded CR/LF; logged verbatim that forges log lines. Same fix
+        # the unhandled-exception handler already carries (#1591 class) — and
+        # the sanitized form also reaches the analytics prop, so neither the log
+        # nor the sink can be forged.
+        safe_route_path = route_path.replace("\r", "\\r").replace("\n", "\\n")
+        _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))
         _logger.warning(
             "transport wait bound (%.0fs) exceeded: %s %s — refusing legibly",
-            _TRANSPORT_WAIT_BOUND_S, scope.get("method"), route_path)
-        await _send_wait_bound_refusal(send, scope, route_path)
+            _TRANSPORT_WAIT_BOUND_S, scope.get("method"), safe_route_path)
+        # Register for abandonment BEFORE the refusal send. The send happens
+        # 10 s in, where a client that has already gone makes uvicorn raise
+        # (ConnectionResetError / ClientDisconnected); if that raise skipped
+        # this call the still-running handler task would never be registered,
+        # its late exception never retrieved, and it would leak. So abandonment
+        # comes first and the send is then best-effort — the client is gone,
+        # but the abandoned handler must still be drained.
         _abandon_wait_bound_request(task)
+        try:
+            await _send_wait_bound_refusal(send, scope, route_path)
+        except Exception:
+            _logger.debug(
+                "wait-bound refusal send failed (client disconnected?)",
+                exc_info=True)
 
 
 app.add_middleware(WaitBoundMiddleware)

@@ -1398,9 +1398,12 @@ durations:
   test_recall_state.py: 3.3
   test_battery_corpus_v11.py: 3.2
   test_tenancy_spine.py: 3.2
-  # #3834: NEW file (this PR) — never sampled by a CI run yet, so it carries the
-  # flat default until the next durations refresh replaces it with the measured
-  # value. Explicit rather than absent so the #3400 coverage floor still holds.
+  # #3834: NEW file (this PR) — never sampled by a CI run yet, so it starts at
+  # the flat default (`2.0 == DEFAULT_FAST_WEIGHT`, so it changes no LPT
+  # packing weight) until the next durations refresh replaces it with the
+  # measured value. Kept EXPLICIT for hygiene, not necessity: the #3400 floor
+  # is a global >=90% ratio and passes without this entry, but the current
+  # margin is only ~0.02%, so listing the file avoids eroding it.
   test_transport_wait_bound.py: 2.0
   test_collision_preflight.py: 3.0
   test_control_plane_offload_3498.py: 2.7  # #3498: control-plane offload seam

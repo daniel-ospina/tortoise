@@ -301,7 +301,7 @@ async def test_an_already_started_response_is_never_replaced(monkeypatch):
 async def test_breach_is_recorded_off_the_request_path(fast_bound, monkeypatch):
     """`_track_analytics_event` does a BLOCKING httpx POST. On the request path
     it would create the very latency this bound exists to cut, so it is
-    dispatched exactly as `tortoise/mcp_server.py:208-224` does."""
+    dispatched exactly as `tortoise/mcp_server.py:184-207` does."""
     seen = []
 
     def _blocking_writer(org_id, event_name, properties):
@@ -404,3 +404,52 @@ def test_cold_half_readiness_gate_holds_or_is_reported():
     assert callable(health_ready)
     paths = {getattr(r, "path", None) for r in ha.app.routes}
     assert "/health/ready" in paths
+
+
+# ── honest coverage pins (security + a stated limitation) ────────────────
+
+@pytest.mark.asyncio
+async def test_breach_path_is_sanitized_before_the_log_and_the_sink(
+        fast_bound, monkeypatch):
+    """The ASGI server percent-DECODES the path, so a request to
+    `/v1/x/%0d%0aFORGED` arrives with embedded CR/LF — logged verbatim that
+    forges log lines, and stored verbatim it reaches the analytics sink. The
+    refusal path sanitizes ONCE, for both (the same #1591-class fix the
+    unhandled-exception handler in the same file already carries)."""
+    seen = []
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: seen.append(props))
+    mw = ha.WaitBoundMiddleware(_slow_app(5.0))
+    rec = await _drive(mw, _scope("/v1/points/foo\r\nFORGED LINE"))
+    assert rec.status == 504
+    for _ in range(200):
+        if seen:
+            break
+        await asyncio.sleep(0.02)
+    assert seen, "breach telemetry never fired"
+    stored = seen[0]["path"]
+    assert "\r" not in stored and "\n" not in stored, (
+        f"raw CR/LF reached the analytics sink: {stored!r}")
+    assert stored == "/v1/points/foo\\r\\nFORGED LINE"
+
+
+@pytest.mark.asyncio
+async def test_synchronous_handler_is_not_bounded_it_is_stated_not_assumed(
+        fast_bound):
+    """HONEST LIMITATION PIN: an `asyncio` deadline only fires while the loop
+    runs, so a handler that blocks the loop synchronously cannot be converted
+    into a refusal — it returns 200. This module still runs synchronous work on
+    the loop (#3060/#3718), where the bound is strictly additive, never a cure.
+    Pinned so the limit is visible rather than assumed; if this ever returns 504
+    the bound gained on-loop preemption and the docstring must change."""
+    async def app(scope, receive, send):
+        time.sleep(0.2)          # blocks the loop — the timer cannot fire
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"ok": true}'})
+
+    mw = ha.WaitBoundMiddleware(app)
+    rec = await _drive(mw, _scope())
+    assert rec.status == 200, (
+        "the loop was blocked, so the bound could not fire")
+    assert rec.json == {"ok": True}

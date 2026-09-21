@@ -564,8 +564,17 @@ class TestHealthEndpoints:
         classes = [m.cls for m in ha_mod.app.user_middleware]
         assert ha_mod.InFlightMiddleware in classes, (
             "InFlightMiddleware is not installed — the idle gate always reads 0")
-        assert classes[0] is ha_mod.InFlightMiddleware, (
-            f"the gauge must wrap everything (registered last): {classes!r}")
+        # #3834: WaitBoundMiddleware is now registered LAST (outermost), so the
+        # gauge sits immediately inside it. That order is REQUIRED, not
+        # incidental: the bound ABANDONS (never cancels) a breached handler, and
+        # the gauge must keep counting that handler until it genuinely finishes.
+        # Reversing the two would release the gauge at the 10 s refusal while the
+        # abandoned work still runs — the exact #2850 mis-read. The gauge still
+        # wraps every handler and every short-circuiting middleware.
+        assert classes[0] is ha_mod.WaitBoundMiddleware, (
+            f"the wait bound must be outermost (registered last): {classes!r}")
+        assert classes[1] is ha_mod.InFlightMiddleware, (
+            f"the gauge must wrap every handler (registered second-outermost): {classes!r}")
 
         # (b) a REAL request through the module-level app: the gauge is >= 1
         # WHILE the handler runs, and released afterwards. ``/health`` is read

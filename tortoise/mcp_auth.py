@@ -117,7 +117,13 @@ ERR_SUSPENDED = -32006
 # ``WaitBoundMiddleware``); the MCP surface has no HTTP body of its own, so the
 # advertised delay rides ``error.data.retry_after`` alongside the
 # ``Retry-After`` header (#3851's shape).
-ERR_TIMEOUT = -32007
+#
+# -32009, NOT -32007: the ERR_* namespace is split across this module and
+# ``mcp_server.py``, and -32007 is already ``ERR_QUOTA_SERVER`` there (the
+# namespace note at ``mcp_server.py:697-704`` already tracks the ``-32006``
+# quota/suspended collision as a known defect). Reusing -32007 would make a
+# wait-bound refusal indistinguishable from a server-quota refusal.
+ERR_TIMEOUT = -32009
 
 
 # ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────
