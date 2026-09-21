@@ -199,6 +199,45 @@ _TRANSPORT_WAIT_BOUND_MESSAGE = (
 )
 
 
+def _sanitize_for_log(value: str) -> str:
+    """Escape the control characters that can forge a log line or an ANSI
+    escape, for a log AND a telemetry sink (the sanitized form is passed to
+    both).
+
+    Lives HERE, not in ``hosted_api``, for the same reason the bound's
+    constants do (#3834): both surfaces need it — the REST arm sanitizes the
+    route path, the MCP arm the client-supplied tool name — and ``mcp_server``
+    must not import ``hosted_api`` on the fast path (that import builds the
+    whole hosted FastAPI app). This module is the neutral home both surfaces
+    already share.
+
+    The ASGI server percent-DECODES the path, so ``/v1/x/%0d%0aFORGED`` arrives
+    with embedded CR/LF; escaped verbatim it forges log lines. CR/LF alone is
+    not the whole class (code-review round 2): VT/FF/ESC/NUL, DEL, the C1 range
+    (U+0085 NEL and U+009B CSI are line-break / escape introducers to Unicode-
+    aware readers) and U+2028/U+2029 all do the same. CR/LF/TAB keep their
+    readable backslash escapes so existing log greps still match. This is
+    deliberately BROADER than ``tortoise/schemas.py``'s C0-only control-char
+    validation: that rejects a user field; this escapes a value bound for a log
+    line and a telemetry sink.
+    """
+    out = []
+    for ch in value:
+        if ch == "\r":
+            out.append("\\r")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch < " " or "\x7f" <= ch <= "\x9f":
+            out.append(f"\\x{ord(ch):02x}")
+        elif ch in ("\u2028", "\u2029"):
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 # ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────
 # An org-resolution outage (control plane or registry unreachable) is a
 # RETRYABLE dependency condition, not a hard outage. Before this the 503

@@ -2244,38 +2244,6 @@ def _is_jsonrpc_surface(route_path: str) -> bool:
     return route_path == "/mcp" or route_path.startswith("/mcp/")
 
 
-def _sanitize_for_log(value: str) -> str:
-    """Escape the control characters that can forge a log line or an ANSI
-    escape, for the log AND the analytics sink (the sanitized form is passed to
-    both).
-
-    The ASGI server percent-DECODES the path, so ``/v1/x/%0d%0aFORGED`` arrives
-    with embedded CR/LF; escaped verbatim it forges log lines. CR/LF alone is
-    not the whole class (code-review round 2): VT/FF/ESC/NUL, DEL, the C1 range
-    (U+0085 NEL and U+009B CSI are line-break / escape introducers to Unicode-
-    aware readers) and U+2028/U+2029 all do the same. CR/LF/TAB keep their
-    readable backslash escapes so existing log greps still match. This is
-    deliberately BROADER than ``tortoise/schemas.py``'s C0-only control-char
-    validation: that rejects a user field; this escapes a value bound for a log
-    line and a telemetry sink.
-    """
-    out = []
-    for ch in value:
-        if ch == "\r":
-            out.append("\\r")
-        elif ch == "\n":
-            out.append("\\n")
-        elif ch == "\t":
-            out.append("\\t")
-        elif ch < " " or "\x7f" <= ch <= "\x9f":
-            out.append(f"\\x{ord(ch):02x}")
-        elif ch in ("\u2028", "\u2029"):
-            out.append(f"\\u{ord(ch):04x}")
-        else:
-            out.append(ch)
-    return "".join(out)
-
-
 def _cors_headers_for_scope(scope) -> list[tuple[bytes, bytes]]:
     """Re-apply the CORS headers a refusal sent from OUTSIDE ``CORSMiddleware``
     would otherwise lose.
@@ -2564,6 +2532,20 @@ class WaitBoundMiddleware:
 
         refused = True
         state = scope.get("state")
+        # #3834 F-2 (exactly-once breach telemetry): the MCP dispatch seam
+        # shares this ``scope["state"]`` dict (Starlette's ``Mount`` forwards
+        # the same mapping) and reads this flag before emitting its own breach
+        # event. Without it a pre-SSE stall (pre-SSE cost >= bound) produced
+        # TWO ``transport_wait_bound_exceeded`` rows for one request — the
+        # middleware's here and the seam's, where the seam's own deadline had
+        # already collapsed to 0. The middleware is the one that ANSWERED the
+        # caller on this path, so its event is the truthful one; the seam's
+        # refusal below is redundant. On the SSE-started path this branch is
+        # never reached (``response_started`` returns above) and the seam's
+        # event is the only one — which is why this is a FLAG and not a
+        # ``remaining <= 0`` guard at the seam.
+        if isinstance(state, dict):
+            state["_wait_bound_refused"] = True
         org_id = state.get("org_id") if isinstance(state, dict) else None
         # The ASGI server percent-DECODES the path, so `/v1/x/%0d%0a…` arrives
         # with embedded CR/LF; logged verbatim that forges log lines. This is
@@ -2571,9 +2553,9 @@ class WaitBoundMiddleware:
         # ``_unhandled_exception_handler`` (#1591 class) carries — the C0 range
         # plus DEL/C1 and the Unicode line separators — and the sanitized form
         # also reaches the analytics prop, so neither the log nor the sink can
-        # be forged. (That handler still carries the CR/LF-only form; a shared
-        # helper there is a separate change, not asserted here.)
-        safe_route_path = _sanitize_for_log(route_path)
+        # be forged. The helper lives in ``mcp_auth`` (#3834 F-3) so the MCP
+        # arm shares it without importing this module.
+        safe_route_path = _mcp_auth._sanitize_for_log(route_path)
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))

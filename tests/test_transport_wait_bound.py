@@ -715,6 +715,169 @@ def test_mcp_seam_spends_the_transport_deadline_not_a_fresh_one(
         "pre-SSE cost is being added to a FRESH MCP deadline (two deadlines)")
 
 
+def test_mcp_breach_reports_the_caller_visible_interval(
+        mcp_slow_tool, monkeypatch):
+    """#3834 F-1: the MCP arm's breach event must report the SAME interval the
+    REST arm reports — the CALLER-VISIBLE wait — not this seam's own entry.
+
+    The seam spends only the transport's REMAINING deadline, so a ``t0``-based
+    interval under-reports by the entire pre-SSE cost (org resolution, rate
+    limit, routing). Measured on the pre-fix head with the real layering at
+    bound 0.3 s and pre-SSE 0.2 s: the caller waited ~0.3 s while the event said
+    ~0.09 s. A consumer thresholding ``latency_ms >= 10000`` counted ZERO MCP
+    breaches on the very surface the bound was justified by.
+    """
+    from contextlib import asynccontextmanager
+
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from starlette.testclient import TestClient
+
+    from tortoise import mcp_server as ms
+
+    bound = 0.3
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", bound)
+    seen: list = []
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: seen.append((ev, props)))
+
+    mcp_app = ms.create_http_app(auth_mode="none")
+
+    @asynccontextmanager
+    async def _lifespan(parent_app):
+        async with mcp_app.lifespan(mcp_app):
+            yield
+
+    class _PreSseCost:
+        """A realistic pre-SSE cost (org resolution / rate limit / routing)."""
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http":
+                await asyncio.sleep(0.2)
+            await self.app(scope, receive, send)
+
+    parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
+    parent.add_middleware(_PreSseCost)
+    parent.add_middleware(ha.WaitBoundMiddleware)
+    try:
+        with TestClient(parent) as client:
+            t0 = time.perf_counter()
+            r = client.post("/mcp/", headers=_MCP_HEADERS, json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "_bound_slow", "arguments": {}}})
+            elapsed = time.perf_counter() - t0
+        for _ in range(250):
+            if seen:
+                break
+            time.sleep(0.02)
+    finally:
+        ms._pending_mcp_wait_bound.clear()
+
+    assert r.status_code == 200, r.text
+    breach = [p for e, p in seen if e == ha._TRANSPORT_WAIT_BOUND_EVENT]
+    assert len(breach) == 1, breach
+    emitted = breach[0]["latency_ms"]
+    # The seam-local interval is ~remaining == bound - pre-SSE (~0.1 s); the
+    # caller-visible one is ~bound. A regression back to the seam's ``t0``
+    # lands well under the 0.75 * bound floor.
+    assert emitted >= 0.75 * bound * 1000, (
+        f"the MCP breach reported {emitted} ms for a caller-visible wait of "
+        f"{elapsed * 1000:.0f} ms — that is the seam-local interval, not the "
+        "interval the bound governs")
+    assert abs(emitted - elapsed * 1000) < 150, (
+        f"emitted {emitted} ms vs caller-visible {elapsed * 1000:.0f} ms — the "
+        "two arms are measuring different intervals")
+
+
+def test_mcp_breach_is_recorded_exactly_once_on_the_composed_path(
+        mcp_slow_tool, monkeypatch):
+    """#3834 F-2: ONE logical breach must produce ONE
+    ``transport_wait_bound_exceeded`` — and no false ``status=timeout``.
+
+    When the pre-SSE cost ALONE exceeds the bound the middleware refuses (its
+    SSE response never starts) and emits; the ABANDONED MCP app then reaches the
+    dispatch, where the transport's remaining deadline has collapsed to 0, so
+    the seam used to emit a SECOND event plus an ``mcp_tool_call{status:
+    "timeout"}`` for a dispatch it never waited on. Reproduced on the pre-fix
+    head: one ``tools/call`` → two breach rows + one false timeout row.
+
+    The seam reads the middleware's ``scope["state"]["_wait_bound_refused"]``
+    flag, so this test also proves the shared dict crosses Starlette's ``Mount``
+    boundary (the F1 test proves the same for ``_wait_bound_t0``). The portal is
+    kept alive after the 504 so the abandoned inner task can reach the seam, as
+    it would on a real server.
+    """
+    from contextlib import asynccontextmanager
+
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from starlette.testclient import TestClient
+
+    from tortoise import mcp_server as ms
+
+    bound = 0.3
+    monkeypatch.setattr(ma, "_TRANSPORT_WAIT_BOUND_S", bound)
+    seen: list = []
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: seen.append((ev, props)))
+
+    mcp_app = ms.create_http_app(auth_mode="none")
+
+    @asynccontextmanager
+    async def _lifespan(parent_app):
+        async with mcp_app.lifespan(mcp_app):
+            yield
+
+    class _PreSseCost:
+        """Pre-SSE cost alone exceeds the bound → the middleware refuses."""
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http":
+                await asyncio.sleep(0.4)
+            await self.app(scope, receive, send)
+
+    parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=mcp_app)])
+    parent.add_middleware(_PreSseCost)
+    parent.add_middleware(ha.WaitBoundMiddleware)
+    try:
+        with TestClient(parent) as client:
+            r = client.post("/mcp/", headers=_MCP_HEADERS, json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "_bound_slow", "arguments": {}}})
+            # Keep the portal (and the request loop) alive: the middleware has
+            # already answered 504, but the abandoned dispatch keeps running.
+            time.sleep(1.5)
+        for _ in range(250):
+            if seen:
+                break
+            time.sleep(0.02)
+        time.sleep(0.3)
+    finally:
+        ms._pending_mcp_wait_bound.clear()
+
+    assert r.status_code == 504, r.text
+    breach = [p for e, p in seen if e == ha._TRANSPORT_WAIT_BOUND_EVENT]
+    assert len(breach) == 1, (
+        f"one request recorded {len(breach)} breach events — the seam emitted "
+        f"a second one for a refusal the transport already delivered: {breach}")
+    # The surviving event is the MIDDLEWARE's (it answered the caller): no
+    # ``tool_name``, and the path is the transport's, not the seam's hardcoded
+    # ``/mcp`` literal.
+    assert "tool_name" not in breach[0], breach
+    assert breach[0]["path"] == "/mcp/", breach
+    timeouts = [p for e, p in seen
+                if e == "mcp_tool_call" and p.get("status") == "timeout"]
+    assert timeouts == [], (
+        "a dispatch the transport had already refused was recorded as a "
+        f"timeout: {timeouts}")
+
+
 @pytest.mark.asyncio
 async def test_mcp_wait_bound_fast_path_overhead_is_bounded(monkeypatch):
     """#3834 F2 guard: the seam wraps EVERY tool call, so its fast-path cost
@@ -1081,6 +1244,72 @@ async def test_breach_path_is_sanitized_before_the_log_and_the_sink(
     assert stored == (
         "/v1/points/foo\\r\\nFORGED\\x1b[31m\\x0b\\x0c\\x00\\u2028\\u2029"
         "\\x85NEL\\x9bCSI\\x7f"), (f"unexpected sanitized form: {stored!r}")
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_name_is_sanitized_at_the_log_and_the_analytics_sink(
+        fast_bound, monkeypatch, caplog):
+    """#3834 F-3: the MCP tool name is the client-supplied JSON-RPC
+    ``params.name`` and reaches the seam BEFORE any registry lookup, so it is
+    untrusted for the same reason the REST arm sanitizes its route path. A name
+    carrying CR/LF, an ANSI escape, NUL, U+2028/U+2029 and the C1 introducers
+    must appear ESCAPED in BOTH the log record and the analytics props.
+
+    ``_original_call_tool`` is replaced so a crafted name reliably reaches the
+    breach path (an unregistered name would otherwise fail resolution before the
+    bound). The name is the only thing under test.
+    """
+    import logging
+
+    from tortoise import mcp_server as ms
+
+    raw = "evil\r\nFORGED\x1b[31m\x00\u2028\u2029\u0085NEL\x9bCSI\x7f"
+    escaped = ("evil\\r\\nFORGED\\x1b[31m\\x00\\u2028\\u2029\\x85NEL"
+               "\\x9bCSI\\x7f")
+    seen: list = []
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: seen.append((ev, props)))
+
+    async def _slow_dispatch(name, arguments=None, **kwargs):
+        await asyncio.sleep(5.0)
+
+    monkeypatch.setattr(ms, "_original_call_tool", _slow_dispatch)
+    try:
+        with caplog.at_level(logging.WARNING, logger=ms._log.name):
+            result = await ms.mcp.call_tool(raw)
+        assert result.meta == {ms._WAIT_BOUND_META_KEY: True}
+        for _ in range(250):
+            events = {e for e, _ in seen}
+            if ha._TRANSPORT_WAIT_BOUND_EVENT in events and "mcp_tool_call" in events:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        ms._pending_mcp_wait_bound.clear()
+
+    # ── the log sink ───────────────────────────────────────────────────
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING
+                and "MCP tools/call" in r.getMessage()]
+    assert warnings, "the MCP breach warning never fired"
+    assert escaped in warnings[0], (
+        f"the tool name was not escaped in the log line: {warnings[0]!r}")
+    for ch in ("\r", "\n", "\x1b", "\x00", "\u2028", "\u2029",
+               "\u0085", "\u009b", "\x7f"):
+        assert ch not in warnings[0], (
+            f"raw control char {ch!r} reached the log line: {warnings[0]!r}")
+
+    # ── both analytics sinks ───────────────────────────────────────────
+    by_event: dict = {}
+    for ev, props in seen:
+        by_event.setdefault(ev, []).append(props)
+    assert ha._TRANSPORT_WAIT_BOUND_EVENT in by_event, seen
+    breach_name = by_event[ha._TRANSPORT_WAIT_BOUND_EVENT][0]["tool_name"]
+    assert breach_name == escaped, (
+        f"the breach prop carried the raw name: {breach_name!r}")
+    assert "mcp_tool_call" in by_event, seen
+    call_name = by_event["mcp_tool_call"][0]["tool_name"]
+    assert call_name == escaped, (
+        f"the mcp_tool_call prop carried the raw name: {call_name!r}")
 
 
 @pytest.mark.asyncio

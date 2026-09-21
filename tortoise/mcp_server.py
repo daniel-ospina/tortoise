@@ -184,7 +184,8 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
     daemon thread. Any failure is logged and swallowed — telemetry must never
     break a tool call.
     """
-    props = {"tool_name": tool_name, "status": status,
+    props = {"tool_name": _mcp_auth._sanitize_for_log(tool_name),
+             "status": status,
              "latency_ms": latency_ms, "error_kind": error_kind}
 
     def _write() -> None:
@@ -298,11 +299,18 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
     refusal. The single emit site is unchanged — only where its module is
     imported moved.
     """
+    # #3834 F-3: sanitize the client-supplied tool name at the analytics sink.
+    # The helper is shared with the REST arm (``mcp_auth``), not a third copy —
+    # ``mcp_server`` already imports that module, so this pays no ``hosted_api``
+    # import. Sanitized on the loop (pure and cheap), so the off-loop closure
+    # carries only the safe value.
+    safe_name = _mcp_auth._sanitize_for_log(name)
+
     def _emit() -> None:
         try:
             from tortoise import hosted_api as _ha
             _ha._emit_wait_bound_breach(
-                org_id, "/mcp", "POST", latency_ms, tool_name=name)
+                org_id, "/mcp", "POST", latency_ms, tool_name=safe_name)
         except Exception:  # telemetry must never turn a refusal into an error
             _log.debug("mcp wait-bound telemetry emit failed", exc_info=True)
 
@@ -336,25 +344,26 @@ _original_call_tool = mcp.call_tool
 #: dependency writes ``org_id`` into).
 _WAIT_BOUND_ARRIVAL_KEY = "_wait_bound_t0"
 
+#: The key the middleware sets when IT has already emitted the breach event and
+#: answered the caller (#3834 F-2). The seam reads it so one request records
+#: exactly one ``transport_wait_bound_exceeded``.
+_WAIT_BOUND_REFUSED_KEY = "_wait_bound_refused"
 
-def _wait_bound_arrival() -> float | None:
-    """When the HTTP request arrived at the transport, or None off-HTTP.
 
-    The stamp is written by ``hosted_api.WaitBoundMiddleware`` and is what makes
-    the bound ONE deadline instead of two (#3834 F1). The middleware cannot
-    bound an MCP *tool call* — Streamable-HTTP starts the SSE response BEFORE
-    dispatching the tool — so it hands this seam the SAME arrival time and the
-    seam waits only the REMAINING part of the bound. Without it the
-    caller-visible wait is pre-SSE cost + bound (measured: 0.522 s for an
-    advertised 0.3 s bound) and a slow org resolution can push the total past
-    the 15 s client budget with no legible refusal.
+def _wait_bound_state() -> dict | None:
+    """The shared ASGI ``scope["state"]`` dict, or None off-HTTP.
+
+    Both the transport arrival stamp (#3834 F1) and the already-refused flag
+    (#3834 F-2) ride this one dict, which ``hosted_api.WaitBoundMiddleware``
+    writes and Starlette's ``Mount`` forwards to this sub-app as the SAME
+    mapping.
 
     HTTP-only by construction: on stdio there is no request, so this returns
-    None and the full bound applies. It deliberately never raises — a missing
-    stamp means "use the full bound", never "fail the tool call".
-    ``get_http_request`` is tried first because it is the public API, but its
-    MCP-SDK ``request_ctx`` branch can return a protocol object rather than the
-    Starlette request, so FastMCP's HTTP ContextVar is the reliable fallback.
+    None. It deliberately never raises — a missing dict means "no transport
+    stamp / no refusal", never "fail the tool call". ``get_http_request`` is
+    tried first because it is the public API, but its MCP-SDK ``request_ctx``
+    branch can return a protocol object rather than the Starlette request, so
+    FastMCP's HTTP ContextVar is the reliable fallback.
     """
     candidates: list = []
     try:
@@ -373,10 +382,46 @@ def _wait_bound_arrival() -> float | None:
             continue
         state = scope.get("state")
         if isinstance(state, dict):
-            stamp = state.get(_WAIT_BOUND_ARRIVAL_KEY)
-            if isinstance(stamp, (int, float)):
-                return float(stamp)
+            return state
     return None
+
+
+def _wait_bound_arrival() -> float | None:
+    """When the HTTP request arrived at the transport, or None off-HTTP.
+
+    The stamp is written by ``hosted_api.WaitBoundMiddleware`` and is what makes
+    the bound ONE deadline instead of two (#3834 F1). The middleware cannot
+    bound an MCP *tool call* — Streamable-HTTP starts the SSE response BEFORE
+    dispatching the tool — so it hands this seam the SAME arrival time and the
+    seam waits only the REMAINING part of the bound. Without it the
+    caller-visible wait is pre-SSE cost + bound (measured: 0.522 s for an
+    advertised 0.3 s bound) and a slow org resolution can push the total past
+    the 15 s client budget with no legible refusal.
+
+    HTTP-only by construction, so on stdio it returns None and the full bound
+    applies.
+    """
+    state = _wait_bound_state()
+    if state is not None:
+        stamp = state.get(_WAIT_BOUND_ARRIVAL_KEY)
+        if isinstance(stamp, (int, float)):
+            return float(stamp)
+    return None
+
+
+def _wait_bound_refused() -> bool:
+    """True when the transport already refused this request (#3834 F-2).
+
+    ``hosted_api.WaitBoundMiddleware`` sets this on the shared
+    ``scope["state"]`` when IT emits the breach event and answers the caller —
+    the pre-SSE-stall path, where pre-SSE cost >= bound and this seam's own
+    deadline has already collapsed to 0. The seam must then NOT emit a second
+    ``transport_wait_bound_exceeded`` and must NOT record the redundant refusal
+    as an ``mcp_tool_call`` ``timeout``. It still returns the refusal, so the
+    abandoned dispatch still terminates cleanly.
+    """
+    state = _wait_bound_state()
+    return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
 
 
 async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
@@ -459,16 +504,46 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
         pass
 
     _hold_mcp_dispatch_after_request(task)
-    # The SAME breach writer the REST arm uses — one emit site, one prop
-    # vocabulary — scheduled OFF the loop (see
-    # ``_emit_mcp_wait_bound_breach_off_loop``): the fast path must not pay a
-    # ``hosted_api`` import, and neither must the breach path, where that import
-    # froze the loop and delivered the refusal seconds late.
-    _emit_mcp_wait_bound_breach_off_loop(
-        _current_org_id.get() or "", int((_time.perf_counter() - t0) * 1000), name)
-    _log.warning(
-        "transport wait bound (%.0fs) exceeded: MCP tools/call %s — refusing "
-        "legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, name)
+    # #3834 F-2: the transport already refused AND answered this request (a
+    # pre-SSE stall, where pre-SSE cost >= bound and this seam's remaining
+    # deadline was 0). The middleware's event is then the truthful record;
+    # emitting here would be a second, mutually-inconsistent
+    # ``transport_wait_bound_exceeded`` for the same request.
+    transport_refused = _wait_bound_refused()
+    # #3834 F-1: report the interval the bound actually governs — the
+    # CALLER-VISIBLE wait, the SAME interval the REST arm's breach event reports
+    # (``hosted_api`` uses ``time.monotonic() - transport arrival``). ``t0`` here
+    # is THIS seam's entry, which is AFTER pre-SSE (org resolution, rate limit,
+    # routing); because the seam spends only the transport's REMAINING deadline,
+    # a ``t0``-based interval under-reports by the whole pre-SSE cost. On stdio
+    # there is no transport arrival, so the seam-local ``t0`` stands in.
+    if arrival is None:
+        latency_ms = int((_time.perf_counter() - t0) * 1000)
+    else:
+        latency_ms = int((_time.monotonic() - arrival) * 1000)
+    # #3834 F-3: the tool name is the client-supplied JSON-RPC ``params.name``,
+    # reaching this seam before any registry lookup — so it is untrusted in the
+    # same class of sink the REST arm already sanitizes its route path for.
+    # Escape it for the log line (the analytics sink sanitizes its own copy).
+    safe_name = _mcp_auth._sanitize_for_log(name)
+    if transport_refused:
+        # The transport's warning already covers this request; a second
+        # "refusing legibly" warning would describe a refusal this seam never
+        # delivers (the middleware dropped the SSE response).
+        _log.debug(
+            "MCP tools/call %s already refused at the transport; this seam's "
+            "refusal is redundant", safe_name)
+    else:
+        # The SAME breach writer the REST arm uses — one emit site, one prop
+        # vocabulary — scheduled OFF the loop (see
+        # ``_emit_mcp_wait_bound_breach_off_loop``): the fast path must not pay
+        # a ``hosted_api`` import, and neither must the breach path, where that
+        # import froze the loop and delivered the refusal seconds late.
+        _emit_mcp_wait_bound_breach_off_loop(
+            _current_org_id.get() or "", latency_ms, name)
+        _log.warning(
+            "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
+            "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
     retry_after = _mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S
     return ToolResult(
         content=_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE,
@@ -568,7 +643,16 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
             # status (not exec_error) so "how often are we breaching 10 s" is
             # answerable from the SAME mcp_tool_call series the bound was
             # justified by.
-            status, error_kind = "timeout", "wait_bound"
+            if _wait_bound_refused():
+                # #3834 F-2: the TRANSPORT already refused and answered this
+                # request before this seam could wait on it (pre-SSE cost >=
+                # bound, so the remaining deadline was 0). Recording ``timeout``
+                # would be a second, FALSE row in the very series the bound is
+                # measured from. ``refused`` is its own status: the dispatch was
+                # abandoned by an OUTER refusal, not by this seam's deadline.
+                status, error_kind = "refused", "transport_wait_bound"
+            else:
+                status, error_kind = "timeout", "wait_bound"
         # The stdio auth gate (#236) returns an error dict instead of raising
         # (TORTOISE_API_KEY set → every call is rejected). Classify it so
         # unauthenticated stdio calls don't masquerade as ok.
@@ -590,6 +674,14 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         status, error_kind = _classify_mcp_call_error(exc)
         raise
     finally:
+        # NOTE (#3834 F-1): this is deliberately the SEAM-LOCAL interval (tool
+        # dispatch, transport cost excluded), NOT the caller-visible interval
+        # the breach event above reports. ``mcp_tool_call`` is an established
+        # dispatch series (#888/#889; the p99 22.5 s population the bound was
+        # justified by), and its contract — documented at ``_wrapped_call_tool``
+        # — excludes transport auth. Redefining it would silently break
+        # comparability with that population. The bound's own telemetry is the
+        # breach event, which measures the caller-visible wait on both arms.
         latency_ms = int((_time.perf_counter() - t0) * 1000)
         try:
             _emit_mcp_tool_call_telemetry(org_id, name, status, latency_ms,
