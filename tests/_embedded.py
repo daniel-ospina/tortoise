@@ -30,6 +30,89 @@ from tortoise.config import is_db_uri
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.projection import FalkorProjection
 
+# ── #4439: no RDB snapshot storm from ephemeral harness fixtures ──────────
+#
+# redislite ships a periodic save schedule in
+# `DEFAULT_REDIS_SETTINGS['save']` (900 1 / 300 100 / 60 200 / 15 1000), so
+# EVERY server it starts forks an `redis-rdb-bgsave` snapshot on those
+# triggers — including a throwaway test fixture on a `tmpXXXX` socket in
+# `$TMPDIR`, whose data is discarded by definition. On a loaded box holding
+# hundreds of leaked fixtures (#4299) that fork storm is the single largest
+# CPU consumer (#4439). A harness fixture never needs an automatic snapshot:
+# explicit `SAVE`/`BGSAVE`, a graceful explicit `close()` (redislite's
+# `shutdown(save=True)`), and the AOF path (`TORTOISE_EMBEDDED_AOF=1`) are the
+# persistence contracts the suite actually asserts. (Interpreter-exit teardown
+# is `SHUTDOWN NOSAVE` when `TORTOISE_FAST_ATEXIT=1`, as conftest sets — see
+# `tortoise/embedded_lifecycle.py` — so it never relied on the schedule either.)
+#
+# Scope of the relief: this changes the schedule for servers constructed AFTER
+# the patch. Already-running leaked servers (#4299) keep their old schedule and
+# keep forking until reaped — this is the "leak at source" arm, not an instant
+# drop in the measured population.
+#
+# The patch is applied HERE, at module import — `tests/conftest.py` imports
+# this module before any server is constructed — so it covers every
+# in-process construction, including module-import-time ones.
+#
+# ⛔ TRAP (do not "simplify" this to `[]` or `''`):
+# `redislite.configuration.config()` renders only TRUTHY settings
+# (`if config_dict[key]: ... else: del config_dict[key]`). A falsy value
+# therefore OMITS the `save` directive entirely, and Redis then applies its
+# BUILT-IN defaults (measured on the bundled redis-server v8.6.2:
+# `3600 1 300 100 60 10000`) — the storm continues while the change LOOKS
+# correct. The value must be truthy AND equal to Redis's
+# disable form: the two-character string `""`, which `config_line` renders
+# as `save ""`. `tests/test_embedded_lifecycle.py` pins both halves.
+#
+# ⛔ SCOPE (do not "fix" this in product code): `tortoise.FalkorDB` subclasses
+# redislite's client and serves genuinely durable embedded user databases too.
+# Disabling persistence there would change PRODUCT durability semantics for
+# every user of embedded mode, not just test-fixture behaviour — a real
+# embedded graph must keep its automatic snapshot in production. This is a
+# TEST-HARNESS patch only; `tortoise/__init__.py` is deliberately untouched.
+# (The patch is process-global WITHIN a test session, so an in-process
+# `tortoise.FalkorDB(path)` built by a test also gets the fixture schedule.
+# That is deliberate: every durability assertion in the suite drives an
+# explicit `SAVE`/`BGSAVE` or a graceful `close()`, and no test depends on a
+# periodic snapshot — pinned by the embedded carve-out lane.)
+#
+# ⛔ DECISION CONTRADICTION (reconciled, not ignored): the closed #3827 plan doc
+# (docs/plans/2026-09-17-3827-embedded-lane-evidence-producer.md, D19) recorded
+# that the embedded lane RETAINS a save fork source — `CONFIG GET save`
+# non-empty (redislite default) — and `tools/embedded_evidence.py` carries a
+# `save-child-slot` fork-cause class keyed on it. #4439 (the owner-filed issue
+# this patch implements) deliberately supersedes D19's live-axis premise for
+# HARNESS FIXTURES: `CONFIG GET save` is now empty there and `save-child-slot`
+# is unreachable on the embedded lane. D19's enforcing file
+# (tests/test_embedded_save_tripwire.py) was never committed and #3827 is
+# closed, so nothing is red — but any future tripwire must assert the DISABLED
+# form, not the redislite default.
+#
+# Residual (tracked, not absorbed): servers spawned by a test's own SUBPROCESS
+# (`python -c '... FalkorDB() ...'`) do not import this module and keep the
+# default schedule — follow-up issue #4497. Those spawns are short-lived and
+# write nothing, so no former trigger can fire; the fork cost is produced by
+# the long-lived in-process fixtures this patch covers. Servers constructed
+# with an explicit `serverconfig={'save': ...}` keep that explicit value
+# (`settings()` applies kwargs over the default).
+REDIS_SAVE_DISABLED = '""'
+
+
+def _disable_redislite_rdb_save() -> None:
+    """Set redislite's default save schedule to Redis's disable form (#4439).
+
+    Idempotent and non-raising: redislite absent means no embedded servers
+    exist, so there is nothing to damp.
+    """
+    try:
+        from redislite import configuration
+    except Exception:  # pragma: no cover - redislite absent
+        return
+    configuration.DEFAULT_REDIS_SETTINGS["save"] = REDIS_SAVE_DISABLED
+
+
+_disable_redislite_rdb_save()
+
 # #4096: session-scoped test trees created by fixtures in this module and in
 # tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
 # which `_redislite_hygiene` declares as a dependency so pytest's reverse-order

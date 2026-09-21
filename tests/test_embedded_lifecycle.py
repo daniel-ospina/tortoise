@@ -1631,3 +1631,92 @@ def test_partial_init_cleanup_reclaims_the_orphaned_server(tmp_path):
 
     with contextlib.suppress(Exception):
         proj.db._t_close()
+
+
+# ── #4439: harness fixtures must not fork periodic RDB snapshots ──────────
+#
+# `redislite.configuration.DEFAULT_REDIS_SETTINGS['save']` ships a periodic
+# save schedule, so every harness fixture server forked an
+# `redis-rdb-bgsave` snapshot to persist data that is discarded by
+# definition. `tests/_embedded.py` patches the default to Redis's disable
+# form (`save ""`) at import time. These tests pin the mechanism AND the
+# trap that made an earlier attempt wrong.
+
+def test_harness_disables_redislite_rdb_save():
+    """The harness default renders exactly `save ""` (Redis's disable form).
+
+    #4439 acceptance 1: the generated server config must contain `save ""`.
+    """
+    from redislite import configuration
+
+    from tests._embedded import REDIS_SAVE_DISABLED
+
+    # Truthy AND the disable form — the two properties the trap depends on.
+    assert REDIS_SAVE_DISABLED == '""'
+    assert bool(REDIS_SAVE_DISABLED) is True, (
+        "the disable form must stay TRUTHY: config() deletes falsy settings "
+        "(see test_falsy_save_omits_directive_documenting_trap)")
+    assert configuration.DEFAULT_REDIS_SETTINGS["save"] == REDIS_SAVE_DISABLED
+
+    save_lines = [l for l in configuration.config().splitlines()  # noqa: E741
+                  if l.startswith("save")]
+    assert save_lines == ['save ""'], (
+        f"harness config must render exactly one `save \"\"` line, got "
+        f"{save_lines!r}")
+
+
+def test_falsy_save_omits_directive_documenting_trap(monkeypatch):
+    """NEGATIVE CONTROL (#4439 trap): a falsy `save` renders NO `save` line.
+
+    `redislite.configuration.config()` renders only truthy settings, so
+    `save=[]` / `save=''` OMIT the directive — and Redis's built-in defaults
+    then apply (measured on the bundled redis-server v8.6.2: `3600 1 / 300 100
+    / 60 10000`), i.e. saving is NOT disabled.
+    This is the trap the `save ""` form avoids; pinning it here stops a
+    future "simplification" to a falsy value from silently restoring the
+    fork storm while looking correct.
+
+    `monkeypatch.setitem` restores the harness default at teardown — without
+    it this test would leave the module global falsy and re-arm the storm for
+    every later server in the session.
+    """
+    from redislite import configuration
+
+    for falsy in ([], ""):
+        assert not falsy  # the property under test
+        monkeypatch.setitem(configuration.DEFAULT_REDIS_SETTINGS, "save", falsy)
+        save_lines = [l for l in configuration.config().splitlines()  # noqa: E741
+                      if l.startswith("save")]
+        assert save_lines == [], (
+            f"falsy save={falsy!r} unexpectedly rendered {save_lines!r}; the "
+            "trap (omitted directive → Redis built-in defaults) changed")
+
+
+def test_live_fixture_server_reports_rdb_save_disabled(tmp_path):
+    """A live harness fixture server gets persistence disabled end-to-end.
+
+    #4439 acceptance 1 (live half): the server actually started by the
+    harness writes `save ""` into its redis.config and reports an empty
+    `save` value over the wire — so no periodic snapshot can ever fire.
+    """
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection(str(tmp_path / "fixture.db"), graph_name="test",
+                            skip_health_check=True)
+    try:
+        if not getattr(proj, "_is_embedded", False):
+            pytest.skip("not an embedded construction (server-mode redirect)")
+        config_file = proj.db.client.redis_configuration_filename
+        with open(config_file) as fh:
+            save_lines = [l for l in fh.read().splitlines()  # noqa: E741
+                          if l.startswith("save")]
+        assert save_lines == ['save ""'], (
+            f"live fixture redis.config must disable saving, got {save_lines!r}")
+        result = proj.db.execute_command("CONFIG", "GET", "save")
+        # Redis returns the (empty) value, not the two-quote form.
+        value = result[1] if isinstance(result, (list, tuple)) else (
+            result.get("save") if isinstance(result, dict) else None)
+        assert value == "", (
+            f"live fixture must report save disabled (empty), got {result!r}")
+    finally:
+        proj.close()
