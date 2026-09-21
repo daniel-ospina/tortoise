@@ -29,7 +29,8 @@ this precedence (first match wins):
 
   1. trunk / ``--protect`` glob / the current branch / the main checkout's
      branch                      -> PRESERVE ``trunk``
-  2. an open PR for this headRefName             -> PRESERVE ``open-pr``
+  2. an open PR for this headRefName, or this branch is an OPEN PR's baseRefName
+                                 -> PRESERVE ``open-pr`` / ``open-pr-base``
   3. tip is an ancestor of the main ref          -> SAFE ``ancestry``
   4. tip == the head SHA of a MERGED PR          -> SAFE ``pr-merged-tip``
                                                  (content landed per the PR record)
@@ -80,6 +81,13 @@ Safety
 * Report and bundle writes refuse a symlinked target and replace atomically
   (``os.replace``), so a planted link cannot clobber another file.
 * Remote branches are NEVER touched.
+* **What a report actually covers.** A dry run lists every branch by class, and
+  for worktrees it lists ONLY those holding a SAFE branch (the held table) or
+  sitting on a DETACHED HEAD; a worktree holding a PRESERVE/JUDGEMENT branch is
+  not listed individually. The delegated worktree engine
+  (``pi-reap-worktrees.sh``) runs ONLY under ``--apply --reap-worktrees`` (always
+  with ``--apply``), so a dry-run report has no delegate section at all — its
+  output appears only on that apply path.
 
 Exit codes (a delegate code is never passed through unmodified)
 -------------------------------------------------------------
@@ -90,6 +98,12 @@ Exit codes (a delegate code is never passed through unmodified)
   4  partial failure — at least one deletion was refused, or the worktree
      engine reported >=1 FAILED removal
   5  internal error (unexpected engine exit, malformed output)
+  6  INCOMPLETE AFTER DELETION — the run aborted after at least one branch had
+     already been deleted (a mid-loop timeout, or a report path that became a
+     symlink between the pre-delete and post-delete writes). Exit 2's "Nothing
+     was deleted" contract does NOT hold here; the pre-delete recovery record
+     holds every classified tip, so ``git branch <name> <sha>`` restores any of
+     them.
 
 Usage
 -----
@@ -117,6 +131,9 @@ EXIT_INCOMPLETE = 2
 EXIT_USAGE = 3
 EXIT_PARTIAL = 4
 EXIT_INTERNAL = 5
+#: Aborted AFTER >=1 deletion landed — the "nothing was deleted" contract of
+#: EXIT_INCOMPLETE no longer holds, so automation gets a distinct signal.
+EXIT_INCOMPLETE_AFTER_DELETE = 6
 
 #: Page caps. A list that reaches its cap is TRUNCATED, never "complete but short".
 DEFAULT_MAX_PR_PAGES = 50
@@ -340,6 +357,7 @@ def fetch_prs(slug: str, *, max_pages: int, per_page: int) -> dict:
     open_by_head: dict[str, list[dict]] = {}
     merged_by_head: dict[str, list[dict]] = {}
     closed_unmerged_by_head: dict[str, list[dict]] = {}
+    open_bases: set[str] = set()
     for pages, dest in ((open_pages, open_by_head), (closed_pages, None)):
         for page in pages:
             for pr in page:
@@ -351,12 +369,19 @@ def fetch_prs(slug: str, *, max_pages: int, per_page: int) -> dict:
                        "merged": pr.get("merged_at") is not None}
                 if dest is not None:
                     dest.setdefault(head, []).append(row)
+                    base = (pr.get("base") or {}).get("ref")
+                    if base:
+                        # An OPEN PR's base is a live integration target: deleting
+                        # that local branch would break the PR (live shape: PR
+                        # #4181's base is the local branch feat/2409-contact-form).
+                        open_bases.add(base)
                 elif row["merged"]:
                     merged_by_head.setdefault(head, []).append(row)
                 else:
                     closed_unmerged_by_head.setdefault(head, []).append(row)
     return {"open": open_by_head, "merged": merged_by_head,
-            "closed_unmerged": closed_unmerged_by_head}
+            "closed_unmerged": closed_unmerged_by_head,
+            "open_bases": open_bases}
 
 
 # ── classification (pure — the unit under mutation test) ────────────────────
@@ -389,6 +414,12 @@ def classify(
         elif name in prs["open"]:
             row["verdict"], row["reason"] = VERDICT_PRESERVE, "open-pr"
             row["pr_number"] = prs["open"][name][0]["number"]
+        elif name in prs.get("open_bases", ()):
+            # This branch is the BASE of an open PR. Deleting it would break a
+            # live PR even when the branch itself is an ancestor of the main ref
+            # (rule 3 would otherwise call it SAFE). Rule 2 checked only the PR
+            # HEAD; this is the base-ref veto.
+            row["verdict"], row["reason"] = VERDICT_PRESERVE, "open-pr-base"
         elif name in ancestors:
             row["verdict"], row["reason"] = VERDICT_SAFE, "ancestry"
             row["commits_survive"] = "reachable-from-main"
@@ -683,21 +714,30 @@ def run_worktree_engine(engine: str, repo_root: str, timeout: int) -> tuple[int,
 
 
 def delete_branches(repo_root: str, rows: list[dict], held: set[str],
-                    *, backup_bundle: str | None) -> list[dict]:
-    """Delete the SAFE rows. ``held`` must be a worktree snapshot taken
-    immediately before this call (after any delegated teardown).
+                    *, backup_bundle: str | None,
+                    results: list[dict] | None = None) -> list[dict]:
+    """Delete the SAFE rows. ``held`` must be a worktree snapshot taken by the
+    caller immediately before this call (after any delegated teardown).
 
     Deletion uses the ATOMIC compare-and-delete primitive
     ``git update-ref -d refs/heads/<b> <expected>``: it fails without deleting
     if the ref no longer equals the classified tip, closing the
     check-then-act window. Because ``update-ref`` does NOT itself refuse a
-    branch checked out in some worktree (``git branch -D`` does), the ``held``
-    snapshot IS the checked-out guard — it is recomputed right before this loop,
-    and a worktree created in the microseconds during the loop is the documented
-    residual. A requested ``--backup-bundle`` that cannot be produced aborts the
-    whole phase (``Incomplete``) rather than deleting unbacked-up.
+    branch checked out in some worktree, the ``held`` snapshot IS the
+    checked-out guard. The residual is NOT microseconds: a ``--backup-bundle``
+    run stages temporary refs and writes the bundle after ``held`` was read (up
+    to the 900 s bundle timeout), so a worktree created during that stretch is
+    still absent from ``held``. A requested ``--backup-bundle`` that cannot be
+    produced aborts the whole phase (``Incomplete``) rather than deleting
+    unbacked-up.
+
+    ``results`` may be a caller-owned sink: when supplied, progress is appended
+    to it as it happens, so an ``Incomplete`` raised mid-loop still leaves the
+    caller the deletions that already landed (the caller uses that to return the
+    distinct exit 6 instead of the "nothing was deleted" exit 2).
     """
-    results: list[dict] = []
+    if results is None:
+        results = []
     targets = [r for r in rows if r["verdict"] == VERDICT_SAFE]
     if backup_bundle:
         _make_backup_bundle(repo_root, backup_bundle,
@@ -715,8 +755,15 @@ def delete_branches(repo_root: str, rows: list[dict], held: set[str],
             results.append({"branch": b, "oid": expected, "result": "refused",
                             "detail": "missing classified OID"})
             continue
-        res = _run(["git", "-C", repo_root, "update-ref", "-d",
-                    f"refs/heads/{b}", expected])
+        try:
+            res = _run(["git", "-C", repo_root, "update-ref", "-d",
+                        f"refs/heads/{b}", expected])
+        except Incomplete as exc:
+            # A timeout here aborts the phase; record the branch we were on so
+            # the caller can see how far it got, then fail closed.
+            results.append({"branch": b, "oid": expected, "result": "aborted",
+                            "detail": str(exc)})
+            raise
         if res.returncode == 0:
             results.append({"branch": b, "oid": expected, "result": "deleted", "detail": ""})
         else:
@@ -741,6 +788,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="branch_reaper",
         description="Reap provably-dead local branches, classified from GitHub PR state (#4408). "
                     "Dry-run by default.",
+        # A destructive arming flag must be EXACT: without this, `--a`, `--ap`
+        # and `--appl` all arm the delete path.
+        allow_abbrev=False,
     )
     p.add_argument("--repo", default=None,
                    help="repo path or owner/name (default: cwd)")
@@ -787,8 +837,8 @@ def _run_main(args) -> int:
 
     if args.apply and is_main_checkout(repo_root):
         print("branch_reaper: refusing --apply from the MAIN checkout — run from a linked "
-              "worktree (this tool invokes `git branch -D` as an interpreter file payload, "
-              "which main-worktree-guard does not content-gate).", file=sys.stderr)
+              "worktree (this tool invokes `git update-ref -d` as an interpreter file "
+              "payload, which main-worktree-guard does not content-gate).", file=sys.stderr)
         return EXIT_USAGE
 
     try:
@@ -847,13 +897,17 @@ def _run_main(args) -> int:
                     print(f"branch_reaper: internal error — unexpected worktree-engine exit {rc}.",
                           file=sys.stderr)
                     return EXIT_INTERNAL
-                worktrees = enum_worktrees(repo_root)
 
-            # Recompute the worktree-held set AFTER any delegated teardown — this
-            # is the checked-out guard for the CAS delete phase — and refresh each
-            # row's worktree so the recovery record and the report are derived from
-            # the SAME snapshot deletion uses (a stale pre-teardown `r["worktree"]`
-            # silently omitted a freed-then-deleted branch from the recovery record).
+            # Re-read the worktree list IMMEDIATELY before the delete phase, on
+            # EVERY --apply path (not only --reap-worktrees). `git update-ref -d`
+            # does NOT refuse a branch checked out in a worktree, so this snapshot
+            # IS the checked-out guard; the initial enumeration happened before two
+            # paginated `gh api` calls and the per-worktree dirty probes, which is
+            # far too old to guard the delete. Re-reading here also refreshes each
+            # row's worktree so the recovery record and the report derive from the
+            # SAME snapshot deletion uses (a stale `r["worktree"]` silently omitted
+            # a freed-then-deleted branch from the recovery record).
+            worktrees = enum_worktrees(repo_root)
             held = {wt["branch"] for wt in worktrees if wt.get("branch")}
             held_map = {wt["branch"]: wt["path"] for wt in worktrees if wt.get("branch")}
             for r in rows:
@@ -874,7 +928,9 @@ def _run_main(args) -> int:
                     main_ref_used=ref, include_closed_unmerged=args.include_closed_unmerged,
                     engine_output=engine_output, recovery=recovery, detached_ts=detached_ts))
             free_before = _disk_free_kb(repo_root)
-            apply_results = delete_branches(repo_root, rows, held, backup_bundle=args.backup_bundle)
+            apply_results = []
+            delete_branches(repo_root, rows, held, backup_bundle=args.backup_bundle,
+                            results=apply_results)
             free_after = _disk_free_kb(repo_root)
             if free_before is not None and free_after is not None:
                 disk = {"before_kb": free_before, "after_kb": free_after,
@@ -882,6 +938,13 @@ def _run_main(args) -> int:
             if any(r["result"] == "refused" for r in apply_results):
                 result = EXIT_PARTIAL
         except Incomplete as exc:
+            deleted = [r for r in (apply_results or []) if r["result"] == "deleted"]
+            if deleted:
+                print(f"branch_reaper: INCOMPLETE AFTER DELETION — {exc}. "
+                      f"{len(deleted)} branch(es) had already been deleted; the remaining "
+                      f"targets were NOT deleted. The pre-delete recovery record holds every "
+                      f"classified tip.", file=sys.stderr)
+                return EXIT_INCOMPLETE_AFTER_DELETE
             print(f"branch_reaper: INCOMPLETE — {exc}. Delete phase aborted; the "
                   f"pre-delete recovery record is on disk.", file=sys.stderr)
             return EXIT_INCOMPLETE
@@ -896,6 +959,8 @@ def _run_main(args) -> int:
             _write_text_safe(args.report, report)
     except Incomplete as exc:
         print(f"branch_reaper: {exc}", file=sys.stderr)
+        if apply_results and any(r["result"] == "deleted" for r in apply_results):
+            return EXIT_INCOMPLETE_AFTER_DELETE
         return EXIT_INCOMPLETE
     if args.json:
         print(json.dumps({"repo": repo_root, "slug": slug, "main_ref": ref,

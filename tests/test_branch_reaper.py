@@ -24,6 +24,13 @@ Coverage (the mutations from the issue):
   * --apply from the MAIN checkout -> refused (exit 3)
   * a ref that MOVED between classify and delete -> skipped, not destroyed
   * the pre-delete recovery record is written before any deletion
+  * a worktree created AFTER the initial enumeration is still seen by the delete
+    phase (the held snapshot is re-read on every --apply path)
+  * a missing worktree engine -> INCOMPLETE / exit 2 (fail closed, not exit 5)
+  * a symlinked --report path -> refused, target untouched
+  * --apply cannot be armed by an abbreviated flag (--ap)
+  * an OPEN PR's base branch -> PRESERVE (base-ref veto)
+  * an Incomplete AFTER a deletion -> distinct exit 6, not exit 2
 """
 from __future__ import annotations
 
@@ -128,8 +135,9 @@ class ReaperTestCase(unittest.TestCase):
         _git(self.repo, "branch", branch, "main")
         return self.main_sha
 
-    def add_pr(self, state: str, head: str, sha: str) -> int:
+    def add_pr(self, state: str, head: str, sha: str, base: str = "main") -> int:
         pr = {"number": self._next_pr(), "head": {"ref": head, "sha": sha},
+              "base": {"ref": base},
               "merged_at": "2026-09-01T00:00:00Z" if state == "merged" else None}
         {"open": self.open_prs, "merged": self.merged_prs, "closed": self.closed_prs}[state].append(pr)
         return pr["number"]
@@ -241,6 +249,21 @@ class ReaperTestCase(unittest.TestCase):
         self.assertEqual(cur["verdict"], "PRESERVE")
         self.assertEqual(cur["reason"], "trunk")
 
+    def test_open_pr_base_branch_is_preserved(self):
+        # P2-2: a local branch that is ONLY an open PR's base must not be deleted
+        # by rule 3 (ancestry) — deleting it would break a live PR. Live shape in
+        # this repo: PR #4181's base is the local branch `feat/2409-contact-form`.
+        self.branch_at_main("feat/base-target")
+        self.add_pr("open", "feature/child", self.main_sha, base="feat/base-target")
+        self.write_fixtures()
+        row = self.rows()["feat/base-target"]
+        self.assertEqual(row["verdict"], "PRESERVE")
+        self.assertEqual(row["reason"], "open-pr-base")
+
+        rc, out, err = self.run_tool(["--apply"], repo=self.driver)
+        self.assertEqual(rc, 0, err + out)
+        self.assertIn("feat/base-target", self.branches())
+
     def test_judgement_has_no_pr_and_is_not_ancestor(self):
         self.commit_on("nopr/branch", "unlanded")
         self.write_fixtures()
@@ -271,6 +294,22 @@ class ReaperTestCase(unittest.TestCase):
                                    env_extra={"GH_STUB_FAIL": "1"})
         self.assertEqual(rc, 2)
         self.assertIn("INCOMPLETE", err)
+
+    def test_missing_worktree_engine_is_incomplete_exit_2(self):
+        # P2-4(b): the DOCUMENTED contract for a missing engine is INCOMPLETE /
+        # exit 2 (fail closed, nothing deleted). Without the isfile guard, bash
+        # exits 127, which the translation table maps to exit 5 (internal error)
+        # — a contract change. This pins exit 2.
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        missing = self.tmp / "no-such-engine.sh"
+        rc, out, err = self.run_tool(["--apply", "--reap-worktrees",
+                                      "--worktree-engine", str(missing)], repo=self.driver)
+        self.assertEqual(rc, 2, err + out)
+        self.assertIn("INCOMPLETE", err)
+        self.assertIn("worktree engine not found", err)
+        self.assertIn("merged/branch", self.branches())
 
     # ── worktree safety mutations ───────────────────────────────────────────
 
@@ -306,6 +345,48 @@ class ReaperTestCase(unittest.TestCase):
                                       "--worktree-engine", str(engine)], repo=self.driver)
         self.assertEqual(rc, 2, err + out)
         self.assertIn("held/branch", self.branches())
+
+    def test_late_worktree_is_re_read_before_delete(self):
+        # P1-1: enum_worktrees runs BEFORE the two paginated gh api calls. A
+        # worktree created in that window must still be seen by the delete phase,
+        # because `git update-ref -d` does NOT refuse a checked-out branch. The
+        # stub creates the worktree while serving the CLOSED pages — i.e. after
+        # the initial enumeration and before the hoisted re-read.
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        late_wt = self.tmp / "wt-late"
+        late_stub = _write_exec(self.gh_dir / "gh-late", f"""#!/usr/bin/env bash
+set -u
+d="${{GH_STUB_DIR:?GH_STUB_DIR unset}}"
+state=""
+for a in "$@"; do
+  case "$a" in
+    *state=open*) state=open ;;
+    *state=closed*) state=closed ;;
+  esac
+done
+[ -n "$state" ] || exit 1
+if [ "$state" = "closed" ]; then
+  git -C {shlex.quote(str(self.repo))} worktree add {shlex.quote(str(late_wt))} merged/branch >/dev/null 2>&1 || true
+fi
+cat "$d/${{state}}_pages.json"
+""")
+        rc, out, err = self.run_tool(["--apply"], repo=self.driver,
+                                     env_extra={"BRANCH_REAPER_GH": str(late_stub)})
+        self.assertEqual(rc, 0, err + out)
+        self.assertIn("merged/branch", self.branches())
+
+    def test_apply_cannot_be_armed_by_abbreviation(self):
+        # P2-1: argparse abbreviates by default, so `--ap` arms the destructive
+        # path. A destructive arming flag must be exact.
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        rc, out, err = self.run_tool(["--ap"], repo=self.driver)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("unrecognized arguments", err)
+        self.assertIn("merged/branch", self.branches())
 
     def test_engine_that_removes_nothing_keeps_held_branch(self):
         sha = self.commit_on("held/branch", "safe work")
@@ -424,6 +505,58 @@ class ReaperTestCase(unittest.TestCase):
         rec = report.parent / (report.name + ".recovery.json")
         self.assertTrue(rec.exists())
         self.assertIn(sha, [b["oid"] for b in json.loads(rec.read_text())["branches"]])
+
+    def test_report_symlink_path_is_refused_and_target_untouched(self):
+        # P2-4(a): `_write_text_safe` (the --report writer) must REFUSE a
+        # symlinked target. Without the guard, os.replace silently REPLACES the
+        # link rather than failing, so this asserts the documented refusal
+        # (exit 2 + message) — which fails the moment the guard is removed.
+        self.write_fixtures()
+        victim = self.tmp / "victim.md"
+        victim.write_text("do not clobber\n")
+        link = self.tmp / "report.md"
+        os.symlink(victim, link)
+        rc, out, err = self.run_tool(["--report", str(link)])
+        self.assertEqual(rc, 2, err + out)
+        self.assertIn("symlink", err)
+        self.assertEqual(victim.read_text(), "do not clobber\n")
+        self.assertTrue(link.is_symlink())
+
+    def test_incomplete_after_a_deletion_returns_distinct_exit(self):
+        # P1-2: exit 2 documents "Nothing was deleted". Once a deletion has
+        # landed, a later Incomplete must surface a DISTINCT code so automation
+        # does not read a false "nothing deleted".
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("branch_reaper", TOOL)
+        br = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(br)
+        sha = self.commit_on("merged/branch", "merged work")
+        self.add_pr("merged", "merged/branch", sha)
+        self.write_fixtures()
+        real_delete = br.delete_branches
+        target = {"branch": "merged/branch", "oid": sha, "ts": 0,
+                  "verdict": "SAFE", "reason": "pr-merged-tip"}
+
+        def partial_delete(repo_root, rows, held, *, backup_bundle, results=None):
+            real_delete(repo_root, [target], held, backup_bundle=None, results=results)
+            raise br.Incomplete("simulated timeout on a later ref")
+
+        br.delete_branches = partial_delete
+        saved = {k: os.environ.get(k) for k in ("BRANCH_REAPER_GH", "GH_STUB_DIR")}
+        os.environ["BRANCH_REAPER_GH"] = str(self.gh)
+        os.environ["GH_STUB_DIR"] = str(self.gh_dir)
+        try:
+            rc = br.main(["--repo", str(self.driver), "--slug", "owner/repo", "--apply"])
+        finally:
+            br.delete_branches = real_delete
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertEqual(rc, br.EXIT_INCOMPLETE_AFTER_DELETE, rc)
+        self.assertNotIn("merged/branch", self.branches())
 
     def test_backup_bundle_symlink_path_is_refused(self):
         sha = self.commit_on("merged/branch", "merged work")
