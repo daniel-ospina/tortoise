@@ -173,9 +173,12 @@ _KNOWN_ON_LOOP_RESIDUAL = frozenset({
 })
 
 #: Callees that OFFLOAD their argument — a call nested inside one of these is
-#: not on the loop, so the walk does not descend into it.
+#: not on the loop, so the walk does not descend into it. ``_oauth_offload``
+#: (#3669) is the OAuth-lane wrapper over the same seam (it calls ``_cp_offload``
+#: on the dedicated ``oauth`` pool), so it is a boundary for the same reason.
 OFFLOAD_BOUNDARY_CALLEES = frozenset({
-    "_cp_offload", "run_control_plane_call", "run_on_daemon_worker", "to_thread",
+    "_cp_offload", "_oauth_offload", "run_control_plane_call",
+    "run_on_daemon_worker", "to_thread",
 })
 
 
