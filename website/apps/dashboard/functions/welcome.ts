@@ -5,10 +5,12 @@
  * ----------------------
  * `welcome.html` used to decide this in the browser, via a hard gate that called
  * `readValidSession()`. That function reads the legacy parent-domain
- * `sb-tortoise-auth-token` cookie, which a BFF login never writes (the BFF session is
- * the HttpOnly `__Host-session`), so a visitor whose browser held no consent-page cookie
- * read as signed OUT and the gate redirected them to /auth — the #3485 loop,
- * reproduced by construction. Removing the bridge and the gate together is what fixed it.
+ * `sb-tortoise-auth-token` cookie — after first migrating any legacy localStorage
+ * session into it — and a BFF login writes only the HttpOnly `__Host-session`, so
+ * a browser holding no legacy session read as signed OUT and the gate redirected
+ * it to /auth: the #3485 loop, reproduced by construction for that visitor. One
+ * who had been through the MCP consent page held the cookie and was NOT bounced.
+ * Removing the bridge and the gate together is what fixed it.
  *
  * The BFF session cookie is HttpOnly. The server is the only thing that can
  * legitimately answer "is this visitor signed in?" — so the answer is a status
@@ -46,7 +48,8 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     // 302, not a rendered page: /welcome is a post-AUTH landing, so an
     // anonymous visitor belongs at the sign-in screen. This is deterministic
     // server-side routing, so it cannot loop the way the client gate did — the
-    // client gate bounced SIGNED-IN users because it could not see the session.
+    // client gate bounced a browser that held no legacy session, because it could
+    // not see the BFF session.
     return redirect(
       `/auth?next=${encodeURIComponent(url.pathname + url.search)}&stale=1`,
     );

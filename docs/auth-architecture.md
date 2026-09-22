@@ -101,8 +101,7 @@ the token regardless of which subdomain presented it.
   `sb-tortoise-auth-token` is **not** the session backbone (the canonical session is the HttpOnly
   `__Host-session` above): the bridge that once
   wrote it (`website/assets/supabase-session.js`) is loaded by no BFF page
-  (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`), and the canonical session is the
-  HttpOnly `__Host-session` above. **But it is still ISSUED and still ACCEPTED** — a real,
+  (`tests/test_cross_subdomain_cookie_sync.py` pins `PAGES = []`). **But it is still ISSUED and still ACCEPTED** — a real,
   JS-readable Supabase session, not inert scaffolding:
   - **Issued by — the legacy writer, and the UNFIXED EXCEPTION to the ruling above** (tracked, not
     accepted): the MCP consent page in `tortoise/oauth.py`, served live at `/oauth/authorize`
@@ -194,8 +193,8 @@ a database outage to the user as "you are signed out".
 > synchronous client-side head-gate cookie checks (`readValidSession()` +
 > `location.replace`) in each page's `<head>`, and the dashboard's `index.html`
 > carried the same check before the bundle rendered. Those checks were removed — a synchronous client
-> gate cannot see an HttpOnly host-only cookie, and one that tries reproduces the
-> #3485 loop.
+> gate cannot see an HttpOnly host-only cookie; one that tries, in a browser holding no legacy
+> session, reproduces the #3485 loop.
 
 ### 2.4 What was wrong (the user report)
 
