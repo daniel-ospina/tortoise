@@ -53,11 +53,15 @@ ORG = "org-2006-telemetry"
 # candidates (the same gate the #2600 `actor_user_id` alias uses), so the
 # funnel identity assertions below exercise the real contract.
 USER = "3f1a7c2e-9b84-4d51-a0c6-71e2ab5f8d30"
+# #3671: a step checkpoint now requires an AGENT credential — a session JWT is
+# refused 403 — so this org is the AGENT lane (`key_id`, no `session_user_id`).
+# `actor_user_id` is the #2600 alias of the key's `created_by` and keeps the
+# UUID funnel identity the W11 events join on.
 TEAM = {
     "org_id": ORG, "tier": "free", "key_id": "k1",
     "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
     "max_teams": 1, "max_points": 10000, "max_sessions": None,
-    "session_user_id": USER,
+    "actor_user_id": USER,
 }
 
 
@@ -161,7 +165,7 @@ class TestExactOnce:
         assert len(evs) == 1, (
             f"expected exactly one onboarding_seed_complete, got {evs}")
         assert evs[0]["properties"] == {"org_id": ORG, "source": "checkpoint"}
-        assert evs[0]["distinct_id"] == USER  # session user UUID (funnel join)
+        assert evs[0]["distinct_id"] == USER  # actor UUID (funnel join)
         # no decide event ever fired from a seed step
         assert _events(emitted, "onboarding_decide_complete") == []
 
