@@ -263,7 +263,7 @@ def test_http_noarg_gate_allows_persisted_dirty_state(monkeypatch):
         try:
             assert sdk._hydrate_dirty_roots()
             token = _transport_mode.set("http")
-            monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: sdk)
+            monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
             try:
                 result = mcp_server.tortoise_compute_confidence()
             finally:

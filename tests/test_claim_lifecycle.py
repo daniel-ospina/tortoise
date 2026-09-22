@@ -173,10 +173,11 @@ def test_all_documented_transitions_allowed(sdk_factory, tmp_path):
     from tortoise.sdk import _ALLOWED_TRANSITIONS
 
     # Canonical transitions from ONTOLOGY §5 table (#432 code-review decision:
-    # a draft point can go terminal before ever going live):
+    # a draft point can go terminal before ever going live; #2498 removed the
+    # outdated→retracted edge — `outdated` is terminal in the shared vocabulary):
     # draft → live, retracted, superseded
     # live → retracted, superseded
-    # outdated → retracted
+    # outdated → (none)  [#2498]
     # retracted → (none)
     # superseded → (none)
     # archived → (none)
@@ -191,8 +192,8 @@ def test_all_documented_transitions_allowed(sdk_factory, tmp_path):
         "live → retracted must be allowed"
     assert "superseded" in _ALLOWED_TRANSITIONS["live"], \
         "live → superseded must be allowed"
-    assert "retracted" in _ALLOWED_TRANSITIONS["outdated"], \
-        "outdated → retracted must be allowed"
+    assert _ALLOWED_TRANSITIONS["outdated"] == frozenset(), \
+        "outdated is terminal — no outgoing transitions (#2498)"
     assert _ALLOWED_TRANSITIONS["retracted"] == frozenset(), \
         "retracted is terminal — no outgoing transitions"
     assert _ALLOWED_TRANSITIONS["superseded"] == frozenset(), \
