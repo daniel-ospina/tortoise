@@ -481,8 +481,11 @@ async def _lifespan(app: FastAPI):
     # explicitly (hosted_api._lifespan pattern) so the
     # StreamableHTTPSessionManager initializes (T1.2 pin).
     #
-    # #2988: arm the liveness refresher here, so /health answers from a
-    # continuously refreshed in-memory verdict from the first millisecond.
+    # #2988: arm the liveness refresher here, so /health answers from in-memory
+    # state immediately. The verdict is ``degraded`` ("probe in flight") until
+    # the first refresh lands — up to the cold-start allowance on a large cold
+    # graph (#3243), the very window a request-path probe would have spent
+    # blocking. It is NOT "green from the first millisecond".
     # Each app instance starts from a CLEAN probe state — a probe worker wedged
     # during a previous instance (TestClient reuse, in-process reload) must not
     # survive into this one — and the cached probe connection is dropped for

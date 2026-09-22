@@ -65,10 +65,12 @@ PROBE_TIMEOUT = 1.5
 # to ``setup_timeout + PROBE_TIMEOUT``: only a caller that can afford it may
 # pass it.
 #
-# WHO MAY SPEND IT — the deciding line is REQUEST PATH vs BACKGROUND, not
-# liveness vs readiness (#2988/#3243):
-#   * the on-demand MCP health tool passes it (its only job is "is the served
-#     graph reachable?");
+# WHO MAY SPEND IT — the deciding line is whether the probe IS the request's
+# answer, not request-path vs background (#2988/#3243):
+#   * the on-demand MCP health tool passes it: the probe IS the answer (its only
+#     job is "is the served graph reachable?"), so the deep budget is correct;
+#   * NEVER a request-path liveness GATE (a `/health` handler that probes
+#     inline) — there the fast <1.5 s degrade contract must hold;
 #   * a BACKGROUND liveness REFRESHER passes it. The selfhost ``/health``
 #     coordinator does (#2988): its request path reads an in-memory snapshot and
 #     cannot be slowed by the allowance, so the deep budget buys a correct
