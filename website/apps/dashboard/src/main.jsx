@@ -8934,12 +8934,24 @@ function claimIntentInFlight() {
                     {team.dashboard_key_login !== false && <span style={{ color: 'var(--accent,#06b6d4)' }}>(recommended: disable)</span>}
                     {team.dashboard_key_login === false && <span style={{ color: 'var(--green,#4ade80)' }}>disabled ✓</span>}
                   </h4>
-                  <p>
-                    We recommend disabling your API key as a dashboard sign-in
-                    method. The key stays valid for graph operations — managing
-                    keys, restoring backups, and billing will require your
-                    GitHub/Google sign-in instead.
-                  </p>
+                  {/* #3136: the recommendation is ADVISORY — it renders
+                      only while the setting is ON (the agent-signup cohort
+                      that still signs in with a key). The OFF state renders
+                      the consequence line instead, never a stale nag. */}
+                  {team.dashboard_key_login !== false && (
+                    <p>
+                      We recommend disabling your API key as a dashboard sign-in
+                      method. The key stays valid for graph operations — managing
+                      keys, restoring backups, and billing will require your
+                      GitHub/Google sign-in instead.
+                    </p>
+                  )}
+                  {team.dashboard_key_login === false && (
+                    <p>
+                      Your API key can no longer sign in to this dashboard. It
+                      still works for graph operations (SDK, CLI, MCP).
+                    </p>
+                  )}
                   {toggleError && <p className="error" role="alert">{toggleError}</p>}
                 </div>
               </div>

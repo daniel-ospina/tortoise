@@ -244,14 +244,18 @@ def _absent_via_legacy() -> dict:
 
 def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = None,
                         key_authed: list | None = None,
+                        team_row: dict | None = None,
                         mint_response: tuple[int, dict] | None = None) -> None:
     """Cookie-seeded session + layered api mock (gate.py style, §S5): teams
     rows with role:'owner', a localStorage-seeded LEGACY_RESIDUE that the
     mount PURGES (never probed/adopted — #2246), GET /v1/team/keys returns
     the mixed fixture. POST /v1/session/key is a loud 500 + counter — the
     #2167 zero-mint tripwire. key_authed collects any request whose
-    Authorization is a Bearer tt_ key (must stay empty — session JWT only)."""
+    Authorization is a Bearer tt_ key (must stay empty — session JWT only).
+    team_row overrides the /v1/team(s) payload (#3136: dashboard_key_login
+    ON/OFF render proof)."""
     user_id = "u-mixed2178"
+    row = team_row if team_row is not None else TEAM_ROW
     mint_calls = mint_calls if mint_calls is not None else []
     key_authed = key_authed if key_authed is not None else []
 
@@ -276,7 +280,7 @@ def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = 
                 return
             if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([TEAM_ROW]))
+                              body=json.dumps([row]))
                 return
             # #4330: the create-key modal's mint (POST /v1/team/keys). Opt-in —
             # when `mint_response` is None the POST keeps falling through to the
@@ -312,7 +316,7 @@ def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = 
                 # #2246: this answers completeLogin's SESSION read — the
                 # key-lane probe leg is deleted.
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps(TEAM_ROW))
+                              body=json.dumps(row))
                 return
             # Everything else (graphs/members/alerts/…) — deterministic 401
             # so the app shell renders without a real network round trip.
@@ -349,6 +353,34 @@ def _open_keys_tab(page: Page, mint_calls: list | None = None,
     # The keys table is the only <table> in the active tab's DOM (BackupsCard
     # is a div card; other tab sections don't render when inactive).
     expect(page.locator("tbody tr")).to_have_count(8, timeout=15_000)
+
+
+def test_off_state_copy_never_nags(page: Page) -> None:
+    """#3136 (render proof): a team whose dashboard_key_login is false reads
+    the consequence line on the API Keys tab and NEVER the disable
+    recommendation (the pre-fix defect). Positive control below."""
+    off = {**TEAM_ROW, "dashboard_key_login": False}
+    _wire_mixed_harness(page, _mixed_keys_fixture(), team_row=off)
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("body")).to_contain_text("API key dashboard login", timeout=15_000)
+    expect(page.locator("body")).to_contain_text("disabled ✓")
+    expect(page.locator("body")).not_to_contain_text("We recommend disabling")
+    expect(page.locator("body")).to_contain_text("Your API key can no longer sign in")
+
+
+def test_on_state_copy_still_recommends(page: Page) -> None:
+    """#3136 positive control: while dashboard_key_login is not false (the
+    agent-signup cohort) the recommendation still renders — the fix gates the
+    copy, it does not delete the nudge."""
+    on = {**TEAM_ROW, "dashboard_key_login": True}
+    _wire_mixed_harness(page, _mixed_keys_fixture(), team_row=on)
+    _goto_local_dashboard(page)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("body")).to_contain_text("We recommend disabling", timeout=15_000)
+    expect(page.locator("body")).not_to_contain_text("Your API key can no longer sign in")
 
 
 def test_zero_session_key_posts_and_zero_key_authed_requests(page: Page) -> None:
