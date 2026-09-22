@@ -83,7 +83,8 @@ Both keep the stale premise ("no executable verification") alive.
 ## Adversarial Threat Surface
 
 **(not adversarial)** — test coverage + operator-facing copy. No gate, no fail-open enforcement, no
-attacker-defeatable path. `OVERRIDES:` not applicable.
+attacker-defeatable path, and no adversarial `OVERRIDES:` ruling. (The one deliberate departure this
+scope does carry is recorded in § Known residual of this scope's own test.)
 
 ## Phase 3 — codebase explorer / wiring check
 
@@ -211,3 +212,8 @@ under CI (`pytest.fail`, not `pytest.skip`, when `os.environ["CI"]` is set and N
 and the lanes that run them provision Node 22 (`actions/setup-node@v4`), so the requirement is owned
 by the lane rather than inherited from the runner image. Both directions are pinned by tests in
 `tests/test_pi_capture_hooks.py`.
+
+**OVERRIDES:** the node guard's skip-in-every-case default (the deferral recorded above) — the two
+installed-artifact checks this scope adds fail closed under CI, because a fail-open guard on the only
+executable proof that the seam works as installed is precisely the defect this scope exists to close.
+The deferral still governs the pre-existing behavioral suite, whose skip contract is untouched.

@@ -76,10 +76,12 @@ install guard.
 `tortoise/pi-hooks/` selects `core` via the `tortoise/` fallback, so the guard runs on the PR that
 edits the seam.
 
-The `node`-backed checks need **Node ≥ 22.6** (`--experimental-strip-types`; a no-op on ≥ 22.18). The
-python-ci `test` lane installs it explicitly (`actions/setup-node@v4`, Node 22), so the requirement is
-owned by the lane rather than inherited from whatever the runner image ships. Locally they *skip* when
-Node is missing or older, because the source-level pins above still ran. In **CI the two
+The `node`-backed checks need **Node ≥ 22.6** (`--experimental-strip-types`; a no-op on ≥ 22.18).
+Every lane that executes `tests/test_pi_capture_hooks.py` provisions it explicitly — today the
+python-ci `test` job and the post-merge-validation `validate` job, both via `actions/setup-node@v4`
+(Node 22) — so the requirement is owned by the lane rather than inherited from whatever the runner
+image ships. Locally they *skip* when Node is missing or older, because the source-level pins above
+still ran. In **CI the two
 installed-artifact checks FAIL instead of skipping** — they are the only executable proof that the
 seam works at its install location, so a runner that cannot run them must fail by name rather than
 report green with the check silently absent (the same ruling the embedder step and

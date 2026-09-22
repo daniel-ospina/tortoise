@@ -43,7 +43,7 @@ installed fidelity).
 **Acceptance:** `tests/test_pi_capture_hooks.py::test_installed_seam_loads_and_fires` passes;
 `test_installed_seam_probe_fails_when_the_artifact_is_not_self_contained` passes (proves non-vacuity);
 both FAIL under CI when `node` is absent or is < 22.6 (they skip only in a local run, where the
-source-level pins above still ran); the python-ci `test` lane provisions Node 22.
+source-level pins above still ran); every lane that executes this file provisions Node 22.
 
 **Files:**
 - Modify: `tests/test_pi_capture_hooks.py`
@@ -258,22 +258,15 @@ Order: **1 → 2 → 3 → 4 → 5** (Task 1 is the critical path; Tasks 2–5 a
    → assert `test_pi_capture_hooks.py` and `test_session_verify.py` are in the emitted `test_files`.
 5. `bash scripts/check-pipeline-compliance.sh` (pre-commit docs/version gate; `scripts` → `$AGENT_INFRA_PATH/scripts`).
 6. Node gate, both directions: `CI=true` with a stub `node` reporting v20.11.0 → the two
-   installed-artifact checks FAIL by name (the behavioral suite still skips); real Node ≥ 22.6 with
-   `CI=true` → 8 passed, 0 skipped.
+   installed-artifact checks FAIL by name (7 passed / 2 failed / 1 skipped); real Node ≥ 22.6 with
+   `CI=true` → 10 passed, 0 skipped.
 
 ## Reviewers
 
-Plan review: per `proportional-gates` §Review Cycles, standard → Low-Medium → **2 reviewers**, cap 3
-cycles. Cycle-1 findings (P1 done-state placement; P2 stdout contract, one-sided pin, verification
-commands, manual-residual actor; P3 receipt quote, `#3971` fact, mutation expressibility, path
-injection, ctx shape), cycle-2 findings (P1 scoped-not-absolute replacement copy, second negative
-token; P2 `#4680`/`#1714` placement and the miscited objective-1 row, Node strip-types bound; P3
-actor resolvability, append-don't-rewrite, done-state location; P4 snippet bindings), and cycle-3
-findings (**P1** the manual procedure measured a receipt `#4675` suppresses and omitted the
-`retrievable` pass condition; P2 the installed-artifact check mis-attributed to the TS suite, false
-`#1714` provenance; P4 README run-command conflict) are all incorporated above. A fourth cycle ran one
-over the Low-Medium cap of 3 and returned a P1 (the `retrievable` pass condition left under-defined),
-which was incorporated too: this is an **incorporation exit, not a clean exit**.
+Plan review: 2 reviewers per `proportional-gates` §Review Cycles (standard → Low-Medium, cap 3
+cycles). Four cycles ran; the fourth was one over that cap and found that the `retrievable` pass
+condition was under-defined. The findings from all four cycles are incorporated above. Exit:
+incorporation over cap, not clean.
 
 <!-- plan-review: cycles=4, status=incorporation-exit-over-cap, version=2.3.0 -->
 

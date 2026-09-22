@@ -225,10 +225,12 @@ def _require_node() -> str:
     Node must fail by name instead of silently dropping them and reporting
     green.  That is the same ruling the embedder step (#2573) and
     ``bff_test_helpers.require_toolchain`` (#3501) apply: a runner that cannot
-    run the required check fails HERE rather than degrading unnoticed.  The
-    python-ci ``test`` lane provisions Node 22 (``actions/setup-node``), so the
-    requirement is owned by the lane, not inherited from the runner image.
-    Locally the skip is kept, because the source-level pins above still ran.
+    run the required check fails HERE rather than degrading unnoticed.  Every
+    lane that executes this file provisions Node 22 (``actions/setup-node``) —
+    today the python-ci ``test`` job and the post-merge-validation ``validate``
+    job — so the requirement is owned by the lanes, not inherited from the
+    runner image.  Locally the skip is kept, because the source-level pins above
+    still ran.
 
     The pre-existing ``test_extension_behavioral_suite`` above deliberately
     keeps its own skip (it is not escalated to a CI failure): this gate is for
@@ -290,7 +292,7 @@ def _guard_outcome() -> str:
     """
     try:
         _require_node()
-    except pytest.fail.Exception as exc:  # noqa: PT012 — deliberate
+    except pytest.fail.Exception as exc:
         return f"fail: {exc}"
     except pytest.skip.Exception as exc:
         return f"skip: {exc}"
