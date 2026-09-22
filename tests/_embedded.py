@@ -260,6 +260,13 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",
+    # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
+    # silent vecf32-overwrite behaviour (the server lane lands the same write),
+    # so they must construct a real embedded store — a redirected construction
+    # would run against the server and certify nothing. Registered with the
+    # carve_out list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality).
+    "test_vecf32_overwrite_seams_4524",
 )
 
 _HAS_FALKOR: bool | None = None

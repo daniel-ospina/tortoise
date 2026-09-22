@@ -550,6 +550,12 @@ def test_no_redirect_stems_registry_exact():
         # pass. Runs embedded in every lane (same rationale as
         # test_hosted_backup).
         "test_cross_tenant_read_isolation",
+        # #4524: the vecf32 overwrite-seam guards assert the EMBEDDED engine's
+        # silent vecf32-overwrite behaviour (the server lane lands the same
+        # write), so the module joins the carve-out lane — registered in
+        # ci-surfaces.yml:carve_out + the core surface and in
+        # TEST_NO_REDIRECT_STEMS.
+        "test_vecf32_overwrite_seams_4524",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

@@ -426,9 +426,11 @@ class _EntityHandlers:
         the embedded lane reddened). So the node kept its OLD vector and a
         rebuilt Point's ``embedding`` no longer derived from its ``content``.
         ``REMOVE``-first is the workaround this repo's own test helper
-        documents (``tests/test_precision_leak_4028.py``); the OTHER
-        vector-write sites carry the same overwrite shape and are NOT fixed by
-        this clause (tracked in #4520). On the server lane the final state is
+        documents (``tests/test_precision_leak_4028.py``); the sibling entity
+        seams in THIS file (``Subject``/``Object``/``Document``/plain
+        ``Event``) carried the same overwrite shape and are cleared the same
+        way by #4524, while the vector writers in OTHER files still carry it
+        (tracked in #4520). On the server lane the final state is
         unchanged, and because the clause is emitted ONLY when a new vector is
         being written, the preserve-on-None semantics above are untouched.
         See the query below.
@@ -1309,6 +1311,22 @@ class _EntityHandlers:
         # producer without a deterministic id (api.add_subject, which unlike
         # add_object has no id= override) can re-id a canonical node — blast
         # radius is id-based wiring only (about* edges match by name).
+        # #4524: the embedded engine's ``vecf32`` overwrite hazard, same as
+        # the Point seam above (#4457): writing a vector onto a property that
+        # already holds one can be SILENTLY DISCARDED by falkordblite, leaving
+        # the stale vector in place with no error. This write sits inside the
+        # MERGE's ON CREATE/ON MATCH clauses, where the dialect will not accept
+        # an interleaved REMOVE — so clear the property in a SEPARATE query
+        # first (the shape tests/test_precision_leak_4028.py documents;
+        # atomicity is not required). Emitted ONLY when a new embedding is being
+        # written, so the ``ELSE s.embedding`` preserve branch is untouched and
+        # a fresh MERGE has nothing to remove. Key is ``name`` — the SAME key
+        # the MERGE uses (not ``id``), or this misses its own node.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (s:Subject {name:$name}) REMOVE s.embedding",
+                params={"name": name},
+            )
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
@@ -1369,6 +1387,15 @@ class _EntityHandlers:
         # same deterministic id for a given name across producers (this
         # function early-returns when the caller sends no id, so entities
         # without ids never fire the clause).
+        # #4524: as for Subject above — the embedded engine can silently
+        # discard a ``vecf32`` overwrite, and this embedding sits inside
+        # ON CREATE/ON MATCH, so PRE-REMOVE it in a separate query. Emitted
+        # only when a new vector is being written; key ``name``, the MERGE key.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (o:Object {name:$name}) REMOVE o.embedding",
+                params={"name": name},
+            )
         self.g.query(
             "MERGE (o:Object {name:$name}) "
             "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
@@ -1568,8 +1595,14 @@ class _EntityHandlers:
         # #167: sourcePath — coalesce-null sentinel (no "" default) so
         # partial updates preserve existing value
         sp = ev.get("source_path")
+        # #4524: the embedded engine's ``vecf32`` overwrite hazard (#4457).
+        # This one is a plain MERGE + SET list (no ON CREATE/ON MATCH), so the
+        # conditional REMOVE rides in the SAME atomic query exactly as
+        # _upsert_point_props does — emitted only when a new embedding is being
+        # written, so the ``ELSE d.embedding`` preserve branch is untouched.
+        embed_clear = "REMOVE d.embedding " if embedding is not None else ""
         self.g.query(
-            "MERGE (d:Document {id:$id}) "
+            "MERGE (d:Document {id:$id}) " + embed_clear +
             "SET d.title=coalesce($title, d.title), "
             "    d.documentKind=coalesce($dk, d.documentKind), "
             "    d.format=coalesce($fmt, d.format), "
@@ -1704,6 +1737,17 @@ class _EntityHandlers:
     def _event_plain_merge(self, eid: str, props: dict, embedding,
                            inner: dict) -> None:
         """The legacy single-statement Event MERGE (+ edges + extra props)."""
+        # #4524: the ON MATCH embedding write below can be a SILENT no-op on
+        # the embedded engine — a ``vecf32`` overwrite of an existing vector is
+        # discarded (#4457). It sits inside ON CREATE/ON MATCH, so clear the
+        # property in a separate query first. Emitted ONLY when a new embedding
+        # is being written, leaving the ``ELSE e.embedding`` preserve branch
+        # untouched.
+        if embedding is not None:
+            self.g.query(
+                "MATCH (e:Event {eventId: $eid}) REMOVE e.embedding",
+                params={"eid": eid},
+            )
         self.g.query(
             "MERGE (e:Event {eventId: $eid}) "
             "ON CREATE SET e += $props, e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) END "
