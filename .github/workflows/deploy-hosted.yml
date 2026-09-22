@@ -86,7 +86,7 @@ on:
       # model bake). Mirrors skip-db-health-gate; a skipped gate emits a
       # warning — never silent. Incident-window convention: set
       # vars.SKIP_PACK_SMOKE=true during packaging incidents, clear it after
-      # (same runbook as SKIP_DB_HEALTH_GATE).
+      # (docs/infra-runbook.md §8 — the SKIP_* bypass convention).
       skip-pack-smoke:
         description: 'Skip the pack-catalog smoke (incident-fix deploys)'
         required: false
@@ -100,7 +100,7 @@ on:
       # incident-fix deploys; exit-2 (could-not-determine: API error, shape
       # drift) can NEVER be bypassed. Incident-window convention: set
       # vars.SKIP_FLY_MACHINES_GUARD=true during incidents, CLEAR IT AFTER
-      # (same runbook as SKIP_DB_HEALTH_GATE).
+      # (docs/infra-runbook.md §8 — the SKIP_* bypass convention).
       skip-fly-machines-guard:
         description: 'Skip the Fly machine fleet guard (incident-fix deploys)'
         required: false
@@ -114,7 +114,8 @@ on:
       # emits a warning — never silent. Exit-2 (missing or empty secret list,
       # unparsable manifest) can NEVER be bypassed. Convention: set
       # vars.SKIP_FLY_SECRET_PROVENANCE=true during the incident, CLEAR IT AFTER,
-      # and declare the secret in .github/scripts/fly-managed-secrets.txt.
+      # and declare the secret in .github/scripts/fly-managed-secrets.txt
+      # (docs/infra-runbook.md §8.1 — the provenance gate).
       skip-fly-secret-provenance:
         description: 'Skip the Fly secret provenance guard (incident-fix deploys)'
         required: false
@@ -491,7 +492,7 @@ jobs:
             exit 2
           fi
           if [ "$RC" -eq 1 ] && [ "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" = "true" ]; then
-            echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (runbook: SKIP_DB_HEALTH_GATE)." >&2
+            echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (docs/infra-runbook.md §8 — the SKIP_* bypass convention)." >&2
             exit 0
           fi
           exit "$RC"
@@ -614,7 +615,7 @@ jobs:
           if [ -z "$OPENROUTER_API_KEY" ] && [ -n "$TORTOISE_SESSION_LLM_MODEL" ]; then
             echo "::notice::TORTOISE_SESSION_LLM_MODEL comes from a GitHub secret — the key it names must be configured"
           elif [ -z "$TORTOISE_SESSION_LLM_MODEL" ] && [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "::warning::TORTOISE_SESSION_LLM_MODEL is the versioned openrouter default but OPENROUTER_API_KEY is not set on GitHub — session-capture extraction will fail until that key is configured or the model override is changed (docs/infra-runbook.md §4)"
+            echo "::warning::TORTOISE_SESSION_LLM_MODEL is the versioned openrouter default but OPENROUTER_API_KEY is not set on GitHub — session-capture extraction will fail until that key is configured or the model override is changed (docs/infra-runbook.md §4.6)"
           fi
           if [ -n "$TORTOISE_SESSION_LLM_MODEL" ]; then
             ARGS+=(TORTOISE_SESSION_LLM_MODEL="$TORTOISE_SESSION_LLM_MODEL")
