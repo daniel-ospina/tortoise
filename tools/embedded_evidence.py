@@ -935,7 +935,9 @@ def _worktree_at(ref: str, run_root: Path, name: str) -> tuple[Path, bool]:
     return wt, True
 
 
-def _record_out_pathspec(cwd: Path, exclude: Path | None) -> list[str]:
+def _record_out_pathspec(
+    cwd: Path, exclude: Path | None, env: dict[str, str] | None = None
+) -> list[str]:
     """Git pathspec entries that drop `exclude` from a status/diff scoped to `cwd`.
 
     `--record-out` is a command-line argument, so a RELATIVE one names a path under
@@ -971,6 +973,14 @@ def _record_out_pathspec(cwd: Path, exclude: Path | None) -> list[str]:
       symlink RESOLVED to a directory, since it follows the final component. Git
       treats a pathspec naming a directory as that whole subtree, so this is the
       same whole-subtree over-match reached from the other direction.
+    * a target with anything UNDER it that git can report. Git expands a pathspec
+      `X` to `X` **and every `X/…`**, and that expansion does not consult the
+      filesystem: with `X` a REGULAR FILE in the worktree, the index or the HEAD
+      tree can still hold `X/a.txt` (a typechange), and then `D X/a.txt` — real
+      dirt — vanished from the pin while an unrelated dirty file kept `dirty`
+      True. So the guard asks git for the union it would report (`ls-files
+      --with-tree=HEAD` = index ∪ HEAD tree, which is what catches a path dropped
+      from the index but still in HEAD) instead of assuming a file target is safe.
 
     `rel == "."` (the target IS the measured root), `rel == ".."` (an ancestor of
     `cwd`, hence outside the measured tree), anything outside the repo, and a path
@@ -1000,7 +1010,21 @@ def _record_out_pathspec(cwd: Path, exclude: Path | None) -> list[str]:
         return []  # nothing to exclude yet — never guess at what it might mean
     if os.path.isdir(target_abs):
         return []  # a directory, incl. a symlink RESOLVED to one: a whole subtree
-    return [f":(exclude,literal){Path(rel).as_posix()}"]
+    rel_posix = Path(rel).as_posix()
+    try:
+        # Index ∪ HEAD tree. `--with-tree=HEAD` is load-bearing: a path removed
+        # from the index but still in HEAD is absent from `ls-files` and yet
+        # `diff-index HEAD` reports it as `D`, so it is exactly the kind of dirt
+        # the exclusion would otherwise swallow.
+        descendants = _git(
+            "ls-files", "--with-tree=HEAD", "--", f":(literal){rel_posix}/",
+            cwd=cwd, env=env,
+        )
+    except RuntimeError:
+        return []  # exactness cannot be PROVEN ⇒ refuse; refusal only ADDS dirt
+    if descendants.strip():
+        return []  # `:(exclude)X` would also drop everything under `X/`
+    return [f":(exclude,literal){rel_posix}"]
 
 
 def _porcelain_digest(
@@ -1025,7 +1049,7 @@ def _porcelain_digest(
     # exclusion-only pathspec is in fact legal (measured rc 0), so `.` is
     # documentation, not a requirement. `env` pins the environment the measured
     # calls see — see `_git`.
-    pathspec = [".", *_record_out_pathspec(cwd, exclude)]
+    pathspec = [".", *_record_out_pathspec(cwd, exclude, env=env)]
     status = _git("status", "--porcelain=v2", "--untracked-files=all", "--", *pathspec,
                   cwd=cwd, env=env)
     diff = _git("diff-index", "HEAD", "--", *pathspec, cwd=cwd, env=env)

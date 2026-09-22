@@ -1185,7 +1185,10 @@ def test_record_out_exclusion_is_exact_path(tmp_path):
 #      symlink to a directory resolved to `docs`, and `:(exclude)docs` dropped the
 #      whole `docs/` subtree;
 #   3. no `literal` magic, so git GLOBBED the pathspec — `docs/out[12].json`
-#      matched `docs/out1.json` and `docs/out2.json`.
+#      matched `docs/out1.json` and `docs/out2.json`;
+#   4. the pathspec's own prefix expansion — `X` also matches every `X/…`, so a
+#      receipt at a path the index still holds files UNDER dropped the deletion
+#      `D X/a.txt` even though `X` was a regular file, not a directory.
 #
 # Each fix was correct for the spelling that reproduced it. This battery exists
 # instead: ONE table over every over-match shape found (plus the refusals), driving
@@ -1314,7 +1317,7 @@ def test_record_out_exclusion_cannot_over_match(
     # byte-for-byte, so a refusal can never be mistaken for a silent drop.
     unexcluded_digest, _ = ee._porcelain_digest(root, exclude=None, env=env)
 
-    pathspec = ee._record_out_pathspec(root, exclude)
+    pathspec = ee._record_out_pathspec(root, exclude, env=env)
     digest, dirty = ee._porcelain_digest(root, exclude=exclude, env=env)
 
     assert dirty is True, f"--record-out {spec!r} ({kind}) hid the dirty canary"
@@ -1338,6 +1341,41 @@ def test_record_out_exclusion_cannot_over_match(
             f"refusing {spec!r} still dropped something from the pin"
         )
         assert pathspec == [], f"{spec!r} ({kind}) must not be excluded at all"
+
+
+def test_record_out_exclusion_refuses_a_path_git_holds_files_under(tmp_path):
+    """#4203 — the prefix expansion of an exclusion, which `literal` does NOT stop.
+
+    Git's pathspec `X` matches `X` **and every `X/…`**, and that expansion is
+    filesystem-independent: with `X` a REGULAR FILE in the worktree (so the
+    directory guard does not fire) the index can still hold `X/a.txt`, and then
+    `D X/a.txt` — real dirt — disappeared from the pin. `dirty` stayed True here
+    only because of the unrelated canary, so this is exactly the half of the
+    battery that the digest assertion, not the `dirty` assertion, is for.
+
+    `X/a.txt` is left in the INDEX (its worktree deletion is unstaged). The sibling
+    variant — removed from the index but still in HEAD, which `ls-files` alone does
+    not see and `ls-files --with-tree=HEAD` does — is covered by the same guard.
+    """
+    root, env = _real_git_repo(
+        tmp_path, {"docs/out/a.txt": "one\n", "src/keep.py": "y = 1\n"}
+    )
+    (root / "src" / "keep.py").write_text("y = 2\n")  # canary
+    (root / "docs" / "out" / "a.txt").unlink()  # tracked deletion (unstaged)
+    (root / "docs" / "out").rmdir()
+    (root / "docs" / "out").write_text("now a regular file\n")
+
+    before, before_dirty = ee._porcelain_digest(root, exclude=None, env=env)
+    assert before_dirty is True
+
+    receipt = root / "docs" / "out"
+    assert ee._record_out_pathspec(root, receipt, env=env) == [], (
+        "a path git holds files UNDER must not be excluded: `:(exclude)docs/out` "
+        "also drops `docs/out/a.txt`"
+    )
+    after, dirty = ee._porcelain_digest(root, exclude=receipt, env=env)
+    assert dirty is True
+    assert after == before, "the `D docs/out/a.txt` dirt must survive the refusal"
 
 
 def test_measured_git_calls_ignore_the_runners_ambient_config(tmp_path, monkeypatch):
