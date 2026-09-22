@@ -105,6 +105,74 @@ def test_unsupported_filter_op_raises_on_patch_and_delete() -> None:
         f.query("org_memberships", method="DELETE",
                 filters=[("org_id", "in", ["t1"])])
 
+    # The guard is NOT scoped to a non-empty body: the empty-body early
+    # return scans no rows, so without an explicit pre-return validation it
+    # carried the query past ``_matches`` and returned ``[]`` with no error
+    # (#2642 re-review P2). An op the fake cannot model must raise whether or
+    # not a body is supplied.
+    with pytest.raises(ValueError, match="unsupported filter op"):
+        f.query("org_memberships", select=["org_id"], method="PATCH",
+                filters=[("org_id", "in", ["t1"])], json_body={})
+
     # the supported-op control: the same PATCH/DELETE path still works
     assert f.query("org_memberships", method="DELETE",
                    filters=[("org_id", "eq", "t1")]) == []
+
+
+def test_patch_empty_body_makes_no_updates_and_returns_no_representation() -> None:
+    """#2642 re-review P2 — the PATCH empty-body branch is load-bearing.
+
+    PostgREST "makes no updates" for a bodyless PATCH, so the representation
+    is ``[]`` even when the filter matches (UpdateSpec.hs:
+    ``PATCH /items?select=id`` + ``{}`` → ``[]``). Without that branch the
+    fake returns the MATCHED row's representation, which is precisely the
+    fake/production divergence that hid the empty-body 404 — so the branch
+    must be pinned by a test, not merely exercised when the seam fix is
+    absent.
+
+    REDs on: deleting the ``if not json_body: return []`` branch (case 1
+    then returns ``[{"id": "A"}]`` instead of ``[]``)."""
+    def _cp() -> FakeControlPlane:
+        return FakeControlPlane(tables={"t": [{"id": "A", "org_id": "O"}]})
+
+    match: list[tuple[str, str, object]] = [("org_id", "eq", "O"), ("id", "eq", "A")]
+
+    # 1. empty body + select, filter MATCHES → no representation, no mutation.
+    #    This is the assertion that discriminates the empty-body branch.
+    cp = _cp()
+    assert cp.query("t", select=["id"], method="PATCH", filters=match, json_body={}) == []
+    assert cp.tables["t"] == [{"id": "A", "org_id": "O"}]
+
+    # 2. empty body, select-less → still no representation
+    assert _cp().query("t", method="PATCH", filters=match, json_body={}) == []
+
+    # 3. non-empty body, select-less, filter MATCHES → no representation
+    #    (PostgREST echoes a representation only when ``?select=`` is given)
+    cp = _cp()
+    assert cp.query("t", method="PATCH", filters=match, json_body={"org_id": "O"}) == []
+    assert cp.tables["t"] == [{"id": "A", "org_id": "O"}]
+
+    # 4. non-empty body + select, filter does NOT match → no representation
+    #    (a genuinely non-matching filter, so this is empty for the ordinary
+    #    reason — it guards against the empty-body branch ever being widened)
+    nomatch: list[tuple[str, str, object]] = [("org_id", "eq", "OTHER")]
+    cp = _cp()
+    assert cp.query("t", select=["id"], method="PATCH", filters=nomatch,
+                    json_body={"org_id": "B"}) == []
+    assert cp.tables["t"] == [{"id": "A", "org_id": "O"}]
+
+    # 5. positive control — SAME shape as (1) but with a non-empty body: the
+    #    filter matches and the updated row IS returned. This proves (1)'s
+    #    ``[]`` came from the empty-body branch, not from a non-matching
+    #    filter.
+    cp = _cp()
+    assert cp.query("t", select=["id"], method="PATCH", filters=match,
+                    json_body={"org_id": "O"}) == [{"id": "A"}]
+    assert cp.tables["t"] == [{"id": "A", "org_id": "O"}]
+
+    # 5b. and the match really MUTATES (not just echoes): a changing body
+    #     lands on the stored row
+    cp = _cp()
+    assert cp.query("t", select=["id", "org_id"], method="PATCH", filters=match,
+                    json_body={"org_id": "O2"}) == [{"id": "A", "org_id": "O2"}]
+    assert cp.tables["t"] == [{"id": "A", "org_id": "O2"}]

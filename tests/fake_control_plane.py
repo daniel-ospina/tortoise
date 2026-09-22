@@ -808,6 +808,14 @@ class FakeControlPlane:
             # with an empty body" — `PATCH /items?select=id` + `{}` → `[]`).
             # Returning the matched row here was the fake divergence that hid
             # the #2642 re-review P2 empty-body 404.
+            #
+            # Validate every filter op BEFORE the empty-body return: that
+            # return scans no rows, so it would otherwise carry the query
+            # straight past _matches' unsupported-op guard (a filter the fake
+            # cannot model must raise for a bodyless PATCH too — #2642
+            # re-review P2). Validating the whole list here also makes the
+            # guard hold when an earlier filter would short-circuit the scan.
+            _validate_filter_ops(filters)
             if not json_body:
                 return []
             updated: list[dict] = []
@@ -900,6 +908,28 @@ class FakeControlPlane:
         raise ValueError(f"unsupported method {method!r}")
 
 
+# Filter ops the fake implements. One module-level set so the PATCH
+# empty-body path can validate WITHOUT scanning rows (see
+# _validate_filter_ops) — the guard must not depend on a row existing.
+_SUPPORTED_FILTER_OPS = frozenset({"eq", "neq", "is", "gt", "gte", "lt", "lte"})
+
+
+def _validate_filter_ops(filters: list[tuple[str, str, object]] | None) -> None:
+    """Raise ValueError for a filter op the fake does not implement.
+
+    ``_matches`` raises the same error, but only while scanning rows and only
+    for the filters it actually reaches — so a bodyless PATCH (which scans no
+    rows), or an empty table, or a filter list where an earlier predicate
+    short-circuits, would skip the guard. The guard must hold UNIVERSALLY: an
+    op the fake cannot model must raise regardless of body or row count, or a
+    test can pass against a query production would answer differently
+    (#3665 / #2642 re-review P2).
+    """
+    for _col, op, _value in filters or []:
+        if op not in _SUPPORTED_FILTER_OPS:
+            raise ValueError(f"unsupported filter op {op!r}")
+
+
 def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
         if op == "eq" and row.get(col) != value:
@@ -918,7 +948,7 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
         if op == "lte" and (row.get(col) is None or row.get(col) > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
-        if op not in ("eq", "neq", "is", "gt", "gte", "lt", "lte"):
+        if op not in _SUPPORTED_FILTER_OPS:
             # #3665 review: an op this helper does not implement must RAISE,
             # not silently no-op. Silently ignoring an op makes PATCH/DELETE
             # match on the remaining filters — i.e. the fake mutates MORE rows
