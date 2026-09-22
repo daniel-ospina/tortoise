@@ -25380,7 +25380,6 @@ async def connector_auth(
     """Initiate OAuth for a connector source type. Returns the authorize URL.
 
     Dispatches to the correct OAuth flow based on source_type.
-    Creates the connector row if it doesn't exist yet.
     """
     team_id = team["team_id"]
     if source_type == "github":
@@ -25395,8 +25394,8 @@ async def connector_auth(
         # Store CSRF state with connector context
         from tortoise.hosted_api import _GITHUB_STATES
         _GITHUB_STATES[state] = {
-            "team_id": team_id,
-            "connector_create": True,  # signal to create connector on callback
+            "org_id": org_id,
+            "org": None,
             "created_at": __import__("time").time(),
         }
         callback = _os.environ.get(
