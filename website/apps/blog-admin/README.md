@@ -5,7 +5,9 @@ Tortoise blog CMS (issue #1798, epic `docs/epics/2026-08-27-tortoise-blog-cms/03
 Served by the admin gate Function
 (`website/apps/dashboard/functions/admin/[[path]].ts`) at `/admin/*` on the APP
 origin (`app.premiselabs.co`) — same-origin with the `__Host-session` cookie
-(#4171). The marketing origin 301s `tortoise.premiselabs.co/admin` here.
+(#4171). The marketing origin 302s `tortoise.premiselabs.co/admin` here — 302 and
+not 301 because a new branch for a moved surface must stay reclaimable
+(`engineering/auth/SCOPE.md` §12 in the `premise-labs` repo; #4409).
 
 ## Dev
 

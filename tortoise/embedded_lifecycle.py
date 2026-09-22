@@ -68,15 +68,21 @@ from __future__ import annotations  # noqa: I001
 import math
 import os
 import contextlib
+import fcntl
 
 import shutil
 import signal
 import socket
+import stat
 import sys
 import tempfile
 import time
 
-from tortoise.embedded_reaper import OWNERS_DIRNAME, _is_ephemeral_dir
+from tortoise.embedded_reaper import (
+    OWNERS_DIRNAME,
+    OWNER_LOCK_NAME,
+    _is_ephemeral_dir,
+)
 from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 
 # ── #4214: the exit seam must not stat the temp root once per client ───────
@@ -828,7 +834,14 @@ def _gc_close(db_ref) -> None:
     db = db_ref()
     if db is None:
         return  # not a redislite-pinned client — nothing to do
-    client = getattr(db, "client", db)
+    # #4487 review: `getattr(db, "client", db)` is NOT safe — a raw embedded
+    # `Redis` exposes `.client` as a BOUND METHOD (its self-constructing clone
+    # helper), so the old form treated that method as the inner client and
+    # bailed at the `socket_file is None` guard below, leaving the owner
+    # record (which the #4487 patch now writes) unreleased. A callable is
+    # never an inner client.
+    _inner = getattr(db, "client", None)
+    client = _inner if (_inner is not None and not callable(_inner)) else db
     # #4214: `_gc_close` runs both on ordinary mid-run collection and on
     # `weakref`'s exit pass. Only the latter may skip work: mid-run GC-time
     # reclamation is the #1475 close-on-GC contract and must keep running.
@@ -907,22 +920,26 @@ def _gc_close(db_ref) -> None:
     _neutralize_redislite_cleanup(client)
     if not pid_before:
         _remove_ephemeral_socket_dir(rdir, sock_path)
-    _release_owner_quietly(db)
+    # #4487 review: `_cleanup()` can null `socket_file`, so hand the socket we
+    # captured BEFORE it to the release fallback (a raw client has no
+    # idempotent `_t_release_owner` to fall back on).
+    _release_owner_quietly(db, sock_path)
 
 
-def _release_owner_quietly(db) -> None:
+def _release_owner_quietly(db, sock: str | None = None) -> None:
     """#3599: release a client's owner claim from GC/**non-raising** contexts.
 
     Prefers the guarded wrapper's idempotent ``_t_release_owner``; a raw
     redislite client has no such method and falls back to a direct
-    ``forget_owner`` on its own socket path.
+    ``forget_owner`` on ``sock`` (the caller-captured path) or its own socket
+    path.
     """
     try:
         release = getattr(db, "_t_release_owner", None)
         if release is not None:
             release()
             return
-        forget_owner(owner_socket_of(db))
+        forget_owner(sock or owner_socket_of(db))
     except Exception:  # GC/teardown context: never raise
         pass
 
@@ -1037,7 +1054,17 @@ def close_embedded_clients() -> int:
         # #1371 fast-close probe reads ``dbdir``/``socket_file`` off the
         # INNER redislite client (the wrapper has neither — it only owns
         # ``close()`` → ``client._cleanup()``).
-        inner = getattr(client, "client", client)
+        # #4487 review: a raw embedded `Redis` exposes `.client` as a bound
+        # method; never treat a callable as the inner client.
+        _c = getattr(client, "client", None)
+        inner = _c if (_c is not None and not callable(_c)) else client
+        # #4487 review (cycle 2): capture the socket BEFORE any teardown —
+        # redislite's `_cleanup()` nulls `socket_file`, and a raw client has
+        # no idempotent `_t_release_owner` to fall back on, so a post-teardown
+        # `owner_socket_of(inner)` resolves None and STRANDS the claim (the
+        # refcount then short-circuits `record_owner` forever, leaving a later
+        # live server on this path uninstrumented — the #4487 class).
+        sock_before = getattr(inner, "socket_file", None) or owner_socket_of(inner)
         try:
             # #4214: this is the #2203 terminating-signal teardown — the
             # process is about to die (`os.kill(self, signum)` follows), so
@@ -1045,7 +1072,7 @@ def close_embedded_clients() -> int:
             # close rather than delaying the death it exists to perform.
             if atexit_fast_close(inner, at_exit=True):
                 closed += 1
-                _release_owner(client, inner)
+                _release_owner(client, inner, sock_before)
                 continue
         except Exception:
             pass  # probe/gating failure -> fall through to the normal close
@@ -1055,7 +1082,7 @@ def close_embedded_clients() -> int:
                 t_close()
             except Exception:
                 pass  # teardown context: never raise
-            _release_owner(client, inner)
+            _release_owner(client, inner, sock_before)
             closed += 1
             continue
         cleanup = getattr(client, "_cleanup", None)
@@ -1068,24 +1095,25 @@ def close_embedded_clients() -> int:
             # `_cleanup` aborted must not re-run it from `__del__`.
             _neutralize_redislite_cleanup(inner)
             closed += 1
-        _release_owner(client, inner)
+        _release_owner(client, inner, sock_before)
     return closed
 
 
-def _release_owner(client, inner) -> None:
+def _release_owner(client, inner, sock: str | None = None) -> None:
     """#3599: release a client's owner-record claim (never raises).
 
     Prefers the guarded wrapper's idempotent ``_t_release_owner`` (which
     also handles the refcount when one process holds several clients on a
     shared server); a raw redislite client has no such method and falls
-    back to a direct ``forget_owner``.
+    back to a direct ``forget_owner`` on ``sock`` (the caller-captured path,
+    taken BEFORE teardown nulls ``socket_file``) or its own socket path.
     """
     try:
         release = getattr(client, "_t_release_owner", None)
         if release is not None:
             release()
             return
-        forget_owner(owner_socket_of(inner) if inner is not None else None)
+        forget_owner(sock if sock is not None else owner_socket_of(inner))
     except Exception:  # teardown context: never raise
         pass
 
@@ -1199,6 +1227,126 @@ def owner_record_dir(socket_file: str) -> str:
 #: record is only dropped when the last of them closes).
 _owner_refcounts: dict[str, int] = {}
 
+#: #4577: per-process fd holding the SHARED ``flock`` on each socket's owner
+#: dir ``.lock``, keyed by the same abspath key as `_owner_refcounts`. The fd
+#: is kept OPEN for the process lifetime and closed only when the refcount
+#: reaches 0, so the kernel holds the lock exactly as long as this process is
+#: a live owner. Kept in lockstep with `_owner_refcounts` so no fd leaks
+#: (every key is popped and closed on the last `forget_owner`; the at-fork
+#: hook re-acquires fresh descriptors, see `_adopt_owner_records_after_fork`).
+_owner_lock_fds: dict[str, int] = {}
+
+
+def _acquire_owner_lock(socket_file: str) -> int | None:
+    """Take and HOLD a shared ``flock`` on the owner dir's ``.lock`` (#4577).
+
+    The reaper's liveness question ("does this server still have a live
+    owner?") becomes a KERNEL FACT when it is answered by a held lock: the
+    kernel releases the lock when the last fd referring to the open file
+    description is closed, i.e. when this process dies. That is strictly
+    stronger than the pid+start inference (#3599 / #1642 FIX 5), which needs
+    a ``ps`` read and still has a recycled-pid / unreadable-start failure
+    class (an inference can be wrong; a held lock cannot).
+
+    ``O_NOFOLLOW`` so a symlink planted at ``.lock`` in a shared tempdir is
+    never followed (#4098 discipline): the open fails with ELOOP and this
+    process simply carries no lock, which the reader treats as "unknown" and
+    falls back to the records. Never raises — a lock we cannot take is a
+    missing optimisation, never a construction failure.
+
+    Returns the held fd (the caller keeps it open for the process lifetime)
+    or None when no lock could be taken.
+    """
+    path = os.path.join(owner_record_dir(socket_file), OWNER_LOCK_NAME)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+    try:
+        # #4577 review, #4098 discipline: reject a planted NON-REGULAR file.
+        # On Linux `flock` on a FIFO SUCCEEDS, so without this the writer
+        # would "hold" a lock the reader must then refuse to open (which,
+        # unguarded, blocks forever). No lock -> the records stay the
+        # fallback signal.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            return None
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+    except OSError:
+        # A lock we cannot take is "no lock"; close the fd rather than leak
+        # it — the record files remain the fallback liveness signal.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return None
+    return fd
+
+
+def _release_owner_lock(key: str) -> None:
+    """Drop this process's shared ``flock`` for ``key`` (last owner only).
+
+    Closing the fd is what releases the lock (the kernel drops it with the
+    open file description); the explicit ``LOCK_UN`` just makes the release
+    immediate and self-documenting. Never raises.
+
+    Then reclaim the ``.lock`` file so the owner dir can be removed when this
+    process was the LAST owner on the host — otherwise every close would
+    strand a ``.lock``-only ``.tortoise-owners`` dir (the temp-dir leak class
+    #3599 exists to fight). The reclaim is gated on an EXCLUSIVE
+    non-blocking lock taken AFTER our own release: a competing live owner's
+    shared lock makes the attempt fail, and the file is then left in place
+    for it. (Unlinking would be safe even then — a live owner always has a
+    record file, which is the fallback signal — but keeping the stronger
+    signal whenever any other owner exists is strictly better.)
+    """
+    fd = _owner_lock_fds.pop(key, None)
+    if fd is None:
+        return
+    with contextlib.suppress(OSError):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    with contextlib.suppress(OSError):
+        os.close(fd)
+    path = os.path.join(owner_record_dir(key), OWNER_LOCK_NAME)
+    try:
+        probe = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    except OSError:
+        return  # already gone / unreadable — nothing to reclaim
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # another live owner still holds it -> leave the file
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(probe)
+
+#: Cache of THIS process's start time, keyed by pid (#4487).
+#: `record_owner` runs on EVERY construction now, and `_process_start_time`
+#: shells out to `ps` — a fork+exec per client, which on a loaded runner is
+#: real load and was implicated in the carve-out lane's time-bounded waits.
+#: A process's own start time never changes, so resolve it once; the pid key
+#: keeps this correct across `fork()` (a child sees its own pid).
+_own_start_cache: dict[int, float | None] = {}
+
+
+def _own_start_time() -> float | None:
+    """This process's start time, resolved at most ONCE per pid (#4487)."""
+    pid = os.getpid()
+    if pid not in _own_start_cache:
+        from tortoise.embedded_reaper import _process_start_time
+        try:
+            _own_start_cache[pid] = _process_start_time(pid)
+        except Exception:
+            _own_start_cache[pid] = None
+    return _own_start_cache[pid]
+
 
 def _adopt_owner_records_after_fork() -> None:
     """Re-establish owner records for inherited clients in a forked child.
@@ -1220,12 +1368,38 @@ def _adopt_owner_records_after_fork() -> None:
     two inherited clients would drop the record while the other is still
     live. The load-bearing property — a parent SIGKILL cannot make a forked
     child's live server look orphaned — does hold.
+
+    #4487 review: `_own_start_cache` is inherited too, and a stale entry for
+    a pid the KERNEL later reassigns to this child would make `record_owner`
+    stamp the child's record with a dead ancestor's start — `_owner_records`
+    compares it against the real start, reads the record DEAD, and the reaper
+    kills a live owner's server (the #1642 FIX 5 fail-open class). Drop it so
+    the child resolves its own start fresh, exactly as the counts are redone.
     """
+    _own_start_cache.clear()
     inherited = list(_owner_refcounts)
     _owner_refcounts.clear()
-    for sock in inherited:
+    # #4577: the child inherits the parent's lock fds, which refer to the
+    # SAME open file descriptions. Those must not stay in the child's map:
+    # `flock(LOCK_UN)` on a duplicate releases the lock for the PARENT too
+    # (a lock belongs to the open file description, not the fd), so a child
+    # `forget_owner` could unlock a still-live parent's server — the exact
+    # #1557 fail-open this lock exists to prevent. Re-acquire a fresh
+    # description for every inherited socket FIRST (a second SHARED lock is
+    # compatible, so it succeeds while the inherited one is still held),
+    # then close the inherited fds — which never leaves a free-lock window
+    # for a concurrent reaper.
+    inherited_locks = dict(_owner_lock_fds)
+    _owner_lock_fds.clear()
+    # Re-acquire for the union: a held fd whose refcount entry was somehow
+    # missing must still get a fresh descriptor, or the child would drop a
+    # lock it inherited without replacing it.
+    for sock in dict.fromkeys([*inherited, *inherited_locks]):
         with contextlib.suppress(Exception):
             record_owner(sock)
+    for fd in inherited_locks.values():
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 if hasattr(os, "register_at_fork"):  # POSIX; absent on Windows
@@ -1240,8 +1414,22 @@ def owner_socket_of(client) -> str | None:
     client at ``.client``) and a raw redislite client (which owns
     ``socket_file`` directly). Host/port (server-mode) constructions have no
     ``socket_file`` and correctly yield None — there is no child to reap.
+
+    #4487 review: the client's OWN ``.socket_file`` is read FIRST. An embedded
+    redislite ``Redis`` exposes ``.client`` as a BOUND METHOD (its
+    self-constructing clone helper), so the old
+    ``getattr(client, "client", None) or client`` resolved a raw client's
+    inner to that method, found no ``socket_file`` there, and returned None —
+    silently breaking every RELEASE fallback for raw clients (the record the
+    #4487 patch writes was then never released). A callable ``.client`` is
+    never an inner client.
     """
-    inner = getattr(client, "client", None) or client
+    sock = getattr(client, "socket_file", None)
+    if isinstance(sock, str) and sock:
+        return sock
+    inner = getattr(client, "client", None)
+    if inner is None or callable(inner):
+        return None
     sock = getattr(inner, "socket_file", None)
     return sock if isinstance(sock, str) and sock else None
 
@@ -1268,14 +1456,9 @@ def record_owner(socket_file: str | None) -> bool:
         os.makedirs(owner_record_dir(socket_file), exist_ok=True)
     except OSError:
         return False
-    # Import at call time: `_process_start_time` shells out to `ps`, and the
-    # reaper module is already a module-level import here — this keeps the
-    # acquisition localized and skippable.
-    from tortoise.embedded_reaper import _process_start_time
-    try:
-        start = _process_start_time(os.getpid())
-    except Exception:
-        start = None
+    # #4487: this process's own start time is invariant — resolve it once
+    # (see `_own_start_time`), not a `ps` fork on every construction.
+    start = _own_start_time()
     # An undeterminable start time is stamped 'unknown'; _owner_records
     # treats that as LIVE (fail closed) — never as a dead owner.
     stamp = f"{os.getpid()}-{'unknown' if start is None else int(start)}"
@@ -1288,6 +1471,14 @@ def record_owner(socket_file: str | None) -> bool:
     except OSError:
         return False
     _owner_refcounts[key] = _owner_refcounts.get(key, 0) + 1
+    # #4577: hold the shared liveness lock alongside the record file. The
+    # `key not in` guard keeps the fd map consistent with the refcount map —
+    # re-acquiring when a descriptor is already held would overwrite (and
+    # leak) it. A None fd is "no lock": the records stay the fallback.
+    if key not in _owner_lock_fds:
+        fd = _acquire_owner_lock(socket_file)
+        if fd is not None:
+            _owner_lock_fds[key] = fd
     return True
 
 
@@ -1308,6 +1499,12 @@ def forget_owner(socket_file: str | None) -> bool:
         _owner_refcounts[key] = held - 1
         return False  # another client in this process still owns it
     _owner_refcounts.pop(key, None)
+    # #4577: the LAST client in this process drops this process's shared
+    # lock — the kernel-visible signal that this owner is gone. Released
+    # here (after the count, before the record unlink) so the migration of
+    # the two signals always overlaps; either order is safe because a free
+    # lock only ever falls back to the records.
+    _release_owner_lock(key)
     d = owner_record_dir(socket_file)
     try:
         names = os.listdir(d)
@@ -1326,3 +1523,83 @@ def forget_owner(socket_file: str | None) -> bool:
     with contextlib.suppress(OSError):
         os.rmdir(d)
     return removed
+
+
+# ── #4487: instrument EVERY redislite construction, not just the guarded one ─
+#
+# `record_owner` is called from the guarded `tortoise.FalkorDB` constructor
+# (tortoise/__init__.py), so a spawn that goes through that choke-point is
+# instrumented. But a RAW `redislite.falkordb_client.FalkorDB(...)` or
+# `redislite.client.Redis(...)` bypasses the guard entirely and writes NO
+# owner record. Measured 2026-09-21 on this host: an active lane's raw
+# reproduction script left a live, detached redis-server with no
+# `.tortoise-owners` dir — exactly the class the reaper cannot confirm under
+# `--only-safe` while any suite is live (#4487).
+#
+# Patch redislite's OWN constructor seam — `RedisMixin.__init__`, the base of
+# both `Redis` and `FalkorDB` — so EVERY construction in a process that
+# imports tortoise records an owner, including raw ones. This mirrors the
+# existing #3653 `_cleanup` patch above: installed once at import, additive,
+# and it leaves a process that never imports tortoise untouched (the
+# documented "non-tortoise users unaffected" boundary is preserved — the
+# patch is a property of importing tortoise, not of importing redislite).
+#
+# The guarded constructor's own `record_owner` call is REMOVED in the same
+# change: `record_owner` is refcounted per (process, socket path), so two
+# writers for one client would make close() release only one claim and leave
+# the record (with a LIVE pid) pinning the server forever — a fail-closed
+# leak the reaper could never clear. ONE writer only.
+_ORIGINAL_REDISLITE_INIT = None
+
+
+def _install_owner_record_patch() -> None:
+    """#4487: record an owner for every redislite construction (once).
+
+    Wraps `RedisMixin.__init__` so that a client constructed by ANY caller —
+    guarded or raw — records this process as an owner of the server it just
+    started. Runs AFTER the original init (redislite sets `socket_file`
+    inside it); a construction that aborts mid-init records nothing, matching
+    the guard's previous behaviour. Never raises — a `record_owner` I/O
+    failure must never break client construction.
+    """
+    global _ORIGINAL_REDISLITE_INIT
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to patch
+        return
+    if getattr(RedisMixin, "_tortoise_owner_record_patch", False):
+        return
+    original = RedisMixin.__init__
+    _ORIGINAL_REDISLITE_INIT = original
+
+    def _init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        # `record_owner` / `owner_socket_of` are defined above and resolved
+        # at call time; the guard keeps construction unconditional.
+        #
+        # Resolve the socket from the object we are patching FIRST: this
+        # seam fires on the object that OWNS the server (redislite's `Redis`,
+        # including the inner client a `FalkorDB` wrapper builds), whose own
+        # `.socket_file` is authoritative. `owner_socket_of` is the fallback
+        # for any wrapper shape — it is NOT the primary read here because an
+        # inner embedded `Redis` carries its own `.client` attribute, and
+        # `owner_socket_of`'s `getattr(client, 'client', ...)` would then
+        # follow that to a client with no `socket_file` and wrongly report
+        # None (measured: the first cut of this patch wrote no record).
+        try:
+            sock = getattr(self, "socket_file", None)
+            if not (isinstance(sock, str) and sock):
+                sock = owner_socket_of(self)
+            record_owner(sock)
+        except Exception:
+            pass
+
+    RedisMixin.__init__ = _init
+    RedisMixin._tortoise_owner_record_patch = True
+
+
+# Installed at import, at the END of the module so `record_owner` and
+# `owner_socket_of` are defined first. `tortoise/__init__.py` imports this
+# module before it defines the guarded `FalkorDB`, so the patch is always in
+# place before any tortoise construction.
+_install_owner_record_patch()

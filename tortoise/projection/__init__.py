@@ -1145,6 +1145,10 @@ def _journal_append_product(graph_name: str) -> None:
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import (  # noqa: E402, I001
+    BELIEF_BOOL_PROPS,
+    BELIEF_PROPS,
+    _belief_bool_value_ok,
+    _belief_prop_value_ok,
     _EntityHandlers,
     _is_persistable_prop_value,
 )
@@ -1328,7 +1332,6 @@ def _annotator_dims(ev: dict, *, aliases: bool = False) -> dict:
 # real fold branch below (the branch would win anyway, but the set would then
 # mislead the next reader about what is unknown).
 _NO_PROJECTION_FOLD = frozenset({
-    "ConfidenceChanged",    # audit-only, no graph effect (pre-existing no-op)
     "IngestStarted",        # audit-only, no graph effect (pre-existing no-op)
     "BatchIdStamped",       # JSONL-only; replayed from the batch snapshot
                             # (rebuild_all pass-2b), not via this dispatcher
@@ -1450,6 +1453,18 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # conditional — never clobber a sibling dim the revision did not
             # carry.
             p.update(_annotator_dims(ev))
+            # #2884 FIX-4: fold the four belief props when the revision
+            # carries them. `update_point(confidence=...)` writes them LIVE
+            # (`SET n += $props`) and emits them in the PointRevised payload,
+            # but the replay fold built its SET clauses only from the
+            # content/annotator fields and silently discarded them — so a
+            # rebuild dropped a caller-set confidence. Same presence-
+            # conditional shape and the SAME value gate as
+            # `_fold_confidence_changed` / the ConfidenceChanged branch
+            # (#330 parity).
+            for _bk in BELIEF_PROPS:
+                if _bk in ev and _belief_prop_value_ok(_bk, ev[_bk]):
+                    p[_bk] = ev[_bk]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's
@@ -1488,6 +1503,35 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             rid = ev.get("id")
             if isinstance(rid, str) and _owns_point(ev.get("label")):
                 points.pop(rid, None)
+    elif t == "ConfidenceChanged":
+        # #2884 D3: the EP/dream belief-state write-back — parity with the
+        # graph folds (`FalkorProjection.apply` / `rebuild_all`).
+        # Presence-conditional, exactly like `_fold_confidence_changed`: only
+        # keys the record carries are written; a key present with null writes
+        # null. `_belief_prop_value_ok` is the ONE value gate the graph fold
+        # also uses, so the pure fold and the graph fold cannot disagree on a
+        # corrupt line (#330 parity).
+        rid = ev.get("id")
+        p = points.get(rid) if _writable_id(rid) else None
+        if p:
+            for key in BELIEF_PROPS:
+                if key not in ev:
+                    continue
+                value = ev[key]
+                if not _belief_prop_value_ok(key, value):
+                    continue
+                p[key] = value
+            # #2884 A5: the boolean flag riding the same record
+            # (`assess_source`'s `outdated=true`) — same presence-conditional
+            # shape and its own strict bool gate, so the pure fold and the
+            # graph fold agree.
+            for key in BELIEF_BOOL_PROPS:
+                if key not in ev:
+                    continue
+                value = ev[key]
+                if not _belief_bool_value_ok(value):
+                    continue
+                p[key] = value
     elif t in _NO_POINT_FOLD:
         # Recognized, intentionally NOT folded by this point-only index:
         # audit markers, the JSONL-only records replayed by a dedicated pass,
@@ -2503,6 +2547,13 @@ class FalkorProjection(
             # popped here so it never reaches _persist_extra_props.
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+        elif t == "ConfidenceChanged":
+            # #2884 D3: the EP/dream belief-state write-back. Inline (a
+            # non-terminalizing property SET — parity with the PointRevised
+            # branch above); no edge/graph-shape effect, so no deferred
+            # sweep. No return: keep ``apply()``'s declared ``-> None``
+            # contract.
+            self._fold_confidence_changed(ev)
         elif t in _NO_PROJECTION_FOLD:
             # Recognized, intentionally folded elsewhere or not at all: the
             # audit-only markers, the JSONL-only batch snapshot replayed in
@@ -3371,6 +3422,46 @@ class FalkorProjection(
         # #2423: DirectEdgeRepoint descriptors (supersede's 2a-DIRECT transfer
         # journal) — replayed in pass-2b AFTER operator edges exist.
         direct_repoint_events: list = []
+        # #2884 A3 (supersede): the supersede family's BELIEF decay folds
+        # INLINE at the event's own journal seq, exactly as the invalidate
+        # family's does (`_decay_point_belief`). The trailing sweep runs AFTER
+        # the whole pass-1b loop, so a `decay_clause` left in
+        # `_fold_point_superseded` overwrote every LATER same-id belief writer
+        # (a journaled ConfidenceChanged, or a PointRevised carrying
+        # confidence): replay ended at the decayed 0.5 while live ended at the
+        # later writer's value (write != read — the same defect the invalidate
+        # fix closed).
+        #
+        # Resolve, PER OLD-ID, the surviving supersede whose decay applies —
+        # the LAST event not obsoleted by a REAL hard-delete boundary. The
+        # anchor is ``last_ann_drop_seq`` (advanced only by a real
+        # ``EntityMutated op=delete`` / ``PointsMerged`` creation), NOT the
+        # terminalizing ``last_recreate_seq``: a bare same-id re-emit MERGEs
+        # live and keeps belief state, so gating the decay on it would drop a
+        # decay live actually applied. Pass 1a has populated both anchors
+        # before this runs, over the SAME ``events`` list the sweep enumerates.
+        supersede_decay_seq: dict[str, int] = {}
+        for seq, ev in enumerate(events):
+            ev = self._norm(ev)
+            if ev.get("type") != "PointSuperseded":
+                continue
+            _sd_rid = ev.get("id")
+            # Mirror ``_fold_point_superseded``'s applicability guard
+            # (``if not oid or not new_id: return 0``) EXACTLY: the sweep fold
+            # IGNORES an event that lacks ``new_id``, so the inline decay must
+            # not fire for one either — live never decayed for such an event,
+            # and a decay here would be a belief write the graph never
+            # received. The falsy-id test matters as much as the type test: an
+            # EMPTY-STRING id passes ``isinstance(..., str)`` (and
+            # ``_writable_id``) but is skipped by the fold, so a type-only gate
+            # would decay a node the fold ignores.
+            if (not isinstance(_sd_rid, str) or not _sd_rid
+                    or not ev.get("new_id")):
+                continue
+            _sd_drop = last_ann_drop_seq.get(("Point", _sd_rid))
+            if _sd_drop is not None and seq <= _sd_drop:
+                continue
+            supersede_decay_seq[_sd_rid] = seq
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for seq, ev in enumerate(events):
             ev = self._norm(ev)
@@ -3390,7 +3481,20 @@ class FalkorProjection(
                     # regresses the tombstone's stamp below the retract's own
                     # rebuild stamp).
                     max_inline_seq[rid] = seq
-                    self._retract(rid)
+                    # #2884 A7: ``_retract`` carries ``decay_clause`` (a BELIEF
+                    # write) as well as the status tombstone, so this fold is a
+                    # belief writer and needs the SAME hard-delete boundary as
+                    # ``ConfidenceChanged``/``PointRevised``/both decay
+                    # families. Without it, a retract that predates a real
+                    # delete→recreate re-applies onto the fresh incarnation and
+                    # resurrects a belief the live graph never had (pass-1a
+                    # hoists every ``PointAdded``, so the fresh node already
+                    # exists by pass 1b). "retracted" is not lost for a bare
+                    # same-id re-emit: that advances no drop boundary, so the
+                    # tombstone still applies.
+                    _retr_anchor = last_ann_drop_seq.get(("Point", rid))
+                    if _retr_anchor is None or seq > _retr_anchor:
+                        self._retract(rid)
             elif t == "PointPromoted":
                 # #785: rebuild parity — re-apply the promoted snapshot.
                 p = ev.get("point")
@@ -3403,8 +3507,21 @@ class FalkorProjection(
                         max_inline_seq[p["id"]] = seq
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
+                    # #2884 A7: a promote snapshot is ``get_point(...)`` and so
+                    # carries the belief props — this fold is a belief writer
+                    # too. Gate the belief half on the same hard-delete
+                    # boundary: a promote that predates a real
+                    # delete→recreate must not overwrite the fresh
+                    # incarnation's belief with a dead one's. The non-belief
+                    # props (content, status, embedding, …) are unaffected —
+                    # they are the point of the fold (#785 parity).
+                    _prom_props = p
+                    _prom_anchor = last_ann_drop_seq.get(("Point", p["id"]))
+                    if _prom_anchor is not None and seq <= _prom_anchor:
+                        _prom_props = {k: v for k, v in p.items()
+                                       if k not in BELIEF_PROPS}
                     wrote_embedding, wrote_content_hash = (
-                        self._upsert_point_props(p))
+                        self._upsert_point_props(_prom_props))
                     # #4305: id-wide journal-owned derived marks.
                     if wrote_embedding:
                         journal_embed_write.add(p["id"])
@@ -3567,6 +3684,14 @@ class FalkorProjection(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
                         ann_anchor is not None and seq <= ann_anchor),
+                    # #2884 A7: the belief props ride the SAME real-hard-delete
+                    # boundary as the annotator dims — a pre-recreation
+                    # revision's belief value died with the deleted node live
+                    # (the pure fold POPS the entry on delete; the graph must
+                    # agree or #330 parity breaks). A bare same-id re-emit is
+                    # NOT a boundary (it MERGEs live and keeps belief state).
+                    skip_belief_props=(
+                        ann_anchor is not None and seq <= ann_anchor),
                     skip_content=superseded,
                     skip_embedding=skip_embedding,
                     skip_hash=skip_hash)
@@ -3608,6 +3733,38 @@ class FalkorProjection(
                         "(event_id=%s id=%r) — operator not re-created by "
                         "any journaled event, or the record carried no "
                         "annotator dim",
+                        ev.get("event_id"), ev.get("id"))
+            elif t == "ConfidenceChanged":
+                # #2884 D3: pass-1b rebuild parity — the EP/dream write-back's
+                # durability record. Folded INLINE (chronological, journal
+                # order): pass-1a already re-created every Point, so the
+                # target always exists, and an id's LAST record must win (a
+                # dream stamp after an EP flush). The fold may match 0 rows
+                # when the target was hard-deleted / never re-created —
+                # audible, mirroring the PointSuperseded / EntityMutated /
+                # OperatorAnnotated fold-miss warnings.
+                #
+                # #2884 A7: gate on the SAME real-hard-delete boundary as the
+                # annotator dims (`last_ann_drop_seq`) — a belief write that
+                # predates a hard delete→recreate wrote onto an incarnation
+                # live DETACH DELETEd, so the re-created node never had it.
+                # Folding it would resurrect the dead node's belief; the pure
+                # fold POPS the entry on delete (#330 parity). NOT gated on
+                # the terminalizing `last_recreate_seq`: a bare same-id
+                # re-emit MERGEs live and keeps belief state, so dropping the
+                # fold there would lose a live-valid value.
+                _cc_rid = ev.get("id")
+                _cc_anchor = (
+                    last_ann_drop_seq.get(("Point", _cc_rid))
+                    if isinstance(_cc_rid, str) else None)
+                if _cc_anchor is not None and seq <= _cc_anchor:
+                    continue
+                if self._fold_confidence_changed(ev) == 0:
+                    logger.warning(
+                        "rebuild: ConfidenceChanged fold matched no Point "
+                        "(event_id=%s id=%r) — point not re-created by any "
+                        "journaled event (legacy journal, unjournaled "
+                        "producer, or delete race)",
                         ev.get("event_id"), ev.get("id"))
             elif t == "EventRecorded":
                 self._upsert_event(ev)
@@ -3654,7 +3811,18 @@ class FalkorProjection(
                 # re-point + DirectEdgeRepoint replay half is pass-2b —
                 # after pass-2 rebuilds edges from operator snapshots that
                 # still name the OLD input.)
+                #
+                # #2884 A3: the BELIEF-decay half (`decay_clause`) folds INLINE
+                # HERE too, at the surviving event's own journal seq (resolved
+                # by the ``supersede_decay_seq`` pre-pass above) — NOT in the
+                # trailing sweep. The sweep fold below no longer writes any
+                # belief prop, so inline and sweep are mutually exclusive by
+                # construction for the same event (only this branch writes the
+                # decay). The anchor is ``last_ann_drop_seq``, NOT
+                # ``last_recreate_seq`` (see the pre-pass).
                 if isinstance(ev.get("id"), str):
+                    if supersede_decay_seq.get(ev["id"]) == seq:
+                        self._decay_point_belief(ev["id"])
                     point_re_stamp_folds.append((seq, ev))
             elif t == "PointInvalidated":
                 # #2488 pass-1b rebuild parity: the POINT-side invalidate
@@ -3671,7 +3839,32 @@ class FalkorProjection(
                 # journal-append order. The fold applies outdated=true +
                 # validTo/expiredAt/updatedAt + CORRECTS only — it never
                 # writes status (an invalidated point stays status='live').
+                #
+                # #2884 A3: the BELIEF half (`decay_clause`) folds INLINE
+                # HERE, at the event's own journal position, NOT in the
+                # trailing sweep. The sweep runs after the whole pass-1b
+                # loop, so a decay applied there clobbers every LATER
+                # same-id inline belief writer (ConfidenceChanged / a
+                # PointRevised carrying confidence): replay ended at 0.5
+                # while live ended at the later writer's value. Inline
+                # application makes journal order decide, as live
+                # chronology does; the sweep keeps the stamp/CORRECTS half.
+                # #2884 A3b: the BELIEF decay anchors on the REAL hard-delete
+                # boundary (``last_ann_drop_seq``) — the same anchor the
+                # supersede pre-pass and the ConfidenceChanged fold use.
+                # ``last_recreate_seq`` is the STATUS half's anchor: it is
+                # advanced by ANY PointAdded, including a bare same-id re-emit
+                # that MERGEs live (``n.confidence = coalesce($cf,
+                # n.confidence)``) and therefore KEEPS the decayed belief.
+                # Gating belief on it suppressed the decay for that shape, so
+                # replay ended at the pre-invalidate value while live held the
+                # decayed one. The two families cannot hold opposite policies
+                # for one journal shape.
                 if isinstance(ev.get("id"), str):
+                    _inv_rid = ev["id"]
+                    _inv_anchor = last_ann_drop_seq.get(("Point", _inv_rid))
+                    if _inv_anchor is None or seq > _inv_anchor:
+                        self._decay_point_belief(_inv_rid)
                     point_re_stamp_folds.append((seq, ev))
             elif t == "DirectEdgeRepoint":
                 # #2423: supersede's 2a-DIRECT transfer emits a flat
@@ -5222,6 +5415,7 @@ class FalkorProjection(
 
     def _revise_point(self, ev: dict, set_updated_at: bool = False,
                       skip_annotator_dims: bool = False,
+                      skip_belief_props: bool = False,
                       skip_content: bool = False,
                       skip_embedding: bool = False,
                       skip_hash: bool = False) -> tuple[bool, bool]:
@@ -5234,6 +5428,14 @@ class FalkorProjection(
         re-created node). A bare same-id re-emit is NOT such a boundary, so it
         never suppresses a live-valid dim. Chronological callers (``apply()``)
         leave it False. Content/embedding replay is unaffected.
+
+        ``skip_belief_props`` (#2884 A7): the same boundary and the same
+        reasoning, applied to the four belief properties. A revision that
+        predates a real delete→recreate wrote its belief value onto an
+        incarnation live DETACH-DELETEd, so the re-created node never had it;
+        folding it would resurrect a dead node's belief (#330 parity — the
+        pure fold POPS the entry on delete). ``rebuild_all`` sets it from the
+        SAME ``last_ann_drop_seq`` anchor; ``apply()`` leaves it False.
 
         ``skip_content`` / ``skip_embedding`` / ``skip_hash`` (#4042): the
         CONTENT/derived half of the same class, with a DIFFERENT boundary.
@@ -5340,6 +5542,22 @@ class FalkorProjection(
             for key, val in _annotator_dims(ev).items():
                 set_clauses.append(f"n.{key} = ${key}")
                 params[key] = val
+        # #2884 FIX-4: fold the four belief props when the revision carries
+        # them (`update_point(confidence=…)` / `posterior_*` / `lastDreamedAt`).
+        # The live write is `SET n += $props`, and the PointRevised payload
+        # carries the value — but this fold built clauses only from
+        # content/context/embedding/hash/annotator dims, so a rebuild silently
+        # dropped the caller's belief state (write ≠ read). Presence-
+        # conditional and gated by the SAME `_belief_prop_value_ok` the
+        # `_fold_confidence_changed` / ConfidenceChanged folds use (#330
+        # parity). #2884 A7: suppressed by `skip_belief_props` on the same
+        # real-hard-delete anchor as the annotator dims — a pre-recreation
+        # revision's belief value died with the deleted incarnation live.
+        if not skip_belief_props:
+            for key in BELIEF_PROPS:
+                if key in ev and _belief_prop_value_ok(key, ev[key]):
+                    set_clauses.append(f"n.{key} = ${key}")
+                    params[key] = ev[key]
 
         # #4042: every clause can now be suppressed at once (a superseded
         # props-only revision carrying no dims). FalkorDB rejects a `SET` with

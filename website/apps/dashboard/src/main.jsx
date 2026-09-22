@@ -42,7 +42,7 @@ import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from 
 // #3874: the org's API-key allowance as the SERVER states it — the pre-cap
 // line + the at-cap notices derive from one server field so they cannot
 // desync, and no client-side number is ever fabricated.
-import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom } from './keyAllowance.js'
+import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom, existingKeyNoteFrom, capRevokeFirstClause } from './keyAllowance.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -2936,7 +2936,10 @@ function claimIntentInFlight() {
   // durable ROWS or the first-timer welcomeKey, and when a usable durable
   // exists the wizard mints a fresh provisioned key on demand (POST
   // /v1/team/keys) — held HERE in-memory, shown once in the command snippet;
-  // cap error routes to the API Keys tab (regenerate).
+  // cap error routes to REVOKE in the API Keys tab — a revoked row leaves the
+  // gate's count, freeing a slot. Rotate cannot work at the cap: its
+  // replacement mint rides that same capped route before the old row is
+  // revoked.
   const [wizardDurableKey, setWizardDurableKey] = React.useState('')
 
   // #2361 review-r1 (I6): the connect-step key is shown ONCE — an accidental
@@ -2957,8 +2960,10 @@ function claimIntentInFlight() {
   // this flag to stop the done step promising "running it creates a fresh key".
   const [wizardDurableCapped, setWizardDurableCapped] = React.useState(false)
   // #1998 fold-in: optional paste-your-own-durable-key fallback (closes the
-  // 402-cap loop — a user at max_api_keys regenerates in the API Keys tab and
-  // pastes the shown-once replacement here instead of dead-ending).
+  // 402-cap loop — a user at max_api_keys revokes a key in the API Keys tab to
+  // free a slot, then creates one here or pastes a key they already hold;
+  // rotate cannot work at the cap — its replacement mint rides the same capped
+  // route before the old row is revoked).
   const [wizardDurablePaste, setWizardDurablePaste] = React.useState('')
   // #2325: paste-your-own is an ESCAPE behind a disclosure for owner/admin
   // (their primary is the mint CTA below) — never a parallel third
@@ -4873,26 +4878,39 @@ function claimIntentInFlight() {
       // key). wizardDurableKey keeps it in-memory so the connect snippet can
       // embed it THIS session; a reload re-gates (rows-resolution shows the
       // new durable exists → 'rows-durable' gate copy) and re-minting burns
-      // max_api_keys (free = 2) — the 402 handler routes to regenerate+paste.
+      // max_api_keys (free = 2) — the 402 handler routes to revoke+paste:
+      // revoking frees a slot, while rotate cannot work at the cap (its
+      // replacement mint rides the same capped route before the old row is
+      // revoked).
       // Refresh the team keys/sessions lists (createKey precedent) so the new
       // durable row lands in keys[] — the API Keys tab shows it and future
       // durableConnectKey rows-resolution matches it.
       await loadAll('').catch(() => {})
     } catch (e) {
-      // #1147: a tier-cap 402 is a LIMIT, not an error — surface the upgrade /
-      // regenerate path (the API Keys tab's regenerateKey does not grow the
-      // key count). Free tier max_api_keys = 2. The remedy ends at the paste
-      // box, which for owner/admin sits behind the disclosure (#2325 review
-      // P2) — open it so the error's "paste it below" lands on a visible field.
+      // #1147: a tier-cap 402 is a LIMIT, not an error — #4353: the remedy
+      // surfaced is REVOKE in the API Keys tab (a revoked row leaves the gate's
+      // count, freeing a slot), never regenerate/rotate, whose replacement mint
+      // rides this same capped route before the old row is revoked. Free tier
+      // max_api_keys = 2. The remedy ends at the paste box, which for
+      // owner/admin sits behind the disclosure (#2325 review P2) — open it so
+      // the error's "paste a key you already have above" lands on a visible
+      // field.
       if (e?.status === 402) {
         setWizardDurableCapped(true)  // this session's mint is capped (P2-7)
         setWizardShowPaste(true)
         setWizardDurableError(isBuildFork
-          // #3218: the remedy must name only affordances THIS branch renders —
-          // the build fork has no paste row, so "paste a key below" dead-ended
-          // (review cycle 1, P2).
+          // #3218: the build-fork arm names only the API Keys tab route. It is
+          // NOT the case that this branch has no paste row: the build fork's
+          // step-2 no-key branch renders {wizardKeyAffordance}, which for an
+          // owner/admin in mint mode resolves to wizardNoKeyAffordance and
+          // renders the paste disclosure — opened by this handler. The copy
+          // below is deliberately left byte-identical either way: whether it
+          // should also name the paste escape is a product call, not this
+          // gate's.
+          // (Named by symbol, never by line number: a citation into this file
+          // is a claim that re-stales on the next edit above it.)
           ? 'You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.'
-          : 'You\'ve reached your plan\'s limit of API keys — revoke or regenerate one in the API Keys tab (copy the new key there), then paste a key below.')
+          : 'You\'ve reached your plan\'s limit of API keys — revoke an existing key in the API Keys tab to free a slot, then create one here — or paste a key you already have above.')
       } else {
         // #2246 (review) + #2297 POLICY A: reachable mint failures here are
         // the 402 cap above, a suspension 403, or transport — the server POST
@@ -6757,19 +6775,23 @@ function claimIntentInFlight() {
             }
             const check = durableConnectKey('', pasted, keys)
             if (check.source === 'unknown') {
-              setWizardDurableError('That key does not match any key in this organization. Paste a key from this organization\'s API Keys tab, or ask an owner/admin to create one.')
+              // #4353: the owner arm names a create, which 402s at the cap for
+              // the same reason the other three rejections do — so it carries
+              // the same clause. The member arm routes to the owner/admin, the
+              // actor who sees the corrected at-cap remedy on the key surfaces.
+              setWizardDurableError(`That key does not match any key in this organization. ${isOwnerAdmin ? 'Paste a key from this organization\'s API Keys tab, or create one here.' + capRevokeFirstClause(team, keys) : 'Paste a key from this organization\'s API Keys tab, or ask an owner or admin to create one.'}`)
               return
             }
             if (check.source === 'bootstrap') {
-              setWizardDurableError(`That key can\'t be used — it was created for a login session and stops working after 24 hours. ${isOwnerAdmin ? 'Create a new key in the API Keys tab.' : 'Ask an owner or admin to create a new key for you.'}`)
+              setWizardDurableError(`That key can\'t be used — it was created for a login session and stops working after 24 hours. ${isOwnerAdmin ? 'Create a new key in the API Keys tab.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create a new key for you.'}`)
               return
             }
             if (check.source === 'expiring') {
-              setWizardDurableError(`It expires, and a key embedded in an agent must never expire. ${isOwnerAdmin ? 'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              setWizardDurableError(`It expires, and a key embedded in an agent must never expire. ${isOwnerAdmin ? 'Rotate it in the API Keys tab and paste the replacement, or create a new key with No expiration.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create or rotate a key for you.'}`)
               return
             }
             if (check.source === 'revoked' || check.source === 'disabled') {
-              setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create or rotate a key for you.'}`)
               return
             }
             setWizardDurableKey(pasted)
@@ -6866,8 +6888,7 @@ function claimIntentInFlight() {
         </button>
       </div>
       <p className="wizard-note">
-        Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it
-        without adding a key. Creating a new key here spends another of your plan&apos;s key slots.
+        {existingKeyNoteFrom(team, keys)}
       </p>
       {wizardShowPaste && wizardPasteRow}
       {!wizardShowPaste && wizardDurableError && (

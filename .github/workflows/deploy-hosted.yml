@@ -364,6 +364,7 @@ jobs:
           [ -n "$R2_SECRET_ACCESS_KEY" ] && GH_PRESENT="$GH_PRESENT R2_SECRET_ACCESS_KEY"
           [ -n "$RESEND_API_KEY" ] && GH_PRESENT="$GH_PRESENT RESEND_API_KEY"
           [ -n "$RESEND_FROM_EMAIL" ] && GH_PRESENT="$GH_PRESENT RESEND_FROM_EMAIL"
+          [ -n "$SENTRY_DSN" ] && GH_PRESENT="$GH_PRESENT SENTRY_DSN"
           [ -n "$STRIPE_PRICE_IDS" ] && GH_PRESENT="$GH_PRESENT STRIPE_PRICE_IDS"
           [ -n "$STRIPE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT STRIPE_SECRET_KEY"
           [ -n "$STRIPE_WEBHOOK_SECRET" ] && GH_PRESENT="$GH_PRESENT STRIPE_WEBHOOK_SECRET"
@@ -372,9 +373,11 @@ jobs:
           [ -n "$SUPABASE_URL" ] && GH_PRESENT="$GH_PRESENT SUPABASE_URL"
           [ -n "$TELEGRAM_BOT_TOKEN" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_BOT_TOKEN"
           [ -n "$TELEGRAM_CHAT_ID" ] && GH_PRESENT="$GH_PRESENT TELEGRAM_CHAT_ID"
+          [ -n "$TORTOISE_AUDIT_DSN" ] && GH_PRESENT="$GH_PRESENT TORTOISE_AUDIT_DSN"
           [ -n "$TORTOISE_BACKUP_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY"
           [ -n "$TORTOISE_BACKUP_KEY_PREVIOUS" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY_PREVIOUS"
           [ -n "$TORTOISE_ENCRYPTION_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_ENCRYPTION_KEY"
+          [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && GH_PRESENT="$GH_PRESENT TORTOISE_LINK_INTENT_SECRET"
           [ -n "$TORTOISE_SECRET_PEPPER" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
           [ -n "$TURNSTILE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
           export GH_SECRETS_PRESENT="$GH_PRESENT"
@@ -432,6 +435,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
@@ -440,9 +444,11 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TORTOISE_AUDIT_DSN: ${{ secrets.TORTOISE_AUDIT_DSN }}
           TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
           TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
           TORTOISE_ENCRYPTION_KEY: ${{ secrets.TORTOISE_ENCRYPTION_KEY }}
+          TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
       # Migration drift gate (#1095): fail-closed check that repo migrations
@@ -515,6 +521,7 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
           RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           BILLING_FROM_EMAIL: ${{ secrets.BILLING_FROM_EMAIL }}
           BILLING_SUCCESS_URL: ${{ secrets.BILLING_SUCCESS_URL }}
           BILLING_CANCEL_URL: ${{ secrets.BILLING_CANCEL_URL }}
@@ -534,6 +541,8 @@ jobs:
           DR_ISSUES_PAT: ${{ secrets.DR_ISSUES_PAT }}
           BACKUP_ALERT_ASSIGNEE: ${{ secrets.BACKUP_ALERT_ASSIGNEE }}
           BACKUP_SIMULATE_ENABLED: ${{ secrets.BACKUP_SIMULATE_ENABLED }}
+          TORTOISE_AUDIT_DSN: ${{ secrets.TORTOISE_AUDIT_DSN }}
+          TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
           GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
@@ -658,6 +667,24 @@ jobs:
           [ -n "$GH_CLIENT_SECRET" ] && ARGS+=(GITHUB_CLIENT_SECRET="$GH_CLIENT_SECRET")
           [ -n "$GH_CALLBACK_URL" ] && ARGS+=(GITHUB_CALLBACK_URL="$GH_CALLBACK_URL")
           [ -n "$TORTOISE_ENCRYPTION_KEY" ] && ARGS+=(TORTOISE_ENCRYPTION_KEY="$TORTOISE_ENCRYPTION_KEY")
+          # #4126 adoption: the three remaining Fly-only secrets the deploy now
+          # MANAGES. Their GitHub Actions secrets were created FROM the live Fly
+          # value, so the first propagated deploy rewrites each to what the app
+          # already runs — behaviour-preserving — and from then on a GitHub
+          # rotation is the only step needed. Declared `gh-secret:` in
+          # .github/scripts/fly-managed-secrets.txt, with the matching probe line
+          # in the provenance gate above.
+          #   TORTOISE_AUDIT_DSN (#669/#771) — audit_events Supabase pooler DSN
+          #   TORTOISE_LINK_INTENT_SECRET (#1765) — HMAC key for link-intent refs;
+          #     unset → link-intent 503 (fail-closed)
+          #   SENTRY_DSN — error tracking; activates only when set
+          # Guarded, matching every other optional secret — and NOT a silent
+          # fallback to hand-management: an absent GitHub secret leaves the Fly
+          # value untouched, which the provenance gate reports as UNSOURCED and
+          # BLOCKS the deploy (#4126/#4259).
+          [ -n "$TORTOISE_AUDIT_DSN" ] && ARGS+=(TORTOISE_AUDIT_DSN="$TORTOISE_AUDIT_DSN")
+          [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && ARGS+=(TORTOISE_LINK_INTENT_SECRET="$TORTOISE_LINK_INTENT_SECRET")
+          [ -n "$SENTRY_DSN" ] && ARGS+=(SENTRY_DSN="$SENTRY_DSN")
           # #528 server analytics (PostHog) — absent key → analytics module no-ops.
           [ -n "$POSTHOG_API_KEY" ] && ARGS+=(POSTHOG_API_KEY="$POSTHOG_API_KEY")
           [ -n "$POSTHOG_HOST" ] && ARGS+=(POSTHOG_HOST="$POSTHOG_HOST")
@@ -686,50 +713,28 @@ jobs:
       - name: Post-deploy DB health gate (#1719 Task 7)
         # The deploy pipeline previously certified a GREEN deploy while the
         # graph DB was dead (NXDOMAIN, #1381 recurrence — /health returned
-        # 200 with status:degraded). Gate the deploy on the DB data plane:
-        # fail fast ONLY on app-unreachable (curl error); keep polling
-        # db.ok=false for >=3 min (cold-start DB connection exceeds 60s per
-        # #338; DNS propagation after a restart runs ~2 min per #1381);
-        # the db.ok read is a JSON parse, not a body text-match (#4470);
-        # assert /health/ready 200 LAST (it ANDs both planes). Bypassable
-        # for incident-fix deploys: the workflow_dispatch input OR the repo
-        # variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
+        # 200 with status:degraded). Gate the deploy on BOTH planes:
+        # fail fast ONLY on app-unreachable (curl error); poll db.ok (the
+        # FalkorDB data plane) for >=3 min (cold-start DB connection exceeds
+        # 60s per #338; DNS propagation after a restart runs ~2 min per
+        # #1381); then poll /health/ready (it ANDs the Supabase control plane
+        # + the data plane) over its OWN budget, LAST.
+        #
+        # The logic lives in .github/scripts/deploy-health-gate.sh so that it
+        # is TESTABLE — its harness (.github/scripts/deploy-health-gate.test.sh,
+        # run by ci.yml) pins the #4545 regression: the gate used to poll db.ok
+        # and then ASSERT /health/ready ONCE, but db.ok does NOT imply ready
+        # (readiness is a strictly STRONGER predicate — AND of both planes), so
+        # a still-connecting control plane reddened a HEALTHY deploy 2-3s after
+        # the data plane came up. The gate must never assert a predicate it has
+        # not itself observed to be true, on the strength of a weaker one.
+        # Bypassable for incident-fix deploys: the workflow_dispatch input OR
+        # the repo variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
         # push-triggered runs the inputs context is null, so the variable
         # lane is the ONLY way to bypass; set it during the incident window,
         # clear it when RC3 is restored).
         if: ${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}
-        run: |
-          BASE="https://api.premiselabs.co"
-          # Fail fast on app-unreachable (5 quick probes) — a dead app is a
-          # deploy failure, not a DB-wait.
-          APP_OK=0
-          for i in $(seq 1 5); do
-            if curl -fsS "$BASE/health" >/dev/null 2>&1; then APP_OK=1; break; fi
-            sleep 5
-          done
-          [ "$APP_OK" = "1" ] || { echo "::error::app unreachable after deploy ($BASE/health)"; exit 1; }
-          echo "app reachable — polling DB data plane"
-          # Poll db.ok=true for up to 3 min (180s / 10s).
-          DB_OK=0
-          # Parse the JSON and read ``db.ok`` — do NOT text-match the body.
-          # The body gained a SECOND `"ok": true` when /health's additive
-          # ``backup_watcher`` block landed (#4470/#2877), and a
-          # `grep -q '"ok": *true'` then matched the WATCHER's ok while db.ok
-          # was still false: the poll short-circuited on the FIRST probe, the
-          # 3-minute cold-start tolerance above was silently neutralized, and
-          # /health/ready was asserted while the DB was still cold — a spurious
-          # deploy failure on a legitimate cold start. A field's VALUE must be
-          # read, not its spelling.
-          for i in $(seq 1 18); do
-            if curl -fsS "$BASE/health" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("db") or {}).get("ok") else 1)' 2>/dev/null; then DB_OK=1; break; fi
-            sleep 10
-          done
-          [ "$DB_OK" = "1" ] || { echo "::error::db.ok stayed false for 3 min — FalkorDB unreachable"; exit 1; }
-          echo "db.ok true"
-          # /health/ready LAST — it ANDs the Supabase control plane + the
-          # FalkorDB data plane; a 200 is the strongest signal.
-          curl -fsS -o /dev/null -w "health/ready: %{http_code}\n" "$BASE/health/ready" \
-            || { echo "::error::/health/ready not 200 after deploy"; exit 1; }
+        run: bash .github/scripts/deploy-health-gate.sh
         shell: bash
       - name: Warn when DB health gate bypassed
         if: ${{ inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true' }}

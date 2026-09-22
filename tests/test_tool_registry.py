@@ -516,6 +516,25 @@ class TortoiseSDK:
         return _mod_mut_2()
 '''
 
+# A synthetic ledgered entry.  The ledger tests monkeypatch
+# DECLARED_BINDING_DIVERGENCES with this tool instead of using the REAL ledger
+# keys, because the real ledger is emptied as its two entries are repaired — and a
+# test bound to a live ledger would red the build on exactly the action the guard
+# itself instructs ("delete the ledger entry").
+_LEDGER_TOOL = "tortoise_probe_ledgered"
+_LEDGER_DECLARED = "query"
+_LEDGER_OTHER = "recall_state"
+
+
+def _ledger_src(reaches: str) -> str:
+    """Source whose handler for `_LEDGER_TOOL` reaches `reaches`."""
+    return (
+        "def _get_org_sdk():\n"
+        "    ...\n\n"
+        f"def {_LEDGER_TOOL}(id):\n"
+        f"    return _get_org_sdk().{reaches}(id)\n"
+    )
+
 
 def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool, writes: bool = False):
     from tortoise.tool_registry import ToolDefinition
@@ -709,6 +728,115 @@ class TestCapabilityModel:
             violations = binding_resolution_violations([entry], _PROBE_SRC)
             assert any("dispatch" in v for v in violations), (probe, violations)
 
+    def test_T3_divergence_ledger_checked_when_declaration_does_not_resolve(self, monkeypatch):
+        """A ledgered entry whose declaration drifts to an already-exempt dangling
+        name (a `DANGLING_SDK_DECLARATIONS` member, which does not resolve) must
+        still be reported.  Skipping non-resolving declarations — correct for
+        unledgered entries — would leave a stale ledger entry green forever."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset({_LEDGER_OTHER}), "synthetic"),
+        })
+        drifted = _probe(_LEDGER_TOOL, "upsert_tenant_manifest",
+                         annotations=_ro(), http_policy=True)
+        violations = tsc.binding_resolution_violations(
+            [drifted], _ledger_src(_LEDGER_OTHER))
+        assert any("update the entry" in v for v in violations), violations
+
+    def test_T3_handlerless_entry_is_not_a_binding_divergence(self):
+        """An entry with no module-level handler is already reported by the
+        handler-existence arm.  Asserting it *also* \"never reaches\" its
+        declaration is noise — it names a handler that does not exist."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        handlerless = _probe("tortoise_no_handler_at_all", "query",
+                             annotations=_ro(), http_policy=True)
+        violations = binding_resolution_violations([handlerless])
+        assert any("no module-level handler" in v for v in violations), violations
+        assert not any("never" in v for v in violations), violations
+
+    def test_T3_declared_binding_must_be_reached_not_merely_resolvable(self):
+        """#4337: a declared `sdk_method` that RESOLVES but is never called must
+        fail. `query` is a real method on TortoiseSDK, so the resolution arm
+        passes it; only reading the handler body can see that this handler calls
+        `create_point` instead."""
+        from tool_surface_capabilities import binding_resolution_violations
+
+        from tortoise.tool_registry import _ro
+        diverged = _probe("tortoise_probe_reader", "query",
+                          annotations=_ro(), http_policy=True)
+        violations = binding_resolution_violations([diverged], _PROBE_SRC)
+        assert any("never" in v and "query" in v for v in violations), violations
+
+    def test_T3_divergence_ledger_cannot_outlive_its_defect(self, monkeypatch):
+        """The ledger is exact in BOTH directions: a repaired divergence must red
+        the build until its entry is deleted.  Run on a SYNTHETIC ledger so the
+        test survives the repair of the real entries."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset({_LEDGER_OTHER}), "synthetic"),
+        })
+        repaired = _probe(_LEDGER_TOOL, _LEDGER_DECLARED,
+                          annotations=_ro(), http_policy=True)
+        violations = tsc.binding_resolution_violations(
+            [repaired], _ledger_src(_LEDGER_DECLARED))
+        assert any("delete the ledger entry" in v for v in violations), violations
+
+    def test_T3_divergence_ledger_records_the_declared_method(self, monkeypatch):
+        """A ledger keyed on the tool name alone is a blanket exemption: the entry
+        could re-diverge to a DIFFERENT declared method and stay green.  This
+        covers the declared half of the recorded divergence."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset({_LEDGER_OTHER}), "synthetic"),
+        })
+        drifted = _probe(_LEDGER_TOOL, "get_point",
+                         annotations=_ro(), http_policy=True)
+        violations = tsc.binding_resolution_violations(
+            [drifted], _ledger_src(_LEDGER_OTHER))
+        assert any("update the entry" in v for v in violations), violations
+
+    def test_T3_declared_private_method_counts_as_reached(self, monkeypatch):
+        """Presence of the declared method is asked of the RAW reach set.  A
+        declared PRIVATE SDK method is a real binding: filtering it out first would
+        report it unreached, and a ledgered one could never clear its entry."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        private = _probe(_LEDGER_TOOL, "_get_proj",
+                         annotations=_ro(), http_policy=True)
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {})
+        assert not any("never" in v for v in tsc.binding_resolution_violations(
+            [private], _ledger_src("_get_proj")))
+
+    def test_T3_divergence_ledger_records_the_reached_set(self, monkeypatch):
+        """The REACHED half of the recorded divergence, on its own.  Without this
+        the reached comparison is dead weight — the declared-drift test exercises
+        only the other conjunct, so deleting the reached check leaves the suite
+        green."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import _ro
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset(), "synthetic"),
+        })
+        same_declared = _probe(_LEDGER_TOOL, _LEDGER_DECLARED,
+                               annotations=_ro(), http_policy=True)
+        violations = tsc.binding_resolution_violations(
+            [same_declared], _ledger_src(_LEDGER_OTHER))
+        assert any("update the entry" in v for v in violations), violations
+
     def test_T1_partial_or_dead_self_guard_fails(self):
         """T1: presence of `_http_excluded_error` is not enough — a conditional
         or dead guard does not dominate the write, so it must fail."""
@@ -827,6 +955,20 @@ class TestCapabilityModel:
         assert any("does not resolve" in v
                    for v in declared_set_violations(TOOL_REGISTRY,
                                                    sdk_src="class TortoiseSDK:\n    pass\n"))
+
+    def test_declared_binding_divergence_ledger_is_live(self, monkeypatch):
+        """#4337: a ledger key whose registry entry is gone must fail, not persist
+        unexamined — the name-goes-stale vacuity #4113 exists to remove. The
+        divergence arm iterates ENTRIES, so it cannot see a key with no entry."""
+        import tool_surface_capabilities as tsc
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        monkeypatch.setattr(tsc, "DECLARED_BINDING_DIVERGENCES", {
+            "tortoise_probe_absent_ledger_key": tsc.DeclaredBindingDivergence(
+                _LEDGER_DECLARED, frozenset(), "synthetic"),
+        })
+        assert any("no registry entry" in v
+                   for v in tsc.declared_set_violations(TOOL_REGISTRY))
 
     def test_guard1_declared_and_unguarded_branches_fail(self):
         """Guard 1 must fire on the declared-binding leg and on an HTTP-excluded

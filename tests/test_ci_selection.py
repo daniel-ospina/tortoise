@@ -1009,8 +1009,25 @@ def test_push_legs_partitions_every_classified_file():
     assert not (set(legs["slow"]) & carve), \
         "slow carve-out files run in the URI-unset carve-out job, never the slow legs"
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
-    # bench push_extra lands in half b
-    assert any(f.startswith("bench/") for f in legs["half_b"])
+    # #1485 / #3400: bench files are NOT pinned to a half. `push_extra` is
+    # spread evenly across the halves (#1485) and a bench file registered in
+    # `surfaces` is packed by measured duration (#3400 LPT), so which half a
+    # given bench file lands in is a packing outcome, not an assignment. The
+    # pre-#1485 form of this check required a bench file in half_b SPECIFICALLY
+    # and re-staled the moment a pool change moved one (#3811: adding a single
+    # classified file flipped all three bench files into half_a, reddening an
+    # unrelated PR). Assert the invariant the code actually provides — every
+    # bench file reaches a half (the partition assertion above), and
+    # `push_extra`, when non-empty, reaches BOTH rather than being dumped on
+    # one.
+    assert any(f.startswith("bench/") for f in legs["half_a"] + legs["half_b"]), \
+        "no bench file reached the push legs at all"
+    push_extra = {f.replace(".py", "") for f in m.get("push_extra", [])}
+    if push_extra:
+        assert push_extra & set(legs["half_a"]), \
+            "push_extra lost its even spread (#1485): none in half a"
+        assert push_extra & set(legs["half_b"]), \
+            "push_extra lost its even spread (#1485): none in half b"
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
