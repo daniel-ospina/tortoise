@@ -1362,6 +1362,362 @@ def test_post_write_check_guards_repo_root_too(tmp_path, monkeypatch, capsys):
     assert "inside the measured tree" in err
 
 
+# ── #4585: a FAILED write must not litter the measured tree, and must refuse ──
+#
+# `mkstemp` normalises its `dir` argument with `os.path.abspath` — LEXICALLY —
+# while `os.replace(tmp, out)` resolves `out` through the KERNEL. With a symlink
+# followed by `..` the two disagree about the parent, so the temp file (holding
+# the COMPLETE record JSON) could be created INSIDE the measured tree and left
+# there when `os.replace` failed — and `main` raised the OSError instead of
+# refusing with exit 2. Not a path-prediction bug like #4540/#4572 (the pre-write
+# refusal is right) and not a fail-open: a crash-and-litter bug on a write-failure
+# path. The fix is threefold: create the temp in the PHYSICAL parent, unlink it on
+# failure, and never let a failed write escape `main` as a traceback.
+
+
+def test_a_failed_record_write_leaves_no_temp_in_the_measured_tree(tmp_path, monkeypatch, capsys):
+    """#4585: a failed write leaves NO `.rec-*` residue, and exits 2 with a message.
+
+    The destination kernel-resolves to `<base>/destdir` — OUTSIDE the tree, so the
+    pre-write refusal is correctly silent — while the LEXICAL parent collapses to
+    `<tree>`. Both halves are asserted: the FILESYSTEM (no `.rec-*` in the tree) and
+    the message. `rc == 2` alone is vacuous — the load ceiling also returns 2 — so
+    the refusal must be the WRITE refusal, naming the cause and the remedy.
+    """
+    base = tmp_path / "base"
+    tree = base / "tree"
+    outside = base / "outside"
+    destdir = base / "destdir"          # an existing DIRECTORY: `os.replace` must fail
+    for d in (tree, outside, destdir):
+        d.mkdir(parents=True)
+    (tree / "lnk").symlink_to(outside, target_is_directory=True)
+    attack = tree / "lnk" / ".." / "destdir"
+
+    # The premise the fix must respect: the DESTINATION is outside the tree (so the
+    # pre-write prediction is right and silent), while the LEXICAL parent is inside
+    # it — which is what put the temp in the measured tree on the pre-fix code.
+    assert ee._written_location(attack) == Path(os.path.realpath(str(destdir)))
+    assert Path(os.path.abspath(os.path.dirname(os.fspath(attack)))) == tree, \
+        "mkstemp's lexical parent must be the tree for this case to bite"
+
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "pin": {"measured_root": str(tree)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(attack),
+    ])
+    err = capsys.readouterr().err
+
+    residue = sorted(p.name for p in tree.iterdir())
+    assert residue == ["lnk"], (
+        "a failed write must leave no `.rec-*` residue inside the measured tree: "
+        f"{residue}"
+    )
+    assert rc == 2, "a failed write must be a refusal, not an uncaught exception"
+    assert "could not write the record" in err, f"not the write refusal: {err!r}"
+    assert "NOT written" in err, "the operator must be told the record does not exist"
+    assert str(attack) in err, "the message must name the failed destination"
+    assert "Is a directory" in err or "Errno 21" in err, "the message must carry the cause"
+    assert "outside the measured tree" in err, "the message must say what to do instead"
+    assert destdir.is_dir(), "the refusal must not remove the destination"
+
+
+def test_the_sweep_removes_rec_residue_an_earlier_write_left_behind(
+    tmp_path, monkeypatch, capsys,
+):
+    """The `main` sweep is the backstop for residue the primary cleanup missed.
+
+    `_write_record` unlinks its own temp, but if THAT unlink fails (or an older
+    invocation crashed) the complete record JSON can survive inside a measured
+    tree. This plants that residue and makes the write fail, so the sweep is the
+    only thing that can remove it — a dead sweep fails this test.
+    """
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    # A REAL `mkstemp(prefix=".rec-", suffix=".tmp")` name: 8 of `[a-z0-9_]`.
+    residue = tree / ".rec-a1b2c3d4.tmp"
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "pin": {"measured_root": str(tree)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+
+    def _plant_then_fail(rec, out):
+        residue.write_text("{}\n")
+        raise OSError(21, "Is a directory")
+
+    monkeypatch.setattr(ee, "_write_record", _plant_then_fail)
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(tmp_path / "rec.json"),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 2
+    assert not residue.exists(), "the sweep must remove `.rec-*` residue from the tree"
+    assert "could not write the record" in err, f"not the write refusal: {err!r}"
+
+
+def test_the_sweep_covers_the_destinations_physical_parent(tmp_path, monkeypatch, capsys):
+    """The sweep must also reach a NESTED in-tree parent, not only the tree root.
+
+    A symlink swapped for a real directory after the pre-write refusal can resolve
+    the destination INTO the tree, so the temp is created in a nested directory
+    rather than the tree root. `_write_record`'s own unlink covers that, but when
+    THAT fails the sweep is the backstop — and a sweep of the measured roots alone
+    would only see the top level. The destination's physical parent is therefore
+    swept too; without it this test's residue survives.
+    """
+    tree = tmp_path / "tree"
+    nested = tree / "sub"
+    nested.mkdir(parents=True)
+    residue = nested / ".rec-e5f6a7b8.tmp"
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "pin": {"measured_root": str(tree)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+
+    def _plant_then_fail(rec, out):
+        residue.write_text("{}\n")
+        raise OSError(21, "Is a directory")
+
+    monkeypatch.setattr(ee, "_write_record", _plant_then_fail)
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(nested / "rec.json"),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 2
+    assert not residue.exists(), (
+        "the sweep must reach the destination's physical parent, not only the "
+        "measured roots"
+    )
+    assert "removed 1 temp file(s)" in err, f"the sweep must report what it removed: {err!r}"
+
+
+def _unlink_fails_first_call(monkeypatch):
+    """Make the FIRST `os.unlink` fail, then delegate to the real one.
+
+    Models the precondition #4585's sweep exists for: a BEST-EFFORT unlink that
+    failed, so the caller is the only thing that can still remove the bytes. The
+    failure is deliberately transient (one call) — a *persistent* unlink failure
+    cannot be repaired by any caller, and is reported, not silently absorbed.
+    """
+    real_unlink = os.unlink
+    calls = {"n": 0}
+
+    def _fails_once(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(1, "Operation not permitted")
+        return real_unlink(path)
+
+    monkeypatch.setattr(ee.os, "unlink", _fails_once)
+    return calls
+
+
+def test_a_non_oserror_write_failure_still_sweeps_the_temp(tmp_path, monkeypatch, capsys):
+    """#4585 (a): cleanup must NOT be gated on the exception TYPE.
+
+    `_write_record`'s own unlink is best-effort, so a failure class that is not
+    `OSError` — here `json.dump` raising `TypeError` — combined with an unlink that
+    fails leaves the temp (holding partial record bytes) inside the measured tree.
+    Pre-fix, `main`'s `except OSError` did not match, so the `TypeError` propagated
+    WITHOUT a sweep. Both halves are asserted: the FILESYSTEM, and that the original
+    exception still propagates (the sweep must not swallow it). The exit code is
+    deliberately NOT asserted — a traceback is the pre-existing non-OSError contract
+    and is not what this test pins.
+    """
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    parent = tree / "sub"          # the destination's physical parent, IN the tree
+    parent.mkdir()
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "pin": {"measured_root": str(tree)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+
+    def _raise_type_error(*_a, **_k):
+        raise TypeError("simulated json.dump failure")
+
+    monkeypatch.setattr(ee.json, "dump", _raise_type_error)
+    _unlink_fails_first_call(monkeypatch)
+
+    with pytest.raises(TypeError):
+        ee.main([
+            "run", "--selection", "family", "--n", "2",
+            "--record-out", str(parent / "rec.json"),
+        ])
+    capsys.readouterr()
+
+    residue = sorted(p.name for p in parent.iterdir())
+    assert residue == [], (
+        "a non-OSError write failure must still sweep the temp out of the "
+        f"measured tree: {residue}"
+    )
+
+
+def test_an_in_tree_record_survives_a_failed_verify_unlink_and_is_swept(
+    tmp_path, monkeypatch, capsys,
+):
+    """#4585 (b): the `UsageError` path sweeps too, and removes the record itself.
+
+    The record lands INSIDE the tree (the pre-write prediction was fooled), and
+    `_verify_record_landed_outside`'s own `os.unlink(out)` fails. Pre-fix, `main`
+    printed the usage error and returned 2 with the COMPLETE record JSON still in
+    the measured tree. `rc == 2` is identical either way, so the discriminator is
+    the FILESYSTEM plus the refusal message.
+    """
+    tree = tmp_path / "tree"
+    parent = tree / "sub"
+    parent.mkdir(parents=True)
+    out = parent / "rec.json"
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "pin": {"measured_root": str(tree)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+    _unlink_fails_first_call(monkeypatch)
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(out),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 2, "the run must still refuse the in-tree record"
+    assert not out.exists(), (
+        "the record that landed inside the measured tree must be swept before "
+        "the refusal returns"
+    )
+    assert not list(parent.glob(".rec-*")) and not list(tree.glob(".rec-*")), \
+        "no temp residue may survive either"
+    assert "usage error" in err, f"the refusal must be reported: {err!r}"
+    assert "inside the measured tree" in err, f"not the in-tree refusal: {err!r}"
+
+
+def test_the_sweep_does_not_delete_a_users_rec_named_file(tmp_path, monkeypatch, capsys):
+    """Control: only mkstemp's EXACT shape is swept — a lookalike user file survives.
+
+    `_REC_RESIDUE_RE` is `.rec-` + 8 of `[a-z0-9_]` + `.tmp`, so a user's
+    `.rec-userdefined.tmp` (wrong-length random part), `.rec-user.txt` and
+    `rec-file.tmp` are untouched, while genuine residue IS removed. The pre-fix
+    `.rec-*.tmp` glob deleted the lookalikes — the tool cleaning up a file it never
+    created.
+    """
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    real_residue = tree / ".rec-a1b2c3d4.tmp"      # mkstemp's exact shape
+    lookalike = tree / ".rec-userdefined.tmp"     # prefix + suffix, wrong random part
+    user_txt = tree / ".rec-user.txt"
+    user_plain = tree / "rec-file.tmp"
+    for p in (real_residue, lookalike, user_txt, user_plain):
+        p.write_text("keep me\n")
+
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "pin": {"measured_root": str(tree)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+
+    def _fail(rec, out):
+        raise OSError(21, "Is a directory")
+
+    monkeypatch.setattr(ee, "_write_record", _fail)
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(tmp_path / "rec.json"),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 2, f"the write refusal must still fire: {err!r}"
+    assert not real_residue.exists(), "genuine mkstemp-shaped residue must be removed"
+    assert lookalike.exists(), (
+        "a user file matching the old open glob but not mkstemp's shape must survive"
+    )
+    assert user_txt.exists() and user_plain.exists(), (
+        "files outside the residue shape must never be touched"
+    )
+    assert "removed 1 temp file(s)" in err, f"exactly the real residue: {err!r}"
+
+
+def test_an_out_of_tree_record_is_written_and_the_run_succeeds(tmp_path, monkeypatch, capsys):
+    """The ordinary path is unaffected: an out-of-tree record is written, exit is the record's.
+
+    The fix now resolves the PHYSICAL parent and sweeps `.rec-*`, so this is the
+    falsifier for a fix that over-sweeps, wrongly refuses, or deletes a good
+    record. `main` must return the record's OWN exit code (0 here) — a refusal
+    would return 2 instead.
+    """
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    out = tmp_path / "records" / "rec.json"
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+
+    record = {
+        "pin": {"measured_root": str(tree)},
+        "red": {"cause": None},
+        "load": {"red_band": "L-A"},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": True, "violations": []},
+        "exit_code": 0,
+    }
+    monkeypatch.setattr(ee, "_build_record", lambda args: record)
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(out),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 0, f"the ordinary out-of-tree write must succeed: {err!r}"
+    assert out.is_file(), "the out-of-tree record must be written"
+    assert json.loads(out.read_text()) == record, "the record must round-trip"
+    assert not list(out.parent.glob(".rec-*.tmp")), "success must consume the temp"
+    assert not list(tree.glob(".rec-*.tmp")), "no residue may appear in the measured tree"
+
+
 def test_pin_detects_a_genuine_edit_and_ignores_the_out_of_tree_record(tmp_path, monkeypatch):
     """The pin still FIRES on real dirt, and the tool's own record cannot perturb it.
 

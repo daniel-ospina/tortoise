@@ -30,6 +30,8 @@
 // context.next() are covered by website/_headers). Value matches the API
 // (tortoise/hosted_api.py): max-age=31536000; includeSubDomains — no
 // `preload` yet, soak first per #1003 §1.
+import { RELAXED_CSP } from "./_shared/security-headers.ts";
+
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
 export const onRequest: PagesFunction = async (context) => {
@@ -254,6 +256,7 @@ export const onRequest: PagesFunction = async (context) => {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=60",
+        "Content-Security-Policy": RELAXED_CSP,
         ...HSTS,
       },
     });
