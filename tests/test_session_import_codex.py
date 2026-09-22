@@ -441,3 +441,186 @@ def test_permanent_import_failure_is_not_spooled(
     assert read_spool_meta(spool, "sid-perm") is None
     metas, _ = list_spool_metas(spool)
     assert metas == []
+
+
+def test_unreachable_api_is_spooled_too(tmp_path, monkeypatch, codex_jsonl):
+    """A NETWORK failure (no HTTP status at all) is the most common transient
+    and `classify_failure(None)` is "retry" — so it must spool as well.
+
+    Before this the `URLError` branch only wrote a breadcrumb, so an offline
+    machine lost every session it imported: the same silent loss as the 504,
+    on the failure most likely to happen.
+
+    Mutation: drop the `_spool_if_retryable(None, ...)` call from the URLError
+    branch — the meta assertion REDs."""
+    from urllib.error import URLError
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import (
+        PostOutcome,
+        flush_spool,
+        read_spool_meta,
+        read_spool_turns,
+    )
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-net")
+
+    def _raise(req, timeout=None):
+        raise URLError("Connection refused")
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json"))
+    meta = read_spool_meta(spool, "sid-net")
+    assert meta is not None, "an unreachable API lost the session"
+    assert read_spool_turns(spool, "sid-net") == _EXPECTED_TURNS
+
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    assert flush_spool(spool, _post).filed == 1
+
+
+def test_spooled_entry_keeps_source_and_is_a_superset_of_the_post(
+        tmp_path, monkeypatch, codex_jsonl):
+    """The drained payload must carry what the refused POST carried — and the
+    `machine_id` the spool adds is an addition, not a substitution.
+
+    Pins `source` (unpinned before) and records the one field `_flush_one`
+    synthesises that the import POST never sent."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import PostOutcome, flush_spool
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-src")
+
+    with mock.patch("urllib.request.urlopen",
+                    lambda req, timeout=None: (_ for _ in ()).throw(
+                        _http_error(429, '{"detail":"saturated"}'))):
+        assert _cmd_sessions_import(args) == 1
+
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    assert flush_spool(spool, _post).filed == 1
+    assert filed[0]["source"] == codex_jsonl.stem
+    # `_flush_one` synthesises machine attribution unconditionally; the import
+    # POST never sent it. So the payload SUPERSETS the refused POST...
+    assert "machine_id" in filed[0], filed[0].keys()
+    # ...but it is not a pure superset: an absent model is OMITTED, not sent as
+    # null (`if meta.get("model"): payload["model"] = ...`).
+    assert "model" not in filed[0], filed[0].keys()
+
+
+def test_a_spool_write_failure_cannot_mask_the_honest_error(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """FAIL-OPEN: if the spool itself raises, the command must still exit 1 with
+    the real error on stderr — no traceback escaping into the hook, and above
+    all no "Spooled session" line that would claim a durability it does not
+    have."""
+    from tortoise.__main__ import _cmd_sessions_import
+
+    _import_env(tmp_path, monkeypatch)   # hermetic env; the value is unused
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-boom")
+
+    with mock.patch("urllib.request.urlopen",
+                    lambda req, timeout=None: (_ for _ in ()).throw(
+                        _http_error(504, '{"detail":"wait budget exceeded"}'))), \
+            mock.patch("tortoise.capture_spool.write_spool_entry",
+                       side_effect=RuntimeError("disk on fire")):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "import failed (HTTP 504)" in err, err
+    assert "disk on fire" in err, err
+    assert "Traceback" not in err, err
+    assert "Spooled session" not in err, (
+        "a failed spool write must not claim the session is durable")
+
+
+def test_an_already_filed_entry_does_not_promise_a_filing(
+        tmp_path, monkeypatch, codex_jsonl, capsys):
+    """TRUTHFUL OUTPUT: a drain that already filed this exact content SKIPS the
+    entry, so the message must not say "a later drain will file it"."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import PostOutcome, flush_spool, spool_dir
+
+    _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-dup")
+    boom = lambda req, timeout=None: (_ for _ in ()).throw(  # noqa: E731
+        _http_error(504, '{"detail":"wait budget exceeded"}'))
+
+    def _post(payload):
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    with mock.patch("urllib.request.urlopen", boom):
+        assert _cmd_sessions_import(args) == 1
+        ctx = capsys.readouterr().err
+        assert "a later drain will file it" in ctx, ctx
+
+    # File it, then let the SAME session fail again: the copy is now a no-op.
+    assert flush_spool(spool_dir(), _post).filed == 1
+    with mock.patch("urllib.request.urlopen", boom):
+        assert _cmd_sessions_import(args) == 1
+        assert "already filed" in capsys.readouterr().err
+
+
+def test_an_oversized_turn_is_clamped_before_spooling(tmp_path, monkeypatch):
+    """The spool's per-entry bound is sized on the CLAMPED maximum, so an
+    unclamped turn can overflow it — and `write_spool_entry` then DISCARDS the
+    entry, losing the session this path exists to save.
+
+    `session capture` clamps to 5000 chars; the import path must match, or the
+    import leg loses large sessions that the capture leg files.
+
+    Mutation: spool the unclamped turns — the length assertion REDs."""
+    import json as _json
+
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import read_spool_turns
+
+    spool = _import_env(tmp_path, monkeypatch)
+    long_turn = "x" * 20_000
+    # The REAL codex rollout shape (see _CODEX_LINES): a `response_item`
+    # wrapper with the message inside `payload`. A bare message record parses
+    # to ZERO turns, which would make this test assert nothing.
+    transcript = tmp_path / "big.jsonl"
+    transcript.write_text("\n".join(_json.dumps(rec) for rec in [
+        {"type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": long_turn}]}},
+        {"type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text",
+                                  "text": "short reply"}]}},
+    ]) + "\n", encoding="utf-8")
+
+    def _raise(req, timeout=None):
+        raise _http_error(429, '{"detail":"saturated"}')
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        assert _cmd_sessions_import(SimpleNamespace(
+            file=str(transcript), harness="codex",
+            session_id="sid-big")) == 1
+
+    turns = read_spool_turns(spool, "sid-big")
+    assert turns, "the oversized session was discarded instead of spooled"
+    assert len(turns[0]["content"]) == 5000, (
+        f"unclamped turn of {len(turns[0]['content'])} chars reached the spool")

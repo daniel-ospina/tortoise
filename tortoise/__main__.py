@@ -3985,6 +3985,79 @@ def _cmd_sessions_import(args) -> int:
                      "--api-key <key>')")
         return 1
 
+    def _spool_if_retryable(status: int | None, detail: str) -> None:
+        """Park the turns in the DURABLE SPOOL when the refusal is RETRYABLE.
+
+        The server's capture guard REFUSES rather than enqueues (its capacity
+        gate advertises `Retry-After`), and `classify_failure` already treats
+        5xx / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
+        therefore a DEFERRAL, not a rejection of the content: the POST reached
+        the server, there is no server-side copy to fall back on, and without
+        this the turns are lost. `claude` and `pi` survive the identical 504
+        because `session capture` spools BEFORE its POST; this path must too.
+
+        PERMANENT failures must NOT be parked here — a malformed payload never
+        becomes valid by waiting, and it would retry forever.
+
+        Best-effort by construction: the spool is ADDITIONAL to the
+        `capture-failure` breadcrumb the caller already wrote, never a
+        replacement, so a spool bug must not replace the honest error with a
+        traceback (the hook's fail-open contract).
+        """
+        try:
+            from tortoise.capture_spool import (
+                Snapshot,
+                capture_key,
+                classify_failure,
+                read_spool_meta,
+                spool_dir,
+                write_spool_entry,
+            )
+            from tortoise.session_attribution import (
+                derive_machine_id,
+                sanitize_attribution_field,
+            )
+
+            if classify_failure(status, detail) != "retry":
+                return
+            # Clamp exactly as `session capture` does. The spool's per-entry
+            # bound is sized on the CLAMPED maximum (500 turns x 5000 chars), so
+            # an unclamped turn can overflow it — and write_spool_entry then
+            # DISCARDS the entry, losing the very session this exists to save.
+            # The server clamps to the same width, so nothing stored differs.
+            spool_turns = [{"role": t["role"], "content": t["content"][:5000]}
+                           for t in turns]
+            root = spool_dir()
+            spooled = write_spool_entry(root, Snapshot(
+                session_id=session_id,
+                turns=spool_turns,
+                source=file_path.stem,
+                machine_id=sanitize_attribution_field(
+                    derive_machine_id(), max_length=256) or "",
+                # `sessions import` registers no --model, so there is nothing to
+                # attribute; `session capture` derives it from its own arg.
+                model=None,
+                harness=harness,
+            ))
+            for d in spooled.get("discards", []):
+                print(f"spool discard ({d['reason']}): {d['detail']}",
+                      file=_sys.stderr)
+            if not (spooled.get("written") or spooled.get("bytes")):
+                return
+            # Report truthfully: an entry whose content was ALREADY filed is
+            # SKIPPED by the next drain, so promising a filing would be false.
+            meta = read_spool_meta(root, session_id) or {}
+            already_filed = bool(meta.get("filed_key")) and \
+                meta.get("filed_key") == capture_key(session_id, spool_turns)
+            if already_filed:
+                print(f"Session {session_id} is already filed; the spooled copy "
+                      "is a no-op.", file=_sys.stderr)
+            else:
+                print(f"Spooled session: {session_id} — a later drain will file "
+                      "it.", file=_sys.stderr)
+        except Exception as exc:
+            print(f"spool write failed: {exc}", file=_sys.stderr)
+
     payload = {"harness": harness, "session_id": session_id,
                "source": file_path.stem, "conversation": turns}
     try:
@@ -4003,57 +4076,16 @@ def _cmd_sessions_import(args) -> int:
         # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
         _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}")
-        # A RETRYABLE refusal (5xx / 408 / 425 / 429 / 409 when classify_failure
-        # says "retry") is the server's capacity gate declining rather than
-        # enqueueing: the POST REACHED the server and was refused, so there is
-        # no server-side copy to fall back on. The turns must survive in the
-        # DURABLE SPOOL, which the existing `session drain` files at the next
-        # opportunity — the 504 wait bound and the 429 "capture capacity
-        # saturated" the guard advertises with `Retry-After` both land here.
-        # Without this the session is silently lost: codex and cursor import,
-        # while claude/pi survive the identical failure because `session
-        # capture` spools BEFORE the POST. PERMANENT failures keep the existing
-        # behaviour exactly — exit 1, no receipt, no spool.
-        try:
-            from tortoise.capture_spool import (
-                Snapshot,
-                classify_failure,
-                spool_dir,
-                write_spool_entry,
-            )
-            from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
-
-            if classify_failure(e.code, body) == "retry":
-                # The same derivation `session spool` uses, so the entry is
-                # exactly what the drain expects to file.
-                machine_id = sanitize_attribution_field(
-                    derive_machine_id(), max_length=256) or ""
-                model = sanitize_attribution_field(
-                    getattr(args, "model", None), max_length=128) or None
-                spooled = write_spool_entry(spool_dir(), Snapshot(
-                    session_id=session_id,
-                    turns=turns,
-                    source=file_path.stem,
-                    machine_id=machine_id,
-                    model=model,
-                    harness=harness,
-                ))
-                for d in spooled.get("discards", []):
-                    print(f"spool discard ({d['reason']}): {d['detail']}",
-                          file=_sys.stderr)
-                if spooled.get("written") or spooled.get("bytes"):
-                    print(f"Spooled session: {session_id} — a later drain will "
-                          "file it.", file=_sys.stderr)
-        except Exception as exc:
-            # The spool is ADDITIONAL to the breadcrumb above, never a
-            # replacement: a spool failure must not replace the honest error
-            # with a traceback (the hook's fail-open contract).
-            print(f"spool write failed: {exc}", file=_sys.stderr)
+        _spool_if_retryable(e.code, body)
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
         _record_capture_error(
             harness, f"cannot reach API at {api_url}: {e.reason}")
+        # No status at all (network / timeout) is classified "retry" — and it is
+        # the MOST COMMON transient failure, so it must reach the spool too. A
+        # retryable failure never losing the session is the point of this path.
+        _spool_if_retryable(None, str(e.reason))
         return 1
 
     # Any 2xx is a success — the server stored the Session and wrote its
