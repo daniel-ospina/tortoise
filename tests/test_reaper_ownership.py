@@ -24,14 +24,20 @@ own `.tortoise-owners` instrument (#3599); a dir-ABSENT server is admitted by
 the live pid's own argv naming it (#1642 FIX 3's pass-1 binding, #4136's
 unforgeable arm). The #1557 confirmation window is untouched.
 
-#4546 (OVERRIDES #1642 FIX 3 for the `dir_missing` class ONLY): the
-`unattributed` gate in `reap()` exempts a `dir_missing` record — a LIVE server
-whose REGISTRY data dir (the pytest `tmp_path` tree) is already gone, so no
-on-disk user data remains and pre-#3767 `main` fast-killed it. The exemption is
-exactly that property: `test_dir_missing_unattributed_residue_is_still_fast_killed`
+#4546 (OVERRIDES #3767 for the `dir_missing` class ONLY): in a FULL sweep
+(`only_safe=False`) `reap()`'s `unattributed` arm exempts a `dir_missing`
+record — a LIVE server whose REGISTRY data dir (the pytest `tmp_path` tree) is
+already gone, so no on-disk user data remains and pre-#3767 `main` fast-killed
+it. (#3767's every-mode `unattributed` requirement CARRIES #1642 FIX 3's "a
+missing dir keeps the confirmation window" stance; that carried stance is what
+the exemption relaxes, for this class ONLY — #1642 FIX 3's socket-dir-unlinked
+window and the `path_based` arm are NOT touched.) The exemption is exactly
+that property: `test_dir_missing_unattributed_residue_is_still_fast_killed`
 (positive) and `test_unattributed_no_path_server_is_not_fast_killed` (the
-dir-PRESENT negative control) are its two mutation guards. The pre-existing
-`path_based` arm is NOT exempted.
+dir-PRESENT negative control) are two of its mutation guards, and
+`test_path_based_dir_missing_server_is_not_fast_killed` pins the untouched
+`path_based` arm. Under `--only-safe` the exemption is unreachable (the
+earlier live-pid gate skips first), so `--only-safe` is unchanged.
 """
 from __future__ import annotations
 
@@ -352,8 +358,10 @@ def test_1005_dir_missing_owned_server_is_still_admitted():
 
 
 def test_dir_missing_unattributed_residue_is_still_fast_killed(monkeypatch):
-    """#4546 (OVERRIDES #1642 FIX 3's "a missing dir is not proof of
-    orphanhood → keep the window" FOR THE `dir_missing` CLASS ONLY).
+    """#4546 (OVERRIDES #3767's every-mode `unattributed` requirement — which
+    CARRIES #1642 FIX 3's "a missing dir is not proof of orphanhood → keep the
+    window" stance — FOR THE `dir_missing` CLASS ONLY; #1642 FIX 3's
+    socket-dir-unlinked window is NOT touched).
 
     The pytest-residue shape: a LIVE server whose REGISTRY data dir (the
     `tmp_path` tree) was deleted while its SOCKET dir survives, carrying no
@@ -385,3 +393,38 @@ def test_dir_missing_unattributed_residue_is_still_fast_killed(monkeypatch):
         monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
         R.reap([dict(rec)], dry_run=False, only_safe=False)
         assert killed == [os.getpid()], killed
+
+
+def test_path_based_dir_missing_server_is_not_fast_killed(monkeypatch):
+    """#4546 hard constraint: the exemption is scoped to the NEW
+    `unattributed` arm. A genuinely PATH-BASED (user-data) server whose
+    registry data dir is gone is still gated by the UNTOUCHED `path_based`
+    arm — it is not fast-killed in a full sweep, because its data outlives
+    the test tree and #1642 FIX 3's confirmation window applies in EVERY mode.
+
+    RED if the exemption is widened to `(path_based and not dir_missing) or
+    (unattributed and not dir_missing)` — that mutation lets a `dir_missing`
+    user-data server through, which is exactly what the #4546 scoping
+    forbids. The socket dir is PRESENT here (registry data dir is the missing
+    one).
+    """
+    with _short_base() as base:
+        d = _socket_dir(base, "tmpUSRDATA")   # socket dir PRESENT
+        gone = Path("/nonexistent-4546-user-data")  # non-ephemeral user path
+        assert not gone.exists()
+        (d / "redis.pid").write_text(f"{os.getpid()}\n")
+        (d / "redis.config").write_text(
+            f"dbfilename 'redis.db'\ndir '{gone}'\npidfile '{d}/redis.pid'\n")
+        rec = R._classify_dir(str(d), str(d / "redis.socket"),
+                              known_pid=os.getpid())
+        assert rec is not None
+        assert rec["classification"] == "candidate"
+        assert rec["path_based"] is True    # registry 'dir' is a USER path
+        assert rec["dir_missing"] is True   # ...and it is gone
+        killed: list[int] = []
+        monkeypatch.setattr(R, "_kill",
+                            lambda pid, timeout: killed.append(pid))
+        monkeypatch.setattr(R, "_active_client_count", lambda _s: 0)
+        acted = R.reap([dict(rec)], dry_run=False, only_safe=False)
+        assert acted == []
+        assert killed == [], "a path_based server must keep the gate"
