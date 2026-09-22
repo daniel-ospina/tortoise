@@ -831,7 +831,15 @@ class FakeControlPlane:
             if op == "eq":
                 rows = [r for r in rows if r.get(col) == value]
             elif op == "neq":
-                rows = [r for r in rows if r.get(col) != value]
+                # SQL semantics: `col <> value` is NULL (not TRUE) when either
+                # side is NULL, so a NULL column (or a NULL comparison value)
+                # never matches. Python's bare `r.get(col) != value` would
+                # KEEP the NULL row — a dialect divergence that would hide an
+                # over-exemption regression (e.g. a `created_via=neq.bootstrap`
+                # filter silently exempting legacy NULL rows — #4140 T4).
+                rows = ([] if value is None else
+                        [r for r in rows
+                         if r.get(col) is not None and r.get(col) != value])
             elif op == "is":
                 rows = [r for r in rows if (r.get(col) is None) == (value is None)]
             elif op == "gt":
@@ -880,7 +888,8 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
     for col, op, value in filters:
         if op == "eq" and row.get(col) != value:
             return False
-        if op == "neq" and row.get(col) == value:
+        if op == "neq" and (value is None or row.get(col) is None
+                            or row.get(col) == value):
             return False
         if op == "is" and (row.get(col) is None) != (value is None):
             return False

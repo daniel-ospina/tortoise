@@ -111,6 +111,131 @@ ERR_EXCLUDED = -32004
 ERR_REGISTRY = -32005
 # #308 (R5): suspended org — mirrors REST 403 SUSPENDED (appeal link in data)
 ERR_SUSPENDED = -32006
+# #3834: the transport-level wait bound was breached — the server stopped
+# waiting before a response was ready. On the REST surface this is the code in
+# the JSON-RPC 504 body returned by ``hosted_api.WaitBoundMiddleware``. On the
+# MCP surface it is the code in the refused tool result's
+# ``structuredContent.error`` (``mcp_server._await_under_mcp_wait_bound``): the
+# MCP SDK converts tool-handler exceptions to ``CallToolResult(isError=True)``
+# (``mcp/server/lowlevel/server.py::_make_error_result``), so once the SSE
+# stream is open a raised ``McpError`` loses its code and ``data`` — the result
+# is the only channel that can still carry the retry signal. Either way the
+# advertised delay is ``error.data.retry_after`` (#3851's shape).
+#
+# -32009, NOT -32007: the ERR_* namespace is split across this module and
+# ``mcp_server.py``, and -32007 is already ``ERR_QUOTA_SERVER`` there (see the
+# ``#329`` namespace note above ``ERR_QUOTA_SERVER`` in ``mcp_server.py``, which
+# already tracks the ``-32006`` quota/suspended collision as a known defect).
+# Reusing -32007 would make a wait-bound refusal indistinguishable from a
+# server-quota refusal.
+ERR_TIMEOUT = -32009
+
+
+# ── #3834: the transport-level wait bound's VALUE and refusal vocabulary ───
+# The bound is enforced at two seams — ``hosted_api.WaitBoundMiddleware`` for
+# the REST routes and ``mcp_server._await_under_mcp_wait_bound`` for the MCP
+# tool dispatch — and this module is the only place both can share without an
+# import cycle (``hosted_api`` imports ``mcp_server``, which imports this
+# module). It is also the transport-NEUTRAL home: these three constants carry no
+# REST- or MCP-specific behaviour, unlike ``hosted_api._TRANSPORT_WAIT_BOUND_
+# EXEMPT``, which is a REST-only route exemption and stays there.
+#
+# The number is not chosen here: it is the value the owner pinned for this
+# question (10 s, under the 15 s flat budget of the narrowest uncontrolled
+# client, D-12) and it is re-homed unchanged. It is a module constant rather
+# than an env knob on purpose — once a caller codes to the number, a silent
+# env change is a client-visible contract change (owner's own framing).
+#
+# Why the bound is justified even though the tail it cuts is small: the measured
+# maximum MCP tool-call latency sits ABOVE the 15 s client budget, so for that
+# tail the bound does not abandon work that would otherwise have succeeded — it
+# converts an opaque client-side timeout into a legible refusal. Measured on the
+# TRANSPORT-wide population (the 7,795 `mcp_tool_call` events in
+# `~/.tortoise/analytics_fallback.jsonl`; 22,510 events in the file at this
+# measurement, nearest-rank quantiles on `latency_ms`): p50 26 ms, p95 2,213 ms,
+# p99 22,476 ms, max 157,116 ms; 162 calls (2.1%) exceed the bound. ⚠️ Caveat
+# that travels with these numbers: this is the MCP transport PER TOOL CALL, not
+# the REST HTTP request wait — the best available proxy, not the same quantity.
+# The 10 s value itself was derived from the ask lane's distribution at
+# derivation time (n=573, 1 call > 10 s) and re-homed onto this wider one; the
+# breach event exists so that the difference is measurable in production rather
+# than assumed.
+_TRANSPORT_WAIT_BOUND_S = 10.0
+
+#: Seconds advertised as the back-off on a breach. Ships WITH the bound as one
+#: unit — a bound alone turns an invisible failure into a visible one with no
+#: recovery. This is the single source for the number: the message below carries
+#: no literal, and the REST ``Retry-After`` header and the JSON-RPC
+#: ``error.data.retry_after`` both read it.
+#:
+#: ⚠️ It MUST NOT be shorter than ``_TRANSPORT_WAIT_BOUND_S``. Every breach was
+#: caused by work that exceeded the bound, so a shorter advertised delay tells a
+#: compliant caller to re-enter the SAME slow operation while the abandoned
+#: attempt is still running. What the SHIPPED pair 10/10 BUYS is only a FLOOR:
+#: a compliant caller cannot re-enter before the bound elapses, so overlap now
+#: requires work that outlives ``bound + retry_after`` (≈20 s). That is NOT an
+#: elimination — the measured tail above exceeds it (p99 22,476 ms, max
+#: 157,116 ms), so a retry can still land while the abandoned original runs,
+#: and for a non-idempotent tool the original can still commit AFTER the caller
+#: was told to retry — duplicate side effects. The record below is for the
+#: PRE-FIX pair: at the pre-fix bound/retry = 10/2 the steady-state concurrent
+#: copies of one logical operation WERE 5 (measured at 1/50 scale: refusals=5,
+#: dispatches_started=5, peak_concurrent=5 for ONE logical operation). A prose
+#: caveat does not discharge this: retry middleware acts on status/code/header,
+#: not on the body. Do NOT "simplify" the retry constant back to 2. Pinned by
+#: ``tests/test_transport_wait_bound.py::
+#: test_retry_signal_is_never_shorter_than_the_bound``.
+_TRANSPORT_WAIT_RETRY_AFTER_S = 10
+
+#: The readable refusal. Static and digit-free (the advertised delay has exactly
+#: one source, above) and transport-neutral (it also ships on the MCP surface,
+#: which has no header). Answers the three things a caller must be able to read
+#: at the call site: what happened, whether to retry, and how long to wait.
+_TRANSPORT_WAIT_BOUND_MESSAGE = (
+    "The server's wait budget for this request was exceeded before a response "
+    "was ready. The work may still complete on the server. Wait for the "
+    "advertised delay before retrying, and retry only if repeating the "
+    "operation is safe."
+)
+
+
+def _sanitize_for_log(value: str) -> str:
+    """Escape the control characters that can forge a log line or an ANSI
+    escape, for a log AND a telemetry sink (the sanitized form is passed to
+    both).
+
+    Lives HERE, not in ``hosted_api``, for the same reason the bound's
+    constants do (#3834): both surfaces need it — the REST arm sanitizes the
+    route path, the MCP arm the client-supplied tool name — and ``mcp_server``
+    must not import ``hosted_api`` on the fast path (that import builds the
+    whole hosted FastAPI app). This module is the neutral home both surfaces
+    already share.
+
+    The ASGI server percent-DECODES the path, so ``/v1/x/%0d%0aFORGED`` arrives
+    with embedded CR/LF; escaped verbatim it forges log lines. CR/LF alone is
+    not the whole class (code-review round 2): VT/FF/ESC/NUL, DEL, the C1 range
+    (U+0085 NEL and U+009B CSI are line-break / escape introducers to Unicode-
+    aware readers) and U+2028/U+2029 all do the same. CR/LF/TAB keep their
+    readable backslash escapes so existing log greps still match. This is
+    deliberately BROADER than ``tortoise/schemas.py``'s C0-only control-char
+    validation: that rejects a user field; this escapes a value bound for a log
+    line and a telemetry sink.
+    """
+    out = []
+    for ch in value:
+        if ch == "\r":
+            out.append("\\r")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch < " " or "\x7f" <= ch <= "\x9f":
+            out.append(f"\\x{ord(ch):02x}")
+        elif ch in ("\u2028", "\u2029"):
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 # ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────

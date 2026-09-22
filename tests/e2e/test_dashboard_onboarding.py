@@ -162,8 +162,11 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
         path = _bff_path(url)
         if _is_bff_api(url):
             if path.endswith("/v1/organizations") and method == "GET":
+                # #2494: the mock's org row must carry the name in the field the
+                # dashboard reads (`org_name`) — otherwise the account menu's
+                # organization row renders "No organization".
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([org_row]))
+                              body=json.dumps([{**org_row, "org_name": "Onboarding Test"}]))
                 return
             if path.endswith("/v1/team/keys") and method == "POST":
                 # #2710: the wizard's mint CTA rides this endpoint. The body is
@@ -434,6 +437,29 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # exit ("Open my dashboard →"). No longer a same-named twin — review cycle 1
     # (P2-6): the done button was renamed to "Go to dashboard".
     page.locator(".wizard-actions").get_by_role("button", name="Go to dashboard").click()
+
+    # #2494: account menu expansion — after the dashboard loads ("Overview loaded"
+    # status), click the account menu trigger and verify both labeled sections
+    # (Personal Account with Log out, Organization with org name).
+    expect(page.locator("body")).to_contain_text("Overview loaded", timeout=10_000)
+    page.get_by_role("button", name=re.compile(r"^Account menu — .*")).click()
+    account_menu = page.locator('.account-menu')
+    expect(account_menu).to_be_visible(timeout=5_000)
+    # Personal Account section: identity, Profile button, Log out button.
+    expect(account_menu).to_contain_text("Personal Account")
+    expect(account_menu.get_by_role("button", name="Profile")).to_be_visible()
+    expect(account_menu.locator('.account-menu-logout')).to_be_visible()
+    expect(account_menu.locator('.account-menu-logout')).to_contain_text("Log out")
+    # Divider between sections.
+    expect(account_menu.locator('.account-menu-divider')).to_be_visible()
+    # Organization section: org name, create button.
+    expect(account_menu).to_contain_text("Organization")
+    expect(account_menu).to_contain_text("Onboarding Test")
+    expect(account_menu.get_by_role("button", name=re.compile(r"Create new organization"))).to_be_visible()
+    # Close the menu (Escape key).
+    page.locator('[aria-label^="Account menu —"]').press("Escape")
+    expect(account_menu).not_to_be_visible()
+
     assert not any("onboarding_complete" in p for p in cap["state"]), \
         f"done step must NOT patch onboarding_complete: {cap['state']}"
     # #2323: an org-holding journey NEVER mints a second org through the

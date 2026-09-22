@@ -906,13 +906,21 @@ class TestPatchRouting:
 
     def test_wire_compat_preserved(self):
         """underscore→hyphen translation still works (session_capture_receipt
-        claude_desktop → claude-desktop key)."""
+        claude_desktop → claude-desktop key).
+
+        #3681: the receipt key is SERVER-OWNED, so the PATCH is now REFUSED —
+        but the refusal names the HYPHENATED state key (the translated form),
+        which is exactly what proves the translation ran before the ownership
+        check. A test that only asserted 200 would now be asserting the
+        server-owned hole."""
         tc, _org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state",
                          json={"session_capture_receipt_claude_desktop": "r1"})
-            assert r.status_code == 200
-            assert r.json()["onboarding"]["session_capture_receipt_claude-desktop"] == "r1"
+            assert r.status_code == 403, r.text
+            assert r.json()["detail"] == {
+                "message": "server_owned_key",
+                "keys": ["session_capture_receipt_claude-desktop"]}, r.text
         finally:
             tc.__exit__(None, None, None)
 

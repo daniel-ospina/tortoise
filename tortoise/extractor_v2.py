@@ -242,16 +242,29 @@ VALUE_FIDELITY_RULE = (
 )
 
 
-# #2552 (layer-2 operator-emission semantics — the remaining waves after the
-# #2556 persistence fix, measured 0/4 on the #2514 operator corpus): the
-# operator-structure rule block. Rendered into BOTH mapping stages (S2/S4)
-# from the SAME {anti_routine} slot as its siblings. The product semantics
-# are DECIDED (scoping findings F1/F2 — do not revisit): a mitigation
-# attacks the OPERATOR (the connection) as a graded dampener
-# (w_eff = w * (1 - strength)), never a refutation; a same-session decision
-# reversal is state/validity semantics; a CROSS-SESSION point correction is
-# a CORRECTS supersession — point-level "supersedes" refs resolve against
-# the S3 search results, so they are cross-session by construction.
+# #2552 (layer-2 operator-emission semantics): the operator-structure rule
+# block. Rendered into BOTH mapping stages (S2/S4) from the SAME
+# {anti_routine} slot as its siblings.
+#
+# What is DECIDED, and must not be re-litigated (these are the adopted
+# product semantics, recorded in ``docs/ONTOLOGY.md`` §3.9 / §3.1 and the
+# #2315 product decision of 2026-09-07): a mitigation attacks the OPERATOR
+# (the connection) as a graded dampener (w_eff = w * (1 - strength)), never a
+# refutation; a same-session decision reversal is state/validity semantics;
+# a CROSS-SESSION point correction is a CORRECTS supersession — point-level
+# "supersedes" refs resolve against the S3 search results, so they are
+# cross-session by construction.
+#
+# What is FLAGGED, and therefore NOT decided here (the corpus's own scoping
+# findings F1/F2, ``docs/scoping/2026-09-07-2514-operator-corpus.md``): the
+# core §3.1 Point→Point vocabulary registers IMPL / NAND / hasPart / CORRECTS
+# only — there is no first-class Point→Point "action reduces risk" operator
+# (F1), and §2's state-centric model does not clearly require a Point-level
+# CORRECTS for an in-SESSION reversal (F2).  The rule block below asserts the
+# write path's forms because they are the IMPLEMENTED ones; it is not an
+# ontology ruling.  An earlier version of this comment called the mapping
+# "F1/F2-validated", which read as a settlement of both.  The mapping is a
+# separate, out-of-scope question; do not treat this block as its answer.
 OPERATOR_SEMANTICS_RULE = (
     "OPERATOR STRUCTURE (direction, relevance, supersede — #2552):\n"
     "- NAND IS DIRECTED (extraction default #909 — new-claim-attacks-existing):\n"
@@ -1765,16 +1778,127 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     return queries
 
 
-def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3) -> list[dict]:
-    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit)
+# #2552: a capture's OWN turn echoes are TRANSCRIPT, not memory.
+# capture_session writes the turn Points (deterministic ids ``{session_id}_t{i}``,
+# ``is_episodic=true``, content ``[role] <text>`` via ``sdk._capture_turn_texts``)
+# BEFORE extraction runs, so on a fresh capture they are the ONLY content in the
+# graph — S3 returned them as the link-before-create prior set, the freshly
+# extracted claim NOOP-folded onto its own transcript echo
+# (``classify_consolidation``), never became a memory Point, and every operator
+# referencing it resolved (via ``execute_embed``'s ``point_ids``) to a turn id —
+# an endpoint invisible to the memory layer, so the planted-operator audit graded
+# it from_content_missing / to_content_missing / edge_missing. S3 must never
+# dedup the extraction against the transcript it is extracting.
+#
+# The row test is the extractor's OWN predicate (not a copy of the graded
+# layer's): an id ANCHORED on the capture's ``session_id``
+# (``\A{session_id}_t\d+\Z`` — the same identity ``runner._turn_id_pattern``
+# builds, applied more strictly: ``fullmatch`` rejects the trailing newline that
+# its ``.match`` + ``$`` would accept) AND a turn marker on the row (the
+# production ``pointKind == "event"``, or the ``[role] …`` content leg
+# ``retrieval._is_turn_point`` uses). The graded layer's two legs are
+# independently sufficient (a union); here the id is deliberately conjoined with
+# a marker (an intersection), because ``create_point`` accepts explicit caller
+# ids, ``retrieval.py`` records the D3 decision that the ``{session_id}_t{i}``
+# prefix "is unverifiable — ANY caller id ending in ``_t<digits>`` would be read
+# as a session … the shape of an id is not evidence that a capture happened",
+# and a caller-minted Point whose id merely collides with the session's turn
+# namespace (the class ``tests/test_d3_session_identity.py`` documents as
+# reachable) must survive the prior set. With no session id the filter is a
+# NO-OP: keeping an echo is a missed dedup, dropping a real prior is memory loss.
+#
+# Scope and its bound — two things this does NOT do, both tracked in #4509:
+#   * other ingest lanes' transcript rows with different id shapes (the longmem
+#     lane's ``lme:{qid}:s{si}:t{ti}`` episodic points) do not match; and
+#   * ``tortoise_fts_query`` truncates to ``limit`` internally — i.e. BEFORE this
+#     drop runs — so asking for exactly ``limit`` lets the echoes consume every
+#     slot and hide a real prior ranked below them (the "filtering after the
+#     limit cut silently shrinks the result" defect epic #898 fixed for
+#     ``exclude_status``). The point leg over-fetches ``_PRIOR_OVERFETCH`` and
+#     refills to ``limit``, absorbing up to that many echoes; a session whose
+#     echoes exceed the pool (a capture can hold ``MAX_SESSION_TURNS`` = 500) can
+#     still starve a prior. The durable fix is a pre-truncation exclusion in the
+#     retrieval layer (#4509) — this bound is deliberately local and pinned by a
+#     test rather than pretended away.
+_PRIOR_OVERFETCH = 12
+
+#: Mirror of ``tortoise.retrieval._ROLE_PREFIX_RE`` (keep-in-sync — that is the
+#: production "is this a transcript turn" content leg). Pinned structurally by
+#: ``tests/test_extractor_v2.py::test_turn_echo_content_pattern_matches_retrieval``.
+_TURN_ECHO_CONTENT_RE = re.compile(
+    r"^\[(user|assistant|system|tool|unknown)\]\s*", re.IGNORECASE)
+
+#: ``tortoise_fts_query``'s documented ``limit`` bound (tortoise/sdk.py). The
+#: point leg's over-fetch must not push the call past it — ``limit=9990`` would
+#: otherwise ask for 10002 and raise ``ValueError``.
+_FTS_LIMIT_MAX = 10000
+
+
+def _is_turn_echo_id(session_id, point_id) -> bool:
+    r"""True for one of ``session_id``'s own turn echoes (``{session_id}_t{i}``).
+
+    The anchored ID leg only — pair it with :func:`_is_turn_echo_row`. The match
+    is ``\A{session_id}_t\d+\Z`` (``re.fullmatch``) — NOT a shape test, and NOT
+    ``str.isdigit``: ``isdigit()`` also accepts category-No numerics such as
+    ``²``, and ``fullmatch`` is deliberately stricter than the graded layer's
+    ``_turn_id_pattern`` + ``.match`` (whose ``$`` accepts one trailing
+    newline). Stricter can only MISS a drop, never lose a real prior. False
+    whenever the session id is unknown, so a caller that cannot name its session
+    never drops a row."""
+    if not session_id or not point_id:
+        return False
+    return bool(re.fullmatch(
+        rf"{re.escape(str(session_id))}_t\d+", str(point_id)))
+
+
+def _is_turn_echo_row(session_id, row: dict) -> bool:
+    """This session's turn ID **and** a turn marker on the row.
+
+    The id is the reliable turn/claim discriminator (``runner._turn_id_pattern``'s
+    identity). The marker is EITHER the production turn kind
+    (``pointKind == "event"`` — what ``capture_session`` stamps on every turn
+    Point, ``tortoise/sdk.py``) OR the ``[role] …`` transcript prefix
+    (``retrieval._is_turn_point``'s content leg). The kind leg is what keeps a
+    capture whose role is not in the prefix allowlist from silently retaining
+    its own echoes: ``_normalize_turn_role`` passes ANY role string through, so
+    a ``[developer] …`` / ``[human] …`` turn matches no alternation.
+
+    Requiring a marker at all is what keeps a caller-minted Point — whose id
+    merely sits in the session's turn namespace, the class
+    ``tests/test_d3_session_identity.py`` documents as reachable — in the
+    prior set."""
+    if not _is_turn_echo_id(session_id, row.get("id")):
+        return False
+    if row.get("point_kind") == "event":
+        return True
+    content = row.get("content")
+    return bool(_TURN_ECHO_CONTENT_RE.match(str(content or "").strip()))
+
+
+def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
+              session_id: str | None = None) -> list[dict]:
+    # Only the point leg over-fetches, and only when there is a session to filter
+    # by and a `limit` in the callee's valid range; every other call keeps the
+    # exact ``limit`` window it always had (so an out-of-range `limit` still
+    # raises from the callee, on every leg, as before). The over-fetch is clamped
+    # to the callee's documented bound so it cannot itself raise.
+    fetch = (min(limit + _PRIOR_OVERFETCH, _FTS_LIMIT_MAX)
+             if (entity_type == "point" and session_id
+                 and 0 < limit <= _FTS_LIMIT_MAX) else limit)
+    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=fetch)
     out = []
     for r in rows or []:
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
                         "kind": r.get("kind", "")})
+        elif entity_type == "point" and _is_turn_echo_row(session_id, r):
+            # #2552: this capture's transcript echo — never a memory prior.
+            continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
                         "kind": r.get("kind", "")})
+        if limit > 0 and len(out) >= limit:
+            break
     return out
 
 
@@ -1820,7 +1944,8 @@ def _enrich_point_priors(sdk, points: list[dict]) -> None:
 
 
 def search_graph(sdk, embed_list: dict, story: str, *,
-                 max_queries: int = 15, limit: int = 3) -> dict:
+                 max_queries: int = 15, limit: int = 3,
+                 session_id: str | None = None) -> dict:
     """S3: search the REAL graph for existing entities/points/events.
 
     - Resolves the active backend from the environment (design doc §3 owner
@@ -1829,6 +1954,11 @@ def search_graph(sdk, embed_list: dict, story: str, *,
       topic, events by entity (tortoise_fts_query, batch).
     - Graceful degradation: unreachable graph (connection error/timeout)
       returns partial results + ``degraded`` — the pipeline proceeds.
+
+    ``session_id`` is the capture being extracted: it is the anchor that lets
+    the point leg drop the capture's OWN turn echoes from the prior set
+    (#2552 — see ``_is_turn_echo_id``). Callers that cannot name their session
+    pass nothing and get the unfiltered priors.
 
     Returns:
         {"mode": str, "degraded": bool, "reason": str|None,
@@ -1862,7 +1992,8 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                     break
                 q_run += 1
                 try:
-                    for row in _fts_rows(sdk, entity_type, q, limit=limit):
+                    for row in _fts_rows(sdk, entity_type, q, limit=limit,
+                                         session_id=session_id):
                         rid = row.get("id")
                         if not rid or rid in results[bucket[entity_type]]:
                             continue
@@ -3599,8 +3730,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
       - no minted kinds: unknown kinds repair to the family fallback with a
         warning (core:other / core:occurrence / statement).
       - Layer-1 integrity: operators whose src/dst/target reference no emitted
-        point/event are DROPPED with a warning (mirrors _stream_to_payload);
+        point/event are DROPPED with a warning. NOTE the v1 seam
+        (``_stream_to_payload``) drops that same class and does NOT mint, so
+        this clause is no longer a mirror of it — see the #2552 note below.
         MITIGATES strengths clamp to [0.10, 0.50] with a warning.
+        ⚠️ #2552 MINT-BEFORE-WIRE: before that check runs, an operator endpoint
+        that names no emitted point/event is materialized as a statement Point
+        carrying the model's own reference text, and a MITIGATES's declared
+        ``target_edge`` IMPL is materialized when the model did not separately
+        emit it. So the drop now fires only on a genuinely unresolvable ref
+        (empty, a ref naming an emitted ENTITY — the prompt forbids entity
+        endpoints, so no claim Point is fabricated for one — or the
+        degenerate self-edge), not on the prompt's "CREATE the point first"
+        instruction being skipped by the model. A minted endpoint no
+        surviving operator references is pruned again.
 
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
              "minted_kinds", "stats"}.
@@ -3713,6 +3856,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # entities only)
     emitted_entity_keys = {(e["name"], _norm_kind(e["kind"]))
                            for e in payload_entities}
+    # #2552 mint-before-wire guard: an operator endpoint that names an
+    # EMITTED ENTITY is forbidden by the OPERATOR REFERENCING hard rule, so it
+    # must never be materialized as a claim Point (see `_mint_endpoint`).
+    emitted_entity_names = {_norm(name) for name, _ in emitted_entity_keys}
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -3975,6 +4122,100 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             return event_ids[r]
         return ""
 
+    # ── MINT-BEFORE-WIRE (#2552, dependency order 3.5) ────────────────────
+    # The OPERATOR REFERENCING hard rule in the S2/S4 prompts instructs the
+    # model that "If an endpoint of an IMPL/NAND/MITIGATES relation has no
+    # point yet, CREATE the point first and reference it". Nothing in this
+    # seam enforced the second half: `_resolve` below is a strict consumer of
+    # the model's own `points` array, so an operator naming an endpoint the
+    # model did not also emit as a point/event was DROPPED — the edge was lost
+    # with a warning and the model's non-compliance became silent recall loss.
+    # Measured on the #2514 operator corpus (2026-09-16): 2 of 4 planted edges
+    # failed at the ENDPOINT stage (`from_content_missing` /
+    # `to_content_missing`) before any kind or direction question arose.
+    #
+    # This pre-pass materializes such an endpoint as a statement Point (the
+    # only extraction point kind — ONTOLOGY §2 state-centric model) whose
+    # content is the model's OWN reference text, verbatim: nothing is
+    # invented and no fuzzy binding is attempted — a ref that does not resolve
+    # under the existing normalized-equality rule is minted exactly as the
+    # model wrote it. It runs BEFORE the operator pass so the ordinary
+    # `_resolve` path then wires the operator unchanged. Two guards bound the
+    # pre-pass, both from the #2552 code review: a ref naming an emitted
+    # ENTITY is NOT minted (the prompt forbids entity endpoints — the operator
+    # drops instead of a claim Point being fabricated from a participant
+    # name), and any minted endpoint no surviving operator references is
+    # pruned before payload assembly. Because of that prune,
+    # ``stats["operator_endpoints_minted"]`` is read from ``minted_endpoints``
+    # AFTER the prune and therefore counts minted-and-RETAINED endpoints, not
+    # every mint performed — a run can emit two "endpoint minted" warnings and
+    # still report ``operator_endpoints_minted == 0``.
+    minted_endpoints: list[str] = []
+
+    def _mint_endpoint(ref: str, where: str) -> str:
+        content = str(ref or "").strip()[:1000]
+        if not content:
+            return ""
+        n = _norm(content)
+        if n in point_ids:
+            return point_ids[n]
+        if n in emitted_entity_names:
+            # The hard rule is explicit — "NEVER use an entity name as an
+            # operator endpoint — entities are wired through
+            # about_entities". Minting one would fabricate a degenerate claim
+            # Point out of a participant name, so the ref is NOT minted. What
+            # then happens depends on the call site: a src/dst endpoint drops
+            # in the operator pass with its ordinary "did not resolve"
+            # warning, while a MITIGATES ``target_edge`` endpoint drops in pass
+            # 2 with "MITIGATES target edge not emitted" (that operator's own
+            # src/dst still resolve). Either way it is the pre-#2552
+            # behaviour, which is correct HERE.
+            warnings.append(
+                f"operator endpoint NOT minted (#2552 mint-before-wire): "
+                f"{where} named the emitted ENTITY {content[:60]!r} — the "
+                "OPERATOR REFERENCING rule forbids entity endpoints, so no "
+                "claim Point is fabricated for it")
+            return ""
+        pid = _content_id("pt", content)
+        payload_points.append({
+            "id": pid, "content": content, "pointKind": "statement",
+            "reason": "NEW", "confidence": 0.5, "c_cal": 0.5,
+            "about_entities": [], "source_ref": "session.md", "quote": "",
+            "search_keys": [], "status": "draft",
+        })
+        point_ids[n] = pid
+        # `_resolve` probes the UNTRUNCATED ref, so register that key too when
+        # truncation changed it — otherwise a >1000-char ref mints a Point the
+        # operator pass cannot resolve: the edge still drops AND the Point is
+        # orphaned (code-review P2).
+        _full = _norm(ref)
+        if _full != n:
+            point_ids.setdefault(_full, pid)
+        minted_endpoints.append(pid)
+        warnings.append(
+            f"operator endpoint minted (#2552 mint-before-wire): {where} "
+            f"named {content[:60]!r} but no emitted point/event carried it — "
+            "materialized as a statement Point so the operator wires")
+        return pid
+
+    for _op in embed_list.get("operators", []) or []:
+        if not isinstance(_op, dict):
+            continue
+        _op_type = str(_op.get("op_type", "")).upper()
+        if _op_type not in ("IMPL", "NAND", "MITIGATES"):
+            continue
+        for _side in ("src", "dst"):
+            _ref = str(_op.get(_side, "") or "")
+            if _ref and not _resolve(_ref):
+                _mint_endpoint(_ref, f"{_op_type} {_side}")
+        if _op_type == "MITIGATES":
+            _target = _op.get("target") or _op.get("target_edge") or {}
+            if isinstance(_target, dict):
+                for _side in ("src", "dst"):
+                    _ref = str(_target.get(_side, "") or "")
+                    if _ref and not _resolve(_ref):
+                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}")
+
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
     mitigates_pending: list[dict] = []
@@ -4035,6 +4276,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
                             "clamped")
             strength = min(0.50, max(0.10, strength))
+        declared_target_missing = (
+            bool(t_src and t_dst) and t_src != t_dst
+            and (t_src, t_dst, "IMPL") not in emitted_edges)
+        if declared_target_missing:
+            # #2552 mint-before-wire (the IMPL pair): the OUTPUT_CONTRACT
+            # declares a MITIGATES as ONE operator entry carrying its
+            # ``target_edge`` — it never asks the model to ALSO repeat that
+            # IMPL as its own operator entry, so a contract-compliant
+            # emission was dropped here unconditionally. The model asserted
+            # the edge by naming it in ``target_edge``: materialize it. Only
+            # the degenerate case (a missing endpoint, or a self-edge) still
+            # drops.
+            payload_operators.append({
+                "src": t_src, "dst": t_dst, "op_type": "IMPL",
+                "direction": "unidirectional"})
+            emitted_edges.add((t_src, t_dst, "IMPL"))
+            warnings.append(
+                "MITIGATES target edge materialized (#2552 mint-before-"
+                f"wire): the declared target IMPL ({t_src[:40]!r} → "
+                f"{t_dst[:40]!r}) was not emitted as its own operator "
+                "— added so the dampener has its target")
         if not (t_src and t_dst and (t_src, t_dst, "IMPL") in emitted_edges):
             warnings.append(f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
                             "IMPL) — dropped")
@@ -4043,6 +4305,37 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "src": src, "dst": dst, "op_type": "MITIGATES",
             "target": {"src": t_src, "dst": t_dst, "op_type": "IMPL"},
             "strength": round(strength, 2)})
+
+    # ── minted-endpoint prune (#2552 code-review P2) ──────────────────────
+    # A mint happens BEFORE the operator is known to survive, so an operator
+    # that still drops (a MITIGATES declaring no target edge, a src==dst
+    # self-edge) would otherwise commit a claim Point NOTHING references — an
+    # unsupported assertion in the memory layer, which is worse than the edge
+    # loss this pre-pass exists to fix. Prune every minted endpoint that no
+    # surviving payload operator references.
+    if minted_endpoints:
+        referenced: set[str] = set()
+        for _po in payload_operators:
+            referenced.add(str(_po.get("src") or ""))
+            referenced.add(str(_po.get("dst") or ""))
+            _tgt = _po.get("target")
+            if isinstance(_tgt, dict):
+                referenced.add(str(_tgt.get("src") or ""))
+                referenced.add(str(_tgt.get("dst") or ""))
+        orphans = [pid for pid in minted_endpoints if pid not in referenced]
+        if orphans:
+            orphan_set = set(orphans)
+            payload_points[:] = [p for p in payload_points
+                                 if p.get("id") not in orphan_set]
+            for _k in [k for k, v in point_ids.items() if v in orphan_set]:
+                del point_ids[_k]
+            minted_endpoints[:] = [p for p in minted_endpoints
+                                   if p not in orphan_set]
+            warnings.append(
+                f"minted operator endpoint(s) pruned (#2552 mint-before-wire): "
+                f"{len(orphans)} materialized endpoint(s) are referenced by no "
+                "surviving operator — dropped rather than committing an "
+                "unsupported claim Point")
 
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`
@@ -4132,6 +4425,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
+            "operator_endpoints_minted": len(minted_endpoints),
             "tier_a_points": tier_a_points,
             "noops": len(noops),
             "deletions": len(deletions),
@@ -4520,7 +4814,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census_class(error_census, "classify_error")
 
     # ── S3: search the graph (real backend, graceful degradation) ──────────
-    search = search_graph(sdk, embed_list, story)
+    search = search_graph(sdk, embed_list, story, session_id=session_id)
 
     # ── S4: review gaps → complete embed list (E4: merges-not-replaces) ───
     complete_list: dict = embed_list
