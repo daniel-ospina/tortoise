@@ -858,7 +858,7 @@ class _GuardedGraph:
     def __getattr__(self, name):
         return getattr(self._g, name)
 
-from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS  # noqa: E402, I001
+from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS, parse_uri_userinfo  # noqa: E402, I001
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
@@ -1682,11 +1682,17 @@ def resolve_db_endpoint(uri: str, graph_name: str | None = None) -> DbEndpoint:
     from urllib.parse import urlparse
     parsed = urlparse(uri)
     _validate_uri_scheme(parsed.scheme)
+    # #3039: urlparse does NOT percent-decode userinfo while redis.from_url
+    # does. This resolver is THE canonical URI → client-kwargs derivation
+    # (from_uri and backup._bgsave both call it), so the SINGLE shared decode
+    # rule is applied HERE — otherwise a password needing percent-encoding
+    # reaches FalkorDB as a literal %XX and auth fails misleadingly.
+    username, password = parse_uri_userinfo(uri)
     return DbEndpoint(
         host=parsed.hostname or "localhost",
         port=parsed.port or 16379,
-        username=parsed.username or None,
-        password=parsed.password or None,
+        username=username,
+        password=password,
         graph_name=(graph_name if graph_name is not None
                     else (parsed.path.lstrip('/') or "tortoise")),
         ssl=(parsed.scheme == "rediss"),
@@ -2006,8 +2012,9 @@ class FalkorProjection(
                         f"TORTOISE_DB_URI must point at a local docker (D-4); "
                         f"set TORTOISE_TEST_ALLOW_REMOTE=1 to override")
                 port = _parsed.port or 16379
-                username = _parsed.username or None
-                password = _parsed.password or None
+                # #3039: urlparse does NOT percent-decode userinfo — the
+                # single decode rule lives in tortoise.config.
+                username, password = parse_uri_userinfo(_uri)
                 ssl = (_parsed.scheme == "rediss")
                 _sess = os.environ.get("TORTOISE_TEST_SESSION", "")
                 if path == ":memory:":

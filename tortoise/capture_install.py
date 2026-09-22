@@ -162,8 +162,43 @@ CAPTURE_SEAM: dict[str, str] = {
     "pi": "tortoise/pi-hooks/tortoise-capture.ts",
 }
 
-#: Claude Code hook scripts → ``.claude/hooks/``.
-CLAUDE_SCRIPTS: tuple[str, ...] = ("session-start.sh", "session-end.sh")
+#: The per-hook budget #3754 established and #3801 identified as the
+#: load-bearing half of the contract: Claude Code cancels a SessionEnd hook at
+#: its 1.5 s default, the budget rises to the highest per-hook timeout, and 60
+#: is the documented ceiling.  Must stay equal to the value the dashboard
+#: block emits (pinned by ``tests/test_capture_install.py``).
+CLAUDE_TIMEOUT = 60
+
+#: The cheaper per-turn budget.  The turn hook spools the transcript locally
+#: (no network round-trip), so it does not need SessionEnd's 60 s; the
+#: dashboard emits this value too.
+CLAUDE_PER_TURN_TIMEOUT = 30
+
+#: Claude Code capture hooks as ``(script, event, timeout)`` — THIS is the
+#: single source of truth.  ``CLAUDE_SCRIPTS`` is DERIVED from it, so the files
+#: the installer COPIES and the registrations it MERGES can never name
+#: different sets of scripts.
+#:
+#: They once did (#3971 merge): ``hook_install._claude_layout()`` carried
+#: ``session-turn.sh`` (added with the per-turn spool) while this module kept a
+#: separately-maintained ``CLAUDE_SCRIPTS`` pair, so the installer placed TWO
+#: scripts and ``detect_install`` demanded THREE — an install that reports
+#: ``missing-script: session-turn.sh`` immediately after installing, with the
+#: drift guard unable to say why.
+CLAUDE_CAPTURE_HOOKS: tuple[tuple[str, str, int], ...] = (
+    ("session-start.sh", "SessionStart", CLAUDE_TIMEOUT),
+    ("session-end.sh", "SessionEnd", CLAUDE_TIMEOUT),
+    # #3963: the CHEAP per-turn capture.  Capture used to happen only at
+    # SessionEnd, which is cancelled at its ~1.5 s default (#3754) and does not
+    # fire at all on a kill — so an interrupted session filed nothing.  This
+    # hook spools the transcript locally (no network) at every user prompt; the
+    # filing is deferred to the SessionStart drain / the SessionEnd flush.
+    ("session-turn.sh", "UserPromptSubmit", CLAUDE_PER_TURN_TIMEOUT),
+)
+
+#: Claude Code hook scripts → ``.claude/hooks/`` (derived; see above).
+CLAUDE_SCRIPTS: tuple[str, ...] = tuple(
+    name for name, _, _ in CLAUDE_CAPTURE_HOOKS)
 
 #: Codex's shipped capture hook (one script) and the event it registers.
 CODEX_SCRIPT_NAME = "tortoise-session-end.sh"
@@ -191,12 +226,9 @@ CODEX_HOOKS_SUBDIR = "hooks"
 CURSOR_REGISTRATION_FILE = "hooks.json"
 CURSOR_HOOKS_SUBDIR = "hooks"
 
-#: The per-hook budget #3754 established and #3801 identified as the
-#: load-bearing half of the contract: Claude Code cancels a SessionEnd hook at
-#: its 1.5 s default, the budget rises to the highest per-hook timeout, and 60
-#: is the documented ceiling.  Must stay equal to the value the dashboard
-#: block emits (pinned by ``tests/test_capture_install.py``).
-CLAUDE_TIMEOUT = 60
+#: ``CLAUDE_TIMEOUT`` / ``CLAUDE_PER_TURN_TIMEOUT`` are declared beside
+#: ``CLAUDE_CAPTURE_HOOKS`` above — one block, so each budget and the script it
+#: belongs to cannot drift apart.
 
 #: The extension name Pi auto-discovers under ``~/.pi/agent/extensions/``.
 PI_EXTENSION_NAME = "tortoise-capture.ts"
@@ -486,17 +518,19 @@ def _our_command_dicts(entry: object, script_name: str, hooks_dir: str,
     return hook_install._entry_command_dicts(entry, script_name, hooks_dir, root)
 
 
-def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
+def merge_capture_hooks(data: dict, *, timeout: int | None = None,
                         hooks_dir: str = ".claude/hooks",
                         root: str | os.PathLike[str] = ".") -> dict:
-    """Merge the two capture registrations into a Claude ``settings.json``
+    """Merge the capture registrations into a Claude ``settings.json``
     document, in place, and return it.
 
     Merge, never overwrite: every unrelated key, every other event, and any
-    foreign hook already registered under ``SessionStart`` / ``SessionEnd``
-    survive untouched (a foreign hook is *appended after*, never replaced).  An
-    existing registration of ours is repaired in place — the #3754 ``timeout``
-    is set when absent or lower than ``timeout``, and never lowered.
+    foreign hook already registered under ``SessionStart`` / ``SessionEnd`` /
+    ``UserPromptSubmit`` survive untouched (a foreign hook is *appended after*,
+    never replaced).  An existing registration of ours is repaired in place —
+    the #3754 ``timeout`` is set when absent or lower than the script's budget
+    (#3963: per-script, so the per-turn hook keeps its cheaper 30 s), and never
+    lowered.
 
     The emitted entry is the shape ``tortoise hooks status`` (#3866) classifies
     as ours: a matcher entry whose ``hooks`` array holds
@@ -515,8 +549,10 @@ def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
         data["hooks"] = hooks
     if not isinstance(hooks, dict):
         raise ValueError('"hooks" is not a JSON object')
-    for script_name, event in (("session-start.sh", "SessionStart"),
-                               ("session-end.sh", "SessionEnd")):
+    for script_name, event, script_timeout in CLAUDE_CAPTURE_HOOKS:
+        # An explicit ``timeout`` overrides every script's declared budget;
+        # otherwise each entry keeps the budget declared beside it above.
+        effective = script_timeout if timeout is None else timeout
         entries = hooks.get(event)
         if entries is None:
             entries = []
@@ -539,8 +575,8 @@ def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
                 # ``tortoise hooks status`` report blocking drift on the state
                 # this installer preserves.
                 if (not hook_install._is_timeout_budget(current)
-                        or current < timeout):
-                    existing["timeout"] = timeout
+                        or current < effective):
+                    existing["timeout"] = effective
                 existing.setdefault("type", "command")
             continue
         entries.append({
@@ -548,7 +584,7 @@ def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
             "hooks": [{
                 "type": "command",
                 "command": f"{hooks_dir}/{script_name}",
-                "timeout": timeout,
+                "timeout": effective,
             }],
         })
     return data
@@ -1138,6 +1174,8 @@ def install_capture(
 
 __all__ = [
     "CAPTURE_SEAM",
+    "CLAUDE_CAPTURE_HOOKS",
+    "CLAUDE_PER_TURN_TIMEOUT",
     "CLAUDE_SCRIPTS",
     "CLAUDE_TIMEOUT",
     "CODEX_EVENT",
