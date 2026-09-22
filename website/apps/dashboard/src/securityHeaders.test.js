@@ -43,12 +43,14 @@
 //     indirection and a template-built `` `set-cookie${""}` `` are all caught;
 //     the files allowed to name it without being writers are the three
 //     hop-by-hop STRIP-LIST proxies, and their exemption is pinned (below);
+//   - the CSP stamp scan counts AST SHAPE — an object property or a
+//     `headers.set/append` argument — so a stamp-shaped string, regex or template
+//     cannot inflate the count;
 //   - the two audited writers are exempt from the umbrella, and their exemption
-//     is paid for structurally: every top-level function in them that builds a
-//     `Response`, and every export that mentions the token, must pair it with
-//     `no-store` (so a new cacheable helper fails whatever spelling it uses);
-//   - the CSP stamp scan reads a view with template-literal TEXT blanked, so a
-//     stamp-shaped string in a template cannot inflate the count;
+//     is paid for structurally: a cookie write inside a function that builds a
+//     `Response` must pair it with `no-store` (so a new cacheable helper fails
+//     whatever spelling it uses, in a class method or a callback as much as a
+//     top-level function);
 //   - the scan walks BOTH projects' function trees, over every JS/TS extension.
 //
 // SOURCE SCANNING NEEDS A REAL LEXER, NOT A STATE MACHINE
@@ -65,8 +67,9 @@
 // spelling. (esbuild's `transform` was tried and rejected: it preserves comments
 // inside object literals, which is exactly where every stamp lives.)
 //
-// Declared exception: the stamp COUNT is source-level, so a deliberately dead
-// stamp still counts (see `STAMP`, and the plan doc's `## Residuals`).
+// Declared exception: the stamp count is structural but file-wide, so a
+// deliberately dead stamp still counts, and a stamp on a non-HTML response
+// counts toward the file total (see the plan doc's `## Residuals`).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -116,36 +119,29 @@ const HTML_SITES = [
 const STRICT_PATHS = ['/', '/team', '/team/', '/index.html']
 
 /**
- * A CSP stamp, anchored to the response-header key rather than the bare
- * constant name: `"Content-Security-Policy": ADMIN_CSP` or
- * `headers.set("Content-Security-Policy", RELAXED_CSP)`. Anchoring on the
- * header key keeps an import line (`import { RELAXED_CSP } …`) from counting as
- * a stamp.
+ * The CSP stamp scan reads AST SHAPE (see `stampCount`), not text: a stamp is an
+ * object property `"Content-Security-Policy": <const>` or a
+ * `headers.set/append("Content-Security-Policy", <const>)` call. A whole-file
+ * regex was tried first and rejected — it counted a stamp-shaped string or regex
+ * as a stamp, so a file with zero live stamps could pass.
  *
- * KNOWN FALSE POSITIVE (fail-closed): refactoring the header NAME into a local
- * constant (`const CSP_HEADER = "Content-Security-Policy"; headers.set(CSP_HEADER,
- * RELAXED_CSP)`) keeps the response correct but no longer matches — the guard
- * cannot resolve an identifier. It fails loudly naming the file; extend this
- * regex in the same change. A deliberately dead stamp
- * (`if (false) headers.set(…, CONST)`) still counts: source analysis cannot see
- * reachability, and no runtime harness here drives all six handlers.
+ * KNOWN FALSE POSITIVE (fail-closed): building the header NAME as an expression
+ * (`headers.set(HEADER, RELAXED_CSP)`, or a template literal) is no longer
+ * counted, so the guard reddens and names the file. It cannot resolve an
+ * identifier, and the fix is to name the header at the stamp site. A stamp on a
+ * NON-HTML response still counts toward the file total — a source count is not
+ * reachability (see the plan doc's `## Residuals`).
  */
-const STAMP =
-  /Content-Security-Policy["']?\s*[,:]\s*(RELAXED_CSP|STRICT_CSP|ADMIN_CSP|strictCspWithNonce)\b/g
-
 /**
  * The two audited cookie writers. They are exempt from the file-level umbrella
- * scan below, so the exemption is paid for STRUCTURALLY rather than with a count.
- *
- * A pinned count of cookie-WRITE statements was tried first and rejected on two
- * counts, both proven in review: it missed an aliased header name
- * (`const H = "Set-Cookie"; headers.append(H, …)`), and it reddened CI on a
- * harmless extraction of the two identical append loops into one shared helper.
- * The structural rule that replaced it — every top-level function that builds a
- * `Response`, and every export that mentions the token, must pair it with
- * `no-store` — catches both the literal and aliased forms (a new cacheable
- * helper builds a `Response`) while leaving a helper that only appends a cookie
- * to its caller's headers exempt.
+ * scan below, so the exemption is paid for STRUCTURALLY: a cookie write inside a
+ * function that builds a `Response` must pair it with `no-store` (see
+ * `cookieWritesWithEnclosingFunction`). Review proved both cheaper alternatives
+ * wrong: a file-level COUNT of write statements missed an aliased header name
+ * (`const H = "Set-Cookie"`) and reddened CI on a harmless extraction of the two
+ * append loops into one helper, and a rule over only TOP-LEVEL functions missed
+ * a class method, a `Response.json` helper, an aliased constructor and a
+ * top-level callback — all of which the count had caught.
  */
 const AUDITED_COOKIE_WRITERS = new Set([DASHBOARD_SESSION_TS, DASHBOARD_CONFIRM_TS])
 
@@ -193,7 +189,30 @@ const COOKIE_MENTION = /set-cookie/i
 const COOKIE_WRITE =
   /\.(?:append|set)\(\s*["'`]set-cookie["'`]|["'`]set-cookie["'`]\s*:|\[\s*\[\s*["'`]set-cookie["'`]/gi
 
-/** Delete each `[start, end)` range, replacing it with a single space. */
+/**
+ * The CSP constants the stamp scan recognises, and the value shapes a stamp may take.
+ */
+const CSP_CONSTANTS = new Set(['RELAXED_CSP', 'STRICT_CSP', 'ADMIN_CSP'])
+
+function isCspValue(node) {
+  if (!node) return false
+  if (node.type === 'Identifier') return CSP_CONSTANTS.has(node.name)
+  if (node.type === 'CallExpression' && node.callee?.type === 'Identifier') {
+    return node.callee.name === 'strictCspWithNonce'
+  }
+  return false
+}
+
+/** The string value of an object key / argument node, when it is a literal name. */
+function nameOf(node) {
+  if (node?.type === 'StringLiteral' || node?.type === 'Literal') return String(node.value)
+  if (node?.type === 'Identifier') return node.name
+  return null
+}
+
+/**
+ * Blank the given `[start, end)` ranges so the scan below sees structure, not text.
+ */
 function withoutRanges(source, ranges) {
   let out = ''
   let at = 0
@@ -231,72 +250,180 @@ function commentStripped(relPath) {
  * constant beside it keep their identifiers, which a minifying pass would not
  * guarantee). A parse failure throws, which fails every test that scans: that is
  * the intended fail-closed direction.
+ *
+ * A hand-rolled quote/regex scanner is NOT used. It was wrong three times in
+ * review — a quote inside `/[&<>"']/`, a nested template literal, and a `//`
+ * after a `:` each desynced it, so comments silently survived and a
+ * commented-out stamp still counted. `esbuild`'s `transform` was tried too and
+ * rejected: it PRESERVES comments inside object literals, which is exactly where
+ * every stamp lives.
  */
 function commentStrippedSource(source, relPath = 'file.ts') {
   const ast = parseSource(source, relPath)
   return withoutRanges(source, (ast.comments ?? []).map((c) => [c.start, c.end]))
 }
 
-/**
- * The view the CSP stamp scan uses: comments removed AND template-literal string
- * content blanked.
- *
- * A stamp-shaped string inside a template literal is text, not a stamp. Review
- * proved the count could be inflated that way — delete a file's only real stamp,
- * add `const NOTE = `"Content-Security-Policy": RELAXED_CSP`` — and the file
- * passed with zero live stamps. Blanking the *quasi* ranges (which exclude the
- * backticks and the `${…}` expressions) removes template TEXT while keeping code
- * inside an interpolation. The trade-off is fail-closed: a header name BUILT as a
- * template literal is no longer counted, and the guard names the file.
- */
-function stampView(relPath) {
-  const source = readFileSync(join(repoRoot, relPath), 'utf8')
-  const ast = parseSource(source, relPath)
-  const ranges = (ast.comments ?? []).map((c) => [c.start, c.end])
-  const collect = (node) => {
-    if (!node || typeof node !== 'object') return
-    if (Array.isArray(node)) {
-      for (const n of node) collect(n)
-      return
-    }
-    if (node.type === 'TemplateLiteral') {
-      for (const q of node.quasis) ranges.push([q.start, q.end])
-    }
-    for (const key of Object.keys(node)) {
-      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
-      collect(node[key])
-    }
+/** Walk every node of a babel AST (objects and arrays), skipping location metadata. */
+function visitNodes(node, fn) {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    for (const child of node) visitNodes(child, fn)
+    return
   }
-  collect(ast.program)
-  return withoutRanges(source, ranges)
+  fn(node)
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue
+    visitNodes(node[key], fn)
+  }
+}
+
+function functionNodes(ast) {
+  const out = []
+  visitNodes(ast.program, (node) => {
+    if (
+      node.type === 'FunctionDeclaration' ||
+      node.type === 'FunctionExpression' ||
+      node.type === 'ArrowFunctionExpression' ||
+      node.type === 'ClassMethod' ||
+      node.type === 'ObjectMethod' ||
+      node.type === 'ClassPrivateMethod'
+    ) {
+      out.push(node)
+    }
+  })
+  return out
 }
 
 /**
- * Every top-level function in a file: `{ name, body, exported }`.
+ * Count real CSP stamp APPLICATIONS, from AST shape.
  *
- * Used by the audited-module rule, which needs to see non-exported functions
- * too (a new cacheable helper need not be exported to be reachable). A function
- * that only appends a cookie to its caller's headers builds no `Response`, so it
- * is correctly exempt.
+ * A whole-file regex was tried first and rejected: it counted a stamp-shaped
+ * STRING or REGEX as a stamp, so a file with zero live stamps could pass
+ * (review deleted a file's only stamp and added
+ * `const NOTE = 'x "Content-Security-Policy": RELAXED_CSP'`). Counting only the
+ * two shapes that actually stamp a header — an object property
+ * `"Content-Security-Policy": <const>`, and a `headers.set/append("Content-Security-Policy", <const>)`
+ * call — cannot be inflated by any string, template or regex, because text is
+ * not a property or an argument. A header name BUILT as an expression is not
+ * counted (fail-closed, and it names the file).
  */
-function topLevelFunctions(relPath) {
-  const source = commentStripped(relPath)
-  const ast = parseSource(source, relPath)
-  const out = []
-  for (const node of ast.program.body) {
-    const exported =
-      node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration'
-    const decl = exported ? node.declaration : node
-    if (!decl) continue
-    if (decl.type === 'FunctionDeclaration') {
-      out.push({ name: decl.id?.name ?? 'default', body: source.slice(decl.start, decl.end), exported })
-    } else if (decl.type === 'VariableDeclaration') {
-      for (const v of decl.declarations) {
-        out.push({ name: v.id?.name ?? '?', body: source.slice(v.start, v.end), exported })
+function stampCount(relPath) {
+  const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
+  let count = 0
+  visitNodes(ast.program, (node) => {
+    if (node.type === 'ObjectProperty' && nameOf(node.key) === 'Content-Security-Policy') {
+      if (isCspValue(node.value)) count += 1
+      return
+    }
+    if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
+      const method = nameOf(node.callee.property)
+      if (method === 'set' || method === 'append') {
+        if (nameOf(node.arguments?.[0]) === 'Content-Security-Policy' && isCspValue(node.arguments?.[1])) {
+          count += 1
+        }
       }
     }
+  })
+  return count
+}
+
+/**
+ * Identifiers in the file whose value is a `no-store` string — directly, or via
+ * another such identifier (`const DEFAULT_CACHE = NO_STORE`).
+ *
+ * Resolving identifiers rather than matching the literal `NO_STORE` is what lets
+ * a pure RENAME or a wrapping constant pass: the value `"no-store"` is what the
+ * browser sees, and a guard that demands one particular identifier name is a
+ * false positive, not a safety net.
+ */
+function noStoreIdentifiers(ast) {
+  const decls = []
+  visitNodes(ast.program, (node) => {
+    if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier') decls.push(node)
+  })
+  const tokens = new Set()
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (const d of decls) {
+      const init = d.init
+      if (!init) continue
+      if (init.type === 'StringLiteral' && /no-store/i.test(init.value)) tokens.add(d.id.name)
+      else if (
+        init.type === 'TemplateLiteral' &&
+        init.quasis.length === 1 &&
+        /no-store/i.test(init.quasis[0].value.raw)
+      ) {
+        tokens.add(d.id.name)
+      } else if (init.type === 'Identifier' && tokens.has(init.name)) tokens.add(d.id.name)
+    }
   }
-  return out
+  return tokens
+}
+
+/** Identifiers aliasing the `Response` constructor (`const R = Response`). */
+function responseAliases(ast) {
+  const aliases = new Set(['Response'])
+  visitNodes(ast.program, (node) => {
+    if (
+      node.type === 'VariableDeclarator' &&
+      node.id?.type === 'Identifier' &&
+      node.init?.type === 'Identifier' &&
+      node.init.name === 'Response'
+    ) {
+      aliases.add(node.id.name)
+    }
+  })
+  return aliases
+}
+
+/**
+ * Whether a function body builds a Response at all — `new Response(...)` or
+ * `Response.json/redirect/error(...)`, through any resolved alias of `Response`.
+ */
+function buildsResponse(body, aliases) {
+  const ctor = [...aliases].join('|')
+  return (
+    new RegExp(`\\bnew\\s+(?:${ctor})\\s*\\(`).test(body) ||
+    new RegExp(`\\b(?:${ctor})\\s*\\.\\s*(?:json|redirect|error)\\s*\\(`).test(body)
+  )
+}
+
+/**
+ * Every cookie WRITE in the file and the innermost function that encloses it,
+ * with the function's source slice.
+ *
+ * The rule the audited modules are held to is anchored HERE — on the write, not
+ * on a file-level count and not only on top-level functions:
+ *
+ *   a cookie write inside a function that builds a Response requires that
+ *   function to pair it with `no-store`.
+ *
+ * A file-level count of write statements was tried and rejected: it missed an
+ * aliased header name and it reddened CI on a harmless extraction of the two
+ * append loops into one helper. A rule over only TOP-LEVEL functions was tried
+ * and rejected too — review showed it missed a class method, a `Response.json`
+ * helper, an aliased constructor and a top-level callback, all of which the
+ * count had caught. Anchoring on the write catches every one of those shapes,
+ * while a helper that only appends a cookie to its CALLER's `Headers` builds no
+ * Response and is correctly exempt.
+ */
+function cookieWritesWithEnclosingFunction(relPath) {
+  const source = commentStripped(relPath)
+  const ast = parseSource(source, relPath)
+  const fns = functionNodes(ast)
+  const out = []
+  for (const m of source.matchAll(COOKIE_WRITE)) {
+    const at = m.index
+    const enclosing = fns
+      .filter((n) => n.start <= at && at < n.end)
+      .sort((a, b) => a.end - a.start - (b.end - b.start))[0]
+    if (!enclosing) continue
+    out.push({
+      text: m[0],
+      name: enclosing.id?.name ?? enclosing.key?.name ?? '(anonymous)',
+      body: source.slice(enclosing.start, enclosing.end),
+    })
+  }
+  return { source, ast, writes: out }
 }
 
 function loadTs(entry) {
@@ -493,17 +620,19 @@ test('the only cookie writers are the two audited files', () => {
   // of the two identical append loops into one helper.
   for (const rel of AUDITED_COOKIE_WRITERS) {
     assert.match(commentStripped(rel), COOKIE_MENTION, `${rel} must be recognised as naming set-cookie`)
-    const unpinned = topLevelFunctions(rel)
-      .filter(
-        ({ body, exported }) =>
-          (/\bnew Response\b/.test(body) || (exported && COOKIE_MENTION.test(body))) &&
-          !/no-store|NO_STORE/.test(body),
-      )
-      .map(({ name }) => `${rel}:${name}`)
+    const { ast, writes } = cookieWritesWithEnclosingFunction(rel)
+    assert.ok(writes.length > 0, `${rel} must contain cookie writes — the write scan is broken`)
+    const noStore = noStoreIdentifiers(ast)
+    const aliases = responseAliases(ast)
+    const hasNoStore = (body) =>
+      /no-store/i.test(body) || [...noStore].some((t) => new RegExp(`\\b${t}\\b`).test(body))
+    const unpinned = writes
+      .filter(({ body }) => buildsResponse(body, aliases) && !hasNoStore(body))
+      .map(({ name, text }) => `${rel}:${name} (${text})`)
     assert.deepEqual(
       unpinned,
       [],
-      'a function in an audited module that builds a Response (or exports a cookie mention) must pair it with no-store',
+      'a cookie write inside a function that builds a Response must pair it with no-store',
     )
   }
 
@@ -631,13 +760,13 @@ test('_headers values are byte-identical to the stamped constants', () => {
 test('every HTML-producing Function stamps the CSP on each HTML-producing path', () => {
   const wrong = []
   for (const [rel, expected] of HTML_SITES) {
-    const found = (stampView(rel).match(STAMP) ?? []).length
+    const found = stampCount(rel)
     if (found !== expected) wrong.push(`${rel}: expected ${expected} stamp(s), found ${found}`)
   }
   assert.deepEqual(
     wrong,
     [],
-    'an HTML-producing path lost its Content-Security-Policy stamp (if the header name was refactored into a constant, extend STAMP)',
+    'an HTML-producing path lost its Content-Security-Policy stamp (a stamp must be an object property or a headers.set/append argument — a header name built as an expression is not counted)',
   )
 })
 
