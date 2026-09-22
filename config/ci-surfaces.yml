@@ -744,10 +744,10 @@ surfaces:
   # OPENROUTER_API_KEY inside Fly-only env) produced a total extraction outage
   # that the API reported as 200/partial, and nothing in CI could see the drift.
   # Registered in `core` alongside its sibling deploy-time guards
-  # (test_fly_machines_guard.py, test_deploy_workflow.py). It is hermetic but
-  # multi-minute, so it carries an explicit `durations:` weight (see the
-  # durations map) — an unmeasured entry would also drop fast-pool coverage
-  # below the 90% floor (#4259 review).
+  # (test_fly_machines_guard.py, test_deploy_workflow.py). It is hermetic, and
+  # its cost is measured in the durations map like every other fast file — an
+  # entry that is zero or absent would either drop fast-pool coverage below the
+  # 90% floor or hand the LPT pack a real 0.0 weight (#4259 review).
   - test_fly_secret_drift.py
   # #3039: percent-decoding of URI userinfo (the single shared rule in
   # tortoise/config.py, which is a core-surface path) — registered here so a
@@ -1404,24 +1404,48 @@ carve_out:
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:
-# #3395: per-file CI wall time (seconds), swept from the per-file junit
-# artifacts of two complete 2026-09-22 runs — 35755845755 (head 8478de353)
-# and 35743868968 (head 8116a93fc) — across all legs. Method: sum of
-# testcase/@time per `file` attribute; the value is the LARGER of the two
-# runs (the split sizes legs for the worst case), floored at 0.1s. The two
-# runs agree closely — over the files that cost at least a second, the median
-# per-file ratio is 1.10x and the p90 is 1.21x (below a second the times are
-# noise, which is why the value is not a median) — so the basis is stable.
-# Re-sweep the same way; this map is measurement, not estimate.
+# #3395: per-file CI wall time (seconds), swept from junit artifacts rather
+# than entered by hand. A file's weight is what it costs the leg that CARRIES
+# it in the split — the fast pool from `pytest-log-test-a` / `-test-b`, slow
+# files from `pytest-log-test-slow`, carve-out files from
+# `pytest-log-test-carve-out` — taking the LARGER of the two source runs (the
+# split sizes legs for the worst case), floored at 0.1s. Legs that do not feed
+# the split are excluded deliberately: `test-track-b` and `d14-hosted-api`
+# select different marker sets than the halves (`-m 'not track_b and not live'`),
+# and d14 emits `junit-d14.xml`. Summing across every leg instead would
+# double-count those (test_ingest_safety.py would read 4.2s, not the ~1.0s the
+# half actually spends).
 #
 # #3400: consumed by split_fast_gate (LPT) for BOTH the tier-2 --split path
 # and the full-matrix push halves. duration_coverage_issues() floors coverage
-# at 90%. The split's balance is only as good as these weights, so a weight
-# is a measured CI value wherever one exists — local timings are NOT the
-# input, because the CI wall time is what the split must model.
+# at 90%. The balance is only as good as these weights, so a weight is a
+# measured CI value wherever one exists — local timings are NOT the input.
+# The basis is a sum of testcase/@time, so a leg's once-per-leg conftest import
+# and collection cost is shared by the whole leg and is not attributed to any
+# single file — which is why a file with a small measured cost keeps a small
+# weight even when the leg's startup is heavy.
 #
-# Rows marked `# unmeasured` did not run in either sweep run — the value is
-# carried forward and must not be read as a fresh measurement.
+# SOURCE RUNS: 35755845755 and 35743868968, both 2026-09-22, both
+# `pull_request` runs of branch fix/3671-onboarding-truth-surface (PR #3746)
+# rather than push-to-main runs — main's current push runs were cancelled or
+# left a leg cut, so a complete pair was not available there. Both runs' fast
+# legs produced complete junit — test (a) 8,164 and test (b) 5,874 testcases in
+# each — which is what "complete" means here. 35743868968 ended `cancelled`
+# overall and its `test (b)` leg reported failures, but it ran to completion and
+# its per-file times are usable. Prefer a push-to-main run when one completes;
+# expect small per-file differences from these.
+# Over the files costing at least a second the two runs agree closely (median
+# ratio 1.10x, p90 1.21x); below a second the times are noise, which is why
+# the value is the larger and not a median.
+#
+# ONE row is not a measurement: test_mcp_rename_table.py is held equal to
+# test_bridge_table.py because
+# tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite
+# requires the two generator suites to carry one weight — the pin constrains
+# equality, not the number.
+#
+# Rows marked `# unmeasured` ran in no source leg — the value is carried
+# forward and must not be read as a fresh measurement.
   bench/test_bench_core.py: 0.1
   bench/test_degradation_chain.py: 1.3
   bench/test_roundrobin.py: 0.1
@@ -1762,7 +1786,7 @@ durations:
   test_ingest_event_endpoint.py: 1.3
   test_ingest_promotion.py: 0.4
   test_ingest_rebuild_durability.py: 0.9
-  test_ingest_safety.py: 4.2
+  test_ingest_safety.py: 1.0
   test_ingest_v2_consolidation.py: 19.4
   test_ingest_v2_parallel.py: 0.2
   test_init_apikey_validation.py: 4.3
@@ -1818,9 +1842,7 @@ durations:
   # cost, so they carry the SAME weight — asserted by
   # tests/test_mcp_rename_table.py::test_duration_weight_matches_the_sibling_generator_suite.
   # Held equal at the larger of the two measured costs (bridge 2.7s, mcp 1.1s
-  # across the two sweep runs, taken at the fleet's usual heavy load), so the
-  # pin is satisfied without the 240s reserve the earlier local reading had
-  # entered.
+  # across the two sweep runs, taken at the fleet's usual heavy load).
   test_mcp_rename_table.py: 2.7
   test_mcp_server.py: 4.4
   test_mcp_server_auth_modes.py: 0.7

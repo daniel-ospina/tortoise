@@ -77,12 +77,10 @@ DEFAULT_FAST_WEIGHT = 2.0
 # the flat default), which silently degenerated the duration-aware pack into
 # a count-based one. Floor the coverage so it cannot rot back. The check is
 # skipped entirely for an ABSENT/EMPTY map (a repo that has not adopted
-# durations is not failed) and bites once the map is populated: 90% leaves
-# ~52 files of headroom on the current 520-file pool (actual: 96.5%, after the
-# merge of main grew the pool from 500 — the 18 unmeasured files carry no hand
-# entry: 16 are main-added tests, 2 (test_helpers.py,
-# test_provenance_extractedfrom_3263.py) were already unmeasured on the branch.
-# They pack at DEFAULT_FAST_WEIGHT).
+# durations is not failed) and bites once the map is populated. Do not restate
+# the pool size or the current percentage here — the durations map's own header
+# carries the sweep that measures them, and a figure copied into this comment is
+# what went stale before (it read "520 files / 96.5%" while the pool had grown).
 DURATION_COVERAGE_MIN = 0.90
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)

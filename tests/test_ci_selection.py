@@ -1218,7 +1218,8 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(below) != [], "89% must fire"
     assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
     assert duration_coverage_issues(above) == [], "95% must be silent"
-    # the real map: 502/520 fast files measured (96.5%)
+    # the real map must be silent — the measured figure lives in the durations
+    # map's own header, not here (a number copied into this comment goes stale)
     assert duration_coverage_issues(load_manifest()) == []
 
 
