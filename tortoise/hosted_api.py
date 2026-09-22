@@ -25485,7 +25485,10 @@ def _billing_email_like(value: object) -> bool:
 def _billing_customer_email(sdk, org: dict) -> str:
     """Resolve the billing email via the fallback chain (review fix 1):
 
-    1. ``Org.email`` — set at /v1/register (self-service orgs).
+    1. ``Org.email`` — set at /v1/register (self-service orgs); the resolved
+       org dict carries it in BOTH lanes (registry Team node / Supabase orgs
+       row) and is read as the ``t.email`` twin (#4640: Supabase mode passes
+       ``sdk=None`` — the registry graph is deleted post-#669).
     2. ``APIKey.created_by`` — provision-path orgs (created via
        /internal/provision) have no ``Org.email``; the Edge Function stored
        the creator on the APIKey node instead. Prefer the key used for THIS
@@ -25502,26 +25505,37 @@ def _billing_customer_email(sdk, org: dict) -> str:
        client-supplied body/header. Last in the chain: the existing
        resolutions keep precedence.
     4. 400 last resort — clear message, no crash.
+
+    ``sdk`` is None in Supabase mode (#4640): the registry reads are skipped
+    entirely, and resolution runs through the resolved org dict, which the
+    control-plane seam populated from the authoritative row.
     """
     org_id = org["org_id"]
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.email", params={"id": org_id}
-    ).result_set
-    if row and row[0][0]:
-        return row[0][0]
-    key_id = org.get("key_id")
-    if key_id:
+    if sdk is not None:
         row = sdk._get_registry().query(
-            "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
+            "MATCH (t:Team {id:$id}) RETURN t.email", params={"id": org_id}
+        ).result_set
+        if row and row[0][0]:
+            return row[0][0]
+    # #4640: the resolved org row's email — the ``t.email`` twin above, and the
+    # only link available in Supabase mode. Registry parity: org["email"] IS
+    # the t.email that read returns, so this is a selfhost no-op.
+    if _billing_email_like(org.get("email")):
+        return org["email"].strip()
+    if sdk is not None:
+        key_id = org.get("key_id")
+        if key_id:
+            row = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.created_by", params={"id": key_id}
+            ).result_set
+            if row and _billing_email_like(row[0][0]):
+                return row[0][0].strip()
+        row = sdk._get_registry().query(
+            "MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1",
+            params={"tid": org_id},
         ).result_set
         if row and _billing_email_like(row[0][0]):
             return row[0][0].strip()
-    row = sdk._get_registry().query(
-        "MATCH (k:APIKey {org_id:$tid}) RETURN k.created_by LIMIT 1",
-        params={"tid": org_id},
-    ).result_set
-    if row and _billing_email_like(row[0][0]):
-        return row[0][0].strip()
     # #4504: verified session email — before the 400, after the existing
     # resolutions (precedence unchanged). Reached whenever no earlier link
     # produced an address — including a non-email ``created_by``.
@@ -25541,25 +25555,49 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
 
     Order matters (scoping P1-2, review fix 1): resolve/validate price →
     stored-mirror guard → resolve email → create-or-reuse Stripe customer →
-    SYNC-PERSIST ``stripe_customer_id`` on the Org node (plus ``customer_email``
-    on first bind, or as a backfill when the stored one is empty — a reused
-    customer keeps its stored email, see below) → stale-mirror race guard
-    (list_subscriptions) → create Checkout session. A missed first webhook
-    event leaves a reconcilable mirror (Task 8).
+    SYNC-PERSIST ``stripe_customer_id`` on the authoritative store (#4640: the
+    orgs row in Supabase mode, the Org node in registry mode; plus
+    ``customer_email`` on first bind, or as a backfill when the stored one is
+    empty — a reused customer keeps its stored email, see below) →
+    stale-mirror race guard (list_subscriptions) → create Checkout session. A
+    missed first webhook event leaves a reconcilable mirror (Task 8).
+
+    #4640: Supabase mode reads/writes ``organizations`` through the
+    control-plane seam, exactly as the webhook's ``_set`` does (#669: the
+    registry graph is deleted there). The pre-fix code read and wrote the
+    registry unconditionally — the reads matched nothing and the persist was a
+    silent no-op (or a registry-graph resurrection, #878), so the portal's
+    read of the same store found no customer.
     """
     from tortoise.billing import StripeClient
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        org_billing_state,
+        update_org_billing,
+    )
     org_id = org["org_id"]
-    sdk = _make_sdk(namespace="registry")
+    supabase_mode = is_supabase_enabled()
+    # Supabase mode never constructs a registry-namespaced SDK: post-#669 the
+    # registry graph is deleted, so a read finds nothing and a write would
+    # resurrect it (#878).
+    sdk = None if supabase_mode else _make_sdk(namespace="registry")
 
     # Layer 1 guard: stored mirror already active → reject before any Stripe call.
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) "
-        "RETURN t.subscription_status, t.stripe_customer_id, t.customer_email",
-        params={"id": org_id},
-    ).result_set
-    status = row[0][0] if row else None
-    stored_customer_id = row[0][1] if row else None
-    stored_customer_email = row[0][2] if row else None
+    if supabase_mode:
+        stored = org_billing_state(get_control_plane(), org_id)
+    else:
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) "
+            "RETURN t.subscription_status, t.stripe_customer_id, t.customer_email",
+            params={"id": org_id},
+        ).result_set
+        stored = ({"subscription_status": row[0][0],
+                   "stripe_customer_id": row[0][1],
+                   "customer_email": row[0][2]} if row else {})
+    status = stored.get("subscription_status")
+    stored_customer_id = stored.get("stripe_customer_id")
+    stored_customer_email = stored.get("customer_email")
     if status in _BILLING_ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="team already has an active subscription")
 
@@ -25580,7 +25618,12 @@ def _billing_checkout_sync(org: dict, price_id: str) -> dict:
     # rewriting it would make the mirror disagree with the address invoices go
     # to. Backfill only when the stored value is empty (the checkout webhook
     # persisted the binding without a customer_email).
-    if stored_customer_id and stored_customer_email:
+    binding = {"stripe_customer_id": customer_id}
+    if not (stored_customer_id and stored_customer_email):
+        binding["customer_email"] = email
+    if supabase_mode:
+        update_org_billing(get_control_plane(), org_id, binding)
+    elif stored_customer_id and stored_customer_email:
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id=$cid",
             params={"id": org_id, "cid": customer_id},
@@ -25763,14 +25806,30 @@ async def billing_checkout_new_org(body: NewOrgCheckoutRequest, user: dict = Dep
 
 def _billing_portal_sync(org: dict) -> dict:
     """Sync body of POST /v1/billing/portal — portal session for an existing
-    Stripe customer; 404 when the org never checked out (no customer id)."""
+    Stripe customer; 404 when the org never checked out (no customer id).
+
+    #4640: the customer binding is read from the SAME store the checkout
+    persisted it to. Supabase mode reads the authoritative orgs row through
+    the control-plane seam (#669: the registry graph is deleted there — the
+    pre-fix registry read missed the row the webhook wrote and 404'd a
+    just-subscribed org). Registry mode keeps the Team-node read (selfhost).
+    """
     from tortoise.billing import StripeClient
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        org_billing_state,
+    )
     org_id = org["org_id"]
-    sdk = _make_sdk(namespace="registry")
-    row = sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id", params={"id": org_id}
-    ).result_set
-    customer_id = row[0][0] if row else None
+    if is_supabase_enabled():
+        customer_id = org_billing_state(
+            get_control_plane(), org_id).get("stripe_customer_id")
+    else:
+        sdk = _make_sdk(namespace="registry")
+        row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id", params={"id": org_id}
+        ).result_set
+        customer_id = row[0][0] if row else None
     if not customer_id:
         raise HTTPException(status_code=404, detail="no Stripe customer for this team — start a checkout first")
     try:

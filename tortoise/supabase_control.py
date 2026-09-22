@@ -3001,6 +3001,32 @@ def org_id_for_stripe_customer(cp, customer_id: str) -> str | None:
     return rows[0]["id"] if rows else None
 
 
+def org_billing_state(cp, org_id: str) -> dict:
+    """Billing-identity columns for one org (checkout guard + portal read).
+
+    The FORWARD twin of :func:`org_id_for_stripe_customer` (the reverse
+    webhook lookup). Supabase mode only: the registry lane keeps its
+    ``Team``-node read inline in ``hosted_api`` (selfhost). ``{}`` when the
+    org row is absent.
+
+    ``stripe_customer_id`` is a 0006 base column; ``subscription_status`` /
+    ``customer_email`` are the 0012 additive tier, read through the #1096
+    fail-soft ladder so a pre-0012 schema degrades those to None instead of
+    taking down checkout/portal.
+
+    Used by the two billing routes that must agree on WHERE the
+    ``stripe_customer_id`` mirror lives (#4640): the checkout sync-persist and
+    the portal read. A registry-graph read here would miss the authoritative
+    row the webhook wrote post-#669.
+    """
+    row = _orgs_row_fail_soft(
+        cp, org_id,
+        select=["stripe_customer_id", "subscription_status", "customer_email"],
+        additive_tiers=[_ORG_ADDITIVE_BILLING_TIER],
+    )
+    return row or {}
+
+
 def update_org_billing(cp, org_id: str, updates: dict) -> None:
     """PATCH billing state on the orgs row (webhook SET twin).
 
