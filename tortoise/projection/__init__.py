@@ -3482,6 +3482,22 @@ class FalkorProjection(
                         journal_hash_write.add(p["id"])
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
+        # #4743 review P1 — journal order across the deferral boundary.
+        # `EntityMutated` STATE folds run INLINE below, but `ObjectSuperseded`
+        # folds are DEFERRED to the sweep after pass 1b (deliberately: the fold
+        # is an unconditional `SET o.status='superseded'` and must run after
+        # every Object-creation event). Without journal order being consulted
+        # here, the deferred sweep wins over a LATER state op on the same
+        # Object: live=`archived` → rebuild_all=`superseded`, i.e. exactly the
+        # revert this lane exists to remove — while `apply()`/`rebuild()` fold
+        # both inline in journal order and land on `archived`, so the engines
+        # disagree. Record the LAST state fold per (label, id) and the LAST
+        # ObjectSuperseded per id, both by journal `seq`, and re-fold only a
+        # state op the sweep actually clobbered (a supersede AFTER the state op
+        # must still win — that is live truth).
+        _state_fold_seq: dict = {}
+        _state_fold_ev: dict = {}
+        _supersede_seq: dict = {}
         # #3664: EntityLinked records are deferred to a trailing sweep that
         # runs after PASS 2 (see the sweep before pass 2b). The deferral is
         # for the SOURCE endpoint: the TARGET is already created by pass-1b
@@ -3702,6 +3718,11 @@ class FalkorProjection(
                         anchor = last_recreate_seq_any.get(rid)
                 if anchor is not None and seq <= anchor:
                     continue
+                if ev.get("op") in _ENTITY_MUTATION_STATE_OPS and isinstance(rid, str):
+                    _fold_key = (ev.get("label"), rid)
+                    if seq >= _state_fold_seq.get(_fold_key, -1):
+                        _state_fold_seq[_fold_key] = seq
+                        _state_fold_ev[_fold_key] = ev
                 matched = self._fold_entity_mutation(ev)
                 if matched == 0 and ev.get("op") == "delete":
                     # Fold-miss signal (the journal claims a delete whose
@@ -3882,6 +3903,9 @@ class FalkorProjection(
                 # registration is irrelevant and later re-creations are
                 # re-folded correctly.
                 supersede_folds.append(ev)
+                _sid = ev.get("id")
+                if isinstance(_sid, str) and seq >= _supersede_seq.get(_sid, -1):
+                    _supersede_seq[_sid] = seq
             elif t == "PointSuperseded":
                 # #2423 pass-1b rebuild parity: the POINT-side analog of
                 # #2164 (ObjectSuperseded above) — apply() has no supersede
@@ -4022,6 +4046,20 @@ class FalkorProjection(
                     "unjournaled capture SDK, legacy unjournaled Object, or "
                     "delete race)",
                     ev.get("event_id"), ev.get("supersedes_by"))
+
+        # #4743 review P1: undo the deferral's clobber, in journal order. A
+        # state op folded inline above was overwritten by an
+        # `ObjectSuperseded` that the sweep applied UNCONDITIONALLY afterwards
+        # — correct only when the supersede really came later. Re-fold the
+        # state op when the journal says it came last, so `rebuild_all` agrees
+        # with `apply()`/`rebuild()` and with live. (`label == "Object"` is
+        # the only label `_fold_object_superseded` writes; the sweep cannot
+        # touch any other label's state fold.)
+        for (_ujm_label, _ujm_id), _ujm_seq in _state_fold_seq.items():
+            if _ujm_label != "Object":
+                continue
+            if _ujm_seq > _supersede_seq.get(_ujm_id, -1):
+                self._fold_entity_mutation(_state_fold_ev[(_ujm_label, _ujm_id)])
 
         # ── Pass 1b fold sweep (points): cross-family re-stamp survivors ──
         # PointSuperseded replays (#2423 — status/validity/CORRECTS) +

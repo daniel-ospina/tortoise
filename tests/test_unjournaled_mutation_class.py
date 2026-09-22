@@ -11,6 +11,14 @@ lane closes the two that share a seam and cites the other two:
      non-Point canonical labels, so a rename / status change / revise on a
      Subject, Object, Document, Source or Event reverted to the creation
      snapshot on rebuild. (#3312 statuses, #3377 rename)  ← closed here
+
+     ⚠️ The producer covers all five labels; the FOLD can only match FOUR.
+     A `Document` mutation journals an `EntityMutated label="Document"` whose
+     fold can only warn, because `Document` creation goes through
+     `_create_entity` (inline `DocumentCreated` :GraphEvent, **no JSONL
+     record**) — pre-existing and tracked by **#2296**. That residual is
+     disclosed, not fixed here, and `test_non_point_labels_share_the_one_seam`
+     names it rather than claiming five working labels.
   2. **One event type, two live end-states.** ``delete_point`` hard-deletes,
      ``retract_point`` tombstones, and BOTH emitted
      ``_emit_event("PointRetracted", …, id=id)``. The fold has exactly one
@@ -329,20 +337,84 @@ class TestPropertyMutationRoundTrip:
         assert _props(sdk, "Object", oid, "confidence")["confidence"] == \
             pytest.approx(0.25)
 
-    def test_five_labels_share_the_one_seam(self, env, caplog):
-        """Every non-Point canonical label, not just the one the issue names."""
+    def test_non_point_labels_share_the_one_seam(self, env, caplog):
+        """Two of the five labels on the one seam — and a named CAVEAT.
+
+        The producer journals for all five non-`Point` labels, but only FOUR of
+        them can fold: `Document` creation goes through `_create_entity`, which
+        writes an inline `DocumentCreated` :GraphEvent and **no JSONL record**
+        (pre-existing, #2296). A `Document` mutation therefore journals an
+        `EntityMutated label="Document"` whose fold can only ever warn, and a
+        rebuild destroys the Document. That is #2296's disclosed residual, NOT
+        something this seam fixes — so this test asserts the labels it actually
+        exercises and does not claim five.
+        """
         sdk, events = env
         sub = sdk.create_subject("Topic")
         sid = (sub.get("node") or sub)["id"]
         oid = sdk.create_entity("object", name="O",
                                 objectKind="k")["node"]["id"]
         sdk.update_entity(sid, name="RenamedTopic")
-
         sdk.update_entity(oid, name="RenamedO")
         labels = {r["label"] for r in _mutations(events)}
-        assert labels <= {"Object", "Subject"}
-        assert "Object" in labels
+        assert labels == {"Object", "Subject"}
         _assert_round_trip(sdk, events, caplog)
+
+    def test_object_status_survives_a_supersede_that_came_first(
+            self, env, caplog):
+        """#4743 review P1 — journal order across `rebuild_all`'s deferral boundary.
+
+        `ObjectSuperseded` folds are DEFERRED to a sweep just after pass 1b (a
+        deliberate ordering: the fold is an unconditional
+        `SET o.status='superseded'` and must run after every Object-creation
+        event), while `EntityMutated` state folds run INLINE. Without an order
+        check the sweep wins over a LATER state op, so live and `apply()` read
+        `archived` while `rebuild_all` reads `superseded` — the exact revert
+        this lane removes, in the very engine it removes it from (and the two
+        engines stop agreeing with each other, breaking the #330 parity claim).
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
+        sdk._emit_event("ObjectSuperseded", id=oid, name="O",
+                        supersedes_by="other", session_id="s", evidence="e")
+        sdk.update_entity(oid, status="archived")
+        assert _props(sdk, "Object", oid, "status")["status"] == "archived"
+
+        # Compares ONLY the property under test, not the whole map: the
+        # synthetic `_emit_event` above journals the supersede but does not
+        # perform the live graph write the real producer
+        # (`commit_ops.apply_supersessions`) performs alongside it, so the
+        # supersede's OWN props (`supersededBy`/`supersededAt`) legitimately
+        # exist on the replay side only. `status` is the two-sided value.
+        caplog.clear()
+        sdk._get_proj().rebuild_all(str(events))
+        assert _fold_warnings(caplog) == [], _fold_warnings(caplog)
+        assert _props(sdk, "Object", oid, "status")["status"] == "archived", (
+            "the deferred ObjectSuperseded sweep clobbered a LATER state op — "
+            "rebuild_all reverted the mutation")
+
+    def test_supersede_still_wins_when_it_came_last(self, env):
+        """The CONVERSE of the P1 fix: a supersede after the state op must win.
+
+        Without this row the P1 fix could be "re-apply every state fold after
+        the sweep", which would invert the other order and make replay
+        disagree with live wherever a supersede legitimately landed last.
+
+        Asserts the replay outcome only, not `live == replay`: the synthetic
+        `_emit_event` here does NOT perform the live graph write the real
+        producer (`commit_ops.apply_supersessions`) performs alongside it, so
+        this probe's live side is not a faithful live sequence — only the
+        journal, and therefore the replay, is faithful.
+        """
+        sdk, events = env
+        oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
+        sdk.update_entity(oid, status="archived")
+        sdk._emit_event("ObjectSuperseded", id=oid, name="O",
+                        supersedes_by="other", session_id="s", evidence="e")
+        sdk._get_proj().rebuild_all(str(events))
+        assert _props(sdk, "Object", oid, "status")["status"] == "superseded", (
+            "a supersede journalled LAST must win — the P1 fix must not simply "
+            "re-apply every state fold")
 
     def test_no_record_for_a_write_that_matched_nothing(self, env):
         """No phantom record: the producer mirrors ``_delete_entity``'s
