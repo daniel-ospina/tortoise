@@ -20,7 +20,8 @@ they do — not pruned from the existing 150.
 > **Scope of this approval.** The owner settled the **target surface** on 2026-09-21, including the
 > ruling that `graph_set_recording` is kept — which is what sets the MCP count at **26**. The
 > **four** placement questions that were left open in `canonical-mcp-tools.md` (`packs_list`,
-> `pack_install`, `run_onboarding`, `manage_deployment`) were **settled on 2026-09-22** — see
+> `pack_install`, `run_onboarding`, `manage_deployment`) were **settled on 2026-09-22** (recorded on
+> **#4282**) — see
 > §"The four open placements — settled". None of the four changes the count: they are all **off the
 > MCP target**, which is why the MCP stays at **26**. See `vision-mcp-sdk-surface.md`
 > §"Cross-artifact tensions".

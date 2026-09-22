@@ -23,7 +23,7 @@ A disposition is **three orthogonal axes plus a delete instruction** — never o
 | `Basis` | How strong is the evidence for this row? | `stated`, `derived`, `unbacked`, `contested` |
 | `Delete` | Must Phase 2 delete the implementation? | `delete`, `retain` |
 
-The axes are independent, and that is the point: `DISCARDED` used to mean both “not on the public surface” and “DELETE this” at once, which nearly deleted three shipping methods. Now the visibility is `internal` **and** the delete instruction is `delete`, each in its own cell. A `—` in an axis cell means the doc states nothing for that axis (an `unbacked` or `contested` row).
+The axes are independent, and that is the point: `DISCARDED` used to mean both “not on the public surface” and “DELETE this” at once, so one word carried a visibility fact and a delete COMMAND. Now the visibility is `internal` **and** the delete instruction is `delete`, each in its own cell. A `—` in an axis cell means the doc states nothing for that axis (an `unbacked` or `contested` row).
 
 `Target` names the destination method; `—` means no destination is stated. The canonical inventory's group names are an **earlier sketch** (`revise_knowledge`, `stabilize_beliefs`, `write_knowledge`, `index_files`). The `Target` column always carries the **beta** target name (`update_knowledge`, `refresh_confidence`, `write_knowledge_batch`, `index_sources_from_directory`) — the canonical doc itself says beta governs where the two disagree, and records the renames.
 
@@ -356,8 +356,8 @@ resolves each method to its family group: `W16`.
 
 ### C6 — the lifecycle/confidence fold (the former `CONTESTED` rows)
 
-beta's `### Removed` row filed these under “reachable through the canonical two”
-without NAMING a destination, so they were an open finding — and the project's
+beta's `### Removed` row filed these as *reachable* without NAMING a destination,
+so they were an open finding — and the project's
 own docs disagreed about the fold (the approved MCP list absorbed two into
 `revise_knowledge`; beta then SPLIT `revise_knowledge` into `update_knowledge` +
 `supersede_knowledge`, so the approved absorber's name no longer exists; the

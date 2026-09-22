@@ -81,7 +81,8 @@ def _doc_text(name: str) -> str:
 # ORTHOGONAL AXES (lifecycle, visibility, basis) plus an explicit DELETE instruction;
 # a single flat enum was the defect. The observed harm: `DISCARDED` was consumed as a
 # COMMAND ("Phase 2's signal to DELETE"), so "not on the public surface" and "delete
-# this" were spelled the same way — which nearly deleted three shipping methods.
+# this" were spelled the same way, so one word carried a visibility fact and a
+# delete COMMAND.
 #
 # ⛔ `deferred` is deliberately absent: it already means *postponed / not done* in
 # `docs/ONTOLOGY.md`, the OPPOSITE of what the old rename table used `DEFERRED` for.
@@ -174,11 +175,12 @@ DISPOSITION_SECTION: dict[str, str] = {
 # that merely SITS under "### Removed".
 #
 # `DISCARDED` is Phase 2's signal to DELETE. beta's "### Removed" table contains one row
-# whose rationale says the opposite of its section — "Lifecycle and confidence wrangling
-# — reachable through the canonical two" — and that is a FOLD, not a delete. Sitting under
-# a heading is a LOCATION, not a clause: `list_drafts` and `quarantine_batch` were
-# rendered `DISCARDED` there while `promote_point`/`set_point_baseline` were flagged
-# contested in C3b, so the same row produced two different readings of the same ruling.
+# whose rationale says the opposite of its section — it names the capability as *state*
+# folded onto `update_knowledge` / `list_knowledge`, with "No separate verb" — and that
+# is a FOLD, not a delete. Sitting under a heading is a LOCATION, not a clause:
+# `list_drafts` and `quarantine_batch` were rendered `DISCARDED` there while
+# `promote_point`/`set_point_baseline` were flagged contested in C3b, so the same row
+# produced two different readings of the same ruling.
 #
 # The check is a DENYLIST rather than an allowlist because retention is phrased a small
 # closed number of ways in these docs ("reachable", "kept", "live" …) while removal is
@@ -189,6 +191,9 @@ RETENTION_MARKERS = (
     "reachable", "kept", "relocated", "not discarded", "live", "unlisted",
     "survives", "retained", "remains", "stays", "continues to serve",
     "still serves",
+    # The fold vocabulary the w11 row now uses: a capability retained as a FIELD on the
+    # general update, selected by a FILTER on the general list — never a separate verb.
+    "field on", "fields on", "no separate verb", "filter on",
 )
 
 
@@ -227,8 +232,8 @@ UNBACKED_REASON = {
 # C6 — the lifecycle/confidence FOLD, and its three-way disagreement.
 #
 # beta's "### Removed" row filed `promote_point`, `set_point_baseline`, `list_drafts` and
-# `quarantine_batch` under "reachable through the canonical two" without NAMING a
-# destination, so they rendered as an open finding. Three of the project's own docs
+# `quarantine_batch` as *reachable* without NAMING a destination, so they rendered as an
+# open finding. Three of the project's own docs
 # disagreed about the fold:
 #   * `canonical-mcp-tools.md` row 17 (owner-approved 2026-09-18): `revise_knowledge`
 #     ABSORBS `promote_point` and `set_point_baseline`;
@@ -1361,8 +1366,8 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
 
     # 8b. A `DISCARDED` disposition must be supported by the row's CLAUSE, not only by
     #     its location. Sitting under "### Removed" is where the row IS; the rationale is
-    #     what it SAYS. beta's w11 row sits under "### Removed" while saying the
-    #     capability is "reachable through the canonical two" — a FOLD, not a delete, and
+    #     what it SAYS. beta's w11 row sits under "### Removed" while naming the
+    #     capability as *state* folded onto the general update — a FOLD, not a delete, and
     #     `DISCARDED` is Phase 2's signal to DELETE. The inverse is checked too, so a
     #     `CONTESTED` disposition cannot be applied to a region that says nothing about
     #     retention.
@@ -1489,10 +1494,11 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         + ", ".join(f"`{v}`" for v in DELETE_VALUES) + " |",
         "",
         "The axes are independent, and that is the point: `DISCARDED` used to mean both "
-        "\u201cnot on the public surface\u201d and \u201cDELETE this\u201d at once, which "
-        "nearly deleted three shipping methods. Now the visibility is `internal` **and** "
-        "the delete instruction is `delete`, each in its own cell. A `—` in an axis cell "
-        "means the doc states nothing for that axis (an `unbacked` or `contested` row).",
+        "\u201cnot on the public surface\u201d and \u201cDELETE this\u201d at once, so one "
+        "word carried a visibility fact and a delete COMMAND. Now the visibility is "
+        "`internal` **and** the delete instruction is `delete`, each in its own cell. A "
+        "`—` in an axis cell means the doc states nothing for that axis (an `unbacked` "
+        "or `contested` row).",
         "",
         "`Target` names the destination method; `—` means no destination is stated. The "
         "canonical inventory's group names are an **earlier sketch** "
@@ -1659,8 +1665,8 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "",
         "### C6 — the lifecycle/confidence fold (the former `CONTESTED` rows)",
         "",
-        "beta's `### Removed` row filed these under “reachable through the canonical two”",
-        "without NAMING a destination, so they were an open finding — and the project's",
+        "beta's `### Removed` row filed these as *reachable* without NAMING a destination,",
+        "so they were an open finding — and the project's",
         "own docs disagreed about the fold (the approved MCP list absorbed two into",
         "`revise_knowledge`; beta then SPLIT `revise_knowledge` into `update_knowledge` +",
         "`supersede_knowledge`, so the approved absorber's name no longer exists; the",

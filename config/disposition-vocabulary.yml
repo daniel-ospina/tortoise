@@ -22,7 +22,8 @@
 # A single flat disposition value conflates three independent facts. The observed harm
 # is real: `DISCARDED` was consumed as a COMMAND (`tools/sdk_rename_table.py` —
 # "DISCARDED is Phase 2's signal to DELETE"), so "not on the public surface" and
-# "delete this" were spelled the same way — which nearly deleted three shipping methods.
+# "delete this" were spelled the same way — one word carrying a visibility fact and a
+# delete COMMAND.
 #
 # OVERRIDES: a single flat lifecycle enum (the common convention — an AIP-style
 # "Stability levels" list alone) — disposition is modelled as orthogonal axes because

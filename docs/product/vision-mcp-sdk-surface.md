@@ -87,8 +87,7 @@ are correctly `REMOVED`. **They are one of the genuine retirements** — `check_
 the proposed entry point and absorbs none of them. Two of the seven were **tenant-visible reads**
 (`onboarding_state`, `onboarding_github_status` — both `_ro()`, `http_policy=True`); they are
 **rehomed to the tenancy block (SDK/REST)**, so the capability survives while the MCP surface
-loses both reads. (An earlier draft of this footnote claimed
-`run_onboarding` was never in the approved list; that was false and is corrected here.)
+loses both reads.
 
 **`98 − 26 = 72 retired` is wrong** and circulated in earlier drafts: 14 retire, 2 are tenancy-only,
 1 is absorbed into a builder-only SDK method that is not on the MCP, and 81 are
@@ -134,10 +133,10 @@ and it needs a `team:manage`-scoped key, so it is **not** a universal self-heal 
 
 `docs/product/canonical-mcp-tools.md` is **owner-approved and merged**, and it carried five items
 left **open**. **All five are now settled by an owner ruling:** `graph_set_recording` on
-2026-09-21, and the remaining four on **2026-09-22**. The beta target had already made a call on
-the four; the ruling is what made it the surface, and the approved doc is updated to match. **A
-draft making a call does not resolve an owner-open item** — the rule still holds, and it is why
-this section records the settlement rather than silently closing the rows.
+2026-09-21, and the remaining four on **2026-09-22** (both recorded on **#4282**). The beta target
+had already made a call on the four; the ruling is what made it the surface, and the approved doc
+is updated to match. **A draft making a call does not resolve an owner-open item — an owner ruling
+does.**
 
 The rule the four applied: **containers may be on the MCP; account tenancy is not.** A container
 is fine on the agent surface when it is operator-only and never handed to a tenant

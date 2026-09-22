@@ -1941,12 +1941,13 @@ def test_validate_rows_rejects_a_discarded_row_whose_clause_says_reachable(
         generator_module) -> None:
     r"""P1-4: a DISCARDED region must SAY removal — sitting under "### Removed" is not enough.
 
-    beta's w11 row sits under "### Removed" but its rationale says the capability is
-    "reachable through the canonical two" — a FOLD, not a delete. `list_drafts` and
-    `quarantine_batch` were rendered DISCARDED (Phase 2's DELETE signal) with no
-    contested flag at all, while `promote_point`/`set_point_baseline` were surfaced only
-    because the BRIDGE happens to bind them. The guard must reject rendering that row
-    DISCARDED, and the four rows are the ones the C6 fold record now names.
+    beta's w11 row sits under "### Removed" but its rationale names the capability as
+    *state* folded onto `update_knowledge` / `list_knowledge` with "No separate verb" —
+    a FOLD, not a delete. `list_drafts` and `quarantine_batch` were rendered DISCARDED
+    (Phase 2's DELETE signal) with no contested flag at all, while
+    `promote_point`/`set_point_baseline` were surfaced only because the BRIDGE happens
+    to bind them. The guard must reject rendering that row DISCARDED, and the four rows
+    are the ones the C6 fold record now names.
     """
     rows, targets = _rows_for_validation(generator_module)
     assert generator_module._validate_rows(rows, targets) == []
@@ -2170,8 +2171,8 @@ def test_section_prose_paragraphs_are_read() -> None:
         "(`update_knowledge`, `refresh_confidence`, `write_knowledge_batch`, "
         "`index_sources_from_directory`) — the canonical doc itself says beta governs "
         "where the two disagree, and records the renames.",
-        "beta's `### Removed` row filed these under “reachable through the canonical two”\n"
-        "without NAMING a destination, so they were an open finding — and the project's\n"
+        "beta's `### Removed` row filed these as *reachable* without NAMING a destination,\n"
+        "so they were an open finding — and the project's\n"
         "own docs disagreed about the fold (the approved MCP list absorbed two into\n"
         "`revise_knowledge`; beta then SPLIT `revise_knowledge` into `update_knowledge` +\n"
         "`supersede_knowledge`, so the approved absorber's name no longer exists; the\n"
@@ -2253,10 +2254,10 @@ def test_legend_structural_prose_and_reproduce_block_are_read() -> None:
         assert row in doc, f"an axis legend row changed or was dropped: {row}"
     assert (
         "The axes are independent, and that is the point: `DISCARDED` used to mean both "
-        "“not on the public surface” and “DELETE this” at once, which nearly deleted "
-        "three shipping methods. Now the visibility is `internal` **and** the delete "
-        "instruction is `delete`, each in its own cell. A `—` in an axis cell means the "
-        "doc states nothing for that axis (an `unbacked` or `contested` row)."
+        "“not on the public surface” and “DELETE this” at once, so one word carried a "
+        "visibility fact and a delete COMMAND. Now the visibility is `internal` **and** "
+        "the delete instruction is `delete`, each in its own cell. A `—` in an axis cell "
+        "means the doc states nothing for that axis (an `unbacked` or `contested` row)."
     ) in doc, "the axes-independence rationale changed or was dropped"
     assert (
         "`Target` names the destination method; `—` means no destination is stated."

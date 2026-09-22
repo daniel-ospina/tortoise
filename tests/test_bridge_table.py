@@ -686,6 +686,13 @@ def test_the_d2c_disclosure_names_the_sibling_wrong_destinations() -> None:
         f"{sorted(set(parsed) ^ set(CONTESTED_DESTINATION))}"
     )
     for tool, (reading, _authority) in CONTESTED_DESTINATION.items():
+        # INDEPENDENTLY pinned: the reading must be the documented `update_knowledge` and
+        # must DIFFER from the map's value. Without this, setting the reading equal to the
+        # map value renders a self-contradictory "wrong destination" row green.
+        assert reading == "update_knowledge" and reading != DESTINATION[tool], (
+            f"the documented reading for {tool} must be `update_knowledge` and must differ "
+            f"from the map's {DESTINATION[tool]!r} — otherwise the disclosure is vacuous"
+        )
         dest, rendered_reading = parsed[tool]
         assert dest == DESTINATION[tool], (
             f"§D2c says the map carries {dest} for {tool}; the map says {DESTINATION[tool]} "

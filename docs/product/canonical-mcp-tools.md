@@ -19,12 +19,19 @@ related:
   - "#4114"
 ---
 
-# Canonical MCP tool list — 23 tools
+# Canonical MCP tool list — 23 proposed tools (the beta target is 26)
 
 **Owner-approved 2026-09-18.** This is the target MCP surface. Everything not on this
 list is retired, folded into a member below, or archived. The surface is frozen in both
 directions until this list is executed — see `docs/product/mcp-sdk-surface.md` (the
 generated view of the current baseline) and the gate in `tools/surface-guard.py`.
+
+**Amended 2026-09-22** (owner ruling, recorded on #4282): the four placement items this
+document left **OPEN** are settled — `manage_deployment` is **off the MCP**,
+`run_onboarding` is **dropped for `check_connection`**, and `packs_list`/`pack_install` are
+**SDK/REST, post-beta** (#4663). The **23** is this list's own proposal count; the **MCP
+target is 26**. `approved: 2026-09-18` above stays the original ruling date; this paragraph
+records the amendment.
 
 > This document is the **approval record**, not the generated baseline. The generated
 > list of what exists *today* is `docs/product/mcp-sdk-surface.md`, rendered from
