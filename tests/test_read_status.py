@@ -32,7 +32,10 @@ pytest output are recorded in the PR body / the lane report):
   (two on ``tortoise_fts_query``, one on ``recall_state``) stay green under
   that mutation, as does the hosted-route ON test — it monkeypatches
   ``_data_sdk`` with a fake that writes the term itself, so the real
-  ``_with_read_status`` is never invoked.
+  ``_with_read_status`` is never invoked. #4028's vector-floor return is
+  covered too (``test_state_vector_floor_empty_is_an_answered_read``): it is
+  a data-returning path of ``tortoise_fts_query`` and REDs under this
+  mutation like the rest.
 
 These run on the embedded lane (``TORTOISE_TEST_CARVE_OUT=1``) or a
 ``TORTOISE_DB_URI`` (``tests/conftest.py`` session gate).
@@ -40,7 +43,9 @@ These run on the embedded lane (``TORTOISE_TEST_CARVE_OUT=1``) or a
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
+import numpy as np
 import pytest
 
 from tortoise import status_vocabulary
@@ -67,6 +72,41 @@ def _no_embedder(monkeypatch):
     """The dense leg cannot run — the #2573/#2898 degrade class."""
     monkeypatch.setattr(
         EmbeddingModel, "get", classmethod(lambda cls, load_timeout=None: None))
+
+
+class _StubEmbedder:
+    """Deterministic 384-dim encoder — a healthy embedder with no HF load.
+
+    Same shape as ``tests/test_2952_degraded_read.py::_FakeEmbedder``, kept
+    local so this module carries no cross-test import. Every text maps to a
+    sha256-derived vector, so a query and a document are never cosine-1.0 —
+    which is what lets a floor of 1.0 empty the leg deterministically.
+    """
+
+    DIM = 384
+
+    def encode(self, texts, batch_size=32, show_progress_bar=False):
+        rows = []
+        for text in texts:
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            raw = (digest * (self.DIM // len(digest) + 1))[:self.DIM]
+            rows.append(np.frombuffer(raw, dtype=np.uint8).astype(np.float64))
+        return np.asarray(rows)
+
+
+def _pin_embedder(monkeypatch):
+    """Pin a HEALTHY deterministic embedder so the dense leg actually RUNS.
+
+    Patches the singleton, which both the store write path
+    (``compute_embedding`` → ``_encode``) and the query path resolve through,
+    so a created Point carries a vector and the query gets one too.
+    """
+    embedder = _StubEmbedder()
+    monkeypatch.setattr(
+        EmbeddingModel, "get",
+        classmethod(lambda cls, load_timeout=None: embedder))
+    EmbeddingModel._reset()
+    return embedder
 
 
 def _unopenable_store(monkeypatch, sdk):
@@ -378,6 +418,55 @@ class TestReadPathStates:
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] == STATUS_EMPTY
+        finally:
+            sdk.close()
+
+    def test_state_vector_floor_empty_is_an_answered_read(
+            self, sdk_factory, monkeypatch):
+        """#4028's floor-emptied vector leg is an ANSWER, and every answer
+        carries a term.
+
+        The merge that composed main's ``relevance_floor_empty`` return with
+        this branch's status sink left that one data-returning branch
+        unwrapped — so the hosted route's unguarded ``status_out["status"]``
+        raised ``KeyError`` (a 500 on the public route) whenever the floor
+        removed every neighbour. This drives the REAL ``tortoise_fts_query``:
+        a healthy embedder puts a vector on the Point, the query has no FTS
+        match, and a floor of 1.0 empties the vector leg — the exact state the
+        composed branch exists for.
+        """
+        _pin_embedder(monkeypatch)
+        monkeypatch.setenv("TORTOISE_VECTOR_MIN_SIMILARITY", "1.0")
+        sdk = sdk_factory()
+        try:
+            sdk.create_point("statement", "alpha beta gamma waves")
+            out: dict = {}
+            rows = sdk.tortoise_fts_query(
+                "zzzqunmatchedtoken", read_status_out=out, limit=5)
+            assert rows == []
+            # the sink IS set, with a term from the four-term vocabulary
+            assert out["status"] in READ_STATUSES
+            # reached-and-nothing-relevant is `empty`, never a leg failure
+            assert out["status"] == STATUS_EMPTY
+        finally:
+            sdk.close()
+
+    def test_recall_state_never_emits_a_null_composite(
+            self, sdk_factory, monkeypatch):
+        """The composite guard: if a leg's return path ever escapes the
+        status contract (the ``relevance_floor_empty`` return did, before the
+        merge fix), ``combine_read_statuses(None, None)`` is ``None`` — and the
+        composite sink must still carry a term from the four-term vocabulary,
+        never ``null`` (the hosted route indexes it unguarded)."""
+        sdk = sdk_factory()
+        try:
+            # simulate a leg whose return path writes no term
+            monkeypatch.setattr(
+                sdk, "tortoise_fts_query", lambda *a, **k: [])
+            out: dict = {}
+            rows = sdk.recall_state("alpha", read_status_out=out, limit=5)
+            assert rows == []
+            assert out["status"] in READ_STATUSES
         finally:
             sdk.close()
 

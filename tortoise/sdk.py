@@ -13968,7 +13968,12 @@ class TortoiseSDK:
                     leg_trace.append(_trace_entry(
                         "fallback", ran=False, degraded=False,
                         reason="relevance_floor_empty", count=0))
-                return []
+                # A REACHED store that answered with nothing relevant is still
+                # an ANSWER — it must report a term like every other
+                # data-returning path here. The hosted route indexes
+                # ``status_out["status"]`` unguarded, so a missing term is a
+                # 500, not a null.
+                return _with_read_status([])
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
                 # #1375: serve from the cached lean corpus snapshot when
@@ -15234,6 +15239,13 @@ class TortoiseSDK:
             _composite = combine_read_statuses(
                 (_point_status or {}).get("status"),
                 (_object_status or {}).get("status"))
+            if _composite is None:
+                # Defect guard, not a state: every leg's return path writes
+                # its own term (see ``_with_read_status``), so a None
+                # composite means one path escaped that contract. Never emit
+                # ``null`` under the four-term vocabulary — describe the read
+                # the caller RECEIVES instead.
+                _composite = STATUS_AVAILABLE if out else STATUS_EMPTY
             if _composite == STATUS_AVAILABLE and not out:
                 _composite = STATUS_EMPTY
             read_status_out["status"] = _composite
