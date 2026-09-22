@@ -1109,14 +1109,17 @@ def _real_git_repo(
 # is nothing whose exactness has to be proven.
 
 
-def test_in_tree_record_out_is_refused(tmp_path, capsys):
+def test_in_tree_record_out_is_refused(tmp_path, monkeypatch, capsys):
     """An in-tree `--record-out` is a usage error: exit 2, and NO record written.
 
     This drives the PUBLIC entry point (`main`), so the path resolution the tool
     actually uses is the one under test, with an ABSOLUTE in-tree path so the
-    assertion does not depend on the pytest cwd. The refusal fires before any
-    measurement, so no test selection runs and no record is emitted.
+    assertion does not depend on the pytest cwd. The load ceiling is forced high so
+    the ONLY exit-2 route is the refusal — otherwise a loaded host's `environment
+    error` would satisfy the exit code and the test would prove nothing (a previous
+    cycle caught exactly this vacuity).
     """
+    monkeypatch.setattr(ee, "load1", lambda: 1e9)
     in_tree = ee.REPO_ROOT / "docs" / "evidence" / "3827-green.json"
     before = in_tree.exists()
 
@@ -1130,6 +1133,7 @@ def test_in_tree_record_out_is_refused(tmp_path, capsys):
     assert in_tree.exists() is before, "a refused invocation must write NO record"
     assert str(in_tree) in err, "the message must name the offending path"
     assert "inside the measured tree" in err, "the message must name what is wrong"
+    assert "usage error" in err, "it must be the USAGE error, not a load-ceiling error"
     assert "copy or upload" in err, "the message must say what to do instead"
     assert str(ee._default_record_out()) in err, "the message must name the default"
 
@@ -1138,6 +1142,211 @@ def test_in_tree_record_out_is_refused(tmp_path, capsys):
     # every --record-out, including the default, would still satisfy the asserts
     # above.
     ee._refuse_in_tree_record_out(ee._default_record_out(), ee.REPO_ROOT)
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_link_dotdot_record_out_is_refused(tmp_path, monkeypatch, capsys, relative):
+    """The bypass that killed the `abspath` prediction: `lnk/../x.json`.
+
+    `abspath` collapses the `..` LEXICALLY, before resolving `lnk`, so the guard
+    read "outside" while `os.replace` resolved `lnk` FIRST and only then applied
+    `..`, landing the record at `<tree>/x.json`. Both spellings are covered — an
+    ABSOLUTE path with the `..` inline, and a RELATIVE one with the cwd outside the
+    repo. Driven through `main` (exit code + message), with the ceiling forced high
+    so the only exit-2 route is the refusal.
+    """
+    monkeypatch.setattr(ee, "load1", lambda: 1e9)
+    docs = ee.REPO_ROOT / "docs"
+    assert docs.is_dir(), "the fixture needs a real in-tree symlink target"
+    workdir = tmp_path / "attack"
+    workdir.mkdir()
+    (workdir / "lnk").symlink_to(docs, target_is_directory=True)
+    name = "3827-link-dotdot.json"
+    in_tree = ee.REPO_ROOT / name
+    assert not in_tree.exists()
+
+    if relative:
+        monkeypatch.chdir(workdir)
+        attack = Path("lnk") / ".." / name
+    else:
+        attack = workdir / "lnk" / ".." / name
+
+    # The kernel truth the prediction must model: the write lands IN the tree. A
+    # guard that still collapsed `..` lexically would put this under `workdir`.
+    assert ee._written_location(attack) == Path(os.path.realpath(str(ee.REPO_ROOT))) / name, \
+        "the guard must resolve lnk BEFORE applying .. — this is the whole bypass"
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(attack),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 2
+    assert "usage error" in err, "it must be the USAGE error, not a load-ceiling error"
+    assert "inside the measured tree" in err, f"not the refusal: {err!r}"
+    assert not in_tree.exists(), "no in-tree file may appear (filesystem, not just rc)"
+
+
+def test_the_kernel_follows_the_link_then_applies_dotdot(tmp_path):
+    """The premise the guard must model, pinned on the REAL filesystem (in tmp).
+
+    This asserts the KERNEL behaviour that made `abspath` wrong: the write goes
+    beside the link TARGET's parent, and NOT beside the directory in which the `..`
+    is spelled. It is deliberately safe — the whole demonstration happens under
+    `tmp_path` — so a red run cannot dirty the checkout.
+    """
+    measured = tmp_path / "measured"
+    measured.mkdir()
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "lnk").symlink_to(measured, target_is_directory=True)
+    attack = base / "lnk" / ".." / "x.json"
+
+    assert ee._written_location(attack) == tmp_path / "x.json", \
+        "the prediction must match where the kernel writes"
+
+    ee._write_record({"k": 1}, attack)
+    assert (tmp_path / "x.json").is_file(), "the kernel lands it beside the link target"
+    assert not (base / "x.json").exists(), "abspath's lexical prediction is wrong"
+
+
+def _refused(path, *roots, cwd=None, monkeypatch=None):
+    if cwd is not None:
+        monkeypatch.chdir(cwd)
+    try:
+        ee._refuse_in_tree_record_out(path, *roots)
+    except ee.UsageError:
+        return True
+    return False
+
+
+def test_record_out_containment_matrix(tmp_path, monkeypatch):
+    """Every in-tree spelling is refused; every out-of-tree one is not.
+
+    Containment is decided by IDENTITY (the kernel's `samefile`), not by string
+    containment, so it is insensitive to both case and lexical divergence. The two
+    symlink rows are the ones a string test gets backwards in both directions: a
+    link INSIDE the root pointing OUT does not put the file in the root (the link
+    is followed), and a link OUTSIDE pointing IN does.
+    """
+    root = tmp_path / "measured"
+    (root / "docs" / "evidence").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    # A symlink INSIDE the measured root that points OUTSIDE it.
+    (root / "escape").symlink_to(outside, target_is_directory=True)
+    # A symlink OUTSIDE the measured root that points INSIDE it.
+    (outside / "enter").symlink_to(root / "docs", target_is_directory=True)
+    try:
+        case_insensitive = os.path.samefile(root, tmp_path / "MEASURED")
+    except OSError:
+        case_insensitive = False
+
+    must_refuse = [
+        ("plain absolute", root / "docs" / "evidence" / "x.json"),
+        ("the root itself", root),
+        ("a directory in the root", root / "docs"),
+        ("trailing slash", str(root / "docs") + "/"),
+        ("link then dotdot", outside / "enter" / ".." / "x.json"),
+        ("through a link into the root", outside / "enter" / "x.json"),
+    ]
+    if case_insensitive:
+        must_refuse.append(("case-variant root", tmp_path / "MEASURED" / "x.json"))
+    else:
+        # Case-SENSITIVE filesystem: `MEASURED` is genuinely a different tree, so
+        # refusing it would be a false positive. Identity is what the check keys on.
+        assert not _refused(tmp_path / "MEASURED" / "x.json", root, monkeypatch=monkeypatch)
+
+    for label, path in must_refuse:
+        assert _refused(path, root, monkeypatch=monkeypatch), f"not refused: {label} -> {path}"
+
+    # Relative spellings, resolved against a cwd that IS the measured tree.
+    assert _refused(Path("docs") / "x.json", root, cwd=root, monkeypatch=monkeypatch)
+    assert _refused(Path("."), root, cwd=root, monkeypatch=monkeypatch)
+
+    must_accept = [
+        ("outside", outside / "x.json"),
+        ("inside->outside link", root / "escape" / "x.json"),
+        ("space in name", outside / "a b" / "x.json"),
+    ]
+    for label, path in must_accept:
+        assert not _refused(path, root, monkeypatch=monkeypatch), \
+            f"wrongly refused: {label} -> {path}"
+
+
+def test_post_write_check_deletes_an_in_tree_record(tmp_path, monkeypatch, capsys):
+    """The fail-closed cross-check: a record past the PRE-write prediction is
+    observed after the write and DELETED (#4203).
+
+    The pre-write refusal is monkeypatched to a no-op — the point is the POST-write
+    fact check, which must hold even when the prediction is wrong. On the pre-fix
+    code the record is simply written and `main` returns the record's own exit code,
+    so this test's `rc == 2` and `not target.exists()` both FAIL without the fix.
+    The whole case lives under `tmp_path`: a red run cannot dirty the checkout.
+    """
+    measured = tmp_path / "measured"
+    measured.mkdir()
+    target = measured / "sub" / "rec.json"
+
+    monkeypatch.setattr(ee, "_refuse_in_tree_record_out", lambda *a, **k: None)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "schema": "embedded-evidence/1",
+        "pin": {"measured_root": str(measured)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(target),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 2, "an in-tree record must be a usage error, not the record's exit code"
+    assert not target.exists(), "the post-write check must DELETE the in-tree record"
+    assert not target.parent.exists() or not list(target.parent.iterdir()), \
+        "no residue (temp file) may survive the deletion"
+    assert "inside the measured tree" in err, "the error must name what was wrong"
+    assert "deleted" in err, "the error must say the record was deleted"
+
+
+def test_post_write_check_guards_repo_root_too(tmp_path, monkeypatch, capsys):
+    """The post-write check covers `REPO_ROOT`, not only the measured tree.
+
+    `pin.post_review_dirty` is measured on the INVOKING checkout even when `--ref`
+    measures a detached worktree, so a record written into `REPO_ROOT` dirties the
+    pin whether or not `--ref` was given. `REPO_ROOT` is redirected to a throwaway
+    tree so the test cannot dirty the real checkout.
+    """
+    fake_repo = tmp_path / "fake-repo"
+    fake_repo.mkdir()
+    measured = tmp_path / "measured"          # NOT inside `fake_repo`
+    measured.mkdir()
+    target = fake_repo / "rec.json"
+
+    monkeypatch.setattr(ee, "REPO_ROOT", fake_repo)
+    monkeypatch.setattr(ee, "_refuse_in_tree_record_out", lambda *a, **k: None)
+    monkeypatch.setattr(ee, "_build_record", lambda args: {
+        "pin": {"measured_root": str(measured)},
+        "red": {"cause": None},
+        "load": {"red_band": None},
+        "verdict": {"status": "ALL-GREEN", "closes_issue": False, "violations": []},
+        "exit_code": 3,
+    })
+
+    rc = ee.main([
+        "run", "--selection", "family", "--n", "2",
+        "--record-out", str(target),
+    ])
+    err = capsys.readouterr().err
+
+    assert rc == 2, "a record inside REPO_ROOT must be refused"
+    assert not target.exists(), "the in-repo record must be deleted"
+    assert "inside the measured tree" in err
 
 
 def test_pin_detects_a_genuine_edit_and_ignores_the_out_of_tree_record(tmp_path, monkeypatch):
