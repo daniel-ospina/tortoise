@@ -734,8 +734,7 @@ class TestCliOnboardDbTarget:
         connection. `FalkorProjection.from_uri` is faked so no server is
         needed and the post-bind query can raise on demand.
         """
-        monkeypatch.setenv(
-            "TORTOISE_DB_URI", "docker://:pw@localhost:16399/uri_probe")
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:16399/uri_probe")
         _delenv_falkordb(monkeypatch)
 
         import tortoise.projection as _proj_mod
