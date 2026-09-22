@@ -331,6 +331,22 @@ function nameOf(node) {
 }
 
 /**
+ * The lower-cased CSP header name when `node` is a STRING LITERAL, else null.
+ *
+ * Header names are case-insensitive (RFC 9110), so a `"content-security-policy"`
+ * stamp is the same header as the canonical spelling; and a name held in a
+ * VARIABLE or built at runtime is unreadable to this scan. Both are treated as
+ * "may be the CSP header" rather than skipped: a browser INTERSECTS two CSP
+ * policies, so a beacon-less second stamp beside a valid one narrows the served
+ * policy and blocks the beacon.
+ */
+function cspHeaderName(node) {
+  return node?.type === 'StringLiteral' || node?.type === 'Literal'
+    ? String(node.value).toLowerCase()
+    : null
+}
+
+/**
  * Blank the given `[start, end)` ranges so the scan below sees structure, not text.
  */
 function withoutRanges(source, ranges) {
@@ -438,7 +454,10 @@ function stampCount(relPath) {
     if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
       const method = nameOf(node.callee.property)
       if (method === 'set' || method === 'append') {
-        if (nameOf(node.arguments?.[0]) === 'Content-Security-Policy' && isCspValue(node.arguments?.[1])) {
+        if (
+          cspHeaderName(node.arguments?.[0]) === 'content-security-policy' &&
+          isCspValue(node.arguments?.[1])
+        ) {
           count += 1
         }
       }
@@ -572,14 +591,18 @@ function stampConstants(relPath) {
     names.push(node.type === 'CallExpression' ? node.callee.name : node.name)
   }
   visitNodes(ast.program, (node) => {
-    if (node.type === 'ObjectProperty' && nameOf(node.key) === 'Content-Security-Policy') {
+    if (node.type === 'ObjectProperty' && String(nameOf(node.key) ?? '').toLowerCase() === 'content-security-policy') {
       record(node.value)
       return
     }
     if (node.type === 'CallExpression' && node.callee?.type === 'MemberExpression') {
       const method = nameOf(node.callee.property)
       if (method === 'set' || method === 'append') {
-        if (nameOf(node.arguments?.[0]) === 'Content-Security-Policy') record(node.arguments?.[1])
+        const name = cspHeaderName(node.arguments?.[0])
+        if (name === 'content-security-policy') record(node.arguments?.[1])
+        // An UNREADABLE header name (a variable, a concat) means this call may or
+        // may not stamp a CSP, so assuming it does not is a fail-open guess.
+        else if (name === null) names.push('(unreadable header name)')
       }
     }
   })
@@ -761,6 +784,35 @@ function normaliseCsp(value) {
   return value.replace(/\s+/g, ' ').replace(/;\s*$/, '').trim()
 }
 
+/**
+ * Duplicate declarations in a `_headers` file: a block PATH declared more than
+ * once, or more than one `Content-Security-Policy` line inside a block.
+ *
+ * `parseHeaders` is last-wins on both, so a duplicate is invisible to every
+ * assertion that reads the parsed form — but it is NOT inert: the edge joins
+ * matching rules (and repeated header lines) into one header, so a beacon-less
+ * duplicate would narrow the served policy while the guard stayed green.
+ */
+function headerDuplicates(relPath) {
+  const blocks = []
+  let current = null
+  for (const raw of readFileSync(join(repoRoot, relPath), 'utf8').split('\n')) {
+    if (!raw.trim() || raw.trim().startsWith('#')) continue
+    if (!/^\s/.test(raw)) {
+      current = { path: raw.trim(), csp: 0 }
+      blocks.push(current)
+      continue
+    }
+    if (!current) continue
+    if (raw.trim().toLowerCase().startsWith('content-security-policy:')) current.csp += 1
+  }
+  const paths = blocks.map((b) => b.path)
+  return [
+    ...paths.filter((p, i) => paths.indexOf(p) !== i).map((p) => `${p} (declared more than once)`),
+    ...blocks.filter((b) => b.csp > 1).map((b) => `${b.path} (${b.csp} Content-Security-Policy lines)`),
+  ]
+}
+
 /** Every JS/TS source file under both Pages projects' `functions/` trees. */
 const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mjs']
 
@@ -783,6 +835,25 @@ function functionFiles() {
     .flatMap((root) => walk(join(repoRoot, root)))
     .filter((f) => SOURCE_EXTENSIONS.some((ext) => f.endsWith(`.${ext}`)))
     .map((f) => relative(repoRoot, f))
+}
+
+/**
+ * Every `Content-Type` value in a file that is NOT a string literal — a variable,
+ * a concatenation, a forwarded upstream value. Such a value cannot be classified
+ * by a textual `html` scan, so the file has to be named instead (see
+ * `NON_LITERAL_CT` in the completeness test).
+ */
+function nonLiteralContentTypes(relPath) {
+  const src = commentStripped(relPath)
+  const out = []
+  const re =
+    /(?:\.(?:set|append)\(\s*["'`]Content-Type["'`]\s*,\s*|["'`]Content-Type["'`]\s*:\s*)([^,}\n]+)/g
+  let match
+  while ((match = re.exec(src))) {
+    const value = match[1].trim()
+    if (!/^["'`]/.test(value)) out.push(value.slice(0, 60))
+  }
+  return out
 }
 
 // ── 1. the comment stripper every source scan depends on ────────────────────
@@ -1071,6 +1142,20 @@ test('_headers values are byte-identical to the stamped constants', () => {
     'only the strict paths may detach the inherited policy (and each must re-add STRICT_CSP, ' +
       'asserted above) — a detach on any other block drops the CSP from that surface',
   )
+
+  // `parseHeaders` is LAST-wins on both a repeated block path and a repeated
+  // `Content-Security-Policy` line, so a beacon-less duplicate that comes FIRST is
+  // discarded by every scan above — while the edge JOINS matching rules and
+  // repeated header lines, so the served header would carry the beacon-less value
+  // and block the beacon with the whole suite green. Duplicates must not exist.
+  for (const rel of ['website/_headers', 'website/apps/dashboard/public/_headers']) {
+    assert.deepEqual(
+      headerDuplicates(rel),
+      [],
+      `${rel} declares a block or a CSP line more than once — the redundant copy is joined by ` +
+        `the edge (and dropped by this scan), so it is never a no-op`,
+    )
+  }
 })
 
 // ── 4b. every policy admits the PLATFORM-INJECTED beacon ──────────────────
@@ -1254,6 +1339,37 @@ test('every file that emits or serves HTML is in the guarded site list', () => {
     [...NON_HTML_FILES.keys()].filter((rel) => !mentionsHtml.includes(rel)).sort(),
     [],
     'these NON_HTML_FILES entries no longer mention HTML — drop the stale exemption',
+  )
+
+  // A Content-Type the scan cannot READ as a literal — a variable, a concat, a
+  // forwarded upstream value — is the other way to serve HTML without naming
+  // `html` anywhere (`"text/" + "ht" + "ml"`, or a `mime` variable). A textual
+  // mention scan is a heuristic, so the files that produce such a type are NAMED
+  // rather than assumed harmless: the classification is a decision, not an
+  // accident of spelling.
+  const NON_LITERAL_CT = new Map([
+    [
+      'website/apps/dashboard/functions/api/provision.ts',
+      'forwards the caller/upstream Content-Type through the proxy (JSON in practice)',
+    ],
+    [
+      'website/functions/blog/api/generate-cover.ts',
+      '`mime` comes from the cover image format (png/jpeg/webp), never html',
+    ],
+  ])
+  const unreadableCt = (rel) => nonLiteralContentTypes(rel).length > 0
+  assert.deepEqual(
+    functionFiles()
+      .filter((rel) => unreadableCt(rel) && !guarded.has(rel) && !NON_LITERAL_CT.has(rel))
+      .sort(),
+    [],
+    'these files set a Content-Type this scan cannot read as a literal and are not named — ' +
+      'name them (with the reason the type is never html) or make the value a literal',
+  )
+  assert.deepEqual(
+    [...NON_LITERAL_CT.keys()].filter((rel) => !unreadableCt(rel)).sort(),
+    [],
+    'these NON_LITERAL_CT entries no longer set a non-literal Content-Type — drop the stale exemption',
   )
 })
 
