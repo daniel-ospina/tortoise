@@ -19890,8 +19890,7 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 # session credential, so removing the exemption now would 403 the live
 # dashboard. It MUST be removed — emptying this allowlist, which is the
 # fail-closed default a future step inherits — once the deploy carrying #3913
-# reaches production (#3704 is the pre-#3913 writer removal; the live front
-# door is the frozen bundle, not a dashboard path).
+# reaches production.
 _DASHBOARD_WRITABLE_STEPS: frozenset[str] = frozenset({
     "catalog-presented",
 })
