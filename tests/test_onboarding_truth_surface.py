@@ -616,7 +616,7 @@ def _our_opens(opens, org_id: str = "org-truth") -> list:
             if org_id in (o[0] or "") or org_id in (o[1] or "")]
 
 
-def _stub_mintable_org_graph(monkeypatch, *, listed=()):
+def _stub_mintable_org_graph(monkeypatch, *, listed=(), org_id: str = "org-truth"):
     """Route-path stubs for the point write that model graph MATERIALIZATION
     faithfully, so the auto-file's real opener selection is OBSERVABLE.
 
@@ -658,6 +658,16 @@ def _stub_mintable_org_graph(monkeypatch, *, listed=()):
     written: list[tuple] = []
     opens: list[tuple] = []
     state = set(listed)
+    # The names THIS tenant can materialize. Background traffic must not reach
+    # the listing double: CI runs the retention sweep live (`TORTOISE_TEST_
+    # SWEEP_TEAM_STRAYS=1`, #1886), and its per-graph opens of the shared DB's
+    # OTHER tenants (`org_<hex>`) would otherwise be added to `state` by the
+    # materialization model below — measured in CI `test (b)`: the "listing is
+    # unchanged" assertion failed with 5 stray `org_<hex>` names, in a test
+    # whose `opens` assertion had already been scoped and passed. Scoping the
+    # materialization keeps every RED mutation visible: a minted
+    # `org_{org_id}` / `team_{org_id}` is still recorded.
+    tenant_names = {f"org_{org_id}", f"team_{org_id}"}
 
     class _Db:
         def list_graphs(self):
@@ -674,7 +684,8 @@ def _stub_mintable_org_graph(monkeypatch, *, listed=()):
     class _SdkHandle:
         def __init__(self, name):
             self._name = name
-            state.add(name)        # model _ensure_indexes() materialization
+            if name in tenant_names:   # this tenant only — see `tenant_names`
+                state.add(name)        # model _ensure_indexes() materialization
 
         def _get_proj(self):
             return _Proj(self._name)
