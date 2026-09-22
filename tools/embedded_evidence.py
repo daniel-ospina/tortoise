@@ -1236,12 +1236,91 @@ def _tool_version() -> str:
 
 
 def _write_record(rec: dict, out: Path) -> None:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(out.parent), prefix=".rec-", suffix=".tmp")
-    with os.fdopen(fd, "w") as fh:
-        json.dump(_jsonable(rec), fh, indent=2, sort_keys=False)
-        fh.write("\n")
-    os.replace(tmp, out)
+    """Write `rec` to `out` atomically, via a temp in `out`'s PHYSICAL parent.
+
+    The temp must be created in the parent the KERNEL will use, not the lexical
+    one. `mkstemp` normalises its `dir` with `os.path.abspath` — LEXICALLY — while
+    `os.replace(tmp, out)` resolves every directory component of `out` through
+    symlinks. With a symlink followed by `..` the two disagree:
+
+        tree/lnk -> <outside>
+        out = tree/lnk/../destdir
+
+    kernel-resolves the destination to `<outside>/../destdir` (outside the tree,
+    so the pre-write refusal is correctly silent), while `abspath` collapses
+    `lnk/..` to `<tree>` — so the temp file, holding the COMPLETE record JSON, was
+    created INSIDE the measured tree and left there when `os.replace` failed
+    (#4585). `realpath` resolves `..` AFTER the symlink, exactly as the kernel
+    does, so the temp and the destination share one parent.
+
+    If the write or the replace fails, the temp is unlinked before the error is
+    re-raised: a partial record must not survive as dirt in a tree the pin
+    measures. `os.unlink` is best-effort — the caller (`main`) sweeps any
+    `.rec-*` residue that this cleanup could not remove.
+    """
+    parent = Path(os.path.realpath(os.path.dirname(os.fspath(out))))
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=".rec-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(_jsonable(rec), fh, indent=2, sort_keys=False)
+            fh.write("\n")
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# `tempfile.mkstemp` names its file `prefix + 8 random chars + suffix`, so a temp
+# THIS tool created is always `.rec-` + exactly 8 of `[a-z0-9_]` + `.tmp`. Matching
+# that shape (rather than an open `.rec-*.tmp` glob) keeps the backstop sweep from
+# deleting a user file that merely shares the prefix: the earlier glob removed any
+# `.rec-anything.tmp` — the tool cleaning up something it never created (#4585).
+_REC_RESIDUE_RE = re.compile(r"\A\.rec-[a-z0-9_]{8}\.tmp\Z")
+
+
+def _sweep_record_residue(*measured_roots: Path) -> list[Path]:
+    """Delete residue `_write_record` left inside a measured tree; return removals.
+
+    A temp file holds the COMPLETE record JSON, so a survivor is exactly the
+    "the tool's own record is part of the dirt it measures" condition #4203 exists
+    to eliminate. `_write_record` now creates the temp in the destination's
+    physical parent and unlinks it on failure, so this is the BACKSTOP for residue
+    that cleanup could not remove (its `os.unlink` failed, or an earlier invocation
+    crashed). Every directory a temp can be created in is swept: the measured roots
+    themselves (a lexical collapse such as `tree/lnk/..` places the temp in the tree
+    ROOT) and the destination's physical parent (where the temp goes when `out`
+    resolves to a nested directory). The sweep is non-recursive, and it removes a
+    file only when its name matches `_REC_RESIDUE_RE` — the exact shape
+    `mkstemp(prefix=".rec-", suffix=".tmp")` emits — so it cannot touch anything
+    else the tree contains. The residual blast radius is stated where it bites: a
+    file that is ITSELF a genuine `.rec-XXXXXXXX.tmp` is indistinguishable from one
+    of our temps and is removed; nothing outside that exact shape is.
+    """
+    removed: list[Path] = []
+    for root in measured_roots:
+        root_real = Path(os.path.realpath(os.fspath(root)))
+        if not root_real.is_dir():
+            continue
+        try:
+            names = sorted(os.listdir(root_real))
+        except OSError:
+            # Best-effort: the sweep runs inside the write-failure handler, so it
+            # must not turn a refusal into a traceback.
+            continue
+        for name in names:
+            if not _REC_RESIDUE_RE.match(name):
+                continue
+            candidate = root_real / name
+            try:
+                os.unlink(candidate)
+            except OSError:
+                continue
+            removed.append(candidate)
+    return removed
 
 
 def _default_record_out() -> Path:
@@ -1343,6 +1422,35 @@ def _verify_record_landed_outside(out: Path, *measured_roots: Path) -> None:
                 f"tree (the default is {_default_record_out()}) and copy or upload "
                 "it afterwards."
             )
+
+
+def _remove_in_tree_record(out: Path, *measured_roots: Path) -> list[Path]:
+    """Best-effort removal of a record that landed inside a measured tree.
+
+    `_verify_record_landed_outside` already unlinks it, but that unlink is
+    best-effort (the `OSError` is suppressed), and #4585 measured the consequence:
+    with the unlink failing, the verification still raised `UsageError` and `main`
+    returned 2 while the COMPLETE record JSON survived inside the measured tree.
+    The caller runs this during cleanup so the deletion is retried rather than
+    abandoned after one attempt.
+
+    Returns the paths that could NOT be removed — empty on success — so the caller
+    reports the residual honestly instead of implying a clean tree. A path that is
+    not inside a measured tree, or does not exist, is nothing to do: the write
+    never landed it there.
+    """
+    landed = Path(os.path.realpath(os.fspath(out)))
+    in_tree = any(
+        _inside_tree(landed, Path(os.path.realpath(os.fspath(root))))
+        for root in measured_roots
+    )
+    if not in_tree or not os.path.lexists(os.fspath(out)):
+        return []
+    try:
+        os.unlink(out)
+    except OSError:
+        return [out]
+    return []
 
 
 def _refuse_in_tree_record_out(out: Path, *measured_roots: Path) -> None:
@@ -1755,18 +1863,70 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     out = args.record_out or _default_record_out()
+    measured_roots = [REPO_ROOT, Path(rec["pin"]["measured_root"])]
     try:
         _write_record(rec, out)
         # #4203: the pre-write refusal PREDICTS the destination; this OBSERVES it.
         # A record that slipped past the prediction is deleted and refused here, so
         # no future spelling of the path can leave the tool's own record as dirt in
         # a tree it is measuring.
-        _verify_record_landed_outside(
-            out, REPO_ROOT, Path(rec["pin"]["measured_root"]),
+        _verify_record_landed_outside(out, *measured_roots)
+    except BaseException as exc:
+        # #4585: cleanup is UNCONDITIONAL on failure — the exception TYPE cannot
+        # tell us whether residue survives, because BOTH unlinks that decide it are
+        # best-effort: `_write_record` suppresses its own, and
+        # `_verify_record_landed_outside` suppresses its own. A non-OSError from
+        # `json.dump` (or a `UsageError` from the post-write verification) whose
+        # unlink failed therefore used to escape with the temp — holding the
+        # COMPLETE record — still inside the measured tree. Sweep FIRST, then map
+        # the exit, so no failure path returns or raises without having cleaned up.
+        swept = _sweep_record_residue(
+            *measured_roots,
+            # The physical parent the temp is created in, so a temp that resolved
+            # to a NESTED in-tree directory (a symlink swapped after the pre-write
+            # refusal) is swept too — the measured roots alone only reach the
+            # top-level collapse.
+            Path(os.path.realpath(os.path.dirname(os.fspath(out)))),
         )
-    except UsageError as exc:
-        print(f"usage error: {exc}", file=sys.stderr)
-        return 2
+        if isinstance(exc, UsageError):
+            # #4585 (b): the record itself landed inside the tree and the
+            # verification's own unlink failed. Retry the removal here; if it STILL
+            # cannot be removed, say so rather than imply a clean tree.
+            survivors = _remove_in_tree_record(out, *measured_roots)
+            print(f"usage error: {exc}", file=sys.stderr)
+            if survivors:
+                print(
+                    "error: the in-tree record at "
+                    f"{', '.join(str(s) for s in survivors)} could NOT be removed; "
+                    "the tool's own bytes are still inside the measured tree. "
+                    "Delete it manually before trusting the pin.",
+                    file=sys.stderr,
+                )
+            return 2
+        if isinstance(exc, OSError):
+            # #4585: a failed write is a REFUSAL, never a traceback. The environment
+            # made certification impossible, so the exit code is 2 (environment
+            # error) — but the operator must be told WHAT failed, WHY it matters and
+            # WHAT to do, and any `.rec-*` temp left inside a measured tree has been
+            # swept above: the temp holds a complete record, and leaving it would
+            # make the tool's own bytes part of the dirt the pin measures.
+            detail = (
+                f"removed {len(swept)} temp file(s) from the measured tree"
+                if swept else "no temp residue was found in the measured tree"
+            )
+            print(
+                f"error: could not write the record to {out}: {exc}. "
+                "The record was NOT written, so no certification exists for this "
+                f"head ({detail}). Write the record outside the measured tree (the "
+                f"default is {_default_record_out()}) and re-run; if the destination "
+                "already exists it must be a FILE, not a directory.",
+                file=sys.stderr,
+            )
+            return 2
+        # Anything else (MemoryError, TypeError, KeyboardInterrupt …): the sweep
+        # has already run, so the bytes are gone; re-raise rather than mislabel it
+        # as a refusal.
+        raise
     print(json.dumps({
         "record": str(out),
         "status": rec["verdict"]["status"],
