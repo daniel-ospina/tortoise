@@ -75,36 +75,88 @@ def _doc_text(name: str) -> str:
     """The source text a citation names, read fresh at build time."""
     return (BETA_DOC if name == BETA else CANON_DOC).read_text(encoding="utf-8")
 
-# The dispositions that are not a target method name. Every one is an OWNER
-# RULING already recorded in an owner-approved doc, transcribed here — none is a
-# design decision made by this generator:
-#   UNCHANGED  — the method is already on the target surface.
-#   DISCARDED  — the method retires. beta's "Discarded — and why" is the only
-#                section that may back this: DISCARDED is Phase 2's signal to DELETE.
-#   UNBACKED   — no doc states a destination. A finding, not an answer.
-#   DEFERRED   — beta's "Named but not solved": the capability is real and LIVE,
-#                filed post-beta and unlisted until then. NOT deleted — it is not a
-#                DISCARDED row and must not be rendered as one, or Phase 2 deletes a
-#                capability the owner ruled is merely unlisted.
-#   RELOCATED  — beta's "Kept and relocated" ruling: the code must survive but moves
-#                OUT of the product SDK (it is test infrastructure). It is neither a
-#                target (it is not on the 40) nor deleted (the code is kept), so
-#                neither UNCHANGED nor DISCARDED is honest.
+# ─────────────────────────────────────────────────────────────────────
+# THE DISPOSITION VOCABULARY — declared in `config/disposition-vocabulary.yml` and
+# READ from there, never restated here. The field models a disposition as three
+# ORTHOGONAL AXES (lifecycle, visibility, basis) plus an explicit DELETE instruction;
+# a single flat enum was the defect. The observed harm: `DISCARDED` was consumed as a
+# COMMAND ("Phase 2's signal to DELETE"), so "not on the public surface" and "delete
+# this" were spelled the same way — which nearly deleted three shipping methods.
+#
+# ⛔ `deferred` is deliberately absent: it already means *postponed / not done* in
+# `docs/ONTOLOGY.md`, the OPPOSITE of what the old rename table used `DEFERRED` for.
+# The state it named is `visibility: unlisted`.
+# ─────────────────────────────────────────────────────────────────────
+VOCAB_PATH = ROOT / "config" / "disposition-vocabulary.yml"
+
+
+def _load_vocabulary() -> dict:
+    """The declared vocabulary, read from its one authoritative home."""
+    import yaml
+
+    if not VOCAB_PATH.is_file():
+        raise SystemExit(
+            f"the disposition vocabulary is UNDECLARED: {VOCAB_PATH} is missing. "
+            "The axes and the disposition combinations must have one home."
+        )
+    doc = yaml.safe_load(VOCAB_PATH.read_text(encoding="utf-8"))
+    for key in ("axes", "delete_instruction", "dispositions"):
+        if not isinstance(doc, dict) or key not in doc:
+            raise SystemExit(f"{VOCAB_PATH.name} declares no `{key}` section")
+    for axis in ("lifecycle", "visibility"):
+        if "values" not in doc["axes"].get(axis, {}):
+            raise SystemExit(f"{VOCAB_PATH.name} declares no `{axis}` values")
+    return doc
+
+
+VOCAB = _load_vocabulary()
+AXIS_VALUES = {axis: tuple(spec["values"]) for axis, spec in VOCAB["axes"].items()}
+DELETE_VALUES = tuple(VOCAB["delete_instruction"]["values"])
+
+# The disposition KEYS. A target method name in a row's authored value means RENAMED
+# (or UNCHANGED when the target IS the method); everything else is one of these keys.
 UNCHANGED = "UNCHANGED"
+RENAMED = "RENAMED"
 DISCARDED = "DISCARDED"
-UNBACKED = "UNBACKED"
-DEFERRED = "DEFERRED"
+UNLISTED = "UNLISTED"  # the state the old vocabulary spelled `DEFERRED`
 RELOCATED = "RELOCATED"
-# CONTESTED — the doc files the method under "### Removed" but its own rationale cell
-# says the capability is *reachable*, which is a FOLD, not a delete. It is neither a
-# target (no destination is named) nor DISCARDED (DISCARDED is Phase 2's signal to
-# DELETE, and the owner ruled the capability is reachable). It is an open finding.
+UNBACKED = "UNBACKED"
 CONTESTED = "CONTESTED"
-NON_TARGET = (UNCHANGED, DISCARDED, UNBACKED, DEFERRED, RELOCATED, CONTESTED)
+NON_TARGET = (UNCHANGED, RENAMED, DISCARDED, UNLISTED, RELOCATED, UNBACKED, CONTESTED)
+BASIS_UNBACKED = "unbacked"
+BASIS_CONTESTED = "contested"
+
+
+def _disposition(method: str, value: str) -> dict:
+    """Expand an authored value into the axes, per the DECLARED vocabulary.
+
+    A disposition key expands through the declaration; a target method name is a RENAME
+    (or UNCHANGED when it is the method itself) — the two implicit dispositions, derived
+    here rather than declared per row.
+    """
+    if value in VOCAB["dispositions"]:
+        key = value
+    else:
+        key = UNCHANGED if value == method else RENAMED
+    spec = VOCAB["dispositions"][key]
+    target = ""
+    if spec.get("target") == "self":
+        target = method
+    elif spec.get("target") == "named":
+        target = value
+    return {
+        "disposition": key,
+        "target": target,
+        "lifecycle": spec.get("lifecycle"),
+        "visibility": spec.get("visibility"),
+        "delete": spec.get("delete"),
+        "basis_override": spec.get("basis"),
+    }
+
 
 # A disposition is only as strong as the section it is cited from. A row claiming
 # DISCARDED may cite text from beta's "Discarded — and why" → "### Removed" ONLY,
-# and a row claiming DEFERRED from its "Named but not solved" — a quote from one
+# and a row claiming UNLISTED from its "Named but not solved" — a quote from one
 # section cannot back the other's disposition. This is exactly how the journal (filed
 # under "Named but not solved" as live and unlisted) was rendered DISCARDED, and how
 # `test_guard` ("**Kept and relocated**", in the *relocated* subsection, not Removed)
@@ -114,7 +166,7 @@ NON_TARGET = (UNCHANGED, DISCARDED, UNBACKED, DEFERRED, RELOCATED, CONTESTED)
 # silently freeing every row that cites it.
 DISPOSITION_SECTION: dict[str, str] = {
     DISCARDED: "### Removed",
-    DEFERRED: "## Named but not solved",
+    UNLISTED: "## Named but not solved",
 }
 
 # RETENTION VOCABULARY — the clause test that makes a `DISCARDED` row more than a row
@@ -168,6 +220,50 @@ UNBACKED_REASON = {
     "record_calibration": "Same group, same mismatch: `refresh_confidence` recomputes "
                           "confidence; recording a calibration milestone is a different "
                           "operation and has no target.",
+}
+
+# ─────────────────────────────────────────────────────────────────────
+# C6 — the lifecycle/confidence FOLD, and its three-way disagreement.
+#
+# beta's "### Removed" row filed `promote_point`, `set_point_baseline`, `list_drafts` and
+# `quarantine_batch` under "reachable through the canonical two" without NAMING a
+# destination, so they rendered as an open finding. Three of the project's own docs
+# disagreed about the fold:
+#   * `canonical-mcp-tools.md` row 17 (owner-approved 2026-09-18): `revise_knowledge`
+#     ABSORBS `promote_point` and `set_point_baseline`;
+#   * `beta-sdk-surface.md` (approved 2026-09-21): all four under "### Removed", no
+#     destination — and it SPLIT `revise_knowledge` into `update_knowledge` +
+#     `supersede_knowledge`, so the approved absorber's NAME no longer exists;
+#   * `bridge-table.md` (generated): `refresh_confidence`, which `sdk-rename-table.md`
+#     §C3b already records as wrong.
+#
+# The convergent shape (lifecycle/confidence state as a FIELD on the general update,
+# selected by a filter on the general list) agrees with the owner's recorded ruling that
+# "retract is a temporal FIELD on update, not a separate verb". Each entry carries its
+# AUTHORITY, because two of the four rest on an owner-ruled absorption and two only on
+# beta's own row clause — that difference is exactly what decides whether the item is
+# still genuinely owner-open.
+# ─────────────────────────────────────────────────────────────────────
+C6_FOLD: dict[str, tuple[str, str]] = {
+    "promote_point": (
+        "update_knowledge",
+        "the owner-approved MCP list absorbs it into `revise_knowledge`, whose beta "
+        "successor is `update_knowledge`; the new status is a FIELD, and promote's "
+        "incident-operator cascade and approval gate ride with it",
+    ),
+    "set_point_baseline": (
+        "update_knowledge",
+        "same approved absorption; the starting belief is a FIELD, not a separate verb",
+    ),
+    "quarantine_batch": (
+        "update_knowledge",
+        "beta's own row: reachable through `update_knowledge`; the quarantine state is "
+        "a FIELD",
+    ),
+    "list_drafts": (
+        "list_knowledge",
+        "a filter on the general list: `list_knowledge(kind=…, status=…)`",
+    ),
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -316,8 +412,13 @@ CITES: dict[str, tuple[str, str]] = {
                           "`invalid_at`/`expired_at` on the existing update, not a "
                           "separate verb. |"),
     "w11_lifecycle": (BETA, "| `promote_point`, `set_point_baseline`, `list_drafts`, "
-                            "`quarantine_batch` | 4 | Lifecycle and confidence wrangling "
-                            "— reachable through the canonical two. |"),
+                            "`quarantine_batch` | 4 | Lifecycle and confidence **state** "
+                            "— a **field on `update_knowledge`** (promote, baseline, "
+                            "quarantine), selected by a **filter on "
+                            "`list_knowledge(kind=…, status=…)`** (drafts). No separate "
+                            "verb. `promote_point` also promotes its incident operators "
+                            "and carries the approval gate, so it is not "
+                            "`update_point(status='live')`. |"),
     "w12": (BETA, "| `delete_point`, `delete_point_wrapped` | 2 | "
                   "→ `delete_knowledge`. |"),
     "w12_canon": (CANON, "| W12 | `delete_knowledge` | #18 | `delete`, "
@@ -380,7 +481,7 @@ CITES: dict[str, tuple[str, str]] = {
 # states), then per-method exceptions. Every value is either a name in
 # the 40-method target surface parsed from the beta doc, or one of the
 # non-target dispositions in `NON_TARGET` (UNCHANGED / DISCARDED /
-# UNBACKED / DEFERRED / RELOCATED).
+# UNBACKED / UNLISTED / RELOCATED).
 # ─────────────────────────────────────────────────────────────────────
 GROUP_TARGET: dict[str, tuple[str, str]] = {
     "R1": ("search_knowledge", "r1"),
@@ -399,7 +500,7 @@ GROUP_TARGET: dict[str, tuple[str, str]] = {
     # W5 is beta's "Named but not solved": the journal is LIVE (in the MCP server),
     # filed post-beta and unlisted — NOT dead. `DISCARDED` here would tell Phase 2 to
     # delete a capability the owner ruled is merely unlisted.
-    "W5": (DEFERRED, "w5"),
+    "W5": (UNLISTED, "w5"),
     "W6": ("mine_knowledge_from_session", "w6"),
     "W7": ("mine_knowledge_from_session", "w6"),
     "W8": ("manage_source_trust", "w8"),
@@ -488,18 +589,17 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "invalidate_point": ("update_knowledge", "w11_retract"),
     "supersede": ("supersede_knowledge", "w11_supersede"),
     "supersede_point": ("supersede_knowledge", "w11_supersede"),
-    # W11 — four rows beta files under "### Removed" while the row's own clause says the
-    # capability is "reachable through the canonical two". That is a FOLD, not a delete,
-    # and `DISCARDED` is Phase 2's signal to DELETE. All four carry `CONTESTED` — an open
-    # finding: not deleted, and no destination stated. The old code rendered all four
-    # `DISCARDED`; the guard that was supposed to stop exactly this was scoped to the
-    # journal bullet alone, so `list_drafts` and `quarantine_batch` went out as bare
-    # DELETE signals. `promote_point`/`set_point_baseline` were only surfaced because the
-    # BRIDGE happens to bind them, not because Part A classified them correctly.
-    "promote_point": (CONTESTED, "w11_lifecycle"),
-    "set_point_baseline": (CONTESTED, "w11_lifecycle"),
-    "list_drafts": (CONTESTED, "w11_lifecycle"),
-    "quarantine_batch": (CONTESTED, "w11_lifecycle"),
+    # W11 — the four rows beta filed under "### Removed" as "reachable through the
+    # canonical two", with no destination NAMED. The fold is now named in beta: lifecycle
+    # and confidence **state** is a FIELD on `update_knowledge`, selected by a FILTER on
+    # `list_knowledge`. `promote_point`/`set_point_baseline` rest on the owner-approved MCP
+    # list's own absorption (into `revise_knowledge`, whose beta successor is
+    # `update_knowledge`); `list_drafts`/`quarantine_batch` rest on beta's row clause —
+    # that difference is recorded in C6, because it decides what is still owner-open.
+    "promote_point": ("update_knowledge", "w11_lifecycle"),
+    "set_point_baseline": ("update_knowledge", "w11_lifecycle"),
+    "list_drafts": ("list_knowledge", "w11_lifecycle"),
+    "quarantine_batch": ("update_knowledge", "w11_lifecycle"),
     # W12 — two members the beta row omits.
     "delete": ("delete_knowledge", "w12_canon"),
     "delete_entity": ("delete_knowledge", "w12_canon"),
@@ -874,11 +974,16 @@ def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
     for name in sorted(methods):
         label = group_of[name]
         if name in OVERRIDE:
-            target, key = OVERRIDE[name]
+            value, key = OVERRIDE[name]
         else:
-            target, key = GROUP_TARGET[label]
+            value, key = GROUP_TARGET[label]
+        disp = _disposition(name, value)
         if not key:
-            basis = "unbacked"
+            if disp["basis_override"] is None:
+                raise SystemExit(
+                    f"{name} has no citation region and no declared evidence basis"
+                )
+            basis = disp["basis_override"]
             quote = ""
             doc = ""
         else:
@@ -887,12 +992,18 @@ def _rows(methods: dict[str, int], groups: dict[str, list[str]]) -> list[dict]:
             # the whole point of the design: the anchor only locates, so a truncated
             # anchor cannot shorten the rendered evidence.
             quote = _derive_region(_doc_text(doc), Region(anchor))
-            basis = "stated" if _names(quote, name) else "derived"
+            basis = disp["basis_override"] or (
+                "stated" if _names(quote, name) else "derived"
+            )
         rows.append({
             "name": name,
             "line": methods[name],
             "group": label,
-            "target": target,
+            "target": disp["target"],
+            "disposition": disp["disposition"],
+            "lifecycle": disp["lifecycle"],
+            "visibility": disp["visibility"],
+            "delete": disp["delete"],
             "basis": basis,
             "doc": doc,
             "quote": quote,
@@ -905,20 +1016,31 @@ def _findings(rows: list[dict], methods: dict[str, int], targets: list[str],
     """The computed findings this artifact exists to produce."""
     by_target: dict[str, list[str]] = {}
     for r in rows:
-        by_target.setdefault(r["target"], []).append(r["name"])
+        # A row with no destination is keyed by its DISPOSITION, so the no-destination
+        # categories stay visible in the counts instead of collapsing into one bucket.
+        by_target.setdefault(_destination(r), []).append(r["name"])
     no_def = [t for t in targets if t not in methods]
     return {
         "by_target": by_target,
         "no_def": no_def,
         "no_def_set": set(no_def),
-        "unbacked": sorted(r["name"] for r in rows if r["target"] == UNBACKED),
-        "contested": sorted(r["name"] for r in rows if r["target"] == CONTESTED),
+        "unbacked": sorted(r["name"] for r in rows if r["basis"] == BASIS_UNBACKED),
+        "contested": sorted(r["name"] for r in rows if r["basis"] == BASIS_CONTESTED),
         "tensions": TENSIONS,
         "phantoms": PHANTOMS,
         "unfilled": [g for g, m in groups.items() if not m],
         # Computed from the sibling Phase 0.1 artifact, never restated.
         "bridge_divergences": _bridge_divergences(rows),
     }
+
+
+def _destination(r: dict) -> str:
+    """A row's destination on one vocabulary: the target name, or its disposition key.
+
+    `UNCHANGED` rows carry their own name as the target (they are already on the target
+    surface) — the same name the sibling bridge renders, so the two artifacts compare.
+    """
+    return r["target"] if r["target"] else r["disposition"]
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1070,18 +1192,18 @@ BRIDGE_DETERMINATION: dict[str, str] = {
                   "provisions a memory GRAPH, not an account, and beta's tenancy block "
                   "has no creation row. Part A's `UNBACKED` is the honest record; the "
                   "bridge asserts a destination no doc states.",
-    "promote_point": "**Genuinely contested — no owner ruling.** beta's row sits in "
-                     "\u201cRemoved\u201d but reads \u201creachable through the canonical "
-                     "two\u201d (a fold, not a delete), and the canonical doc's \u201cdoes "
-                     "not merge\u201d keeps `promote_point` \u2260 "
-                     "`update_point(status='live')` because promote also promotes "
-                     "incident operators. The bridge's `refresh_confidence` does not "
-                     "cover that either.",
-    "set_point_baseline": "**Genuinely contested — no owner ruling.** Same beta row as "
-                          "`promote_point`. The bridge's `refresh_confidence` recomputes "
-                          "confidence; declaring a claim's starting belief is a different "
-                          "operation, and canonical's \u201cWhat we have\u201d rates it a strong "
-                          "novelty (\u201cno product has a per-claim prior\u201d).",
+    "promote_point": "**Part A is right; the bridge is wrong — and the map is owner-approved, so "\
+                     "it is reported here, not edited.** The owner-approved MCP list absorbs "\
+                     "`promote_point` into `revise_knowledge`, whose beta successor is "\
+                     "`update_knowledge`; beta names it a FIELD on that update, and promote's "\
+                     "incident-operator cascade and approval gate ride with it. The bridge's "\
+                     "`refresh_confidence` recomputes confidence and does not cover the "\
+                     "cascade.",
+    "set_point_baseline": "**Part A is right; the bridge is wrong — and the map is owner-approved, "\
+                          "so it is reported here, not edited.** Same approved absorption as "\
+                          "`promote_point`; beta names the starting belief a FIELD on "\
+                          "`update_knowledge`. The bridge's `refresh_confidence` recomputes "\
+                          "confidence, which is a different operation.",
     "query": "**Part A is right; the bridge is wrong.** beta: \u201c`query`, "
              "`paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`\u201d, and "
              "canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit "
@@ -1123,7 +1245,11 @@ def _bridge_bindings() -> list[tuple[str, str, str]]:
         if not m:
             continue
         tool, sdk_cell, dest = (m.group(1), m.group(2).strip(),
-                                m.group(3).strip().strip("`"))
+                                m.group(3).strip())
+        # The bridge appends ` ⚠️` to a destination its sibling records as WRONG. That
+        # marker is RENDERING, not part of the destination, so strip it here — the
+        # destination itself is what this comparison is about.
+        dest = re.sub(r"\s*⚠️\s*$", "", dest).strip().strip("`")
         # `**none declared**` and `\u26a0\ufe0f **does not resolve**` are not methods.
         method = sdk_cell.strip("`") if (sdk_cell.startswith("`")
                                           and sdk_cell.endswith("`")) else ""
@@ -1136,19 +1262,20 @@ def _normalise_bridge(dest: str, method: str) -> str:
 
     `REMOVED` is the bridge's word for `DISCARDED`, a `sdk:`/`tenancy:` prefix names
     the namespace a method lives in, and a destination equal to the method itself is
-    the bridge's way of spelling `UNCHANGED`.
+    the bridge's way of spelling an unchanged row — Part A now carries the method's own
+    name as the target for those, so the two sides compare directly.
     """
     if dest == "REMOVED":
         return DISCARDED
     for ns in ("sdk:", "tenancy:"):
         if dest.startswith(ns):
             dest = dest[len(ns):]
-    return UNCHANGED if dest == method else dest
+    return dest
 
 
 def _bridge_divergences(rows: list[dict]) -> list[tuple[str, str, str, str]]:
-    """(method, Part A target, bridge destination, bridge tool) for every disagreement."""
-    target_of = {r["name"]: r["target"] for r in rows}
+    """(method, Part A destination, bridge destination, bridge tool) for every disagreement."""
+    target_of = {r["name"]: _destination(r) for r in rows}
     out: list[tuple[str, str, str, str]] = []
     for tool, method, dest in _bridge_bindings():
         if not method or method not in target_of:
@@ -1165,7 +1292,7 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
     actually carries, which is where these three findings live.
     """
     errs: list[str] = []
-    target_of = {r["name"]: r["target"] for r in rows}
+    target_of = {r["name"]: _destination(r) for r in rows}
     real = set(targets)
 
     # 7. A row's Target must be what its quote names. The Basis legend says `stated`
@@ -1192,7 +1319,11 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
                    for m in wildcard.finditer(quote))
     candidates = set(target_of) | real
     for r in rows:
-        if r["basis"] != "stated" or r["target"] not in real:
+        # An UNCHANGED row's target is the method's own name, which its quote names by
+        # definition — the check below excludes the row's own name, so it is skipped.
+        if r["basis"] != "stated" or not r["target"] or r["target"] not in real:
+            continue
+        if r["disposition"] == UNCHANGED:
             continue
         if r["doc"] != BETA or _is_wildcard(r["quote"]):
             continue
@@ -1212,7 +1343,7 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
     #    was mapped to deletion.
     beta = BETA_DOC.read_text(encoding="utf-8")
     for r in rows:
-        heading = DISPOSITION_SECTION.get(r["target"])
+        heading = DISPOSITION_SECTION.get(r["disposition"])
         if not heading or r["doc"] != BETA:
             continue
         if heading not in beta:
@@ -1223,8 +1354,8 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
         at = beta.find(r["quote"])
         if not (start <= at < end):
             errs.append(
-                f"DISPOSITION MISFILED: {r['name']} is {r['target']} but cites outside "
-                f"{heading!r} — the cited text does not rule that disposition"
+                f"DISPOSITION MISFILED: {r['name']} is {r['disposition']} but cites "
+                f"outside {heading!r} — the cited text does not rule that disposition"
             )
 
     # 8b. A `DISCARDED` disposition must be supported by the row's CLAUSE, not only by
@@ -1235,17 +1366,17 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
     #     `CONTESTED` disposition cannot be applied to a region that says nothing about
     #     retention.
     for r in rows:
-        if r["target"] not in (DISCARDED, CONTESTED) or r["doc"] != BETA:
+        if r["disposition"] not in (DISCARDED, CONTESTED) or r["doc"] != BETA:
             continue
         retained = _retention_clauses(r["quote"])
-        if r["target"] == DISCARDED and retained:
+        if r["disposition"] == DISCARDED and retained:
             errs.append(
                 f"DISCARDED BUT RETAINED: {r['name']} renders DISCARDED — Phase 2's "
                 f"signal to DELETE — but its own clause says it is "
                 f"{', '.join(repr(m) for m in retained)}. That is a fold, not a delete; "
                 f"the disposition must be CONTESTED (or a target), not DISCARDED."
             )
-        elif r["target"] == CONTESTED and not retained:
+        elif r["disposition"] == CONTESTED and not retained:
             errs.append(
                 f"CONTESTED WITHOUT A RETENTION CLAUSE: {r['name']} renders CONTESTED "
                 f"but its clause does not say the capability is retained — the "
@@ -1261,6 +1392,18 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
     for m in sorted(set(BRIDGE_DETERMINATION) - diverged):
         errs.append(f"STALE BRIDGE DETERMINATION: {m} no longer diverges from "
                     f"{BRIDGE_DOC.name} — remove it")
+
+    # 10. C6's fold record must agree with Part A. A record that drifted from the table
+    #     it records is worse than none: it would claim a destination the surface does
+    #     not carry.
+    for name, (dest, _authority) in sorted(C6_FOLD.items()):
+        if name not in target_of:
+            errs.append(f"C6 FOLD STALE: {name} is not a public method")
+        elif target_of[name] != dest:
+            errs.append(
+                f"C6 FOLD DISAGREES WITH PART A: {name} is {target_of[name]!r} in Part A "
+                f"but the C6 record says {dest!r}"
+            )
     return errs
 
 
@@ -1277,13 +1420,13 @@ def _cell(text: str) -> str:
 def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
            findings: dict) -> str:
     n = len(rows)
-    unchanged = sum(1 for r in rows if r["target"] == UNCHANGED)
-    discarded = sum(1 for r in rows if r["target"] == DISCARDED)
-    deferred = sum(1 for r in rows if r["target"] == DEFERRED)
-    relocated = sum(1 for r in rows if r["target"] == RELOCATED)
-    unbacked = sum(1 for r in rows if r["target"] == UNBACKED)
-    contested = sum(1 for r in rows if r["target"] == CONTESTED)
-    migrated = n - unchanged - discarded - deferred - relocated - unbacked - contested
+    unchanged = sum(1 for r in rows if r["disposition"] == UNCHANGED)
+    renamed = sum(1 for r in rows if r["disposition"] == RENAMED)
+    discarded = sum(1 for r in rows if r["disposition"] == DISCARDED)
+    unlisted = sum(1 for r in rows if r["disposition"] == UNLISTED)
+    relocated = sum(1 for r in rows if r["disposition"] == RELOCATED)
+    unbacked = sum(1 for r in rows if r["basis"] == BASIS_UNBACKED)
+    contested = sum(1 for r in rows if r["basis"] == BASIS_CONTESTED)
     no_def = findings["no_def"]
     empty_groups = findings["unfilled"]
 
@@ -1309,13 +1452,15 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "Phase 0.3b lane; nothing here restates it.",
         "",
         f"**The surface: {n} public methods on `TortoiseSDK` → {len(targets)} target "
-        f"methods.** {migrated} of the {n} are renames to a target; **{unchanged}** are "
-        f"already targets (unchanged); **{discarded}** are discarded with a rationale; "
-        f"**{contested}** are **contested** (filed under “Removed” but their own "
-        f"clause says the capability is reachable — a fold, not a delete, with no "
-        f"destination stated); "
-        f"**{deferred}** are **deferred** (live, filed post-beta and unlisted — NOT "
-        f"deleted); **{relocated}** is **relocated** out of the product SDK; and "
+        f"methods.** Every row carries **three orthogonal axes** — lifecycle, visibility "
+        f"and evidence basis — plus an explicit delete instruction, and the vocabulary is "
+        f"**declared in `config/disposition-vocabulary.yml`**, not restated here. "
+        f"{renamed} of the {n} are renames to a target; **{unchanged}** are already "
+        f"targets (unchanged); **{discarded}** are discarded with a rationale "
+        f"(lifecycle `removed` · visibility `internal` · delete `delete`); "
+        f"**{unlisted}** are live but **unlisted** (visibility `unlisted` — NOT deleted); "
+        f"**{relocated}** is **relocated** out of the product SDK (visibility `internal`); "
+        f"**{contested}** are **contested** (the docs name conflicting destinations); and "
         f"**{unbacked}** have no destination anywhere on the target "
         "surface — those are findings, not rows to be guessed at.",
         "",
@@ -1327,43 +1472,48 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
         "",
         "## Part A — every public method and its migration row",
         "",
-        "`Basis` says how strongly the row is backed: **stated** — the cited quote names "
-        "this method and gives its collapse, rename or deletion; **derived** — a doc gives "
-        "the destination only for a namespace or wildcard covering this method, without "
-        "naming it; **unbacked** — no doc gives a destination.",
+        "A disposition is **three orthogonal axes plus a delete instruction** — never one "
+        "flat value. The vocabulary is **declared in "
+        "`config/disposition-vocabulary.yml`**; this legend names it and does not restate it:",
         "",
-        "A `Target` that is not a target method is a **disposition**, and each is an "
-        "owner ruling transcribed, not a choice made here: **UNCHANGED** — already on "
-        "the target surface; **DISCARDED** — retires, cited from beta's \u201cDiscarded "
-        "— and why\u201d and supported by the row's own CLAUSE, not merely its section; "
-        "**CONTESTED** — the doc files it under \u201cRemoved\u201d while its own clause "
-        "says the capability is reachable, so it is a fold, not a delete, and no "
-        "destination is stated: an open finding; "
-        "**DEFERRED** — beta's \u201cNamed but not solved\u201d: the "
-        "capability is **live** (in the MCP server today), filed post-beta and unlisted "
-        "until then, so it is NOT deleted; **RELOCATED** — beta's \u201cKept and "
-        "relocated\u201d: the code must survive but moves OUT of the product SDK (test "
-        "infrastructure), so it is neither a target nor deleted; **UNBACKED** — no doc "
-        "states a destination.",
+        "| Axis | Question | Values |",
+        "|---|---|---|",
+        f"| `Lifecycle` | {VOCAB['axes']['lifecycle']['question']} | "
+        + ", ".join(f"`{v}`" for v in AXIS_VALUES["lifecycle"]) + " |",
+        f"| `Visibility` | {VOCAB['axes']['visibility']['question']} | "
+        + ", ".join(f"`{v}`" for v in AXIS_VALUES["visibility"]) + " |",
+        f"| `Basis` | {VOCAB['axes']['basis']['question']} | "
+        + ", ".join(f"`{v}`" for v in AXIS_VALUES["basis"]) + " |",
+        f"| `Delete` | {VOCAB['delete_instruction']['question']} | "
+        + ", ".join(f"`{v}`" for v in DELETE_VALUES) + " |",
         "",
-        "The canonical inventory's group names are an **earlier sketch** "
+        "The axes are independent, and that is the point: `DISCARDED` used to mean both "
+        "\u201cnot on the public surface\u201d and \u201cDELETE this\u201d at once, which "
+        "nearly deleted three shipping methods. Now the visibility is `internal` **and** "
+        "the delete instruction is `delete`, each in its own cell. A `—` in an axis cell "
+        "means the doc states nothing for that axis (an `unbacked` or `contested` row).",
+        "",
+        "`Target` names the destination method; `—` means no destination is stated. The "
+        "canonical inventory's group names are an **earlier sketch** "
         "(`revise_knowledge`, `stabilize_beliefs`, `write_knowledge`, `index_files`). The "
         "`Target` column always carries the **beta** target name (`update_knowledge`, "
         "`refresh_confidence`, `write_knowledge_batch`, "
         "`index_sources_from_directory`) — the canonical doc itself says beta governs where "
         "the two disagree, and records the renames.",
         "",
-        "| # | Method | Source | Group | Target | Basis | Citation |",
-        "|---|---|---|---|---|---|---|",
+        "| # | Method | Source | Group | Target | Lifecycle | Visibility | Basis | Delete | Citation |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for i, r in enumerate(rows, 1):
-        if r["basis"] == "unbacked":
-            cite = "**no doc states a destination**"
+        if r["basis"] == BASIS_UNBACKED:
+            cite = "\u2014"
         else:
             cite = f"`{r['doc']}` — “{_cell(r['quote'])}”"
+        target = f"`{r['target']}`" if r["target"] else "\u2014"
         out.append(
             f"| {i} | `{r['name']}` | `sdk.py:{r['line']}` | {r['group']} | "
-            f"`{r['target']}` | {r['basis']} | {cite} |"
+            f"{target} | {r['lifecycle'] or '—'} | {r['visibility'] or '—'} | "
+            f"{r['basis']} | {r['delete'] or '—'} | {cite} |"
         )
 
     out += [
@@ -1377,16 +1527,16 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
     for target in sorted(by_target, key=lambda t: (-len(by_target[t]), t)):
         names = ", ".join(f"`{m}`" for m in by_target[target])
         out.append(f"| `{target}` | {names} | {len(by_target[target])} |")
-    replaced = sum(1 for t in by_target if t in findings["no_def_set"])
-    real_targets = len(by_target) - replaced - _non_target_destinations(by_target)
+    no_def_dests = sum(1 for t in by_target if t in findings["no_def_set"])
+    non_target_dests = _non_target_destinations(by_target)
+    existing_dests = len(by_target) - no_def_dests - non_target_dests
     out += [
         f"| **total** | — | **{n}** |",
         "",
-        f"Distinct destinations: **{len(by_target)}** — **{replaced}** are target methods "
-        f"with no `def` today (Part C1 lists all {len(findings['no_def'])} Phase-2 "
-        f"methods), **{real_targets}** are target "
-        "methods that already exist (`create_entity`, `get_entity`), and "
-        f"**{_non_target_destinations(by_target)}** are the non-target dispositions "
+        f"Distinct destinations: **{len(by_target)}** — **{no_def_dests}** are target "
+        f"methods with no `def` today (Part C1 lists all {len(findings['no_def'])} "
+        f"Phase-2 methods), **{existing_dests}** are target methods that already exist, "
+        f"and **{non_target_dests}** are the no-destination dispositions "
         "(" + " / ".join(f"`{t}`" for t in sorted(t for t in by_target
                                                  if t in NON_TARGET)) + ").",
         "",
@@ -1504,28 +1654,49 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
             + ", ".join(f"`{g}`" for g in empty_groups) + ".",
         ]
 
-    contested_rows = [r for r in rows if r["target"] == CONTESTED]
+    out += [
+        "",
+        "### C6 — the lifecycle/confidence fold (the former `CONTESTED` rows)",
+        "",
+        "beta's `### Removed` row filed these under “reachable through the canonical two”",
+        "without NAMING a destination, so they were an open finding — and the project's",
+        "own docs disagreed about the fold (the approved MCP list absorbed two into",
+        "`revise_knowledge`; beta then SPLIT `revise_knowledge` into `update_knowledge` +",
+        "`supersede_knowledge`, so the approved absorber's name no longer exists; the",
+        "bridge asserted `refresh_confidence`, which §C3b records as wrong). The fold is",
+        "the convergent shape — lifecycle/confidence **state as a field** on the general",
+        "update, selected by a **filter** on the general list — and it agrees with the",
+        "owner's recorded ruling that retraction “is a temporal FIELD on update, not a",
+        "separate verb”. Each row names its AUTHORITY: two rest on the owner-approved MCP",
+        "list's own absorption, two only on beta's row clause — which is what decides",
+        "whether the item is still genuinely owner-open.",
+        "",
+        "| Method | Destination | Authority |",
+        "|---|---|---|",
+    ]
+    for name in sorted(C6_FOLD):
+        dest, authority = C6_FOLD[name]
+        out.append(f"| `{name}` | `{dest}` | {_cell(authority)} |")
+
+    contested_rows = [r for r in rows if r["basis"] == BASIS_CONTESTED]
     if contested_rows:
         out += [
             "",
-            "### C6 — rows filed under “Removed” whose own clause says they are reachable",
+            "#### C6a — rows the docs still contradict",
             "",
-            "`DISCARDED` is Phase 2's signal to **delete** a method. beta's `### Removed`",
-            "table is one ruling and the rationale cell is another, and for these rows the",
-            "clause says the capability is *reachable* — a **fold, not a delete** — while",
-            "naming no destination. They carry `CONTESTED`, which is an open finding: the",
-            "capability is not deleted and no target absorbs it, so Phase 2 cannot",
-            "implement them from this document and needs an owner ruling.",
+            "These rows have no destination the docs agree on; the conflicting citations",
+            "are in Part C3. They render `basis: contested` and carry no destination, so",
+            "Phase 2 cannot implement them without an owner ruling.",
             "",
-            "| Method | Source | Why the disposition is contested |",
+            "| Method | Source | Why it is still contested |",
             "|---|---|---|",
         ]
         for r in contested_rows:
             retained = ", ".join(f"“{m}”" for m in _retention_clauses(r["quote"]))
             out.append(
-                f"| `{r['name']}` | `sdk.py:{r['line']}` | Its “Removed” row says "
-                f"{retained or 'the capability is retained'} — a fold, not a delete, "
-                f"with no destination named. |"
+                f"| `{r['name']}` | `sdk.py:{r['line']}` | Its row says "
+                f"{retained or 'the capability is retained'} — no destination the docs "
+                f"agree on. |"
             )
 
     out += [
@@ -1604,12 +1775,13 @@ def main(argv: list[str] | None = None) -> int:
     args.out.write_text(doc, encoding="utf-8")
     print(f"wrote {args.out}")
     print(f"  public methods: {len(rows)}  targets: {len(targets)}")
-    print(f"  unchanged: {sum(1 for r in rows if r['target'] == UNCHANGED)}  "
-          f"discarded: {sum(1 for r in rows if r['target'] == DISCARDED)}  "
-          f"contested: {sum(1 for r in rows if r['target'] == CONTESTED)}  "
-          f"deferred: {sum(1 for r in rows if r['target'] == DEFERRED)}  "
-          f"relocated: {sum(1 for r in rows if r['target'] == RELOCATED)}  "
-          f"unbacked: {len(findings['unbacked'])}")
+    print(f"  unchanged: {sum(1 for r in rows if r['disposition'] == UNCHANGED)}  "
+          f"renamed: {sum(1 for r in rows if r['disposition'] == RENAMED)}  "
+          f"discarded: {sum(1 for r in rows if r['disposition'] == DISCARDED)}  "
+          f"unlisted: {sum(1 for r in rows if r['disposition'] == UNLISTED)}  "
+          f"relocated: {sum(1 for r in rows if r['disposition'] == RELOCATED)}  "
+          f"unbacked: {len(findings['unbacked'])}  "
+          f"contested: {len(findings['contested'])}")
     print(f"  targets with NO def on TortoiseSDK ({len(findings['no_def'])}): "
           f"{', '.join(findings['no_def'])}")
     return 0
