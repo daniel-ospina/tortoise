@@ -969,12 +969,34 @@ class TestBillingSupabaseStore:
         assert r2.json()["portal_url"] == "https://billing.stripe.com/p/sb1"
         assert seen["cid"] == "cus_sb_1"
 
-    def test_portal_404_when_genuinely_no_customer(self, sb):
-        """No customer binding on the authoritative row → the 404 still fires."""
+    def test_portal_404_when_genuinely_no_customer(self, monkeypatch, sb):
+        """No customer binding on the authoritative row → the 404 still fires,
+        and no Stripe portal call is made."""
         tc, _fake = sb
+        called: list = []
+        monkeypatch.setattr(
+            billing.StripeClient, "create_portal_session",
+            lambda self, cid, return_url: called.append(cid) or "u")
         r = tc.post("/v1/billing/portal")
         assert r.status_code == 404, r.text
         assert "no Stripe customer" in r.json()["detail"]
+        assert called == []
+
+    def test_checkout_400_when_no_email_anywhere(self, monkeypatch, sb):
+        """Supabase mode with no org email and no session email → the terminal
+        400 (the `sdk=None` fall-through), never an AttributeError 500, and no
+        Stripe customer is created."""
+        tc, _fake = sb
+        import tortoise.hosted_api as ha
+        org = {"org_id": self.ORG_ID, "tier": "solo"}
+        ha.app.dependency_overrides[ha.get_current_org_session] = lambda: dict(org)
+        called: list = []
+        monkeypatch.setattr(billing.StripeClient, "create_customer",
+                            lambda self, e: called.append(e) or "cus_x")
+        r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
+        assert r.status_code == 400, r.text
+        assert "No customer email" in r.json()["detail"]
+        assert called == []
 
     def test_webhook_written_binding_opens_the_portal(self, monkeypatch, sb):
         """The exact production path: `checkout.session.completed` writes the
@@ -1072,6 +1094,8 @@ class TestBillingSupabaseStore:
         called: list = []
         monkeypatch.setattr(billing.StripeClient, "create_customer",
                             lambda self, e: called.append("create_customer") or "cus_x")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: called.append("list_subscriptions") or [])
         monkeypatch.setattr(billing.StripeClient, "create_checkout_session",
                             lambda self, *a: called.append("create_checkout_session") or "u")
         r = tc.post("/v1/billing/checkout", json={"price_id": "price_100soloM"})
