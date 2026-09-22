@@ -523,11 +523,11 @@ def test_the_declared_non_derivable_keys_all_exist_on_a_derived_row(derived_base
     """
     sm = _load_manifest_tool()
     row_keys = {k for r in derived_baseline["rows"] for k in r}
-    assert sm.NON_DERIVABLE_ROW_KEYS <= row_keys, (
+    assert row_keys >= sm.NON_DERIVABLE_ROW_KEYS, (
         "these exclusions name keys no derived row carries: "
         f"{sorted(sm.NON_DERIVABLE_ROW_KEYS - row_keys)}"
     )
-    assert sm.NON_DERIVABLE_DOC_KEYS < set(derived_baseline), (
+    assert set(derived_baseline) > sm.NON_DERIVABLE_DOC_KEYS, (
         "these doc-level exclusions name keys the derivation does not emit: "
         f"{sorted(sm.NON_DERIVABLE_DOC_KEYS - set(derived_baseline))}"
     )
@@ -588,14 +588,14 @@ def test_each_declared_non_derivable_row_key_is_actually_excluded(derived_baseli
     (mutation M3: `reason` dropped from the set, suite still green).
     """
     sm = _load_manifest_tool()
-    assert sm.NON_DERIVABLE_ROW_KEYS == {
+    assert {
         "used_by",
         "recommendation",
         "basis",
         "reason",
         "approval",
         "exemption",
-    }, "the exclusion set changed — every key must be justified where it is declared"
+    } == sm.NON_DERIVABLE_ROW_KEYS, "the exclusion set changed — every key must be justified where it is declared"
     row = copy.deepcopy(derived_baseline["rows"][0])
     for key in sorted(sm.NON_DERIVABLE_ROW_KEYS):
         mutated = copy.deepcopy(row)
@@ -607,12 +607,12 @@ def test_each_declared_non_derivable_row_key_is_actually_excluded(derived_baseli
 
 def test_each_declared_non_derivable_doc_key_is_actually_excluded(derived_baseline):
     sm = _load_manifest_tool()
-    assert sm.NON_DERIVABLE_DOC_KEYS == {
+    assert {
         "cut_at_commit",
         "approval_status",
         "approval_principal",
         "approval_pr",
-    }
+    } == sm.NON_DERIVABLE_DOC_KEYS
     for key in sorted(sm.NON_DERIVABLE_DOC_KEYS):
         mutated = dict(derived_baseline)
         mutated[key] = "a value no derivation produces"

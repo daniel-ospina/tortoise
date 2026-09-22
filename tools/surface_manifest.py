@@ -113,7 +113,7 @@ def _read_manifest(path: Path | None = None) -> dict:
         )
     try:
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001 — any read/parse failure is a refusal
+    except Exception as exc:  # any read/parse failure is a refusal
         raise SurfaceEvidenceUnreadable(f"could not read {path}: {exc}") from exc
     if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
         raise SurfaceEvidenceUnreadable(
@@ -242,7 +242,7 @@ def tracked_python() -> list[str]:
         out = subprocess.run(
             ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
         )
-    except Exception as exc:  # noqa: BLE001 — an unlistable tree is a refusal
+    except Exception as exc:  # an unlistable tree is a refusal
         raise SurfaceEvidenceUnreadable(
             f"could not list the tracked python files (`git ls-files *.py`): "
             f"{type(exc).__name__}: {exc}"
@@ -264,7 +264,7 @@ def load_order() -> dict:
         )
     try:
         table = yaml.safe_load(ORDER_FILE.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise SurfaceEvidenceUnreadable(f"could not read {ORDER_FILE}: {exc}") from exc
     if not isinstance(table, dict):
         raise SurfaceEvidenceUnreadable(
@@ -630,7 +630,7 @@ def build_doc(commit: str | None = None) -> dict:
         from tortoise.mcp_server import __name__ as _  # noqa: F401  (import check)
         from tortoise.sdk import TortoiseSDK
         from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-    except Exception as exc:  # noqa: BLE001 — an unimportable declaration is a refusal
+    except Exception as exc:  # an unimportable declaration is a refusal
         raise SurfaceEvidenceUnreadable(
             f"could not import the surface declaration: {type(exc).__name__}: {exc}"
         ) from exc
@@ -1412,7 +1412,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
     except SurfaceEvidenceUnreadable as exc:
         return _refuse(exc)
-    except Exception as exc:  # noqa: BLE001 — an unimportable declaration is a refusal
+    except Exception as exc:  # an unimportable declaration is a refusal
         return _refuse(
             SurfaceEvidenceUnreadable(
                 f"could not import the surface declaration: {type(exc).__name__}: {exc}"
@@ -1601,7 +1601,7 @@ def _derivation_problems(doc: dict, derived: dict) -> list[str]:
         derived_order = [str(r.get("name")) for r in derived.get(key) or [] if isinstance(r, dict)]
         if recorded_order != derived_order:
             at = next(
-                (i for i, (a, b) in enumerate(zip(recorded_order, derived_order)) if a != b),
+                (i for i, (a, b) in enumerate(zip(recorded_order, derived_order, strict=False)) if a != b),
                 min(len(recorded_order), len(derived_order)),
             )
             problems.append(
