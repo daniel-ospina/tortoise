@@ -96,14 +96,31 @@ _record_breadcrumb() {
   # contain double quotes — the 504 body is
   # ``{"detail":"The server's wait budget … exceeded"}`` — so interpolating it
   # raw emitted INVALID JSON and made the breadcrumb unparseable by
-  # `session verify` (measured #4714). Backslash first, then quote, then the
-  # newlines a multi-line error can carry. Pure shell: this function must run
-  # where python3 does not exist.
+  # `session verify` (measured #4714). Order matters: backslash FIRST, then the
+  # quote, then the control characters (each insertion adds its own backslash,
+  # so escaping the backslash last would double-escape it). The C0 set matters
+  # for more than cosmetics: `sessions import` ALREADY writes this same file
+  # with `json.dumps` on its own failure branches, so an unescaped tab or CR
+  # here would REPLACE a valid breadcrumb with an unparseable one and destroy
+  # the evidence this change exists to preserve. Pure shell: this function must
+  # run where python3 does not exist.
   local esc="${detail//\\/\\\\}"
   esc="${esc//\"/\\\"}"
   esc="${esc//$'\n'/\\n}"
+  esc="${esc//$'\r'/\\r}"
+  esc="${esc//$'\t'/\\t}"
+  # Belt-and-braces for the REST of the C0 class (an ESC, a NUL, a form feed).
+  # `tr` is POSIX and every bit as available as `mkdir`/`date`, so this keeps
+  # the function pure-shell. Stripping is safe here: \n, \r and \t were
+  # already converted to their two-character escapes above, so the raw bytes
+  # deleted below are only the ones that have no JSON escape at all.
+  esc="$(printf '%s' "$esc" | tr -d '\000-\010\013\014\016-\037')"
   local esc_harness="${harness//\\/\\\\}"
   esc_harness="${esc_harness//\"/\\\"}"
+  esc_harness="${esc_harness//$'\n'/\\n}"
+  esc_harness="${esc_harness//$'\r'/\\r}"
+  esc_harness="${esc_harness//$'\t'/\\t}"
+  esc_harness="$(printf '%s' "$esc_harness" | tr -d '\000-\010\013\014\016-\037')"
   mkdir -p "$crumb_dir" 2>/dev/null || true
   printf '{\n  "harness": "%s",\n  "detail": "%s",\n  "recorded_at": "%s",\n  "kind": "%s"\n}\n' \
     "$esc_harness" "$esc" "$stamp" "$kind" \

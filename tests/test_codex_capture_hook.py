@@ -486,7 +486,7 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
     # script.
     _failing_tortoise(
         bindir, log,
-        'import failed (HTTP 504): {"detail":"The wait budget was exceeded"}')
+        'import failed (HTTP 504): {"detail":"The wait\tbudget was exceeded"}')
     rollout = tmp_path / "rollout-2026.jsonl"
     rollout.write_text("{}\n", encoding="utf-8")
 
@@ -506,13 +506,26 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
     assert log.exists() and "DONE" in log.read_text(encoding="utf-8"), (
         "the detached worker did not run")
 
+    # Wait on the ARTIFACT, not the marker. The fake writes DONE *before* it
+    # exits, while the hook records the breadcrumb only AFTER reaping it — so
+    # DONE does not imply the crumb exists and asserting on it races (the same
+    # class the pre-existing tests avoid by reading only what the fake itself
+    # wrote before DONE).
     crumb = home / ".tortoise" / "capture-errors" / "codex.json"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not crumb.is_file():
+        time.sleep(0.05)
     assert crumb.is_file(), (
         "a failed capture left NO evidence — silence is the defect (#4714)")
     record = json.loads(crumb.read_text(encoding="utf-8"))
     assert record["kind"] == "capture-failure", record
     assert "504" in record["detail"], record
     assert record["harness"] == "codex", record
-    assert "wait budget" in record["detail"], (
+    assert "wait" in record["detail"] and "budget" in record["detail"], (
         "the error text must survive JSON-escaping — a raw interpolation of a "
         "quote-bearing message emits INVALID JSON")
+    raw = crumb.read_text(encoding="utf-8")
+    assert "\t" not in raw, (
+        "a raw tab in the JSON text is a control character and makes the file "
+        "unparseable — it must be escaped or stripped. Assert on the RAW file: "
+        "json.loads would decode a correct \\t back to a tab and hide this")

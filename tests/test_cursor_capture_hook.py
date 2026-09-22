@@ -633,7 +633,7 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
     # script.
     _failing_tortoise(
         bindir, log,
-        'import failed (HTTP 504): {"detail":"The wait budget was exceeded"}')
+        'import failed (HTTP 504): {"detail":"The wait\tbudget was exceeded"}')
     transcript = tmp_path / "agent.jsonl"
     transcript.write_text(
         '{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}\n',
@@ -648,13 +648,25 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
         "a failed capture must never break Cursor's shutdown (fail-open)")
 
     _wait_for_done(log)
+    # Wait on the ARTIFACT, not the marker. The fake writes DONE *before* it
+    # exits, while the hook records the breadcrumb only AFTER reaping it — so
+    # _wait_for_done returning does not imply the crumb exists and asserting on
+    # it races.
     crumb = home / ".tortoise" / "capture-errors" / "cursor.json"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not crumb.is_file():
+        time.sleep(0.05)
     assert crumb.is_file(), (
         "a failed capture left NO evidence — silence is the defect (#4714)")
     record = json.loads(crumb.read_text(encoding="utf-8"))
     assert record["kind"] == "capture-failure", record
     assert "504" in record["detail"], record
     assert record["harness"] == "cursor", record
-    assert "wait budget" in record["detail"], (
+    assert "wait" in record["detail"] and "budget" in record["detail"], (
         "the error text must survive JSON-escaping — a raw interpolation of a "
         "quote-bearing message emits INVALID JSON")
+    raw = crumb.read_text(encoding="utf-8")
+    assert "\t" not in raw, (
+        "a raw tab in the JSON text is a control character and makes the file "
+        "unparseable — it must be escaped or stripped. Assert on the RAW file: "
+        "json.loads would decode a correct \\t back to a tab and hide this")
