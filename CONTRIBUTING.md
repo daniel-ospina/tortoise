@@ -56,20 +56,33 @@ any added public SDK method, any removal, any **changed SDK binding** (which met
 change to how a tool is served (HTTP vs stdio-only), a registry whose entry count no longer matches the
 baseline (a duplicate name a name comparison cannot see), or an exemption that has become reachable. A
 missing, unreadable, or malformed baseline is also a failure — including a **duplicate row name**, which
-a name-keyed comparison silently drops and so cannot verify — as is an unreadable served-surface
-declaration: the guard must never skip a check and still report success.
+a name-keyed comparison silently drops and so cannot verify, and a row whose `name` is not a non-empty
+string (which used to crash the check with a traceback rather than fail closed) — as is an unreadable
+served-surface declaration: the guard must never skip a check and still report success. An SDK row is
+identified by its name: it must be `sdk:<its method>`, so a row that renames a real method or fronts an
+existing method under a new name is a failure rather than an invisible addition.
 
 The baseline cannot be *edited* either. `tools/surface_manifest.py check` (the same required job) also
-**re-derives the whole baseline from the declaration** and reds on any difference outside the columns
-that are not a function of the code (`used_by`, `recommendation`, `basis`, `reason` — they read a
-machine-local call log — and the human `approval` fields). So hand-editing the baseline's `counts:`,
-a row's description, its `class`, or any other derived cell is a red build, not a shortcut: change the
-registry, then re-cut. Two things have no automatic path and are updated by hand as part of that: the
-`approval` fields (a re-cut resets them to `null` and marks the baseline `pending-owner-approval`, so the
-owner re-approves — see "To propose an addition"), and `baseline_counts` in
+**re-derives the whole baseline from the declaration** and reds on any difference outside the columns that
+are not a function of the code. Those columns are exactly `NON_DERIVABLE_ROW_KEYS` and
+`NON_DERIVABLE_DOC_KEYS` in the tool (the authority — read them there): `used_by`, `recommendation`,
+`basis` and `reason` (they read a machine-local call log), the human `approval` reference and `exemption`
+flag, and the doc-level `cut_at_commit` / `approval_status` / `approval_principal` / `approval_pr`. One
+consequence worth stating plainly: those columns **are** editable in a PR, so the review evidence a reader
+sees in the generated document is not gate-verified — the served surface is. So hand-editing the
+baseline's `counts:`, a row's description, its `class`, `served` or `served_from`, or any other derived
+cell is a red build, not a shortcut: change the registry, then re-cut.
+
+Two things have no automatic path and are updated by hand as part of a re-cut: the `approval` fields (a
+re-cut resets them to `null` and marks the baseline `pending-owner-approval`, so the owner re-records
+them — see "To propose an addition"), and `baseline_counts` in
 [`config/surface-order.yml`](config/surface-order.yml), the frozen keyword distribution the derived
-`counts:` is checked against. If an added tool moves that distribution, the check reds until the order
-table records the new expectation.
+`counts:` is checked against. The check reads that table for `keywords`, `tokens`, `family_rank` **and**
+`baseline_counts`, and refuses a table whose shapes or ranks are wrong or whose `baseline_counts` is
+empty — an empty table cannot turn the distribution check off. If an added tool moves the distribution,
+the check reds until the order table records the new expectation. Note what the approval reference does
+and does not do: the gate verifies its **shape** (a PR number and an `@handle`), never that the review it
+names exists — the carrier for that is a repository ruleset requiring review, as the #3863 scope doc states.
 
 **"Added tool" means the advertised surface, not just the registry.** A tool can reach agents without
 ever entering `TOOL_REGISTRY`, by three routes the guard checks separately, because each is invisible

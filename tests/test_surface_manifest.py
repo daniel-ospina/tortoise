@@ -425,20 +425,30 @@ def derived_baseline() -> dict:
 def checker(monkeypatch, derived_baseline):
     """`check` bound to a redirected manifest, against the real derivation."""
     sm = _load_manifest_tool()
-    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: derived_baseline)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
     return sm
 
 
 def _check(sm, doc: dict, tmp_path) -> tuple[int, str]:
+    """Run `cmd_check` with a redirected manifest, capturing stdout AND stderr.
+
+    stderr is captured because a traceback goes there: an assertion that the output carries
+    no traceback is vacuous against a stdout-only buffer (review finding). `MANIFEST_FILE`
+    is restored, so a test cannot leak the redirect into another one.
+    """
     path = tmp_path / "manifest.yml"
     path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
-    sm.MANIFEST_FILE = path
     import io
-    from contextlib import redirect_stdout
+    from contextlib import redirect_stderr, redirect_stdout
 
+    previous = sm.MANIFEST_FILE
+    sm.MANIFEST_FILE = path
     buf = io.StringIO()
-    with redirect_stdout(buf):
-        rc = sm.cmd_check(argparse.Namespace())
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            rc = sm.cmd_check(argparse.Namespace())
+    finally:
+        sm.MANIFEST_FILE = previous
     return rc, buf.getvalue()
 
 
@@ -465,29 +475,30 @@ def test_the_check_reds_on_a_hand_edited_count(checker, tmp_path, mutate):
     assert "counts" in out and "999" in out, out
 
 
-def test_the_check_reds_on_a_hand_edited_rendered_cell(checker, tmp_path):
-    """MEMBERSHIP is not CONTENT.
+@pytest.mark.parametrize(
+    "row_name, field, value",
+    [
+        pytest.param("tool", "job", "a description no derivation produces", id="rendered-cell"),
+        pytest.param("sdk", "class", "definitely-not-derived", id="caller-scan-column"),
+    ],
+)
+def test_the_check_reds_on_a_hand_edited_derived_cell(checker, tmp_path, row_name, field, value):
+    """MEMBERSHIP is not CONTENT, for both row kinds.
 
     Every name-only check passes while the description that renders into the document the
-    owner reviews — `job`, the cell the table is built from — says something else. A guard
-    that only proves a row EXISTS does not protect what the row says.
+    owner reviews — `job`, the cell the table is built from — says something else, and `class`
+    is derived by an AST caller scan that NO other gate reads (measured: `grep class
+    tools/surface-guard.py` finds only prose). A guard that only proves a row EXISTS does not
+    protect what the row says. (Two tests that each mutated one key and asserted the same two
+    substrings were one code path with two constants; parametrized — review finding.)
     """
     doc = _manifest()
-    row = next(r for r in doc["rows"] if not str(r["name"]).startswith("sdk:"))
-    row["job"] = "a description no derivation produces"
+    prefix = "sdk:" if row_name == "sdk" else ""
+    row = next(r for r in doc["rows"] if str(r["name"]).startswith(prefix))
+    row[field] = value
     rc, out = _check(checker, doc, tmp_path)
-    assert rc == 1, "a hand-edited rendered cell did not red the lint"
-    assert "job" in out and row["name"] in out, out
-
-
-def test_the_check_reds_on_a_derived_column_the_guard_never_sees(checker, tmp_path):
-    """`class` is derived (an AST caller scan), is rendered, and no other gate reads it."""
-    doc = _manifest()
-    row = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
-    row["class"] = "definitely-not-derived"
-    rc, out = _check(checker, doc, tmp_path)
-    assert rc == 1, "a hand-edited `class` did not red the lint"
-    assert "class" in out and row["name"] in out, out
+    assert rc == 1, f"a hand-edited `{field}` did not red the lint"
+    assert field in out and row["name"] in out, out
 
 
 def test_the_check_reds_on_an_unclassified_new_column(checker, tmp_path):
@@ -583,6 +594,7 @@ def test_each_declared_non_derivable_row_key_is_actually_excluded(derived_baseli
         "basis",
         "reason",
         "approval",
+        "exemption",
     }, "the exclusion set changed — every key must be justified where it is declared"
     row = copy.deepcopy(derived_baseline["rows"][0])
     for key in sorted(sm.NON_DERIVABLE_ROW_KEYS):
@@ -623,27 +635,6 @@ def test_a_nonderivable_key_is_still_seen_when_it_is_the_ONLY_difference(derived
         {"rows": [renamed], "retired": []}, {"rows": [row], "retired": []}
     )
     assert problems, "a renamed row slipped through the projection"
-
-
-def test_cut_refuses_when_the_declaration_cannot_be_read(monkeypatch, capsys, tmp_path):
-    """`cut` overwrites the frozen baseline, so unreadable evidence must write NOTHING.
-
-    Stands in for the import/registry failure, which needs a broken interpreter to
-    reproduce: the contract under test is that the failure is reported as a refusal and
-    the artifact is left alone.
-    """
-    sm = _load_manifest_tool()
-    target = tmp_path / "surface-manifest.yml"
-    monkeypatch.setattr(sm, "MANIFEST_FILE", target)
-
-    def _boom(*a, **k):
-        raise sm.SurfaceEvidenceUnreadable("the declaration is unreadable")
-
-    monkeypatch.setattr(sm, "build_doc", _boom)
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
-    out = capsys.readouterr().out
-    assert "::error::" in out and "unreadable" in out, out
-    assert not target.exists(), "a refused cut wrote the baseline anyway"
 
 
 def test_the_guard_reds_on_a_duplicate_registry_entry():
@@ -1214,3 +1205,243 @@ def test_the_check_reds_on_reordered_rows(checker, tmp_path):
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 1, "reordering the artifact did not red the check"
     assert "not in the derived order" in out, out
+
+
+# --- CYCLE 2: the gate's own fail-opens, found adversarially --------------------------
+# A second review cycle attacked the D2 gate itself rather than the drift check, and found
+# the strongest defect of the whole change: `surface-guard.py` keys SDK rows by `method`
+# into a set, so a fabricated row for a brand-new public SDK method — new name, an
+# existing method, `exemption: true` — passed the gate (verified: the same method WITHOUT
+# the row was correctly refused; WITH it, exit 0). Renaming a real SDK row also passed.
+# Every test below pins one close, and each has a mutation in the battery.
+
+
+def test_the_guard_refuses_an_sdk_row_whose_name_is_not_its_method(tmp_path):
+    """The SDK-row fail-open: a set of `method`s cannot stand in for the row SET.
+
+    `baseline_sdk = {r["method"] for sdk rows}` means a row that renames the name while
+    keeping a real method contributes nothing to the comparison. Measured before the fix:
+    a fabricated `name: sdk:totally_new_and_unapproved` carrying an existing `method` and
+    `exemption: true` → `OK … 151 public SDK methods (1 exempt)`, exit 0. The derivation
+    emits `sdk:<method>` for every one of the 150 rows, so that identity is the check.
+    """
+    doc = _manifest()
+    real = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    doc["rows"].append(dict(real, name="sdk:totally_new_and_unapproved", exemption=True))
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a fabricated SDK row passed the expansion gate"
+    assert "do not identify their method" in result.stdout, result.stdout
+
+
+def test_the_guard_refuses_a_renamed_sdk_row(tmp_path):
+    """The weaker form of the same fail-open: renaming a real row, method untouched."""
+    doc = _manifest()
+    for row in doc["rows"]:
+        if str(row["name"]).startswith("sdk:"):
+            row["name"] = row["name"] + "_ghost"
+            break
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a renamed SDK row passed the expansion gate"
+    assert "do not identify their method" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(1, id="int"),
+        pytest.param(["a", "b"], id="list-unhashable"),
+    ],
+)
+def test_the_guard_refuses_a_malformed_row_name_instead_of_tracing(tmp_path, bad_name):
+    """A non-string name crashed the gate OUTSIDE its own fail-closed contract.
+
+    Measured before the fix: `name: null` → `AttributeError: 'NoneType' object has no
+    attribute 'startswith'`; `name: [a, b]` → `TypeError: unhashable type: 'list'` from
+    `{r["name"] for r in rows}`. A traceback exits 1, but it is not the refusal this gate
+    promises, and `git grep` shows no other check reads those rows.
+    """
+    doc = _manifest()
+    doc["rows"][0]["name"] = bad_name
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "a malformed row name did not red the gate"
+    assert "malformed row name" in result.stdout, result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "bad_served",
+    [pytest.param(None, id="null"), pytest.param("", id="empty"), pytest.param("grpc", id="unknown")],
+)
+def test_the_guard_refuses_a_served_value_it_cannot_classify(tmp_path, bad_served):
+    """A FALSY `served` turned a check OFF and the gate still printed OK.
+
+    `if name.startswith("sdk:") or not row.get("served"): continue` skipped the
+    served-surface comparison for `served: null` / `""` — the same defect class this file
+    already fixed for a broken import — and printed `OK`. Only `http` / `stdio-only` occur
+    on tool rows and only `sdk` on SDK rows (measured over all 232 rows).
+    """
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if not str(r["name"]).startswith("sdk:"))
+    row["served"] = bad_served
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, f"`served: {bad_served!r}` skipped the check"
+    assert "cannot classify" in result.stdout or "must be `served: sdk`" in result.stdout, result.stdout
+
+
+def test_the_guard_refuses_an_sdk_row_not_served_as_sdk(tmp_path):
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    row["served"] = "http"
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, "an SDK row claiming to be an HTTP tool was accepted"
+    assert "must be `served: sdk`" in result.stdout, result.stdout
+
+
+def test_the_exemption_control_is_usable_without_reding_the_drift_check(checker, tmp_path):
+    """`exemption` is a HUMAN RECORDING — excluding it is what keeps the control reachable.
+
+    `build_doc` emits `exemption: False` for every row, so while `exemption` was compared as
+    a derived value, recording one (the path `tools/surface-guard.py` reads and CONTRIBUTING
+    documents) made the REQUIRED check red with no legitimate way back — `cut` resets it to
+    False forever. Measured before the fix: guard `OK … (1 exempt)`, check
+    `FAIL row 'sdk:annotate_ask_hits' was hand-edited — exemption: recorded {True}, derived {False}`.
+    """
+    doc = _manifest()
+    row = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    row["exemption"] = True
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 0, f"a recorded exemption is refused: {result.stdout}"
+    assert "1 exempt" in result.stdout, result.stdout
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 0, f"a recorded exemption red the drift check: {out}"
+
+
+def test_the_check_reds_on_reordered_retired_rows(checker, tmp_path):
+    """The ROW order was pinned; the `retired` order was not (surviving mutation).
+
+    Reversing `retired` in the baseline left `check` GREEN while the same edit to `rows`
+    reds — the comparison is one line with two call sites, and only one was covered.
+    """
+    doc = _manifest()
+    doc["retired"] = list(reversed(doc["retired"]))
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "reversing the retired block did not red the check"
+    assert "retired" in out and "not in the derived order" in out, out
+
+
+def test_the_check_refuses_a_duplicate_RETIRED_name(checker, tmp_path):
+    """The reader's duplicate refusal covers both lists; only `rows` was asserted."""
+    doc = _manifest()
+    doc["retired"].insert(0, dict(doc["retired"][0], use_instead="fabricated"))
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a duplicate retired name did not red the check"
+    assert "duplicate" in out and "retired" in out, out
+
+
+def test_the_check_refuses_a_baseline_with_no_cut_at_commit(checker, tmp_path):
+    """`cut_at_commit` is excluded from the drift comparison, so this is all that pins it.
+
+    It moved into `_read_manifest` because `cmd_render` slices it: a hand-edited
+    `cut_at_commit: null` was a `TypeError` in the renderer and a mere problem in the check.
+    """
+    doc = _manifest()
+    doc["cut_at_commit"] = None
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a baseline with no cut_at_commit did not red the check"
+    assert "::error::" in out and "cut_at_commit" in out, out
+
+
+def test_the_render_refuses_instead_of_tracing(tmp_path, monkeypatch, capsys):
+    """`cmd_render` indexed `family_rank` / `cut_at_commit` with no guard at all."""
+    sm = _load_manifest_tool()
+    for label, damage in (
+        ("missing-family_rank", lambda d: next(r for r in d["rows"] if not str(r["name"]).startswith("sdk:")).pop("family_rank")),
+        ("null-cut_at_commit", lambda d: d.__setitem__("cut_at_commit", None)),
+    ):
+        doc = _manifest()
+        damage(doc)
+        path = tmp_path / f"{label}.yml"
+        path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+        monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+        assert sm.cmd_render(argparse.Namespace()) == 1, label
+        out = capsys.readouterr().out
+        assert "::error::" in out, (label, out)
+        assert "Traceback" not in out, (label, out)
+
+
+@pytest.mark.parametrize(
+    "damage, needle",
+    [
+        pytest.param(lambda t: t.__setitem__("tokens", []), "tokens", id="tokens-empty-list"),
+        pytest.param(lambda t: t.__setitem__("tokens", {"fetch": "fetch"}), "LIST", id="token-scalar"),
+        pytest.param(lambda t: t.__setitem__("keywords", {}), "keywords", id="keywords-empty"),
+        pytest.param(lambda t: t.__setitem__("keywords", {"fetch": "1"}), "INTEGER", id="str-rank"),
+        pytest.param(lambda t: t.__setitem__("family_rank", {}), "family_rank", id="family-rank-empty"),
+        pytest.param(lambda t: t.__setitem__("baseline_counts", []), "baseline_counts", id="counts-deleted"),
+        pytest.param(lambda t: t.__setitem__("baseline_counts", {"fetch": 14}), "exactly one entry", id="counts-partial"),
+        pytest.param(lambda t: t.pop("baseline_counts"), "baseline_counts", id="counts-absent"),
+        pytest.param(lambda t: t.__setitem__("tokens", {**t["tokens"], "nosuchkeyword": ["x"]}), "unknown", id="unknown-keyword"),
+        pytest.param(lambda t: t["keywords"].__setitem__("fetch", 2), "1..", id="rank-collision"),
+    ],
+)
+def test_load_order_refuses_a_malformed_table(tmp_path, monkeypatch, damage, needle):
+    """KEY PRESENCE IS NOT SHAPE — each of these passed the old validation and then broke.
+
+    Measured against /tmp copies before the fix: `tokens: []` → `AttributeError: 'list'
+    object has no attribute 'items'`; `tokens: {fetch: fetch}` silently iterated the STRING's
+    characters so every real token fell through to `operate`; `keywords: {}` → `KeyError:
+    'fetch'`; string ranks → `TypeError: '<' not supported` (and lexicographic order, where
+    `'10' < '2'`); `family_rank: {}` → `KeyError` out of `build_doc`; an EMPTY
+    `baseline_counts` short-circuited property 4's `if baseline and ...`, so deleting the
+    frozen expectation turned the distribution check OFF with every gate green.
+    """
+    sm = _load_manifest_tool()
+    table = copy.deepcopy(sm.load_order())
+    damage(table)
+    path = tmp_path / "surface-order.yml"
+    path.write_text(yaml.safe_dump(table, sort_keys=False))
+    monkeypatch.setattr(sm, "ORDER_FILE", path)
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.load_order()
+    assert needle in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_check_refuses_an_unreadable_evidence_file(tmp_path, monkeypatch, capsys):
+    """The parse-failure branch: garbage bytes, not a shape the reader can classify."""
+    sm = _load_manifest_tool()
+    path = tmp_path / "manifest.yml"
+    path.write_bytes(b"\x00\x01not: [valid: yaml")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    assert sm.cmd_check(argparse.Namespace()) == 1
+    out = capsys.readouterr().out
+    assert "::error::" in out and "could not read" in out, out
+
+
+def test_the_derivation_refuses_when_a_tracked_file_cannot_be_read(monkeypatch):
+    """A tracked-but-absent file escaped as `FileNotFoundError` out of the caller scan.
+
+    `git ls-files` lists INDEX entries, so `rm foo.py` (without `git rm`) leaves it listed;
+    `scan_callers` read it with only `except (SyntaxError, UnicodeDecodeError)`, so the
+    REQUIRED gate traced back. A silently OMITTED file would be worse: a missed caller
+    changes a row's derived class.
+    """
+    sm = _load_manifest_tool()
+    monkeypatch.setattr(sm, "tracked_python", lambda: ["tortoise/definitely_absent_xyz.py"])
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm.build_doc()
+    assert "could not read the tracked file" in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_check_reds_on_a_hand_added_null_doc_key(checker, tmp_path):
+    """ABSENCE and `null` are different, and `doc.get(key) != derived.get(key)` conflated them.
+
+    A hand-added top-level key whose value was `null` compared `None == None` and was
+    accepted, contradicting `_derivation_problems`' contract that an unclassified key reds by
+    DEFAULT. The sentinel makes absence itself a difference.
+    """
+    doc = _manifest()
+    doc["sneaky_null_top_key"] = None
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a hand-added null-valued top-level key passed the drift check"
+    assert "sneaky_null_top_key" in out, out

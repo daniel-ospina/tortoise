@@ -124,6 +124,18 @@ def _read_manifest(path: Path | None = None) -> dict:
             f"{path} is malformed: `retired:` must be a list (got "
             f"{type(doc.get('retired')).__name__})."
         )
+    # `cut_at_commit` is PROVENANCE, not a derived value (`cut` records the commit it ran
+    # at), so it is excluded from the drift comparison — which makes this shape check the
+    # ONLY thing that pins it. It lives HERE rather than in one consumer because
+    # `cmd_render` slices it for the document's header: a hand-edited `cut_at_commit: null`
+    # escaped as `TypeError: 'NoneType' object is not subscriptable` out of the renderer
+    # while `cmd_check` reported the missing value as a mere problem — two readers, two
+    # opinions, and one of them a traceback.
+    if not isinstance(doc.get("cut_at_commit"), str) or not doc["cut_at_commit"]:
+        raise SurfaceEvidenceUnreadable(
+            f"{path} records no `cut_at_commit`: it must name the commit the baseline was cut "
+            "at, as a non-empty string. Re-cut the baseline."
+        )
     # A DUPLICATE NAME is unverified content, not a harmless repetition. Every comparison
     # in this file — here and in tools/surface-guard.py — keys rows by NAME, so a second
     # row with an existing name is silently DROPPED: a doctored duplicate inserted before
@@ -147,25 +159,42 @@ def _read_manifest(path: Path | None = None) -> dict:
 # makes a hand-edited manifest a failure rather than a fact. These keys are excluded
 # from that comparison because their value is not a function of the code alone:
 #
-#   * `~/.tortoise/analytics_fallback.jsonl` is a MACHINE-LOCAL call log. It supplies
-#     the `agents` / `never called` prefix of `used_by` and the wording of `reason`, so
-#     neither column is reproducible on another checkout — measured with the log absent:
-#     132 `used_by` and 25 `reason` rows differ, and those are the ONLY row keys that do.
-#     `recommendation` and `basis` are computed from the same observed-call signal, so
-#     they are excluded even where today's rows happen to agree.
-#   * `approval` / `approval_status` / `approval_principal` / `approval_pr` are a HUMAN
-#     recording — a PR number and a principal — not a derivation.
+#   * `used_by` / `recommendation` / `basis` / `reason` read a MACHINE-LOCAL call log
+#     (`~/.tortoise/analytics_fallback.jsonl`): it supplies the `agents` / `never called`
+#     prefix of `used_by` and the wording of `reason`, so neither column is reproducible on
+#     another checkout — measured with the log absent, 132 `used_by` and 25 `reason` rows
+#     differ, and those are the ONLY row keys that do. `recommendation` and `basis` are
+#     computed from the same observed-call signal, so they are excluded even where today's
+#     rows happen to agree. NOTE: a PR author can therefore rewrite the evidence the owner
+#     READS (the rendered `Used by` / `Recomm.` columns) while every gate stays green. That
+#     is a documented residual — the columns are not a function of the code — FILED, not hidden.
+#   * `approval` is the owner's reference: a PR number and a principal. The gate checks its
+#     SHAPE only; the consent carrier is a repository ruleset, per the #3863 scope doc.
+#   * `exemption` is a HUMAN RECORDING too — an owner-approved flag that a row's
+#     reachability is deliberately excused (`tools/surface-guard.py` reads it). It was
+#     missing from this list while `build_doc` emits `exemption: False` for every row, so
+#     recording one — the path CONTRIBUTING documents — made the REQUIRED check red with no
+#     way back (`cut` resets it to False forever). Verified: `exemption: true` on an SDK row
+#     makes the guard report "1 exempt" and the check FAIL "recorded {True}, derived {False}".
 #   * `cut_at_commit` is provenance: `cut` records the commit it ran at.
 #
-# The exclusion is a DENY-list applied to BOTH sides, so a key the generator grows later
-# is compared by default (it is present on one side only) and reds until it is
-# deliberately classified here.
-NON_DERIVABLE_ROW_KEYS = frozenset({"used_by", "recommendation", "basis", "reason", "approval"})
+# The exclusion is a DENY-list applied to BOTH sides, so a key the generator grows later is
+# compared by default (present on one side only, and ABSENCE is compared as absence — a
+# hand-added top-level key whose value is `null` used to match `None` and slip through) and
+# reds until it is deliberately classified here.
+NON_DERIVABLE_ROW_KEYS = frozenset(
+    {"used_by", "recommendation", "basis", "reason", "approval", "exemption"}
+)
 NON_DERIVABLE_DOC_KEYS = frozenset(
     {"cut_at_commit", "approval_status", "approval_principal", "approval_pr"}
 )
 
-# The four consumer-class values the guard derives from caller file paths. The
+# The sentinel for "this key is not in the document at all". `doc.get(key)` cannot express
+# absence separately from a `null` value, and the difference is exactly what a hand-added
+# top-level `sneaky_key: null` exploited.
+_ABSENT = object()
+
+# The four consumer-class values the DERIVATION computes from caller file paths. The
 # fifth, `control-plane`, is a judgement (it is about what a method DOES —
 # provision or destroy keys, orgs, instances, tenants) and is therefore authored
 # and baseline-protected, not derived.
@@ -209,9 +238,15 @@ def category(path: str) -> str:
 
 
 def tracked_python() -> list[str]:
-    out = subprocess.run(
-        ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
-    )
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
+        )
+    except Exception as exc:  # noqa: BLE001 — an unlistable tree is a refusal
+        raise SurfaceEvidenceUnreadable(
+            f"could not list the tracked python files (`git ls-files *.py`): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     return [line for line in out.stdout.splitlines() if line]
 
 
@@ -236,7 +271,8 @@ def load_order() -> dict:
             f"{ORDER_FILE} is malformed: expected a mapping carrying `keywords:`, `tokens:` "
             f"and `family_rank:` (got {type(table).__name__})."
         )
-    missing = [k for k in ("keywords", "tokens", "family_rank") if k not in table]
+    required = ("keywords", "tokens", "family_rank", "baseline_counts")
+    missing = [k for k in required if k not in table]
     if missing:
         # `family_rank` is required by `build_doc`, not only by this lint: validating a
         # SUBSET let a table missing it pass the read and then escape as a bare KeyError
@@ -244,6 +280,76 @@ def load_order() -> dict:
         raise SurfaceEvidenceUnreadable(
             f"{ORDER_FILE} is malformed: missing {missing}. The derivation cannot order or "
             "label a row without them."
+        )
+    # KEY PRESENCE IS NOT SHAPE. The checks below exist because a plausible-looking table
+    # passed the presence test and then escaped as a bare traceback or produced a WRONG
+    # derivation — each measured against a copy of this file:
+    #   tokens: []                   -> AttributeError: 'list' object has no attribute 'items'
+    #   tokens: {fetch: fetch}       -> iterated the STRING's characters, so every real token
+    #                                   fell through and the keyword silently became `operate`
+    #   keywords: {}                 -> KeyError: 'fetch'
+    #   keywords/family_rank values  -> `TypeError: '<' not supported` when sorted, and string
+    #                                   ranks sort LEXICOGRAPHICALLY ('10' < '2')
+    #   family_rank: {}              -> KeyError out of `build_doc`
+    #   baseline_counts empty/absent -> property 4's `if baseline and ...` short-circuited, so
+    #                                   deleting the frozen expectation turned the check OFF
+    def _refuse_shape(what: str, why: str) -> SurfaceEvidenceUnreadable:
+        return SurfaceEvidenceUnreadable(f"{ORDER_FILE} is malformed: {what} {why}.")
+
+    for key in ("keywords", "family_rank"):
+        table_key = table[key]
+        if not isinstance(table_key, dict) or not table_key:
+            raise _refuse_shape(f"`{key}:` must be a non-empty mapping", f"(got {table_key!r:.120})")
+        if any(
+            not isinstance(k, str) or not isinstance(v, int) or isinstance(v, bool)
+            for k, v in table_key.items()
+        ):
+            raise _refuse_shape(f"every `{key}:` entry must map a name to an INTEGER", "")
+        ranks = sorted(table_key.values())
+        if ranks != list(range(1, len(ranks) + 1)):
+            # Ranks that are not a clean 1..N let two entries share a rank (an order the
+            # emitted list cannot express) or leave a gap (a rank nothing can reach).
+            # Nothing else checks this: property 5 compares each row to its OWN stored
+            # rank, which is self-consistent under either defect.
+            raise _refuse_shape(
+                f"`{key}:` ranks must be exactly 1..{len(ranks)}", f"(got {ranks})"
+            )
+    toks = table["tokens"]
+    if not isinstance(toks, dict) or not toks:
+        raise _refuse_shape("`tokens:` must be a non-empty mapping", f"(got {toks!r:.120})")
+    bad_tokens = [
+        k
+        for k, v in toks.items()
+        if not isinstance(v, list) or not all(isinstance(t, str) for t in v)
+    ]
+    if bad_tokens:
+        raise _refuse_shape(
+            "every `tokens:` entry must map a keyword to a LIST of token strings",
+            f"(offenders: {bad_tokens[:5]})",
+        )
+    unknown = sorted(set(toks) - set(table["keywords"]))
+    if unknown:
+        raise _refuse_shape(
+            "every `tokens:` key must be one of the `keywords:`", f"(unknown: {unknown[:5]})"
+        )
+    counts = table["baseline_counts"]
+    if not isinstance(counts, dict) or not counts:
+        raise _refuse_shape(
+            "`baseline_counts:` must be a non-empty mapping — it is the frozen keyword "
+            "distribution the derivation is checked against, and an empty one turns that "
+            "check off",
+            f"(got {counts!r:.120})",
+        )
+    if any(
+        not isinstance(k, str) or not isinstance(v, int) or isinstance(v, bool)
+        for k, v in counts.items()
+    ):
+        raise _refuse_shape("every `baseline_counts:` entry must map a keyword to an INTEGER", "")
+    if set(counts) != set(table["keywords"]):
+        raise _refuse_shape(
+            "`baseline_counts:` must have exactly one entry per `keywords:` entry — a keyword "
+            "with no frozen count is a keyword whose distribution nothing checks",
+            f"(diff: {sorted(set(counts) ^ set(table['keywords']))[:5]})",
         )
     return table
 
@@ -286,7 +392,19 @@ def scan_callers(method_names: set[str], registered_handlers: set[str] | None = 
     for rel in tracked_python():
         path = ROOT / rel
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            # `git ls-files` lists INDEX entries, so a tracked file removed from the working
+            # tree (or unreadable) is still listed and this read raised `FileNotFoundError`
+            # out of the derivation — a bare traceback in the REQUIRED gate, the same defect
+            # class this file refuses for every other piece of evidence. A silently OMITTED
+            # file is worse than a refusal: a missed caller changes a row's derived class.
+            raise SurfaceEvidenceUnreadable(
+                f"could not read the tracked file {rel}: {exc}. The caller scan must not omit "
+                "a tracked file."
+            ) from exc
+        try:
+            tree = ast.parse(text)
         except (SyntaxError, UnicodeDecodeError):
             continue
         registered = registered_handlers or set()
@@ -882,9 +1000,20 @@ def cmd_render(args: argparse.Namespace) -> int:
         doc = _read_manifest()
     except SurfaceEvidenceUnreadable as exc:
         return _refuse(exc)
+    # ROWS THE RENDERER CANNOT READ ARE A REFUSAL, not a traceback: `cmd_render` indexes
+    # `family_rank` / `keyword_rank` / `cluster` / `family` directly, and it used to raise
+    # `KeyError: 'family_rank'` on a manifest that `check` merely reported as malformed.
+    _, malformed = _partition_rows(doc["rows"])
+    if malformed:
+        return _refuse(
+            SurfaceEvidenceUnreadable(
+                "the baseline carries rows this tool cannot render (re-cut it): "
+                + "; ".join(malformed[:5])
+            )
+        )
     rows = doc["rows"]
-    tools = [r for r in rows if not str(r["name"]).startswith("sdk:")]
-    sdk = [r for r in rows if str(r["name"]).startswith("sdk:")]
+    tools = [r for r in rows if not r["name"].startswith("sdk:")]
+    sdk = [r for r in rows if r["name"].startswith("sdk:")]
 
     tools.sort(key=lambda r: (r["family_rank"], r["keyword_rank"], r["cluster"] or r["name"], 0 if r["canonical"] in (True, None) else 1, r["name"]))
 
@@ -1237,6 +1366,44 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
+REQUIRED_ROW_COLUMNS = ("family", "family_rank", "keyword", "keyword_rank", "cluster")
+
+
+def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
+    """(the non-`sdk:` rows the comparisons can read, why each other row cannot be read).
+
+    A row that HAS a name but lacks a column the properties index is malformed EVIDENCE,
+    not a comparison result: it used to escape as a bare KeyError/TypeError (`r["keyword"]`,
+    then the family_rank sort) instead of the `::error::` refusal the contract promises.
+    Both readers share this one predicate — `cmd_check` reports what it cannot compare and
+    `cmd_render` refuses — because two readers with two opinions is how `cmd_render` came to
+    trace back (`KeyError: 'family_rank'`) on a manifest the check merely reported.
+    """
+    problems: list[str] = []
+    usable: list[dict] = []
+    for r in rows:
+        if not isinstance(r, dict) or not isinstance(r.get("name"), str) or not r["name"]:
+            problems.append(f"malformed row (not a mapping with a non-empty string name): {r!r}")
+            continue
+        if r["name"].startswith("sdk:"):
+            continue
+        missing = [k for k in REQUIRED_ROW_COLUMNS if k not in r]
+        if missing:
+            problems.append(f"malformed row {r['name']!r}: missing {missing} — re-cut the baseline")
+            continue
+        bad = [k for k in ("family_rank", "keyword_rank") if not isinstance(r[k], int)]
+        if r["cluster"] is not None and not isinstance(r["cluster"], str):
+            bad.append("cluster")
+        if bad:
+            problems.append(
+                f"malformed row {r['name']!r}: {bad} have types the check cannot order — "
+                "re-cut the baseline"
+            )
+            continue
+        usable.append(r)
+    return usable, problems
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """AC13's lint: nine structural properties, plus a tenth derived from the code."""
     try:
@@ -1254,37 +1421,14 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     verbs = order["keywords"]
     tokens_to_keyword = {t: kw for kw, toks in order["tokens"].items() for t in toks}
-    # Malformed rows must fail CLEANLY, and this must run before any row access —
-    # the previous placement sat after `r["name"]` has already been dereferenced, so a
-    # malformed row crashed with a bare traceback and the property could never fire.
-    # Properties 1-9 index these keys directly, so a row that HAS a name but lacks one of
-    # them is malformed EVIDENCE, not a comparison result — it is reported and excluded
-    # rather than allowed to raise (verified: a row missing `keyword` or carrying a
+    # Malformed rows must fail CLEANLY, and this must run before any row access. The
+    # predicate is shared with `cmd_render` (`_partition_rows`), so neither reader can
+    # half-fix it. Properties 1-9 index these keys directly, so a row that HAS a name but
+    # lacks one of them is malformed EVIDENCE, not a comparison result — it is reported and
+    # excluded rather than allowed to raise (verified: a row missing `keyword` or carrying a
     # non-integer `family_rank` escaped as KeyError/TypeError instead of the refusal).
-    problems: list[str] = []
-    required = ("family", "family_rank", "keyword", "keyword_rank", "cluster")
-    rows = []
-    for r in doc["rows"]:
-        if not isinstance(r, dict) or "name" not in r:
-            problems.append(f"malformed row (not a mapping with a name): {r!r}")
-            continue
-        if str(r["name"]).startswith("sdk:"):
-            continue
-        missing = [k for k in required if k not in r]
-        if missing:
-            problems.append(f"malformed row {r['name']!r}: missing {missing} — re-cut the baseline")
-            continue
-        bad = [
-            k for k in ("family_rank", "keyword_rank")
-            if not isinstance(r[k], int)
-        ] + (["cluster"] if r["cluster"] is not None and not isinstance(r["cluster"], str) else [])
-        if bad:
-            problems.append(
-                f"malformed row {r['name']!r}: {bad} have types the check cannot order — "
-                "re-cut the baseline"
-            )
-            continue
-        rows.append(r)
+    rows, malformed = _partition_rows(doc["rows"])
+    problems: list[str] = list(malformed)
 
     # 1. totality — every tool row carries exactly one derived keyword
     # 2. derivation agreement
@@ -1397,8 +1541,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     # because it imports the declaration and scans every tracked module for callers. That
     # is the price of the artifact being verified against the code at all; the CI job that
     # runs this has a 10-minute bound and the check is required.
-    if not doc.get("cut_at_commit"):
-        problems.append("the baseline records no `cut_at_commit`; it must name the commit it was cut at")
+    # The `cut_at_commit` presence check MOVED into `_read_manifest`: it is provenance and
+    # the renderer slices it, so a null value was a TypeError there and a mere problem here.
+    # One reader, one verdict.
     try:
         derived = build_doc()
     except SurfaceEvidenceUnreadable as exc:
@@ -1433,10 +1578,15 @@ def _derivation_problems(doc: dict, derived: dict) -> list[str]:
     for key in sorted(set(doc) | set(derived)):
         if key in NON_DERIVABLE_DOC_KEYS or key in ("rows", "retired"):
             continue
-        if doc.get(key) != derived.get(key):
+        # A MISSING key and a `null` ONE ARE NOT THE SAME THING. `doc.get(key) !=
+        # derived.get(key)` treated a hand-added top-level key whose value was `null` as a
+        # match (both sides `None`), so it slipped through — contradicting this function's
+        # own contract that an unclassified key reds by DEFAULT, and contradicting the
+        # deny-list comment that says absence is compared as absence.
+        if doc.get(key, _ABSENT) != derived.get(key, _ABSENT):
             problems.append(
-                f"the baseline's `{key}` does not match the code: recorded {doc.get(key)!r}, "
-                f"derived {derived.get(key)!r}"
+                f"the baseline's `{key}` does not match the code: recorded "
+                f"{doc.get(key, _ABSENT)!r}, derived {derived.get(key, _ABSENT)!r}"
             )
     for label, key in (("row", "rows"), ("retired row", "retired")):
         derived_rows = {str(r.get("name")): r for r in derived.get(key) or [] if isinstance(r, dict)}
